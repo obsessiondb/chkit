@@ -133,6 +133,72 @@
   "table() requires order_by/orderBy". On an engine without sort order, a table with only
   `order_by` is now reported as "sets primaryKey, orderBy ... Remove them", as in TS (it said
   "sets orderBy ... Remove it").
+- `check --json` and `status --json` leave `database` out when no database is configured, as
+  in TS (#452). With a plugin target (such as an ObsessionDB service) and no `clickhouse`
+  block, a missing target database wrote `"database": null`; now `databaseMissing` comes
+  alone.
+- `chkit status --table` is accepted and ignored, as in TS and the docs (#451). Before,
+  chkit-py read the snapshot and kept only the pending migrations that touch the matched
+  tables, so `--table nomatch_*` reported `Pending: 0` (and `"pending": 0`,
+  `"pendingMigrations": []` in `--json`) with two migrations pending. The counts and the
+  pending list now always cover every migration; an invalid selector still fails, as in TS.
+- Database, table, view, dictionary and materialized view names are quoted in generated SQL,
+  as in TS (#448): a name that is not a plain identifier (`my-db`, `user-events`, `a.b`) is
+  backtick-quoted in `CREATE`, `ALTER`, `DROP`, `RENAME`, `CREATE DATABASE`, `TO` and
+  `DEPENDS ON`, and backticks and backslashes in quoted column, index, projection and
+  constraint names are escaped (`` `we\`ird\\c` ``). Before, such names produced invalid SQL.
+  Plain names stay bare, so SQL for existing schemas is unchanged. With `clickhouse.cluster`
+  set, `ON CLUSTER` now lands after a quoted name (`` `my db`.`a b` ON CLUSTER 'c' ``) instead
+  of inside it. The suggested column rename statement now uses `RENAME COLUMN IF EXISTS`, as
+  in TS.
+- `chkit migrate --json` prints the same JSON as TS (#460): every payload (plan, apply,
+  nothing pending, `--retry`, `--abandon`, and the checksum, empty-migration and destructive
+  refusals) starts with `"command": "migrate"` and `"schemaVersion": 1`, and has the
+  `--table` `scope` after `mode`. **Behaviour change** for `--json` readers: each `applied`
+  entry has `appliedAt` instead of `applied_at`.
+- `chkit status`, `generate`, `migrate` and `check` print absolute paths, as in TS (#458):
+  `status` `migrationsDir` (text and `--json`), `generate --json` `migrationFile` and
+  `snapshotFile`, the `Generated empty migration: <path>` line, the `migrate --retry`
+  not-found error, and the conflicted or invalid snapshot errors of `check` and `migrate`
+  resolve the configured dirs against the current directory instead of printing them as
+  configured. The `generate` text output now matches TS line for line (`Generated migration:
+  <path>`, `Updated snapshot:`, `Definitions:`, `Operations:`, `Risk summary:`, and the `Table
+  scope:` block with `--table`).
+- `chkit generate --dryrun` prints the same text and JSON as TS (#461). The text lists
+  `Planned operations:` and `Risk summary:` first, then `- <type> [<risk>] <key>` for each
+  operation, the warnings, the cutovers, and the rename suggestions with their reason and
+  confirmation SQL, which were missing. In `--json`, `scope` comes right after the envelope
+  and an operation has `warning` only when it is set (no more `"warning": null`). A
+  column rename suggestion's `confirmationSQL` is `RENAME COLUMN IF EXISTS`, as in TS. The
+  `--table` no-match `warning` in `--json` reads `No tables matched selector "<selector>".`
+  without the trailing `No changes planned.` (the text output keeps it), and `generate`
+  warnings print without color, as in TS.
+  scope:` block with `--table`); the `generate --dryrun` text still differs (#461).
+- `chkit check` passes the plugins' `on_check` the flags that were passed, keyed by long name
+  as in TS (`--json`, `--strict`, `--table`, `--config`, `--force-shared-engines`,
+  `--no-shared-engines`, `--service`) (#450). Before, `on_check` always got `{}`, so
+  `check --force-shared-engines` had no effect: on a target not recognized as ObsessionDB the
+  ObsessionDB plugin did not reject a `Distributed` table, and check passed where TS fails with
+  `obsessiondb_distributed_unsupported`.
+- `chkit generate`, `migrate` and `pull` pass every plugin hook they run the flags that were
+  passed, keyed by long name as in TS (#456): `on_config_loaded`, `on_schema_loaded` and
+  `on_plan_created` in generate, `on_init`, `get_context`, `on_before_apply` and
+  `on_after_apply` in migrate, and `on_init`, `get_context` and `on_pull_introspect` in pull.
+  Before, generate's hooks got only `--force-shared-engines` / `--no-shared-engines` (and
+  `on_plan_created` got `{}`), the apply hooks and `on_pull_introspect` got `{}`, and
+  `on_init` / `get_context` got only `--service`. To key them as TS does, pull's `--force`
+  and `--overwrite` are now two options (either one overwrites; `-f` stays on `--force`).
+- `chkit check` runs the plugins' `on_config_loaded` hooks, as in TS (#449): with command
+  `check` and the resolved `--table` scope, right before `on_check`. Before, chkit-py
+  never called them, so state a plugin set up there was missing in `on_check`. A hook
+  error fails the check with exit 1 and `Plugin "<name>" failed in onConfigLoaded: ...`
+  (plus the `--json` error envelope). A `--table` selector that matches no table still
+  skips every plugin hook.
+- `chkit migrate` runs the plugins' `on_config_loaded` hooks, as in TS (#455): in plan and
+  apply mode (and with `--retry` / `--abandon`), with command `migrate` and the resolved
+  `--table` scope, after the scope is resolved and before the migrations are listed. Before,
+  chkit-py never called them. A hook error stops migrate before it reads the journal, with exit 1
+  and `Plugin "<name>" failed in onConfigLoaded: ...` (plus the `--json` error envelope).
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured

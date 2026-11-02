@@ -33,7 +33,7 @@ bunx chkit ingest run --tag provider:google-meet --tag resource:transcript-entri
 bunx chkit ingest run --tag provider:google-meet --tag resource:participant-sessions
 ```
 
-`sourceId` scopes raw identities and queries; `streamPrefix` determines journal IDs. Another installation needs separate values. The factory snapshots supplied configuration and injectable request dependencies. Edit `database` before schema imports to change setup-time table placement. The default pipeline runs one stream and request at a time.
+`sourceId` scopes raw identities and queries; `streamPrefix` determines journal IDs. Another installation needs separate values. The factory snapshots supplied configuration, including `accessToken`, which defaults to `GOOGLE_MEET_ACCESS_TOKEN`. Edit `database` before schema imports to change setup-time table placement. The default pipeline runs one stream and request at a time.
 
 ## Sync behavior
 

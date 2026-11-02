@@ -549,6 +549,45 @@ def test_apply_refuses_pending_files_without_statements(
         _drop(project, views=[], tables=[t])
 
 
+def test_migrate_json_has_the_ts_envelope_scope_and_keys(
+    make_project: Callable[[str], Project],
+) -> None:
+    """Every migrate --json payload is ``{command, schemaVersion, mode, scope, ...}``
+    with the TS keys, as ``emitJson('migrate', ...)`` writes it (#460)."""
+    project = make_project("json_envelope")
+    db, t = project.database, f"{project.prefix}t"
+    m = "20990101000000_init.sql"
+    sql = f"CREATE TABLE IF NOT EXISTS {db}.{t} (id UInt64) ENGINE = MergeTree ORDER BY id;\n"
+    unscoped = {"enabled": False, "matchedTables": [], "matchCount": 0}
+    try:
+        _write(project, m, sql)
+        plan = _parse(_migrate(["--json"]))
+        assert list(plan) == ["command", "schemaVersion", "mode", "scope", "pending"]
+        assert plan == {
+            "command": "migrate",
+            "schemaVersion": 1,
+            "mode": "plan",
+            "scope": unscoped,
+            "pending": [m],
+        }
+
+        no_match = _parse(_migrate(["--json", "--table", "nomatch"]))
+        assert no_match["scope"] == {
+            "enabled": True,
+            "selector": "nomatch",
+            "matchedTables": [],
+            "matchCount": 0,
+        }
+
+        applied = _parse(_migrate(["--execute", "--json"]))
+        assert list(applied) == ["command", "schemaVersion", "mode", "scope", "applied"]
+        assert (applied["command"], applied["mode"], applied["scope"]) == ("migrate", "execute", unscoped)
+        assert [list(e) for e in applied["applied"]] == [["name", "appliedAt", "checksum"]]
+        assert applied["applied"][0]["checksum"] == checksum_sql(sql)
+    finally:
+        _drop(project, views=[], tables=[t])
+
+
 def test_abandoned_async_load_failing_before_start_is_not_journaled_completed(
     make_project: Callable[[str], Project],
 ) -> None:

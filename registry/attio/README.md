@@ -15,7 +15,7 @@ Set `ATTIO_API_TOKEN` in your execution environment and configure the project's 
 
 See Attio's [API key instructions](https://attio.com/help/reference/apps/generating-an-api-key). Use a single-workspace API token for this setup; OAuth token creation and refresh require a separate application flow.
 
-Bun loads a project `.env` automatically. With Node or a scheduler, explicitly supply environment variables using that runtime's environment-loading mechanism. `.env.example` only lists required variable names; it does not load values. Schema imports, `check`, and `ingest list` do not read the token or make API requests.
+Bun loads a project `.env` automatically. With Node or a scheduler, explicitly supply environment variables using that runtime's environment-loading mechanism. `.env.example` only lists required variable names; it does not load values. `config.ts` passes `ATTIO_API_TOKEN` as `apiToken`; set `apiToken` there to use another token, for example for a second installation. Schema imports, `check`, and `ingest list` neither require the token nor make API requests.
 
 Review `config.ts` before the first migration. The default target database is `default`; raw table and view names begin with `attio_`. Use a stable, non-secret `sourceId` for this source instance. For another installation, give it a distinct source ID and table prefix or database before exporting its pipeline. Changing these after ingestion changes stream/storage identities and requires a deliberate migration.
 
@@ -30,7 +30,7 @@ bunx chkit ingest run --tag provider:attio
 
 The schema uses native JSON (ClickHouse 25.3 or newer). A direct ClickHouse connection is required; workbench-only execution is not supported. Use an external scheduler to repeat the run command, with one ingestion process per project/target at a time.
 
-`createAttioPipeline(config, deps)` snapshots reader settings and configured collections for one installation. Database and table prefix belong to setup-time `attioConfig`: the factory uses the exported raw tables and does not redefine storage.
+`createAttioPipeline(config)` snapshots reader settings, including `apiToken`, and configured collections for one installation. Each reader validates that snapshot with zod when its stream runs: invalid settings or a missing token fail the stream before any request. Database and table prefix belong to setup-time `attioConfig`: the factory uses the exported raw tables and does not redefine storage.
 
 ## Included resources
 
@@ -58,7 +58,7 @@ API references: [attributes](https://docs.attio.com/rest-api/endpoint-reference/
 
 ## Customize the source
 
-Each file in `sources/` contains one resource's raw table and reader, such as `sources/notes.ts`, `sources/tasks.ts`, or `sources/members.ts`. `sources/records.ts` also defines the people, company, and deal views. `client.ts` shares HTTP, validation, and pagination logic; `pipeline.ts` creates streams from the explicit object/list configuration.
+Each file in `sources/` contains one resource's raw table and reader, such as `sources/notes.ts`, `sources/tasks.ts`, or `sources/members.ts`. `sources/records.ts` also defines the people, company, and deal views. `client.ts` owns authentication, response validation, and pagination; `sources/common.ts` turns its pages into raw rows; `pipeline.ts` creates streams from the explicit object/list configuration.
 
 Remove an entry from `pipeline.ts` to stop collecting that resource. Keep its schema export in `index.ts` to preserve already collected data. Removing schema exports can generate destructive migration operations, which should be reviewed. After removing a resource's stream and schema export, its local files can also be deleted.
 
@@ -80,7 +80,7 @@ bunx chkit ingest run --tag provider:attio --tag resource:records --tag object:p
 
 Record streams carry `resource:records` and `object:<ref>`. Object-attribute streams carry `resource:object_attributes` and `object:<ref>`; entries/list-attribute streams carry their resource tag and `list:<ref>`.
 
-`pageSize` defaults to 500. Notes have a separate `notesPageSize` of 50, the documented maximum. Requests go through the ingestion executor's retry/cancellation context, with a 30-second request timeout. The serial pipeline leaves a 25ms gap before each request and a 125ms gap for notes; raising concurrency requires revisiting rate control. `429` responses retain `Retry-After` for executor backoff. Attio also limits query complexity; a permanently expensive query may need simpler filters/sorts rather than repeated retries. See [rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
+`pageSize` defaults to 500. Notes have a separate `notesPageSize` of 50, the documented maximum. Requests go through the ingestion runtime's `fetch`, which owns retries, cancellation, and a 30-second request timeout. The pipeline sends one request at a time. A `429` pauses the pipeline's requests until its `Retry-After` and does not use up a retry. Attio also limits query complexity; a permanently expensive query may need simpler filters/sorts rather than repeated retries. See [rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
 
 ## Stored data and editable views
 
@@ -117,7 +117,7 @@ Install the optional test suite with `bunx chkit add attio --with-tests`, then r
 bun test src/integrations/attio/tests/attio.test.ts
 ```
 
-For a custom install path, point the command at that folder's `tests/attio.test.ts`. Tests mock Attio HTTP responses and use in-memory ingestion destinations and journals. They require Bun but no Attio credentials or ClickHouse server. The fixture suite checks per-type stream selection, independent pagination, preserved custom fields, repeat runs, cancellation, errors, safe offset-zero restart, successful empty reads, and rows loaded before a journal failure. Adjust the fixtures and expectations when customizing the source.
+For a custom install path, point the command at that folder's `tests/attio.test.ts`. Tests pass fixture Attio responses to the ingestion runtime's `fetch` and use in-memory ingestion destinations and journals. They require Bun but no Attio credentials or ClickHouse server. The fixture suite checks per-type stream selection, independent pagination, preserved custom fields, repeat runs, cancellation, errors, safe offset-zero restart, successful empty reads, and rows loaded before a journal failure. Adjust the fixtures and expectations when customizing the source.
 
 ## Smoke check
 

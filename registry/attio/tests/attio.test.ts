@@ -1,18 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 
-import { HttpError, definePipeline, runIngestion, selectStreams, type FetchContext } from '@chkit/plugin-ingest'
+import { HttpError, runIngestion, selectStreams, type PipelineDefinition } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
-import { classifyAttioError, readCollection, type AttioClientDeps } from '../client.js'
-import { attioConfig } from '../config.js'
+import type { AttioReaderConfig } from '../config.js'
 import * as definitions from '../index.js'
 import { attio, createAttioPipeline } from '../pipeline.js'
-import { readEntries } from '../sources/entries.js'
-import { readMembers } from '../sources/members.js'
-import { readNotes } from '../sources/notes.js'
-import { readRecords } from '../sources/records.js'
-import { readTasks } from '../sources/tasks.js'
-import { fixtureDeps, fixtureResponse, peopleObject, person } from './fixtures.js'
+import { attioEnv, fixtureConfig, fixtureResponse, peopleObject, person } from './fixtures.js'
+
+const people = ['resource:records', 'object:people']
+const retry = { retries: 1, minTimeout: 0, maxTimeout: 0, randomize: false }
 
 describe('Attio template', () => {
   test('exports independently selectable object streams and raw destinations without credentials', () => {
@@ -21,7 +18,7 @@ describe('Attio template', () => {
     expect(attio.streams).toHaveLength(9)
     expect(attio.streams.filter((stream) => stream.tags.includes('resource:records')).map((stream) => stream.id))
       .toEqual(['attio.primary.records.people', 'attio.primary.records.companies'])
-    expect(selectStreams([attio], ['resource:records', 'object:people']).map(({ stream }) => stream.id)).toEqual(['attio.primary.records.people'])
+    expect(selectStreams([attio], people).map(({ stream }) => stream.id)).toEqual(['attio.primary.records.people'])
     expect(selectStreams([attio], ['resource:records', 'object:companies']).map(({ stream }) => stream.id))
       .toEqual(['attio.primary.records.companies'])
     for (const stream of attio.streams) {
@@ -33,17 +30,17 @@ describe('Attio template', () => {
   })
 
   test('an object named tasks does not overlap the workspace tasks resource tag', () => {
-    const pipeline = createAttioPipeline({ ...attioConfig, objects: ['tasks'], lists: [] }, fixtureDeps())
+    const pipeline = createAttioPipeline({ ...fixtureConfig, objects: ['tasks'], lists: [] })
     expect(selectStreams([pipeline], ['resource:tasks']).map(({ stream }) => stream.id)).toEqual(['attio.primary.tasks'])
     expect(selectStreams([pipeline], ['resource:records', 'object:tasks']).map(({ stream }) => stream.id))
       .toEqual(['attio.primary.records.tasks'])
   })
 
   test('configured custom objects and lists have their own streams sharing raw tables', async () => {
-    const pipeline = fixturePipeline(fixtureDeps())
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
-    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })
+    const result = await runIngestion(request(pipeline), { ...attioEnv(), journal, destination, retry })
     expect(result.ok, JSON.stringify(result)).toBe(true)
     expect(pipeline.streams).toHaveLength(11)
     expect(result.streams.filter((stream) => stream.streamId.includes('.records.')).map((stream) => stream.rows)).toEqual([1, 1])
@@ -61,7 +58,7 @@ describe('Attio template', () => {
   test('one object reader paginates only that object and preserves raw custom values and IDs', async () => {
     const requests: Array<{ path: string; body: unknown }> = []
     const firstPage = Array.from({ length: 500 }, (_, index) => ({ ...person, id: { ...person.id, record_id: `record-${index}` } }))
-    const deps = fixtureDeps((url, init) => {
+    const env = attioEnv((url, init) => {
       const body = typeof init.body === 'string' ? JSON.parse(init.body) : undefined
       requests.push({ path: url.pathname, body })
       if (url.pathname === '/v2/objects/people') return Response.json({ data: peopleObject })
@@ -70,114 +67,133 @@ describe('Attio template', () => {
       }
       throw new Error(`Unexpected URL ${url.pathname}`)
     })
-    const chunks = await collect(readRecords(context(), 'people', deps))
-    expect(chunks.map((chunk) => chunk.rows.length)).toEqual([500, 1])
+    const journal = createMemoryJournal()
+    const destination = createMemoryDestination()
+    const result = await runIngestion(request(fixturePipeline(), people), { ...env, journal, destination, retry })
+    expect(result.streams.map((stream) => [stream.outcome, stream.rows, stream.chunks])).toEqual([['succeeded', 501, 2]])
     expect(requests).toEqual([
       { path: '/v2/objects/people', body: undefined },
       { path: '/v2/objects/object-people/records/query', body: { limit: 500, offset: 0 } },
       { path: '/v2/objects/object-people/records/query', body: { limit: 500, offset: 500 } },
     ])
-    expect(chunks.every((chunk) => !('state' in chunk) && !('id' in chunk))).toBe(true)
-    expect(chunks[0]?.rows[0]?.id).toBe(JSON.stringify(['attio.primary', 'records', 'workspace-1', 'object-people', 'record-0']))
-    expect(chunks[0]?.rows[0]?.raw).toMatchObject({ data: { values: { custom_multi: [{ value: 'one' }, { value: 'two' }] } } })
-    const custom = await collect(readRecords(context(), 'subscriptions', fixtureDeps()))
-    expect(custom[0]?.rows[0]?.raw).toMatchObject({ object_slug: 'subscriptions' })
-    expect(custom[0]?.rows[0]?.id).not.toBe(chunks[0]?.rows[0]?.id)
+    expect((await journal.readCheckpoint('attio.primary.records.people')).envelope).toBeUndefined()
+    const rows = destination.tables.get('default.attio_records_raw') ?? []
+    expect(rows[0]?.id).toBe(JSON.stringify(['attio.primary', 'records', 'workspace-1', 'object-people', 'record-0']))
+    expect(rows[0]?.raw).toMatchObject({ data: { values: { custom_multi: [{ value: 'one' }, { value: 'two' }] } } })
+    const custom = createMemoryDestination()
+    const subscriptions = await runIngestion(request(fixturePipeline(), ['resource:records', 'object:subscriptions']), {
+      ...attioEnv(), journal: createMemoryJournal(), destination: custom, retry,
+    })
+    expect(subscriptions.ok).toBe(true)
+    const customRow = custom.tables.get('default.attio_records_raw')?.[0]
+    expect(customRow?.raw).toMatchObject({ object_slug: 'subscriptions' })
+    expect(customRow?.id).not.toBe(rows[0]?.id)
   })
 
-  test('a source identity supplied to the pipeline owns stream IDs and raw row IDs', async () => {
-    const config = { ...attioConfig, sourceId: 'attio.secondary', objects: ['people'], lists: [], pageSize: 2 }
+  test('a source identity and token supplied to the pipeline own stream IDs, raw row IDs and requests', async () => {
+    const config = { ...fixtureConfig, sourceId: 'attio.secondary', objects: ['people'], lists: [], pageSize: 2, apiToken: 'secondary-token' }
     const queries: unknown[] = []
-    const pipeline = createAttioPipeline(config, fixtureDeps((url, init) => {
+    const authorizations = new Set<string | null>()
+    const env = attioEnv((url, init) => {
+      authorizations.add(new Headers(init.headers).get('Authorization'))
       if (url.pathname.endsWith('/records/query')) queries.push(JSON.parse(String(init.body)))
       return fixtureResponse(url)
-    }))
+    })
+    const pipeline = createAttioPipeline(config)
     config.sourceId = 'changed-after-construction'
     config.pageSize = 500
     config.objects.push('companies')
+    config.apiToken = 'changed'
     const destination = createMemoryDestination()
-    const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:records', 'object:people']), backfill: undefined }, {
-      journal: createMemoryJournal(), destination,
-    })
+    const result = await runIngestion(request(pipeline, people), { ...env, journal: createMemoryJournal(), destination })
     expect(result.ok).toBe(true)
     expect(result.streams[0]?.streamId).toBe('attio.secondary.records.people')
     const row = destination.tables.get('default.attio_records_raw')?.[0]
     expect(row?.id).toBe(JSON.stringify(['attio.secondary', 'records', 'workspace-1', 'object-people', 'record-1']))
     expect(row?.raw).toMatchObject({ source_id: 'attio.secondary' })
     expect(queries).toEqual([{ limit: 2, offset: 0 }])
+    expect([...authorizations]).toEqual(['Bearer secondary-token'])
     expect(selectStreams([pipeline], ['resource:records']).map(({ stream }) => stream.id)).toEqual(['attio.secondary.records.people'])
   })
 
   test('notes use their 50-item limit and stop fetching after cancellation', async () => {
     const controller = new AbortController()
-    const waits: number[] = []
-    const urls: string[] = []
+    const requests: URL[] = []
     const page = Array.from({ length: 50 }, (_, index) => ({ id: { workspace_id: 'workspace-1', note_id: `note-${index}` } }))
-    const deps = fixtureDeps((url) => { urls.push(url.toString()); return Response.json({ data: page }) })
-    deps.wait = async (milliseconds, signal) => { waits.push(milliseconds); signal.throwIfAborted() }
-    const iterator = readNotes(context(controller.signal), deps)
-    expect((await iterator.next()).value?.rows).toHaveLength(50)
-    controller.abort(new Error('fixture cancelled'))
-    await expect(iterator.next()).rejects.toThrow('fixture cancelled')
-    expect(urls).toHaveLength(1)
-    expect(new URL(urls[0] ?? '').searchParams.get('limit')).toBe('50')
-    expect(waits).toEqual([125])
+    const env = attioEnv((url) => {
+      requests.push(url)
+      controller.abort(new Error('fixture cancelled'))
+      return Response.json({ data: page })
+    })
+    const pipeline = fixturePipeline()
+    const result = await runIngestion(request(pipeline, ['resource:notes']), {
+      ...env, signal: controller.signal, journal: createMemoryJournal(), destination: createMemoryDestination(), retry,
+    })
+    expect(result.streams[0]?.outcome).toBe('cancelled')
+    expect(requests).toHaveLength(1)
+    expect(requests[0]?.searchParams.get('limit')).toBe('50')
   })
 
   test('GET offset pagination requests the terminating empty page for an exact multiple', async () => {
-    const offsets: string[] = []
-    const deps = fixtureDeps((url) => {
-      const offset = url.searchParams.get('offset') ?? ''
+    const offsets: Array<string | null> = []
+    const env = attioEnv((url) => {
+      const offset = url.searchParams.get('offset')
       offsets.push(offset)
-      return Response.json({ data: offset === '0' ? [{ id: { task_id: 'a' } }, { id: { task_id: 'b' } }] : [] })
+      return Response.json({ data: offset === '0' ? [task('a'), task('b')] : [] })
     })
-    const pages = await collect(readCollection(context(), { path: '/tasks', idFields: ['task_id'], pageSize: 2 }, deps))
-    expect(pages.map((page) => page.items.length)).toEqual([2, 0])
-    expect(pages.map((page) => page.next)).toEqual([2, undefined])
+    const result = await runIngestion(request(fixturePipeline({ ...fixtureConfig, pageSize: 2 }), ['resource:tasks']), {
+      ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), retry,
+    })
+    expect(result.streams.map((stream) => [stream.outcome, stream.rows, stream.chunks])).toEqual([['succeeded', 2, 2]])
     expect(offsets).toEqual(['0', '2'])
   })
 
   test('malformed successful responses and missing identities fail visibly', async () => {
-    for (const payload of [{}, { data: null }, { data: [{ id: { task_id: 'task-1' } }] }]) {
-      await expect(collect(readTasks(context(), fixtureDeps(() => Response.json(payload))))).rejects.toThrow('Attio')
+    for (const [payload, message] of [
+      [{}, 'expected array, received undefined'],
+      [{ data: null }, 'expected array, received null'],
+      [{ data: [{ id: { task_id: 'task-1' } }] }, 'expected string, received undefined'],
+      [{ data: [{ id: { workspace_id: 'workspace-1', task_id: '' } }] }, 'Too small'],
+    ] as const) {
+      expect(await streamError(['resource:tasks'], () => Response.json(payload))).toContain(message)
     }
-    const malformed = fixtureDeps((url) => url.pathname === '/v2/objects/people'
-      ? fixtureResponse(url) : Response.json({ data: [{ ...person, values: { name: 'not-an-array' } }] }))
-    await expect(collect(readRecords(context(), 'people', malformed))).rejects.toThrow('invalid values')
-    await expect(collect(readRecords(context(), 'people', fixtureDeps(() => Response.json({ data: [peopleObject] }))))).rejects.toThrow('Attio')
+    expect(await streamError(people, (url) => url.pathname === '/v2/objects/people'
+      ? fixtureResponse(url) : Response.json({ data: [{ ...person, values: { name: 'not-an-array' } }] }))).toContain('expected array, received string')
+    expect(await streamError(people, () => Response.json({ data: [peopleObject] }))).toContain('expected object, received array')
+    expect(await streamError(people, () => Response.json({ data: { ...peopleObject, api_slug: '' } }))).toContain('Too small')
   })
 
   test.each(['workspace_id', 'object_id'])('object readers reject children with a different %s', async (field) => {
-    const deps = fixtureDeps((url) => url.pathname === '/v2/objects/people'
-      ? fixtureResponse(url) : Response.json({ data: [{ ...person, id: { ...person.id, [field]: 'foreign' } }] }))
-    await expect(collect(readRecords(context(), 'people', deps))).rejects.toThrow('different workspace or parent')
+    expect(await streamError(people, (url) => url.pathname === '/v2/objects/people'
+      ? fixtureResponse(url) : Response.json({ data: [{ ...person, id: { ...person.id, [field]: 'foreign' } }] }))).toContain('different workspace or parent')
   })
 
   test('list readers resolve one list and reject entries belonging to another list', async () => {
     const requests: string[] = []
-    const deps = fixtureDeps((url) => {
+    const env = attioEnv((url) => {
       requests.push(url.pathname)
       return fixtureResponse(url)
     })
-    const chunks = await collect(readEntries(context(), 'sales', deps))
+    const destination = createMemoryDestination()
+    const result = await runIngestion(request(fixturePipeline(), ['resource:entries']), { ...env, journal: createMemoryJournal(), destination, retry })
+    expect(result.ok).toBe(true)
     expect(requests).toEqual(['/v2/lists/sales', '/v2/lists/list-sales/entries/query'])
-    expect(chunks[0]?.rows[0]?.raw).toMatchObject({ list_slug: 'sales' })
-    const invalid = fixtureDeps((url) => url.pathname === '/v2/lists/sales'
-      ? fixtureResponse(url) : Response.json({ data: [{ id: { workspace_id: 'workspace-1', list_id: 'foreign', entry_id: 'one' }, entry_values: {} }] }))
-    await expect(collect(readEntries(context(), 'sales', invalid))).rejects.toThrow('different workspace or parent')
+    expect(destination.tables.get('default.attio_entries_raw')?.[0]?.raw).toMatchObject({ list_slug: 'sales' })
+    expect(await streamError(['resource:entries'], (url) => url.pathname === '/v2/lists/sales'
+      ? fixtureResponse(url) : Response.json({ data: [{ id: { workspace_id: 'workspace-1', list_id: 'foreign', entry_id: 'one' }, entry_values: {} }] })))
+      .toContain('different workspace or parent')
   })
 
   test('permission failures fail one object stream while another remains independent', async () => {
     const requests: string[] = []
-    const deps = fixtureDeps((url) => {
+    const env = attioEnv((url) => {
       requests.push(url.pathname)
       return url.pathname === '/v2/objects/object-custom/records/query'
         ? Response.json({ code: 'insufficient_scope' }, { status: 403 }) : fixtureResponse(url)
     })
-    const pipeline = fixturePipeline(deps)
     const destination = createMemoryDestination()
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:records']), backfill: undefined }, { journal, destination })
+    const result = await runIngestion(request(fixturePipeline(), ['resource:records']), { ...env, journal, destination, retry })
     expect(result.ok).toBe(false)
     expect(result.streams.map((stream) => [stream.streamId, stream.outcome, stream.rows])).toEqual([
       ['attio.primary.records.people', 'succeeded', 1], ['attio.primary.records.subscriptions', 'failed', 0],
@@ -191,27 +207,27 @@ describe('Attio template', () => {
 
   test('429 retries remain under executor authority and retain Retry-After', async () => {
     let calls = 0
-    const deps = fixtureDeps((url) => {
+    const env = attioEnv((url) => {
       calls += 1
       return calls === 1 ? Response.json({ code: 'rate_limit_exceeded' }, { status: 429, headers: { 'Retry-After': '0' } }) : fixtureResponse(url)
     })
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:notes']), backfill: undefined }, {
-      journal, destination: createMemoryDestination(),
-    })
+    const result = await runIngestion(request(fixturePipeline(), ['resource:notes']), { ...env, journal, destination: createMemoryDestination(), retry })
     expect(result.ok).toBe(true)
     expect(calls).toBe(2)
     expect(journal.events.some((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toBe(true)
     const http = await HttpError.fromResponse(new Response(null, { status: 429, headers: { 'Retry-After': '2' } }))
     expect(http.retryAfterMs).toBe(2_000)
-    expect(classifyAttioError(http, { kind: 'rate_limited', retryAfterMs: 2_000 })).toBeUndefined()
   })
 
-  test('a missing token fails only when a reader runs', async () => {
-    const deps = fixtureDeps(() => { throw new Error('must not fetch') })
-    deps.token = () => undefined
-    expect(attio.streams).toHaveLength(9)
-    await expect(collect(readMembers(context(), deps))).rejects.toThrow('Set ATTIO_API_TOKEN')
+  test('a missing token fails each stream before any request', async () => {
+    let requests = 0
+    const pipeline = createAttioPipeline({ ...fixtureConfig, apiToken: undefined })
+    const env = attioEnv(() => { requests += 1; return Response.json({}) })
+    const result = await runIngestion(request(pipeline), { ...env, journal: createMemoryJournal(), destination: createMemoryDestination() })
+    expect(result.streams).toHaveLength(9)
+    expect(result.streams.every((stream) => stream.outcome === 'failed' && stream.error?.includes('Set ATTIO_API_TOKEN or pass apiToken.'))).toBe(true)
+    expect(requests).toBe(0)
   })
 
   test('an interrupted object restarts offset zero without requesting other objects', async () => {
@@ -219,7 +235,7 @@ describe('Attio template', () => {
     const requests: string[] = []
     const offsets: number[] = []
     const page = Array.from({ length: 500 }, (_, index) => ({ ...person, id: { ...person.id, record_id: `record-${index}` } }))
-    const deps = fixtureDeps((url, init) => {
+    const env = attioEnv((url, init) => {
       requests.push(url.pathname)
       if (url.pathname === '/v2/objects/people') return fixtureResponse(url)
       if (url.pathname !== '/v2/objects/object-people/records/query') throw new Error(`Unexpected object request ${url.pathname}`)
@@ -230,12 +246,12 @@ describe('Attio template', () => {
     })
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
-    const first = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, { journal, destination })
+    const first = await runIngestion(request(fixturePipeline(), people), { ...env, journal, destination, retry })
     expect(first.ok).toBe(false)
     expect((await journal.readCheckpoint('attio.primary.records.people')).envelope).toBeUndefined()
     fail = false
     const restored = await restoredJournal(journal)
-    const resumed = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, { journal: restored, destination })
+    const resumed = await runIngestion(request(fixturePipeline(), people), { ...env, journal: restored, destination, retry })
     expect(resumed.ok).toBe(true)
     expect(offsets).toEqual([0, 500, 0, 500])
     expect(requests).not.toContain('/v2/objects')
@@ -244,14 +260,14 @@ describe('Attio template', () => {
 
   test('reruns publish changed observations with the same stable raw ID', async () => {
     let changed = false
-    const deps = fixtureDeps((url) => url.pathname === '/v2/objects/object-people/records/query'
+    const env = attioEnv((url) => url.pathname === '/v2/objects/object-people/records/query'
       ? Response.json({ data: [{ ...person, values: { ...person.values, name: [{ full_name: changed ? 'Ada Updated' : 'Ada Example' }] } }] }) : fixtureResponse(url))
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
-    const request = { selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }
-    expect((await runIngestion(request, { journal, destination })).ok).toBe(true)
+    const selected = request(fixturePipeline(), people)
+    expect((await runIngestion(selected, { ...env, journal, destination, retry })).ok).toBe(true)
     changed = true
-    expect((await runIngestion(request, { journal, destination })).ok).toBe(true)
+    expect((await runIngestion(selected, { ...env, journal, destination, retry })).ok).toBe(true)
     const rows = destination.tables.get('default.attio_records_raw') ?? []
     expect(rows).toHaveLength(2)
     expect(rows[0]?.id).toBe(rows[1]?.id)
@@ -260,7 +276,7 @@ describe('Attio template', () => {
 
   test('a fresh runtime after a lost journal acknowledgement replays changed rows safely', async () => {
     let changed = false
-    const deps = fixtureDeps((url) => url.pathname === '/v2/objects/object-people/records/query'
+    const env = attioEnv((url) => url.pathname === '/v2/objects/object-people/records/query'
       ? Response.json({ data: [{ ...person, values: { ...person.values, revision: [{ value: changed ? 'new' : 'old' }] } }] }) : fixtureResponse(url))
     const journal = createMemoryJournal()
     const destination = createMemoryDestination()
@@ -273,38 +289,67 @@ describe('Attio template', () => {
         await journal.append(events)
       },
     }
-    const failed = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, {
-      journal: failingJournal, destination,
-    })
+    const failed = await runIngestion(request(fixturePipeline(), people), { ...env, journal: failingJournal, destination, retry })
     expect(failed.ok).toBe(false)
     expect(destination.tables.get('default.attio_records_raw')).toHaveLength(1)
     changed = true
-    const resumed = await runIngestion({ selected: selectStreams([fixturePipeline(deps)], ['resource:records', 'object:people']), backfill: undefined }, {
-      journal: await restoredJournal(journal), destination,
-    })
+    const resumed = await runIngestion(request(fixturePipeline(), people), { ...env, journal: await restoredJournal(journal), destination, retry })
     expect(resumed.ok).toBe(true)
     const rows = destination.tables.get('default.attio_records_raw') ?? []
     expect(rows).toHaveLength(2)
     expect(rows[0]?.id).toBe(rows[1]?.id)
     expect(rows[1]?.raw).toMatchObject({ data: { values: { revision: [{ value: 'new' }] } } })
   }, 10_000)
+
+  test('invalid configuration imports cleanly and fails each stream when it runs, before any request', async () => {
+    let requests = 0
+    const pipeline = createAttioPipeline({ ...fixtureConfig, pageSize: 0, notesPageSize: 100 })
+    const selected = selectStreams([pipeline], [])
+    expect(selected).toHaveLength(9)
+    const env = attioEnv(() => { requests += 1; return Response.json({}) })
+    const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal: createMemoryJournal(), destination: createMemoryDestination() })
+    expect(result.streams.every((stream) => stream.outcome === 'failed' && /at pageSize[\s\S]*at notesPageSize/.test(stream.error ?? ''))).toBe(true)
+    expect(requests).toBe(0)
+  })
+
+  test('a malformed payload fails at once while a transient response is retried', async () => {
+    let calls = 0
+    const malformed = attioEnv((url) => { calls += 1; return url.pathname === '/v2/tasks' ? Response.json({ data: 'not-a-list' }) : fixtureResponse(url) })
+    const journal = createMemoryJournal()
+    const result = await runIngestion(request(fixturePipeline(), ['resource:tasks']), { ...malformed, journal, destination: createMemoryDestination(), retry })
+    expect(result.streams[0]?.outcome).toBe('failed')
+    expect(result.streams[0]?.error).toContain('Invalid input: expected array, received string')
+    expect(calls).toBe(1)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+
+    let unavailable = true
+    const flaky = attioEnv((url) => {
+      if (unavailable) { unavailable = false; return new Response('busy', { status: 503 }) }
+      return fixtureResponse(url)
+    })
+    const recovered = createMemoryJournal()
+    const retried = await runIngestion(request(fixturePipeline(), ['resource:tasks']), { ...flaky, journal: recovered, destination: createMemoryDestination(), retry })
+    expect(retried.ok).toBe(true)
+    expect(recovered.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass)).toEqual(['transient'])
+  })
 })
 
-function fixturePipeline(deps: AttioClientDeps) {
-  return definePipeline({
-    ...createAttioPipeline({ ...attioConfig, objects: ['people', 'subscriptions'], lists: ['sales'] }, deps),
-    retry: { retries: 1, minTimeout: 0, maxTimeout: 0, randomize: false },
-  })
+function fixturePipeline(config: AttioReaderConfig = { ...fixtureConfig, objects: ['people', 'subscriptions'], lists: ['sales'] }) {
+  return createAttioPipeline(config)
 }
 
-function context(signal = new AbortController().signal): FetchContext {
-  return { signal, attempt: async (operation) => operation(signal) }
+function request(pipeline: PipelineDefinition, tags: readonly string[] = []) {
+  return { selected: selectStreams([pipeline], tags), backfill: undefined }
 }
 
-async function collect<T>(items: AsyncIterable<T>): Promise<T[]> {
-  const result: T[] = []
-  for await (const item of items) result.push(item)
-  return result
+async function streamError(tags: readonly string[], respond: Parameters<typeof attioEnv>[0]): Promise<string | undefined> {
+  const result = await runIngestion(request(fixturePipeline(), tags), { ...attioEnv(respond), journal: createMemoryJournal(), destination: createMemoryDestination(), retry })
+  expect(result.streams.map((stream) => stream.outcome)).toEqual(['failed'])
+  return result.streams[0]?.error
+}
+
+function task(id: string) {
+  return { id: { workspace_id: 'workspace-1', task_id: id } }
 }
 
 async function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {

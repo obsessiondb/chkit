@@ -1,10 +1,11 @@
 """``ON CLUSTER`` injection for the migration plan.
 
-Mirrors the TypeScript ``@chkit/core/on-cluster.ts`` (commit ``6b87e6d`` on
-``main``). Cluster mode is a self-managed multi-node setup: when
-``clickhouse.cluster`` is set, every generated DDL statement in the migration
-plan is stamped with ``ON CLUSTER '<name>'`` and the migration journal is
-stored in a replicated engine. This module is the plan-level post-pass — the
+Mirrors the TypeScript ``@chkit/core/on-cluster.ts`` (commit ``b59fc833``,
+#230, which made the object reference handle quoted identifiers). Cluster
+mode is a self-managed multi-node setup: when ``clickhouse.cluster`` is set,
+every generated DDL statement in the migration plan is stamped with
+``ON CLUSTER '<name>'`` and the migration journal is stored in a replicated
+engine. This module is the plan-level post-pass — the
 journal-store rewrite lives in :mod:`chkit.cli.journal_store`.
 
 The port is a byte-for-byte behavioral mirror of the TS module:
@@ -89,9 +90,16 @@ _OBJECT_GUARD: Final[re.Pattern[str]] = re.compile(
     r"IF\s+(?:NOT\s+)?EXISTS\s+", re.IGNORECASE
 )
 
-# The object reference (``db.name`` or ``db``) is the run of characters up to
-# the next space, ``;``, or ``(`` — ``ON CLUSTER`` slots in right after it.
-_OBJECT_REF: Final[re.Pattern[str]] = re.compile(r"[^\s;(]+")
+# One identifier part: backtick-quoted (backslash-escaped or doubled backticks)
+# or a bare run up to the next space, ``;``, ``(``, or ``.``.
+_IDENTIFIER_PART: Final[str] = r"(?:`(?:[^`\\]|\\.|``)*`|[^\s;(.`]+)"
+
+# The object reference (``db.name`` or ``db``), where each part may be a
+# backtick-quoted identifier containing spaces, dots or escaped backticks.
+# ``ON CLUSTER`` slots in right after it.
+_OBJECT_REF: Final[re.Pattern[str]] = re.compile(
+    rf"{_IDENTIFIER_PART}(?:\.{_IDENTIFIER_PART})*"
+)
 
 # Idempotency is checked positionally — an ``ON CLUSTER`` clause sitting
 # exactly where injection would place it — never by scanning the whole

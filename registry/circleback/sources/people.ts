@@ -1,23 +1,21 @@
-import { IngestConfigError, rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-import { numericId, readCirclebackPages, requestCircleback, requireCirclebackObject, tagNames, toCirclebackRows, type CirclebackClientDeps } from '../client.js'
-import { circlebackConfig } from '../config.js'
+import { circlebackId, circlebackTags, createCirclebackClient, toCirclebackRows } from '../client.js'
+import { circlebackConfig, type CirclebackReaderConfig } from '../config.js'
+
+const person = z.looseObject({ id: circlebackId, tags: circlebackTags })
+const personDetail = person.extend({ externalLinks: z.array(z.unknown()) })
 
 export const circleback_peopleRaw = rawTable({ database: circlebackConfig.database, name: 'circleback_people_raw' })
 
-export async function* readPeople(context: FetchContext, deps: CirclebackClientDeps) {
-  for await (const page of readCirclebackPages(context, { path: '/people' }, deps)) {
+export async function* readPeople(context: SourceContext, config: CirclebackReaderConfig) {
+  const client = createCirclebackClient(context, config)
+  for await (const page of client.pages('/people', person)) {
     for (const listed of page.items) {
-      const id = numericId(listed.id, 'person')
-      const detail = await context.attempt(async (signal) => {
-        const response = await requestCircleback(`/person/${id}`, signal, deps)
-        const person = requireCirclebackObject(await response.json(), 'person detail')
-        if (numericId(person.id, 'person detail') !== id || !Array.isArray(person.externalLinks)) {
-          throw new IngestConfigError('Circleback person detail changed its ID or omitted external links.')
-        }
-        return person
-      }, { label: 'GET /person/{profileId}' })
-      yield { rows: toCirclebackRows([tagNames({ ...listed, ...detail })], (item) => numericId(item.id, 'person'), deps.config.sourceId) }
+      const detail = await client.detail(`/person/${listed.id}`, personDetail)
+      if (detail.id !== listed.id) throw new Error('Circleback person detail changed its ID.')
+      yield { rows: toCirclebackRows([{ ...listed, ...detail }], (item) => item.id, client.settings.sourceId) }
     }
   }
 }
