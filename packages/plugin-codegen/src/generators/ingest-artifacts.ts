@@ -2,6 +2,7 @@ import { dirname, relative } from 'node:path'
 
 import {
   canonicalizeDefinitions,
+  compareCodePoints,
   insertColumnList,
   type TableDefinition,
 } from '@chkit/core'
@@ -70,8 +71,8 @@ export function generateIngestArtifacts(
   const tables = definitions
     .filter((definition): definition is TableDefinition => definition.kind === 'table')
     .sort((a, b) => {
-      if (a.database !== b.database) return a.database.localeCompare(b.database)
-      return a.name.localeCompare(b.name)
+      if (a.database !== b.database) return compareCodePoints(a.database, b.database)
+      return compareCodePoints(a.name, b.name)
     })
 
   const resolved = resolveTableNames(tables, normalized.tableNameStyle)

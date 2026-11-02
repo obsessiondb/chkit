@@ -15,6 +15,7 @@ import type {
   TableDefinition,
   ViewDefinition,
 } from '@chkit/core'
+import { compareCodePoints } from '@chkit/core'
 
 import { debug } from '../../runtime/debug.js'
 import type { TableScope } from '../../runtime/table-scope.js'
@@ -203,12 +204,12 @@ export async function buildDriftPayload(
   const tableDrift = pairs
     .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer))
     .filter((item): item is NonNullable<typeof item> => item !== null)
-    .sort((a, b) => a.table.localeCompare(b.table))
+    .sort((a, b) => compareCodePoints(a.table, b.table))
   const viewDrift = viewPairs
     .flatMap(({ expected, actual }) =>
       compareViewShape(expected, actual, currentDatabase ?? '', canonicalizer)
     )
-    .sort((a, b) => a.object.localeCompare(b.object))
+    .sort((a, b) => compareCodePoints(a.object, b.object))
   const objectDriftWithViews = [...objectDrift, ...viewDrift]
 
   debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${viewDrift.length}`)

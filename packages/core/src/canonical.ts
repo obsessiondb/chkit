@@ -18,9 +18,10 @@ import { canonicalizeProjection } from './projection.js'
 import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 import { canonicalizeVectorIndex } from './vector-index.js'
+import { compareCodePoints } from './order.js'
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
-  return [...items].sort((a, b) => a.name.localeCompare(b.name))
+  return [...items].sort((a, b) => compareCodePoints(a.name, b.name))
 }
 
 function sortKind(kind: SchemaDefinition['kind']): number {
@@ -70,7 +71,7 @@ function normalizeOptionalClause(value: string | undefined): string | undefined 
 function canonicalizeTable(def: TableDefinition): TableDefinition {
   const settings = def.settings
     ? Object.fromEntries(
-        Object.entries(def.settings).sort(([a], [b]) => a.localeCompare(b))
+        Object.entries(def.settings).sort(([a], [b]) => compareCodePoints(a, b))
       )
     : undefined
 
@@ -145,13 +146,13 @@ function canonicalizeRefresh(
         .sort((a, b) => {
           const aKey = `${a.database}.${a.name}`
           const bKey = `${b.database}.${b.name}`
-          return aKey.localeCompare(bKey)
+          return compareCodePoints(aKey, bKey)
         })
     : undefined
 
   const settings = refresh.settings
     ? Object.fromEntries(
-        Object.entries(refresh.settings).sort(([a], [b]) => a.localeCompare(b))
+        Object.entries(refresh.settings).sort(([a], [b]) => compareCodePoints(a, b))
       )
     : undefined
 
@@ -202,7 +203,7 @@ function canonicalizeDictionaryAttribute(attribute: DictionaryAttribute): Dictio
 
 function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition {
   const settings = def.settings
-    ? Object.fromEntries(Object.entries(def.settings).sort(([a], [b]) => a.localeCompare(b)))
+    ? Object.fromEntries(Object.entries(def.settings).sort(([a], [b]) => compareCodePoints(a, b)))
     : undefined
 
   return {
@@ -252,9 +253,9 @@ export function canonicalizeDefinitions(definitions: SchemaDefinition[]): Schema
   return [...dedup.values()].sort((a, b) => {
     const kindOrder = sortKind(a.kind) - sortKind(b.kind)
     if (kindOrder !== 0) return kindOrder
-    const dbOrder = a.database.localeCompare(b.database)
+    const dbOrder = compareCodePoints(a.database, b.database)
     if (dbOrder !== 0) return dbOrder
-    return a.name.localeCompare(b.name)
+    return compareCodePoints(a.name, b.name)
   })
 }
 

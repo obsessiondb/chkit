@@ -5,7 +5,7 @@ import type {
   RiskLevel,
   SchemaDefinition,
 } from '@chkit/core'
-import { quoteIdentifier, renderQualifiedName } from '@chkit/core'
+import { compareCodePoints, quoteIdentifier, renderQualifiedName } from '@chkit/core'
 
 import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping } from './rename-mappings.js'
 
@@ -225,7 +225,7 @@ function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]
       const rankOrder = rank - rankOperation(b.operation)
       if (rankOrder !== 0) return rankOrder
       if (rank === DROP_RANK || rank === CREATE_RANK) return a.index - b.index
-      return a.operation.key.localeCompare(b.operation.key) || a.index - b.index
+      return compareCodePoints(a.operation.key, b.operation.key) || a.index - b.index
     })
     .map(({ operation }) => operation)
 }
