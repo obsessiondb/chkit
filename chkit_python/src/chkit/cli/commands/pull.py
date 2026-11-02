@@ -423,7 +423,7 @@ def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None
     tmp_file.replace(out_file)
 
 
-def run(  # noqa: PLR0917
+def run(  # noqa: PLR0912, PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
