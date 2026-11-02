@@ -127,6 +127,10 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `check --json` and `status --json` leave `database` out when no database is configured, as
+  in TS (#452). With a plugin target (such as an ObsessionDB service) and no `clickhouse`
+  block, a missing target database wrote `"database": null`; now `databaseMissing` comes
+  alone.
 - `chkit status --table` is accepted and ignored, as in TS and the docs (#451). Before,
   chkit-py read the snapshot and kept only the pending migrations that touch the matched
   tables, so `--table nomatch_*` reported `Pending: 0` (and `"pending": 0`,

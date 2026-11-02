@@ -117,7 +117,8 @@ def run(  # noqa: PLR0917
     database = config.clickhouse.database if config.clickhouse else None
     if database_missing:
         payload["databaseMissing"] = True
-        payload["database"] = database
+        if database is not None:
+            payload["database"] = database
 
     if output_json:
         emit_json("status", payload)
