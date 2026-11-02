@@ -144,6 +144,8 @@ export interface SchemaObjectRef {
 	kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
 	database: string
 	name: string
+	/** `system.tables.comment`, as ClickHouse decoded it; `''` when there is none. */
+	comment?: string
 }
 
 export interface SystemTableRow {
@@ -152,6 +154,7 @@ export interface SystemTableRow {
 	engine: string
 	create_table_query?: string
 	primary_key?: string
+	comment?: string
 }
 
 export interface SystemColumnRow {
@@ -189,6 +192,7 @@ export interface IntrospectedTable {
 	projections: ProjectionDefinition[]
 	constraints?: TableConstraintDefinition[]
 	ttl?: string
+	comment?: string
 }
 
 type ClickHouseClient = ReturnType<typeof createClient>
@@ -214,7 +218,6 @@ export {
 export { canonicalizeSqlFragments } from './canonicalize.js'
 export { listViewDetails, parseMaterializedViewTarget, type IntrospectedView } from './view-details.js'
 export {
-	parseCommentFromCreateDictionaryQuery,
 	parseDictionaryAttributesFromCreateDictionaryQuery,
 	parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
 	parseDictionaryRangeFromCreateDictionaryQuery,
@@ -397,6 +400,7 @@ export function buildIntrospectedTables(
 				),
 				constraints: parseConstraintsFromCreateTableQuery(row.create_table_query),
 				ttl: parseTTLFromCreateTableQuery(row.create_table_query),
+				...(row.comment ? { comment: row.comment } : {}),
 			}
 		})
 		.sort((a, b) => {
@@ -1036,7 +1040,7 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 		},
 		async listSchemaObjects(): Promise<SchemaObjectRef[]> {
 			const rows = await this.query<SystemTableRow>(
-				`SELECT database, name, engine
+				`SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
@@ -1051,6 +1055,7 @@ WHERE is_temporary = 0
 					kind,
 					database: row.database,
 					name: row.name,
+					comment: row.comment ?? '',
 				})
 			}
 			return out
@@ -1062,7 +1067,7 @@ WHERE is_temporary = 0
 				.map((dbName) => `'${dbName.replace(/'/g, "''")}'`)
 				.join(', ')
 			const tables = await this.query<SystemTableRow>(
-				`SELECT database, name, engine, create_table_query, primary_key
+				`SELECT database, name, engine, create_table_query, primary_key, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})`,

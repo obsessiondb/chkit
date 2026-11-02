@@ -86,6 +86,8 @@ The output is a schema module that imports the chkit builders and exports the pu
 
 Column defaults come back as the SQL that ClickHouse stores, written as an expression (`{ expression: "now64(3)" }`), so a string default keeps its SQL quotes: `{ expression: "'web'" }`. Pull keeps the [`defaultKind`](/schema/dsl-reference/#defaultkind-optional) of `MATERIALIZED`, `ALIAS`, and `EPHEMERAL` columns next to it: `{ defaultKind: "MATERIALIZED", default: { expression: "toDate(ts)" } }`. A pulled default works like a hand-written one; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional). Upgrade `chkit` together with `@chkit/plugin-pull`: chkit 0.2.0-beta.8 and older cannot read the `{ expression }` form.
 
+Comments of tables, columns, views, materialized views and dictionaries come from `system.tables.comment` and `system.columns.comment`, which ClickHouse has already decoded, so the pulled `comment` is exactly the stored text. A `comment` that contains `AS` leaves the pulled `as` query unchanged.
+
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts
@@ -228,7 +230,7 @@ If you do this, be aware of the consequence: `chkit pull` has no way to detect t
 
 ## Current limits
 
-- Materialized views without a `TO` clause are skipped.
+- Materialized views without a `TO` clause (with an inner table) are skipped with a warning, and so is their `.inner_id.*` table.
 - Dictionaries whose `create_table_query` can't be parsed (attributes, primary key, or `SOURCE`/`LAYOUT`/`LIFETIME` missing) are skipped.
 - XML-config dictionaries (not created via DDL) are not introspected.
 - Requires a live ClickHouse connection.

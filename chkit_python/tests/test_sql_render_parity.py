@@ -874,13 +874,13 @@ def test_view_with_empty_comment_renders_no_comment() -> None:
     assert to_create_sql(v) == "CREATE VIEW IF NOT EXISTS default.v AS\nSELECT 1 AS x;"
 
 
-def test_view_comment_change_recreates_with_the_new_comment() -> None:
+def test_view_comment_change_alters_the_view_in_place() -> None:
+    # #464
     plan = plan_diff(
         [view(database="default", name="v", as_="SELECT 1 AS x", comment="old")],
         [view(database="default", name="v", as_="SELECT 1 AS x", comment="new")],
     )
-    assert [op.type for op in plan.operations] == ["drop_view", "create_view"]
-    assert "COMMENT 'new'" in plan.operations[1].sql
+    assert [op.sql for op in plan.operations] == ["ALTER TABLE default.v MODIFY COMMENT 'new';"]
 
 
 # ---------- CREATE MATERIALIZED VIEW ----------

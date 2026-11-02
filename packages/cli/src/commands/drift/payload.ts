@@ -21,6 +21,7 @@ import type { TableScope } from '../../runtime/table-scope.js'
 import {
   collectTableSqlFragments,
   collectViewSqlQueries,
+  compareObjectComments,
   compareSchemaObjects,
   compareTableShape,
   compareViewShape,
@@ -155,6 +156,7 @@ export async function buildDriftPayload(
       kind: def.kind,
       database: def.database,
       name: def.name,
+      comment: def.comment,
     }))
   const expectedDatabases = new Set(expectedObjects.map((def) => def.database))
   const actualInScope = actualObjects.filter((item) => expectedDatabases.has(item.database))
@@ -204,11 +206,12 @@ export async function buildDriftPayload(
     .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer))
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.table.localeCompare(b.table))
-  const viewDrift = viewPairs
-    .flatMap(({ expected, actual }) =>
+  const viewDrift = [
+    ...viewPairs.flatMap(({ expected, actual }) =>
       compareViewShape(expected, actual, currentDatabase ?? '', canonicalizer)
-    )
-    .sort((a, b) => a.object.localeCompare(b.object))
+    ),
+    ...compareObjectComments(expectedObjects, actualInScope),
+  ].sort((a, b) => a.object.localeCompare(b.object))
   const objectDriftWithViews = [...objectDrift, ...viewDrift]
 
   debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${viewDrift.length}`)

@@ -938,7 +938,6 @@ def _run(tmp_path: Path, sql: str, client: _RecordingClient, store: _FakeStore) 
             file="m.sql",
             retry=None,
             log=lambda _line: None,
-            warn=lambda _line: None,
         )
     )
 
@@ -1079,7 +1078,11 @@ def test_apply_refuses_the_exchange_when_such_inserts_started_during_the_cutover
 
 
 @pytest.mark.usefixtures("_apply_env")
-def test_apply_does_not_guard_other_statements(tmp_path: Path) -> None:
+def test_apply_does_not_guard_other_statements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fake reports every table as present, so the DROP's wait would time out.
+    monkeypatch.setattr(migrate_apply, "wait_for_ddl_propagation", lambda *_a, **_k: None)
     sql = (
         "-- operation: cutover_validate key=table:app.events:cutover:before_exchange risk=caution\n"
         "SELECT 1;\n"
@@ -1117,34 +1120,36 @@ def test_apply_stops_when_the_exchange_does_not_reach_every_replica(
 
 
 @pytest.mark.usefixtures("_apply_env")
-def test_apply_still_only_warns_when_another_propagation_wait_fails(
+def test_apply_stops_when_another_propagation_wait_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # As in TS (#464): the migration fails and is not recorded as applied.
     def slow(*_args: Any, **_kwargs: Any) -> None:
         msg = "not visible yet"
         raise RuntimeError(msg)
 
     monkeypatch.setattr(migrate_apply, "wait_for_ddl_propagation", slow)
     sql = "-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;\n"
-    warnings: list[str] = []
     (tmp_path / "m.sql").write_text(sql, encoding="utf-8")
     store = _FakeStore()
-    apply_migration(
-        ApplyMigrationInput(
-            client=cast(Any, _RecordingClient()),
-            journal_store=cast(Any, store),
-            plugin_runtime=cast(Any, _Runtime()),
-            config=cast(Any, SimpleNamespace(clickhouse=None)),
-            table_scope=cast(Any, None),
-            migrations_dir=tmp_path,
-            file="m.sql",
-            retry=None,
-            log=lambda _line: None,
-            warn=warnings.append,
+    with pytest.raises(RuntimeError, match="not visible yet"):
+        apply_migration(
+            ApplyMigrationInput(
+                client=cast(Any, _RecordingClient()),
+                journal_store=cast(Any, store),
+                plugin_runtime=cast(Any, _Runtime()),
+                config=cast(Any, SimpleNamespace(clickhouse=None)),
+                table_scope=cast(Any, None),
+                migrations_dir=tmp_path,
+                file="m.sql",
+                retry=None,
+                log=lambda _line: None,
+            )
         )
-    )
-    assert warnings == ["  ⚠ DDL propagation wait failed for table:app.t: not visible yet"]
-    assert len(store.appended) == 1
+    assert store.appended == []
+    # The DROP ran and is journaled as completed, so a re-run does not replay it.
+    assert store.state is not None
+    assert [op.status for op in store.state.operations] == ["completed"]
 
 
 # ---------- generate helpers ----------

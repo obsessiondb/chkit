@@ -76,8 +76,6 @@ class ApplyMigrationInput:
     retry: RetryResume | None
     # Progress lines; the command sends them to stderr in --json mode.
     log: Callable[[str], None]
-    # Warnings (DDL propagation) are suppressed in --json mode.
-    warn: Callable[[str], None]
     # --setting values, sent with every statement of the migration (sync,
     # async, barrier, before-retry).
     settings: dict[str, str] | None = None
@@ -248,19 +246,15 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             wait_for_exchange(input_.client, statement, cluster=cluster)
         elif operation is not None and operation.mode != "barrier":
             # Poll system.tables / system.columns until the DDL is visible.
-            # Critical for Replicated / ObsessionDB Shared engines.
-            try:
-                wait_for_ddl_propagation(
-                    input_.client,
-                    operation.type,
-                    operation.key,
-                    cluster=cluster,
-                    statement=statement,
-                )
-            except Exception as wait_error:
-                input_.warn(
-                    f"  ⚠ DDL propagation wait failed for {operation.key}: {wait_error}"
-                )
+            # Critical for Replicated / ObsessionDB Shared engines. A wait that
+            # times out stops the migration, as in TS.
+            wait_for_ddl_propagation(
+                input_.client,
+                operation.type,
+                operation.key,
+                cluster=cluster,
+                statement=statement,
+            )
 
     # TS ``toISOString().replace('Z', '')``: a `Z` suffix only parses with
     # date_time_input_format=best_effort, which the ObsessionDB API does not set.
