@@ -1,6 +1,5 @@
-import { IngestConfigError } from './errors.js'
 import { canonicalJson } from './journal.js'
-import type { AttemptOptions, FetchContext } from './types.js'
+import type { AttemptOptions, SourceContext } from './types.js'
 
 export interface Page<TItem, TCursor, TMetadata = undefined> {
   items: readonly TItem[]
@@ -11,7 +10,7 @@ export interface Page<TItem, TCursor, TMetadata = undefined> {
 }
 
 export interface PaginateOptions<TItem, TCursor, TMetadata = undefined> {
-  context: FetchContext
+  context: SourceContext
   fetchPage(cursor: TCursor | undefined, signal: AbortSignal): Promise<Page<TItem, TCursor, TMetadata>>
   initial?: TCursor
   label?: AttemptOptions['label']
@@ -40,7 +39,7 @@ export async function* paginate<TItem, TCursor, TMetadata = undefined>(
     })
     options.context.signal.throwIfAborted()
     if (typeof page !== 'object' || page === null || !Array.isArray(page.items)) {
-      throw new IngestConfigError(
+      throw new Error(
         `paginate: fetchPage must resolve to a page shaped { items, next, metadata? }, got ${describeValue(page)}.`
       )
     }
@@ -48,7 +47,7 @@ export async function* paginate<TItem, TCursor, TMetadata = undefined>(
     if (next !== undefined && next !== null) {
       const key = continuationKey(next)
       if (seen.has(key)) {
-        throw new IngestConfigError(`paginate: provider returned a repeated continuation ${key}; refusing to loop.`)
+        throw new Error(`paginate: provider returned a repeated continuation ${key}; refusing to loop.`)
       }
       seen.add(key)
     }
@@ -63,7 +62,7 @@ function continuationKey(cursor: unknown): string {
     return canonicalJson(cursor)
   } catch (error) {
     const reason = error instanceof Error ? error.message : String(error)
-    throw new IngestConfigError(`paginate: a continuation must be JSON-serializable (${reason}).`)
+    throw new Error(`paginate: a continuation must be JSON-serializable (${reason}).`)
   }
 }
 

@@ -5,8 +5,9 @@
   "title": "Google Calendar",
   "description": "Editable Google Calendar API ingestion with journaled checkpoints and raw ClickHouse tables.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.10",
-    "@chkit/plugin-ingest@^0.2.0-beta.10"
+    "@chkit/core@^0.2.0-beta.12",
+    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "zod@^4.3.6"
   ],
   "files": [
     {
@@ -49,8 +50,16 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.1",
+      "version": "0.3.0",
       "changelog": [
+        {
+          "version": "0.3.0",
+          "changes": [
+            "Read configuration and the access token when a stream runs, so `generate`, `migrate`, and `chkit check` never depend on them; invalid settings or a missing token fail that run before any request. Requires zod 4 and chkit 0.2.0-beta.12.",
+            "Send requests through the ingestion runtime, which retries only network failures, timeouts, retryable HTTP statuses, and Google's 403 rate-limit responses; malformed payloads and invalid checkpoints fail at once.",
+            "Set `accessToken` in the configuration to use another token, for example for a second installation; it defaults to `GOOGLE_CALENDAR_ACCESS_TOKEN`."
+          ]
+        },
         {
           "version": "0.2.1",
           "changes": [
@@ -81,8 +90,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/google-calendar.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.10",
-      "ingest": "^0.2.0-beta.10",
+      "chkit": "^0.2.0-beta.12",
+      "ingest": "^0.2.0-beta.12",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/google-calendar",
       "entry": "index.ts",

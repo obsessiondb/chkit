@@ -2,16 +2,18 @@ import { BATCH_ID_COLUMN, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destinatio
 import type { LoaderFactory } from './types.js'
 
 export interface SimpleLoaderOptions {
-  /** Rows per physical INSERT. A larger batch is split into deterministic chunks. */
+  /** - Rows per physical INSERT; default 50,000. Keep stable across retries. */
   maxRowsPerInsert?: number
 }
 
 const DEFAULT_MAX_ROWS_PER_INSERT = 50_000
 
 /**
- * Direct at-least-once destination writes. Every write unit reuses one stable
- * token across retries: a batch written by one INSERT has one token, a
- * deterministically chunked batch has one distinct token per chunk.
+ * - Default cheap, direct, at-least-once appends; one stable retry token per write unit.
+ * - Native dedup depends on engine settings and finite token retention, not row keys.
+ *   Keep physical insert sizing stable across retries.
+ * - Choose stagedLoader for immutable-key dedup across overlaps/replays within its
+ *   pinned-server/shared-executor/process contract; use a replacing-table/read model for updates.
  */
 export function simpleLoader(options: SimpleLoaderOptions = {}): LoaderFactory {
   const maxRows = options.maxRowsPerInsert ?? DEFAULT_MAX_ROWS_PER_INSERT

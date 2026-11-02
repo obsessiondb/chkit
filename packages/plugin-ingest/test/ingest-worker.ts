@@ -44,7 +44,7 @@ try {
       yield { id: `page:${state}`, rows: [{ id: state + 1 }], state: state + 1 }
     },
   })
-  const pipeline = definePipeline({ id: config.namespaceId, streams: [stream], retry: { retries: 0 } })
+  const pipeline = definePipeline({ id: config.namespaceId, streams: [stream] })
   const direct = createClickHouseDestination(executor)
   let acknowledgementLost = false
   const load: DestinationAdapter = config.loseLoadAcknowledgements ? {

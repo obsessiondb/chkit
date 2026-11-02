@@ -1,94 +1,79 @@
-import { HttpError, IngestConfigError, paginate, rawRows, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
+import { HttpError, paginate, rawRows, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-import { circlebackConfig, type CirclebackReaderConfig } from './config.js'
+import { circlebackReaderConfigSchema, type CirclebackReaderConfig } from './config.js'
 
-const baseUrl = 'https://circleback.ai/api'
 export type CirclebackObject = Record<string, unknown>
+export type CirclebackCollection = '/meetings' | '/action-items' | '/people' | '/companies'
+export type CirclebackSettings = Omit<z.output<typeof circlebackReaderConfigSchema>, 'apiKey'>
+export type TranscriptRead =
+  | { status: 'available'; data: z.output<typeof transcriptSegments> }
+  | { status: 'forbidden' | 'not_found'; data: null }
 
-export interface CirclebackClientDeps {
-  config: CirclebackReaderConfig
-  fetch: (url: string, init: RequestInit) => Promise<Response>
-  token: () => string | undefined
+export interface CirclebackClient {
+  settings: CirclebackSettings
+  pages<T extends CirclebackObject>(path: CirclebackCollection, item: z.ZodType<T>, query?: Record<string, string>): AsyncGenerator<Page<T, string>>
+  detail<T extends CirclebackObject>(path: string, item: z.ZodType<T>): Promise<T>
+  transcript(meetingId: string): Promise<TranscriptRead>
 }
 
-export const defaultCirclebackClientDeps: CirclebackClientDeps = {
-  config: circlebackConfig,
-  fetch: (url, init) => fetch(url, init),
-  token: () => process.env.CIRCLEBACK_API_KEY,
-}
-
-/** The executor owns one request attempt per page; Link cursors remain local to the full read. */
-export function readCirclebackPages(context: FetchContext, collection: {
-  path: '/meetings' | '/action-items' | '/people' | '/companies'
-  query?: Record<string, string>
-}, deps: CirclebackClientDeps) {
-  const initial = new URL(`${baseUrl}${collection.path}`)
-  for (const [key, value] of Object.entries(collection.query ?? {})) initial.searchParams.set(key, value)
-  return paginate<CirclebackObject, string>({
-    context, initial: initial.toString(), label: `GET ${collection.path}`,
-    fetchPage: async (url, signal) => {
-      if (!url) throw new IngestConfigError('Circleback collection URL is missing.')
-      const response = await requestCircleback(url, signal, deps)
-      const body: unknown = await response.json()
-      if (!Array.isArray(body)) throw new IngestConfigError(`Circleback ${collection.path} is not an array.`)
-      return { items: body.map((item: unknown) => requireCirclebackObject(item, collection.path)),
-        next: nextLink(response.headers.get('link'), url, collection.query ?? {}) }
-    },
-  })
-}
-
-export async function requestCircleback(pathOrUrl: string, signal: AbortSignal, deps: CirclebackClientDeps, allowUnavailable = false): Promise<Response> {
-  const token = deps.token()?.trim()
-  if (!token) throw new IngestConfigError('Set CIRCLEBACK_API_KEY.')
-  const response = await deps.fetch(pathOrUrl.startsWith('/') ? `${baseUrl}${pathOrUrl}` : pathOrUrl, {
-    signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), redirect: 'error',
-    headers: { Authorization: `Bearer ${token}`, Accept: 'application/json' },
-  })
-  if (allowUnavailable && (response.status === 403 || response.status === 404)) return response
-  if (!response.ok) throw await HttpError.fromResponse(response)
-  return response
-}
-
-export function classifyCirclebackError(cause: unknown): ReturnType<ErrorClassifier> {
-  if (cause instanceof SyntaxError) return { kind: 'permanent' }
-  if (!(cause instanceof HttpError) || cause.status !== 429) return undefined
-  const reset = cause.response.headers.get('ratelimit-reset')
-  const resetMs = reset?.trim() ? Number(reset) * 1000 : Number.NaN
-  return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs ?? (Number.isFinite(resetMs) && resetMs >= 0 ? resetMs : undefined) }
-}
-
-export function toCirclebackRows(items: readonly CirclebackObject[], id: (item: CirclebackObject) => string | number, sourceId: string) {
-  return rawRows(items.map((data) => ({ source_id: sourceId, data })), (item) => JSON.stringify([sourceId, id(item.data)]))
-}
-
+export const circlebackId = z.int().positive()
+export const nonBlankString = z.string().refine((value) => value.trim() !== '', 'must not be blank')
 /** Tag names are the requested projection; provider objects otherwise stay intact. */
-export function tagNames(item: CirclebackObject): CirclebackObject {
-  if (item.tags === undefined) return item
-  if (!Array.isArray(item.tags)) throw new IngestConfigError('Circleback tags is not an array.')
-  return { ...item, tags: item.tags.map((tag: unknown) => {
-    const name = requireCirclebackObject(tag, 'tag').name
-    if (typeof name !== 'string' || !name.trim()) throw new IngestConfigError('Circleback tag has no name.')
-    return name
-  }) }
+export const circlebackTags = z.array(z.looseObject({ name: nonBlankString })).transform((tags) => tags.map((tag) => tag.name)).optional()
+const baseUrl = 'https://circleback.ai/api'
+const transcriptSegments = z.array(z.looseObject({ speaker: z.string().nullable(), text: z.string(), timestamp: z.number() }))
+const unavailable = new Map<number, 'forbidden' | 'not_found'>([[403, 'forbidden'], [404, 'not_found']])
+
+export function createCirclebackClient(context: SourceContext, config: CirclebackReaderConfig): CirclebackClient {
+  const { apiKey, ...settings } = circlebackReaderConfigSchema.parse(config)
+  const get = (url: string) => context.attempt(
+    () => context.fetch(url, { redirect: 'error', headers: { Authorization: `Bearer ${apiKey}`, Accept: 'application/json' } })
+      .catch((error: unknown) => { throw withResetDelay(error) }),
+    { label: `GET ${new URL(url).pathname}` },
+  )
+  return {
+    settings,
+    pages<T extends CirclebackObject>(path: CirclebackCollection, item: z.ZodType<T>, query: Record<string, string> = {}) {
+      const initial = new URL(`${baseUrl}${path}`)
+      for (const [key, value] of Object.entries(query)) initial.searchParams.set(key, value)
+      const page = z.array(item)
+      return paginate<T, string>({
+        context, initial: initial.toString(), label: `GET ${path}`,
+        fetchPage: async (url = initial.toString()) => {
+          const response = await get(url)
+          return { items: page.parse(await response.json()), next: nextLink(response.headers.get('link'), url, query) }
+        },
+      })
+    },
+    async detail<T extends CirclebackObject>(path: string, item: z.ZodType<T>) {
+      const response = await get(`${baseUrl}${path}`)
+      return item.parse(await response.json())
+    },
+    async transcript(meetingId: string) {
+      let response: Response
+      try {
+        response = await get(`${baseUrl}/meeting/${encodeURIComponent(meetingId)}/transcript`)
+      } catch (error) {
+        const status = error instanceof HttpError ? unavailable.get(error.status) : undefined
+        if (status) return { status, data: null }
+        throw error
+      }
+      return { status: 'available', data: transcriptSegments.parse(await response.json()) }
+    },
+  }
 }
 
-export function requireCirclebackObject(value: unknown, label: string): CirclebackObject {
-  if (!isCirclebackObject(value)) throw new IngestConfigError(`Circleback ${label} is not an object.`)
-  return value
+/** Circleback sends the wait as RateLimit-Reset seconds, without Retry-After. */
+function withResetDelay(error: unknown): unknown {
+  if (!(error instanceof HttpError) || error.status !== 429 || error.retryAfterMs !== undefined) return error
+  const reset = error.response.headers.get('ratelimit-reset')
+  const resetMs = reset?.trim() ? Number(reset) * 1000 : Number.NaN
+  return Number.isFinite(resetMs) && resetMs >= 0 ? HttpError.withStatus(error.response, 429, { body: error.body, retryAfterMs: resetMs }) : error
 }
 
-export function meetingId(item: CirclebackObject): string {
-  if (typeof item.id !== 'string' || !item.id.trim()) throw new IngestConfigError('Circleback meeting has no valid ID.')
-  return item.id
-}
-
-export function numericId(value: unknown, label: string): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) throw new IngestConfigError(`Circleback ${label} has no valid numeric ID.`)
-  return value
-}
-
-function isCirclebackObject(value: unknown): value is CirclebackObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+export function toCirclebackRows<T extends CirclebackObject>(items: readonly T[], id: (item: T) => string | number, sourceId: string) {
+  return rawRows(items.map((data) => ({ source_id: sourceId, data })), (item) => JSON.stringify([sourceId, id(item.data)]))
 }
 
 function nextLink(header: string | null, current: string, query: Record<string, string>): string | undefined {
@@ -96,25 +81,24 @@ function nextLink(header: string | null, current: string, query: Record<string, 
   const candidates: string[] = []
   for (const part of header.split(/,(?=\s*<)/)) {
     const link = /^\s*<([^>]+)>\s*(.*)$/.exec(part)
-    if (!link) throw new IngestConfigError('Circleback returned a malformed Link header.')
+    if (!link) throw new Error('Circleback returned a malformed Link header.')
     const relation = /;\s*rel\s*=\s*(?:"([^"]+)"|([^;\s]+))/.exec(link[2] ?? '')
     if (!(relation?.[1] ?? relation?.[2])?.split(/\s+/).includes('next')) continue
-    if (!link[1]) throw new IngestConfigError('Circleback next page URL is missing.')
+    if (!link[1]) throw new Error('Circleback next page URL is missing.')
     candidates.push(link[1])
   }
-  if (candidates.length > 1) throw new IngestConfigError('Circleback returned multiple next pages.')
+  if (candidates.length > 1) throw new Error('Circleback returned multiple next pages.')
   const value = candidates[0]
   if (!value) return undefined
-  let next: URL
-  try { next = new URL(value, current) }
-  catch { throw new IngestConfigError('Circleback returned an invalid next page URL.') }
+  if (!URL.canParse(value, current)) throw new Error('Circleback returned an invalid next page URL.')
+  const next = new URL(value, current)
   if (next.origin !== 'https://circleback.ai' || next.pathname !== new URL(current).pathname || next.username || next.password || next.hash) {
-    throw new IngestConfigError('Circleback next page changed the collection or origin.')
+    throw new Error('Circleback next page changed the collection or origin.')
   }
   for (const [key, value] of Object.entries(query)) {
     const values = next.searchParams.getAll(key)
     if (values.length > 1 || values.some((nextValue) => nextValue !== value)) {
-      throw new IngestConfigError(`Circleback next page changed the ${key} filter.`)
+      throw new Error(`Circleback next page changed the ${key} filter.`)
     }
     next.searchParams.set(key, value)
   }

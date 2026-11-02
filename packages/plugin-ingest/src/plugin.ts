@@ -12,19 +12,18 @@ import { loadDefinitionModules } from '@chkit/core/schema-loader'
 import { z } from 'zod'
 
 import { BATCH_ID_COLUMN, createClickHouseDestination, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destination.js'
-import { IngestConfigError } from './errors.js'
 import { MAX_DURATION_MS, runIngestion, type BackfillRequest } from './executor.js'
 import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE, emptyCheckpoint, isMissingJournalError } from './journal.js'
-import { collectPipelines, selectStreams, type SelectedStream } from './registry.js'
+import { assertRunnable, collectPipelines, selectStreams, type SelectedStream } from './registry.js'
 import { doctorJournal, repairJournal } from './recovery.js'
-import type { PipelineDefinition } from './types.js'
+import type { PipelineDefinition, StreamResult } from './types.js'
 
 const REQUIRED_COLUMNS = [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]
 /** The budget arms a timer, whose delay cannot exceed a signed 32-bit millisecond count. */
 const MAX_DURATION_SECONDS = Math.floor(MAX_DURATION_MS / 1000)
 
 const IngestOptionsSchema = z.object({
-  journalTable: z.string().min(1).default(DEFAULT_JOURNAL_TABLE),
+  journalTable: z.string().regex(/^[A-Za-z_][A-Za-z0-9_]*$/, 'must be a table name of letters, digits and underscores').default(DEFAULT_JOURNAL_TABLE),
   /** Host-default execution budget in seconds. */
   maxDurationSeconds: z.number().positive().max(MAX_DURATION_SECONDS).default(3600),
   prefetchBatches: z.number().int().positive().default(1),
@@ -64,6 +63,13 @@ interface IngestPluginCommandContext {
   configPath: string
   print: (value: unknown) => void
   pluginContext?: { executor: ClickHouseExecutor; hasExecutor: boolean }
+}
+
+class IngestConfigError extends Error {
+  constructor(message: string, options?: ErrorOptions) {
+    super(message, options)
+    this.name = 'IngestConfigError'
+  }
 }
 
 const runCommand = createPluginRunner<IngestPluginCommandContext>({ configErrorClass: IngestConfigError })
@@ -115,6 +121,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
               } else {
                 const rows = result.streams.reduce((sum, stream) => sum + stream.rows, 0)
                 context.print(`Ingest run ${result.runId}: ${result.ok ? 'ok' : 'incomplete'} (${result.streams.length} streams, ${rows} rows)`)
+                for (const line of formatStreamErrors(result.streams)) context.print(line)
               }
               return result.ok ? 0 : 1
             } finally {
@@ -293,6 +300,20 @@ export function ingest(options: IngestPluginOptions = {}): ChxInlinePluginRegist
   return { plugin: createIngestPlugin(options), name: 'ingest', enabled: true, options }
 }
 
+export function formatStreamErrors(streams: readonly StreamResult[]): string[] {
+  const groups = new Map<string, { outcome: string; error: string; namespaces: string[] }>()
+  for (const { outcome, error, namespaceId } of streams) {
+    if (error === undefined) continue
+    const key = JSON.stringify([outcome, error])
+    const group = groups.get(key) ?? { outcome, error, namespaces: [] }
+    group.namespaces.push(namespaceId)
+    groups.set(key, group)
+  }
+  return [...groups.values()].flatMap(({ outcome, error, namespaces }) => namespaces.length === 1
+    ? [`${namespaces.join('')} ${outcome}: ${error}`]
+    : [`${namespaces.length} streams ${outcome}: ${error}`, `  ${namespaces.join(', ')}`])
+}
+
 /** Local, zero-network graph checks: they hold in `--offline` mode too. */
 export function checkGraph(pipelines: readonly PipelineDefinition[]) {
   const findings: Array<{ code: string; message: string; severity: 'info' | 'warn' | 'error' }> = []
@@ -300,6 +321,12 @@ export function checkGraph(pipelines: readonly PipelineDefinition[]) {
     findings.push({ code: 'ingest_no_pipelines', message: 'No ingestion pipeline is exported by the project entry.', severity: 'warn' })
   }
   for (const pipeline of pipelines) {
+    try {
+      assertRunnable(pipeline)
+    } catch (error) {
+      findings.push({ code: 'ingest_invalid_pipeline', message: error instanceof Error ? error.message : String(error), severity: 'error' })
+      continue
+    }
     for (const stream of pipeline.streams) {
       const columns = new Set(stream.destination.columns.map((column) => column.name))
       const missing = REQUIRED_COLUMNS.filter((name) => !columns.has(name))
@@ -322,12 +349,18 @@ async function loadGraph(config: ResolvedChxConfig): Promise<PipelineDefinition[
 }
 
 async function loadSelection(context: IngestPluginCommandContext): Promise<SelectedStream[]> {
-  const pipelines = await loadGraph(context.config)
-  if (pipelines.length === 0) {
-    throw new IngestConfigError('No ingestion pipeline is exported. Export a definePipeline(...) value from the module configured as "entry".')
+  try {
+    const pipelines = await loadGraph(context.config)
+    if (pipelines.length === 0) {
+      throw new IngestConfigError('No ingestion pipeline is exported. Export a definePipeline(...) value from the module configured as "entry".')
+    }
+    const tags = context.flags['--tag']
+    return selectStreams(pipelines, Array.isArray(tags) ? tags : typeof tags === 'string' ? [tags] : [])
+  } catch (error) {
+    throw error instanceof IngestConfigError
+      ? error
+      : new IngestConfigError(error instanceof Error ? error.message : String(error), { cause: error })
   }
-  const tags = context.flags['--tag']
-  return selectStreams(pipelines, Array.isArray(tags) ? tags : typeof tags === 'string' ? [tags] : [])
 }
 
 function openTarget(context: IngestPluginCommandContext) {

@@ -1,7 +1,9 @@
-import { IngestConfigError, rawRows, rawTable, type FetchContext, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-import { requireLinearObject, type LinearClientDeps, type LinearObject } from '../client.js'
-import { linearConnection, linearId, readLinearPages } from './common.js'
+import { createLinearClient, type LinearClient, type LinearNode } from '../client.js'
+import type { LinearConfig } from '../config.js'
+import { linearId } from './common.js'
 
 const query = `query Issues($after: String, $from: DateTimeOrDuration!, $to: DateTimeOrDuration!) {
   issues(first: 100, after: $after, includeArchived: true, orderBy: updatedAt,
@@ -21,34 +23,35 @@ const labelsQuery = `query IssueLabels($id: String!, $after: String) {
   } }
 }`
 
+const labelNode = z.looseObject({ name: z.string().refine((value) => value.trim() !== '', 'must not be blank') })
+
 export const linear_issuesRaw = rawTable({ database: 'default', name: 'linear_issues_raw' })
 
-export async function* readIssues(context: ReadContext<TimestampRange, TimestampWindowState>, deps: LinearClientDeps) {
-  for await (const page of readLinearPages(context, {
-    query, select: (data) => data.issues, label: 'issues', window: context.selection,
+export async function* readIssues(context: ReadContext<TimestampRange, TimestampWindowState>, config: LinearConfig) {
+  const client = createLinearClient(context, config)
+  for await (const page of client.connection({
+    query, path: ['issues'], label: 'issues', window: context.selection,
     variables: { from: context.selection.from.toISOString(), to: context.selection.to.toISOString() },
-  }, deps)) {
+  })) {
     for (const issue of page.items) {
-      const labels = await completeLabels(context, issue, deps)
+      const labels = await completeLabels(client, issue)
       yield { rows: rawRows([{ ...issue, labels }], linearId) }
     }
   }
 }
 
 /** Label names are the explicitly requested projection; consume every label page first. */
-async function completeLabels(context: FetchContext, issue: LinearObject, deps: LinearClientDeps): Promise<string[]> {
-  const first = linearConnection(issue.labels, 'issue labels')
+async function completeLabels(client: LinearClient, issue: LinearNode): Promise<string[]> {
+  const first = client.inline(issue.labels, 'issue labels')
   const labels = first.items.map(labelName)
   if (first.next !== undefined) {
-    for await (const page of readLinearPages(context, {
-      query: labelsQuery, variables: { id: linearId(issue) }, initial: first.next, label: 'issue labels',
-      select: (data) => requireLinearObject(data.issue, 'label parent issue').labels,
-    }, deps)) labels.push(...page.items.map(labelName))
+    for await (const page of client.connection({
+      query: labelsQuery, path: ['issue', 'labels'], variables: { id: linearId(issue) }, initial: first.next, label: 'issue labels',
+    })) labels.push(...page.items.map(labelName))
   }
   return labels
 }
 
-function labelName(label: LinearObject): string {
-  if (typeof label.name !== 'string' || !label.name.trim()) throw new IngestConfigError('Linear label has no name.')
-  return label.name
+function labelName(label: LinearNode): string {
+  return labelNode.parse(label).name
 }

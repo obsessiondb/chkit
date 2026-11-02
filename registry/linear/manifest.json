@@ -5,8 +5,9 @@
   "title": "Linear",
   "description": "Editable Linear ingestion with nine independent raw resource streams, overlapping update windows, and complete issue history.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.10",
-    "@chkit/plugin-ingest@^0.2.0-beta.10"
+    "@chkit/core@^0.2.0-beta.12",
+    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "zod@^4.3.6"
   ],
   "files": [
     {
@@ -94,8 +95,16 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.1",
+      "version": "0.3.0",
       "changelog": [
+        {
+          "version": "0.3.0",
+          "changes": [
+            "Read configuration and the API key when a stream runs, so `generate`, `migrate`, and `chkit check` never depend on them; invalid settings or a missing key fail that run before any request. Requires zod 4 and chkit 0.2.0-beta.12.",
+            "Send requests through the ingestion runtime, which retries only network failures, timeouts, retryable HTTP statuses, and GraphQL `RATELIMITED` errors (as HTTP 429); malformed payloads and other GraphQL errors fail at once.",
+            "Set `apiKey` in the configuration to use another key, for example for a second workspace; it defaults to `LINEAR_API_KEY`."
+          ]
+        },
         {
           "version": "0.2.1",
           "changes": [
@@ -125,8 +134,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/linear.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.10",
-      "ingest": "^0.2.0-beta.10",
+      "chkit": "^0.2.0-beta.12",
+      "ingest": "^0.2.0-beta.12",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/linear",
       "entry": "index.ts",
