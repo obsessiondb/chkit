@@ -28,7 +28,7 @@ const CODEC_FIELDS: Record<string, readonly string[]> = {
 }
 
 /** The codec kinds, as listed in validation messages. */
-export const CODEC_KINDS: readonly string[] = Object.keys(CODEC_FIELDS)
+const CODEC_KINDS: readonly string[] = Object.keys(CODEC_FIELDS)
 
 function toArray(spec: ColumnCodecSpec): ColumnCodec[] {
   return Array.isArray(spec) ? spec : [spec]

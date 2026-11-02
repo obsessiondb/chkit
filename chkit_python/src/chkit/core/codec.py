@@ -52,7 +52,7 @@ _CODEC_FIELDS: Final[dict[str, tuple[str, ...]]] = {
 }
 """The fields each codec kind takes, in the order they are reported."""
 
-CODEC_KINDS: Final[tuple[str, ...]] = tuple(_CODEC_FIELDS)
+_CODEC_KINDS: Final[tuple[str, ...]] = tuple(_CODEC_FIELDS)
 """The codec kinds, as listed in validation messages."""
 
 # chkit-py's models also take the snake_case spelling of these fields.
@@ -409,14 +409,14 @@ def codec_atom_problem(step: object) -> CodecAtomProblem | None:
     kind = data.get("kind") if isinstance(data, dict) else None
     if not isinstance(data, dict) or not isinstance(kind, str):
         return CodecAtomProblem(
-            "codec_unknown", f"has a codec without a kind; use one of {', '.join(CODEC_KINDS)}"
+            "codec_unknown", f"has a codec without a kind; use one of {', '.join(_CODEC_KINDS)}"
         )
     fields = _CODEC_FIELDS.get(kind)
     if fields is None:
         return CodecAtomProblem(
             "codec_unknown",
             f'has an unknown codec kind "{kind}"; codec kinds are case-sensitive: '
-            f"{', '.join(CODEC_KINDS)}",
+            f"{', '.join(_CODEC_KINDS)}",
         )
     for field, value in data.items():
         if field != "kind" and value is not None and field not in fields:
