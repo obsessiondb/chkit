@@ -86,8 +86,12 @@ def test_keeps_key_clauses_on_merge_tree_engines(engine: str) -> None:
 
 
 def test_merge_tree_table_still_requires_keys() -> None:
-    with pytest.raises(ValueError, match="requires primary_key"):
+    with pytest.raises(ValueError, match="requires order_by"):
         table(database="app", name="t", engine="MergeTree()", columns=COLUMNS)
+    with pytest.raises(ValueError, match="requires order_by"):
+        table(
+            database="app", name="t", engine="MergeTree()", columns=COLUMNS, primary_key=["id"]
+        )
 
 
 def test_renders_only_the_keys_a_non_merge_tree_engine_sets() -> None:

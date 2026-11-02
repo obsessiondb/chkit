@@ -39,8 +39,8 @@ from typing import Final, Literal, TypeAlias
 
 from chkit.core.canonical import canonicalize_definition
 from chkit.core.engine import engine_name
+from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine
-from chkit.core.key_clause import is_plain_column_reference
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefinition,
@@ -405,15 +405,15 @@ def _build_operations(
                 "exchange_tables",
                 table_key,
                 "caution",
-                f"EXCHANGE TABLES {_qualified(database, request.table)} AND "
-                f"{_qualified(database, names.shadow)};",
+                f"EXCHANGE TABLES {render_qualified_name(database, request.table)} AND "
+                f"{render_qualified_name(database, names.shadow)};",
                 before_retry=sql.unswapped_guard,
             ),
             _op(
                 "drop_materialized_view",
                 f"materialized_view:{database}.{names.mirror}",
                 "caution",
-                f"DROP TABLE IF EXISTS {_qualified(database, names.mirror)} SYNC;",
+                f"DROP TABLE IF EXISTS {render_qualified_name(database, names.mirror)} SYNC;",
             ),
             _op(
                 "cutover_validate",
@@ -471,7 +471,7 @@ def _build_operations(
                 "drop_table",
                 f"table:{database}.{names.reconcile}",
                 "caution",
-                f"DROP TABLE IF EXISTS {_qualified(database, names.reconcile)} SYNC;",
+                f"DROP TABLE IF EXISTS {render_qualified_name(database, names.reconcile)} SYNC;",
             ),
         ]
     )
@@ -481,8 +481,8 @@ def _build_operations(
                 "alter_table_rename_table",
                 f"table:{database}.{names.previous}:rename_table",
                 "caution",
-                f"RENAME TABLE IF EXISTS {_qualified(database, names.shadow)} TO "
-                f"{_qualified(database, names.previous)};",
+                f"RENAME TABLE IF EXISTS {render_qualified_name(database, names.shadow)} TO "
+                f"{render_qualified_name(database, names.previous)};",
             )
         )
     else:
@@ -491,7 +491,7 @@ def _build_operations(
                 "drop_table",
                 f"table:{database}.{names.shadow}",
                 "danger",
-                f"DROP TABLE IF EXISTS {_qualified(database, names.shadow)} SYNC;",
+                f"DROP TABLE IF EXISTS {render_qualified_name(database, names.shadow)} SYNC;",
                 before_retry=sql.swapped_guard,
                 warning=(
                     f"Drops the pre-cutover table {database}.{names.shadow} (the old "
@@ -505,7 +505,7 @@ def _build_operations(
             "drop_table",
             f"table:{database}.{names.snapshot}",
             "caution",
-            f"DROP TABLE IF EXISTS {_qualified(database, names.snapshot)} SYNC;",
+            f"DROP TABLE IF EXISTS {render_qualified_name(database, names.snapshot)} SYNC;",
         )
     )
     return operations
@@ -546,11 +546,11 @@ def _create_cutover_sql(
     cluster: str | None,
 ) -> _CutoverSql:
     def q(name: str) -> str:
-        return _qualified(database, name)
+        return render_qualified_name(database, name)
 
     target = f"{database}.{table}"
-    column_list = ", ".join(_quote_column(column) for column in columns)
-    key_list = ", ".join(_quote_column(column) for column in key)
+    column_list = ", ".join(quote_identifier(column) for column in columns)
+    key_list = ", ".join(quote_identifier(column) for column in key)
 
     def every_replica(query: str) -> str:
         if cluster:
@@ -1079,20 +1079,6 @@ def _canonical_table(definition: TableDefinition) -> TableDefinition:
 
 def _without_rename(definition: TableDefinition) -> TableDefinition:
     return definition.model_copy(update={"renamed_from": None, "retained_by": None})
-
-
-def _qualified(database: str, name: str) -> str:
-    """TS ``renderQualifiedName``: plain identifiers bare, anything else quoted."""
-    return f"{_render_identifier(database)}.{_render_identifier(name)}"
-
-
-def _render_identifier(name: str) -> str:
-    return name if is_plain_column_reference(name) else _quote_column(name)
-
-
-def _quote_column(name: str) -> str:
-    escaped = name.replace("\\", "\\\\").replace("`", "\\`")
-    return f"`{escaped}`"
 
 
 def _string_literal(value: str) -> str:

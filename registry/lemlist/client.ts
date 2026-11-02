@@ -1,33 +1,80 @@
-import { HttpError, IngestConfigError, paginate, rawRows, type FetchContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { paginate, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-import { lemlistConfig, type LemlistReaderConfig } from './config.js'
+import { lemlistReaderConfigSchema, type LemlistReaderConfig } from './config.js'
 
-interface LemlistItem { _id: string; [key: string]: unknown }
+export type ListResource = 'activities' | 'campaigns' | 'contacts' | 'companies'
+export type InboxScope = { userId: string } | { contactId: string }
+export type LemlistItem = z.infer<typeof lemlistItem>
+export type LemlistSettings = Omit<z.output<typeof lemlistReaderConfigSchema>, 'apiKey'>
+export interface InboxCursor { page: number; skip: number }
 
-export interface LemlistClientDeps {
-  config: LemlistReaderConfig
-  fetch: (url: string, init: RequestInit) => Promise<Response>
-  token: () => string | undefined
+export interface LemlistClient {
+  settings: LemlistSettings
+  list(resource: ListResource, window?: TimestampRange): AsyncGenerator<Page<LemlistItem, number>>
+  inbox(scope: InboxScope): AsyncGenerator<Page<LemlistItem, InboxCursor>>
+  contacts(ids: readonly string[]): Promise<LemlistItem[]>
+  campaignLeads(campaignId: string): Promise<LemlistItem[]>
+  teamUserIds(): Promise<string[]>
 }
 
-export const defaultLemlistClientDeps: LemlistClientDeps = {
-  config: lemlistConfig,
-  fetch: (url, init) => fetch(url, init),
-  token: () => process.env.LEMLIST_API_KEY,
+type Get = (path: string, params: Record<string, string>) => Promise<unknown>
+
+const nonNegative = z.int().nonnegative()
+const lemlistId = z.string().refine((value) => value.trim() !== '', 'must not be blank')
+const lemlistItem = z.looseObject({ _id: lemlistId })
+const lemlistItems = z.array(lemlistItem)
+  .refine((items) => new Set(items.map((item) => item._id)).size === items.length, 'must not repeat an object ID')
+// The public API returns arrays; retain compatibility with older campaign envelopes.
+const campaignItems = z.union([lemlistItems, z.looseObject({ campaigns: lemlistItems }).transform(({ campaigns }) => campaigns)])
+const offsetListing = z.looseObject({ data: lemlistItems, limit: z.int().positive(), total: nonNegative, offset: nonNegative })
+const inboxListing = z.looseObject({
+  data: lemlistItems,
+  pagination: z.looseObject({ totalItems: nonNegative, perPage: z.int().positive(), currentPage: z.int().positive(), totalPages: nonNegative, nextPage: z.int().nullable() }),
+})
+const team = z.looseObject({ userIds: z.array(lemlistId).optional(), users: z.array(z.looseObject({ userId: lemlistId })).optional() })
+
+export function createLemlistClient(context: SourceContext, config: LemlistReaderConfig): LemlistClient {
+  const { apiKey, ...settings } = lemlistReaderConfigSchema.parse(config)
+  const authorization = `Basic ${Buffer.from(`:${apiKey}`).toString('base64')}`
+  const get: Get = async (path, params) => {
+    const url = new URL(`https://api.lemlist.com/api${path}`)
+    for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value)
+    const response = await context.fetch(url, { headers: { Authorization: authorization }, redirect: 'error' })
+    return response.json()
+  }
+  return {
+    settings,
+    list: (resource, window) => listPages(context, get, settings.pageSize, resource, window),
+    inbox: (scope) => inboxPages(context, get, settings.pageSize, scope),
+    contacts: async (ids) => {
+      const items = lemlistItems.parse(await get('/contacts', { idsOrEmails: ids.join(',') }))
+      const expected = new Set(ids)
+      if (items.length !== ids.length || items.some((item) => !expected.has(item._id))) {
+        throw new Error('Lemlist contact lookup did not return every discovered contact; replay this stream.')
+      }
+      return items
+    },
+    // The normal lead list has a 500-row cap and no continuation. This endpoint explicitly exports all states.
+    campaignLeads: async (campaignId) => lemlistItems.parse(
+      await get(`/v2/campaigns/${encodeURIComponent(campaignId)}/export/leads`, { state: 'all', format: 'json' }),
+    ),
+    teamUserIds: async () => {
+      const members = team.parse(await get('/team', { version: 'v2' }))
+      const ids = members.userIds ?? members.users?.map((user) => user.userId)
+      if (!ids?.length) throw new Error('Lemlist team has no member IDs; configure inboxUserIds or restore team access.')
+      return [...new Set(ids)]
+    },
+  }
 }
 
 /** Offsets are local traversal positions, never durable change cursors. */
-export function readPages(
-  context: FetchContext,
-  resource: 'activities' | 'campaigns' | 'contacts' | 'companies',
-  window: TimestampRange | undefined,
-  deps: LemlistClientDeps,
-) {
+function listPages(context: SourceContext, get: Get, pageSize: number, resource: ListResource, window: TimestampRange | undefined) {
   const seen = new Set<string>()
   return paginate({
     context, initial: 0, label: `GET /${resource}`,
-    fetchPage: async (offset = 0, signal) => {
-      const params: Record<string, string> = { limit: String(deps.config.pageSize), offset: String(offset) }
+    fetchPage: async (offset = 0) => {
+      const params: Record<string, string> = { limit: String(pageSize), offset: String(offset) }
       if (resource === 'activities' || resource === 'campaigns') params.version = 'v2'
       if (window) {
         params.minDate = window.from.toISOString()
@@ -36,42 +83,39 @@ export function readPages(
         params.sortBy = 'createdAt'
         params.sortOrder = 'asc'
       }
-      const result = await requestLemlist(`/${resource}`, params, signal, deps)
+      const result = await get(`/${resource}`, params)
       let items: LemlistItem[]
       let next: number | undefined
       if (resource === 'contacts' || resource === 'companies') {
-        const response = requireObject(result, `${resource} listing`)
-        items = requireItems(response.data, resource)
-        const limit = requireInteger(response.limit, 'listing limit', 1)
-        const total = requireInteger(response.total, 'listing total')
-        if (response.offset !== offset || limit > deps.config.pageSize || items.length > limit ||
-          offset + items.length > total || (items.length < limit && offset + items.length < total)) {
-          throw new IngestConfigError(`Lemlist ${resource} has inconsistent pagination; replay this stream.`)
+        const listing = offsetListing.parse(result)
+        items = listing.data
+        if (listing.offset !== offset || listing.limit > pageSize || items.length > listing.limit ||
+          offset + items.length > listing.total || (items.length < listing.limit && offset + items.length < listing.total)) {
+          throw new Error(`Lemlist ${resource} has inconsistent pagination; replay this stream.`)
         }
-        next = offset + items.length < total ? offset + limit : undefined
+        next = offset + items.length < listing.total ? offset + listing.limit : undefined
       } else {
-        // The public API returns arrays; retain compatibility with older campaign envelopes.
-        items = requireItems(resource === 'campaigns' && isObject(result) ? result.campaigns : result, resource)
-        if (items.length > deps.config.pageSize) throw new IngestConfigError(`Lemlist ${resource} exceeds pageSize.`)
-        next = items.length === deps.config.pageSize ? offset + items.length : undefined
+        items = resource === 'campaigns' ? campaignItems.parse(result) : lemlistItems.parse(result)
+        if (items.length > pageSize) throw new Error(`Lemlist ${resource} exceeds pageSize.`)
+        next = items.length === pageSize ? offset + items.length : undefined
       }
       rejectRepeatedPage(items, seen, resource)
-      if (next !== undefined && !Number.isSafeInteger(next)) throw new IngestConfigError('Lemlist offset exceeded the safe integer range.')
+      if (next !== undefined && !Number.isSafeInteger(next)) throw new Error('Lemlist offset exceeded the safe integer range.')
       return { items, next }
     },
   })
 }
 
 /** Inbox pagination is page-based; the messages endpoint accepts the equivalent skip. */
-export function readInboxPages(context: FetchContext, scope: { userId: string } | { contactId: string }, deps: LemlistClientDeps) {
+function inboxPages(context: SourceContext, get: Get, pageSize: number, scope: InboxScope) {
   const path = 'userId' in scope ? '/inbox' : `/inbox/${encodeURIComponent(scope.contactId)}`
   const seen = new Set<string>()
   let expectedTotal: number | undefined
   let received = 0
   return paginate({
     context, initial: { page: 1, skip: 0 }, label: `GET ${path}`,
-    fetchPage: async (cursor = { page: 1, skip: 0 }, signal) => {
-      const params: Record<string, string> = { limit: String(deps.config.pageSize) }
+    fetchPage: async (cursor: InboxCursor = { page: 1, skip: 0 }) => {
+      const params: Record<string, string> = { limit: String(pageSize) }
       if ('userId' in scope) {
         params.userId = scope.userId
         params.page = String(cursor.page)
@@ -79,86 +123,26 @@ export function readInboxPages(context: FetchContext, scope: { userId: string } 
         params.skip = String(cursor.skip)
         params.markAsRead = 'false'
       }
-      const response = requireObject(await requestLemlist(path, params, signal, deps), 'inbox listing')
-      const items = requireItems(response.data, path)
-      const pagination = requireObject(response.pagination, 'inbox pagination')
-      const total = requireInteger(pagination.totalItems, 'inbox totalItems')
-      const perPage = requireInteger(pagination.perPage, 'inbox perPage', 1)
-      const currentPage = requireInteger(pagination.currentPage, 'inbox currentPage', 1)
-      const totalPages = requireInteger(pagination.totalPages, 'inbox totalPages')
-      const nextPage = pagination.nextPage
-      if (currentPage !== cursor.page || perPage > deps.config.pageSize || items.length > perPage ||
+      const { data: items, pagination } = inboxListing.parse(await get(path, params))
+      const { totalItems: total, perPage, currentPage, totalPages, nextPage } = pagination
+      if (currentPage !== cursor.page || perPage > pageSize || items.length > perPage ||
         (expectedTotal !== undefined && total !== expectedTotal) ||
-        (nextPage !== null && (!Number.isSafeInteger(nextPage) || nextPage !== currentPage + 1)) ||
-        (nextPage !== null && (items.length === 0 || currentPage >= totalPages)) ||
+        (nextPage !== null && (nextPage !== currentPage + 1 || items.length === 0 || currentPage >= totalPages)) ||
         (nextPage === null && totalPages > currentPage)) {
-        throw new IngestConfigError('Lemlist inbox has malformed or incomplete pagination; replay this stream.')
+        throw new Error('Lemlist inbox has malformed or incomplete pagination; replay this stream.')
       }
       rejectRepeatedPage(items, seen, path)
       const count = received + items.length
-      if (count > total || (nextPage === null && count !== total)) throw new IngestConfigError('Lemlist inbox ended before its advertised complete collection.')
+      if (count > total || (nextPage === null && count !== total)) throw new Error('Lemlist inbox ended before its advertised complete collection.')
       expectedTotal = total
       received = count
-      const next = typeof nextPage === 'number' ? { page: nextPage, skip: cursor.skip + perPage } : undefined
+      const next = nextPage === null ? undefined : { page: nextPage, skip: cursor.skip + perPage }
       return { items, next }
     },
   })
 }
 
-export async function requestLemlist(path: string, params: Record<string, string>, signal: AbortSignal, deps: LemlistClientDeps): Promise<unknown> {
-  const key = deps.token()?.trim()
-  if (!key) throw new IngestConfigError('Set LEMLIST_API_KEY.')
-  const url = new URL(`https://api.lemlist.com/api${path}`)
-  for (const [name, value] of Object.entries(params)) url.searchParams.set(name, value)
-  const response = await deps.fetch(url.toString(), {
-    signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), redirect: 'error',
-    headers: { Authorization: `Basic ${Buffer.from(`:${key}`).toString('base64')}` },
-  })
-  if (!response.ok) throw await HttpError.fromResponse(response)
-  try {
-    return await response.json()
-  } catch (cause) {
-    if (cause instanceof SyntaxError) throw new IngestConfigError(`Lemlist ${path} returned invalid JSON.`)
-    throw cause
-  }
-}
-
-export function toLemlistRows(items: readonly LemlistItem[], deps: LemlistClientDeps, parent?: { campaign_id: string } | { contact_id: string } | { user_id: string }) {
-  return rawRows(items.map((data) => ({ source_id: deps.config.sourceId, ...parent, data })), ({ data }) =>
-    JSON.stringify([deps.config.sourceId, ...Object.values(parent ?? {}), data._id]))
-}
-
-export function requireItems(value: unknown, label: string): LemlistItem[] {
-  if (!Array.isArray(value) || !value.every(isItem)) throw new IngestConfigError(`Lemlist ${label} response has no valid items.`)
-  const ids = value.map((item) => item._id)
-  if (new Set(ids).size !== ids.length) throw new IngestConfigError(`Lemlist ${label} repeated an object ID.`)
-  return value
-}
-
-export function requireObject(value: unknown, label: string): Record<string, unknown> {
-  if (!isObject(value)) throw new IngestConfigError(`Lemlist ${label} is not an object.`)
-  return value
-}
-
-export function requireId(value: unknown, label: string): string {
-  if (typeof value !== 'string' || !value.trim()) throw new IngestConfigError(`Lemlist ${label} has no valid ID.`)
-  return value
-}
-
 function rejectRepeatedPage(items: readonly LemlistItem[], seen: Set<string>, label: string) {
-  if (items.some((item) => seen.has(item._id))) throw new IngestConfigError(`Lemlist ${label} repeated a page or object ID; replay this stream.`)
+  if (items.some((item) => seen.has(item._id))) throw new Error(`Lemlist ${label} repeated a page or object ID; replay this stream.`)
   for (const item of items) seen.add(item._id)
-}
-
-function requireInteger(value: unknown, label: string, minimum = 0): number {
-  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value < minimum) throw new IngestConfigError(`Lemlist ${label} is invalid.`)
-  return value
-}
-
-function isItem(value: unknown): value is LemlistItem {
-  return isObject(value) && typeof value._id === 'string' && value._id.trim().length > 0
-}
-
-function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
 }

@@ -1,12 +1,16 @@
-import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-import { githubNumber, readGitHubPages, requireGitHubObject, toGitHubRows, type GitHubClientDeps } from '../client.js'
+import { createGitHubClient, githubRecord, toGitHubRows } from '../client.js'
 import type { GitHubConfig } from '../config.js'
+
+const stargazer = z.looseObject({ user: githubRecord })
 
 export const github_stargazersRaw = rawTable({ database: 'default', name: 'github_stargazers_raw' })
 
-export async function* readStargazers(context: FetchContext, repo: string, config: GitHubConfig, deps: GitHubClientDeps) {
-  for await (const page of readGitHubPages(context, { path: `/repos/${repo}/stargazers`, accept: 'application/vnd.github.star+json' }, config, deps)) {
-    yield { rows: toGitHubRows(page.items, repo, (star) => githubNumber(requireGitHubObject(star.user, 'stargazer user'), 'id')) }
+export async function* readStargazers(context: SourceContext, repo: string, config: GitHubConfig) {
+  const client = createGitHubClient(context, config)
+  for await (const page of client.pages(`/repos/${repo}/stargazers`, stargazer, { accept: 'application/vnd.github.star+json' })) {
+    yield { rows: toGitHubRows(page.items, repo, (star) => star.user.id) }
   }
 }

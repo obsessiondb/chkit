@@ -15,39 +15,35 @@ For expensive full reads, use the provider's change mechanism: a timestamp windo
 
 ## Timestamp windows
 
-`start` is the first run's lower bound. Later runs start at the last watermark minus `overlapMs` (default `0`). The upper bound is a fixed execution cutoff, or the explicit backfill upper bound. Choose overlap based on provider indexing delays and late updates; reconcile repeated records in the destination.
+`start` is the first run's lower bound. `timestampWindow` checks `start` and `overlapMs` when the stream plans its run, so an invalid value fails that stream without affecting schema commands. Later runs start at the last watermark minus `overlapMs` (default `0`). The upper bound is a fixed execution cutoff, or the explicit backfill upper bound. Choose overlap based on provider indexing delays and late updates; reconcile repeated records in the destination.
 
 This complete source module uses the client from [Readers and pagination](/api-sync/readers/#a-reusable-page-client). Save it as `src/sources/helpdesk.ts` and re-export its table and pipeline from the project entry:
 
 ```ts
-import { definePipeline, defineStream, paginate, rawRows, rawTable, timestampWindow } from '@chkit/plugin-ingest'
-import { fetchTicketPage } from './helpdesk-client.js'
+import { definePipeline, defineStream, rawRows, rawTable, timestampWindow } from '@chkit/plugin-ingest'
+import { createHelpdeskClient, helpdeskConfig } from './helpdesk-client.js'
 
 export const ticketsRaw = rawTable({ database: 'default', name: 'tickets_raw' })
 
-const tickets = defineStream({
-  id: 'helpdesk.tickets',
-  destination: ticketsRaw,
-  incremental: timestampWindow({
-    start: new Date('2026-01-01T00:00:00Z'),
-    overlapMs: 60 * 60 * 1000,
-  }),
-  async *read(context) {
-    const pages = paginate({
-      context,
-      label: 'GET /tickets',
-      fetchPage: async (cursor: string | undefined, signal) => {
-        const page = await fetchTicketPage(context.selection, cursor, signal)
-        return { items: page.data, next: page.next_cursor ?? undefined }
-      },
-    })
-    for await (const page of pages) {
-      yield { rows: rawRows(page.items, (ticket) => ticket.id) }
-    }
-  },
-})
+export function createHelpdeskPipeline(config = helpdeskConfig) {
+  const tickets = defineStream({
+    id: 'helpdesk.tickets',
+    destination: ticketsRaw,
+    incremental: timestampWindow({
+      start: new Date('2026-01-01T00:00:00Z'),
+      overlapMs: 60 * 60 * 1000,
+    }),
+    async *read(context) {
+      const client = createHelpdeskClient(context, config)
+      for await (const page of client.tickets(context.selection)) {
+        yield { rows: rawRows(page.items, (ticket) => ticket.id) }
+      }
+    },
+  })
+  return definePipeline({ id: 'helpdesk', streams: [tickets] })
+}
 
-export const helpdesk = definePipeline({ id: 'helpdesk', streams: [tickets] })
+export const helpdesk = createHelpdeskPipeline()
 ```
 
 The client applies **both** `selection.from` and `selection.to`. chkit does not filter arbitrary provider rows itself. If an API supports only a lower bound, the reader must enforce the upper bound using documented timestamp/order semantics and terminate pagination correctly. Specify whether boundaries are inclusive or exclusive and test them.
@@ -65,7 +61,7 @@ Use `timestampWindow({ from })` when `start` and `overlapMs` do not express the 
 
 Choose `cursorState` when the provider guarantees resumption across runs. `parse` validates the saved state. `context.state` and `context.selection` expose it to the reader; neither contains uncommitted progress.
 
-This standalone fixture demonstrates a provider with stable, increasing change sequence numbers. `paginate` owns each request attempt and exposes its candidate checkpoint in metadata. Replace the fixture body of `fetchPage` with a documented provider operation, forwarding its signal:
+This standalone fixture demonstrates a provider with stable, increasing change sequence numbers. `paginate` owns each request attempt and exposes its candidate checkpoint in metadata. Replace the fixture body of `fetchPage` with a provider request through `context.fetch`:
 
 ```ts
 import { cursorState, definePipeline, defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-ingest'

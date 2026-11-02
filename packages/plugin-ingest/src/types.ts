@@ -37,18 +37,21 @@ export interface AttemptOptions {
   label?: string
 }
 
-/** Source request capabilities, independent of selection and checkpoint types. */
-export interface FetchContext {
+export type Fetch = (input: string | URL, init?: RequestInit) => Promise<Response>
+
+/** Source services the run provides, independent of selection and checkpoint types. */
+export interface SourceContext {
   signal: AbortSignal
+  /** `fetch` with the pipeline's request queue, transient retries, a request timeout, and `HttpError` for unsuccessful responses. */
+  fetch(input: string | URL, init?: RequestInit): Promise<Response>
   /**
-   * Run one source operation under executor authority: fetch permit, retry
-   * policy, failure classification and cancellation. Operations that bypass it
-   * only get coarse recovery (reader recreation from the last checkpoint).
+   * Run one source operation that is not a plain request, such as an SDK call, with the
+   * same queue and retries. Only transient failures are retried; it rejects with the thrown value.
    */
   attempt<T>(operation: (signal: AbortSignal) => Promise<T>, options?: AttemptOptions): Promise<T>
 }
 
-export interface ReadContext<TSelection, TState> extends FetchContext {
+export interface ReadContext<TSelection, TState> extends SourceContext {
   streamId: string
   /** What to read this execution, planned by the incremental strategy. */
   selection: TSelection
@@ -85,12 +88,7 @@ export interface PlanInput<TState> {
 /** p-retry context with the original provider failure and its classification. */
 export type RetryContext = Omit<PRetryContext, 'error'> & { error: FetchFailure }
 
-export type RetryOptions = Pick<PRetryOptions,
-  'retries' | 'factor' | 'minTimeout' | 'maxTimeout' | 'randomize' | 'maxRetryTime'
-> & {
-  shouldRetry?: (context: RetryContext) => boolean | Promise<boolean>
-  shouldConsumeRetry?: (context: RetryContext) => boolean | Promise<boolean>
-}
+export type RetryOptions = Pick<PRetryOptions, 'retries' | 'minTimeout' | 'maxTimeout' | 'randomize' | 'maxRetryTime'>
 
 export interface StreamBudget {
   /** Maximum source chunks pulled in one execution of this stream. */
@@ -108,10 +106,8 @@ export interface StreamDefinition<TRow extends Row = Row, TState = unknown, TSel
   readonly incremental: IncrementalStrategy<TState, TSelection>
   readonly read: (context: ReadContext<TSelection, TState>) => AsyncIterable<SourceChunk<TRow, TState>>
   readonly loader: LoaderFactory | undefined
-  readonly retry: RetryOptions | undefined
   readonly batchSize: number | undefined
   readonly budget: StreamBudget | undefined
-  readonly classifyError: ErrorClassifier | undefined
 }
 
 // biome-ignore lint/suspicious/noExplicitAny: a heterogeneous stream list cannot share row/state generics
@@ -125,7 +121,6 @@ export interface PipelineDefinition {
   readonly maxStreams: number
   readonly maxFetches: number
   readonly maxLoads: number
-  readonly retry: RetryOptions | undefined
 }
 
 // ───── Failure classification ─────
@@ -136,8 +131,6 @@ export type FailureClass =
   | { kind: 'transient' }
   | { kind: 'permanent' }
   | { kind: 'unknown' }
-
-export type ErrorClassifier = (cause: unknown, fallback: FailureClass) => FailureClass | undefined
 
 // ───── Loading ─────
 

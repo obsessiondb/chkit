@@ -1,57 +1,115 @@
-import { HttpError, IngestConfigError, type ErrorClassifier } from '@chkit/plugin-ingest'
+import { HttpError, paginate, type Page, type SourceContext, type TimestampRange } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-export type LinearObject = Record<string, unknown>
+import { linearConfigSchema, type LinearConfig } from './config.js'
 
-export interface LinearClientDeps {
-  fetch: (url: string, init: RequestInit) => Promise<Response>
-  token: () => string | undefined
+export type LinearNode = z.infer<typeof linearNode>
+export type LinearSettings = Omit<z.output<typeof linearConfigSchema>, 'apiKey'>
+
+export interface ConnectionRequest {
+  query: string
+  path: readonly string[]
+  label: string
+  variables?: Record<string, unknown>
+  initial?: string
+  window?: TimestampRange
 }
 
-export const defaultLinearClientDeps: LinearClientDeps = {
-  fetch: (url, init) => fetch(url, init),
-  token: () => process.env.LINEAR_API_KEY,
+export interface LinearClient {
+  settings: LinearSettings
+  connection(request: ConnectionRequest): AsyncGenerator<Page<LinearNode, string>>
+  inline(value: unknown, label: string): Page<LinearNode, string>
 }
 
-/** paginate supplies the executor attempt for each GraphQL page. */
-export async function graphql(document: string, variables: Record<string, unknown>, signal: AbortSignal, deps: LinearClientDeps): Promise<LinearObject> {
-  const token = deps.token()?.trim()
-  if (!token) throw new IngestConfigError('Set LINEAR_API_KEY.')
-  const response = await deps.fetch('https://api.linear.app/graphql', {
-    method: 'POST', signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), redirect: 'error',
-    headers: { Authorization: token, 'Content-Type': 'application/json' },
-    body: JSON.stringify({ query: document, variables }),
-  })
-  if (!response.ok) throw await HttpError.fromResponse(response)
-  const body = requireLinearObject(await response.clone().json(), 'GraphQL response')
-  if (body.errors !== undefined && !Array.isArray(body.errors)) throw new IngestConfigError('Linear GraphQL errors is not an array.')
-  if (Array.isArray(body.errors) && body.errors.length > 0) {
-    const rateLimited = body.errors.some((error: unknown) => isLinearObject(error) &&
-      isLinearObject(error.extensions) && error.extensions.code === 'RATELIMITED')
-    if (rateLimited) throw await HttpError.fromResponse(response)
-    throw new IngestConfigError(`Linear GraphQL returned errors: ${JSON.stringify(body.errors)}`)
+interface GraphqlReply {
+  body: unknown
+  response: Response
+}
+
+const nonBlank = z.string().refine((value) => value.trim() !== '', 'must not be blank')
+const linearNode = z.looseObject({ id: nonBlank })
+const linearObject = z.looseObject({})
+const connection = z.looseObject({
+  nodes: z.array(linearNode),
+  pageInfo: z.looseObject({ hasNextPage: z.boolean(), endCursor: z.string().nullish() }),
+})
+const windowedNode = z.looseObject({ updatedAt: z.string().refine((value) => Number.isFinite(Date.parse(value)), 'must be a timestamp') })
+const graphqlErrors = z.looseObject({ errors: z.array(z.unknown()).min(1) })
+const graphqlResponse = z.looseObject({
+  data: linearObject.nullish(),
+  errors: z.array(z.looseObject({ extensions: z.looseObject({ code: z.unknown() }).nullish() })).optional(),
+})
+
+export function createLinearClient(context: SourceContext, config: LinearConfig): LinearClient {
+  const { apiKey, ...settings } = linearConfigSchema.parse(config)
+  const graphql = async (query: string, variables: Record<string, unknown>) => {
+    const reply = await post(context, apiKey, JSON.stringify({ query, variables }))
+    return graphqlData(reply)
   }
-  return requireLinearObject(body.data, 'GraphQL data')
+  return {
+    settings,
+    connection: (request) => paginate<LinearNode, string>({
+      context, initial: request.initial, label: `POST /graphql ${request.label}`,
+      fetchPage: async (after) => {
+        const data = await graphql(request.query, { ...request.variables, after: after ?? null })
+        const page = linearConnection(request.path.reduce<unknown>((value, field) => linearObject.parse(value)[field], data), request.label)
+        if (request.window) assertWindow(page.items, request.window, request.label)
+        return page
+      },
+    }),
+    inline: linearConnection,
+  }
 }
 
-/** Preserve GraphQL rate errors as well as HTTP 429 rate limits. */
-export function classifyLinearError(cause: unknown): ReturnType<ErrorClassifier> {
-  if (cause instanceof SyntaxError) return { kind: 'permanent' }
-  if (!(cause instanceof HttpError)) return undefined
-  if (cause.status !== 429 && !([200, 400].includes(cause.status) && /"code"\s*:\s*"RATELIMITED"/.test(cause.body))) return undefined
-  const headers = cause.response.headers
+async function post(context: SourceContext, apiKey: string, body: string): Promise<GraphqlReply> {
+  try {
+    const response = await context.fetch('https://api.linear.app/graphql', {
+      method: 'POST', redirect: 'error', body,
+      headers: { Authorization: apiKey, 'Content-Type': 'application/json' },
+    })
+    return { body: await response.json(), response }
+  } catch (error) {
+    if (!(error instanceof HttpError)) throw error
+    if (error.status === 429) throw rateLimited(error.response, error.body)
+    if (error.status !== 400) throw error
+    const reply: unknown = await error.response.json().catch(() => undefined)
+    if (!graphqlErrors.safeParse(reply).success) throw error
+    return { body: reply, response: error.response }
+  }
+}
+
+async function graphqlData(reply: GraphqlReply): Promise<Record<string, unknown>> {
+  const { data, errors } = graphqlResponse.parse(reply.body)
+  if (errors?.some((error) => error.extensions?.code === 'RATELIMITED')) {
+    throw rateLimited(reply.response, JSON.stringify(reply.body))
+  }
+  if (errors?.length) throw new Error(`Linear GraphQL returned errors: ${JSON.stringify(errors)}`)
+  if (!data) throw new Error('Linear GraphQL returned no data.')
+  return data
+}
+
+/** Linear puts the wait in per-budget reset headers (epoch milliseconds). */
+function rateLimited(response: Response, body: string): HttpError {
   const resets = ['requests', 'endpoint-requests', 'complexity'].flatMap((kind) => {
-    if (headers.get(`x-ratelimit-${kind}-remaining`) !== '0') return []
-    const reset = Number(headers.get(`x-ratelimit-${kind}-reset`))
+    if (response.headers.get(`x-ratelimit-${kind}-remaining`) !== '0') return []
+    const reset = Number(response.headers.get(`x-ratelimit-${kind}-reset`))
     return Number.isFinite(reset) && reset > 0 ? [Math.max(0, reset - Date.now())] : []
   })
-  return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs ?? (resets.length ? Math.max(...resets) : undefined) }
+  return HttpError.withStatus(response, 429, { body, retryAfterMs: resets.length ? Math.max(...resets) : undefined })
 }
 
-export function requireLinearObject(value: unknown, label: string): LinearObject {
-  if (!isLinearObject(value)) throw new IngestConfigError(`Linear ${label} is not an object.`)
-  return value
+function linearConnection(value: unknown, label: string): Page<LinearNode, string> {
+  const { nodes, pageInfo } = connection.parse(value)
+  if (!pageInfo.hasNextPage) return { items: nodes, next: undefined }
+  if (!pageInfo.endCursor?.trim()) throw new Error(`Linear ${label} returned no new cursor.`)
+  return { items: nodes, next: pageInfo.endCursor }
 }
 
-function isLinearObject(value: unknown): value is LinearObject {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+function assertWindow(items: readonly LinearNode[], window: TimestampRange, label: string): void {
+  for (const item of items) {
+    const updated = Date.parse(windowedNode.parse(item).updatedAt)
+    if (updated < window.from.getTime() || updated > window.to.getTime()) {
+      throw new Error(`Linear ${label} has no updatedAt within the requested window.`)
+    }
+  }
 }

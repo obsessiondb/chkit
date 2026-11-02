@@ -37,18 +37,16 @@ test('ClickHouse retains successful transcript content through permission loss a
   await waitForTable(executor, destination.database, destination.name)
   let responseStatus = 200
   let segments = [{ speaker: 'Fixture speaker', text: 'Retained speech', timestamp: 1.5 }]
-  const source = createCirclebackPipeline({ ...circlebackConfig, sourceId: 'circleback.retention' }, {
-    config: circlebackConfig, token: () => 'fixture',
-    fetch: async (input) => new URL(input).pathname === '/api/meetings'
-      ? Response.json([{ id: 'meeting-1' }])
-      : responseStatus === 200 ? Response.json(segments) : new Response('unavailable', { status: responseStatus }),
-  })
-  const pipeline = { ...source, retry: { retries: 0 }, streams: source.streams.map((stream) => ({ ...stream, destination })) }
+  const source = createCirclebackPipeline({ ...circlebackConfig, sourceId: 'circleback.retention', apiKey: 'fixture' })
+  const fetch = async (input: string | URL) => new URL(input).pathname === '/api/meetings'
+    ? Response.json([{ id: 'meeting-1' }])
+    : responseStatus === 200 ? Response.json(segments) : new Response('unavailable', { status: responseStatus })
+  const pipeline = { ...source, streams: source.streams.map((stream) => ({ ...stream, destination })) }
   const request = { selected: selectStreams([pipeline], ['resource:meeting_transcripts']), backfill: undefined }
   const journal = createMemoryJournal()
   for (const [httpStatus, status] of [[200, 'available'], [403, 'forbidden'], [404, 'not_found']] as const) {
     responseStatus = httpStatus
-    expect((await runIngestion(request, { journal, destination: createClickHouseDestination(executor) })).ok).toBe(true)
+    expect((await runIngestion(request, { fetch, journal, destination: createClickHouseDestination(executor), retry: { retries: 0 } })).ok).toBe(true)
     await executor.command(`OPTIMIZE TABLE ${qualified} FINAL`)
     const raw = await settledRaw(segments, status)
     expect(raw).toHaveLength(2)
@@ -57,7 +55,7 @@ test('ClickHouse retains successful transcript content through permission loss a
   }
   responseStatus = 200
   segments = []
-  expect((await runIngestion(request, { journal, destination: createClickHouseDestination(executor) })).ok).toBe(true)
+  expect((await runIngestion(request, { fetch, journal, destination: createClickHouseDestination(executor), retry: { retries: 0 } })).ok).toBe(true)
   await executor.command(`OPTIMIZE TABLE ${qualified} FINAL`)
   const raw = await settledRaw([], 'available')
   expect(raw).toHaveLength(2)

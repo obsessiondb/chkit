@@ -16,6 +16,7 @@ not-ok result that has an error-severity finding.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -30,6 +31,7 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json
 from chkit.cli.migration_store import (
@@ -46,7 +48,12 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.core.model import ChxConfigEnv
-from chkit.plugins import ChxOnCheckContext, ChxOnCheckResult, ChxPlugin
+from chkit.plugins import (
+    ChxOnCheckContext,
+    ChxOnCheckResult,
+    ChxOnConfigLoadedContext,
+    ChxPlugin,
+)
 
 
 def run(  # noqa: PLR0912, PLR0915, PLR0917
@@ -79,10 +86,10 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             ),
         ),
     ] = None,
-    # Accepted so existing scripts keep working; only generate and snapshot
-    # rebuild run the on_schema_loaded hooks that read them (as in TS).
-    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
-    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    # As in TS, the ObsessionDB plugin's on_check reads these: a Distributed
+    # table fails check when the target counts as ObsessionDB.
+    force_shared_engines: ForceSharedEnginesOption = False,
+    no_shared_engines: NoSharedEnginesOption = False,
     service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="check"))
@@ -105,8 +112,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
         exit_no_target("check", msg, json_mode=output_json)
 
-    migrations_dir = Path(config.migrations_dir)
-    meta_dir = Path(config.meta_dir)
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
+    meta_dir = Path(os.path.abspath(config.meta_dir))
     migrations_dir.mkdir(parents=True, exist_ok=True)
 
     files = list_migration_filenames(migrations_dir)
@@ -156,13 +163,36 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         # Match the TS finding code: ``schema_drift`` (was ``drift``).
         failed_checks.append("schema_drift")
 
+    # As in TS, every hook gets the parsed flags.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--json": output_json,
+            "--table": table_selector,
+            "--strict": strict,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
+    )
+    # As in TS, the on_config_loaded hooks run right before on_check.
+    plugin_runtime.run_on_config_loaded(
+        ChxOnConfigLoadedContext(
+            command="check",
+            config=config,
+            table_scope=table_scope,
+            flags=hook_flags,
+            config_path=resolved_config_path,
+            options={},
+        )
+    )
     # Plugin-driven findings (e.g. codegen, backfill).
     plugin_results = plugin_runtime.run_on_check(
         ChxOnCheckContext(
             command="check",
             config=config,
             table_scope=table_scope,
-            flags={},
+            flags=hook_flags,
             config_path=resolved_config_path,
             json_mode=output_json,
             options={},
@@ -210,7 +240,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     database = config.clickhouse.database if config.clickhouse else None
     if database_missing:
         summary["databaseMissing"] = True
-        summary["database"] = database
+        if database is not None:
+            summary["database"] = database
 
     if output_json:
         emit_json("check", summary)
