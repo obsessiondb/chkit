@@ -162,13 +162,25 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         # Match the TS finding code: ``schema_drift`` (was ``drift``).
         failed_checks.append("schema_drift")
 
+    # As in TS, every hook gets the parsed flags.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--json": output_json,
+            "--table": table_selector,
+            "--strict": strict,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
+    )
     # As in TS, the on_config_loaded hooks run right before on_check.
     plugin_runtime.run_on_config_loaded(
         ChxOnConfigLoadedContext(
             command="check",
             config=config,
             table_scope=table_scope,
-            flags={},
+            flags=hook_flags,
             config_path=resolved_config_path,
             options={},
         )
@@ -179,17 +191,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             command="check",
             config=config,
             table_scope=table_scope,
-            flags=passed_flags(
-                {
-                    "--config": str(config_path) if config_path is not None else None,
-                    "--json": output_json,
-                    "--table": table_selector,
-                    "--strict": strict,
-                    "--force-shared-engines": force_shared_engines,
-                    "--no-shared-engines": no_shared_engines,
-                    "--service": service,
-                }
-            ),
+            flags=hook_flags,
             config_path=resolved_config_path,
             json_mode=output_json,
             options={},

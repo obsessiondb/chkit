@@ -26,7 +26,7 @@ import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from typer.exceptions import TyperException
@@ -73,6 +73,7 @@ from chkit.cli.commands.migrate_retry import (
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.migration_metadata import extract_migration_metadata
@@ -117,6 +118,8 @@ class _MigrateContext:
     config: ChxResolvedConfig
     plugin_runtime: PluginRuntime
     table_scope: TableScope
+    # The parsed flags the plugin hooks get, keyed as in TS.
+    flags: dict[str, Any]
     files: list[str]
     applied_names: set[str]
     pending_all: list[str]
@@ -219,11 +222,28 @@ def run(  # noqa: PLR0917
         typer.Option("--json", help="Emit a JSON-formatted summary."),
     ] = False,
     # Accepted so existing scripts keep working; only generate and snapshot
-    # rebuild run the on_schema_loaded hooks that read them (as in TS).
-    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
-    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    # rebuild run the on_schema_loaded hooks that act on them (as in TS).
+    force_shared_engines: ForceSharedEnginesOption = False,
+    no_shared_engines: NoSharedEnginesOption = False,
     service: ServiceOption = None,
 ) -> None:
+    # As in TS, every hook gets the flags that were passed, keyed by long name.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--apply": apply,
+            "--execute": execute,
+            "--allow-destructive": allow_destructive,
+            "--table": table_selector,
+            "--retry": retry,
+            "--abandon": abandon,
+            "--setting": setting,
+            "--json": output_json,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
+    )
     try:
         _run(
             config_path=config_path,
@@ -235,6 +255,7 @@ def run(  # noqa: PLR0917
             setting=setting,
             output_json=output_json,
             service=service,
+            hook_flags=hook_flags,
         )
     except (typer.Exit, typer.Abort, TyperException):
         raise
@@ -260,6 +281,7 @@ def _run(
     setting: list[str] | None,
     output_json: bool,
     service: str | None,
+    hook_flags: dict[str, Any],
 ) -> None:
     # Usage errors surface before any connection is made.
     targets = resolve_recovery_targets(
@@ -280,6 +302,7 @@ def _run(
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
         service=service,
+        flags=hook_flags,
     )
     if executor is None and config.clickhouse is None:
         msg = (
@@ -306,7 +329,7 @@ def _run(
             command="migrate",
             config=config,
             table_scope=table_scope,
-            flags={},
+            flags=hook_flags,
             config_path=str(config_path or "clickhouse.config.py"),
             options={},
         )
@@ -344,6 +367,7 @@ def _run(
             config=config,
             plugin_runtime=plugin_runtime,
             table_scope=table_scope,
+            flags=hook_flags,
             files=files,
             applied_names=applied_names,
             pending_all=[f for f in files if f not in applied_names],
@@ -699,6 +723,7 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                 log=log,
                 warn=warn,
                 settings=ctx.settings,
+                flags=ctx.flags,
             )
         )
         applied_now.append(entry)

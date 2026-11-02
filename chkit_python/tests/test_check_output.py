@@ -99,6 +99,10 @@ import json
 
 
 class _Probe:
+    def on_config_loaded(self, ctx):
+        with open("config_loaded_flags.json", "w") as f:
+            json.dump(ctx.flags, f)
+
     def on_check(self, ctx):
         with open("flags.json", "w") as f:
             json.dump(ctx.flags, f)
@@ -323,7 +327,7 @@ def test_schema_validation_is_left_to_generate(project: Path) -> None:
 
 
 def test_on_check_gets_the_passed_flags_keyed_as_in_ts(project: Path) -> None:
-    """As in TS, on_check gets only the flags that were passed, by long name (#450)."""
+    """As in TS, on_config_loaded and on_check get only the flags that were passed, by long name (#450)."""
     config = project / "clickhouse.config.py"
     config.write_text(
         CONFIG.replace("config = define_config", FLAG_PROBE + "\nconfig = define_config")
@@ -333,6 +337,7 @@ def test_on_check_gets_the_passed_flags_keyed_as_in_ts(project: Path) -> None:
 
     _check()
     assert json.loads((project / "flags.json").read_text(encoding="utf-8")) == {}
+    assert json.loads((project / "config_loaded_flags.json").read_text(encoding="utf-8")) == {}
 
     _check(
         "--config", "clickhouse.config.py", "--json", "--strict", "-t", "events",
@@ -346,6 +351,9 @@ def test_on_check_gets_the_passed_flags_keyed_as_in_ts(project: Path) -> None:
         "--force-shared-engines": True,
         "--no-shared-engines": True,
     }
+    assert json.loads((project / "config_loaded_flags.json").read_text(encoding="utf-8")) == (
+        json.loads((project / "flags.json").read_text(encoding="utf-8"))
+    )
 
 
 def test_force_shared_engines_fails_a_distributed_table(project: Path) -> None:

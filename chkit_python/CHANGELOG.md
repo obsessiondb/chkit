@@ -133,6 +133,14 @@
   `check --force-shared-engines` had no effect: on a target not recognized as ObsessionDB the
   ObsessionDB plugin did not reject a `Distributed` table, and check passed where TS fails with
   `obsessiondb_distributed_unsupported`.
+- `chkit generate`, `migrate` and `pull` pass every plugin hook they run the flags that were
+  passed, keyed by long name as in TS (#456): `on_config_loaded`, `on_schema_loaded` and
+  `on_plan_created` in generate, `on_init`, `get_context`, `on_before_apply` and
+  `on_after_apply` in migrate, and `on_init`, `get_context` and `on_pull_introspect` in pull.
+  Before, generate's hooks got only `--force-shared-engines` / `--no-shared-engines` (and
+  `on_plan_created` got `{}`), the apply hooks and `on_pull_introspect` got `{}`, and
+  `on_init` / `get_context` got only `--service`. To key them as TS does, pull's `--force`
+  and `--overwrite` are now two options (either one overwrites; `-f` stays on `--force`).
 - `chkit check` runs the plugins' `on_config_loaded` hooks, as in TS (#449): with command
   `check` and the resolved `--table` scope, right before `on_check`. Before, chkit-py
   never called them, so state a plugin set up there was missing in `on_check`. A hook
