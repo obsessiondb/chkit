@@ -71,7 +71,7 @@ describe('async migrate statements through the ObsessionDB remote executor (live
   test('an attach counts only query_log entries of the attempt it attaches to', async () => {
     const run = startRun('remote_attach')
     const migrationName = `20990101000000_${run.prefix}attach.sql`
-    const queryId = makeDeterministicQueryId(migrationName, 0)
+    const queryId = makeDeterministicQueryId(getLiveEnv().clickhouseDatabase, '_chkit_migrations', migrationName, 0)
     try {
       await run.createTable()
       await run.remote.submit(`INSERT INTO ${run.table} SELECT number FROM numbers(2)`, queryId)

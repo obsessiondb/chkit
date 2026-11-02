@@ -127,6 +127,13 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- Concurrent `migrate --apply` runs of one migration file against other databases, or by
+  projects with other journal tables in one database, no longer share async query ids
+  (#463), as in TS. A run used to attach to the other run's query or read its result:
+  `Applied` with no rows loaded, or the other run's failure. The id is now
+  `sha256("chkit:<currentDatabase()>:<journal table>:<migration>:<statement index>")`,
+  read with the server clock, and a statement the journal already tracks keeps the
+  `queryId` it recorded, so an upgrade in the middle of a load still attaches to it.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured

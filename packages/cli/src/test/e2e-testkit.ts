@@ -49,6 +49,32 @@ export function runCli(
   return spawnWithTimeout(['bun', CLI_ENTRY, ...args], { cwd, env: extraEnv, timeoutMs })
 }
 
+/**
+ * Starts the CLI without waiting for it, for tests that run several at once.
+ * Like runCli, the child is killed after `timeoutMs`; `kill` ends it earlier.
+ */
+export function startCli(
+  cwd: string,
+  args: string[],
+  extraEnv: Record<string, string> = {},
+  { timeoutMs = 120_000 }: { timeoutMs?: number } = {}
+): { result: Promise<CliResult>; kill: () => void } {
+  const proc = Bun.spawn(['bun', CLI_ENTRY, ...args], {
+    cwd,
+    env: { ...process.env, ...extraEnv },
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  })
+  const result = Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }))
+  return { result, kill: () => proc.kill('SIGKILL') }
+}
+
 function isValidJson(str: string): boolean {
   try {
     JSON.parse(str)
