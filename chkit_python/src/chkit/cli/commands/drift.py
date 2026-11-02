@@ -107,10 +107,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         service=service,
     )
     if executor is None and config.clickhouse is None:
-        msg = (
-            "clickhouse.config.py must include a `clickhouse` block or select an "
-            "ObsessionDB service for drift checks."
-        )
+        msg = "clickhouse config is required for drift checks"
         exit_no_target("drift", msg, json_mode=output_json)
     with open_client(executor, config.clickhouse) as client:
         payload_obj = build_drift_payload(

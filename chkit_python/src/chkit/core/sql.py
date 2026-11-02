@@ -11,6 +11,7 @@ from chkit.core.codec import render_codec
 from chkit.core.column_default import render_default
 from chkit.core.constraint import constraint_expression, constraint_kind, render_constraint
 from chkit.core.engine import is_merge_tree_engine, supports_sort_order
+from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine, render_kafka_setting
 from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
 from chkit.core.model import (
@@ -34,6 +35,7 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import render_projection_body
+from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.text_index import TEXT_INDEX_GRANULARITY, render_text_index_type
 from chkit.core.validate import assert_valid_definitions
@@ -77,8 +79,7 @@ def _comment_literal(comment: str) -> str:
 
 
 def _render_column(col: ColumnDefinition) -> str:
-    type_text = f"Nullable({col.type})" if col.nullable else f"{col.type}"
-    out = f"`{col.name}` {type_text}"
+    out = f"{quote_identifier(col.name)} {render_column_type(col)}"
     if col.default is not None:
         out += f" {col.default_kind or 'DEFAULT'} {render_default(col.default)}"
     elif col.default_kind == "EPHEMERAL":
@@ -90,13 +91,19 @@ def _render_column(col: ColumnDefinition) -> str:
     return out
 
 
+def render_column_type(column: ColumnDefinition) -> str:
+    """A column's type as chkit renders it in DDL (TS ``renderColumnType``)."""
+    type_ = js_trim(str(column.type))
+    return f"Nullable({type_})" if column.nullable else type_
+
+
 def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str:
     """Key clause columns as chkit renders them in DDL (TS ``renderKeyClauseColumns``)."""
     # Quote a token when it names a declared column (including names that need
     # quoting like `user-id`) or is a bare identifier. Only true expressions
     # (e.g. `toStartOfHour(ts)`) are emitted verbatim.
     return ", ".join(
-        f"`{c}`" if c in column_names or is_plain_column_reference(c) else c
+        quote_identifier(c) if c in column_names or is_plain_column_reference(c) else c
         for c in normalize_key_columns(columns)
     )
 
@@ -136,12 +143,12 @@ def _render_settings_clause(settings: dict[str, str | int | float | bool]) -> st
 
 
 def _render_projection(p: ProjectionDefinition) -> str:
-    return f"PROJECTION `{p.name}` {render_projection_body(p)}"
+    return f"PROJECTION {quote_identifier(p.name)} {render_projection_body(p)}"
 
 
 def _render_index_line(idx: SkipIndexDefinition) -> str:
     return (
-        f"INDEX `{idx.name}` ({idx.expression}) "
+        f"INDEX {quote_identifier(idx.name)} ({idx.expression}) "
         f"TYPE {_render_index_type(idx)} GRANULARITY "
         f"{TEXT_INDEX_GRANULARITY if idx.type == 'text' else idx.granularity}"
     )
@@ -192,7 +199,8 @@ def _render_table_sql(definition: TableDefinition) -> str:
         clauses.append(f"COMMENT {_comment_literal(definition.comment)}")
 
     return (
-        f"CREATE TABLE IF NOT EXISTS {definition.database}.{definition.name}\n"
+        f"CREATE TABLE IF NOT EXISTS "
+        f"{render_qualified_name(definition.database, definition.name)}\n"
         f"(\n  {body}\n) ENGINE = {definition.engine}\n"
         f"{chr(10).join(clauses)};"
     )
@@ -208,7 +216,7 @@ def _render_view_comment(comment: str | None) -> str:
 
 def _render_view_sql(definition: ViewDefinition) -> str:
     return (
-        f"CREATE VIEW IF NOT EXISTS {definition.database}.{definition.name}"
+        f"CREATE VIEW IF NOT EXISTS {render_qualified_name(definition.database, definition.name)}"
         f"{_render_view_comment(definition.comment)} AS\n{definition.as_};"
     )
 
@@ -225,7 +233,7 @@ def _render_refresh_settings(settings: dict[str, str | int | float]) -> str:
 
 
 def _render_depends_on(depends_on: list[TableRef]) -> str:
-    return ", ".join(f"{d.database}.{d.name}" for d in depends_on)
+    return ", ".join(render_qualified_name(d.database, d.name) for d in depends_on)
 
 
 def _render_refresh_clause(refresh: MaterializedViewRefresh) -> str:
@@ -250,14 +258,14 @@ def _render_refresh_clause(refresh: MaterializedViewRefresh) -> str:
 def _render_materialized_view_sql(definition: MaterializedViewDefinition) -> str:
     header = (
         f"CREATE MATERIALIZED VIEW IF NOT EXISTS "
-        f"{definition.database}.{definition.name}"
+        f"{render_qualified_name(definition.database, definition.name)}"
     )
     refresh_block = (
         f"\n{_render_refresh_clause(definition.refresh)}"
         if definition.refresh is not None
         else ""
     )
-    to_clause = f" TO {definition.to.database}.{definition.to.name}"
+    to_clause = f" TO {render_qualified_name(definition.to.database, definition.to.name)}"
     empty_clause = " EMPTY" if (definition.refresh is not None and definition.refresh.empty) else ""
     return (
         f"{header}{refresh_block}{to_clause}{empty_clause}"
@@ -273,11 +281,12 @@ def render_alter_modify_refresh(definition: MaterializedViewDefinition) -> str:
         )
         raise ValueError(msg)
     clause = _render_refresh_clause(definition.refresh)
-    return f"ALTER TABLE {definition.database}.{definition.name} MODIFY {clause};"
+    name = render_qualified_name(definition.database, definition.name)
+    return f"ALTER TABLE {name} MODIFY {clause};"
 
 
 def _render_dictionary_attribute(attr: DictionaryAttribute) -> str:
-    out = f"`{attr.name}` {attr.type}"
+    out = f"{quote_identifier(attr.name)} {attr.type}"
     if attr.expression is not None:
         out += f" EXPRESSION {attr.expression}"
     elif attr.default is not None:
@@ -295,7 +304,7 @@ def _render_dictionary_attribute(attr: DictionaryAttribute) -> str:
 
 def _render_dictionary_range_column(column: str, column_names: set[str]) -> str:
     if column in column_names or is_plain_column_reference(column):
-        return f"`{column}`"
+        return quote_identifier(column)
     return column
 
 
@@ -334,7 +343,7 @@ def render_dictionary_sql(definition: DictionaryDefinition, replace: bool = Fals
     if definition.comment:
         clauses.append(f"COMMENT {_comment_literal(definition.comment)}")
     return (
-        f"{verb} {definition.database}.{definition.name}\n"
+        f"{verb} {render_qualified_name(definition.database, definition.name)}\n"
         f"(\n  {attrs}\n)\n{chr(10).join(clauses)};"
     )
 
@@ -353,7 +362,7 @@ def to_create_sql(definition: SchemaDefinition) -> str:
 def render_alter_add_column(definition: TableDefinition, column: ColumnInput) -> str:
     normalized = _normalize_column(column)
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
         f"ADD COLUMN IF NOT EXISTS {_render_column(normalized)};"
     )
 
@@ -361,7 +370,7 @@ def render_alter_add_column(definition: TableDefinition, column: ColumnInput) ->
 def render_alter_modify_column(definition: TableDefinition, column: ColumnInput) -> str:
     normalized = _normalize_column(column)
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
         f"MODIFY COLUMN {_render_column(normalized)};"
     )
 
@@ -404,30 +413,31 @@ def render_alter_remove_column_expression(
     if previous.default is None or column.default is not None or column.default_kind == "EPHEMERAL":
         return None
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"MODIFY COLUMN `{column.name}` REMOVE {previous.default_kind or 'DEFAULT'};"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"MODIFY COLUMN {quote_identifier(column.name)} "
+        f"REMOVE {previous.default_kind or 'DEFAULT'};"
     )
 
 
 def render_alter_drop_column(definition: TableDefinition, column_name: str) -> str:
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"DROP COLUMN IF EXISTS `{column_name}`;"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"DROP COLUMN IF EXISTS {quote_identifier(column_name)};"
     )
 
 
 def render_alter_remove_codec(definition: TableDefinition, column_name: str) -> str:
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"MODIFY COLUMN `{column_name}` REMOVE CODEC;"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"MODIFY COLUMN {quote_identifier(column_name)} REMOVE CODEC;"
     )
 
 
 def render_alter_add_index(definition: TableDefinition, index: IndexInput) -> str:
     normalized = _normalize_index(index)
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"ADD INDEX IF NOT EXISTS `{normalized.name}` ({normalized.expression}) "
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"ADD INDEX IF NOT EXISTS {quote_identifier(normalized.name)} ({normalized.expression}) "
         f"TYPE {_render_index_type(normalized)} GRANULARITY "
         f"{TEXT_INDEX_GRANULARITY if normalized.type == 'text' else normalized.granularity};"
     )
@@ -435,8 +445,8 @@ def render_alter_add_index(definition: TableDefinition, index: IndexInput) -> st
 
 def render_alter_drop_index(definition: TableDefinition, index_name: str) -> str:
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"DROP INDEX IF EXISTS `{index_name}`;"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"DROP INDEX IF EXISTS {quote_identifier(index_name)};"
     )
 
 
@@ -444,16 +454,16 @@ def render_alter_add_constraint(
     definition: TableDefinition, constraint: TableConstraintDefinition
 ) -> str:
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"ADD CONSTRAINT IF NOT EXISTS `{constraint.name}` "
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"ADD CONSTRAINT IF NOT EXISTS {quote_identifier(constraint.name)} "
         f"{constraint_kind(constraint)} {constraint_expression(constraint)};"
     )
 
 
 def render_alter_drop_constraint(definition: TableDefinition, constraint_name: str) -> str:
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"DROP CONSTRAINT IF EXISTS `{constraint_name}`;"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"DROP CONSTRAINT IF EXISTS {quote_identifier(constraint_name)};"
     )
 
 
@@ -462,16 +472,16 @@ def render_alter_add_projection(
 ) -> str:
     normalized = _normalize_projection(projection)
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"ADD PROJECTION IF NOT EXISTS `{normalized.name}` "
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"ADD PROJECTION IF NOT EXISTS {quote_identifier(normalized.name)} "
         f"{render_projection_body(normalized)};"
     )
 
 
 def render_alter_drop_projection(definition: TableDefinition, projection_name: str) -> str:
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"DROP PROJECTION IF EXISTS `{projection_name}`;"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"DROP PROJECTION IF EXISTS {quote_identifier(projection_name)};"
     )
 
 
@@ -479,16 +489,18 @@ def render_alter_modify_setting(
     definition: TableDefinition, key: str, value: str | int | float | bool
 ) -> str:
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
         f"MODIFY SETTING {key} = {_render_setting_value(value)};"
     )
 
 
 def render_alter_reset_setting(definition: TableDefinition, key: str) -> str:
-    return f"ALTER TABLE {definition.database}.{definition.name} RESET SETTING {key};"
+    name = render_qualified_name(definition.database, definition.name)
+    return f"ALTER TABLE {name} RESET SETTING {key};"
 
 
 def render_alter_modify_ttl(definition: TableDefinition, ttl: str | None) -> str:
+    name = render_qualified_name(definition.database, definition.name)
     if ttl is None:
-        return f"ALTER TABLE {definition.database}.{definition.name} REMOVE TTL;"
-    return f"ALTER TABLE {definition.database}.{definition.name} MODIFY TTL {ttl};"
+        return f"ALTER TABLE {name} REMOVE TTL;"
+    return f"ALTER TABLE {name} MODIFY TTL {ttl};"

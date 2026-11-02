@@ -41,8 +41,8 @@
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
-    "lint": "biome lint src",
-    "test": "bun test src",
+    "lint": "biome lint src test",
+    "test": "env -u CLICKHOUSE_URL -u CLICKHOUSE_HOST bun run ../../scripts/infra-up.ts && bun test src test",
     "clean": "rm -rf dist"
   },
   "dependencies": {

@@ -1,13 +1,12 @@
 import { expect, expectTypeOf, test } from 'bun:test'
 
 import { rawRows, rawTable } from './destination.js'
-import { IngestConfigError } from './errors.js'
 import { runIngestion } from './executor.js'
 import { cursorState } from './incremental.js'
 import { paginate, type Page } from './paginate.js'
 import { definePipeline, defineStream, selectStreams } from './registry.js'
 import { createMemoryDestination, createMemoryJournal } from './testing.js'
-import type { AttemptOptions, DestinationAdapter, FetchContext } from './types.js'
+import type { AttemptOptions, DestinationAdapter, SourceContext } from './types.js'
 
 interface Progress {
   syncToken: string
@@ -28,8 +27,9 @@ test('yields full typed pages and unchanged metadata, including empty continuati
     { items: [], next: 'P2', metadata: metadata[1] },
     { items: [], next: undefined, metadata: metadata[2] },
   ]
-  const context: FetchContext = {
+  const context: SourceContext = {
     signal: controller.signal,
+    fetch: unusedFetch,
     attempt: async (operation, options = {}) => {
       attempts.push(options)
       return operation(controller.signal)
@@ -116,11 +116,11 @@ test('tolerates an omitted continuation as a terminal page', async () => {
   expect(await iterator.next()).toEqual({ done: true, value: undefined })
 })
 
-test('a continuation that cannot be serialized is a configuration error, not a TypeError', async () => {
-  const initial = paginate({ context: fetchContext(), initial: 1n, fetchPage: async () => ({ items: [], next: undefined }) })
-  await expect(initial.next()).rejects.toThrow(IngestConfigError)
-  await expect(paginate({ context: fetchContext(), initial: 1n, fetchPage: async () => ({ items: [], next: undefined }) }).next())
-    .rejects.toThrow('continuation must be JSON-serializable')
+test('a continuation that cannot be serialized fails with an explanation, not a TypeError', async () => {
+  const error: unknown = await paginate({ context: fetchContext(), initial: 1n, fetchPage: async () => ({ items: [], next: undefined }) }).next()
+    .catch((failure: unknown) => failure)
+  expect(error).not.toBeInstanceOf(TypeError)
+  expect(error).toMatchObject({ message: expect.stringContaining('continuation must be JSON-serializable') })
   let requests = 0
   const later = paginate({ context: fetchContext(), fetchPage: async () => { requests += 1; return { items: [1], next: 2n } } })
   await expect(later.next()).rejects.toThrow('continuation must be JSON-serializable')
@@ -179,7 +179,7 @@ test('cursorState resumes pages and commits an empty terminal bookmark only afte
   const target = rawTable({ database: 'test', name: 'changes' })
   const pipeline = (maxChunks?: number) => definePipeline({
     id: 'test', streams: [defineStream({
-      id: 'test.changes', destination: target, batchSize: 2, retry: { retries: 0 },
+      id: 'test.changes', destination: target, batchSize: 2,
       budget: maxChunks === undefined ? undefined : { maxChunks },
       incremental: cursorState({ id: 'test.changes.progress', version: 1, parse: parseProgress }),
       async *read(context) {
@@ -227,16 +227,20 @@ test('cursorState resumes pages and commits an empty terminal bookmark only afte
   ])
 })
 
-function fetchContext(signal = new AbortController().signal): FetchContext {
-  return { signal, attempt: (operation) => operation(signal) }
+function fetchContext(signal = new AbortController().signal): SourceContext {
+  return { signal, fetch: unusedFetch, attempt: (operation) => operation(signal) }
+}
+
+async function unusedFetch(): Promise<Response> {
+  throw new Error('This paginate test does not send requests.')
 }
 
 function parseProgress(raw: unknown): Progress {
   if (typeof raw !== 'object' || raw === null || !('syncToken' in raw) || typeof raw.syncToken !== 'string') {
-    throw new IngestConfigError('Progress has no sync token.')
+    throw new Error('Progress has no sync token.')
   }
   if ('pageToken' in raw && raw.pageToken !== undefined) {
-    if (typeof raw.pageToken !== 'string') throw new IngestConfigError('Progress has an invalid page token.')
+    if (typeof raw.pageToken !== 'string') throw new Error('Progress has an invalid page token.')
     return { syncToken: raw.syncToken, pageToken: raw.pageToken }
   }
   return { syncToken: raw.syncToken }

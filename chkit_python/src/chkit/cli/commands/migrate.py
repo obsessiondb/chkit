@@ -21,12 +21,11 @@ Flags mirror the TypeScript ``migrateCommand``:
 
 from __future__ import annotations
 
-import json
 import os
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
 from typer.exceptions import TyperException
@@ -38,6 +37,7 @@ from chkit.cli.command_target import (
     resolve_plugin_executor,
 )
 from chkit.cli.commands.migrate_abandon import (
+    AbandonReport,
     JournalStateStore,
     abandon_migration_state,
     abandon_report,
@@ -73,8 +73,9 @@ from chkit.cli.commands.migrate_retry import (
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
-from chkit.cli.json_output import emit_json_error, json_error_code
+from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
 from chkit.cli.migration_metadata import extract_migration_metadata
 from chkit.cli.migration_store import (
     MigrationJournal,
@@ -93,11 +94,12 @@ from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEngi
 from chkit.cli.table_scope import (
     TableScope,
     resolve_table_scope,
+    scope_to_payload,
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
-from chkit.plugins import ChxPlugin
+from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
 
 @dataclass(slots=True)
@@ -117,6 +119,8 @@ class _MigrateContext:
     config: ChxResolvedConfig
     plugin_runtime: PluginRuntime
     table_scope: TableScope
+    # The parsed flags the plugin hooks get, keyed as in TS.
+    flags: dict[str, Any]
     files: list[str]
     applied_names: set[str]
     pending_all: list[str]
@@ -130,6 +134,7 @@ class AbandonContext:
     json_mode: bool
     execute_requested: bool
     journal_store: JournalStateStore
+    table_scope: TableScope
     applied_names: set[str]
     files: list[str]
     meta_dir: Path
@@ -219,11 +224,28 @@ def run(  # noqa: PLR0917
         typer.Option("--json", help="Emit a JSON-formatted summary."),
     ] = False,
     # Accepted so existing scripts keep working; only generate and snapshot
-    # rebuild run the on_schema_loaded hooks that read them (as in TS).
-    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
-    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    # rebuild run the on_schema_loaded hooks that act on them (as in TS).
+    force_shared_engines: ForceSharedEnginesOption = False,
+    no_shared_engines: NoSharedEnginesOption = False,
     service: ServiceOption = None,
 ) -> None:
+    # As in TS, every hook gets the flags that were passed, keyed by long name.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--apply": apply,
+            "--execute": execute,
+            "--allow-destructive": allow_destructive,
+            "--table": table_selector,
+            "--retry": retry,
+            "--abandon": abandon,
+            "--setting": setting,
+            "--json": output_json,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
+    )
     try:
         _run(
             config_path=config_path,
@@ -235,6 +257,7 @@ def run(  # noqa: PLR0917
             setting=setting,
             output_json=output_json,
             service=service,
+            hook_flags=hook_flags,
         )
     except (typer.Exit, typer.Abort, TyperException):
         raise
@@ -260,6 +283,7 @@ def _run(
     setting: list[str] | None,
     output_json: bool,
     service: str | None,
+    hook_flags: dict[str, Any],
 ) -> None:
     # Usage errors surface before any connection is made.
     targets = resolve_recovery_targets(
@@ -280,18 +304,14 @@ def _run(
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
         service=service,
+        flags=hook_flags,
     )
     if executor is None and config.clickhouse is None:
-        msg = (
-            "clickhouse.config.py must include a `clickhouse` block or select an "
-            "ObsessionDB service to migrate."
-        )
+        msg = "clickhouse config is required for migrate (journal is stored in ClickHouse)"
         exit_no_target("migrate", msg, json_mode=output_json)
 
-    migrations_dir = Path(config.migrations_dir)
-    migrations_dir.mkdir(parents=True, exist_ok=True)
-    meta_dir = Path(config.meta_dir)
-    files = list_migration_filenames(migrations_dir)
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
+    meta_dir = Path(os.path.abspath(config.meta_dir))
 
     # --abandon only changes the journal and rejects --table, so it does not
     # read snapshot.json: a conflicted snapshot cannot block it.
@@ -300,6 +320,22 @@ def _run(
     table_scope = resolve_table_scope(
         table_selector, table_keys_from_definitions(snapshot_defs)
     )
+
+    # As in TS, the on_config_loaded hooks run after the scope is resolved and
+    # before the migrations are listed.
+    plugin_runtime.run_on_config_loaded(
+        ChxOnConfigLoadedContext(
+            command="migrate",
+            config=config,
+            table_scope=table_scope,
+            flags=hook_flags,
+            config_path=str(config_path or "clickhouse.config.py"),
+            options={},
+        )
+    )
+
+    migrations_dir.mkdir(parents=True, exist_ok=True)
+    files = list_migration_filenames(migrations_dir)
 
     if targets.retry_target is not None and targets.retry_target not in files:
         msg = (
@@ -330,6 +366,7 @@ def _run(
             config=config,
             plugin_runtime=plugin_runtime,
             table_scope=table_scope,
+            flags=hook_flags,
             files=files,
             applied_names=applied_names,
             pending_all=[f for f in files if f not in applied_names],
@@ -342,6 +379,7 @@ def _run(
                     json_mode=output_json,
                     execute_requested=execute_requested,
                     journal_store=journal_store,
+                    table_scope=table_scope,
                     applied_names=applied_names,
                     files=files,
                     meta_dir=meta_dir,
@@ -388,7 +426,7 @@ def run_abandon(
 
     if not ctx.execute_requested:
         if ctx.json_mode:
-            _echo_json({"mode": "plan", "abandon": report.to_payload()})
+            _emit_abandon_json("plan", ctx.table_scope, report)
             return
         render_abandon_text(
             report, performed=False, file_exists=file_exists, snapshot_file=snapshot_file
@@ -405,7 +443,7 @@ def run_abandon(
 
     abandon_migration_state(state, journal_store=ctx.journal_store)
     if ctx.json_mode:
-        _echo_json({"mode": "execute", "abandon": report.to_payload()})
+        _emit_abandon_json("execute", ctx.table_scope, report)
         return
     render_abandon_text(
         report, performed=True, file_exists=file_exists, snapshot_file=snapshot_file
@@ -418,9 +456,11 @@ def _run_checksum_gate(ctx: _MigrateContext, journal: MigrationJournal) -> None:
     if not checksum_mismatches:
         return
     if ctx.json_mode:
-        _echo_json(
+        emit_json(
+            "migrate",
             {
                 "mode": ctx.mode,
+                "scope": scope_to_payload(ctx.table_scope),
                 "error": "Checksum mismatch detected on applied migrations",
                 "checksumMismatches": [m.model_dump() for m in checksum_mismatches],
             }
@@ -481,9 +521,11 @@ def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     if plan.no_scope_match:
         selector = ctx.table_scope.selector or ""
         if ctx.json_mode:
-            _echo_json(
+            emit_json(
+                "migrate",
                 {
                     "mode": ctx.mode,
+                    "scope": scope_to_payload(ctx.table_scope),
                     "pending": [],
                     "applied": [],
                     "warning": f'No tables matched selector "{selector}".',
@@ -495,8 +537,15 @@ def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
         render_retry_notice(plan.retry)
         return
     if ctx.json_mode:
-        _echo_json(
-            {"mode": ctx.mode, "pending": [], "applied": [], **_retry_field(plan.retry)}
+        emit_json(
+            "migrate",
+            {
+                "mode": ctx.mode,
+                "scope": scope_to_payload(ctx.table_scope),
+                "pending": [],
+                "applied": [],
+                **_retry_field(plan.retry),
+            },
         )
         return
     typer.echo("No pending migrations.")
@@ -506,13 +555,17 @@ def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
 def _render_plan(ctx: _MigrateContext, plan: _PendingPlan) -> bool:
     """Render the pending plan. True when the JSON plan ended the run."""
     if ctx.json_mode and not ctx.execute_requested:
-        payload: dict[str, object] = {"mode": ctx.mode, "pending": plan.pending}
+        payload: dict[str, object] = {
+            "mode": ctx.mode,
+            "scope": scope_to_payload(ctx.table_scope),
+            "pending": plan.pending,
+        }
         if plan.undetermined:
             payload["undeterminedMigrations"] = plan.undetermined
         if plan.empty_migrations:
             payload["emptyMigrations"] = plan.empty_migrations
         payload.update(_retry_field(plan.retry))
-        _echo_json(payload)
+        emit_json("migrate", payload)
         return True
     if ctx.json_mode:
         return False
@@ -559,9 +612,11 @@ def _run_empty_migration_gate(ctx: _MigrateContext, empty_migrations: list[str])
     if not apply_possible:
         return
     if ctx.json_mode:
-        _echo_json(
+        emit_json(
+            "migrate",
             {
                 "mode": ctx.mode,
+                "scope": scope_to_payload(ctx.table_scope),
                 "error": EMPTY_MIGRATIONS_SUMMARY,
                 "emptyMigrations": empty_migrations,
             }
@@ -605,9 +660,11 @@ def _run_destructive_gate(ctx: _MigrateContext, pending: list[str]) -> None:
         "after review."
     )
     if ctx.json_mode:
-        _echo_json(
+        emit_json(
+            "migrate",
             {
                 "mode": "execute",
+                "scope": scope_to_payload(ctx.table_scope),
                 "error": error,
                 "destructiveMigrations": destructive_files,
                 "destructiveOperations": [
@@ -680,6 +737,7 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                 ),
                 log=log,
                 settings=ctx.settings,
+                flags=ctx.flags,
             )
         )
         applied_now.append(entry)
@@ -689,12 +747,16 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     if ctx.json_mode:
         payload: dict[str, object] = {
             "mode": "execute",
-            "applied": [e.model_dump() for e in applied_now],
+            "scope": scope_to_payload(ctx.table_scope),
+            "applied": [
+                {"name": e.name, "appliedAt": e.applied_at, "checksum": e.checksum}
+                for e in applied_now
+            ],
         }
         if plan.undetermined:
             payload["undeterminedMigrations"] = plan.undetermined
         payload.update(_retry_field(retry))
-        _echo_json(payload)
+        emit_json("migrate", payload)
         return
     typer.echo("")
     typer.echo(
@@ -718,5 +780,7 @@ def _retry_field(retry: RetryResolution | None) -> dict[str, object]:
     return {} if retry is None else {"retry": retry_payload(retry)}
 
 
-def _echo_json(payload: dict[str, object]) -> None:
-    typer.echo(json.dumps(payload, indent=2))
+def _emit_abandon_json(mode: str, scope: TableScope, report: AbandonReport) -> None:
+    emit_json(
+        "migrate", {"mode": mode, "scope": scope_to_payload(scope), "abandon": report.to_payload()}
+    )

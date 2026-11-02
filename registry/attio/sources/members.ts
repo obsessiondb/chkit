@@ -1,14 +1,16 @@
-import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
 
-import { readRows, type AttioClientDeps } from '../client.js'
-import { attioConfig } from '../config.js'
+import { createAttioClient } from '../client.js'
+import { attioConfig, type AttioReaderConfig } from '../config.js'
+import { readRows } from './common.js'
 
 export const attioMembersRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_members_raw` })
 
-export function readMembers(context: FetchContext, deps?: AttioClientDeps) {
-  return readRows(context, {
+export async function* readMembers(context: SourceContext, config: AttioReaderConfig) {
+  const client = createAttioClient(context, config)
+  yield* readRows(client, {
     resource: 'members', request: {
       path: '/workspace_members', idFields: ['workspace_id', 'workspace_member_id'],
     },
-  }, deps)
+  })
 }

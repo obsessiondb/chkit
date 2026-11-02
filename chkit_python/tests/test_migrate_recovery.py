@@ -57,6 +57,7 @@ from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.cli.main import app
 from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.safety_markers import MigrationOperationSummary
+from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import QueryResult
 from chkit.core.sql_splitter import extract_executable_statements, split_sql_statements
 
@@ -702,6 +703,7 @@ def _abandon_ctx(store: FakeStore, *, execute: bool = False) -> AbandonContext:
         json_mode=False,
         execute_requested=execute,
         journal_store=store,
+        table_scope=TableScope(enabled=False),
         applied_names=set(),
         files=["m.sql"],
         meta_dir=Path.cwd() / "chkit/meta",

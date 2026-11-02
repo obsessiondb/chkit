@@ -13,9 +13,10 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
+from typing import Any
 
 from chkit import __version__
 from chkit.cli.commands.migrate_async_apply import (
@@ -79,6 +80,8 @@ class ApplyMigrationInput:
     # --setting values, sent with every statement of the migration (sync,
     # async, barrier, before-retry).
     settings: dict[str, str] | None = None
+    # The command's parsed flags, keyed as in TS, for the apply hooks.
+    flags: dict[str, Any] = field(default_factory=dict)
 
 
 class StatementError(RuntimeError):
@@ -98,7 +101,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 command="migrate",
                 config=input_.config,
                 table_scope=input_.table_scope,
-                flags={},
+                flags=input_.flags,
                 migration=file,
                 sql=sql,
                 statements=parsed_statements,
@@ -269,7 +272,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             command="migrate",
             config=input_.config,
             table_scope=input_.table_scope,
-            flags={},
+            flags=input_.flags,
             migration=file,
             statements=statements,
             applied_at=entry.applied_at,

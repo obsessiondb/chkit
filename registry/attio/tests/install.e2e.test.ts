@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
@@ -12,7 +12,8 @@ import { buildRegistryCatalog } from '../../../packages/cli/src/registry/build.j
 import { CLI_VERSION } from '../../../packages/cli/src/runtime/version.js'
 import { formatTestDiagnostic, runCli } from '../../../packages/cli/src/test/e2e-testkit.js'
 import { readRegistrySourceCatalog } from '../../../scripts/registry-catalog.js'
-import { fixtureDeps, person } from './fixtures.js'
+import { linkWorkspaceModules } from '../../../scripts/registry-consumer.js'
+import { attioEnv, person } from './fixtures.js'
 
 describe.serial('built Attio template installed into a consumer', () => {
   const env = getLiveEnv()
@@ -38,7 +39,7 @@ describe.serial('built Attio template installed into a consumer', () => {
     // Exercise source with workspace packages, retaining the template version and changelog.
     const workspaceCatalog = { ...catalog, items: catalog.items.map((item) => item.name === 'attio' ? {
       ...item,
-      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`],
+      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
       meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
     } : item) }
     await buildRegistryCatalog({ catalog: workspaceCatalog, sourceRoot: join(root, 'registry'), outputDir })
@@ -93,7 +94,7 @@ describe.serial('built Attio template installed into a consumer', () => {
     expect(installed.attio.streams.filter((stream) => stream.tags.includes('resource:records')).map((stream) => stream.id))
       .toEqual(['attio.primary.records.people', 'attio.primary.records.subscriptions'])
     let revision = 1
-    const deps = fixtureDeps((url) => {
+    const provider = attioEnv((url) => {
       if (url.pathname === '/v2/objects/people') return Response.json({ data:
         { id: { workspace_id: 'workspace-1', object_id: 'people' }, api_slug: 'people' },
       })
@@ -107,12 +108,12 @@ describe.serial('built Attio template installed into a consumer', () => {
       if (url.pathname === '/v2/objects/custom/records/query') return Response.json({ data: [{ id: { workspace_id: 'workspace-1', object_id: 'custom', record_id: 'custom-1' }, values: { unmodeled: [{ value: 'retained' }] } }] })
       throw new Error(`Unexpected provider fixture request: ${url.pathname}`)
     })
-    const configured = factory.createAttioPipeline(installedConfig.attioConfig, deps)
-    const pipeline = definePipeline({ id: 'fixture', streams: configured.streams.filter((stream) => stream.tags.includes('resource:records')), retry: { retries: 0 } })
+    const configured = factory.createAttioPipeline({ ...installedConfig.attioConfig, apiToken: 'fixture' })
+    const pipeline = definePipeline({ id: 'fixture', streams: configured.streams.filter((stream) => stream.tags.includes('resource:records')) })
     const journal = createMemoryJournal()
     for (const next of [1, 2]) {
       revision = next
-      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createClickHouseDestination(executor) })
+      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...provider, journal, destination: createClickHouseDestination(executor), retry: { retries: 0 } })
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
     const people = await executor.query<{ record_id: string; name: string; email_addresses: string[]; company_record_ids: string[] }>(
@@ -143,8 +144,7 @@ describe.serial('built Attio template installed into a consumer', () => {
 })
 
 async function writeProject(project: string, root: string, database: string, prefix: string): Promise<void> {
-  await mkdir(project, { recursive: true })
-  await symlink(join(root, 'node_modules'), join(project, 'node_modules'), 'dir')
+  await linkWorkspaceModules(root, project)
   await mkdir(join(project, 'src/db/schema'), { recursive: true })
   await writeFile(join(project, 'src/db/schema/existing.ts'), `import { table } from '@chkit/core'
 export const existing = table({ database: ${JSON.stringify(database)}, name: '${prefix}existing', engine: 'MergeTree', columns: [{ name: 'id', type: 'UInt64' }], orderBy: ['id'] })\n`)

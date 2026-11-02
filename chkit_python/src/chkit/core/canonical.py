@@ -59,7 +59,7 @@ def _canonicalize_comment(comment: str | None) -> str | None:
 
 def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
     type_value = column.type
-    canon_type = type_value.strip() if isinstance(type_value, str) else type_value
+    canon_type = js_trim(type_value) if isinstance(type_value, str) else type_value
     return column.model_copy(
         update={
             "default_kind": None if column.default_kind == "DEFAULT" else column.default_kind,
@@ -267,7 +267,7 @@ def _canonicalize_dictionary_attribute(
     attribute: DictionaryAttribute,
 ) -> DictionaryAttribute:
     type_value = attribute.type
-    canon_type = type_value.strip() if isinstance(type_value, str) else type_value
+    canon_type = js_trim(type_value) if isinstance(type_value, str) else type_value
     return attribute.model_copy(
         update={"name": attribute.name.strip(), "type": canon_type}
     )

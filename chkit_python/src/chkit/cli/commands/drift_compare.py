@@ -40,7 +40,7 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql import render_key_clause_columns
+from chkit.core.sql import render_column_type, render_key_clause_columns
 from chkit.core.sql_lexer import JS_WHITESPACE_RUN, identifier_name, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import (
     is_synthetic_ephemeral_default,
@@ -333,9 +333,8 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
     )
 
     # Introspection unwraps Nullable(T) into type=T plus nullable=True.
-    type_ = str(column.type).strip()
     parts = [
-        f"type={f'Nullable({type_})' if column.nullable else type_}",
+        f"type={render_column_type(column)}",
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
@@ -430,7 +429,7 @@ def _normalize_projection_shape(
     projection: ProjectionDefinition, canonicalizer: SqlCanonicalizer | None = None
 ) -> str:
     if is_index_projection(projection):
-        type_text = projection.type.strip() if projection.type is not None else ""
+        type_text = js_trim(projection.type) if projection.type is not None else ""
         return "|".join(
             [
                 f"index={normalize_projection_index(projection.index or '')}",

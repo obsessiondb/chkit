@@ -1,5 +1,5 @@
 import { afterEach, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 
@@ -11,6 +11,7 @@ import { formatTestDiagnostic, runCli } from '../packages/cli/src/test/e2e-testk
 import { spawnWithTimeout } from '../packages/cli/src/test/spawn-cli.js'
 import { buildOfficialRegistry } from './build-registry.js'
 import { readRegistrySourceCatalog } from './registry-catalog.js'
+import { linkWorkspaceModules } from './registry-consumer.js'
 
 const directories: string[] = []
 afterEach(async () => {
@@ -79,7 +80,7 @@ test.serial('modular provider artifacts install runnable readers, discoverable s
   expect(catalog.items.map((item) => item.name)).toEqual(names)
   const built = await buildRegistryCatalog({ catalog, sourceRoot: join(workspace, 'registry'), outputDir })
   await mkdir(project)
-  await symlink(join(workspace, 'node_modules'), join(project, 'node_modules'), 'dir')
+  await linkWorkspaceModules(workspace, project)
   await writeFile(join(project, 'package.json'), JSON.stringify({ name: 'registry-consumer', private: true, type: 'module' }))
   await writeFile(join(project, 'tsconfig.json'), JSON.stringify({
     compilerOptions: { target: 'ES2022', module: 'NodeNext', moduleResolution: 'NodeNext', customConditions: ['source'],

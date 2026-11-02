@@ -4,9 +4,9 @@ This editable integration syncs eight GitHub resource collections into separate 
 
 ## First run
 
-Set `GITHUB_TOKEN` in the runtime environment and configure a direct ClickHouse connection. For private repositories, the supported setup grants repository access with **Issues: read**, **Pull requests: read**, and **Contents: read** permissions, including GraphQL commit reads. These permissions describe the supported setup; field-level minimum permissions depend on the selected endpoints and GraphQL fields. Requests read credentials at execution time; schema imports do not call GitHub. Native JSON requires ClickHouse 25.3 or later.
+Set `GITHUB_TOKEN`, or pass `token` in `config.ts`, and configure a direct ClickHouse connection. For private repositories, the supported setup grants repository access with **Issues: read**, **Pull requests: read**, and **Contents: read** permissions, including GraphQL commit reads. These permissions describe the supported setup; field-level minimum permissions depend on the selected endpoints and GraphQL fields. Each stream checks its configuration and token when it runs, before any request, so `generate`, `migrate`, and `chkit check` never depend on them; schema imports do not call GitHub. Native JSON requires ClickHouse 25.3 or later.
 
-Edit `githubConfig.repositories`, `sourceId`, timestamp settings, and `pageSize` in `config.ts`. Raw table names and database are declared in their `sources/` modules; edit those definitions before the first migration. `createGitHubPipeline(config, deps)` snapshots reader settings and binds an injectable fetch/token reader. Destination schemas remain setup-time module exports.
+Edit `githubConfig.repositories`, `sourceId`, timestamp settings, and `pageSize` in `config.ts`. Raw table names and database are declared in their `sources/` modules; edit those definitions before the first migration. `createGitHubPipeline(config)` snapshots the configuration, including `token`; pass another `token` for a second installation. Requests go through the ingestion runtime, which retries only network failures, timeouts, retryable HTTP statuses, and GitHub primary and secondary rate limits, including GraphQL `RATE_LIMITED` errors. Destination schemas remain setup-time module exports.
 
 ```sh
 bunx chkit check
@@ -84,4 +84,4 @@ bunx chkit add github --with-tests
 bun test src/integrations/github/tests/basic.test.ts
 ```
 
-Portable fixtures verify resource selection and failure isolation, raw payloads and join keys, commit field selection, old-parent child updates, pagination continuations, source/sink failure recovery, configuration snapshots, and empty completion without live credentials.
+Portable fixtures pass provider responses through the ingestion runtime's `fetch` and verify resource selection and failure isolation, raw payloads and join keys, commit field selection, old-parent child updates, pagination continuations, source/sink failure recovery, configuration snapshots, and empty completion without live credentials.

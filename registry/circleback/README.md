@@ -2,9 +2,9 @@
 
 This editable integration stores Circleback provider objects in five independent raw resource streams within one account pipeline.
 
-Set `CIRCLEBACK_API_KEY` in the runtime environment. Create a key in Circleback **Settings → API keys** and configure the project's direct ClickHouse connection. Native JSON requires ClickHouse 25.3 or later. The [official API reference](https://circleback.ai/docs/api) describes authentication, access and account rate limits.
+Set `CIRCLEBACK_API_KEY`, or pass `apiKey` in `config.ts`. Create a key in Circleback **Settings → API keys** and configure the project's direct ClickHouse connection. Native JSON requires ClickHouse 25.3 or later. The [official API reference](https://circleback.ai/docs/api) describes authentication, access and account rate limits.
 
-Edit `config.ts` for the stable `sourceId`, meeting `ownership`, and setup-time `database`. `ownership: 'All'` includes meetings shared with the authenticated user. People, companies, and action items use their own authenticated-user API collections; these APIs do not promise an organization-wide export.
+Edit `config.ts` for the stable `sourceId`, meeting `ownership`, and setup-time `database`. Each stream checks its configuration and API key when it runs, before any request, so `generate`, `migrate`, and `chkit check` never depend on them. `ownership: 'All'` includes meetings shared with the authenticated user. People, companies, and action items use their own authenticated-user API collections; these APIs do not promise an organization-wide export.
 
 ```sh
 bunx chkit check
@@ -45,7 +45,7 @@ Transcript discovery has its own full meeting listing. It rechecks old meetings 
 
 The [action-item listing](https://circleback.ai/docs/api/action-items/list-action-items) defaults to the authenticated assignee and incomplete items. The integration explicitly reads any assignee across both native completion statuses. `PENDING` and `DONE` are the exhaustive statuses in the [official OpenAPI](https://circleback.ai/docs/api/openapi.json), also documented by the [update endpoint](https://circleback.ai/docs/api/action-items/update-action-item). An unexpected status or ignored partition fails visibly. Mutable lists and status partitions are not atomic snapshots; a later full run reconciles edits and moves between partitions.
 
-Requests forward cancellation, time out after 30 seconds, and use one executor-owned retry wrapper. HTTP failures retain provider responses; `429` honors `Retry-After`, falling back to Circleback's `RateLimit-Reset` seconds when `Retry-After` is absent or not parsed by the shared HTTP parser. Blank and negative `Retry-After` values currently parse as zero and bypass the fallback. Without either parsed delay the executor uses its normal retry backoff. This fallback is fixture-tested hardening, not evidence of a live provider incident. Authentication and listing permission failures fail their resource. Run one ingestion process per ClickHouse target at a time and repeat runs with an external scheduler.
+Requests go through the ingestion runtime, which forwards cancellation, times out after 30 seconds, and retries only network failures, timeouts, and retryable HTTP statuses. HTTP failures retain provider responses; `429` honors `Retry-After`, falling back to Circleback's `RateLimit-Reset` seconds when `Retry-After` is absent or not parsed by the shared HTTP parser. Blank and negative `Retry-After` values currently parse as zero and bypass the fallback. Without either parsed delay the executor uses its normal retry backoff. This fallback is fixture-tested hardening, not evidence of a live provider incident. Authentication and listing permission failures fail their resource. Run one ingestion process per ClickHouse target at a time and repeat runs with an external scheduler.
 
 ## Identities and company joins
 
@@ -64,7 +64,7 @@ Numeric provider IDs such as `assignee.profileId` and `person.companyId` remain 
 
 The [company list](https://circleback.ai/docs/api/companies/list-companies) permits an optional native numeric `id`; [company detail](https://circleback.ai/docs/api/companies/get-company) includes people and external links. The companies stream preserves both listing and detail fields under `data`. Its `company_id` envelope field is the listed/detail native ID or a consistent non-null `people[].companyId`; conflicting native IDs fail. A valid empty company without a numeric ID still syncs with `company_id: null`. No numeric ID is synthesized. Join `person.data.companyId` to `company.company_id` only when present, together with `source_id`; unknown numeric identity is a documented join gap.
 
-Keep `sourceId` stable. Switching accounts or meeting filters requires a distinct source ID and deliberately configured destination. `createCirclebackPipeline(config, deps)` binds a snapshot of reader configuration and optional HTTP dependencies. Its runtime config does not redefine exported tables; change `database` or installed raw table definitions before schema discovery and migration generation.
+Keep `sourceId` stable. Switching accounts or meeting filters requires a distinct source ID and deliberately configured destination. `createCirclebackPipeline(config)` binds a snapshot of reader configuration, including `apiKey`; pass another `apiKey` for a second installation. Its runtime config does not redefine exported tables; change `database` or installed raw table definitions before schema discovery and migration generation.
 
 Version 0.1.0 used direct meeting JSON and unscoped meeting row IDs. The 0.2.0 layout introduces source envelopes, scoped row keys, string tags and four additional tables. Reingest into a fresh configured destination or migrate earlier observations deliberately; old unscoped rows are not automatically rewritten or deleted.
 
@@ -99,4 +99,4 @@ bunx chkit add circleback --with-tests
 bun test src/integrations/circleback/tests/basic.test.ts
 ```
 
-Portable fixtures use injected HTTP and in-memory ingestion adapters without credentials or a live database. They cover five isolated and reordered resources, full-sync failure/replay, empty completion, scoped identities, tag names, all action statuses, company joins, late transcripts, permission-loss retention, malformed responses, and pagination safety.
+Portable fixtures pass provider responses through the ingestion runtime's `fetch` and use in-memory ingestion adapters without credentials or a live database. They cover five isolated and reordered resources, full-sync failure/replay, empty completion, scoped identities, tag names, all action statuses, company joins, late transcripts, permission-loss retention, malformed responses, and pagination safety.

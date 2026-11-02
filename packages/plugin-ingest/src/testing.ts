@@ -1,6 +1,8 @@
 import { validateJournalHistory } from './journal-history.js'
 import { toJournalRow, type JournalRow } from './journal.js'
-import type { CommittedCheckpoint, DestinationAdapter, Journal, JournalEvent, Row } from './types.js'
+import { createRequestQueue } from './request-queue.js'
+import { createSourceServices } from './source-context.js'
+import type { CommittedCheckpoint, DestinationAdapter, Fetch, Journal, JournalEvent, ReadContext, RetryOptions, Row, SourceContext } from './types.js'
 
 export interface MemoryJournal extends Journal {
   readonly events: JournalEvent[]
@@ -60,5 +62,38 @@ export function createMemoryDestination(): MemoryDestination {
       tokens.push(`${key}:${token}`)
       tables.set(key, [...(tables.get(key) ?? []), ...rows])
     },
+  }
+}
+
+export interface TestSourceOptions {
+  fetch: Fetch
+  signal?: AbortSignal
+  /** Defaults to no retries, so a test sees the first failure. */
+  retry?: RetryOptions
+}
+
+/** A source context with the runtime's request handling, for calling a client or reader directly. */
+export function createSourceContext(options: TestSourceOptions): SourceContext {
+  return createSourceServices({
+    signal: options.signal ?? new AbortController().signal,
+    fetch: options.fetch,
+    retry: options.retry ?? { retries: 0 },
+    queue: createRequestQueue(Number.POSITIVE_INFINITY),
+    onRetry: () => undefined,
+  })
+}
+
+export function createReadContext<TSelection, TState>(options: TestSourceOptions & {
+  selection: TSelection
+  state?: TState
+  cutoff?: Date
+  streamId?: string
+}): ReadContext<TSelection, TState> {
+  return {
+    ...createSourceContext(options),
+    streamId: options.streamId ?? 'test.stream',
+    selection: options.selection,
+    state: options.state,
+    cutoff: options.cutoff ?? new Date(),
   }
 }

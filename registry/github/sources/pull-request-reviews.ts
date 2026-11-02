@@ -1,16 +1,16 @@
-import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
 
-import { githubNumber, readGitHubPages, readPullPages, toGitHubRows, type GitHubClientDeps } from '../client.js'
+import { createGitHubClient, githubRecord, toGitHubRows } from '../client.js'
 import type { GitHubConfig } from '../config.js'
 
 export const github_pullRequestReviewsRaw = rawTable({ database: 'default', name: 'github_pull_request_reviews_raw' })
 
-export async function* readPullRequestReviews(context: FetchContext, repo: string, config: GitHubConfig, deps: GitHubClientDeps) {
-  for await (const pulls of readPullPages(context, repo, config, deps)) {
-    for (const pull of pulls.items) {
-      const number = githubNumber(pull, 'number')
-      for await (const page of readGitHubPages(context, { path: `/repos/${repo}/pulls/${number}/reviews` }, config, deps)) {
-        yield { rows: toGitHubRows(page.items, repo, (review) => githubNumber(review, 'id'), { pull_number: number }) }
+export async function* readPullRequestReviews(context: SourceContext, repo: string, config: GitHubConfig) {
+  const client = createGitHubClient(context, config)
+  for await (const pulls of client.pulls(repo)) {
+    for (const { number } of pulls.items) {
+      for await (const page of client.pages(`/repos/${repo}/pulls/${number}/reviews`, githubRecord)) {
+        yield { rows: toGitHubRows(page.items, repo, (review) => review.id, { pull_number: number }) }
       }
     }
   }
