@@ -66,6 +66,7 @@ from chkit.cli.commands.generate_rename_mappings import (
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import (
     generate_empty_migration,
@@ -75,11 +76,7 @@ from chkit.cli.migration_store import (
 )
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.schema_loader import load_schema_definitions_with_hooks
-from chkit.cli.shared_engine_flags import (
-    ForceSharedEnginesOption,
-    NoSharedEnginesOption,
-    shared_engine_hook_flags,
-)
+from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
     TableScope,
     build_scoped_snapshot_definitions,
@@ -414,6 +411,27 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    # As in TS, every hook gets the flags that were passed, keyed by long name.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--name": migration_name,
+            "--migration-id": migration_id,
+            "--table": table_selector,
+            "--rename-table": rename_table,
+            "--rename-column": rename_column,
+            "--rename-dictionary": rename_dictionary,
+            "--dryrun": dryrun,
+            "--json": output_json,
+            "--cutover": cutover,
+            "--cutover-copy": cutover_copy,
+            "--cutover-old": cutover_old,
+            "--drop-retained": drop_retained,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
+    )
     if service is not None:
         # generate sends no SQL, but as in TS --service still names the
         # service, and an unknown name fails.
@@ -424,6 +442,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             config_path=str(config_path or "clickhouse.config.py"),
             json_mode=output_json,
             service=service,
+            flags=hook_flags,
         )
         if executor is not None:
             executor.close()
@@ -431,10 +450,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         command="generate",
         config=config,
         config_path=str(config_path or "clickhouse.config.py"),
-        flags=shared_engine_hook_flags(
-            force_shared_engines=force_shared_engines,
-            no_shared_engines=no_shared_engines,
-        ),
+        flags=hook_flags,
         json_mode=output_json,
         plugin_runtime=plugin_runtime,
     )
@@ -525,7 +541,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             command="generate",
             config=config,
             table_scope=table_scope,
-            flags={},
+            flags=hook_flags,
             plan=plan,
         )
     )
