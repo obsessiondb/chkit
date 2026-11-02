@@ -991,12 +991,15 @@ def table(
     ob = order_by if order_by is not None else orderBy
     from chkit.core.engine import supports_sort_order
 
+    # TS model.ts: an omitted primary key inherits ORDER BY (MergeTree semantics).
+    if pk is None:
+        pk = ob
     # Kafka, Distributed, Memory and other engines without sort order take no keys.
     if not supports_sort_order(engine):
         pk = pk or []
         ob = ob or []
-    if pk is None or ob is None:
-        msg = "table() requires primary_key/primaryKey and order_by/orderBy"
+    if ob is None:
+        msg = "table() requires order_by/orderBy"
         raise ValueError(msg)
 
     payload: dict[str, object] = _strip_none(

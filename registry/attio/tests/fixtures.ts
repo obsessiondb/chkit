@@ -1,5 +1,6 @@
-import type { AttioClientDeps } from '../client.js'
 import { attioConfig } from '../config.js'
+
+export const fixtureConfig = { ...attioConfig, apiToken: 'fixture' }
 
 export const peopleObject = { id: { workspace_id: 'workspace-1', object_id: 'object-people' }, api_slug: 'people' }
 const companiesObject = { id: { workspace_id: 'workspace-1', object_id: 'object-companies' }, api_slug: 'companies' }
@@ -44,15 +45,8 @@ const fixtureCollections: Record<string, readonly unknown[]> = {
   '/v2/workspace_members': [{ id: { workspace_id: 'workspace-1', workspace_member_id: 'member-1' }, first_name: 'Grace' }],
 }
 
-export function fixtureDeps(
-  respond: (url: URL, init: RequestInit) => Response | Promise<Response> = fixtureResponse,
-): AttioClientDeps {
-  return {
-    config: attioConfig,
-    token: () => 'fixture-token',
-    wait: async () => {},
-    fetch: (url, init) => Promise.resolve(respond(new URL(url), init)),
-  }
+export function attioEnv(respond: (url: URL, init: RequestInit) => Response | Promise<Response> = fixtureResponse) {
+  return { fetch: async (input: string | URL, init?: RequestInit) => respond(new URL(input), init ?? {}) }
 }
 
 export function fixtureResponse(url: URL): Response {

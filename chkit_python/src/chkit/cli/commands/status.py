@@ -12,6 +12,7 @@ Followed by lists of pending filenames and any detected checksum mismatches.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -23,21 +24,16 @@ from chkit.cli.command_target import (
     open_client,
     resolve_plugin_executor,
 )
-from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.config_loader import load_config
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json
 from chkit.cli.migration_store import (
     find_checksum_mismatches,
     list_migration_filenames,
-    read_snapshot,
 )
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
-from chkit.cli.table_scope import (
-    resolve_table_scope,
-    table_keys_from_definitions,
-)
+from chkit.cli.table_scope import resolve_table_scope
 from chkit.core.model import ChxConfigEnv
 from chkit.plugins import ChxPlugin
 
@@ -56,8 +52,8 @@ def run(  # noqa: PLR0917
             "--table",
             "-t",
             help=(
-                "Filter pending list to migrations touching the matched tables. "
-                "Examples: events, events_*, analytics.events."
+                "Accepted and ignored, as in TS: status always reports every "
+                "migration."
             ),
         ),
     ] = None,
@@ -77,22 +73,18 @@ def run(  # noqa: PLR0917
         service=service,
     )
     if executor is None and config.clickhouse is None:
-        msg = (
-            "clickhouse.config.py must include a `clickhouse` block or select an "
-            "ObsessionDB service (journal lives in ClickHouse)."
-        )
+        msg = "clickhouse config is required for status (journal is stored in ClickHouse)"
         exit_no_target("status", msg, json_mode=output_json)
 
-    migrations_dir = Path(config.migrations_dir)
-    meta_dir = Path(config.meta_dir)
+    # Absolute, as TS ``resolveDirs`` resolves them, so the printed
+    # ``migrationsDir`` reads the same in both CLIs.
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
     migrations_dir.mkdir(parents=True, exist_ok=True)
     files = list_migration_filenames(migrations_dir)
 
-    snapshot = read_snapshot(meta_dir)
-    snapshot_defs = list(snapshot.definitions) if snapshot is not None else []
-    table_scope = resolve_table_scope(
-        table_selector, table_keys_from_definitions(snapshot_defs)
-    )
+    # TS validates --table for every command and status then ignores it: the
+    # counts and the pending list always cover every migration.
+    resolve_table_scope(table_selector, [])
 
     with open_client(executor, config.clickhouse) as client:
         store = JournalStore(
@@ -107,16 +99,8 @@ def run(  # noqa: PLR0917
         # filenames live elsewhere. Intersecting with `files` keeps the count
         # consistent with what `chkit migrate` will see. Mirrors TS status #31.
         applied = [f for f in files if f in applied_names]
-        pending_all = [f for f in files if f not in applied_names]
+        pending = [f for f in files if f not in applied_names]
         mismatches = find_checksum_mismatches(migrations_dir, journal)
-
-    if table_scope.enabled:
-        scoped = filter_pending_by_scope(
-            migrations_dir, pending_all, set(table_scope.matched_tables)
-        )
-        pending = scoped.in_scope
-    else:
-        pending = pending_all
 
     payload: dict[str, object] = {
         "migrationsDir": str(migrations_dir),
@@ -130,7 +114,8 @@ def run(  # noqa: PLR0917
     database = config.clickhouse.database if config.clickhouse else None
     if database_missing:
         payload["databaseMissing"] = True
-        payload["database"] = database
+        if database is not None:
+            payload["database"] = database
 
     if output_json:
         emit_json("status", payload)

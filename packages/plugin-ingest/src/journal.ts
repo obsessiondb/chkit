@@ -1,6 +1,5 @@
 import { isUnknownDatabaseError, waitForTable, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
 
-import { IngestConfigError } from './errors.js'
 import { validateJournalHistory } from './journal-history.js'
 import { digest, toJournalRow, type JournalRow } from './journal-records.js'
 import type { Journal } from './types.js'
@@ -67,7 +66,7 @@ export function isMissingJournalError(error: unknown): boolean {
 }
 
 function validateTableName(name: string): void {
-  if (!TABLE_NAME_PATTERN.test(name)) throw new IngestConfigError(`Invalid journal table or database name "${name}".`)
+  if (!TABLE_NAME_PATTERN.test(name)) throw new Error(`Invalid journal table or database name "${name}".`)
 }
 
 export function journalTableSql(qualified: string): string {

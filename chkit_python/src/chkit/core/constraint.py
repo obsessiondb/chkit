@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Literal
 
+from chkit.core.identifier import quote_identifier
 from chkit.core.model import TableConstraintDefinition
 from chkit.core.sql_normalizer import normalize_sql_fragment
 
@@ -13,7 +14,8 @@ ConstraintKind = Literal["CHECK", "ASSUME"]
 def render_constraint(constraint: TableConstraintDefinition) -> str:
     """``CONSTRAINT `name` CHECK expr`` / ``CONSTRAINT `name` ASSUME expr``."""
     kind = constraint_kind(constraint)
-    return f"CONSTRAINT `{constraint.name}` {kind} {constraint_expression(constraint)}"
+    name = quote_identifier(constraint.name)
+    return f"CONSTRAINT {name} {kind} {constraint_expression(constraint)}"
 
 
 def constraint_kind(constraint: TableConstraintDefinition) -> ConstraintKind:

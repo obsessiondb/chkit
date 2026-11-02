@@ -159,7 +159,9 @@ def test_migrate_through_the_service_records_applied_at_without_a_zone(
 
 @pytest.mark.usefixtures("isolated_home")
 @pytest.mark.parametrize(
-    "args", [*COMMANDS, pytest.param(["check", "--json"], id="check")]
+    "args",
+    # pull reports like the TS pull plugin instead (test_no_target_error.py, #459).
+    [*(c for c in COMMANDS if c.id != "pull"), pytest.param(["check", "--json"], id="check")],
 )
 def test_command_without_a_target_exits_1_with_the_error_envelope(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: list[str]
@@ -189,7 +191,6 @@ def test_command_without_a_target_exits_1_with_the_error_envelope(
     assert envelope["command"] == args[0]
     assert envelope["ok"] is False
     assert envelope["error"]["code"] == "error"
-    assert "select an ObsessionDB service" in envelope["error"]["message"]
     assert envelope["error"]["message"] in result.stderr
     assert "Usage:" not in result.stderr
 

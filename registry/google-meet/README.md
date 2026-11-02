@@ -2,7 +2,7 @@
 
 This editable reader rereads recent conferences and their raw resources, using ordinary pagination and coarse discovery-page checkpoints.
 
-Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access and configure a direct ClickHouse connection. Review `sourceId`, `streamPrefix`, `lookbackHours`, `pageSize`, `maxChunks`, and `database` in `config.ts`. Keep source identity tied to one Google account; these list responses do not identify the authenticated account. Tokens are read at request time and are not refreshed by the reader. Meet requires user authentication and returns records accessible to that user; Google documents `conferenceRecords.list` as filtered to conferences the authenticated user organized, so calls that user only attended can be absent. Native JSON requires ClickHouse 25.3 or later. See [authorization](https://developers.google.com/workspace/meet/api/guides/authenticate-authorize).
+Set `GOOGLE_MEET_ACCESS_TOKEN` with `meetings.space.readonly` access and configure a direct ClickHouse connection. Review `sourceId`, `streamPrefix`, `lookbackHours`, `pageSize`, `maxChunks`, and `database` in `config.ts`. Keep source identity tied to one Google account; these list responses do not identify the authenticated account. The token is read when a stream runs and is not refreshed by the reader; pass `accessToken` in the config to use another one. Meet requires user authentication and returns records accessible to that user; Google documents `conferenceRecords.list` as filtered to conferences the authenticated user organized, so calls that user only attended can be absent. Native JSON requires ClickHouse 25.3 or later. See [authorization](https://developers.google.com/workspace/meet/api/guides/authenticate-authorize).
 
 ```sh
 bunx chkit check
@@ -33,7 +33,7 @@ bunx chkit ingest run --tag provider:google-meet --tag resource:participant-sess
 
 `pipeline.ts` binds configuration, strategies and destinations. `sources/resources.ts` contains ordinary resource traversal; `client.ts` validates requests and uses `paginate`. The plugin owns request retries, cancellation, destination acknowledgement and checkpoint persistence.
 
-`sourceId` scopes raw identities and queries; `streamPrefix` determines journal IDs. Use separate values for another installation. `createGoogleMeetPipeline` snapshots configuration and injectable HTTP/token dependencies. Raw destinations are setup-time exports: edit `database` before schema imports to change placement. The default pipeline runs one stream and request at a time.
+`sourceId` scopes raw identities and queries; `streamPrefix` determines journal IDs. Use separate values for another installation. `createGoogleMeetPipeline` snapshots configuration, including `accessToken`, which defaults to `GOOGLE_MEET_ACCESS_TOKEN`. Raw destinations are setup-time exports: edit `database` before schema imports to change placement. The default pipeline runs one stream and request at a time.
 
 ## Recent coverage
 
@@ -78,6 +78,6 @@ bunx chkit add google-meet --with-tests
 bun test src/integrations/google-meet/tests/basic.test.ts
 ```
 
-Fixtures cover independent resources, unfinished-page replay, completed-page resume, sink acknowledgement loss, changed bodies under stable IDs, recent late transcripts, empty pages, bounded token resets, fixed windows, scoped settings, historical isolation and request-time tokens.
+Fixtures cover independent resources, unfinished-page replay, completed-page resume, sink acknowledgement loss, changed bodies under stable IDs, recent late transcripts, empty pages, bounded token resets, fixed windows, scoped settings, historical isolation and the configured access token.
 
 The [Google Meet integration guide](https://chkit.obsessiondb.com/integrations/google-meet/) covers installation and sync behavior.

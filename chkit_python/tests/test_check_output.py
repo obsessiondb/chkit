@@ -18,6 +18,7 @@ from typer.testing import CliRunner
 
 from chkit.cli.commands import check
 from chkit.cli.commands.drift_payload import DriftPayload
+from chkit.cli.json_output import _reset_for_testing
 from chkit.cli.main import app
 from chkit.cli.migration_store import MigrationJournal, MigrationJournalEntry
 
@@ -47,6 +48,25 @@ def _plugin(name, evaluated, severity):
     return ChxPlugin(manifest=ChxPluginManifest(name=name), hooks=_Hooks(name, evaluated, severity))
 
 
+class _ConfigLoadedHooks:
+    def __init__(self, fail):
+        self.fail, self.calls = fail, []
+
+    def on_config_loaded(self, ctx):
+        scope = ctx.table_scope
+        self.calls.append(["on_config_loaded", ctx.command, scope.selector, scope.matched_tables])
+        if self.fail:
+            raise RuntimeError("boom")
+
+    def on_check(self, ctx):
+        self.calls.append(["on_check", ctx.command])
+        return ChxOnCheckResult(plugin="probe", evaluated=True, ok=True, findings=[], metadata={"calls": self.calls})
+
+
+def _config_loaded_probe(fail):
+    return ChxPlugin(manifest=ChxPluginManifest(name="probe"), hooks=_ConfigLoadedHooks(fail))
+
+
 config = define_config(
     {
         "schema": "./schema.py",
@@ -72,6 +92,34 @@ events = table(database="app", name="events", engine="MergeTree()",
 users = table(database="app", name="users", engine="MergeTree()",
     columns=[ColumnDefinition(name="id", type="UInt64")], primary_key=["PRIMARY_KEY"], order_by=["id"])
 definitions = schema(events, users)
+"""
+
+FLAG_PROBE = """
+import json
+
+
+class _Probe:
+    def on_config_loaded(self, ctx):
+        with open("config_loaded_flags.json", "w") as f:
+            json.dump(ctx.flags, f)
+
+    def on_check(self, ctx):
+        with open("flags.json", "w") as f:
+            json.dump(ctx.flags, f)
+
+
+_probe = ChxPlugin(manifest=ChxPluginManifest(name="probe"), hooks=_Probe())
+"""
+
+DISTRIBUTED_SCHEMA = """
+from chkit import ColumnDefinition, schema, table
+
+events_local = table(database="app", name="events_local", engine="MergeTree()",
+    columns=[ColumnDefinition(name="id", type="UInt64")], primary_key=["id"], order_by=["id"])
+events = table(database="app", name="events",
+    engine="Distributed('cluster', 'app', 'events_local', rand())",
+    columns=[ColumnDefinition(name="id", type="UInt64")])
+definitions = schema(events_local, events)
 """
 
 EVENTS_ONLY_MIGRATION = """-- operation: add_column key=table:app.events:column:extra risk=safe
@@ -234,6 +282,38 @@ def test_only_an_evaluated_result_with_an_error_finding_fails(project: Path) -> 
     )
 
 
+def test_on_config_loaded_runs_before_on_check_with_the_table_scope(project: Path) -> None:
+    """TS check runs ``onConfigLoaded`` (command, table scope) right before ``onCheck`` (#449)."""
+    _write_config(project, "[_config_loaded_probe(False)]")
+
+    result = _check("--json", "--table", "events")
+
+    assert result.exit_code == 0, result.output
+    assert json.loads(result.stdout)["plugins"]["probe"]["calls"] == [
+        ["on_config_loaded", "check", "events", ["app.events"]],
+        ["on_check", "check"],
+    ]
+
+
+def test_an_on_config_loaded_error_fails_check_as_in_ts(project: Path) -> None:
+    _write_config(project, "[_config_loaded_probe(True)]")
+    _reset_for_testing()  # an earlier --json run in this process marks JSON as written
+
+    result = _check("--json")
+
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {
+        "command": "check",
+        "schemaVersion": 1,
+        "ok": False,
+        "error": {
+            "code": "error",
+            "message": 'Plugin "probe" failed in onConfigLoaded: boom',
+        },
+    }
+    assert result.stderr == 'Plugin "probe" failed in onConfigLoaded: boom\n'
+
+
 def test_schema_validation_is_left_to_generate(project: Path) -> None:
     (project / "schema.py").write_text(SCHEMA.replace("PRIMARY_KEY", "missing"), encoding="utf-8")
 
@@ -244,3 +324,57 @@ def test_schema_validation_is_left_to_generate(project: Path) -> None:
     generated = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
     assert generated.exit_code == 1
     assert json.loads(generated.stdout)["error"] == "validation_failed"
+
+
+def test_on_check_gets_the_passed_flags_keyed_as_in_ts(project: Path) -> None:
+    """As in TS, on_config_loaded and on_check get only the flags that were passed, by long name (#450)."""
+    config = project / "clickhouse.config.py"
+    config.write_text(
+        CONFIG.replace("config = define_config", FLAG_PROBE + "\nconfig = define_config")
+        .replace("PLUGINS", "[_probe]"),
+        encoding="utf-8",
+    )
+
+    _check()
+    assert json.loads((project / "flags.json").read_text(encoding="utf-8")) == {}
+    assert json.loads((project / "config_loaded_flags.json").read_text(encoding="utf-8")) == {}
+
+    _check(
+        "--config", "clickhouse.config.py", "--json", "--strict", "-t", "events",
+        "--force-shared-engines", "--no-shared-engines",
+    )
+    assert json.loads((project / "flags.json").read_text(encoding="utf-8")) == {
+        "--config": "clickhouse.config.py",
+        "--json": True,
+        "--table": "events",
+        "--strict": True,
+        "--force-shared-engines": True,
+        "--no-shared-engines": True,
+    }
+    assert json.loads((project / "config_loaded_flags.json").read_text(encoding="utf-8")) == (
+        json.loads((project / "flags.json").read_text(encoding="utf-8"))
+    )
+
+
+def test_force_shared_engines_fails_a_distributed_table(project: Path) -> None:
+    """As in TS, the ObsessionDB check reads --force-shared-engines (#450)."""
+    (project / "schema.py").write_text(DISTRIBUTED_SCHEMA, encoding="utf-8")
+    (project / "clickhouse.config.py").write_text(
+        "from chkit_plugin_obsessiondb import obsessiondb\n"
+        + CONFIG.replace("PLUGINS", "[obsessiondb()]"),
+        encoding="utf-8",
+    )
+
+    assert json.loads(_check("--json").stdout)["plugins"] == {}
+
+    result = _check("--json", "--force-shared-engines")
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["failedChecks"] == ["plugin:obsessiondb"]
+    assert payload["plugins"] == {
+        "obsessiondb": {
+            "evaluated": True,
+            "ok": False,
+            "findingCodes": ["obsessiondb_distributed_unsupported"],
+        }
+    }

@@ -1,14 +1,34 @@
-"""Identifier helpers.
-
-Partial port of ``packages/core/src/identifier.ts``: only the unquoting half,
-which drift uses to compare clauses ClickHouse re-renders with its own quoting.
-"""
+"""Identifier helpers, ported from ``packages/core/src/identifier.ts``."""
 
 from __future__ import annotations
 
 import re
 
+from chkit.core.key_clause import is_plain_column_reference
 from chkit.core.sql_scan import find_quote_end
+
+
+def quote_identifier(name: str) -> str:
+    """Wrap a name in backticks, escaping backslashes and backticks.
+
+    The name can never terminate the quoted identifier early. Matches
+    ClickHouse's own formatting of quoted identifiers.
+    """
+    escaped = name.replace("\\", "\\\\").replace("`", "\\`")
+    return f"`{escaped}`"
+
+
+def render_identifier(name: str) -> str:
+    """Render a database or object name.
+
+    Plain identifiers stay bare so generated SQL is unchanged for existing
+    schemas; anything else is quoted and escaped.
+    """
+    return name if is_plain_column_reference(name) else quote_identifier(name)
+
+
+def render_qualified_name(database: str, name: str) -> str:
+    return f"{render_identifier(database)}.{render_identifier(name)}"
 
 
 def unquote_identifiers(sql: str) -> str:

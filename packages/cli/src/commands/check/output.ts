@@ -89,7 +89,7 @@ export function renderCheckText(inputs: CheckInputs, result: CheckResult): void 
   const { policy, pending, checksumMismatches, drift, pluginResults, tableScope, databaseMissing, database } = inputs
 
   if (databaseMissing) {
-    console.log(`⚠ Database "${database}" does not exist on the target server.`)
+    console.log(`⚠ Database "${database ?? ''}" does not exist on the target server.`)
     console.log('  It will be created when you run: chkit migrate --apply\n')
   }
 

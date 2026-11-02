@@ -7,9 +7,11 @@ A reader is an async generator that fetches provider data and yields bounded chu
 
 ## Requests and provider clients
 
-Start with one HTTP request inside `context.attempt`. Pass its cancellation signal to `fetch`, and convert unsuccessful responses with `HttpError.fromResponse`. For a paginated endpoint, use `paginate({ context, fetchPage })`; it calls `context.attempt` for each page.
+Send requests with `context.fetch`. It goes through the pipeline's request queue, retries only transient failures with backoff and `Retry-After`, aborts when the run is cancelled or after 30 seconds, and throws `HttpError` for unsuccessful responses. For a paginated endpoint, use `paginate({ context, fetchPage })`; a `context.fetch` inside `fetchPage` shares that page's attempt, so it is retried once per page, never twice.
 
-Authentication, token refresh, and required scopes belong to the provider client. Keep credentials in environment variables or the application's existing secret mechanism. Direct requests outside `context.attempt` bypass request-level retry policy and fetch permits.
+Keep everything that touches HTTP in one provider client: configuration, credentials, URLs, authentication headers, pagination, and response parsing. Build the client at the start of `read`. Schema commands such as `generate` and `migrate` import the same module, but never run a reader, so they need neither credentials nor valid sync settings. A missing credential or an invalid setting fails that stream before its first request and is not retried. Readers then only call client methods and turn provider objects into chunks.
+
+Use `context.attempt` for source operations that are not plain HTTP requests, such as an SDK call. Requests made with the global `fetch` bypass the request queue and retries, so any failure there fails the stream. See [retry boundaries](/api-sync/operations/#retry-boundaries).
 
 ## A reusable page client
 
@@ -18,43 +20,54 @@ This example assumes a provider contract: `GET /tickets` accepts `updated_since`
 Create `src/sources/helpdesk-client.ts`:
 
 ```ts
-import { HttpError } from '@chkit/plugin-ingest'
+import { paginate, type SourceContext } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-export type Ticket = { id: string; subject: string; updated_at: string }
-export type TicketPage = { data: Ticket[]; next_cursor: string | null }
+export const helpdeskConfig = {
+  baseUrl: process.env.HELPDESK_API_URL,
+  token: process.env.HELPDESK_TOKEN,
+}
 
-export async function fetchTicketPage(
-  range: { from: Date; to: Date },
-  cursor: string | undefined,
-  signal: AbortSignal,
-): Promise<TicketPage> {
-  const base = process.env.HELPDESK_API_URL
-  const token = process.env.HELPDESK_TOKEN
-  if (!base || !token) throw new Error('Set HELPDESK_API_URL and HELPDESK_TOKEN')
-  const url = new URL('tickets', base)
-  url.searchParams.set('updated_since', range.from.toISOString())
-  url.searchParams.set('updated_before', range.to.toISOString())
-  if (cursor !== undefined) url.searchParams.set('cursor', cursor)
-  const response = await fetch(url, {
-    signal,
-    headers: { Authorization: `Bearer ${token}` },
-  })
-  if (!response.ok) throw await HttpError.fromResponse(response)
-  return await response.json() as TicketPage
+const configSchema = z.object({
+  baseUrl: z.url({ error: 'Set HELPDESK_API_URL.' }),
+  token: z.string({ error: 'Set HELPDESK_TOKEN.' }).min(1, 'Set HELPDESK_TOKEN.'),
+})
+const ticketPage = z.object({
+  data: z.array(z.looseObject({ id: z.string(), updated_at: z.string() })),
+  next_cursor: z.string().nullable(),
+})
+
+export function createHelpdeskClient(context: SourceContext, config = helpdeskConfig) {
+  const { baseUrl, token } = configSchema.parse(config)
+  return {
+    tickets: (range: { from: Date; to: Date }) => paginate({
+      context,
+      label: 'GET /tickets',
+      fetchPage: async (cursor: string | undefined) => {
+        const url = new URL('tickets', baseUrl)
+        url.searchParams.set('updated_since', range.from.toISOString())
+        url.searchParams.set('updated_before', range.to.toISOString())
+        if (cursor !== undefined) url.searchParams.set('cursor', cursor)
+        const response = await context.fetch(url, { headers: { Authorization: `Bearer ${token}` } })
+        const page = ticketPage.parse(await response.json())
+        return { items: page.data, next: page.next_cursor ?? undefined }
+      },
+    }),
+  }
 }
 ```
 
-This helper performs one request. Call it through `context.attempt` or from `paginate`'s `fetchPage` callback, as shown in [Incremental syncs](/api-sync/incremental-syncs/#timestamp-windows). Validate untrusted response shapes at the source boundary in production; a TypeScript assertion does not validate JSON.
+The reader in [Incremental syncs](/api-sync/incremental-syncs/#timestamp-windows) builds this client and iterates `client.tickets(context.selection)`. The zod schemas validate the untrusted response; a TypeScript assertion does not validate JSON. A validation error fails the stream without retries. `z.looseObject` keeps every provider field for the raw destination. A second account passes its own `config` to `createHelpdeskClient`.
 
 ## Pages and checkpoint metadata
 
-`paginate` yields the complete `{ items, next, metadata? }` returned by `fetchPage`, including empty and terminal pages. Read rows from `page.items`. `initial` and `next` support offset, string-token, and compound-object continuations, compared by their JSON serialization (a `bigint` continuation is rejected); `next: undefined` ends pagination. At runtime, an omitted or `null` continuation also ends pagination. Repeated continuations, including a return to `initial`, and a result that is not a page object with an `items` array fail with `IngestConfigError` before the invalid page reaches the reader.
+`paginate` yields the complete `{ items, next, metadata? }` returned by `fetchPage`, including empty and terminal pages. Read rows from `page.items`. `initial` and `next` support offset, string-token, and compound-object continuations, compared by their JSON serialization (a `bigint` continuation is rejected); `next: undefined` ends pagination. At runtime, an omitted or `null` continuation also ends pagination. Repeated continuations, including a return to `initial`, and a result that is not a page object with an `items` array fail the stream before the invalid page reaches the reader.
 
 `next` controls the next request. `metadata` carries provider details such as a candidate checkpoint, replacement sync token, or page identity. The helper preserves metadata without interpreting or persisting it. With `cursorState`, explicitly map a safe, complete checkpoint from the page into `SourceChunk.state`; the executor commits it after the rows are saved. Empty pages can carry meaningful progress through the same path. See the complete [provider cursor example](/api-sync/incremental-syncs/#provider-cursors-and-compound-state).
 
 A page cursor can be temporary, tied to one snapshot, or expire before the next run. Only persist it with `cursorState` when the provider guarantees it is valid for later executions. Otherwise page through a timestamp window and commit progress after that whole window succeeds.
 
-For a sync-token API, a nonterminal page can retain the input sync token and save its next-page position in metadata. Its terminal page has no `next`, but can carry a replacement sync token. Metadata and pagination therefore have independent types: `paginate<TItem, TCursor, TMetadata>`. Protocol-specific token recovery remains the reader's responsibility; use `context.attempt` for requests outside `paginate` and avoid wrapping its `fetchPage` in another attempt.
+For a sync-token API, a nonterminal page can retain the input sync token and save its next-page position in metadata. Its terminal page has no `next`, but can carry a replacement sync token. Metadata and pagination therefore have independent types: `paginate<TItem, TCursor, TMetadata>`. Protocol-specific token recovery remains the client's responsibility. A rejected token usually arrives as an unsuccessful response: catch the `HttpError` from `context.fetch`, check its `status` and `body`, and return a reset page instead of throwing.
 
 ## Bound work and separate accounts
 
@@ -83,9 +96,9 @@ If editing or deleting a comment does not update the ticket's timestamp, an incr
 <details>
 <summary>Wrap a provider SDK or reusable client</summary>
 
-Use a provider SDK when it handles signing, authentication, or protocol details the integration needs. Call it inside `context.attempt`, forward cancellation where supported, and classify SDK-specific errors through the stream's `classifyError`. Avoid nested retries in the SDK and chkit unless their combined behavior is deliberate.
+Use a provider SDK when it handles signing, authentication, or protocol details the integration needs. Call it inside `context.attempt`, forward cancellation where supported, and disable the SDK's own retries. Errors with a network code or a timeout are retried as they are; rethrow an SDK error that carries an HTTP status as `await HttpError.fromResponse(new Response(null, { status, headers }))` so it is classified like a response.
 
-Pass `FetchContext` to reusable clients that need only `attempt` and `signal`; they do not need to depend on checkpoint types.
+Pass `SourceContext` to reusable clients; it carries `fetch`, `attempt`, and `signal`, without checkpoint types.
 
 </details>
 

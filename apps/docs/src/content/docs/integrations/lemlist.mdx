@@ -19,9 +19,9 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:lemlist
 ```
 
-Set `LEMLIST_API_KEY` in the runtime environment before the ingestion run. Edit `src/integrations/lemlist/config.ts` for the account namespace, page size (1–100), initial activity date, overlap, interval length, and optional conversation user IDs. `pipeline.ts` groups seven independent streams in one account pipeline; select resources with tags. `sources/` contains the readers and `client.ts` uses `paginate()` for authenticated requests. `index.ts` exports the pipeline and raw schema. Child readers discover their own campaigns, contacts, or users; they do not depend on other streams running first.
+Set `LEMLIST_API_KEY` in the runtime environment before the ingestion run, or set `apiKey` in `src/integrations/lemlist/config.ts`. Edit the same file for the account namespace, page size (1–100), initial activity date, overlap, interval length, and optional conversation user IDs. `pipeline.ts` groups seven independent streams in one account pipeline; select resources with tags. `sources/` contains the readers; `client.ts` parses the configuration and owns authenticated requests, `paginate()` traversal, and payload validation. `index.ts` exports the pipeline and raw schema. Child readers discover their own campaigns, contacts, or users; they do not depend on other streams running first.
 
-`createLemlistPipeline(config, deps)` binds reader settings and optional HTTP dependencies. Configure storage in the installation's `lemlistConfig` before schema discovery; factories use the exported raw tables.
+`createLemlistPipeline(config)` snapshots reader settings, including `apiKey`. Configuration and the key are checked when a stream runs, so schema commands do not need them; invalid settings or a missing key fail each stream before any request. Configure storage in the installation's `lemlistConfig` before schema discovery; factories use the exported raw tables.
 
 Keep each stream ID and destination tied to one account. The reader does not resolve the key's account identity; switching accounts requires new stream IDs and destinations so previous watermarks cannot skip history.
 

@@ -18,6 +18,7 @@ Flag set matches the TypeScript ``generateCommand``:
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -66,6 +67,7 @@ from chkit.cli.commands.generate_rename_mappings import (
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import (
     generate_empty_migration,
@@ -75,11 +77,7 @@ from chkit.cli.migration_store import (
 )
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.schema_loader import load_schema_definitions_with_hooks
-from chkit.cli.shared_engine_flags import (
-    ForceSharedEnginesOption,
-    NoSharedEnginesOption,
-    shared_engine_hook_flags,
-)
+from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
     TableScope,
     build_scoped_snapshot_definitions,
@@ -190,10 +188,10 @@ def _exit_validation_failed(error: ChxValidationError, *, output_json: bool) -> 
 
 
 def _operation_payload(op: MigrationOperation) -> dict[str, object]:
-    """An operation in ``--json`` output. ``mode``/``beforeRetry`` appear only
-    when set, like TS ``JSON.stringify`` omitting undefined fields."""
+    """An operation in ``--json`` output. ``warning``/``mode``/``beforeRetry``
+    appear only when set, like TS ``JSON.stringify`` omitting undefined fields."""
     payload = op.model_dump(by_alias=True)
-    for field in ("mode", "beforeRetry"):
+    for field in ("warning", "mode", "beforeRetry"):
         if payload.get(field) is None:
             payload.pop(field, None)
     return payload
@@ -393,13 +391,17 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         _exit_error(str(error), output_json=output_json)
     now = datetime.now(tz=UTC)
     config = load_config(config_path, ChxConfigEnv(command="generate"))
+    # Absolute, as TS ``resolveDirs`` resolves them, so every printed path
+    # (``migrationFile``, ``snapshotFile``) reads the same in both CLIs.
+    meta_dir = Path(os.path.abspath(config.meta_dir))
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
     # `--empty` scaffolds a blank manual migration: no schema diff, no plugin
     # pipeline, and the snapshot is left untouched. Short-circuit before any of
     # that machinery so the file is a pristine stub for hand-editing.
     if empty:
         _emit_empty_migration(
             generate_empty_migration(
-                Path(config.migrations_dir),
+                migrations_dir,
                 migration_name=migration_name,
                 migration_id=migration_id,
                 cli_version=__version__,
@@ -409,6 +411,27 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         return
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
+    )
+    # As in TS, every hook gets the flags that were passed, keyed by long name.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--name": migration_name,
+            "--migration-id": migration_id,
+            "--table": table_selector,
+            "--rename-table": rename_table,
+            "--rename-column": rename_column,
+            "--rename-dictionary": rename_dictionary,
+            "--dryrun": dryrun,
+            "--json": output_json,
+            "--cutover": cutover,
+            "--cutover-copy": cutover_copy,
+            "--cutover-old": cutover_old,
+            "--drop-retained": drop_retained,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
     )
     if service is not None:
         # generate sends no SQL, but as in TS --service still names the
@@ -420,6 +443,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             config_path=str(config_path or "clickhouse.config.py"),
             json_mode=output_json,
             service=service,
+            flags=hook_flags,
         )
         if executor is not None:
             executor.close()
@@ -427,21 +451,16 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         command="generate",
         config=config,
         config_path=str(config_path or "clickhouse.config.py"),
-        flags=shared_engine_hook_flags(
-            force_shared_engines=force_shared_engines,
-            no_shared_engines=no_shared_engines,
-        ),
+        flags=hook_flags,
         json_mode=output_json,
         plugin_runtime=plugin_runtime,
+        table_selector=table_selector,
     )
     schema_canonical = canonicalize_definitions(threaded_defs)
 
     issues = validate_definitions(schema_canonical)
     if issues:
         _exit_validation_failed(ChxValidationError(issues), output_json=output_json)
-
-    meta_dir = Path(config.meta_dir)
-    migrations_dir = Path(config.migrations_dir)
 
     previous = read_snapshot(meta_dir)
     old_defs = list(previous.definitions) if previous is not None else []
@@ -474,9 +493,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     )
     table_scope = resolve_table_scope(table_selector, available_keys)
     if table_scope.enabled and table_scope.match_count == 0:
-        warning = (
-            f'No tables matched selector "{table_scope.selector or ""}". No changes planned.'
-        )
+        warning = f'No tables matched selector "{table_scope.selector or ""}".'
         if output_json:
             emit_json(
                 "generate",
@@ -491,7 +508,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 },
             )
         else:
-            typer.echo(warning)
+            typer.echo(f"{warning} No changes planned.")
         return
 
     # Mirror TS ``generate.command``: surface validation failures as a
@@ -510,6 +527,19 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     except ChxValidationError as error:
         _exit_validation_failed(error, output_json=output_json)
 
+    # Plugins may rewrite the plan (e.g. inject pre/post statements). As in
+    # TS they see the full plan, and the scope filter then also drops what
+    # they add for tables outside --table.
+    plan = plugin_runtime.run_on_plan_created(
+        ChxOnPlanCreatedContext(
+            command="generate",
+            config=config,
+            table_scope=table_scope,
+            flags=hook_flags,
+            plan=plan,
+        )
+    )
+
     if table_scope.enabled:
         # TableRenameMapping is structurally compatible with table_scope's
         # internal _RenameMapping Protocol but mypy can't infer that without help.
@@ -519,17 +549,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             rename_mappings=active_table_mappings,  # type: ignore[arg-type]
         )
         plan = filtered.plan
-
-    # Plugins may rewrite the plan (e.g. inject pre/post statements).
-    plan = plugin_runtime.run_on_plan_created(
-        ChxOnPlanCreatedContext(
-            command="generate",
-            config=config,
-            table_scope=table_scope,
-            flags={},
-            plan=plan,
-        )
-    )
 
     # A cutover replaces the DROP + CREATE of a structural change with a
     # zero-downtime copy and swap. It runs after scope filtering, so a table
@@ -571,10 +590,12 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     )
 
     if dryrun:
+        # TS ``emitGeneratePlanOutput``.
         if output_json:
             emit_json(
                 "generate",
                 {
+                    "scope": scope_to_payload(table_scope),
                     "mode": "plan",
                     "operationCount": len(plan.operations),
                     "riskSummary": plan.risk_summary.model_dump(),
@@ -582,23 +603,32 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                     "renameSuggestions": [
                         s.model_dump(by_alias=True) for s in plan.rename_suggestions
                     ],
-                    "scope": scope_to_payload(table_scope),
                     "warnings": dictionary_password_warnings,
                     **cutover_payload,
                 },
             )
             return
-        typer.echo(f"Plan: {len(plan.operations)} operation(s)")
-        for op in plan.operations:
-            typer.echo(f"- [{op.risk}] {op.type} {op.key}")
+        typer.echo(f"Planned operations: {len(plan.operations)}")
         risks = plan.risk_summary
         typer.echo(
-            f"Risk: safe={risks.safe} caution={risks.caution} danger={risks.danger}"
+            f"Risk summary: safe={risks.safe}, caution={risks.caution}, "
+            f"danger={risks.danger}"
         )
+        for op in plan.operations:
+            typer.echo(f"- {op.type} [{op.risk}] {op.key}")
         for warning in dictionary_password_warnings:
-            typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
+            typer.echo(f"Warning: {warning}", err=True)
         for line in cutover_text_lines(cutover_summaries):
             typer.echo(line)
+        if plan.rename_suggestions:
+            typer.echo("\nRename suggestions (review and confirm manually):")
+            for suggestion in plan.rename_suggestions:
+                typer.echo(
+                    f"- {suggestion.kind} {suggestion.database}.{suggestion.table}: "
+                    f"{suggestion.from_} -> {suggestion.to} [{suggestion.confidence}]"
+                )
+                typer.echo(f"  {suggestion.reason}")
+                typer.echo(f"  Confirm with: {suggestion.confirmation_sql}")
         return
 
     scoped_definitions = (
@@ -658,19 +688,27 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
         return
 
-    if artifact is None:
+    # TS ``emitGenerateApplyOutput``.
+    if migration_file is not None:
+        typer.echo(f"Generated migration: {migration_file}")
+    else:
         typer.echo("No migration generated: plan is empty.")
-        typer.echo(f"  Snapshot: {snapshot_path}")
-        return
-    typer.secho(f"Generated migration {artifact.id}", fg=typer.colors.GREEN)
-    typer.echo(f"  SQL:      {artifact.sql_path}")
-    typer.echo(f"  Snapshot: {snapshot_path}")
-    typer.echo(f"  Operations: {len(plan.operations)}")
+    if table_scope.enabled:
+        typer.echo(
+            f"Table scope:        {table_scope.selector or ''} "
+            f"({table_scope.match_count} matched)"
+        )
+        for table_key in table_scope.matched_tables:
+            typer.echo(f"- {table_key}")
+    typer.echo(f"Updated snapshot:   {snapshot_path}")
+    typer.echo(f"Definitions:        {len(artifact_definitions)}")
+    typer.echo(f"Operations:         {len(plan.operations)}")
     risks = plan.risk_summary
     typer.echo(
-        f"  Risk: safe={risks.safe} caution={risks.caution} danger={risks.danger}"
+        f"Risk summary:       safe={risks.safe}, caution={risks.caution}, "
+        f"danger={risks.danger}"
     )
     for warning in dictionary_password_warnings:
-        typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
+        typer.echo(f"Warning: {warning}", err=True)
     for line in cutover_text_lines(cutover_summaries):
         typer.echo(line)

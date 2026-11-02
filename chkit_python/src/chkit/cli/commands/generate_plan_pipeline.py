@@ -18,6 +18,7 @@ from chkit.cli.commands.generate_rename_mappings import (
     DictionaryRenameMapping,
     TableRenameMapping,
 )
+from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.model import (
     ColumnRenameSuggestion,
     MigrationOperation,
@@ -122,8 +123,8 @@ def apply_explicit_table_renames(
                 risk="caution",
                 sql=(
                     f"RENAME TABLE IF EXISTS "
-                    f"{mapping.old_database}.{mapping.old_name} TO "
-                    f"{mapping.new_database}.{mapping.new_name};"
+                    f"{render_qualified_name(mapping.old_database, mapping.old_name)} TO "
+                    f"{render_qualified_name(mapping.new_database, mapping.new_name)};"
                 ),
             )
         )
@@ -179,8 +180,8 @@ def apply_explicit_dictionary_renames(
                 risk="caution",
                 sql=(
                     f"RENAME DICTIONARY IF EXISTS "
-                    f"{mapping.old_database}.{mapping.old_name} TO "
-                    f"{mapping.new_database}.{mapping.new_name};"
+                    f"{render_qualified_name(mapping.old_database, mapping.old_name)} TO "
+                    f"{render_qualified_name(mapping.new_database, mapping.new_name)};"
                 ),
             )
         )
@@ -227,8 +228,9 @@ def build_explicit_column_rename_suggestions(
                 drop_operation_key=drop_key,
                 add_operation_key=add_key,
                 confirmation_sql=(
-                    f"ALTER TABLE {mapping.database}.{mapping.table} "
-                    f"RENAME COLUMN IF EXISTS `{mapping.from_}` TO `{mapping.to}`;"
+                    f"ALTER TABLE {render_qualified_name(mapping.database, mapping.table)} "
+                    f"RENAME COLUMN IF EXISTS {quote_identifier(mapping.from_)} "
+                    f"TO {quote_identifier(mapping.to)};"
                 ),
             )
         )
