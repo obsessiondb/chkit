@@ -64,7 +64,7 @@ Use local `apps/docs/src/content/docs/api-sync/` or these URLs. Match the instal
 - Confirm plain MergeTree/Atomic on one pinned server and all writers sharing the staged gate, executor object and identity policy in one package/process. No Shared/replicated/Distributed/replacing targets, load balancers, restrictive row policies or competing writes/schema changes. Sharing an executor does not gate direct/simple/custom writes.
 - Explain DDL, scratch storage, sorting and potentially full destination-key scans. Full scratch schema preserves DEFAULT dependencies: defaults resolve at staging; generated columns and ingestion time recompute at publication, with materialized compute/storage potentially paid twice.
 - Follow the [loading example and safety contract](https://chkit.obsessiondb.com/api-sync/loading.md) for wiring and recovery. The caller closes its executor and aligns publication/journal targets; CLI `--config` does not rebind it. Unknown publication stays fenced with scratch retained. Quiesce old publishers and their server queries before restart; never delete scratch by prefix while writers are active.
-- Validate with `bun run test:staged-loader` (also in `bun run verify`): disposable local databases, deliberately independent of managed target variables. Report local evidence, not managed/replicated coverage.
+- Validate with the normal `bun run test` or `bun run verify`. Staged-loader cases always use disposable local databases, even when other tests target a remote server; Docker remains required. Report local evidence, not managed/replicated coverage.
 
 ## Deliver and verify
 
