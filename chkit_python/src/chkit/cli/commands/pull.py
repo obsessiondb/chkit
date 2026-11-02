@@ -20,8 +20,9 @@ obsessiondb plugin port.
 
 from __future__ import annotations
 
+import os
 import re
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
 from typing import Annotated
 
@@ -91,16 +92,18 @@ from chkit.plugins import ChxOnPullIntrospectContext, ChxPlugin
 
 def _introspected_table_to_definition(
     item: IntrospectedTable,
+    server_settings: Mapping[str, str] | None = None,
 ) -> TableDefinition | None:
     """Turn an IntrospectedTable into a TableDefinition (lossy where types differ)."""
     if not item.columns:
         return None
 
     kafka = is_kafka_engine(item.engine or "")
+    declared = _declared_settings(item, server_settings or {})
     settings = (
-        parse_kafka_settings(item.settings or {})
+        parse_kafka_settings(declared)
         if kafka
-        else {k: _coerce_setting_value(v) for k, v in (item.settings or {}).items()}
+        else {k: _coerce_setting_value(v) for k, v in declared.items()}
     )
 
     indexes: list[
@@ -137,6 +140,38 @@ def _introspected_table_to_definition(
         projections=list(item.projections) or None,
         constraints=list(item.constraints or []) or None,
     )
+
+
+def _declared_settings(
+    item: IntrospectedTable, server_settings: Mapping[str, str]
+) -> dict[str, str]:
+    """Leave out the settings the server fills in (TS ``declaredSettings``, #466).
+
+    A table that does not declare them has them anyway: ClickHouse writes
+    ``index_granularity = 8192`` into every MergeTree table, and ObsessionDB
+    writes ``storage_policy = 's3'`` into every Shared table, the only policy
+    such a table can have. A setting at the server's value is left out the
+    same way, declared or not.
+    """
+    engine = item.engine or ""
+    settings = dict(item.settings or {})
+    if "MergeTree" not in engine:
+        return settings
+    declared: dict[str, str] = {}
+    for key, value in settings.items():
+        quoted = re.fullmatch(r"'(.*)'", value, re.DOTALL)
+        plain = quoted.group(1) if quoted else value
+        if key == "storage_policy" and engine.startswith("Shared") and plain == "s3":
+            continue
+        if server_settings.get(key) != plain:
+            declared[key] = value
+    return declared
+
+
+def _read_merge_tree_settings(client: object) -> dict[str, str]:
+    """The value every MergeTree setting takes on this server when a table does not declare it."""
+    rows = client.query("SELECT name, value FROM system.merge_tree_settings").rows  # type: ignore[attr-defined]
+    return {str(row["name"]): str(row["value"]) for row in rows}
 
 
 def _coerce_setting_value(value: str) -> str | int | float | bool:
@@ -181,6 +216,18 @@ def _is_obsessiondb_metadata_table(item: object) -> bool:
     ) in _OBSESSIONDB_METADATA_TABLES
 
 
+def _is_journal_table(item: object) -> bool:
+    # chkit's migration journal (CHKIT_JOURNAL_TABLE, ``_chkit_migrations`` by
+    # default) is chkit's own bookkeeping, not part of the user's schema (#466).
+    kind = getattr(item, "kind", None)
+    journal = (os.environ.get("CHKIT_JOURNAL_TABLE") or "").strip() or "_chkit_migrations"
+    return (kind is None or kind == "table") and getattr(item, "name", None) == journal
+
+
+def _is_pulled_object(item: object) -> bool:
+    return not _is_obsessiondb_metadata_table(item) and not _is_journal_table(item)
+
+
 def _refresh_shape_to_model(
     shape: MaterializedViewRefreshShape | None,
 ) -> MaterializedViewRefresh | None:
@@ -208,10 +255,11 @@ def _pull_definitions(
     client: object, databases: Sequence[str]
 ) -> list[SchemaDefinition]:
     """Combine introspect.list_table_details + view parsing into SchemaDefinitions."""
+    server_settings = _read_merge_tree_settings(client)
     introspected_tables = list_table_details(client, list(databases))
     table_defs: list[SchemaDefinition] = []
     for it in introspected_tables:
-        td = _introspected_table_to_definition(it)
+        td = _introspected_table_to_definition(it, server_settings)
         if td is not None:
             table_defs.append(td)
 
@@ -505,13 +553,11 @@ def run(  # noqa: PLR0917
         with open_client(executor, config.clickhouse) as client:
             # Capture objects so we can summarize what got skipped, even when
             # --database was passed explicitly.
-            raw_objects = [
-                o for o in list_schema_objects(client) if not _is_obsessiondb_metadata_table(o)
-            ]
+            raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
             if not selected:
                 selected = sorted({getattr(o, "database", "") for o in raw_objects})
             definitions = _pull_definitions(client, selected)
-    definitions = [d for d in definitions if not _is_obsessiondb_metadata_table(d)]
+    definitions = [d for d in definitions if _is_pulled_object(d)]
 
     content = render_schema_file(definitions)
     out_file_abs = (Path.cwd() / out_file).resolve()

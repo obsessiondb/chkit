@@ -69,7 +69,8 @@ export function diffSettings(
       if (hadValue) changes.push({ kind: 'reset', key })
       continue
     }
-    if (!hadValue || oldSettings[key] !== nextValue) {
+    // Compared as rendered: `index_granularity: 4096` and the "4096" pull reads back are the same.
+    if (!hadValue || String(oldSettings[key]) !== String(nextValue)) {
       changes.push({ kind: 'modify', key, value: nextValue })
     }
   }
