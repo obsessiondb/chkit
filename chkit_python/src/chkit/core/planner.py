@@ -52,6 +52,7 @@ from chkit.core.sql import (
     render_alter_remove_codec,
     render_alter_remove_column_expression,
     render_alter_reset_setting,
+    render_column_type,
     render_dictionary_sql,
     to_create_sql,
 )
@@ -236,8 +237,7 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
     data.pop("name", None)
     data.pop("renamed_from", None)
     data.pop("nullable", None)
-    type_ = str(column.type).strip()
-    data["type"] = f"Nullable({type_})" if column.nullable else type_
+    data["type"] = render_column_type(column)
     return data
 
 

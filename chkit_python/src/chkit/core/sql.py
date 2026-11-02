@@ -34,6 +34,7 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import render_projection_body
+from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.text_index import TEXT_INDEX_GRANULARITY, render_text_index_type
 from chkit.core.validate import assert_valid_definitions
@@ -67,8 +68,7 @@ def _normalize_projection(projection: ProjectionInput) -> ProjectionDefinition:
 
 
 def _render_column(col: ColumnDefinition) -> str:
-    type_text = f"Nullable({col.type})" if col.nullable else f"{col.type}"
-    out = f"`{col.name}` {type_text}"
+    out = f"`{col.name}` {render_column_type(col)}"
     if col.default is not None:
         out += f" {col.default_kind or 'DEFAULT'} {render_default(col.default)}"
     elif col.default_kind == "EPHEMERAL":
@@ -79,6 +79,12 @@ def _render_column(col: ColumnDefinition) -> str:
     if col.codec is not None:
         out += f" {render_codec(col.codec)}"
     return out
+
+
+def render_column_type(column: ColumnDefinition) -> str:
+    """A column's type as chkit renders it in DDL (TS ``renderColumnType``)."""
+    type_ = js_trim(str(column.type))
+    return f"Nullable({type_})" if column.nullable else type_
 
 
 def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str:
