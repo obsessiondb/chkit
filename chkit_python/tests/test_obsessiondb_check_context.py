@@ -180,4 +180,6 @@ def test_check_without_clickhouse_block_or_service_says_what_is_missing(
     )
 
     assert result.exit_code == 1
-    assert "select an ObsessionDB service" in result.stderr
+    assert result.stderr == (
+        "clickhouse config is required for check (journal is stored in ClickHouse)\n"
+    )

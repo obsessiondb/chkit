@@ -318,7 +318,7 @@ def test_suggests_a_likely_column_rename_when_add_drop_definitions_match() -> No
     assert s.drop_operation_key == "table:app.events:column:source"
     assert s.add_operation_key == "table:app.events:column:origin"
     assert s.confirmation_sql == (
-        "ALTER TABLE app.events RENAME COLUMN `source` TO `origin`;"
+        "ALTER TABLE app.events RENAME COLUMN IF EXISTS `source` TO `origin`;"
     )
 
 

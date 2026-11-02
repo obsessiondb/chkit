@@ -7,6 +7,7 @@ from __future__ import annotations
 
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import ProjectionDefinition
+from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import find_quote_end, is_quote_char, strip_wrapping_parens
 
@@ -77,7 +78,7 @@ def canonicalize_projection(projection: ProjectionDefinition) -> ProjectionDefin
         return ProjectionDefinition(
             name=projection.name,
             index=normalize_projection_index(index),
-            type=projection.type.strip() if projection.type is not None else None,
+            type=js_trim(projection.type) if projection.type is not None else None,
         )
     return ProjectionDefinition(
         name=projection.name,
@@ -90,6 +91,6 @@ def canonicalize_projection(projection: ProjectionDefinition) -> ProjectionDefin
 def render_projection_body(projection: ProjectionDefinition) -> str:
     if is_index_projection(projection):
         index = projection.index if projection.index is not None else ""
-        type_text = projection.type.strip() if projection.type is not None else ""
+        type_text = js_trim(projection.type) if projection.type is not None else ""
         return f"INDEX {normalize_projection_index(index)} TYPE {type_text}"
     return f"({projection.query})"

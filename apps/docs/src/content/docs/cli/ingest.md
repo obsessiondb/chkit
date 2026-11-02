@@ -71,7 +71,7 @@ A `--tag` filter that matches no stream fails with exit code 2 before any work r
 
 Executes the selected streams from validated checkpoints in the ingestion journal (`_chkit_ingestion_journal` by default). Each run records its starting checkpoint and local event sequence. Progress advances after writes succeed; a later run resumes from a selected valid checkpoint.
 
-The run ends when every selected stream finishes, the execution budget is exhausted, or the process receives `SIGINT` or `SIGTERM`. A budget-exhausted or interrupted run keeps committed progress and exits with code 1. Each stream reports one outcome: `succeeded`, `failed`, `budget_exhausted`, or `cancelled`.
+The run ends when every selected stream finishes, the execution budget is exhausted, or the process receives `SIGINT` or `SIGTERM`. A budget-exhausted or interrupted run keeps committed progress and exits with code 1. Each stream reports one outcome: `succeeded`, `failed`, `budget_exhausted`, or `cancelled`. The summary prints each distinct error once, with the streams it affected, so a missing credential shared by six streams appears as one message. `--json` keeps the error on every stream.
 
 Overlapping processes write independent run-scoped identities. A stale valid read can replay work without colliding with another run's event sequence. Snapshot validation diagnoses malformed tails and retains valid acknowledged progress. Destination delivery remains at-least-once. See [Scheduling and recovery](/api-sync/operations/).
 
@@ -151,7 +151,7 @@ chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
 |------|---------|
 | 0 | Success. For `run`, every selected stream succeeded; for `doctor`, every history is healthy; a repair preview completed or the reviewed replacement was materialized |
 | 1 | Error, including an unknown flag or missing flag value, an unhealthy `doctor` report, or a `run` with any stream that did not succeed |
-| 2 | Configuration error: no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, or missing direct connection |
+| 2 | Configuration error: an invalid pipeline definition, a definition module that fails to load, no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, or missing direct connection |
 
 ## JSON output
 

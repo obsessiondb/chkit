@@ -1,7 +1,8 @@
 import { rawRows, rawTable, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-ingest'
 
-import type { LinearClientDeps } from '../client.js'
-import { linearId, readLinearPages } from './common.js'
+import { createLinearClient } from '../client.js'
+import type { LinearConfig } from '../config.js'
+import { linearId } from './common.js'
 
 const query = `query Projects($after: String, $from: DateTimeOrDuration!, $to: DateTimeOrDuration!) {
   projects(first: 100, after: $after, includeArchived: true, orderBy: updatedAt,
@@ -16,9 +17,10 @@ const query = `query Projects($after: String, $from: DateTimeOrDuration!, $to: D
 
 export const linear_projectsRaw = rawTable({ database: 'default', name: 'linear_projects_raw' })
 
-export async function* readProjects(context: ReadContext<TimestampRange, TimestampWindowState>, deps: LinearClientDeps) {
-  for await (const page of readLinearPages(context, {
-    query, select: (data) => data.projects, label: 'projects', window: context.selection,
+export async function* readProjects(context: ReadContext<TimestampRange, TimestampWindowState>, config: LinearConfig) {
+  const client = createLinearClient(context, config)
+  for await (const page of client.connection({
+    query, path: ['projects'], label: 'projects', window: context.selection,
     variables: { from: context.selection.from.toISOString(), to: context.selection.to.toISOString() },
-  }, deps)) yield { rows: rawRows(page.items, linearId) }
+  })) yield { rows: rawRows(page.items, linearId) }
 }
