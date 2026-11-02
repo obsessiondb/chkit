@@ -67,6 +67,27 @@ describe('@chkit/cli query precision e2e', () => {
     }
   }, 30_000)
 
+  test('--json keeps numbers in JSON and Dynamic columns as numbers unless a double would change them (#438)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-query-precision-'))
+    try {
+      const configPath = await writeConfig(dir)
+      const sql =
+        `SELECT CAST('{"a": 2.5, "b": [1, 0.1], "u": 18446744073709551615}' AS JSON) AS j, ` +
+        'CAST(toFloat64(0.1) AS Dynamic) AS d_f64, CAST(toUInt64(18446744073709551615) AS Dynamic) AS d_u64'
+      const result = runCli(dir, ['query', sql, '--json', '--config', configPath], {
+        HOME: dir,
+        XDG_CONFIG_HOME: dir,
+      })
+      expect(result.exitCode, formatTestDiagnostic('query --json failed', result)).toBe(0)
+      const payload = JSON.parse(result.stdout) as { data: Array<Record<string, unknown>> }
+      expect(payload.data).toEqual([
+        { j: { a: 2.5, b: [1, 0.1], u: '18446744073709551615' }, d_f64: 0.1, d_u64: '18446744073709551615' },
+      ])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 30_000)
+
   test('the table output prints every digit', async () => {
     const dir = await mkdtemp(join(tmpdir(), 'chkit-query-precision-'))
     try {

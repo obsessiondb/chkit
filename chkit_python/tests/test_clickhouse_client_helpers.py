@@ -230,6 +230,17 @@ def test_format_connection_error_leaves_out_credentials_in_the_url() -> None:
     assert "at https://ch.example.com:8443." in msg
 
 
+def test_format_connection_error_names_the_user_set_in_the_url() -> None:
+    # The URL's user is the one the client signs in as, as in TS.
+    msg = format_connection_error(
+        DatabaseError(WRONG_PASSWORD_ERROR), "http://al%40ice:SeCrEtPw@localhost:8199", "default"
+    )
+    assert msg == (
+        'Authentication failed for user "al@ice" at http://localhost:8199. '
+        "Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD."
+    )
+
+
 def test_format_connection_error_ignores_other_errors() -> None:
     assert format_connection_error(DatabaseError(THROW_IF_ERROR), "http://localhost:8123") is None
 

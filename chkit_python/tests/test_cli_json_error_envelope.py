@@ -5,7 +5,11 @@ Mirrors the TS CLI's top-level catch in ``packages/cli/src/bin/chkit.ts``.
 
 from __future__ import annotations
 
+import functools
 import json
+import os
+import subprocess
+import sys
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -72,6 +76,7 @@ def test_failing_command_prints_the_envelope(
     result = CliRunner().invoke(app, args)
 
     assert result.exit_code == 1
+    assert result.stderr == "Connection refused\n"
     assert json.loads(result.stdout) == {
         "command": command,
         "schemaVersion": 1,
@@ -80,9 +85,10 @@ def test_failing_command_prints_the_envelope(
     }
 
 
-def test_failing_command_without_json_prints_nothing_to_stdout(
+def test_failing_command_without_json_prints_one_line(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Like the TS CLI (#437): the message, not a traceback.
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(status, "load_config", _raise_connection_refused)
 
@@ -90,7 +96,31 @@ def test_failing_command_without_json_prints_nothing_to_stdout(
 
     assert result.exit_code == 1
     assert result.stdout == ""
-    assert isinstance(result.exception, ConnectionError)
+    assert result.stderr == "Connection refused\n"
+
+
+def test_failing_command_logs_the_traceback_under_chkit_debug(tmp_path: Path) -> None:
+    # A subprocess, so CHKIT_DEBUG's logging setup stays out of this process.
+    (tmp_path / "clickhouse.config.py").write_text("raise RuntimeError('boom')\n", encoding="utf-8")
+    run = functools.partial(
+        subprocess.run,
+        [sys.executable, "-m", "chkit.cli.main", "status"],
+        cwd=tmp_path,
+        capture_output=True,
+        text=True,
+        check=False,
+    )
+
+    # An empty config home, so a user profile config cannot change the output.
+    env = {**os.environ, "XDG_CONFIG_HOME": str(tmp_path / "xdg")}
+    quiet = run(env={**env, "CHKIT_DEBUG": ""})
+    debug = run(env={**env, "CHKIT_DEBUG": "1"})
+
+    assert (quiet.returncode, quiet.stdout, quiet.stderr) == (1, "", "boom\n")
+    assert debug.returncode == 1
+    assert "fatal error" in debug.stderr
+    assert "Traceback (most recent call last)" in debug.stderr
+    assert debug.stderr.endswith("RuntimeError: boom\nboom\n")
 
 
 def test_usage_error_prints_the_envelope_and_keeps_exit_code_2(

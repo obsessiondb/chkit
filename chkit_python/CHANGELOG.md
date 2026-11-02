@@ -127,6 +127,65 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit check` passes the plugins' `on_check` the flags that were passed, keyed by long name
+  as in TS (`--json`, `--strict`, `--table`, `--config`, `--force-shared-engines`,
+  `--no-shared-engines`, `--service`) (#450). Before, `on_check` always got `{}`, so
+  `check --force-shared-engines` had no effect: on a target not recognized as ObsessionDB the
+  ObsessionDB plugin did not reject a `Distributed` table, and check passed where TS fails with
+  `obsessiondb_distributed_unsupported`.
+- `chkit check` runs the plugins' `on_config_loaded` hooks, as in TS (#449): with command
+  `check` and the resolved `--table` scope, right before `on_check`. Before, chkit-py
+  never called them, so state a plugin set up there was missing in `on_check`. A hook
+  error fails the check with exit 1 and `Plugin "<name>" failed in onConfigLoaded: ...`
+  (plus the `--json` error envelope). A `--table` selector that matches no table still
+  skips every plugin hook.
+- `chkit migrate` runs the plugins' `on_config_loaded` hooks, as in TS (#455): in plan and
+  apply mode (and with `--retry` / `--abandon`), with command `migrate` and the resolved
+  `--table` scope, after the scope is resolved and before the migrations are listed. Before,
+  chkit-py never called them. A hook error stops migrate before it reads the journal, with exit 1
+  and `Plugin "<name>" failed in onConfigLoaded: ...` (plus the `--json` error envelope).
+- Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
+  (#432): each one the URL sets, percent-decoded, takes precedence over the configured
+  `username` / `password`. Before, chkit-py ignored them and signed in with the configured
+  ones. "Authentication failed for user ..." names the URL's user, and the invalid-URL errors
+  no longer print the credentials (the protocol error prints the scheme only, as in TS).
+- `chkit query` keeps numbers in `JSON`, `Object` and `Dynamic` columns as numbers, as in TS
+  (#438). Every number in a column whose type is or contains one of them was a string,
+  floats and small integers included: `CAST('{"a": 2.5, "b": [1, 0.1]}' AS JSON)` printed
+  `{"a":"2.5","b":["1","0.1"]}`. Inside these columns a number now becomes a string of the
+  digits ClickHouse sent only when a float cannot hold it: `2.5`, `1` and `0.1` stay
+  numbers, `18446744073709551615` stays a string, in the table and in `--json`.
+- `chkit check` prints the same JSON and text as TS and judges the same way (#435).
+  **Behaviour change** for `--json` readers: the payload no longer has `issues`,
+  `pendingMigrations`, `checksumMismatches` or `pluginCheckResults` (use `chkit status
+  --json` for the migration names), and always has `plugins` (`{}` without plugin checks),
+  written before `scope` as in TS. The text starts with `Check status:` and `Policy:`, uses
+  `Pending migrations: N` / `Checksum mismatches: N`, lists the `--table` scope and the
+  plugin checks, and prints each plugin's `on_check_report` lines, without the
+  `Validation issues:` line or the blank line before `Failed checks:`. **Behaviour change:**
+  check no longer validates the schema files (no `validation` failed check; `generate` and
+  `snapshot rebuild` still fail on an invalid schema), a plugin fails the check only with an
+  evaluated, not-ok result that has an `error` finding (a `warn`-only or unevaluated result
+  no longer fails it), and `--table` scopes only the drift and plugin checks: pending
+  migrations of other tables count again, as documented.
+- The typed `T64` codec is accepted before a general codec, as in TS (#434). ClickHouse accepts
+  `CODEC(T64, LZ4)`, `CODEC(T64, ZSTD(3))` and `CODEC(Delta, T64, LZ4)`, but chkit-py classed
+  `T64` as a general codec, so those chains failed validation with
+  `codec_chain_multiple_general`. `T64` compresses on its own, like `DoubleDelta`, so it moved
+  from `GeneralColumnCodec` to `PreprocessingColumnCodec`: a lone `T64` still validates,
+  `[{"kind": "T64"}, {"kind": "LZ4"}]` now validates and renders `CODEC(T64, LZ4)`, and `T64`
+  after a general codec, which ClickHouse rejects, fails with
+  `codec_chain_must_end_with_general`. A migrated `T64` chain reports no drift.
+- An unhandled error prints one line and exits 1, as in TS (#437): ClickHouse's own message
+  for a server error, the error's message otherwise. Before, it printed a full traceback,
+  under `--json` after the error envelope too. `CHKIT_DEBUG=1` logs the traceback to stderr.
+  Usage errors (exit 2), `Ctrl-C` (exit 130) and the commands' own exits are unchanged.
+- `chkit generate` compares a column's type as rendered, as in TS (#433, port of #275), so
+  switching between `type="Nullable(Int64)"` and `type="Int64", nullable=True` plans
+  nothing. Before, it wrote a `MODIFY COLUMN` migration that changed nothing. A change to
+  nullability, to the underlying type or to a nested `Nullable` wrapper (such as
+  `LowCardinality(Nullable(String))`) still plans `MODIFY COLUMN`. Column rename
+  suggestions and codec removals match across both spellings too.
 - The typed `GCD` codec is a preprocessing codec, as in TS (#408). ClickHouse rejects a lone
   `CODEC(GCD)` because GCD does not compress, and chkit-py classed it as a general codec, so
   no typed GCD chain was valid: `[{"kind": "GCD"}, {"kind": "LZ4"}]` now validates and

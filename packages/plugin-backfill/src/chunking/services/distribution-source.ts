@@ -21,7 +21,7 @@ export async function probeStringPrefixDistribution(
   const range = ranges.find((candidate) => candidate.dimensionIndex === dimensionIndex)
   if (!range?.from || !range.to) return []
 
-  const rows = await context.query<{ prefix: string; cnt: string }>(`
+  const rows = await context.query<{ prefix: string; cnt: number | string }>(`
 SELECT
   substring(${sortKey.name}, 1, ${depth}) AS prefix,
   count() AS cnt
@@ -56,7 +56,7 @@ export async function probeStringKeyDistribution(
   const range = ranges.find((candidate) => candidate.dimensionIndex === dimensionIndex)
   if (!range?.from || !range.to) return undefined
 
-  const rows = await context.query<{ key: string; cnt: string }>(`
+  const rows = await context.query<{ key: string; cnt: number | string }>(`
 SELECT
   ${sortKey.name} AS key,
   count() AS cnt
@@ -91,7 +91,7 @@ export async function probeTemporalDistribution(
     ? `toStartOfDay(${sortKey.name})`
     : `toStartOfHour(${sortKey.name})`
 
-  const rows = await context.query<{ bucket: string; cnt: string }>(`
+  const rows = await context.query<{ bucket: string; cnt: number | string }>(`
 SELECT
   formatDateTime(${bucketExpression}, '%Y-%m-%dT%H:%i:%sZ') AS bucket,
   count() AS cnt

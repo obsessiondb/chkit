@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
 from chkit.core.constraint import constraint_kind
@@ -225,18 +226,28 @@ def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool
     )
 
 
-def _column_identity(column: ColumnDefinition) -> str:
-    """JSON-stable shape of a column ignoring name + renamed_from."""
+def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
+    """Column shape ignoring name + renamed_from, with the type as rendered.
+
+    Compare what the DSL renders: inline ``Nullable(T)`` and ``nullable=True``
+    are equivalent, while an additional or differently placed wrapper is not.
+    """
     data = column.model_dump(mode="json", by_alias=False)
     data.pop("name", None)
     data.pop("renamed_from", None)
-    return json.dumps(data, sort_keys=True, default=str)
+    data.pop("nullable", None)
+    type_ = str(column.type).strip()
+    data["type"] = f"Nullable({type_})" if column.nullable else type_
+    return data
+
+
+def _column_identity(column: ColumnDefinition) -> str:
+    """JSON-stable shape of a column ignoring name + renamed_from."""
+    return json.dumps(_normalized_column(column), sort_keys=True, default=str)
 
 
 def _column_identity_without_codec(column: ColumnDefinition) -> str:
-    data = column.model_dump(mode="json", by_alias=False)
-    data.pop("name", None)
-    data.pop("renamed_from", None)
+    data = _normalized_column(column)
     data.pop("codec", None)
     return json.dumps(data, sort_keys=True, default=str)
 

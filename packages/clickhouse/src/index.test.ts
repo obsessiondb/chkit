@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import {
   assertStreamedQuerySucceeded,
@@ -9,6 +9,7 @@ import {
   createStatelessClickHouseExecutor,
   createStatelessClickHouseClient,
   formatConnectionError,
+  urlWithoutCredentials,
   inferSchemaKindFromEngine,
   observableSystemTable,
   parseCommentFromCreateDictionaryQuery,
@@ -42,6 +43,21 @@ type MockClientOptions = {
   insertHeaders?: Record<string, string>
 }
 
+// Reads look up the user's readonly level once per executor (#412).
+function isReadonlyLookup(sql: string): boolean {
+  return sql.includes("getSetting('readonly')")
+}
+
+function readonlyLookupResult(readonly: number) {
+  return {
+    query_id: 'readonly-lookup',
+    response_headers: {},
+    async text() {
+      return `{"readonly":"${readonly}"}\n`
+    },
+  }
+}
+
 function createMockClient(
   name: string,
   calls: InsertCall[],
@@ -54,7 +70,8 @@ function createMockClient(
         response_headers: opts.commandHeaders ?? {},
       }
     },
-    async query() {
+    async query(params: { query: string }) {
+      if (isReadonlyLookup(params.query)) return readonlyLookupResult(0)
       return {
         query_id: `${name}-query`,
         response_headers: opts.queryHeaders ?? {},
@@ -111,6 +128,23 @@ describe('@chkit/clickhouse smoke', () => {
     expect(typeof stateless.query).toBe('function')
     expect(typeof session.query).toBe('function')
 
+    await Promise.all([stateless.close(), session.close()])
+  })
+
+  test('credentials in the URL raise no client override warnings (#432)', async () => {
+    const warn = spyOn(console, 'warn').mockImplementation(() => {})
+    const config = {
+      url: 'http://default:SeCrEtPw@localhost:8123',
+      username: 'default',
+      password: '',
+      database: 'default',
+    }
+    const stateless = createStatelessClickHouseClient(config)
+    const session = createSessionClickHouseClient(config)
+    const warnings = warn.mock.calls.map((args) => args.join(' '))
+    warn.mockRestore()
+
+    expect(warnings).toEqual([])
     await Promise.all([stateless.close(), session.close()])
   })
 
@@ -297,11 +331,18 @@ SETTINGS index_granularity = 8192;`
   })
 
   // A readonly = 1 user cannot change any setting, so reads send none on top
-  // of the client's wait_end_of_query; writes keep theirs (#402).
-  test('sends the write settings with command and insert only', async () => {
-    const sent: Record<string, unknown> = {}
+  // of the client's wait_end_of_query; writes keep theirs (#402). Other users
+  // get progress headers on reads too (#412).
+  const progress = { send_progress_in_http_headers: 1, http_headers_progress_interval_ms: '30000' }
+  test.each([
+    [0, progress, { ...progress, max_result_rows: 3 }],
+    [2, progress, { ...progress, max_result_rows: 3 }],
+    [1, undefined, { max_result_rows: 3 }],
+  ])('a readonly = %p user sends the progress settings with reads accordingly', async (readonly, read, readWithSettings) => {
+    const sent: Array<[string, unknown]> = []
+    let lookups = 0
     const record = (method: string) => async (params: { clickhouse_settings?: unknown }) => {
-      sent[method] = params.clickhouse_settings
+      sent.push([method, params.clickhouse_settings])
       return {
         query_id: method,
         response_headers: {},
@@ -313,8 +354,14 @@ SETTINGS index_granularity = 8192;`
     const client = {
       command: record('command'),
       insert: record('insert'),
-      query: async (params: { clickhouse_settings?: unknown; format: string }) =>
-        record(params.format === 'JSON' ? 'queryJson' : 'query')(params),
+      query: async (params: { query: string; clickhouse_settings?: unknown; format: string }) => {
+        if (isReadonlyLookup(params.query)) {
+          lookups += 1
+          expect(params.clickhouse_settings).toBeUndefined()
+          return readonlyLookupResult(readonly)
+        }
+        return record(params.format === 'JSON' ? 'queryJson' : 'query')(params)
+      },
       async close() {},
     } as unknown as ReturnType<typeof createStatelessClickHouseClient>
     const executor = createExecutorWithClient(
@@ -323,16 +370,45 @@ SETTINGS index_granularity = 8192;`
     )
 
     await executor.query('SELECT 1')
+    await executor.query('SELECT 1', { max_result_rows: 3 })
     await executor.queryJson?.('SELECT 1')
     await executor.command('CREATE TABLE t (a UInt8) ENGINE = Memory', { max_threads: 1 })
     await executor.insert({ table: 't', values: [{ a: 1 }] })
+    // Callers that choose their own read settings reuse the same lookup (#414).
+    expect(await executor.canChangeSettings?.()).toBe(readonly !== 1)
 
-    expect(sent).toEqual({
-      query: undefined,
-      queryJson: undefined,
-      command: { async_insert: 0, send_progress_in_http_headers: 1, max_threads: 1 },
-      insert: { async_insert: 0, send_progress_in_http_headers: 1 },
-    })
+    expect(lookups).toBe(1)
+    expect(sent).toEqual([
+      ['query', read],
+      ['query', readWithSettings],
+      ['queryJson', read],
+      ['command', { async_insert: 0, ...progress, max_threads: 1 }],
+      ['insert', { async_insert: 0, ...progress }],
+    ])
+    await executor.close()
+  })
+
+  test('a failed readonly lookup fails the read and is looked up again on the next one', async () => {
+    let lookups = 0
+    const client = {
+      async query(params: { query: string }) {
+        if (isReadonlyLookup(params.query)) {
+          lookups += 1
+          if (lookups === 1) throw new Error('Code: 81. DB::Exception: Database app does not exist. (UNKNOWN_DATABASE)')
+          return readonlyLookupResult(0)
+        }
+        return { query_id: 'q', response_headers: {}, async text() { return '{"id":1}' } }
+      },
+      async close() {},
+    } as unknown as ReturnType<typeof createStatelessClickHouseClient>
+    const executor = createExecutorWithClient(
+      { url: 'http://localhost:8123', username: 'default', password: '', database: 'app', secure: false },
+      client,
+    )
+
+    await expect(executor.query('SELECT 1 AS id')).rejects.toThrow(/UNKNOWN_DATABASE/)
+    expect(await executor.query('SELECT 1 AS id')).toEqual([{ id: 1 }])
+    expect(lookups).toBe(2)
     await executor.close()
   })
 
@@ -392,7 +468,8 @@ SETTINGS index_granularity = 8192;`
     // silently bypassed.
     let textCalled = false
     const failingBodyClient = {
-      async query() {
+      async query(params: { query: string }) {
+        if (isReadonlyLookup(params.query)) return readonlyLookupResult(0)
         return {
           query_id: 'q-1',
           response_headers: {
@@ -646,6 +723,46 @@ describe('formatConnectionError', () => {
 
   test('returns undefined for unrecognized errors (caller rethrows raw)', () => {
     expect(formatConnectionError(new Error('Unknown data type family: Nope'), 'https://x')).toBeUndefined()
+  })
+
+  test('leaves out credentials in the URL (#432)', () => {
+    const url = 'http://default:SeCrEtPw@localhost:8199'
+    const refused = Object.assign(new Error('connect ECONNREFUSED'), { code: 'ECONNREFUSED' })
+    const auth = Object.assign(new Error(rawAuthBlurb), { code: '516' })
+    expect(formatConnectionError(refused, url)).toBe(
+      'Could not connect to ClickHouse at http://localhost:8199 (connection refused)',
+    )
+    expect(formatConnectionError(auth, url, 'default')).toBe(
+      'Authentication failed for user "default" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+  })
+
+  test('names the user set in the URL, which the client signs in as', () => {
+    const auth = Object.assign(new Error(rawAuthBlurb), { code: '516' })
+    expect(formatConnectionError(auth, 'http://al%40ice:SeCrEtPw@localhost:8199', 'default')).toBe(
+      'Authentication failed for user "al@ice" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+    expect(formatConnectionError(auth, 'http://a%zz:SeCrEtPw@localhost:8199', 'default')).toBe(
+      'Authentication failed for user "a%zz" at http://localhost:8199. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+  })
+})
+
+describe('urlWithoutCredentials', () => {
+  test('drops the userinfo and keeps the rest of the URL as written', () => {
+    expect(urlWithoutCredentials('https://lucas:SeCrEtPw@ch.example.com:8443/db?x=1')).toBe(
+      'https://ch.example.com:8443/db?x=1',
+    )
+    expect(urlWithoutCredentials('http://lucas@localhost:8123')).toBe('http://localhost:8123')
+  })
+
+  test('drops a password that contains an unencoded @', () => {
+    expect(urlWithoutCredentials('http://default:SeC@rEtPw@localhost:8123')).toBe('http://localhost:8123')
+  })
+
+  test('leaves a URL without credentials unchanged, including an @ after the host', () => {
+    expect(urlWithoutCredentials('https://db.example.com:443')).toBe('https://db.example.com:443')
+    expect(urlWithoutCredentials('http://localhost:8123/?user=a@b')).toBe('http://localhost:8123/?user=a@b')
   })
 })
 
@@ -933,13 +1050,54 @@ describe('systemTableSource / observableSystemTable', () => {
       /ALL_CONNECTION_TRIES_FAILED/,
     )
   })
+
+  // #436: the status reads decode as executor.query() does. ClickHouse 26.3
+  // sends UInt64 counts as JSON numbers; a profile with
+  // output_format_json_quote_64bit_integers = 1 sends them as strings.
+  test('queryStatus reads counts sent as numbers or as strings of digits', async () => {
+    const running = createStatusCapturingClient(0, {
+      bodies: {
+        processes:
+          '{"read_rows":10,"read_bytes":"18446744073709551615","written_rows":"3","written_bytes":24,"elapsed":1.5}',
+      },
+    })
+    const runningExecutor = createExecutorWithClient(
+      { url: 'http://localhost:8123', database: 'default' },
+      running.client,
+    )
+    expect(await runningExecutor.queryStatus('qid-1')).toEqual({
+      status: 'running',
+      readRows: 10,
+      readBytes: Number('18446744073709551615'),
+      writtenRows: 3,
+      writtenBytes: 24,
+      elapsedMs: 1500,
+    })
+
+    const finished = createStatusCapturingClient(0, {
+      bodies: {
+        query_log:
+          '{"type":"QueryFinish","written_rows":5,"written_bytes":"40","query_duration_ms":7,"exception":""}\n',
+      },
+    })
+    const finishedExecutor = createExecutorWithClient(
+      { url: 'http://localhost:8123', database: 'default' },
+      finished.client,
+    )
+    expect(await finishedExecutor.queryStatus('qid-2')).toEqual({
+      status: 'finished',
+      writtenRows: 5,
+      writtenBytes: 40,
+      durationMs: 7,
+    })
+  })
 })
 
 // A client that answers the replica probe with `replicas` and every status
-// read with no rows, recording each query.
+// read with no rows (or the JSONEachRow body in `bodies`), recording each query.
 function createStatusCapturingClient(
   replicas: number,
-  options: { failProcesses?: Error } = {},
+  options: { failProcesses?: Error; bodies?: { processes?: string; query_log?: string } } = {},
 ) {
   const queries: string[] = []
   const client = {
@@ -947,19 +1105,23 @@ function createStatusCapturingClient(
       return { query_id: 'cmd', response_headers: {} }
     },
     async query(params: { query: string }) {
+      if (isReadonlyLookup(params.query)) return readonlyLookupResult(0)
       queries.push(params.query)
       if (options.failProcesses && params.query.includes('system.processes')) {
         throw options.failProcesses
       }
       const rows = params.query.includes('system.one') && replicas > 0 ? [{ replicas: String(replicas) }] : []
+      const body = params.query.includes('system.processes')
+        ? options.bodies?.processes
+        : params.query.includes('system.query_log')
+          ? options.bodies?.query_log
+          : undefined
+      const text = body ?? rows.map((row) => JSON.stringify(row)).join('\n')
       return {
         query_id: 'q',
         response_headers: {},
-        async json() {
-          return rows
-        },
         async text() {
-          return rows.map((row) => JSON.stringify(row)).join('\n')
+          return text
         },
       }
     },

@@ -93,3 +93,51 @@ def test_keeps_the_rest_of_the_envelope_as_clickhouse_sent_it() -> None:
 def test_reads_an_empty_body_from_a_statement_without_a_result_set_as_no_rows() -> None:
     assert parse_json_result("") == {"data": [], "meta": [], "rows": 0}
     assert parse_json_result(b" \n") == {"data": [], "meta": [], "rows": 0}
+
+
+def test_json_object_and_dynamic_columns_keep_a_number_unless_a_float_would_change_it() -> None:
+    # #438, same body and expectations as the TS test.
+    result = parse_json_result("""{
+        "meta": [
+            {"name": "j", "type": "JSON"},
+            {"name": "o", "type": "Object('json')"},
+            {"name": "d_f64", "type": "Dynamic"},
+            {"name": "d_u64", "type": "Dynamic"},
+            {"name": "d_dec", "type": "Dynamic"},
+            {"name": "d_str", "type": "Dynamic"},
+            {"name": "nd", "type": "Array(Nullable(Dynamic))"}
+        ],
+        "data": [{
+            "j": {"a": 2.5, "b": [1, 0.1], "o": {"x": 1e300, "big": 123456789012345678.91},
+                  "u": 18446744073709551615, "s": "18446744073709551615"},
+            "o": {"i": 7, "u": 9007199254740993},
+            "d_f64": 0.1,
+            "d_u64": 18446744073709551615,
+            "d_dec": 1.25,
+            "d_str": "x",
+            "nd": [null, 2.5, 18446744073709551615]
+        }],
+        "rows": 1
+    }""")
+
+    assert result["data"] == [
+        {
+            "j": {
+                "a": 2.5,
+                "b": [1, 0.1],
+                "o": {"x": 1e300, "big": "123456789012345678.91"},
+                "u": "18446744073709551615",
+                "s": "18446744073709551615",
+            },
+            "o": {"i": 7, "u": "9007199254740993"},
+            "d_f64": 0.1,
+            "d_u64": "18446744073709551615",
+            "d_dec": 1.25,
+            "d_str": "x",
+            "nd": [None, 2.5, "18446744073709551615"],
+        }
+    ]
+    row = result["data"][0]
+    assert type(row["j"]["b"][0]) is int
+    assert type(row["j"]["a"]) is float
+    assert type(row["j"]["u"]) is str

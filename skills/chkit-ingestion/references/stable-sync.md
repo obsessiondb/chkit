@@ -78,6 +78,8 @@ Before delivery, align manifest labels, README, and integration guide with imple
 
 ## Keep one release draft per integration
 
+Template-only updates use independent template versions and must not add package changesets or bump `chkit`. Shared runtime, CLI, plugin, or library behavior changes still require package changesets. Mixed PRs release each affected surface separately; the presence of registry files does not exempt package changes.
+
 Treat release artifacts already present in the PR's merged base as immutable history. A new artifact on an unmerged PR branch is a draft, even after it is committed or pushed. Each integration has at most one new version artifact in that PR; update the same draft throughout implementation instead of retaining intermediate versions. Choose a new version relative to the latest merged release, then keep it until the PR merges.
 
 Maintain cumulative `meta.chkit.changelog` entries with semantic `version` and `changes` arrays, newest first. The first entry matches the current template version. Consolidate the final user-visible changes and identity migrations in that one entry, and preserve earlier released notes. Do not describe temporary PR revisions as published releases or require migrations from them.

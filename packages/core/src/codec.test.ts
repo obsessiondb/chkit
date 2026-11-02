@@ -41,6 +41,12 @@ describe('renderCodec', () => {
     expect(renderCodec([{ kind: 'GCD' }, { kind: 'LZ4' }])).toBe('CODEC(GCD, LZ4)')
   })
 
+  test('renders T64 as a preprocessor before the general codec (#434)', () => {
+    expect(isPreprocessorCodec({ kind: 'T64' })).toBe(true)
+    expect(isGeneralCodec({ kind: 'T64' })).toBe(false)
+    expect(renderCodec([{ kind: 'T64' }, { kind: 'ZSTD', level: 3 }])).toBe('CODEC(T64, ZSTD(3))')
+  })
+
   test('renders FPC with both args', () => {
     expect(renderCodec({ kind: 'FPC', level: 10, floatSize: 4 })).toBe('CODEC(FPC(10, 4))')
   })
@@ -229,6 +235,9 @@ describe('codecFingerprint', () => {
     [[{ kind: 'Gorilla', size: 8 }, { kind: 'ZSTD', level: 2 }], 'CODEC(Gorilla(8), ZSTD(2))'],
     [[{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }], 'CODEC(FPC(12), LZ4)'],
     [[{ kind: 'Delta', size: 8 }, { kind: 'T64' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), T64, ZSTD(1))'],
+    [[{ kind: 'T64' }, { kind: 'LZ4' }], 'CODEC(T64, LZ4)'],
+    [[{ kind: 'T64' }, { kind: 'ZSTD', level: 3 }], 'CODEC(T64, ZSTD(3))'],
+    [[{ kind: 'Delta', size: 8 }, { kind: 'T64' }, { kind: 'LZ4' }], 'CODEC(Delta(8), T64, LZ4)'],
     [[{ kind: 'Delta', size: 8 }, { kind: 'GCD' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), GCD, ZSTD(1))'],
     [codec.raw('ZSTD'), 'CODEC(ZSTD(1))'],
     [codec.raw('Delta(4),ZSTD(3)'), 'CODEC(Delta(4), ZSTD(3))'],

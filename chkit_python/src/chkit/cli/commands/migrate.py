@@ -97,7 +97,7 @@ from chkit.cli.table_scope import (
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
-from chkit.plugins import ChxPlugin
+from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
 
 @dataclass(slots=True)
@@ -289,9 +289,7 @@ def _run(
         exit_no_target("migrate", msg, json_mode=output_json)
 
     migrations_dir = Path(config.migrations_dir)
-    migrations_dir.mkdir(parents=True, exist_ok=True)
     meta_dir = Path(config.meta_dir)
-    files = list_migration_filenames(migrations_dir)
 
     # --abandon only changes the journal and rejects --table, so it does not
     # read snapshot.json: a conflicted snapshot cannot block it.
@@ -300,6 +298,22 @@ def _run(
     table_scope = resolve_table_scope(
         table_selector, table_keys_from_definitions(snapshot_defs)
     )
+
+    # As in TS, the on_config_loaded hooks run after the scope is resolved and
+    # before the migrations are listed.
+    plugin_runtime.run_on_config_loaded(
+        ChxOnConfigLoadedContext(
+            command="migrate",
+            config=config,
+            table_scope=table_scope,
+            flags={},
+            config_path=str(config_path or "clickhouse.config.py"),
+            options={},
+        )
+    )
+
+    migrations_dir.mkdir(parents=True, exist_ok=True)
+    files = list_migration_filenames(migrations_dir)
 
     if targets.retry_target is not None and targets.retry_target not in files:
         msg = (

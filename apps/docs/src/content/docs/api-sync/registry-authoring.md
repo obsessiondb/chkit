@@ -253,7 +253,9 @@ bun run check:registry-releases -- --base origin/main
 
 The base defaults to `origin/main`; use the actual PR base when it differs. Pass provider names to refresh selected integrations, or omit names to refresh all current drafts. The release command regenerates artifacts from source and refuses to replace versions already in the base. The check rejects changed or deleted published artifacts, multiple new versions for one integration, and a current artifact that does not match its source and manifest. The same draft can be regenerated after every edit, including after it has been committed or pushed to the PR branch. Once merged, further template changes require a new version and changelog entry in another PR.
 
-Commit the generated draft with its source, manifest, and changelog updates. Do not hand-edit artifact content or commit generated latest aliases. Adding a provider or template version does not require an npm package release; changes to CLI behavior do. The docs build also publishes a static catalog at `https://chkit.obsessiondb.com/r/registry.json` for web and custom-registry use.
+Commit the generated draft with its source, manifest, and changelog updates. Do not hand-edit artifact content or commit generated latest aliases. Template-only updates must not add package changesets or bump `chkit` or the fixed npm package group. Shared runtime, CLI, plugin, and library behavior changes still require package changesets. Mixed PRs release each affected surface separately; registry files do not exempt package changes.
+
+The official CLI can consume a template release once its manifest and artifact reach GitHub's `main` branch, without an npm release. The docs build separately publishes the static catalog at `https://chkit.obsessiondb.com/r/registry.json`, latest aliases, versioned artifacts, and integration pages; production deployment waits for both verification and managed-database tests. The deployed catalog can lag GitHub when deployment is blocked.
 
 ## Add an app to the official documentation
 

@@ -435,8 +435,7 @@ def test_fails_and_names_a_schema_file_that_still_has_conflict_markers(
     result = chkit(project, args)
 
     assert result.exit_code == 1
-    # snapshot reports on stderr; generate lets the error propagate (chkit-py convention).
-    message = result.stderr if args[0] == "snapshot" else str(result.exception)
+    message = result.stderr
     assert failure in message
     assert CONFLICT_HINT in message
     assert not project.snapshot_path.exists()
@@ -652,7 +651,7 @@ def test_generate_and_drift_name_the_conflict_markers_and_point_to_rebuild(
     result = chkit(project, ["generate", "--dryrun"])
 
     assert result.exit_code == 1
-    message = str(result.exception)
+    message = result.stderr
     # chkit-py commands keep config.meta_dir as given (relative here), so the path is too.
     assert message.startswith(
         "Snapshot chkit/meta/snapshot.json contains unresolved merge conflict markers."
@@ -669,7 +668,7 @@ def test_invalid_json_suggests_restoring_or_rebuilding_not_removing(project_dir:
     result = chkit(project, ["generate", "--dryrun"])
 
     assert result.exit_code == 1
-    message = str(result.exception)
+    message = result.stderr
     assert "Invalid snapshot JSON at " in message
     assert "Outside a merge or rebase, restore the committed version from git." in message
     assert "chkit snapshot rebuild" in message

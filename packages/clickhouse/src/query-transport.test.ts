@@ -41,6 +41,8 @@ describe('query JSONEachRow transport', () => {
       expect(requests[0]?.sql).toContain('FORMAT JSONEachRow')
       expect(requests[0]?.headers.get('X-DDL')).toBe('1')
       expect(requests[0]?.url.searchParams.get('max_result_rows')).toBe('3')
+      expect(requests[0]?.url.searchParams.get('send_progress_in_http_headers')).toBe('1')
+      expect(requests[0]?.url.searchParams.get('http_headers_progress_interval_ms')).toBe('30000')
     })
   })
 
@@ -62,7 +64,10 @@ async function withTransport(
     hostname: '127.0.0.1',
     port: 0,
     async fetch(request) {
-      requests.push({ sql: await request.text(), url: new URL(request.url), headers: request.headers })
+      const sql = await request.text()
+      // The executor's once-per-executor readonly lookup (#412).
+      if (sql.includes("getSetting('readonly')")) return new Response('{"readonly":"0"}\n')
+      requests.push({ sql, url: new URL(request.url), headers: request.headers })
       return reply()
     },
   })

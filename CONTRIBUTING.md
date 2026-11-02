@@ -38,6 +38,7 @@ Pull request CI starts its own ClickHouse service and seeds the test fixtures, i
   bun run changeset
   ```
 
+- Registry template-only changes must not add package changesets or bump `chkit`. Use the independent template version, changelog, and generated artifact workflow in [CLAUDE.md](CLAUDE.md#registry-integration-releases). Shared runtime, CLI, plugin, and library behavior changes still need package changesets; mixed PRs release each affected surface separately.
 - `typecheck`, `lint`, `test`, and `build` must all pass.
 - Commit messages are free-form. Changesets capture the user-facing narrative.
 

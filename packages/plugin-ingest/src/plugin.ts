@@ -13,7 +13,7 @@ import { z } from 'zod'
 
 import { BATCH_ID_COLUMN, createClickHouseDestination, INGESTED_AT_COLUMN, RUN_ID_COLUMN } from './destination.js'
 import { MAX_DURATION_MS, runIngestion, type BackfillRequest } from './executor.js'
-import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE } from './journal.js'
+import { createClickHouseJournal, DEFAULT_JOURNAL_TABLE, emptyCheckpoint, isMissingJournalError } from './journal.js'
 import { assertRunnable, collectPipelines, selectStreams, type SelectedStream } from './registry.js'
 import { doctorJournal, repairJournal } from './recovery.js'
 import type { PipelineDefinition, StreamResult } from './types.js'
@@ -255,10 +255,13 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
                 targetId: target.targetId,
                 table: context.options.journalTable,
               })
-              await journal.ensure()
+              // Read-only: a missing journal means nothing has run yet (#414).
               const streams = await Promise.all(
                 selected.map(async (entry) => {
-                  const checkpoint = await journal.readCheckpoint(entry.stream.id)
+                  const checkpoint = await journal.readCheckpoint(entry.stream.id).catch((error: unknown) => {
+                    if (isMissingJournalError(error)) return emptyCheckpoint()
+                    throw error
+                  })
                   return { ...describeStream(entry), checkpointVersion: checkpoint.version, checkpoint: checkpoint.envelope ?? null }
                 })
               )

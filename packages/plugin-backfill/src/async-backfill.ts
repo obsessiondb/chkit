@@ -219,9 +219,9 @@ export async function syncProgress(
 interface ChunkLogRow {
   query_id: string
   type: string
-  written_rows: string
-  written_bytes: string
-  query_duration_ms: string
+  written_rows: number | string
+  written_bytes: number | string
+  query_duration_ms: number | string
   exception: string
 }
 

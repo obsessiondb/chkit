@@ -74,6 +74,8 @@ Tests use the local stack unless `CLICKHOUSE_URL` or `CLICKHOUSE_HOST` is set; t
 
 `bun run test:obsessiondb` runs the suite against ObsessionDB (set the variables above, e.g. through Doppler). It sets `CHKIT_E2E_TARGET=obsessiondb` and leaves out the Kafka suite, whose broker only exists in the local stack.
 
+The ingest package's normal `test` includes the staged-loader E2Es and builds their public Node consumers through `packages/plugin-ingest/turbo.json`. These destructive failure/recovery fixtures always use disposable local databases and honor `CHKIT_TEST_PORT`, even when other tests target a remote server. The package ensures the existing local test stack is running, so Docker is also required for these cases during `test:obsessiondb`; they do not verify managed staged-loader support.
+
 `bun run test:workbench-api` (opt-in, not in `verify`) runs async migrate through the real ObsessionDB console API with the `chkit obsessiondb login` session and `CHKIT_E2E_OBSESSIONDB_SERVICE=<service slug>`; the Python port is `pytest tests_workbench_api`.
 
 Shared ClickHouse test utilities (target env, polling, naming) live in `packages/clickhouse/src/e2e-testkit.ts` and are importable via `@chkit/clickhouse/e2e-testkit`. Their Python port is `chkit_python/tests/e2e_testkit.py`. CLI-specific utilities (runner, diagnostics) live in `packages/cli/src/test/e2e-testkit.ts` which re-exports the shared ones. The Kafka suite is the private workspace `test/kafka` (`@chkit/kafka-e2e`). plugin-backfill's `test` script seeds its chunking fixtures before running.
@@ -103,9 +105,11 @@ A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known Obsess
 
 ## Release
 
-Uses changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump versions.
+User-facing npm package changes use changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump package versions. Registry templates have independent versions and changelogs; template-only updates must not add package changesets or bump `chkit` or the fixed npm package group.
 
 ### Registry integration releases
+
+For template-only changes, release only the affected integration through its `manifest.json` (`meta.chkit.version` and `meta.chkit.changelog`) and generated artifact below. Changes to distributed source, dependencies, or metadata require a template release. Shared runtime, CLI, plugin, or library behavior changes still require ordinary package changesets. In a mixed PR, release each affected surface separately; the presence of registry files never exempts package changes.
 
 Keep at most one new release artifact per integration in a PR. Versions already on the merged base are immutable; artifacts added by the unmerged PR are drafts. Further edits refresh that same draft version and its current `meta.chkit.changelog` entry, without adding intermediate versions. Preserve earlier released changelog entries.
 

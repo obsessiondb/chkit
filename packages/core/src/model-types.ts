@@ -25,7 +25,7 @@ export type PrimitiveColumnType =
  * Level ranges: LZ4HC 1–12 (default 9), ZSTD 1–22 (default 1).
  */
 export type GeneralColumnCodec =
-  | { kind: 'NONE' | 'LZ4' | 'T64' | 'ALP' }
+  | { kind: 'NONE' | 'LZ4' | 'ALP' }
   | { kind: 'LZ4HC'; level?: number }
   | { kind: 'ZSTD'; level?: number }
 
@@ -36,6 +36,7 @@ export type GeneralColumnCodec =
 export type PreprocessingColumnCodec =
   | { kind: 'Delta' | 'DoubleDelta' | 'Gorilla'; size?: 1 | 2 | 4 | 8 }
   | { kind: 'GCD' }
+  | { kind: 'T64' }
   | { kind: 'FPC'; level: number; floatSize: 4 | 8 }
 
 /**

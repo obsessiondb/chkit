@@ -14,7 +14,7 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { parseJsonResult } from './exact-json.js'
+import { parseJsonEachRow, parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -83,6 +83,9 @@ export type ObservableSystemTable = 'processes' | 'query_log'
 
 export interface ClickHouseExecutor {
 	command(sql: string, settings?: ClickHouseSettings): Promise<void>
+	/** Rows as JSON objects. A number a double cannot hold exactly (an integer
+	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
+	 *  its digits; the ObsessionDB console API returns every value as a string. */
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
 	queryJson?<T extends Record<string, unknown>>(
 		sql: string,
@@ -118,6 +121,10 @@ export interface ClickHouseExecutor {
 	 *  Native executors return `clusterAllReplicas(...)` when `clickhouse.cluster` is set.
 	 *  Remote / ObsessionDB executors may omit this and keep local `system.*` tables. */
 	systemTableSource?(table: ObservableSystemTable): string
+
+	/** Optional capability: whether the user may change settings, which a readonly = 1
+	 *  user may not. Native executors look it up once, with their first read. */
+	canChangeSettings?(): Promise<boolean>
 
 	close(): Promise<void>
 }
@@ -457,9 +464,12 @@ export function formatConnectionError(
 	username?: string,
 ): string | undefined {
 	if (!(error instanceof Error)) return undefined
+	const shownUrl = urlWithoutCredentials(url)
 	if (isAuthError(error)) {
-		const who = username ? `user "${username}"` : 'the configured user'
-		return `Authentication failed for ${who} at ${url}. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.`
+		// A user in the URL is the one the client signs in as (see credentialOptions).
+		const user = urlUsername(url) || username
+		const who = user ? `user "${user}"` : 'the configured user'
+		return `Authentication failed for ${who} at ${shownUrl}. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.`
 	}
 	const label = networkLabelFromError(error)
 	if (label) {
@@ -470,9 +480,26 @@ export function formatConnectionError(
 			isLocalhostDefault && envUnset
 				? '\n  Hint: CLICKHOUSE_URL is not set — chkit fell back to the default localhost endpoint. Set CLICKHOUSE_URL to point at your ClickHouse instance.'
 				: ''
-		return `Could not connect to ClickHouse at ${url} (${label})${hint}`
+		return `Could not connect to ClickHouse at ${shownUrl} (${label})${hint}`
 	}
 	return undefined
+}
+
+/** The URL without its `user:password@` part, for messages and logs. */
+export function urlWithoutCredentials(url: string): string {
+	return url.replace(/^([a-z][a-z\d+.-]*:\/\/)[^/?#]*@/i, '$1')
+}
+
+/** The user set in the URL, decoded as `@clickhouse/client` does, or '' when it sets none. */
+function urlUsername(url: string): string {
+	if (!URL.canParse(url)) return ''
+	const username = new URL(url).username
+	try {
+		return decodeURIComponent(username)
+	} catch {
+		// Malformed escapes: keep them as written, as Python's unquote does.
+		return username
+	}
 }
 
 export function wrapConnectionError(error: unknown, url: string, username?: string): never {
@@ -612,16 +639,36 @@ function logProfiling(
 
 // Sent with every request. wait_end_of_query is an HTTP parameter, not a
 // setting, so a readonly = 1 user, who cannot change any setting, can send it
-// too: reads carry nothing else (#402).
+// too (#402).
 const DEFAULT_CLICKHOUSE_SETTINGS: ClickHouseSettings = {
 	wait_end_of_query: 1,
+}
+
+// Progress headers keep a long query's connection alive through proxies with
+// an idle timeout (often 60 s), since wait_end_of_query holds back the body.
+// Node and Bun reject a response once its headers pass ~16 KB, which the
+// default 100 ms interval reaches after about 10 s, so send one every 30 s.
+const PROGRESS_SETTINGS: ClickHouseSettings = {
+	send_progress_in_http_headers: 1,
+	http_headers_progress_interval_ms: '30000',
 }
 
 // Sent with writes only (command and insert): no asynchronous INSERTs, and
 // progress headers that keep a long migration's connection alive.
 const WRITE_SETTINGS: ClickHouseSettings = {
 	async_insert: 0,
-	send_progress_in_http_headers: 1,
+	...PROGRESS_SETTINGS,
+}
+
+// A readonly = 1 user cannot change any setting: ClickHouse rejects a query
+// that carries one with READONLY (164). readonly = 2 allows them.
+async function canChangeSettings(client: ClickHouseClient): Promise<boolean> {
+	const result = await client.query({
+		query: "SELECT getSetting('readonly') AS readonly",
+		format: 'JSONEachRow',
+	})
+	const row: { readonly: string | number } = JSON.parse((await result.text()).trim())
+	return Number(row.readonly) !== 1
 }
 
 // chkit emits its own clean, one-line connection errors (see wrapConnectionError).
@@ -638,6 +685,17 @@ const SILENT_CLIENT_LOG = { level: ClickHouseLogLevel.OFF }
 // timeout entirely — TCP keepalive still detects dead connections.
 const NO_REQUEST_TIMEOUT = 0
 
+// @clickhouse/client takes credentials in the URL over username/password and logs
+// a warning for each override, whatever the log level. Leaving out what the URL
+// sets keeps the same credentials without the warnings.
+function credentialOptions(config: ClickHouseConfig): { username?: string; password?: string } {
+	const url = URL.canParse(config.url) ? new URL(config.url) : undefined
+	return {
+		...(url?.username ? {} : { username: config.username }),
+		...(url?.password ? {} : { password: config.password }),
+	}
+}
+
 export function createStatelessClickHouseClient(
 	config: ClickHouseConfig,
 	clickhouseSettings: ClickHouseSettings = DEFAULT_CLICKHOUSE_SETTINGS,
@@ -645,8 +703,7 @@ export function createStatelessClickHouseClient(
 ): ClickHouseClient {
 	return createClient({
 		url: config.url,
-		username: config.username,
-		password: config.password,
+		...credentialOptions(config),
 		database: config.database,
 		application: CHKIT_APPLICATION_ID,
 		request_timeout: NO_REQUEST_TIMEOUT,
@@ -670,8 +727,7 @@ export function createSessionClickHouseClient(
 ): ClickHouseClient {
 	return createClient({
 		url: config.url,
-		username: config.username,
-		password: config.password,
+		...credentialOptions(config),
 		database: config.database,
 		session_id: sessionId,
 		application: CHKIT_APPLICATION_ID,
@@ -694,6 +750,23 @@ export function createExecutorWithClient(
 	})
 	let compressedClient: ClickHouseClient | undefined
 
+	// Reads add the progress settings unless the user cannot change settings,
+	// looked up once per executor. A failed lookup is not cached: the database
+	// may not exist yet (#370).
+	let settingsChangeable: Promise<boolean> | undefined
+	function settingsChangeableOnce(): Promise<boolean> {
+		settingsChangeable ??= canChangeSettings(client).catch((error: unknown) => {
+			settingsChangeable = undefined
+			throw error
+		})
+		return settingsChangeable
+	}
+	async function readSettings(
+		settings?: ClickHouseSettings,
+	): Promise<ClickHouseSettings | undefined> {
+		return (await settingsChangeableOnce()) ? { ...PROGRESS_SETTINGS, ...settings } : settings
+	}
+
 	return {
 		async command(sql: string, settings?: ClickHouseSettings): Promise<void> {
 			try {
@@ -712,8 +785,7 @@ export function createExecutorWithClient(
 				if (isUnknownDatabaseError(error)) {
 					const fallback = createClient({
 						url: config.url,
-						username: config.username,
-						password: config.password,
+						...credentialOptions(config),
 						application: CHKIT_APPLICATION_ID,
 						request_timeout: NO_REQUEST_TIMEOUT,
 						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
@@ -740,11 +812,12 @@ export function createExecutorWithClient(
 		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
+				const clickhouseSettings = await readSettings(settings)
 				const result = await client.query({
 					query: sql,
 					format: 'JSONEachRow',
 					http_headers: { 'X-DDL': '1' },
-					...(settings ? { clickhouse_settings: settings } : {}),
+					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
 				// Check headers before decoding the body. With
 				// send_progress_in_http_headers=1, ClickHouse can return HTTP 200
@@ -757,11 +830,9 @@ export function createExecutorWithClient(
 					sql,
 				})
 				// The client's JSONEachRow decoder drops the final row when the
-				// response ends without a newline. Decode every nonempty line.
-				const rows = (await result.text())
-					.split('\n')
-					.filter((line) => line.trim().length > 0)
-					.map((line): T => JSON.parse(line))
+				// response ends without a newline. Decode every nonempty line,
+				// without rounding 64-bit integers and Decimals (#415).
+				const rows = parseJsonEachRow<T>(await result.text())
 				logProfiling(
 					profiler,
 					sql,
@@ -778,11 +849,12 @@ export function createExecutorWithClient(
 			settings?: ClickHouseSettings,
 		): Promise<ClickHouseJsonQueryResult<T>> {
 			try {
+				const clickhouseSettings = await readSettings(settings)
 				const result = await client.query({
 					query: sql,
 					format: 'JSON',
 					http_headers: { 'X-DDL': '1' },
-					...(settings ? { clickhouse_settings: settings } : {}),
+					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
 				assertStreamedQuerySucceeded({
 					response_headers: result.response_headers,
@@ -868,6 +940,7 @@ export function createExecutorWithClient(
 			}
 			return `system.${table}`
 		},
+		canChangeSettings: settingsChangeableOnce,
 		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
 			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
 			// runs the query on one replica only (#246).
@@ -882,13 +955,16 @@ export function createExecutorWithClient(
 					query_params: { qid: queryId },
 					format: 'JSONEachRow',
 				})
-				const runningRows = await running.json<{
-					read_rows: string
-					read_bytes: string
-					written_rows: string
-					written_bytes: string
-					elapsed: string
-				}>()
+				// Decoded as executor.query() does (#436). A UInt64 count arrives as a
+				// number, or as a string of its digits beyond 2^53 or when the
+				// profile sets output_format_json_quote_64bit_integers.
+				const runningRows = parseJsonEachRow<{
+					read_rows: number | string
+					read_bytes: number | string
+					written_rows: number | string
+					written_bytes: number | string
+					elapsed: number
+				}>(await running.text())
 				const [proc] = runningRows
 				if (proc) {
 					return {
@@ -917,13 +993,13 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
 					format: 'JSONEachRow',
 				})
-				const logRows = await log.json<{
+				const logRows = parseJsonEachRow<{
 					type: string
-					written_rows: string
-					written_bytes: string
-					query_duration_ms: string
+					written_rows: number | string
+					written_bytes: number | string
+					query_duration_ms: number | string
 					exception: string
-				}>()
+				}>(await log.text())
 
 				if (logRows.length === 0) {
 					return { status: 'unknown' }
