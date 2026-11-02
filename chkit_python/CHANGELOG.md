@@ -127,6 +127,11 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit status --table` is accepted and ignored, as in TS and the docs (#451). Before,
+  chkit-py read the snapshot and kept only the pending migrations that touch the matched
+  tables, so `--table nomatch_*` reported `Pending: 0` (and `"pending": 0`,
+  `"pendingMigrations": []` in `--json`) with two migrations pending. The counts and the
+  pending list now always cover every migration; an invalid selector still fails, as in TS.
 - Database, table, view, dictionary and materialized view names are quoted in generated SQL,
   as in TS (#448): a name that is not a plain identifier (`my-db`, `user-events`, `a.b`) is
   backtick-quoted in `CREATE`, `ALTER`, `DROP`, `RENAME`, `CREATE DATABASE`, `TO` and
