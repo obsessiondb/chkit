@@ -1,13 +1,13 @@
 import { expect, test } from 'bun:test'
-import { HttpError, IngestConfigError, runIngestion, selectStreams, type FetchContext, type Page } from '@chkit/plugin-ingest'
+import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { createLinearPipeline, linearPipeline } from '../index.js'
 import { linearConfig, type LinearConfig } from '../config.js'
-import { classifyLinearError, type LinearObject } from '../client.js'
-import { readLinearPages } from '../sources/common.js'
 
+const fixtureConfig = { ...linearConfig, apiKey: 'fixture' }
 const cutoff = new Date('2026-01-02T00:00:00Z')
+const oneRetry = { retries: 1, minTimeout: 0, maxTimeout: 0 }
 const updatedAt = '2026-01-01T12:00:00Z'
 const resources = ['issues', 'comments', 'projects', 'project_updates', 'cycles', 'users', 'teams', 'issue_relations', 'issue_history']
 const timestampResources = resources.slice(0, 7)
@@ -33,11 +33,12 @@ type Pipeline = ReturnType<typeof createLinearPipeline>
 
 test('Linear exposes nine independently selectable raw resource tables with provider join identities', async () => {
   const requests: GraphqlRequest[] = []
-  const pipeline = fixturePipeline((body) => { requests.push(body); return fixtureResponse(body) })
+  const env = linearEnv((body) => { requests.push(body); return fixtureResponse(body) })
+  const pipeline = fixturePipeline()
   expect(linearPipeline.streams).toHaveLength(9)
   expect(pipeline.streams.map((stream) => stream.id).sort()).toEqual(resources.map((resource) => `linear.${resource}`).sort())
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const result = await runIngestion(request(pipeline), { journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })
   expect(result.ok, JSON.stringify(result)).toBe(true)
   expect(destination.tables.size).toBe(9)
   for (const [resource, raw] of Object.entries(expectedRows)) {
@@ -66,13 +67,13 @@ test('Linear exposes nine independently selectable raw resource tables with prov
 test('each resource runs alone and reversing stream order preserves the same observations', async () => {
   const pipeline = fixturePipeline(), combined = createMemoryDestination()
   expect((await runIngestion(request({ ...pipeline, streams: [...pipeline.streams].reverse() }),
-    { journal: createMemoryJournal(), destination: combined, now: () => cutoff })).ok).toBe(true)
+    { ...linearEnv(), journal: createMemoryJournal(), destination: combined, now: () => cutoff })).ok).toBe(true)
   for (const resource of resources) {
     const destination = createMemoryDestination(), calls: string[] = []
-    const isolated = fixturePipeline((body) => { calls.push(operation(body)); return fixtureResponse(body) })
-    const selected = request(isolated, resource)
+    const env = linearEnv((body) => { calls.push(operation(body)); return fixtureResponse(body) })
+    const selected = request(pipeline, resource)
     expect(selected.selected.map((entry) => entry.stream.id)).toEqual([`linear.${resource}`])
-    expect((await runIngestion(selected, { journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(selected, { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
     expect(destination.tables.size).toBe(1)
     expect(destination.tables.get(`default.linear_${resource}_raw`)?.map(({ id, raw }) => ({ id, raw })))
       .toEqual(combined.tables.get(`default.linear_${resource}_raw`)?.map(({ id, raw }) => ({ id, raw })))
@@ -81,43 +82,37 @@ test('each resource runs alone and reversing stream order preserves the same obs
 })
 
 test('Linear page adapters preserve continuations and empty terminal pages', async () => {
-  const signal = new AbortController().signal
-  const context: FetchContext = { signal, attempt: (operation) => operation(signal) }
-  const pages: Page<LinearObject, string>[] = []
   const afters: unknown[] = []
-  for await (const page of readLinearPages(context, {
-    query: 'query Comments($after: String) { comments(first: 100, after: $after) { nodes { id updatedAt } pageInfo { hasNextPage endCursor } } }',
-    select: (data) => data.comments, label: 'comments', window: { from: new Date(0), to: cutoff },
-  }, {
-    token: () => 'fixture', fetch: async (_url, init) => {
-      const body: GraphqlRequest = JSON.parse(String(init.body))
-      afters.push(body.variables.after)
-      return response('comments', body.variables.after === 'next' ? [comment] : [],
-        body.variables.after === null ? 'next' : body.variables.after === 'next' ? 'terminal' : null)
-    },
-  })) pages.push(page)
+  const env = linearEnv((body) => {
+    afters.push(body.variables.after)
+    return response('comments', body.variables.after === 'next' ? [comment] : [],
+      body.variables.after === null ? 'next' : body.variables.after === 'next' ? 'terminal' : null)
+  })
+  const destination = createMemoryDestination()
+  const result = await runIngestion(request(fixturePipeline(), 'comments'), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })
+  expect(result.streams.map((stream) => [stream.outcome, stream.chunks])).toEqual([['succeeded', 3]])
   expect(afters).toEqual([null, 'next', 'terminal'])
-  expect(pages.map((page) => page.items)).toEqual([[], [comment], []])
-  expect(pages.map((page) => page.next)).toEqual(['next', 'terminal', undefined])
+  expect(destination.tables.get('default.linear_comments_raw')?.map((row) => row.raw)).toEqual([comment])
 })
 
 test('comment-only edits use their own update window without discovering or depending on old issues', async () => {
   let edited = false
   const requests: GraphqlRequest[] = []
   const oldIssue = { ...issue, updatedAt: '2020-01-01T00:00:00Z' }
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     requests.push(body)
     if (operation(body) === 'Issues') return response('issues', edited ? [] : [oldIssue])
     if (operation(body) === 'Comments') return response('comments', [{ ...comment,
       body: edited ? 'Edited discussion on an old issue' : 'Original discussion', updatedAt: edited ? '2026-01-02T12:00:00Z' : updatedAt }])
-    throw new IngestConfigError(`Unexpected request: ${operation(body)}`)
+    throw new Error(`Unexpected request: ${operation(body)}`)
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
   const initial = { ...request(pipeline), selected: request(pipeline).selected.filter((entry) => ['linear.issues', 'linear.comments'].includes(entry.stream.id)) }
-  expect((await runIngestion(initial, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(initial, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   requests.length = 0
   edited = true
-  expect((await runIngestion(request(pipeline, 'comments'), { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'comments'), { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
   expect(requests.map(operation)).toEqual(['Comments'])
   expect(requests[0]?.variables).toEqual({ after: null, from: '2026-01-01T23:55:00.000Z', to: '2026-01-03T00:00:00.000Z' })
   expect((await journal.readCheckpoint('linear.issues')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
@@ -127,7 +122,7 @@ test('comment-only edits use their own update window without discovering or depe
   expect(new Set(rows.map((row) => row.id)).size).toBe(1)
   expect(rows.at(-1)?.raw).toEqual({ ...comment, body: 'Edited discussion on an old issue', updatedAt: '2026-01-02T12:00:00Z' })
   requests.length = 0
-  expect((await runIngestion(request(pipeline, 'issues'), { journal, destination, now: () => new Date('2026-01-04') })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'issues'), { ...env, journal, destination, now: () => new Date('2026-01-04') })).ok).toBe(true)
   expect(requests.map(operation)).toEqual(['Issues'])
   expect(requests[0]?.variables.from).toBe('2026-01-01T23:55:00.000Z')
   expect((await journal.readCheckpoint('linear.comments')).envelope?.state).toEqual({ watermark: '2026-01-03T00:00:00.000Z' })
@@ -136,7 +131,7 @@ test('comment-only edits use their own update window without discovering or depe
 test('issue labels are complete string arrays across nested pages while issue pages remain independent', async () => {
   const requests: GraphqlRequest[] = []
   const nextIssue = { ...issue, id: 'issue-b', labels: connection([]) }
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     requests.push(body)
     if (operation(body) === 'IssueLabels') return Response.json({ data: { issue: { labels: connection(
       body.variables.after === 'labels-next' ? [{ id: 'label-b', name: 'Customer' }] : [{ id: 'label-c', name: 'Urgent' }],
@@ -144,8 +139,9 @@ test('issue labels are complete string arrays across nested pages while issue pa
     if (body.variables.after) return response('issues', [nextIssue])
     return response('issues', [{ ...issue, labels: connection([{ id: 'label-a', name: 'Bug' }], 'labels-next') }], 'issues-next')
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'issues'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'issues'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(requests.map(operation)).toEqual(['Issues', 'IssueLabels', 'IssueLabels', 'Issues'])
   expect(requests.filter((body) => operation(body) === 'IssueLabels').map((body) => body.variables)).toEqual([
     { id: 'issue-a', after: 'labels-next' }, { id: 'issue-a', after: 'labels-last' },
@@ -160,18 +156,19 @@ test('issue labels are complete string arrays across nested pages while issue pa
 test('a labels page failure leaves the issue window uncommitted and replays from its first page', async () => {
   let fail = true
   const starts: unknown[] = []
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     if (operation(body) === 'IssueLabels') return fail ? Response.json({ errors: [{ message: 'denied' }] })
       : Response.json({ data: { issue: { labels: connection([{ id: 'label-b', name: 'Customer' }]) } } })
     starts.push(body.variables.after)
     return response('issues', [{ ...issue, labels: connection([{ id: 'label-a', name: 'Bug' }], 'labels-next') }])
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'issues')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('linear.issues')).envelope).toBeUndefined()
   expect(destination.tables.size).toBe(0)
   fail = false
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(starts).toEqual([null, null])
   expect(destination.tables.get('default.linear_issues_raw')?.[0]?.raw).toEqual(expectedRows.issues)
 })
@@ -180,14 +177,15 @@ test('a failed comment page does not block any other resource and the next run r
   let fail = true
   const starts: unknown[] = []
   const second = { ...comment, id: 'comment-b' }
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     if (operation(body) !== 'Comments') return fixtureResponse(body)
     if (body.variables.after) return fail ? new Response('denied', { status: 403 }) : response('comments', [second])
     starts.push(body.variables.after)
     return response('comments', [comment], 'comments-next')
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const failed = await runIngestion(request(pipeline), { journal, destination, now: () => cutoff })
+  const failed = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })
   expect(failed.ok).toBe(false)
   expect(failed.streams.filter((stream) => stream.outcome === 'failed').map((stream) => stream.streamId)).toEqual(['linear.comments'])
   expect((await journal.readCheckpoint('linear.comments')).envelope).toBeUndefined()
@@ -195,7 +193,7 @@ test('a failed comment page does not block any other resource and the next run r
     expect((await journal.readCheckpoint(`linear.${resource}`)).lastSuccessSeq).toBeGreaterThan(0)
   }
   fail = false
-  expect((await runIngestion(request(pipeline, 'comments'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'comments'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(starts).toEqual([null, null])
   expect(destination.tables.get('default.linear_comments_raw')?.map((row) => row.id)).toEqual(['comment-a', 'comment-b'])
   expect((await journal.readCheckpoint('linear.comments')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
@@ -203,26 +201,28 @@ test('a failed comment page does not block any other resource and the next run r
 
 test('rejected comment writes preserve their prior watermark and replay the unacknowledged update window', async () => {
   const starts: unknown[] = []
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     starts.push(body.variables.from)
     return response('comments', [{ ...comment, updatedAt: body.variables.from === '1970-01-01T00:00:00.000Z' ? updatedAt : '2026-01-02T12:00:00Z' }])
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'comments')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   const now = () => new Date('2026-01-03')
-  expect((await runIngestion(selected, { journal, destination: { insert: async () => { throw new IngestConfigError('sink rejected') } }, now })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now })).ok).toBe(false)
   expect((await journal.readCheckpoint('linear.comments')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
-  expect((await runIngestion(selected, { journal, destination, now })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now })).ok).toBe(true)
   expect(starts).toEqual(['1970-01-01T00:00:00.000Z', '2026-01-01T23:55:00.000Z', '2026-01-01T23:55:00.000Z'])
   expect((await journal.readCheckpoint('linear.comments')).envelope?.state).toEqual({ watermark: now().toISOString() })
 })
 
 test('empty resources complete independently and timestamp windows overlap while full resources enumerate again', async () => {
   const requests: GraphqlRequest[] = []
-  const pipeline = fixturePipeline((body) => { requests.push(body); return emptyResponse(body) })
+  const env = linearEnv((body) => { requests.push(body); return emptyResponse(body) })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
   for (const now of [cutoff, new Date('2026-01-03')]) {
-    expect((await runIngestion(request(pipeline), { journal, destination, now: () => now })).ok).toBe(true)
+    expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => now })).ok).toBe(true)
   }
   expect(destination.tables.size).toBe(0)
   for (const resource of timestampResources) {
@@ -247,15 +247,16 @@ test('history enumerates all old and archived issues independently and retains p
   const requests: GraphqlRequest[] = []
   const second = { ...history, id: 'history-b', toTitle: 'Later' }
   const third = { ...history, id: 'history-c', issue: { id: 'issue-b' } }
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     requests.push(body)
     if (operation(body) === 'IssueHistoryParents') return response('issues', [{ id: body.variables.after ? 'issue-b' : 'issue-a',
       updatedAt: '2020-01-01T00:00:00Z', archivedAt: '2020-01-02T00:00:00Z' }], body.variables.after ? null : 'parents-next')
     return Response.json({ data: { issue: { history: connection(body.variables.id === 'issue-b' ? [third] : body.variables.after ? [second] : [history],
       body.variables.id === 'issue-a' && !body.variables.after ? 'history-next' : null) } } })
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'issue_history'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'issue_history'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(requests.map(operation)).toEqual(['IssueHistoryParents', 'IssueHistory', 'IssueHistory', 'IssueHistoryParents', 'IssueHistory'])
   expect(requests.every((body) => body.variables.from === undefined && !body.query.includes('filter:'))).toBe(true)
   expect(destination.tables.get('default.linear_issue_history_raw')?.map(({ id, raw }) => ({ id, raw }))).toEqual([history, second, third].map((raw) => ({ id: raw.id, raw })))
@@ -267,7 +268,7 @@ test('mutable relation full sync replays its first page after source and sink fa
   let fail = true, changed = false
   const starts: unknown[] = []
   const second = { ...relation, id: 'relation-b' }
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     expect(operation(body)).toBe('IssueRelations')
     expect(body.variables.from).toBeUndefined()
     expect(body.query).not.toContain('filter:')
@@ -275,15 +276,16 @@ test('mutable relation full sync replays its first page after source and sink fa
     starts.push(body.variables.after)
     return response('issueRelations', [{ ...relation, type: changed ? 'duplicate' : relation.type }], 'relations-next')
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'issue_relations')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('linear.issue_relations')).lastSuccessSeq).toBe(0)
   fail = false
-  expect((await runIngestion(selected, { journal, destination: { insert: async () => { throw new IngestConfigError('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('linear.issue_relations')).lastSuccessSeq).toBe(0)
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   changed = true
-  expect((await runIngestion(selected, { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
   expect(starts).toEqual([null, null, null, null])
   expect((await journal.readCheckpoint('linear.issue_relations')).envelope).toBeUndefined()
   const rows = destination.tables.get('default.linear_issue_relations_raw') ?? []
@@ -294,7 +296,7 @@ test('history failures replay all parent discovery without recording completion 
   let fail = true
   const starts: unknown[] = []
   const second = { ...history, id: 'history-b', issue: { id: 'issue-b' } }
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     if (operation(body) === 'IssueHistoryParents') {
       starts.push(body.variables.after)
       return response('issues', [{ id: 'issue-a' }, { id: 'issue-b' }])
@@ -302,14 +304,15 @@ test('history failures replay all parent discovery without recording completion 
     if (body.variables.id === 'issue-b' && fail) return new Response('denied', { status: 403 })
     return Response.json({ data: { issue: { history: connection(body.variables.id === 'issue-a' ? [history] : [second]) } } })
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'issue_history')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('linear.issue_history')).lastSuccessSeq).toBe(0)
   expect((await journal.readCheckpoint('linear.issue_history')).envelope).toBeUndefined()
   fail = false
-  expect((await runIngestion(selected, { journal, destination: { insert: async () => { throw new IngestConfigError('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('linear.issue_history')).lastSuccessSeq).toBe(0)
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(starts).toEqual([null, null, null])
   expect((await journal.readCheckpoint('linear.issue_history')).envelope).toBeUndefined()
   expect((await journal.readCheckpoint('linear.issue_history')).lastSuccessSeq).toBeGreaterThan(0)
@@ -319,28 +322,32 @@ test('history failures replay all parent discovery without recording completion 
 
 test('Linear binds custom date selection and isolates each installation and resource checkpoint', async () => {
   const requests: GraphqlRequest[] = []
-  const config = { ...linearConfig, sourceId: 'linear.fixture', start: new Date('2025-01-01'), overlapMs: 60_000 }
-  const pipeline = createLinearPipeline(config, { token: () => 'bound-token', fetch: async (_url, init) => {
-    expect(new Headers(init.headers).get('authorization')).toBe('bound-token')
-    const body: GraphqlRequest = JSON.parse(String(init.body))
+  const config = { ...fixtureConfig, sourceId: 'linear.fixture', start: new Date('2025-01-01'), overlapMs: 60_000, apiKey: 'bound-token' }
+  const env = { fetch: async (_input: string | URL, init?: RequestInit) => {
+    const authorization = new Headers(init?.headers).get('authorization')
+    if (authorization === 'denied') return new Response('denied', { status: 403 })
+    expect(authorization).toBe('bound-token')
+    const body: GraphqlRequest = JSON.parse(String(init?.body))
     requests.push(body)
     return emptyResponse(body)
-  } })
+  } }
+  const pipeline = createLinearPipeline(config)
   config.start.setUTCFullYear(2000)
   config.overlapMs = 3_600_000
   config.sourceId = 'mutated'
+  config.apiKey = 'changed'
   expect(pipeline.streams.map((stream) => stream.id).sort()).toEqual(resources.map((resource) => `linear.fixture.${resource}`).sort())
-  const failing = createLinearPipeline({ ...linearConfig, sourceId: 'linear.denied' }, { token: () => 'denied', fetch: async () => new Response('denied', { status: 403 }) })
+  const failing = createLinearPipeline({ ...fixtureConfig, sourceId: 'linear.denied', apiKey: 'denied' })
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const selected = selectStreams([failing, pipeline], ['resource:comments']).map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 0 } } }))
-  const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })
+  const selected = selectStreams([failing, pipeline], ['resource:comments'])
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, retry: { retries: 0 }, journal, destination, now: () => cutoff })
   expect(result.streams.map((stream) => stream.outcome)).toEqual(['failed', 'succeeded'])
   expect(requests[0]?.variables).toEqual({ after: null, from: '2025-01-01T00:00:00.000Z', to: cutoff.toISOString() })
   expect((await journal.readCheckpoint('linear.denied.comments')).envelope).toBeUndefined()
   expect((await journal.readCheckpoint('linear.fixture.comments')).envelope?.state).toEqual({ watermark: cutoff.toISOString() })
   const onlyFixture = selectStreams([failing, pipeline], ['stream:linear.fixture.comments'])
   expect(onlyFixture.map((entry) => entry.stream.id)).toEqual(['linear.fixture.comments'])
-  expect((await runIngestion({ selected: onlyFixture, backfill: undefined }, { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect((await runIngestion({ selected: onlyFixture, backfill: undefined }, { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
   expect(requests[1]?.variables.from).toBe('2026-01-01T23:59:00.000Z')
   expect((await journal.readCheckpoint('linear.fixture.issues')).envelope).toBeUndefined()
   expect((await journal.readCheckpoint('linear.comments')).envelope).toBeUndefined()
@@ -348,21 +355,22 @@ test('Linear binds custom date selection and isolates each installation and reso
 
 test('nullable provider comment references retain the comment ID and unmodified raw payload', async () => {
   const detached = { ...comment, issueId: null, projectUpdateId: 'project-update-a', user: null }
-  const pipeline = fixturePipeline(() => response('comments', [detached]))
+  const env = linearEnv(() => response('comments', [detached]))
+  const pipeline = fixturePipeline()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'comments'), { journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'comments'), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
   expect(destination.tables.get('default.linear_comments_raw')?.map(({ id, raw }) => ({ id, raw }))).toEqual([{ id: detached.id, raw: detached }])
 })
 
 test('GraphQL HTTP400 and HTTP200 rate exhaustion each consume exactly one page retry', async () => {
   for (const status of [400, 200]) {
     let attempts = 0
-    const pipeline = fixturePipeline(() => ++attempts === 1
+    const env = linearEnv(() => ++attempts === 1
       ? Response.json({ errors: [{ message: 'rate limit', extensions: { code: 'RATELIMITED' } }] }, { status, headers: { 'Retry-After': '0' } })
       : response('comments', []))
-    const selected = request(pipeline, 'comments').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
-    expect((await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(request(pipeline, 'comments'), { ...env, retry: oneRetry, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
     expect(attempts).toBe(2)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toHaveLength(1)
   }
@@ -371,15 +379,15 @@ test('GraphQL HTTP400 and HTTP200 rate exhaustion each consume exactly one page 
 test('partial GraphQL data with errors cannot write rows, retry, or complete a resource', async () => {
   for (const resource of ['comments', 'issue_relations', 'issue_history']) {
     let attempts = 0
-    const pipeline = fixturePipeline((body) => {
+    const env = linearEnv((body) => {
       attempts++
       return Response.json({ data: operation(body) === 'IssueHistoryParents' ? { issues: connection([{ id: issue.id }]) }
         : operation(body) === 'Comments' ? { comments: connection([comment]) } : { issueRelations: connection([relation]) },
       errors: [{ message: 'Some fields were denied', extensions: { code: 'FORBIDDEN' } }] })
     })
-    const selected = request(pipeline, resource).selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, resource), { ...env, retry: oneRetry, journal, destination, now: () => cutoff })).ok).toBe(false)
     expect(attempts).toBe(1)
     expect(destination.tables.size).toBe(0)
     expect((await journal.readCheckpoint(`linear.${resource}`)).lastSuccessSeq).toBe(0)
@@ -391,13 +399,14 @@ test('malformed root and nested continuations fail before another request or suc
   for (const name of ['Comments', 'IssueRelations', 'IssueLabels', 'IssueHistoryParents', 'IssueHistory']) {
     for (const endCursor of [7, ' ', null]) {
       let attempts = 0
-      const pipeline = fixturePipeline((body) => {
+      const env = linearEnv((body) => {
         if (operation(body) !== name) return precedingResponse(body, name)
         attempts++
         return connectionFor(body, { nodes: [], pageInfo: { hasNextPage: true, endCursor } })
       })
+      const pipeline = fixturePipeline()
       const resource = resourceFor(name), journal = createMemoryJournal()
-      const result = await runIngestion(request(pipeline, resource), { journal, destination: createMemoryDestination(), now: () => cutoff })
+      const result = await runIngestion(request(pipeline, resource), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
       expect(result.ok, `${name}:${String(endCursor)}`).toBe(false)
       expect(attempts).toBe(1)
       expect((await journal.readCheckpoint(`linear.${resource}`)).envelope).toBeUndefined()
@@ -409,14 +418,14 @@ test('malformed root and nested continuations fail before another request or suc
 test('cyclic root and nested pagination fails permanently without replaying a whole reader', async () => {
   for (const name of ['Comments', 'IssueRelations', 'IssueLabels', 'IssueHistoryParents', 'IssueHistory']) {
     const afters: unknown[] = []
-    const pipeline = fixturePipeline((body) => {
+    const env = linearEnv((body) => {
       if (operation(body) !== name) return precedingResponse(body, name)
       afters.push(body.variables.after)
       return connectionFor(body, connection([], body.variables.after === 'a' ? 'b' : 'a'))
     })
+    const pipeline = fixturePipeline()
     const resource = resourceFor(name), journal = createMemoryJournal()
-    const selected = request(pipeline, resource).selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
-    const result = await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion(request(pipeline, resource), { ...env, retry: oneRetry, journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok, name).toBe(false)
     expect(afters).toEqual(name === 'IssueLabels' ? ['a', 'b'] : [null, 'a', 'b'])
     expect((await journal.readCheckpoint(`linear.${resource}`)).lastSuccessSeq).toBe(0)
@@ -426,16 +435,14 @@ test('cyclic root and nested pagination fails permanently without replaying a wh
 
 test('a repeated initial label cursor cannot publish the issue or retry its label read', async () => {
   const afters: unknown[] = []
-  const pipeline = fixturePipeline((body) => {
+  const env = linearEnv((body) => {
     if (operation(body) !== 'IssueLabels') return precedingResponse(body, 'IssueLabels')
     afters.push(body.variables.after)
     return connectionFor(body, connection([{ id: 'label-cyclic', name: 'Incomplete' }], 'a'))
   })
-  const selected = request(pipeline, 'issues').selected.map((entry) => ({
-    ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } },
-  }))
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'issues'), { ...env, retry: oneRetry, journal, destination, now: () => cutoff })
 
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('repeated continuation')
@@ -454,9 +461,10 @@ test('malformed connections or provider identities cannot silently complete an e
     connection([{ ...comment, updatedAt: '2026-01-03T00:00:00Z' }]),
   ]) {
     let attempts = 0
-    const pipeline = fixturePipeline(() => { attempts++; return Response.json({ data: { comments: payload } }) })
+    const env = linearEnv(() => { attempts++; return Response.json({ data: { comments: payload } }) })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
-    expect((await runIngestion(request(pipeline, 'comments'), { journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, 'comments'), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(false)
     expect(attempts).toBe(1)
     expect((await journal.readCheckpoint('linear.comments')).envelope).toBeUndefined()
   }
@@ -466,14 +474,13 @@ test('Linear rate limits honor exhausted reset headers across HTTP and GraphQL r
   for (const status of [200, 400, 429]) {
     for (const kind of ['requests', 'endpoint-requests', 'complexity']) {
       const reset = Date.now() + 60_000
-      const error = await HttpError.fromResponse(Response.json({ errors: [{ extensions: { code: 'RATELIMITED' } }] }, {
+      const run = await runUntilFirstRetry(() => Response.json({ errors: [{ extensions: { code: 'RATELIMITED' } }] }, {
         status, headers: { [`x-ratelimit-${kind}-remaining`]: '0', [`x-ratelimit-${kind}-reset`]: String(reset) },
       }))
-      const classified = classifyLinearError(error)
-      expect(classified?.kind).toBe('rate_limited')
-      const delay = classified?.kind === 'rate_limited' ? classified.retryAfterMs : undefined
-      expect(delay).toBeGreaterThanOrEqual(reset - Date.now())
-      expect(delay).toBeLessThanOrEqual(60_000)
+      expect(run.requests).toBe(1)
+      expect(run.retries.map((retry) => retry.errorClass)).toEqual(['rate_limited'])
+      expect(run.retries[0]?.delay).toBeGreaterThanOrEqual(reset - Date.now())
+      expect(run.retries[0]?.delay).toBeLessThanOrEqual(60_000)
     }
   }
 })
@@ -485,21 +492,21 @@ test('Linear HTTP429 chooses the latest exhausted reset and lets Retry-After tak
     'x-ratelimit-endpoint-requests-remaining': '0', 'x-ratelimit-endpoint-requests-reset': String(reset),
     'x-ratelimit-complexity-remaining': '1', 'x-ratelimit-complexity-reset': String(reset + 60_000),
   }
-  const latest = classifyLinearError(await HttpError.fromResponse(new Response('Too many requests', { status: 429, headers })))
-  const delay = latest?.kind === 'rate_limited' ? latest.retryAfterMs : undefined
-  expect(delay).toBeGreaterThanOrEqual(reset - Date.now())
-  expect(delay).toBeLessThanOrEqual(60_000)
-  expect(classifyLinearError(await HttpError.fromResponse(new Response('', {
+  const latest = await runUntilFirstRetry(() => new Response('Too many requests', { status: 429, headers }))
+  expect(latest.retries.map((retry) => retry.errorClass)).toEqual(['rate_limited'])
+  expect(latest.retries[0]?.delay).toBeGreaterThanOrEqual(reset - Date.now())
+  expect(latest.retries[0]?.delay).toBeLessThanOrEqual(60_000)
+  expect((await runUntilFirstRetry(() => new Response('', {
     status: 429, headers: { ...headers, 'Retry-After': '0' },
-  })))).toEqual({ kind: 'rate_limited', retryAfterMs: 0 })
+  }))).retries).toEqual([{ errorClass: 'rate_limited', delay: 0 }])
   for (const resetHeader of ['', 'garbage', '0', '-1']) {
-    expect(classifyLinearError(await HttpError.fromResponse(new Response('', {
+    expect((await runUntilFirstRetry(() => new Response('', {
       status: 429, headers: { 'x-ratelimit-requests-remaining': '0', 'x-ratelimit-requests-reset': resetHeader },
-    })))).toEqual({ kind: 'rate_limited', retryAfterMs: undefined })
+    }))).retries).toEqual([{ errorClass: 'rate_limited', delay: undefined }])
   }
-  expect(classifyLinearError(await HttpError.fromResponse(Response.json({ errors: [{ extensions: { code: 'FORBIDDEN' } }] }, {
+  expect(await runUntilFirstRetry(() => Response.json({ errors: [{ extensions: { code: 'FORBIDDEN' } }] }, {
     status: 400, headers,
-  })))).toBeUndefined()
+  }))).toEqual({ outcome: 'failed', requests: 1, retries: [] })
 })
 
 test('Linear HTTP429 reset delay is applied by the executor to exactly one page retry', async () => {
@@ -516,14 +523,9 @@ test('Linear HTTP429 reset delay is applied by the executor to exactly one page 
     return response('comments', [comment])
   } })
   try {
-    const pipeline = createLinearPipeline(linearConfig, {
-      token: () => 'fixture', fetch: (_url, init) => fetch(`http://127.0.0.1:${server.port}/graphql`, init),
-    })
-    const selected = request(pipeline, 'comments').selected.map((entry) => ({
-      ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } },
-    }))
+    const env = { fetch: (_input: string | URL, init?: RequestInit) => fetch(`http://127.0.0.1:${server.port}/graphql`, init) }
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(request(fixturePipeline(), 'comments'), { ...env, retry: oneRetry, journal, destination, now: () => cutoff })).ok).toBe(true)
     expect(requests).toBe(2)
     expect(retriedAt).toBeGreaterThanOrEqual(reset - 5)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toHaveLength(1)
@@ -534,19 +536,85 @@ test('Linear HTTP429 reset delay is applied by the executor to exactly one page 
   }
 })
 
-function fixturePipeline(respond: Responder = fixtureResponse, config: LinearConfig = linearConfig): Pipeline {
-  return createLinearPipeline(config, { token: () => 'fixture', fetch: async (_url, init) => respond(JSON.parse(String(init.body))) })
+test('Linear checks its configuration when a stream runs, not when the module loads or a stream is selected', async () => {
+  let requests = 0
+  const pipeline = createLinearPipeline({ ...fixtureConfig, overlapMs: 1.5 })
+  const selected = selectStreams([pipeline], [])
+  expect(selected).toHaveLength(9)
+  const env = linearEnv(() => { requests += 1; return Response.json({}) })
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.streams.every((stream) => stream.outcome === 'failed' && /at overlapMs/.test(stream.error ?? ''))).toBe(true)
+  expect(requests).toBe(0)
+})
+
+test('Linear fails every stream before any request when the API key is missing', async () => {
+  let requests = 0
+  const pipeline = createLinearPipeline({ ...fixtureConfig, apiKey: undefined })
+  const env = linearEnv(() => { requests += 1; return Response.json({}) })
+  const result = await runIngestion(request(pipeline), { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.streams).toHaveLength(9)
+  expect(result.streams.every((stream) => stream.outcome === 'failed' && stream.error?.includes('Set LINEAR_API_KEY or pass apiKey.'))).toBe(true)
+  expect(requests).toBe(0)
+})
+
+test('Linear fails a malformed provider payload at once and retries only a transient response', async () => {
+  const retry = { retries: 2, minTimeout: 0, maxTimeout: 0 }
+  let calls = 0
+  const malformed = linearEnv(() => {
+    calls += 1
+    return Response.json({ data: { comments: { nodes: 'not-a-list', pageInfo: { hasNextPage: false, endCursor: null } } } })
+  })
+  const journal = createMemoryJournal()
+  const result = await runIngestion(request(fixturePipeline(), 'comments'), { ...malformed, retry, journal, destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.streams[0]?.outcome).toBe('failed')
+  expect(result.streams[0]?.error).toContain('Invalid input: expected array, received string')
+  expect(calls).toBe(1)
+  expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
+
+  let unavailable = true
+  const flaky = linearEnv((body) => {
+    if (unavailable) { unavailable = false; return new Response('busy', { status: 503 }) }
+    return fixtureResponse(body)
+  })
+  const recovered = createMemoryJournal()
+  expect((await runIngestion(request(fixturePipeline(), 'comments'), { ...flaky, retry, journal: recovered, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+  expect(recovered.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass)).toEqual(['transient'])
+})
+
+function fixturePipeline(config: LinearConfig = fixtureConfig): Pipeline {
+  return createLinearPipeline(config)
+}
+
+function linearEnv(respond: Responder = fixtureResponse) {
+  return { fetch: async (_input: string | URL, init?: RequestInit) => respond(JSON.parse(String(init?.body))), retry: { retries: 0 } }
 }
 
 function request(pipeline: Pipeline, resource?: string) {
   return { selected: selectStreams([pipeline], resource ? [`resource:${resource}`] : []).map((entry) => ({
-    ...entry, stream: { ...entry.stream, batchSize: 1, retry: { retries: 0 } },
+    ...entry, stream: { ...entry.stream, batchSize: 1 },
   })), backfill: undefined }
+}
+
+async function runUntilFirstRetry(respond: Responder) {
+  let requests = 0
+  const journal = createMemoryJournal(), cancel = new AbortController()
+  const result = await runIngestion(request(fixturePipeline(), 'comments'), {
+    ...linearEnv((body) => { requests++; return respond(body) }), retry: { retries: 1 }, signal: cancel.signal,
+    journal: { ...journal, append: async (events) => {
+      await journal.append(events)
+      if (events.some((event) => event.eventKind === 'retry_scheduled')) setTimeout(() => cancel.abort())
+    } },
+    destination: createMemoryDestination(), now: () => cutoff,
+  })
+  const retries = journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => ({
+    errorClass: event.errorClass, delay: event.retryAt && event.retryAt.getTime() - cutoff.getTime(),
+  }))
+  return { outcome: result.streams[0]?.outcome, requests, retries }
 }
 
 function operation(body: GraphqlRequest): string {
   const name = /query\s+(\w+)/.exec(body.query)?.[1]
-  if (!name) throw new IngestConfigError('Fixture received an unnamed GraphQL operation.')
+  if (!name) throw new Error('Fixture received an unnamed GraphQL operation.')
   return name
 }
 
@@ -562,7 +630,7 @@ function fixtureResponse(body: GraphqlRequest): Response {
     case 'IssueRelations': return response('issueRelations', [relation])
     case 'IssueHistoryParents': return response('issues', [{ id: issue.id, updatedAt: '2020-01-01T00:00:00Z' }])
     case 'IssueHistory': return Response.json({ data: { issue: { history: connection([history]) } } })
-    default: throw new IngestConfigError(`Unexpected Linear fixture operation: ${operation(body)}`)
+    default: throw new Error(`Unexpected Linear fixture operation: ${operation(body)}`)
   }
 }
 
@@ -585,7 +653,7 @@ function connectionFor(body: GraphqlRequest, page: unknown): Response {
   if (root) return Response.json({ data: { [root]: page } })
   if (operation(body) === 'IssueLabels') return Response.json({ data: { issue: { labels: page } } })
   if (operation(body) === 'IssueHistory') return Response.json({ data: { issue: { history: page } } })
-  throw new IngestConfigError(`Unexpected Linear fixture operation: ${operation(body)}`)
+  throw new Error(`Unexpected Linear fixture operation: ${operation(body)}`)
 }
 
 function resourceFor(name: string): string {

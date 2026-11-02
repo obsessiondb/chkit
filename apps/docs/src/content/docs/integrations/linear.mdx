@@ -21,7 +21,7 @@ bunx chkit ingest run --tag provider:linear
 
 Set `LINEAR_API_KEY` in the runtime environment before ingestion. Edit queries and raw destinations in `src/integrations/linear/sources/` to select fields and configure tables. `config.ts` supplies source identity and timestamp selection; `client.ts` handles authenticated requests, and `pipeline.ts` groups nine independent streams in one workspace pipeline.
 
-`createLinearPipeline(config, deps)` snapshots configuration and binds injectable HTTP dependencies. The pipeline and all nine table exports remain in `index.ts`. Destination schemas stay in source modules rather than runtime configuration.
+`createLinearPipeline(config)` snapshots configuration, including `apiKey`, which defaults to `LINEAR_API_KEY`; set it in `config.ts` to use another key. Each reader validates the snapshot with zod when its stream runs, so invalid settings or a missing key fail that stream before any request. The pipeline and all nine table exports remain in `index.ts`. Destination schemas stay in source modules rather than runtime configuration.
 
 Keep stream IDs and destinations tied to one workspace. The reader does not resolve the token's workspace identity, so switching workspaces requires new IDs and destinations. Reconcile older observations after adding requested fields.
 

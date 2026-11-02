@@ -1,24 +1,17 @@
-import { IngestConfigError, rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type SourceContext } from '@chkit/plugin-ingest'
 
-import { readInboxPages, requestLemlist, requireId, requireObject, toLemlistRows, type LemlistClientDeps } from '../client.js'
-import { lemlistConfig } from '../config.js'
+import { createLemlistClient } from '../client.js'
+import { lemlistConfig, type LemlistReaderConfig } from '../config.js'
 
 export const lemlist_inboxConversationsRaw = rawTable({ database: lemlistConfig.database, name: 'lemlist_inbox_conversations_raw' })
 
-export async function* readInboxConversations(context: FetchContext, deps: LemlistClientDeps) {
-  let userIds = deps.config.inboxUserIds
-  if (!userIds?.length) {
-    userIds = await context.attempt(async (signal) => {
-      const team = requireObject(await requestLemlist('/team', { version: 'v2' }, signal, deps), 'team')
-      const ids = Array.isArray(team.userIds) ? team.userIds : Array.isArray(team.users) ?
-        team.users.map((user: unknown) => requireObject(user, 'team member').userId) : undefined
-      if (!ids?.length) throw new IngestConfigError('Lemlist team has no member IDs; configure inboxUserIds or restore team access.')
-      return [...new Set(ids.map((id: unknown) => requireId(id, 'team member')))]
-    }, { label: 'GET /team members' })
-  }
+export async function* readInboxConversations(context: SourceContext, config: LemlistReaderConfig) {
+  const client = createLemlistClient(context, config)
+  const { sourceId, inboxUserIds } = client.settings
+  const userIds = inboxUserIds?.length ? inboxUserIds : await client.teamUserIds()
   for (const userId of userIds) {
-    for await (const page of readInboxPages(context, { userId }, deps)) {
-      yield { rows: toLemlistRows(page.items, deps, { user_id: userId }) }
+    for await (const page of client.inbox({ userId })) {
+      yield { rows: rawRows(page.items.map((data) => ({ source_id: sourceId, user_id: userId, data })), ({ data }) => JSON.stringify([sourceId, userId, data._id])) }
     }
   }
 }

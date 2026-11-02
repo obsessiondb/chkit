@@ -15,7 +15,7 @@ Set `SLACK_API_TOKEN` in the execution environment and configure the project's d
 
 User OAuth tokens are recommended for broad history and thread access. A bot may list public channels it has not joined, so select IDs of joined conversations rather than `channels: undefined`. Thread reads also require matching history scopes and conversation access; see [`conversations.replies`](https://docs.slack.dev/reference/methods/conversations.replies/). An enabled thread permission failure fails the messages stream visibly. Fix token access or explicitly set `includeReplies: false` for history-only ingestion. See [Slack tokens](https://docs.slack.dev/authentication/tokens/).
 
-Bun loads a project `.env`. A scheduler or other runtime must explicitly supply the variables. `.env.example` lists names and does not load credentials. Tokens are read when requests run; schema imports, `check`, migration generation, and `ingest list` make no Slack requests and need no token. The integration does not obtain or refresh OAuth credentials.
+Bun loads a project `.env`. A scheduler or other runtime must explicitly supply the variables. `.env.example` lists names and does not load credentials. `token` in `config.ts` defaults to `SLACK_API_TOKEN`; set it there to use another token, for example for a second installation. Each stream reads its settings and token when it runs, so invalid settings or a missing token fail that stream before any Slack request. Schema imports, `check`, migration generation, and `ingest list` make no Slack requests and need no token. The integration does not obtain or refresh OAuth credentials.
 
 ```sh
 bunx chkit check
@@ -48,7 +48,7 @@ Replies are individual Message objects with their own `ts` and a `thread_ts` par
 
 ## Choose conversations and request pacing
 
-The default config selects public channels, includes replies, uses metadata pages of 200, and uses history/reply pages of 15. `requestIntervalMs` defaults to 3000; `messageIntervalMs` defaults to 60000.
+The default config selects public channels, includes replies, uses metadata pages of 200, and uses history/reply pages of 15.
 
 Set `channels` to an array of Slack conversation IDs to restrict channels and messages. `undefined` selects all discovered conversations; `[]` selects none. Selection uses IDs, not names. A configured ID absent from discovery fails visibly. Users remain workspace-wide.
 
@@ -63,11 +63,11 @@ Set `channels` to an array of Slack conversation IDs to restrict channels and me
 
 Keep `sourceId` stable after ingestion begins. A second workspace should use a distinct source ID and a separate table prefix or database. Changing these values changes stream and storage identities and requires a deliberate migration.
 
-`createSlackPipeline` in `pipeline.ts` binds source identity, selection, page sizes, pacing, and message state settings when the pipeline is created. Later changes to a config object do not alter that pipeline. Raw table names are defined from `config.ts` when the schema modules load; the factory does not rename or create destination schemas. Set `database` and `tablePrefix` in the installed config before loading schemas and generating migrations.
+`createSlackPipeline` in `pipeline.ts` binds source identity, selection, page sizes, pacing, message state settings, and the token when the pipeline is created. Later changes to a config object do not alter that pipeline. Raw table names are defined from `config.ts` when the schema modules load; the factory does not rename or create destination schemas. Set `database` and `tablePrefix` in the installed config before loading schemas and generating migrations.
 
-Slack documents one request per minute and 15 objects per page for new commercially distributed apps outside the Slack Marketplace. Marketplace and internal customer-built apps retain Tier 3 limits. See the current [history method](https://docs.slack.dev/reference/methods/conversations.history/) and [rate-limit clarification](https://docs.slack.dev/changelog/2025/06/03/rate-limits-clarity/). For an internal app entitled to Tier 3, edit `messagePageSize` to 200 and `messageIntervalMs` to 1200 after confirming its limits.
+Slack documents one request per minute and 15 objects per page for new commercially distributed apps outside the Slack Marketplace. Marketplace and internal customer-built apps retain Tier 3 limits. See the current [history method](https://docs.slack.dev/reference/methods/conversations.history/) and [rate-limit clarification](https://docs.slack.dev/changelog/2025/06/03/rate-limits-clarity/). Requests are not paced: a `429` or `ratelimited` response pauses the pipeline's requests until its `Retry-After` and does not use up a retry, so each app runs at its own limit. For an internal app entitled to Tier 3, edit `messagePageSize` to 200 after confirming its limits.
 
-The pipeline runs one stream, fetch, and load at a time. Requests have a 30-second timeout and use the ingestion executor's retry and cancellation context. The pipeline permits five retries after the initial attempt, with exponential backoff from 1 to 60 seconds. HTTP `429` honors `Retry-After`; Slack rate-limit responses and transient server codes also retry. Authentication and permission errors, including Slack `ok: false` responses, fail visibly instead of becoming empty datasets.
+The pipeline runs one stream, fetch, and load at a time. Requests have a 30-second timeout and use the ingestion executor's retry and cancellation context. The runtime permits five retries after the initial attempt, with exponential backoff from 1 to 60 seconds. HTTP `429` honors `Retry-After`; Slack rate-limit responses and transient server codes also retry. Authentication and permission errors, including Slack `ok: false` responses, fail visibly instead of becoming empty datasets. Only network failures, timeouts, and retryable HTTP statuses retry; malformed payloads and checkpoints fail at once.
 
 History and thread reads can take hours or days at conservative defaults. Restrict conversations and selected streams, and choose `--max-duration` for the workload. The CLI default is 3600 seconds. Interrupted message reads resume a completed timestamp boundary and replay the incomplete history page with its replies; metadata reads restart. A history page and all its replies must fit the execution budget, including its completion marker. Reduce messagePageSize or increase the budget if that unit repeatedly cannot finish.
 
@@ -125,7 +125,7 @@ Messages support isolated date-bound backfills with `--backfill <id> --from <dat
 
 ## Customize the source
 
-`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. `client.ts` handles HTTP, authentication, validation, row IDs, and pacing; all three readers use the plugin's `paginate` helper. Messages use it to cross empty or parent-only pages, retain native `has_more` in metadata, and return to timestamp pagination as soon as rows establish a safe frontier. `state.ts` validates provider timestamp checkpoints; `pipeline.ts` binds reader configuration and composes the three streams. Each stream has its own journal progress and resource tag, so selecting users does not run messages and a message failure does not prevent a users run.
+`sources/channels.ts`, `sources/users.ts`, and `sources/messages.ts` each contain a resource's raw schema and reader. Each reader creates its client from `client.ts`, which parses the configuration and owns authentication, pacing, Slack URLs, payload validation, and Slack error codes; the readers build rows, row IDs, and checkpoints. All three resources page through the plugin's `paginate` helper. Messages use it to cross empty or parent-only pages, retain native `has_more` in metadata, and return to timestamp pagination as soon as rows establish a safe frontier. `state.ts` validates provider timestamp checkpoints; `pipeline.ts` binds reader configuration and composes the three streams. Each stream has its own journal progress and resource tag, so selecting users does not run messages and a message failure does not prevent a users run.
 
 Conversation selection validates configured IDs after discovery finishes. If a configured ID is missing, the stream fails visibly; any metadata pages already loaded remain visible.
 

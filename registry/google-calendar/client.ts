@@ -1,84 +1,92 @@
-import { HttpError, IngestConfigError, type ErrorClassifier, type FetchContext } from '@chkit/plugin-ingest'
+import { HttpError, paginate, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-import { googleCalendarConfig, type GoogleCalendarReaderConfig } from './config.js'
-import type { CalendarState } from './sources/events.js'
+import { googleCalendarReaderConfigSchema, type GoogleCalendarReaderConfig } from './config.js'
 
-export interface CalendarEvent { id: string; [key: string]: unknown }
-interface Page { items: CalendarEvent[]; nextPageToken?: string; nextSyncToken?: string }
+export interface SyncCursor {
+  syncToken?: string
+  pageToken?: string
+  /** Recovery attempts for this unfinished sync, including previous executions. */
+  recoveryCount?: number
+}
+export interface EventsMetadata { reset?: true; nextSyncToken?: string }
+export type CalendarEvent = z.infer<typeof calendarEvent>
+export type GoogleCalendarSettings = Omit<z.output<typeof googleCalendarReaderConfigSchema>, 'accessToken'>
 
-export interface GoogleCalendarClientDeps {
-  config: GoogleCalendarReaderConfig
-  fetch: (url: string, init: RequestInit) => Promise<Response>
-  token: () => string | undefined
+export interface GoogleCalendarClient {
+  settings: GoogleCalendarSettings
+  resolveCalendar(): Promise<string>
+  events(calendarId: string, initial: SyncCursor): AsyncGenerator<Page<CalendarEvent, SyncCursor, EventsMetadata>>
 }
 
-export const defaultGoogleCalendarClientDeps: GoogleCalendarClientDeps = {
-  config: googleCalendarConfig,
-  fetch: (url, init) => fetch(url, init),
-  token: () => process.env.GOOGLE_CALENDAR_ACCESS_TOKEN,
-}
+type Get = (url: URL) => Promise<Response>
+type EventsResponse = { items: CalendarEvent[] } & ({ nextPageToken: string } | { nextSyncToken: string })
 
+const API = 'https://www.googleapis.com/calendar/v3'
 const RATE_LIMIT_REASON = /"reason"\s*:\s*"(?:rateLimitExceeded|userRateLimitExceeded)"/
+const nonBlank = z.string().refine((value) => value.trim() !== '', 'must not be blank')
+const calendarEvent = z.looseObject({ id: nonBlank })
+const calendarMetadata = z.looseObject({ id: nonBlank })
+const eventsPage = z.looseObject({ items: z.array(calendarEvent).optional(), nextPageToken: nonBlank.optional(), nextSyncToken: nonBlank.optional() })
 
-export const classifyGoogleCalendarError: ErrorClassifier = (cause) => {
-  if (cause instanceof IngestConfigError || cause instanceof SyntaxError) return { kind: 'permanent' }
-  if (cause instanceof HttpError && cause.status === 403 && RATE_LIMIT_REASON.test(cause.body)) return { kind: 'rate_limited', retryAfterMs: cause.retryAfterMs }
-  return undefined
+export function createGoogleCalendarClient(context: SourceContext, config: GoogleCalendarReaderConfig): GoogleCalendarClient {
+  const { accessToken, ...settings } = googleCalendarReaderConfigSchema.parse(config)
+  const get: Get = (url) => context.attempt(
+    () => context.fetch(url, { headers: { Authorization: `Bearer ${accessToken}` }, redirect: 'error' })
+      .catch((error: unknown) => { throw asRateLimit(error) }),
+    { label: `GET ${url.pathname}` },
+  )
+  return {
+    settings,
+    resolveCalendar: async () => {
+      const response = await get(new URL(`${API}/calendars/${encodeURIComponent(settings.calendarId)}`))
+      return calendarMetadata.parse(await response.json()).id
+    },
+    events: (calendarId, initial) => paginate<CalendarEvent, SyncCursor, EventsMetadata>({
+      context, initial, label: 'GET calendar events',
+      fetchPage: async (cursor = {}) => {
+        const page = await requestEvents(get, calendarId, cursor)
+        if ('reset' in page) {
+          if ((cursor.recoveryCount ?? 0) >= 1) throw new Error('Calendar unfinished sync repeatedly rejected a token across resumed runs. Adjust the editable stream chunk budget, run duration, or polling frequency, then explicitly migrate the saved state or use a new stream identity after reviewing coverage.')
+          // Reset debt distinguishes safe replay from cycling, and survives restarts.
+          return { items: [], next: { recoveryCount: 1, ...(page.reset === 'page' && cursor.syncToken ? { syncToken: cursor.syncToken } : {}) }, metadata: { reset: true } }
+        }
+        return 'nextPageToken' in page
+          ? { items: page.items, next: { ...cursor, pageToken: page.nextPageToken } }
+          : { items: page.items, next: undefined, metadata: { nextSyncToken: page.nextSyncToken } }
+      },
+    }),
+  }
 }
 
-export async function resolveCalendar(context: FetchContext, deps: GoogleCalendarClientDeps): Promise<string> {
-  return context.attempt(async (signal) => {
-    const payload = await request(`calendars/${encodeURIComponent(deps.config.calendarId)}`, signal, deps)
-    return requiredString(payload.id, 'calendar id')
-  }, { label: 'GET calendar metadata' })
+/** Calendar reports exhausted quota as 403 with a rate-limit reason. */
+function asRateLimit(error: unknown): unknown {
+  return error instanceof HttpError && error.status === 403 && RATE_LIMIT_REASON.test(error.body) ? HttpError.withStatus(error.response, 429, { body: error.body }) : error
 }
 
-/** paginate owns the single executor attempt around this page request. */
-export async function requestEvents(state: CalendarState, signal: AbortSignal, deps: GoogleCalendarClientDeps): Promise<Page | { reset: 'sync' | 'page' }> {
-  const url = new URL(`https://www.googleapis.com/calendar/v3/calendars/${encodeURIComponent(state.calendarId)}/events`)
+async function requestEvents(get: Get, calendarId: string, cursor: SyncCursor): Promise<EventsResponse | { reset: 'sync' | 'page' }> {
+  const url = new URL(`${API}/calendars/${encodeURIComponent(calendarId)}/events`)
   for (const [key, value] of Object.entries({ singleEvents: 'false', showDeleted: 'true', maxResults: '250' })) url.searchParams.set(key, value)
-  if (state.syncToken) url.searchParams.set('syncToken', state.syncToken)
-  if (state.pageToken) url.searchParams.set('pageToken', state.pageToken)
-  const response = await deps.fetch(url.toString(), { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), headers: authorization(deps), redirect: 'error' })
-  if (response.status === 410 && state.syncToken) return { reset: 'sync' }
-  if ((response.status === 400 || response.status === 410) && state.pageToken) return { reset: 'page' }
-  if (!response.ok) throw await HttpError.fromResponse(response)
-  const payload: unknown = await response.json()
-  if (!isObject(payload) || (payload.items !== undefined && !Array.isArray(payload.items))) throw new IngestConfigError('Calendar items are not an array.')
-  const items = (payload.items ?? []).map((item: unknown) => {
-    if (!isObject(item)) throw new IngestConfigError('Calendar returned an invalid event.')
-    return { ...item, id: requiredString(item.id, 'event id') }
-  })
-  const nextPageToken = optionalString(payload.nextPageToken, 'nextPageToken')
-  const nextSyncToken = optionalString(payload.nextSyncToken, 'nextSyncToken')
-  if (nextPageToken && nextSyncToken) throw new IngestConfigError('Calendar returned both a page and sync token.')
-  if (!nextPageToken && !nextSyncToken) throw new IngestConfigError('Calendar terminal page has no nextSyncToken.')
-  return { items, nextPageToken, nextSyncToken }
+  if (cursor.syncToken) url.searchParams.set('syncToken', cursor.syncToken)
+  if (cursor.pageToken) url.searchParams.set('pageToken', cursor.pageToken)
+  let response: Response
+  try {
+    response = await get(url)
+  } catch (error) {
+    const reset = rejectedToken(error, cursor)
+    if (reset) return { reset }
+    throw error
+  }
+  const { items = [], nextPageToken, nextSyncToken } = eventsPage.parse(await response.json())
+  if (nextPageToken && nextSyncToken) throw new Error('Calendar returned both a page and sync token.')
+  if (nextPageToken) return { items, nextPageToken }
+  if (nextSyncToken) return { items, nextSyncToken }
+  throw new Error('Calendar terminal page has no nextSyncToken.')
 }
 
-async function request(path: string, signal: AbortSignal, deps: GoogleCalendarClientDeps): Promise<Record<string, unknown>> {
-  const response = await deps.fetch(`https://www.googleapis.com/calendar/v3/${path}`, { signal: AbortSignal.any([signal, AbortSignal.timeout(30_000)]), headers: authorization(deps), redirect: 'error' })
-  if (!response.ok) throw await HttpError.fromResponse(response)
-  const payload: unknown = await response.json()
-  if (!isObject(payload)) throw new IngestConfigError('Calendar returned an invalid response.')
-  return payload
-}
-
-function authorization(deps: GoogleCalendarClientDeps): Record<string, string> {
-  const token = deps.token()?.trim()
-  if (!token) throw new IngestConfigError('Set GOOGLE_CALENDAR_ACCESS_TOKEN.')
-  return { Authorization: `Bearer ${token}` }
-}
-
-export function optionalString(value: unknown, field: string): string | undefined {
-  return value === undefined ? undefined : requiredString(value, field)
-}
-
-export function requiredString(value: unknown, field: string): string {
-  if (typeof value !== 'string' || value.trim().length === 0) throw new IngestConfigError(`Calendar ${field} must be a non-empty string.`)
-  return value
-}
-
-export function isObject(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value)
+function rejectedToken(error: unknown, cursor: SyncCursor): 'sync' | 'page' | undefined {
+  if (!(error instanceof HttpError)) return undefined
+  if (error.status === 410 && cursor.syncToken) return 'sync'
+  if ((error.status === 400 || error.status === 410) && cursor.pageToken) return 'page'
+  return undefined
 }

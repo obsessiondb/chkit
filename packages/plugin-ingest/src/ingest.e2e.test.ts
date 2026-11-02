@@ -93,7 +93,7 @@ describe('@chkit/plugin-ingest live env e2e', () => {
         for (let page = selection ?? 0; page < source.length; page += 1) yield { rows: source[page] ?? [], state: page + 1 }
       },
     })
-    const pipeline = definePipeline({ id: `${prefix}pipeline`, streams: [stream], retry: { retries: 0 } })
+    const pipeline = definePipeline({ id: `${prefix}pipeline`, streams: [stream] })
     const journal = () => createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable })
     const destination = createClickHouseDestination(executor)
     let acknowledgementLost = false

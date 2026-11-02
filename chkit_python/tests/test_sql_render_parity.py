@@ -35,6 +35,7 @@ from chkit import (
     table,
     view,
 )
+from chkit.core.canonical import canonicalize_definitions
 from chkit.core.planner import plan_diff
 from chkit.core.sql import (
     render_alter_add_column,
@@ -49,6 +50,7 @@ from chkit.core.sql import (
     render_alter_modify_ttl,
     render_alter_remove_codec,
     render_alter_reset_setting,
+    render_column_type,
     to_create_sql,
 )
 
@@ -170,6 +172,75 @@ def test_nullable_wraps_base_type_around_user_type() -> None:
     )
     sql = to_create_sql(t)
     assert "`email` Nullable(String)" in sql
+
+
+# ---------- type trimming (#454) ----------
+# Expected values are what TS ``String(type).trim()`` renders. JS trims
+# U+00A0, U+2028, U+3000 and U+FEFF but keeps U+001C-U+001F and U+0085, while
+# Python ``str.strip()`` does the opposite for those characters.
+
+
+def test_create_sql_trims_column_types_as_ts() -> None:
+    t = _base_table(
+        columns=[
+            {"name": "id", "type": "  UInt64 "},
+            {"name": "n", "type": " String\n", "nullable": True},
+        ]
+    )
+    assert to_create_sql(t) == (
+        "CREATE TABLE IF NOT EXISTS default.test_table\n(\n"
+        "  `id` UInt64,\n"
+        "  `n` Nullable(String)\n"
+        ") ENGINE = MergeTree()\nPRIMARY KEY (`id`)\nORDER BY (`id`);"
+    )
+
+
+@pytest.mark.parametrize(
+    ("type_text", "nullable", "expected"),
+    [
+        (" String ", True, "Nullable(String)"),
+        ("\u00a0UInt8\ufeff", False, "UInt8"),
+        ("\u2028String\u3000", True, "Nullable(String)"),
+        ("\x1cUInt8\x1f", False, "\x1cUInt8\x1f"),
+        ("\x85String\x1d\x1e", True, "Nullable(\x85String\x1d\x1e)"),
+        ("\u200bUInt8\u180e", False, "\u200bUInt8\u180e"),
+    ],
+)
+def test_alter_column_trims_type_as_ts(type_text: str, nullable: bool, expected: str) -> None:
+    t = _base_table()
+    column = {"name": "x", "type": type_text, "nullable": nullable}
+    assert render_column_type(ColumnDefinition.model_validate(column)) == expected
+    assert render_alter_add_column(t, column) == (
+        f"ALTER TABLE default.test_table ADD COLUMN IF NOT EXISTS `x` {expected};"
+    )
+    assert render_alter_modify_column(t, column) == (
+        f"ALTER TABLE default.test_table MODIFY COLUMN `x` {expected};"
+    )
+
+
+@pytest.mark.parametrize(
+    ("type_text", "expected"),
+    [("\u00a0minmax\ufeff", "minmax"), ("\x1cminmax\x1f", "\x1cminmax\x1f")],
+)
+def test_index_projection_trims_type_as_ts(type_text: str, expected: str) -> None:
+    sql = render_alter_add_projection(
+        _base_table(), {"name": "p", "index": "id", "type": type_text}
+    )
+    assert sql == (
+        f"ALTER TABLE default.test_table ADD PROJECTION IF NOT EXISTS `p` INDEX id TYPE {expected};"
+    )
+
+
+def test_canonical_column_type_trims_as_ts() -> None:
+    t = _base_table(
+        columns=[
+            {"name": "id", "type": "\u00a0UInt64\ufeff"},
+            {"name": "n", "type": "\x1cString\x85"},
+        ]
+    )
+    [canonical] = canonicalize_definitions([t])
+    assert isinstance(canonical, TableDefinition)
+    assert [c.type for c in canonical.columns] == ["UInt64", "\x1cString\x85"]
 
 
 # ---------- column defaults ----------

@@ -77,26 +77,31 @@ ATTIO_API_TOKEN=replace-with-the-access-token-from-attio
 
 Bun loads the project's `.env`; a scheduler must supply `ATTIO_API_TOKEN` through its own secret or environment configuration, together with the ClickHouse connection variables. The installer writes required names to `.env.example`, which does not load credentials. Keep real tokens out of source control.
 
-The reader sends the token in an `Authorization: Bearer` header when a request runs. Schema inspection, migration generation, and `ingest list` do not need an Attio token. An existing OAuth access token also works, but this integration does not obtain or refresh OAuth tokens; see [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).
+The installed `config.ts` passes `ATTIO_API_TOKEN` as `apiToken`; set `apiToken` there to use another token, for example for a second installation. The reader sends the token in an `Authorization: Bearer` header when a request runs. Schema inspection, migration generation, and `ingest list` do not need an Attio token. An existing OAuth access token also works, but this integration does not obtain or refresh OAuth tokens; see [Attio authentication](https://docs.attio.com/rest-api/guides/authentication).
 
 A token's permissions also determine which data the API returns. A `401` or `403` fails the affected stream with a diagnostic; the reader does not turn a permission error into an empty result.
 
 ## Choose objects, lists, and destination names
 
-One installation pipeline groups the independently selectable resource streams. `createAttioPipeline(config, deps)` snapshots reader settings and configured collections; raw table placement comes from the installation's setup-time `attioConfig` before schema discovery.
+One installation pipeline groups the independently selectable resource streams. `createAttioPipeline(config)` snapshots reader settings, the token, and configured collections; raw table placement comes from the installation's setup-time `attioConfig` before schema discovery.
 
-The installed `src/integrations/attio/config.ts` starts with:
+The installed `src/integrations/attio/config.ts` contains:
 
 ```ts
-export interface AttioConfig {
-  sourceId: string
-  database: string
-  tablePrefix: string
-  objects: readonly string[]
-  lists: readonly string[]
-  pageSize: number
-  notesPageSize: number
-}
+const name = z.string().refine((value) => value.trim() !== '', 'must not be blank')
+const missingToken = 'Set ATTIO_API_TOKEN or pass apiToken.'
+const apiToken = z.string().optional().pipe(z.string({ error: missingToken }).trim().min(1, missingToken))
+
+const attioConfigSchema = z.object({
+  sourceId: name,
+  database: name,
+  tablePrefix: name,
+  objects: z.array(z.string()).readonly(),
+  lists: z.array(z.string()).readonly(),
+  pageSize: z.int().positive(),
+  notesPageSize: z.int().min(1).max(50),
+  apiToken,
+})
 
 export const attioConfig: AttioConfig = {
   sourceId: 'attio.primary',
@@ -106,6 +111,7 @@ export const attioConfig: AttioConfig = {
   lists: [],
   pageSize: 500,
   notesPageSize: 50,
+  apiToken: process.env.ATTIO_API_TOKEN,
 }
 ```
 
@@ -118,6 +124,9 @@ export const attioConfig: AttioConfig = {
 | `lists` | Explicit list API slugs or UUIDs; default `[]`; creates entries and attribute streams per list |
 | `pageSize` | Positive integer, default `500`, for attributes, records, entries, and tasks |
 | `notesPageSize` | Positive integer up to `50`, default `50`, for notes |
+| `apiToken` | Attio access token, default `ATTIO_API_TOKEN` |
+
+Each reader validates the reader settings (all except `database` and `tablePrefix`) with zod when its stream runs. Invalid settings or a missing token fail that stream before any request. Schema imports, `chkit check`, `generate`, `migrate`, and `ingest list` do not validate them.
 
 Add `deals` or a custom slug to `objects` to collect that type, and add list slugs or IDs to `lists` to collect their entries. Empty arrays disable the corresponding child streams. The objects and lists catalog streams retain all accessible metadata independently of these selections. An unknown or inaccessible configured slug or ID fails its stream visibly. Notes, tasks, and members remain workspace-wide; their readers need separate changes to narrow their coverage.
 
@@ -203,15 +212,15 @@ The destination stores the latest **observed** entity. New observations replace 
 | Active streams, fetches, and loads | One of each per pipeline within a run |
 | Destination batch threshold | `500` rows; pages are accumulated without splitting a source chunk |
 | HTTP request timeout | `30` seconds |
-| Delay before a request | `25` ms; `125` ms for notes |
+| Rate limits | A `429` pauses the pipeline's requests until its `Retry-After`; these waits do not use up retries |
 | Source retry budget | Five retries after the initial attempt |
-| Backoff | Exponential, starting at `1` second, capped at `30` seconds, with jitter |
+| Backoff | Exponential, starting at `1` second, capped at `60` seconds, with jitter |
 | Retry time budget | `10` minutes per retry boundary, subject to the overall execution budget |
 | Default run duration | `3600` seconds; override with `--max-duration` |
 
 HTTP `429` responses honor `Retry-After`. Network failures and HTTP `408`, `425`, and `5xx` responses are retried within the budget. Other `4xx` responses, invalid configuration, invalid JSON, and invalid entity shapes fail without retries. Exhausting a page request's retries fails the stream; restarting the reader does not multiply that request's retry budget.
 
-The request delays keep the default serial pipeline below 40 requests per second and notes below 8 requests per second, before network time. Attio can apply lower limits, including query-complexity limits; repeatedly expensive record or entry queries may require simpler filters or sorts after customization. See [Attio rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
+Requests run without fixed delays. Attio can apply lower limits, including query-complexity limits; repeatedly expensive record or entry queries may require simpler filters or sorts after customization. See [Attio rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
 
 Destination writes have a separate retry policy and reuse an insert deduplication token. Physical duplicate suppression depends on ClickHouse's deduplication settings and window. The logical row identity and `FINAL` queries reconcile repeated observations; this is not an exactly-once delivery guarantee.
 
@@ -410,19 +419,20 @@ Deleting or deselecting a source entity does not remove it from a view. Applicat
 
 | File | Responsibility |
 |---|---|
-| `config.ts` | Source identity, destination names, explicit object/list references, page sizes |
-| `client.ts` | Authentication, response validation, single-parent lookup, pagination, row identity, request pacing |
+| `config.ts` | Source identity, destination names, explicit object/list references, page sizes, token |
+| `client.ts` | Authentication, response validation, single-parent lookup, pagination |
+| `sources/common.ts` | Raw row envelopes and identities shared by the readers |
 | `sources/objects.ts`, `sources/object-attributes.ts` | Object and attribute readers with their raw table schemas |
 | `sources/records.ts` | Record reader, raw records table, people/company/deal views |
 | `sources/lists.ts`, `sources/list-attributes.ts`, `sources/entries.ts` | List resource readers with their raw table schemas |
 | `sources/notes.ts`, `sources/tasks.ts`, `sources/members.ts` | One reader and raw table schema per resource |
 | `tests/attio.test.ts`, `tests/fixtures.ts` | Optional installed tests and mocked API responses |
-| `pipeline.ts` | Per-type/per-list streams, resource tags, retries, batching, concurrency |
+| `pipeline.ts` | Per-type/per-list streams, resource tags, batching, concurrency |
 | `index.ts` | Exports that make the pipeline and schema objects discoverable |
 
 Remove a stream entry from `pipeline.ts` to stop collecting a resource. Keep its schema export to preserve existing tables under migration management. Removing a schema export changes the desired database schema and can generate a drop operation; review that migration separately.
 
-Edit the view SQL in `sources/records.ts` to expose custom fields, then generate and apply a reviewed migration. Existing raw payloads support new projections without another API fetch. Reader changes apply to subsequent ingestion runs. Revisit pacing when raising concurrency, and test modified readers with fixtures before scheduling them.
+Edit the view SQL in `sources/records.ts` to expose custom fields, then generate and apply a reviewed migration. Existing raw payloads support new projections without another API fetch. Reader changes apply to subsequent ingestion runs. Test modified readers with fixtures before scheduling them.
 
 Installed files belong to the project. Reinstalling does not overwrite local edits or automatically merge a newer integration version. See [provider templates](/api-sync/templates/) for version pinning and updates.
 
@@ -435,7 +445,7 @@ bunx chkit add attio --with-tests
 bun test src/integrations/attio/tests/attio.test.ts
 ```
 
-The tests use fixture responses, a mocked HTTP client, and an in-memory destination. They exercise reader behavior without Attio credentials or a ClickHouse server. Edit the fixtures and assertions alongside customized readers. With `--path`, adjust the test command to the chosen installation directory.
+The tests pass fixture responses to the ingestion runtime's `fetch` and use an in-memory destination and journal. They exercise reader behavior without Attio credentials or a ClickHouse server. Edit the fixtures and assertions alongside customized readers. With `--path`, adjust the test command to the chosen installation directory.
 
 Repository-only packaging and live-database tests remain outside the installed test set. The manifest selects the portable tests explicitly.
 
