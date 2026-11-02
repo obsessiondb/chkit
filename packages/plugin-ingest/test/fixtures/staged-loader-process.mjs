@@ -52,7 +52,7 @@ try {
     },
   })
   const result = await runIngestion({
-    selected: selectStreams([definePipeline({ id: config.namespaceId, streams: [stream], retry: { retries: 0 } })], []),
+    selected: selectStreams([definePipeline({ id: config.namespaceId, streams: [stream] })], []),
     backfill: undefined,
   }, {
     journal: createClickHouseJournal({ executor, database: config.database, targetId: config.targetId, table: config.journalTable }),

@@ -1,8 +1,9 @@
 import { view } from '@chkit/core'
-import { rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
 
-import { defaultAttioClientDeps, entityId, readParentCollection, type AttioClientDeps } from '../client.js'
-import { attioConfig } from '../config.js'
+import { createAttioClient } from '../client.js'
+import { attioConfig, type AttioReaderConfig } from '../config.js'
+import { readParentRows } from './common.js'
 
 export const attioRecordsRaw = rawTable({ database: attioConfig.database, name: `${attioConfig.tablePrefix}_records_raw` })
 
@@ -25,17 +26,18 @@ export const attioDeals = recordView('deals', `
   arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_company')) AS company_record_ids,
   arrayMap(value -> JSONExtractString(value, 'target_record_id'), JSONExtractArrayRaw(values, 'associated_people')) AS people_record_ids`)
 
-export function readRecords(context: FetchContext, object: string, deps: AttioClientDeps = defaultAttioClientDeps) {
-  return readParentCollection(context, {
+export async function* readRecords(context: SourceContext, object: string, config: AttioReaderConfig) {
+  const client = createAttioClient(context, config)
+  yield* readParentRows(client, {
     resource: 'records', parent: { kind: 'objects', ref: object },
     request: (parent) => ({
-      path: `/objects/${encodeURIComponent(entityId(parent, 'object_id'))}/records/query`,
+      path: `/objects/${encodeURIComponent(parent.id)}/records/query`,
       idFields: ['workspace_id', 'object_id', 'record_id'],
       method: 'POST',
       valuesField: 'values',
-      pageSize: deps.config.pageSize,
+      pageSize: client.settings.pageSize,
     }),
-  }, deps)
+  })
 }
 
 function recordView(objectSlug: string, columns: string) {

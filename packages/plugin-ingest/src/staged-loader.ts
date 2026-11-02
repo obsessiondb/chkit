@@ -5,7 +5,6 @@ import type { ClickHouseExecutor, ClickHouseSettings } from '@chkit/clickhouse'
 import { quoteIdentifier } from '@chkit/core'
 
 import { BATCH_ID_COLUMN, INGESTED_AT_COLUMN, RUN_ID_COLUMN, toJsonRows } from './destination.js'
-import { IngestConfigError } from './errors.js'
 import type { LoaderFactory, Row, SinkReceipt } from './types.js'
 
 /**
@@ -84,27 +83,26 @@ const STRICT_RESULTS = {
  */
 export function stagedLoader(options: StagedLoaderOptions): LoaderFactory {
   const { executor, winner } = options
-  if (!Array.isArray(options.keys)) throw new IngestConfigError('stagedLoader requires explicit keys')
-  const keys = [...options.keys]
-  const maxRows = options.maxRowsPerInsert ?? 50_000
-  const timeoutMs = options.reconciliationTimeoutMs ?? 30_000
-  if (keys.length === 0 || keys.some((key) => typeof key !== 'string' || !key.trim() || key.startsWith('_chkit_')) || new Set(keys).size !== keys.length) {
-    throw new IngestConfigError('stagedLoader requires distinct, nonempty, non-metadata keys')
-  }
-  if (winner !== 'first' && winner !== 'last') throw new IngestConfigError('stagedLoader winner must be first or last')
-  if (options.concurrency !== 'single-process') throw new IngestConfigError('stagedLoader requires concurrency: single-process')
-  for (const [name, value] of [['maxRowsPerInsert', maxRows], ['reconciliationTimeoutMs', timeoutMs]] as const) {
-    if (!Number.isSafeInteger(value) || value < 1) throw new IngestConfigError(`stagedLoader ${name} must be a positive safe integer`)
-  }
-  if (timeoutMs > 2_147_483_647) throw new IngestConfigError('stagedLoader reconciliationTimeoutMs must be at most 2147483647 ms (the Node timer limit)')
-
   return (ctx) => {
+    if (!Array.isArray(options.keys)) throw new Error('stagedLoader requires explicit keys')
+    const keys = [...options.keys]
+    const maxRows = options.maxRowsPerInsert ?? 50_000
+    const timeoutMs = options.reconciliationTimeoutMs ?? 30_000
+    if (keys.length === 0 || keys.some((key) => typeof key !== 'string' || !key.trim() || key.startsWith('_chkit_')) || new Set(keys).size !== keys.length) {
+      throw new Error('stagedLoader requires distinct, nonempty, non-metadata keys')
+    }
+    if (winner !== 'first' && winner !== 'last') throw new Error('stagedLoader winner must be first or last')
+    if (options.concurrency !== 'single-process') throw new Error('stagedLoader requires concurrency: single-process')
+    for (const [name, value] of [['maxRowsPerInsert', maxRows], ['reconciliationTimeoutMs', timeoutMs]] as const) {
+      if (!Number.isSafeInteger(value) || value < 1) throw new Error(`stagedLoader ${name} must be a positive safe integer`)
+    }
+    if (timeoutMs > 2_147_483_647) throw new Error('stagedLoader reconciliationTimeoutMs must be at most 2147483647 ms (the Node timer limit)')
     for (const key of keys) {
       const column = ctx.table.columns.find((column) => column.name === key)
-      if (!column || !isKeyType(column.type)) throw new IngestConfigError(`stagedLoader key ${key} must be a supported non-null scalar column`)
+      if (!column || !isKeyType(column.type)) throw new Error(`stagedLoader key ${key} must be a supported non-null scalar column`)
     }
     if (ctx.table.columns.some((column) => column.type.startsWith('Nested(') || column.defaultKind === 'EPHEMERAL')) {
-      throw new IngestConfigError('stagedLoader does not support Nested or EPHEMERAL columns')
+      throw new Error('stagedLoader does not support Nested or EPHEMERAL columns')
     }
     const destination = qualified(ctx.table.database, ctx.table.name)
     const gate = publicationGate(executor, destination)
@@ -218,29 +216,29 @@ async function describeDestination(executor: StagedLoaderExecutor, database: str
     executor.query<Column>(`DESCRIBE TABLE ${qualified(database, name)}`, STRICT_RESULTS),
   ])
   if (tables[0]?.engine !== 'MergeTree' || tables[0]?.database_engine !== 'Atomic') {
-    throw new IngestConfigError('stagedLoader requires a plain MergeTree table in an Atomic database on one pinned server')
+    throw new Error('stagedLoader requires a plain MergeTree table in an Atomic database on one pinned server')
   }
   if (columns.some((column) => column.default_type === 'EPHEMERAL' || column.name === ORDINAL || column.name.includes('.'))) {
-    throw new IngestConfigError('stagedLoader does not support EPHEMERAL, Nested/dotted or reserved ordinal columns')
+    throw new Error('stagedLoader does not support EPHEMERAL, Nested/dotted or reserved ordinal columns')
   }
   for (const key of keys) {
     const column = columns.find((column) => column.name === key)
     if (!column || !isKeyType(column.type) || (column.default_type && column.default_type !== 'DEFAULT')) {
-      throw new IngestConfigError(`stagedLoader key ${key} must be a stored, writable non-null scalar column`)
+      throw new Error(`stagedLoader key ${key} must be a stored, writable non-null scalar column`)
     }
   }
   for (const name of [BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN]) {
-    if (!columns.some((column) => column.name === name)) throw new IngestConfigError(`stagedLoader destination is missing ${name}; include ingestionColumns`)
+    if (!columns.some((column) => column.name === name)) throw new Error(`stagedLoader destination is missing ${name}; include ingestionColumns`)
   }
   for (const name of [BATCH_ID_COLUMN, RUN_ID_COLUMN]) {
     const column = columns.find((column) => column.name === name)
     if (column?.type !== 'String' || (column.default_type && column.default_type !== 'DEFAULT')) {
-      throw new IngestConfigError(`stagedLoader ${name} must be a writable String; include ingestionColumns`)
+      throw new Error(`stagedLoader ${name} must be a writable String; include ingestionColumns`)
     }
   }
   const ingestedAt = columns.find((column) => column.name === INGESTED_AT_COLUMN)
   if (ingestedAt?.type !== "DateTime64(6, 'UTC')" || ingestedAt.default_type !== 'DEFAULT' || !["now64(6)", "now64(6,'UTC')"].includes(ingestedAt.default_expression.replaceAll(' ', ''))) {
-    throw new IngestConfigError(`stagedLoader ${INGESTED_AT_COLUMN} must retain its publication-time default; include ingestionColumns unchanged`)
+    throw new Error(`stagedLoader ${INGESTED_AT_COLUMN} must retain its publication-time default; include ingestionColumns unchanged`)
   }
   return columns
 }
@@ -313,10 +311,10 @@ function validateKeys(row: Row, keys: readonly string[]): void {
   for (const key of keys) {
     const value = row[key]
     if (!Object.hasOwn(row, key) || value === null || value === undefined || !['string', 'number', 'bigint', 'boolean'].includes(typeof value)) {
-      throw new IngestConfigError(`stagedLoader row requires a non-null scalar key: ${key}`)
+      throw new Error(`stagedLoader row requires a non-null scalar key: ${key}`)
     }
     if (typeof value === 'number' && !Number.isSafeInteger(value)) {
-      throw new IngestConfigError(`stagedLoader numeric key ${key} must be a safe integer; use an exact string or bigint`)
+      throw new Error(`stagedLoader numeric key ${key} must be a safe integer; use an exact string or bigint`)
     }
   }
 }

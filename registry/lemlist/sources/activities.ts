@@ -1,14 +1,15 @@
-import { IngestConfigError, rawRows, rawTable, timestampWindow, type IncrementalStrategy, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, timestampWindow, type IncrementalStrategy, type ReadContext, type TimestampRange, type TimestampWindowState } from '@chkit/plugin-ingest'
 
-import { readPages, type LemlistClientDeps } from '../client.js'
+import { createLemlistClient } from '../client.js'
 import { lemlistConfig, type LemlistReaderConfig } from '../config.js'
 
 export const lemlist_activitiesRaw = rawTable({ database: lemlistConfig.database, name: 'lemlist_activities_raw' })
 
-export async function* readActivities(context: ReadContext<TimestampRange, TimestampWindowState>, deps: LemlistClientDeps) {
+export async function* readActivities(context: ReadContext<TimestampRange, TimestampWindowState>, config: LemlistReaderConfig) {
+  const client = createLemlistClient(context, config)
   for (let from = context.selection.from; from < context.selection.to;) {
-    const to = new Date(Math.min(from.getTime() + deps.config.intervalMs, context.selection.to.getTime()))
-    for await (const page of readPages(context, 'activities', { from, to }, deps)) {
+    const to = new Date(Math.min(from.getTime() + client.settings.intervalMs, context.selection.to.getTime()))
+    for await (const page of client.list('activities', { from, to })) {
       yield { rows: rawRows(page.items, (item) => item._id) }
     }
     // Only an exhausted interval is a safe frontier. Its mutable offsets restart at zero.
@@ -27,7 +28,7 @@ export function createActivityWindow(config: LemlistReaderConfig): IncrementalSt
       if (input.range && input.state) {
         const frontier = Date.parse(input.state.watermark)
         if (selection.to.getTime() < frontier) {
-          throw new IngestConfigError('Lemlist backfill upper bound precedes its committed interval frontier; use a new backfill ID for a narrower historical range.')
+          throw new Error('Lemlist backfill upper bound precedes its committed interval frontier; use a new backfill ID for a narrower historical range.')
         }
         return { ...selection, from: new Date(Math.max(selection.from.getTime(), frontier - config.overlapMs)) }
       }

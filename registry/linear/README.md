@@ -2,9 +2,9 @@
 
 One workspace pipeline syncs nine independent resource streams into native JSON tables. Readers preserve provider fields and relationship IDs; joins, business mappings, and derived metrics belong in ClickHouse. Issue labels are the explicitly selected exception: their complete names are stored as strings on each issue.
 
-Set `LINEAR_API_KEY` in the runtime environment and configure a direct ClickHouse connection. Edit the GraphQL queries and raw table declarations in `sources/` to request fields and configure destinations. Native JSON requires ClickHouse 25.3 or later.
+Set `LINEAR_API_KEY` in the runtime environment and configure a direct ClickHouse connection. `config.ts` passes it as `apiKey`; set `apiKey` there to use another key. Edit the GraphQL queries and raw table declarations in `sources/` to request fields and configure destinations. Native JSON requires ClickHouse 25.3 or later.
 
-`config.ts` supplies source identity, initial timestamp, and overlap. `createLinearPipeline(config, deps)` snapshots configuration and binds injectable `fetch` and token readers. `pipeline.ts` groups resources without dependency ordering. Destination schemas stay in their source modules rather than runtime configuration.
+`config.ts` supplies source identity, initial timestamp, overlap, and the API key. `createLinearPipeline(config)` snapshots configuration; each reader validates it with zod when its stream runs, so invalid settings or a missing key fail that stream before any request. `client.ts` sends authenticated GraphQL requests through the ingestion runtime and validates connections. `pipeline.ts` groups resources without dependency ordering. Destination schemas stay in their source modules rather than runtime configuration.
 
 Keep stream IDs and destinations tied to one Linear workspace. The reader does not resolve the authenticated workspace identity: changing the token to another workspace requires a new source ID and destinations before ingestion, so old checkpoints cannot skip its history. Adding requested fields later requires reconciliation to populate older observations.
 

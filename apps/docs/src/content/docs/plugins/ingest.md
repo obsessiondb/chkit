@@ -14,7 +14,7 @@ Start with the [Sync quickstart](/api-sync/quickstart/) for a complete first syn
 - Runs finite pulls from application APIs into chkit-managed tables.
 - Records independent run histories in an append-only ClickHouse journal, supporting overlapping executions.
 - Records progress after writes succeed. A retry can reread rows from the last committed checkpoint.
-- Retries source requests with backoff, `Retry-After`, and failure classification.
+- Retries source requests with backoff and failure classification; a rate-limited response pauses its pipeline's requests until `Retry-After`.
 - Selects streams by exact tags so any external scheduler (cron, CI, Kubernetes) can drive it.
 
 Create and change destination tables through [chkit Schema migrations](/tutorials/first-schema/) before running ingestion. Schema management works independently; registering this plugin adds ingestion commands and stream validation to the project.
@@ -52,7 +52,7 @@ A stream is a destination table plus a `read` generator. Fetching and mapping ar
 ```ts
 // src/chkit.ts
 import { table } from '@chkit/core'
-import { HttpError, definePipeline, defineStream, ingestionColumns, paginate, timestampWindow } from '@chkit/plugin-ingest'
+import { definePipeline, defineStream, ingestionColumns, paginate, timestampWindow } from '@chkit/plugin-ingest'
 
 export const tickets = table({
   database: 'crm',
@@ -81,14 +81,13 @@ const ticketStream = defineStream({
     const pages = paginate({
       context,
       label: 'GET /tickets',
-      fetchPage: async (cursor: string | undefined, signal) => {
+      fetchPage: async (cursor: string | undefined) => {
         const url = new URL('https://api.example.com/tickets')
         // This example assumes the provider supports both range parameters.
         url.searchParams.set('updated_since', context.selection.from.toISOString())
         url.searchParams.set('updated_before', context.selection.to.toISOString())
         if (cursor) url.searchParams.set('cursor', cursor)
-        const response = await fetch(url, { signal, headers: { Authorization: `Bearer ${process.env.HELPDESK_TOKEN}` } })
-        if (!response.ok) throw await HttpError.fromResponse(response)
+        const response = await context.fetch(url, { headers: { Authorization: `Bearer ${process.env.HELPDESK_TOKEN}` } })
         const body = await response.json() as {
           data: Array<{ id: string; updated_at: string }>
           next_cursor: string | null
@@ -105,9 +104,13 @@ const ticketStream = defineStream({
 export const helpdesk = definePipeline({ id: 'helpdesk', streams: [ticketStream], maxFetches: 4 })
 ```
 
+`context.fetch` goes through the pipeline's request queue, retries only transient failures, aborts on cancellation or after 30 seconds, and throws `HttpError` for unsuccessful responses. Larger sources keep requests, credentials, and response parsing in a provider client built at the start of `read`; see [Readers and pagination](/api-sync/readers/#requests-and-provider-clients).
+
+Importing a definition never throws, so schema commands such as `generate` and `migrate` keep working while an ingestion definition is invalid. An invalid stream or pipeline definition fails when an ingest command selects it, with exit code `2`, and `chkit check` reports it. Source configuration and credentials are checked by the reader when its stream runs.
+
 Add `ingestionColumns` to custom destination tables. The loader fills `_chkit_batch_id` and `_chkit_run_id`; ClickHouse sets `_chkit_ingested_at` at the physical insert.
 
-`paginate` returns complete pages shaped as `{ items, next, metadata? }`, including empty and terminal pages; a `fetchPage` result without an `items` array fails the stream with `IngestConfigError`. Use `page.items` for rows. Pass checkpoint candidates from metadata explicitly to a yielded chunk's `state` when using `cursorState`; metadata itself is not persisted. See [Readers and pagination](/api-sync/readers/#pages-and-checkpoint-metadata).
+`paginate` returns complete pages shaped as `{ items, next, metadata? }`, including empty and terminal pages; a `fetchPage` result without an `items` array fails the stream. Use `page.items` for rows. Pass checkpoint candidates from metadata explicitly to a yielded chunk's `state` when using `cursorState`; metadata itself is not persisted. See [Readers and pagination](/api-sync/readers/#pages-and-checkpoint-metadata).
 
 Batch identity decides whether a retry is deduplicated. By default it includes a content hash of the rows, which prefers a possible duplicate over suppressing rows that changed between attempts; a field like `synced_at: new Date()` therefore defeats retry deduplication. When a chunk covers a stable source interval, declare it with `id` (for example `yield { rows, id: \`page:${cursor}\` }`): the chunk then becomes its own write unit and its identity ignores row content.
 
@@ -117,7 +120,7 @@ Retain raw objects when the query shape may change and storage is affordable. Ma
 
 ```ts
 import { view } from '@chkit/core'
-import { HttpError, defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-ingest'
+import { defineStream, paginate, rawRows, rawTable } from '@chkit/plugin-ingest'
 
 export const rawTickets = rawTable({ database: 'crm', name: 'tickets_raw' })
 
@@ -139,14 +142,12 @@ const ticketStream = defineStream({
   async *read(context) {
     const pages = paginate({
       context,
-      fetchPage: async (cursor: string | undefined, signal) => {
+      fetchPage: async (cursor: string | undefined) => {
         const url = new URL('https://api.example.com/tickets')
         if (cursor) url.searchParams.set('cursor', cursor)
-        const response = await fetch(url, {
-          signal,
+        const response = await context.fetch(url, {
           headers: { Authorization: `Bearer ${process.env.HELPDESK_TOKEN}` },
         })
-        if (!response.ok) throw await HttpError.fromResponse(response)
         const body = await response.json() as {
           data: Array<{ id: string; [key: string]: unknown }>
           next_cursor: string | null
@@ -171,7 +172,7 @@ The raw table uses `ReplacingMergeTree` to retain the latest ingested version pe
 
 `timestampWindow` starts its first sync at `start`. Later runs begin at the committed watermark minus `overlapMs` (zero by default). Explicit backfill bounds take precedence. For custom lower bounds, use `timestampWindow({ from: ({ watermark, cutoff }) => ... })` instead. Both forms retain the same checkpoint format and only advance after the entire window is saved.
 
-Provider clients can accept the exported `FetchContext` type, containing `attempt` and `signal`. `ReadContext` extends it with the stream selection and checkpoint, so readers can pass their context directly without coupling clients to checkpoint generics.
+Provider clients can accept the exported `SourceContext` type, containing `fetch`, `attempt`, and `signal`. `ReadContext` extends it with the stream selection and checkpoint, so readers can pass their context directly without coupling clients to checkpoint generics.
 
 With `cursorState`, `state` on a chunk must be the complete state that is safe to resume from once every row up to that chunk is saved. Omit it when you cannot make that claim; the run then restarts from the previous checkpoint after a failure.
 
@@ -179,11 +180,9 @@ A checkpoint records its strategy id and version. Changing either makes the next
 
 ## Retry policy
 
-Pipeline `retry` settings are defaults; a stream can override individual settings. Source attempts and reader restarts use [`p-retry`](https://github.com/sindresorhus/p-retry) for exponential backoff, jitter, retry counts, and `maxRetryTime`. The supported options are `retries`, `factor`, `minTimeout`, `maxTimeout`, `randomize`, `maxRetryTime`, `shouldRetry`, and `shouldConsumeRetry`.
+Retries need no configuration. Requests use [`p-retry`](https://github.com/sindresorhus/p-retry): up to 5 retries with exponential backoff and jitter from 1 second, within 10 minutes. A provider's `Retry-After` pauses every request of the pipeline until then and does not count against the 5 retries. Retry waits release fetch and load capacity for other streams.
 
-The policy callbacks receive p-retry's `attemptNumber`, `retriesLeft`, and `retriesConsumed`, plus a `FetchFailure` preserving the original `cause` and normalized `classification`. Returning `false` from `shouldConsumeRetry` follows p-retry's behavior: it skips consuming a retry and skips its backoff. A provider's `Retry-After` still applies, including for those unconsumed retries. Retry waits release fetch and load capacity for other streams.
-
-Once a source attempt exhausts its policy, it fails the stream; reader recovery does not multiply that retry budget. Opaque reader failures restart from the latest committed checkpoint.
+Only transient failures are retried: network error codes, timeouts, and retryable HTTP statuses. Only requests made with `context.fetch`, `context.attempt`, or a `paginate` page are retried. Any other failure fails the stream, whatever its type, and the next run resumes from the latest committed checkpoint. See [retry boundaries](/api-sync/operations/#retry-boundaries).
 
 ## Commands
 

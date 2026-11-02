@@ -502,7 +502,7 @@ describe('staged loader local failure and recovery boundaries', () => {
       async *read() { yield { id: 'page:0', rows: options.rows ?? input, state: 1 } },
     })
     return runIngestion({
-      selected: selectStreams([definePipeline({ id: subject.namespaceId, streams: [stream], retry: { retries: 0 } })], []),
+      selected: selectStreams([definePipeline({ id: subject.namespaceId, streams: [stream] })], []),
       backfill: undefined,
     }, {
       journal,

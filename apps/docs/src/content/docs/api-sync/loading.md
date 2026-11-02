@@ -154,11 +154,11 @@ The stream's `budget.maxChunkRows` (default `100_000`) rejects an oversized yiel
 | Control | Scope | Default | Limits |
 |---|---|---|---|
 | `maxStreams` | Pipeline | `4` | Active stream executions |
-| `maxFetches` | Pipeline | `4` | Source attempts running through `context.attempt` |
+| `maxFetches` | Pipeline | `4` | Source requests running through `context.fetch` or `context.attempt` |
 | `maxLoads` | Pipeline | `2` | Active load attempts |
 | `prefetchBatches` | Plugin/runtime | `1` | Queued batches between fetching and loading for each active reader |
 
-Separate pipelines have separate concurrency ceilings. If pipelines share a provider quota, account for the sum of their requests. These are concurrency limits, not rate limits measured in requests per second. Retry waits release fetch/load capacity for other work.
+Separate pipelines have separate concurrency ceilings and request queues. If pipelines share a provider quota, account for the sum of their requests. These are concurrency limits, not rate limits measured in requests per second: a rate-limited response pauses its pipeline's queue until `Retry-After` instead. Backoff waits release fetch/load capacity for other work.
 
 Increase buffering only when it helps overlap fetching and writing without excessive memory. Larger rows can make a modest row count expensive.
 
@@ -190,7 +190,7 @@ The executor constructs a loader for each batch attempt. Its context supplies `s
 
 Use `context.destination.insert({ table, rows, token })` for direct ClickHouse writes. If a loader uses another publication mechanism, it must still establish the required write evidence before returning success. Do not claim durability for queued, fire-and-forget, or staged data.
 
-The stream's `retry` policy controls source attempts and reader recovery. Load attempts have a separate fixed retry budget; setting stream `retry.retries` does not configure insert retries.
+Load attempts have their own fixed retry budget, separate from request retries. An insert that exhausts its budget fails the stream without restarting the reader.
 
 </details>
 

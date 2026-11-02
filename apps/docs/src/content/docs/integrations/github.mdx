@@ -19,7 +19,7 @@ bunx chkit migrate --apply
 bunx chkit ingest run --tag provider:github
 ```
 
-Set `GITHUB_TOKEN` before the ingestion run. For private repositories, the supported setup grants repository access with **Issues: read**, **Pull requests: read**, and **Contents: read**, including GraphQL commit reads. A field-level permission minimum has not been verified. Edit `githubConfig.repositories`, source identity, and reader settings in `src/integrations/github/config.ts`. Raw tables are declared in their `sources/` modules before schema discovery and migration. Native JSON requires ClickHouse 25.3 or later; schema imports do not call GitHub.
+Set `GITHUB_TOKEN` before the ingestion run, or pass `token` in the configuration. For private repositories, the supported setup grants repository access with **Issues: read**, **Pull requests: read**, and **Contents: read**, including GraphQL commit reads. A field-level permission minimum has not been verified. Edit `githubConfig.repositories`, source identity, and reader settings in `src/integrations/github/config.ts`. Raw tables are declared in their `sources/` modules before schema discovery and migration. Native JSON requires ClickHouse 25.3 or later. Each stream checks its configuration and token when it runs, before any request; schema commands never depend on them, and schema imports do not call GitHub.
 
 <RegistryReference name="github" section="resources" />
 
@@ -34,7 +34,7 @@ bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit -
 bunx chkit ingest run --tag provider:github --tag repository:obsessiondb/chkit --tag resource:pull_request_commits
 ```
 
-Repeated tags use AND matching. The default pipeline runs streams sequentially with `maxStreams: 1`; filtered runs give each resource its own schedule and execution budget. `createGitHubPipeline(config, deps)` snapshots reader settings and injectable HTTP dependencies. Changing `sourceId` creates new stream identities; runtime reader settings do not redefine the exported raw tables.
+Repeated tags use AND matching. The default pipeline runs streams sequentially with `maxStreams: 1`; filtered runs give each resource its own schedule and execution budget. `createGitHubPipeline(config)` snapshots the configuration, including `token`. Changing `sourceId` creates new stream identities; runtime reader settings do not redefine the exported raw tables.
 
 ## Raw data and joins
 
