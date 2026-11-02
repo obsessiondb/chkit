@@ -5,8 +5,9 @@
   "title": "Slack",
   "description": "Editable raw Slack readers with recent overlapping message ranges and checkpoints after complete history pages and replies.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.10",
-    "@chkit/plugin-ingest@^0.2.0-beta.10"
+    "@chkit/core@^0.2.0-beta.12",
+    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "zod@^4.3.6"
   ],
   "devDependencies": [
     "@types/bun@^1.2.0"
@@ -79,8 +80,17 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "changelog": [
+        {
+          "version": "0.3.0",
+          "changes": [
+            "Read configuration and the token when a stream runs, so `generate`, `migrate`, and `chkit check` never depend on them; invalid settings or a missing token fail that run before any request. Requires zod 4 and chkit 0.2.0-beta.12.",
+            "Send requests through the ingestion runtime, which retries only network failures, timeouts, and retryable HTTP statuses, plus Slack rate-limit and server-error codes; malformed payloads, permission errors, and invalid checkpoints fail at once. An expired message cursor still restarts its interval once.",
+            "Set `token` in the configuration to use another token, for example for a second installation; it defaults to `SLACK_API_TOKEN`.",
+            "Remove `requestIntervalMs` and `messageIntervalMs`; requests run at the app's limit, and a rate-limited response pauses the pipeline until its `Retry-After`."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [
@@ -108,8 +118,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/slack.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.10",
-      "ingest": "^0.2.0-beta.10",
+      "chkit": "^0.2.0-beta.12",
+      "ingest": "^0.2.0-beta.12",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/slack",
       "entry": "index.ts",

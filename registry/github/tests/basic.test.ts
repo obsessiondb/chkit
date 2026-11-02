@@ -1,13 +1,14 @@
 import { expect, test } from 'bun:test'
-import { HttpError, IngestConfigError, runIngestion, selectStreams, type FetchContext, type Page } from '@chkit/plugin-ingest'
-import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
+import { HttpError, runIngestion, selectStreams, type Page, type SourceContext } from '@chkit/plugin-ingest'
+import { createMemoryDestination, createMemoryJournal, createSourceContext } from '@chkit/plugin-ingest/testing'
 
 import { createGitHubPipeline, githubPipeline } from '../index.js'
 import { githubConfig, type GitHubConfig } from '../config.js'
-import { classifyGitHubError, readIssuePages, requestGitHubGraphql, type GitHubObject } from '../client.js'
+import { classifyGitHubError, createGitHubClient, type GitHubParent } from '../client.js'
 
 const repository = 'obsessiondb/chkit'
 const cutoff = new Date('2026-01-02T00:00:00Z')
+const fixtureConfig = { ...githubConfig, token: 'fixture' }
 const resources = ['issues', 'issue_comments', 'pull_requests', 'pull_request_comments', 'pull_request_review_comments', 'pull_request_reviews', 'pull_request_commits', 'stargazers']
 const issue = { number: 1, id: 1001, title: 'Issue', updated_at: '2026-01-01T12:00:00Z', labels: [{ name: 'bug' }] }
 const pull = { number: 2, id: 1002, title: 'Pull request', state: 'closed', updated_at: '2026-01-01T12:00:00Z', merged_at: '2026-01-01T00:00:00Z' }
@@ -22,17 +23,23 @@ const stargazer = { starred_at: '2026-01-01T00:00:00Z', user: { id: 501, login: 
 type Responder = (url: URL, init: RequestInit) => Response | Promise<Response>
 type Pipeline = ReturnType<typeof createGitHubPipeline>
 
-test.each(['owner/.', 'owner/..', './repo', '../repo'])('repository selection rejects dot-only URL segments: %s', (repo) => {
-  expect(() => createGitHubPipeline({ ...githubConfig, repositories: [repo] })).toThrow('GitHub repositories must use owner/repository names.')
+test.each(['owner/.', 'owner/..', './repo', '../repo'])('repositories with dot-only URL segments fail every stream before any request: %s', async (repo) => {
+  let requests = 0
+  const env = githubEnv(() => { requests++; return Response.json([]) })
+  const result = await runIngestion(request(fixturePipeline({ ...fixtureConfig, repositories: [repo] })), { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.streams).toHaveLength(8)
+  expect(result.streams.every((stream) => stream.outcome === 'failed' && /must use owner\/repository names\n\s*→ at repositories\[0\]/.test(stream.error ?? ''))).toBe(true)
+  expect(requests).toBe(0)
 })
 
 test('GitHub resource streams retain flat provider payloads and parent join identities', async () => {
   const requests: URL[] = []
-  const pipeline = fixturePipeline((url, init) => { requests.push(url); return fixtureResponse(url, init) })
+  const env = githubEnv((url, init) => { requests.push(url); return fixtureResponse(url, init) })
+  const pipeline = fixturePipeline()
   expect(pipeline.streams.map((stream) => stream.id).sort()).toEqual(resources.map((resource) => `github.${resource}.obsessiondb.chkit`).sort())
   expect(githubPipeline.streams).toHaveLength(8)
   const destination = createMemoryDestination(), journal = createMemoryJournal()
-  const result = await runIngestion(request(pipeline), { journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })
   expect(result.ok, JSON.stringify(result)).toBe(true)
   const expected: Record<string, { id: string; raw: unknown }> = {
     issues: { id: JSON.stringify([repository, 1]), raw: { repository, data: issue } },
@@ -52,15 +59,16 @@ test('GitHub resource streams retain flat provider payloads and parent join iden
 })
 
 test('every resource runs alone and reversing stream order preserves the same observations', async () => {
+  const env = githubEnv()
   const pipeline = fixturePipeline()
   const combined = createMemoryDestination()
   const reversed = { ...pipeline, streams: [...pipeline.streams].reverse() }
-  expect((await runIngestion(request(reversed), { journal: createMemoryJournal(), destination: combined, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(reversed), { ...env, journal: createMemoryJournal(), destination: combined, now: () => cutoff })).ok).toBe(true)
   for (const resource of resources) {
     const destination = createMemoryDestination()
     const selected = request(pipeline, resource)
     expect(selected.selected.map((entry) => entry.stream.id)).toEqual([`github.${resource}.obsessiondb.chkit`])
-    const result = await runIngestion(selected, { journal: createMemoryJournal(), destination, now: () => cutoff })
+    const result = await runIngestion(selected, { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })
     expect(result.ok, `${resource}: ${JSON.stringify(result)}`).toBe(true)
     expect(destination.tables.size).toBe(1)
     expect(destination.tables.get(`default.github_${resource}_raw`)?.map(({ id, raw }) => ({ id, raw })))
@@ -71,9 +79,10 @@ test('every resource runs alone and reversing stream order preserves the same ob
 test('selecting parents requests no children and separates issue and pull request responses', async () => {
   for (const resource of ['issues', 'pull_requests']) {
     const requests: URL[] = []
-    const pipeline = fixturePipeline((url, init) => { requests.push(url); return fixtureResponse(url, init) })
+    const env = githubEnv((url, init) => { requests.push(url); return fixtureResponse(url, init) })
+    const pipeline = fixturePipeline()
     const destination = createMemoryDestination()
-    expect((await runIngestion(request(pipeline, resource), { journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(request(pipeline, resource), { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
     expect(requests.map((url) => url.pathname)).toEqual([`/repos/${repository}/${resource === 'issues' ? 'issues' : 'pulls'}`])
     expect(requests[0]?.searchParams.get('state')).toBe('all')
     expect(requests[0]?.searchParams.get('sort')).toBe('updated')
@@ -87,13 +96,14 @@ test('short issue pages follow Link continuations while excluding PRs and update
   const requests: URL[] = []
   const nextIssue = { ...issue, number: 3, id: 1003 }
   const futureIssue = { ...issue, number: 4, updated_at: '2026-01-03T00:00:00Z' }
-  const pipeline = fixturePipeline((url) => {
+  const env = githubEnv((url) => {
     requests.push(url)
     if (url.searchParams.has('page')) return Response.json([pullIssue, nextIssue, futureIssue])
     return Response.json([issue], { headers: { Link: `<${url}&page=2>; rel="next"` } })
   })
+  const pipeline = fixturePipeline()
   const destination = createMemoryDestination(), journal = createMemoryJournal()
-  const result = await runIngestion(request(pipeline, 'issues'), { journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'issues'), { ...env, journal, destination, now: () => cutoff })
   expect(result.ok).toBe(true)
   expect(requests).toHaveLength(2)
   expect(requests.every((url) => url.searchParams.get('since') === '2008-01-01T00:00:00.000Z')).toBe(true)
@@ -108,13 +118,14 @@ test.each([
   ['quoted semicolon', '?page=2', 'title="; rel=prev"; rel=next'],
 ])('REST pagination follows next links with %s', async (_label, target, parameters) => {
   const requests: URL[] = []
-  const pipeline = fixturePipeline((url) => {
+  const env = githubEnv((url) => {
     requests.push(url)
     if (url.searchParams.has('page')) return Response.json([{ ...issue, number: 2 }])
     return Response.json([issue], { headers: { Link: `<${target}>; ${parameters}` } })
   })
+  const pipeline = fixturePipeline()
   const destination = createMemoryDestination(), journal = createMemoryJournal()
-  const result = await runIngestion(request(pipeline, 'issues'), { journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'issues'), { ...env, journal, destination, now: () => cutoff })
   expect(result.ok, JSON.stringify(result)).toBe(true)
   expect(requests).toHaveLength(2)
   expect(requests[1]?.search).toBe(target)
@@ -126,24 +137,26 @@ test.each([
 
 test.each(['rel="next-archive"', 'title="rel=next"; rel="prev"', 'rel="prev"; rel="next"', 'xrel=next; rel=prev'])('REST pagination ignores non-next relation parameters: %s', async (parameters) => {
   let requests = 0
-  const pipeline = fixturePipeline(() => {
+  const env = githubEnv(() => {
     requests++
     return Response.json([issue], { headers: { Link: `<?page=2>; ${parameters}` } })
   })
-  const result = await runIngestion(request(pipeline, 'issues'), { journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  const pipeline = fixturePipeline()
+  const result = await runIngestion(request(pipeline, 'issues'), { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
   expect(result.ok, JSON.stringify(result)).toBe(true)
   expect(requests).toBe(1)
 })
 
 test.each(['', 'https://[invalid]'])('REST pagination rejects invalid or cyclic next targets without retrying: %s', async (target) => {
   let requests = 0
-  const pipeline = fixturePipeline(() => {
+  const env = githubEnv(() => {
     requests++
     return Response.json([issue], { headers: { Link: `<${target}>; rel="next"` } })
   })
+  const pipeline = fixturePipeline()
   const selected = request(pipeline, 'issues').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 2, minTimeout: 0, maxTimeout: 0 } } }))
   const journal = createMemoryJournal()
-  const result = await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
   expect(result.ok).toBe(false)
   expect(requests).toBe(1)
   expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
@@ -151,31 +164,28 @@ test.each(['', 'https://[invalid]'])('REST pagination rejects invalid or cyclic 
 })
 
 test('issue page filtering preserves continuations and empty terminal pages', async () => {
-  const signal = new AbortController().signal
-  const context: FetchContext = { signal, attempt: (operation) => operation(signal) }
-  const pages: Page<GitHubObject, string>[] = []
+  const pages: Page<GitHubParent, string>[] = []
   const requests: URL[] = []
-  for await (const page of readIssuePages(context, repository, githubConfig, {
-    token: () => 'fixture', fetch: async (input) => {
-      const url = new URL(input)
-      requests.push(url)
-      const number = Number(url.searchParams.get('page') ?? '1')
-      const next = new URL(url)
-      next.searchParams.set('page', String(number + 1))
-      return Response.json(number === 1 ? [pullIssue] : number === 2 ? [issue] : [],
-        { headers: number < 3 ? { Link: `<${next}>; rel="next"` } : {} })
-    },
-  })) pages.push(page)
+  const context = sourceContext((url) => {
+    requests.push(url)
+    const number = Number(url.searchParams.get('page') ?? '1')
+    const next = new URL(url)
+    next.searchParams.set('page', String(number + 1))
+    return Response.json(number === 1 ? [pullIssue] : number === 2 ? [issue] : [],
+      { headers: number < 3 ? { Link: `<${next}>; rel="next"` } : {} })
+  })
+  for await (const page of createGitHubClient(context, fixtureConfig).issues(repository)) pages.push(page)
   expect(requests).toHaveLength(3)
   expect(pages.map((page) => page.items)).toEqual([[], [issue], []])
   expect(pages.map((page) => page.next)).toEqual([requests[1]?.toString(), requests[2]?.toString(), undefined])
 })
 
 test('a failed child stream does not block its parents or the other resource checkpoints', async () => {
-  const pipeline = fixturePipeline((url, init) => url.pathname.endsWith('/issues/1/comments')
+  const env = githubEnv((url, init) => url.pathname.endsWith('/issues/1/comments')
     ? new Response('denied', { status: 403 }) : fixtureResponse(url, init))
+  const pipeline = fixturePipeline()
   const destination = createMemoryDestination(), journal = createMemoryJournal()
-  const result = await runIngestion(request(pipeline), { journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })
   expect(result.ok).toBe(false)
   expect(result.streams.filter((stream) => stream.outcome === 'failed').map((stream) => stream.streamId)).toEqual(['github.issue_comments.obsessiondb.chkit'])
   expect(result.streams.filter((stream) => stream.outcome === 'succeeded')).toHaveLength(7)
@@ -194,7 +204,7 @@ test('comment streams capture edits on old parents using their own overlapping s
   for (const resource of ['issue_comments', 'pull_request_comments', 'pull_request_review_comments']) {
     let edited = false
     const requests: URL[] = []
-    const pipeline = fixturePipeline((url) => {
+    const env = githubEnv((url) => {
       requests.push(url)
       if (url.pathname.endsWith('/issues')) return Response.json([oldIssue, { ...oldPull, pull_request: pullIssue.pull_request }])
       if (url.pathname.endsWith('/pulls')) return Response.json([oldPull])
@@ -203,10 +213,11 @@ test('comment streams capture edits on old parents using their own overlapping s
         ...(resource === 'pull_request_review_comments' ? { pull_request_url: `https://api.github.com/repos/${repository}/pulls/4` } : {}) }
       return Response.json([data, { ...data, id: 999, updated_at: '2026-01-04T00:00:00Z' }])
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion(request(pipeline, resource), { journal, destination, now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(request(pipeline, resource), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
     edited = true
-    expect((await runIngestion(request(pipeline, resource), { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+    expect((await runIngestion(request(pipeline, resource), { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
     const children = requests.filter((url) => url.pathname.endsWith('/comments'))
     expect(children.map((url) => url.searchParams.get('since'))).toEqual(['2008-01-01T00:00:00.000Z', '2026-01-01T23:55:00.000Z'])
     expect(requests.filter((url) => url.pathname.endsWith('/issues') || url.pathname.endsWith('/pulls')).every((url) => !url.searchParams.has('since'))).toBe(true)
@@ -220,25 +231,27 @@ test('comment streams capture edits on old parents using their own overlapping s
 
 test('a rejected child write cannot advance its timestamp watermark and the next run replays the window', async () => {
   const starts: string[] = []
-  const pipeline = fixturePipeline((url, init) => {
+  const env = githubEnv((url, init) => {
     if (url.pathname.endsWith('/comments')) starts.push(url.searchParams.get('since') ?? '')
     return fixtureResponse(url, init)
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
   const selected = request(pipeline, 'issue_comments')
-  const failed = await runIngestion(selected, { journal, destination: { insert: async () => { throw new IngestConfigError('sink rejected') } }, now: () => cutoff })
+  const failed = await runIngestion(selected, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now: () => cutoff })
   expect(failed.ok).toBe(false)
   expect((await journal.readCheckpoint('github.issue_comments.obsessiondb.chkit')).envelope).toBeUndefined()
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(starts).toEqual(['2008-01-01T00:00:00.000Z', '2008-01-01T00:00:00.000Z'])
   expect(destination.tables.get('default.github_issue_comments_raw')).toHaveLength(1)
 })
 
 test('empty resource runs complete independently and full readers scan again without provider state', async () => {
   const calls: string[] = []
-  const pipeline = fixturePipeline((url) => { calls.push(url.pathname); return Response.json([]) })
+  const env = githubEnv((url) => { calls.push(url.pathname); return Response.json([]) })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  for (const now of [cutoff, new Date('2026-01-03')]) expect((await runIngestion(request(pipeline), { journal, destination, now: () => now })).ok).toBe(true)
+  for (const now of [cutoff, new Date('2026-01-03')]) expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => now })).ok).toBe(true)
   expect(destination.tables.size).toBe(0)
   for (const resource of ['pull_requests', 'pull_request_reviews', 'pull_request_commits', 'stargazers']) {
     const checkpoint = await journal.readCheckpoint(`github.${resource}.obsessiondb.chkit`)
@@ -254,23 +267,24 @@ test('stargazer full sync replays from its first page after page or destination 
   let failSecondPage = true
   const starts: string[] = []
   const second = { ...stargazer, user: { id: 502, login: 'another-example' } }
-  const pipeline = fixturePipeline((url) => {
+  const env = githubEnv((url) => {
     if (url.searchParams.get('page') === '2') return failSecondPage ? new Response('denied', { status: 403 }) : Response.json([second])
     starts.push(url.search)
     return Response.json([stargazer], { headers: { Link: `<${url}&page=2>; rel="next"` } })
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
   const selected = request(pipeline, 'stargazers')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('github.stargazers.obsessiondb.chkit')).lastSuccessSeq).toBe(0)
   expect((await journal.readCheckpoint('github.stargazers.obsessiondb.chkit')).envelope).toBeUndefined()
   failSecondPage = false
-  const rejected = await runIngestion(selected, { journal, now: () => cutoff,
-    destination: { insert: async () => { throw new IngestConfigError('sink rejected') } } })
+  const rejected = await runIngestion(selected, { ...env, journal, now: () => cutoff,
+    destination: { insert: async () => { throw new Error('sink rejected') } } })
   expect(rejected.ok).toBe(false)
   expect((await journal.readCheckpoint('github.stargazers.obsessiondb.chkit')).lastSuccessSeq).toBe(0)
   expect((await journal.readCheckpoint('github.stargazers.obsessiondb.chkit')).envelope).toBeUndefined()
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   const completed = await journal.readCheckpoint('github.stargazers.obsessiondb.chkit')
   expect(completed.lastSuccessSeq).toBeGreaterThan(0)
   expect(completed.envelope).toBeUndefined()
@@ -284,7 +298,7 @@ test('stargazer full sync replays from its first page after page or destination 
 test('GraphQL commits collect more than 250 entries and retain only SHA and the full multiline message', async () => {
   const commits = Array.from({ length: 275 }, (_, index) => ({ sha: (index + 1).toString(16).padStart(40, '0'), message: `Subject ${index}\n\nFull body ${index}\nLast line.` }))
   const afters: unknown[] = [], requests: URL[] = []
-  const pipeline = fixturePipeline((url, init) => {
+  const env = githubEnv((url, init) => {
     requests.push(url)
     if (url.pathname !== '/graphql') return fixtureResponse(url, init)
     expect(init.method).toBe('POST')
@@ -295,8 +309,9 @@ test('GraphQL commits collect more than 250 entries and retain only SHA and the 
     const items = commits.slice(offset, offset + 100)
     return commitPage(items, commits.length, offset + items.length < commits.length ? `page-${offset + items.length}` : null)
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'pull_request_commits'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'pull_request_commits'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(afters).toEqual([null, 'page-100', 'page-200'])
   const rows = destination.tables.get('default.github_pull_request_commits_raw') ?? []
   expect(rows).toHaveLength(275)
@@ -310,13 +325,14 @@ test('GraphQL commits collect more than 250 entries and retain only SHA and the 
 test('GraphQL commit totals reject truncated collections and changes during pagination', async () => {
   for (const changed of [false, true]) {
     let calls = 0
-    const pipeline = fixturePipeline((url, init) => {
+    const env = githubEnv((url, init) => {
       if (url.pathname !== '/graphql') return fixtureResponse(url, init)
       calls++
       return commitPage([{ ...commit, sha: String(calls).padStart(40, '0') }], changed && calls === 2 ? 3 : 2, changed && calls === 1 ? 'next' : null)
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
-    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok).toBe(false)
     expect(calls).toBe(changed ? 2 : 1)
     expect((await journal.readCheckpoint('github.pull_request_commits.obsessiondb.chkit')).lastSuccessSeq).toBe(0)
@@ -326,13 +342,14 @@ test('GraphQL commit totals reject truncated collections and changes during pagi
 test('GraphQL commits validate complete counts on empty terminal pages', async () => {
   for (const total of [0, 1, 2]) {
     let calls = 0
-    const pipeline = fixturePipeline((url, init) => {
+    const env = githubEnv((url, init) => {
       if (url.pathname !== '/graphql') return fixtureResponse(url, init)
       calls++
       return commitPage(total > 0 && calls === 1 ? [commit] : [], total, total > 0 && calls === 1 ? 'terminal' : null)
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { journal, destination, now: () => cutoff })
+    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { ...env, journal, destination, now: () => cutoff })
     expect(result.ok).toBe(total < 2)
     expect(calls).toBe(total === 0 ? 1 : 2)
     expect((await journal.readCheckpoint('github.pull_request_commits.obsessiondb.chkit')).lastSuccessSeq > 0).toBe(total < 2)
@@ -343,13 +360,14 @@ test('GraphQL commits validate complete counts on empty terminal pages', async (
 test('GraphQL commit pagination rejects duplicate SHAs within or across pages despite a matching total', async () => {
   for (const acrossPages of [true, false]) {
     let calls = 0
-    const pipeline = fixturePipeline((url, init) => {
+    const env = githubEnv((url, init) => {
       if (url.pathname !== '/graphql') return fixtureResponse(url, init)
       calls++
       return acrossPages ? commitPage([commit], 2, calls === 1 ? 'next' : null) : commitPage([commit, commit], 2, null)
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
-    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok).toBe(false)
     expect(calls).toBe(acrossPages ? 2 : 1)
     expect((await journal.readCheckpoint('github.pull_request_commits.obsessiondb.chkit')).lastSuccessSeq).toBe(0)
@@ -358,26 +376,27 @@ test('GraphQL commit pagination rejects duplicate SHAs within or across pages de
 
 test('GitHub binds configuration and preserves independently selected installation and repository progress', async () => {
   const requests: URL[] = []
-  const config = { ...githubConfig, sourceId: 'github.fixture', repositories: ['first/repo', 'second/repo'], pageSize: 25, start: new Date('2025-01-01'), overlapMs: 60_000 }
-  const pipeline = createGitHubPipeline(config, { token: () => 'bound-token', fetch: async (input, init) => {
-    const url = new URL(input)
+  const config = { ...fixtureConfig, sourceId: 'github.fixture', repositories: ['first/repo', 'second/repo'], pageSize: 25, start: new Date('2025-01-01'), overlapMs: 60_000, token: 'bound-token' }
+  const env = githubEnv((url, init) => {
     requests.push(url)
     expect(new Headers(init.headers).get('authorization')).toBe('Bearer bound-token')
     expect(url.searchParams.get('per_page')).toBe('25')
     return Response.json([])
-  } })
+  })
+  const pipeline = createGitHubPipeline(config)
+  config.token = 'changed'
   config.pageSize = 100
   config.repositories.push('third/repo')
   config.start.setUTCFullYear(2000)
   config.overlapMs = 3_600_000
   expect(pipeline.streams.map((stream) => stream.id).sort()).toEqual(['first.repo', 'second.repo'].flatMap((repo) => resources.map((resource) => `github.fixture.${resource}.${repo}`)).sort())
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(requests.filter((url) => url.searchParams.has('since')).every((url) => url.searchParams.get('since') === '2025-01-01T00:00:00.000Z')).toBe(true)
   requests.length = 0
   const selected = selectStreams([pipeline], ['repository:second/repo', 'resource:issues'])
   expect(selected.map((entry) => entry.stream.id)).toEqual(['github.fixture.issues.second.repo'])
-  expect((await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect((await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
   expect(requests.map((url) => url.pathname)).toEqual(['/repos/second/repo/issues'])
   expect(requests[0]?.searchParams.get('since')).toBe('2026-01-01T23:59:00.000Z')
   expect((await journal.readCheckpoint('github.issues.obsessiondb.chkit')).envelope).toBeUndefined()
@@ -385,11 +404,12 @@ test('GitHub binds configuration and preserves independently selected installati
 
 test('GitHub paginated HTTP rate limits consume exactly one request retry budget', async () => {
   let attempts = 0
-  const pipeline = fixturePipeline(() => ++attempts === 1
+  const env = githubEnv(() => ++attempts === 1
     ? new Response('rate limited', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'retry-after': '0' } }) : Response.json([]))
+  const pipeline = fixturePipeline()
   const selected = request(pipeline, 'stargazers').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
   const journal = createMemoryJournal()
-  expect((await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
   expect(attempts).toBe(2)
   expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled' && event.errorClass === 'rate_limited')).toHaveLength(1)
 })
@@ -397,16 +417,17 @@ test('GitHub paginated HTTP rate limits consume exactly one request retry budget
 test('GraphQL HTTP200 rate errors honor Retry-After while partial data fails permanently', async () => {
   for (const retryable of [true, false]) {
     let attempts = 0
-    const pipeline = fixturePipeline((url, init) => {
+    const env = githubEnv((url, init) => {
       if (url.pathname !== '/graphql') return fixtureResponse(url, init)
       attempts++
       if (retryable && attempts > 1) return commitPage([commit], 1, null)
       return Response.json({ data: { repository: null }, errors: [{ type: retryable ? 'RATE_LIMITED' : 'NOT_FOUND', message: 'query rejected' }] },
         { headers: retryable ? { 'Retry-After': '0', 'x-ratelimit-remaining': '0' } : {} })
     })
+    const pipeline = fixturePipeline()
     const selected = request(pipeline, 'pull_request_commits').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
     const journal = createMemoryJournal()
-    const result = await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok).toBe(retryable)
     expect(attempts).toBe(retryable ? 2 : 1)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(retryable ? 1 : 0)
@@ -420,23 +441,24 @@ test('secondary REST rate limits and headerless GraphQL rate errors retain provi
   expect(rest.body).toContain('secondary rate limit')
   expect(classifyGitHubError(rest)).toEqual({ kind: 'rate_limited', retryAfterMs: 60_000 })
   const payload = { data: { repository: null }, errors: [{ type: 'RATE_LIMITED', message: 'API rate limit exceeded' }] }
-  const failure: unknown = await requestGitHubGraphql('query { viewer { login } }', {}, new AbortController().signal,
-    { token: () => 'fixture', fetch: async () => Response.json(payload) }).catch((cause: unknown) => cause)
+  const client = createGitHubClient(sourceContext(() => Response.json(payload)), fixtureConfig)
+  const failure: unknown = await client.graphql('query { viewer { login } }', {}).catch((cause: unknown) => cause)
   expect(failure).toBeInstanceOf(HttpError)
-  expect(failure).toMatchObject({ status: 200, body: JSON.stringify(payload) })
+  expect(failure).toMatchObject({ status: 429, body: JSON.stringify(payload) })
   expect(classifyGitHubError(failure)).toEqual({ kind: 'rate_limited', retryAfterMs: 60_000 })
 })
 
 test('invalid REST continuations and payloads fail without completing or replaying the resource', async () => {
   for (const mode of ['repeated', 'foreign', 'malformed']) {
     let calls = 0
-    const pipeline = fixturePipeline((url) => {
+    const env = githubEnv((url) => {
       calls++
       return mode === 'malformed' ? Response.json({ not: 'an array' })
         : Response.json([stargazer], { headers: { Link: `<${mode === 'foreign' ? 'https://example.com/steal' : url.toString()}>; rel="next"` } })
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    const result = await runIngestion(request(pipeline, 'stargazers'), { journal, destination, now: () => cutoff })
+    const result = await runIngestion(request(pipeline, 'stargazers'), { ...env, journal, destination, now: () => cutoff })
     expect(result.ok).toBe(false)
     expect(calls).toBe(1)
     expect(destination.tables.size).toBe(0)
@@ -447,7 +469,7 @@ test('invalid REST continuations and payloads fail without completing or replayi
 test('GraphQL malformed or cyclic cursors and invalid commit nodes never record successful completion', async () => {
   for (const mode of ['missing-cursor', 'repeated', 'missing-message']) {
     let calls = 0
-    const pipeline = fixturePipeline((url, init) => {
+    const env = githubEnv((url, init) => {
       if (url.pathname !== '/graphql') return fixtureResponse(url, init)
       calls++
       const page = { totalCount: mode === 'repeated' ? 3 : 1,
@@ -456,8 +478,9 @@ test('GraphQL malformed or cyclic cursors and invalid commit nodes never record 
         pageInfo: { hasNextPage: mode !== 'missing-message', endCursor: mode === 'missing-cursor' ? null : 'same' } }
       return Response.json({ data: { repository: { pullRequest: { commits: page } } } })
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
-    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { journal, destination: createMemoryDestination(), now: () => cutoff })
+    const result = await runIngestion(request(pipeline, 'pull_request_commits'), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
     expect(result.ok).toBe(false)
     expect(calls).toBe(mode === 'repeated' ? 2 : 1)
     if (mode === 'repeated') expect(result.streams[0]?.error).toContain('repeated continuation')
@@ -466,15 +489,69 @@ test('GraphQL malformed or cyclic cursors and invalid commit nodes never record 
 })
 
 test('review comments reject a parent URL from another repository before claiming a watermark', async () => {
-  const pipeline = fixturePipeline(() => Response.json([{ ...reviewComment, pull_request_url: 'https://api.github.com/repos/another/project/pulls/2' }]))
+  const env = githubEnv(() => Response.json([{ ...reviewComment, pull_request_url: 'https://api.github.com/repos/another/project/pulls/2' }]))
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal()
-  const result = await runIngestion(request(pipeline, 'pull_request_review_comments'), { journal, destination: createMemoryDestination(), now: () => cutoff })
+  const result = await runIngestion(request(pipeline, 'pull_request_review_comments'), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })
   expect(result.ok).toBe(false)
   expect((await journal.readCheckpoint('github.pull_request_review_comments.obsessiondb.chkit')).envelope).toBeUndefined()
 })
 
-function fixturePipeline(respond: Responder = fixtureResponse, config: GitHubConfig = githubConfig): Pipeline {
-  return createGitHubPipeline(config, { token: () => 'fixture', fetch: (url, init) => Promise.resolve(respond(new URL(url), init)) })
+test('GitHub checks its configuration when a stream runs, not when the module loads or a stream is selected', async () => {
+  let requests = 0
+  const pipeline = createGitHubPipeline({ ...fixtureConfig, repositories: ['not-a-repository'], pageSize: 500 })
+  const selected = selectStreams([pipeline], [])
+  expect(selected).toHaveLength(8)
+  const env = githubEnv(() => { requests++; return Response.json([]) })
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.streams.every((stream) => stream.outcome === 'failed' && /at pageSize[\s\S]*at repositories\[0\]/.test(stream.error ?? ''))).toBe(true)
+  expect(requests).toBe(0)
+})
+
+test('GitHub fails every stream before any request without a token', async () => {
+  for (const token of [undefined, ' ']) {
+    let requests = 0
+    const env = githubEnv(() => { requests++; return Response.json([]) })
+    const result = await runIngestion(request(fixturePipeline({ ...fixtureConfig, token })), { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+    expect(result.streams).toHaveLength(8)
+    expect(result.streams.every((stream) => stream.outcome === 'failed' && stream.error?.includes('Set GITHUB_TOKEN or pass token.'))).toBe(true)
+    expect(requests).toBe(0)
+  }
+})
+
+test('GitHub fails a malformed provider payload at once and retries only a transient response', async () => {
+  const run = async (respond: Responder) => {
+    const selected = request(fixturePipeline(), 'stargazers').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 2, minTimeout: 0 } } }))
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ selected, backfill: undefined }, { ...githubEnv(respond), journal, destination: createMemoryDestination(), now: () => cutoff })
+    return { result, retries: journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass) }
+  }
+  let calls = 0
+  const malformed = await run(() => { calls += 1; return Response.json({ message: 'Not an array' }) })
+  expect(malformed.result.streams[0]?.outcome).toBe('failed')
+  expect(malformed.result.streams[0]?.error).toContain('Invalid input: expected array, received object')
+  expect(calls).toBe(1)
+  expect(malformed.retries).toEqual([])
+
+  let unavailable = true
+  const flaky = await run((url, init) => {
+    if (unavailable) { unavailable = false; return new Response('busy', { status: 503 }) }
+    return fixtureResponse(url, init)
+  })
+  expect(flaky.result.ok).toBe(true)
+  expect(flaky.retries).toEqual(['transient'])
+})
+
+function fixturePipeline(config: GitHubConfig = fixtureConfig): Pipeline {
+  return createGitHubPipeline(config)
+}
+
+function githubEnv(respond: Responder = fixtureResponse) {
+  return { fetch: async (input: string | URL, init?: RequestInit) => respond(new URL(input), init ?? {}) }
+}
+
+function sourceContext(respond: Responder): SourceContext {
+  return createSourceContext({ fetch: async (input, init) => respond(new URL(input), init ?? {}) })
 }
 
 function request(pipeline: Pipeline, resource?: string) {
@@ -492,7 +569,7 @@ function fixtureResponse(url: URL, _init: RequestInit): Response {
   if (url.pathname.endsWith('/pulls/2/reviews')) return Response.json([review])
   if (url.pathname.endsWith('/stargazers')) return Response.json([stargazer])
   if (url.pathname === '/graphql') return commitPage([commit], 1, null)
-  throw new IngestConfigError(`Unexpected GitHub fixture request: ${url}`)
+  throw new Error(`Unexpected GitHub fixture request: ${url}`)
 }
 
 function commitPage(items: readonly { sha: string; message: string }[], totalCount: number, next: string | null): Response {

@@ -9,7 +9,7 @@ import { loadDefinitionModules, loadSchemaDefinitions } from '@chkit/core/schema
 
 import { rawTable } from './destination.js'
 import { timestampWindow } from './incremental.js'
-import { createIngestPlugin } from './plugin.js'
+import { checkGraph, createIngestPlugin, formatStreamErrors } from './plugin.js'
 import { collectPipelines, definePipeline, defineStream, selectStreams } from './registry.js'
 
 const start = new Date('2024-01-01T00:00:00Z')
@@ -42,13 +42,38 @@ describe('timestampWindow options', () => {
     expect([window.id, window.version]).toEqual(['chkit.timestamp_window', 1])
   })
 
-  test('rejects invalid bounds and overlap', () => {
-    expect(() => timestampWindow({ start: new Date('invalid') })).toThrow('valid Date')
+  test('checks its options when it plans, never when it is defined or selected', () => {
+    const plan = (window: ReturnType<typeof timestampWindow>) => () => window.plan({ state: undefined, cutoff, range: undefined })
+    expect(selecting({ incremental: timestampWindow({ start: new Date('invalid') }) })()).toHaveLength(1)
+    expect(plan(timestampWindow({ start: new Date('invalid') }))).toThrow('timestampWindow: start must be a valid Date.')
     for (const overlapMs of [-1, Number.NaN, Number.POSITIVE_INFINITY]) {
-      expect(() => timestampWindow({ start, overlapMs })).toThrow('non-negative')
+      expect(plan(timestampWindow({ start, overlapMs }))).toThrow('non-negative')
     }
     expect(() => timestampWindow({ start: cutoff }).plan({ state: undefined, cutoff: start, range: undefined })).toThrow('after upper bound')
     expect(() => timestampWindow({ from: () => new Date('invalid') }).plan({ state: undefined, cutoff, range: undefined })).toThrow('valid dates')
+  })
+})
+
+function selecting(input: Partial<Parameters<typeof defineStream>[0]>) {
+  const stream = defineStream({ id: 'x', destination: rawTable({ database: 'test', name: 'rows' }), async *read() {}, ...input })
+  return () => selectStreams([definePipeline({ id: 'p', streams: [stream] })], [])
+}
+
+describe('run output', () => {
+  test('identical stream errors are printed once with the streams they affect', () => {
+    const stream = (namespaceId: string, outcome: 'failed' | 'succeeded', error?: string) => ({
+      streamId: namespaceId, pipelineId: 'meet', namespaceId, outcome, rows: 0, batches: 0, chunks: 0, checkpointVersion: 0, error,
+    })
+    expect(formatStreamErrors([
+      stream('meet.conferences', 'failed', 'Set GOOGLE_MEET_ACCESS_TOKEN.'),
+      stream('meet.recordings', 'succeeded'),
+      stream('meet.transcripts', 'failed', 'Set GOOGLE_MEET_ACCESS_TOKEN.'),
+      stream('meet.participants', 'failed', 'HTTP 403 Forbidden'),
+    ])).toEqual([
+      '2 streams failed: Set GOOGLE_MEET_ACCESS_TOKEN.',
+      '  meet.conferences, meet.transcripts',
+      'meet.participants failed: HTTP 403 Forbidden',
+    ])
   })
 })
 
@@ -121,31 +146,50 @@ describe('exported pipeline discovery', () => {
     expect(() => collectPipelines([{ a, duplicate }])).toThrow('Duplicate pipeline')
     expect(() => collectPipelines([{ a, b }])).toThrow('globally unique')
     expect(() => selectStreams([a, b], ['pipeline:a'])).toThrow('globally unique')
-    expect(() => definePipeline({ id: 'repeat', streams: [stream, stream] })).toThrow('more than once')
+    expect(() => selectStreams([definePipeline({ id: 'repeat', streams: [stream, stream] })], [])).toThrow('more than once')
   })
 
-  test('rejects malformed definitions before the first run instead of failing a scheduled run', () => {
+  test('malformed definitions import cleanly and fail when an ingest command selects them', () => {
     const destination = rawTable({ database: 'test', name: 'rows' })
     const read = async function* () { yield { rows: [] } }
-    expect(() => defineStream({ id: undefined as unknown as string, destination, read })).toThrow('Invalid stream id undefined')
-    expect(() => defineStream({ id: 'x', destination: { database: 'test', name: 'rows' } as never, read })).toThrow('destination must be a table definition')
-    expect(() => defineStream({ id: 'x', destination, read: undefined as never })).toThrow('read must be a function')
-    expect(() => defineStream({ id: 'x', destination, read, tags: 'schedule:1h' as never })).toThrow('tags must be an array of non-empty strings')
-    expect(() => defineStream({ id: 'x', destination, read, tags: [''] })).toThrow('tags must be an array of non-empty strings')
+    expect(selecting({ id: undefined as unknown as string })).toThrow('Invalid stream id undefined')
+    expect(selecting({ destination: { database: 'test', name: 'rows' } as never })).toThrow('destination must be a table definition')
+    expect(selecting({ read: undefined as never })).toThrow('read must be a function')
+    expect(selecting({ tags: 'schedule:1h' as never })).toThrow('tags must be an array of non-empty strings')
+    expect(selecting({ tags: [''] })).toThrow('tags must be an array of non-empty strings')
     for (const maxChunks of [0, 1.5, Number.NaN]) {
-      expect(() => defineStream({ id: 'x', destination, read, budget: { maxChunks } })).toThrow('budget.maxChunks must be a positive integer')
+      expect(selecting({ budget: { maxChunks } })).toThrow('budget.maxChunks must be a positive integer')
     }
-    expect(() => defineStream({ id: 'x', destination, read, budget: { maxChunkRows: -5 } })).toThrow('budget.maxChunkRows must be a positive integer')
-    expect(() => defineStream({ id: 'x', destination, read, retry: { retries: -1 } })).toThrow('retry.retries must be a non-negative integer or Infinity')
-    expect(() => defineStream({ id: 'x', destination, read, retry: { retries: 1.5 } })).toThrow('retry.retries must be a non-negative integer or Infinity')
-    expect(() => defineStream({ id: 'x', destination, read, retry: { minTimeout: Number.NaN } })).toThrow('retry.minTimeout must be a non-negative number')
+    expect(selecting({ budget: { maxChunkRows: -5 } })).toThrow('budget.maxChunkRows must be a positive integer')
+    expect(selecting({ retry: { retries: -1 } })).toThrow('retry.retries must be a non-negative integer or Infinity')
+    expect(selecting({ retry: { retries: 1.5 } })).toThrow('retry.retries must be a non-negative integer or Infinity')
+    expect(selecting({ retry: { minTimeout: Number.NaN } })).toThrow('retry.minTimeout must be a non-negative number')
     expect(defineStream({ id: 'x', destination, read, retry: { retries: Number.POSITIVE_INFINITY, maxRetryTime: Number.POSITIVE_INFINITY } }).retry).toEqual({ retries: Number.POSITIVE_INFINITY, maxRetryTime: Number.POSITIVE_INFINITY })
 
     const stream = defineStream({ id: 'test.rows', destination, read })
-    expect(() => definePipeline({ id: 'p', streams: undefined as never })).toThrow('streams must be an array')
-    expect(() => definePipeline({ id: 'p', streams: [{ id: 'q' } as never] })).toThrow('streams must contain only defineStream(...) values')
-    expect(() => definePipeline({ id: 'p', streams: [stream], retry: { retries: Number.NaN } })).toThrow('retry.retries must be a non-negative integer or Infinity')
-    expect(() => definePipeline({ id: 'p', streams: [stream], maxLoads: 0 })).toThrow('maxLoads must be a positive integer')
+    const pipeline = (input: Partial<Parameters<typeof definePipeline>[0]>) => () => selectStreams([definePipeline({ id: 'p', streams: [stream], ...input })], [])
+    expect(pipeline({ streams: undefined as never })).toThrow('streams must be an array')
+    expect(pipeline({ streams: [{ id: 'q' } as never] })).toThrow('streams must contain only defineStream(...) values')
+    expect(pipeline({ retry: { retries: Number.NaN } })).toThrow('retry.retries must be a non-negative integer or Infinity')
+    expect(pipeline({ maxLoads: 0 })).toThrow('maxLoads must be a positive integer')
+
+    const spread = { ...definePipeline({ id: 'p', streams: [{ ...defineStream({ id: 'x', destination, read }), budget: { maxChunks: 0 } }] }) }
+    expect(() => selectStreams([spread], [])).toThrow('Stream "x": budget.maxChunks must be a positive integer.')
+  })
+
+  test('a definition error is raised only for the pipelines a command selects', () => {
+    const destination = rawTable({ database: 'test', name: 'rows' })
+    const meet = definePipeline({
+      id: 'meet', tags: ['provider:meet'],
+      streams: [defineStream({ id: 'meet.rows', destination, budget: { maxChunks: 0 }, async *read() {} })],
+    })
+    const slack = definePipeline({ id: 'slack', tags: ['provider:slack'], streams: [defineStream({ id: 'slack.rows', destination, async *read() {} })] })
+
+    expect(selectStreams([meet, slack], ['provider:slack']).map((entry) => entry.stream.id)).toEqual(['slack.rows'])
+    expect(() => selectStreams([meet, slack], [])).toThrow('Stream "meet.rows": budget.maxChunks must be a positive integer.')
+    expect(checkGraph([meet, slack])).toEqual([
+      { code: 'ingest_invalid_pipeline', message: 'Stream "meet.rows": budget.maxChunks must be a positive integer.', severity: 'error' },
+    ])
   })
 
   test('preserves unbounded retry timeout policies for streams and pipelines', () => {
@@ -158,8 +202,8 @@ describe('exported pipeline discovery', () => {
   test('declared tags cannot impersonate the derived stream: and pipeline: tags', () => {
     const destination = rawTable({ database: 'test', name: 'rows' })
     const read = async function* () { yield { rows: [] } }
-    expect(() => defineStream({ id: 'one', destination, read, tags: ['stream:two'] })).toThrow('tag "stream:two" uses a reserved prefix')
-    expect(() => definePipeline({ id: 'p', streams: [], tags: ['pipeline:other'] })).toThrow('tag "pipeline:other" uses a reserved prefix')
+    expect(selecting({ id: 'one', tags: ['stream:two'] })).toThrow('tag "stream:two" uses a reserved prefix')
+    expect(() => selectStreams([definePipeline({ id: 'p', streams: [], tags: ['pipeline:other'] })], [])).toThrow('tag "pipeline:other" uses a reserved prefix')
     const one = defineStream({ id: 'one', destination, read, tags: ['Schedule:1h', 'streams:all'] })
     const two = defineStream({ id: 'two', destination, read })
     const pipelines = [definePipeline({ id: 'p', streams: [one] }), definePipeline({ id: 'other', streams: [two] })]
@@ -191,5 +235,59 @@ describe('exported pipeline discovery', () => {
     expect(output[0]).toMatchObject({ ok: false, command: 'run', error: expect.stringContaining('Invalid value for --max-duration: 2147484') })
     expect(createIngestPlugin().optionsSchema.safeParse({ maxDurationSeconds: 2_147_484 }).success).toBe(false)
     expect(createIngestPlugin().optionsSchema.safeParse({ maxDurationSeconds: 2_147_483 }).success).toBe(true)
+  })
+
+  test('an invalid definition leaves schema loading alone and fails every ingest command', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'chkit-definition-'))
+    directories.push(directory)
+    const entry = join(directory, 'entry.ts')
+    await writeFile(entry, `
+      import { definePipeline, defineStream } from ${JSON.stringify(new URL('./registry.ts', import.meta.url).pathname)}
+      import { rawTable } from ${JSON.stringify(new URL('./destination.ts', import.meta.url).pathname)}
+      export const rows = rawTable({ database: 'test', name: 'rows' })
+      export const pipeline = definePipeline({
+        id: 'test',
+        streams: [defineStream({ id: 'test.rows', destination: rows, budget: { maxChunks: 0 }, async *read() {} })],
+      })
+    `)
+    expect((await loadSchemaDefinitions(entry)).map((definition) => definition.name)).toEqual(['rows'])
+
+    const plugin = createIngestPlugin()
+    const check = await plugin.hooks.onCheck({ config: resolveConfig({ entry }) })
+    expect(check).toMatchObject({ ok: false, findings: [{ code: 'ingest_invalid_pipeline', message: 'Stream "test.rows": budget.maxChunks must be a positive integer.' }] })
+    for (const command of plugin.commands) {
+      const output: unknown[] = []
+      const code = await command.run({
+        args: [], flags: {}, jsonMode: true,
+        options: { journalTable: 'test_journal', maxDurationSeconds: 1, prefetchBatches: 1 },
+        config: resolveConfig({ entry }), configPath: entry,
+        print: (value) => { output.push(value) },
+      })
+      expect(code).toBe(2)
+      expect(output[0]).toMatchObject({ ok: false, command: command.name, error: 'Stream "test.rows": budget.maxChunks must be a positive integer.' })
+    }
+  })
+
+  test('any error thrown while building a pipeline is a configuration error for every command', async () => {
+    const directory = await mkdtemp(join(tmpdir(), 'chkit-setup-'))
+    directories.push(directory)
+    const entry = join(directory, 'entry.ts')
+    await writeFile(entry, `
+      function createPipeline(pageSize: number) {
+        if (pageSize > 100) throw new RangeError('pageSize must be at most 100')
+      }
+      export const pipeline = createPipeline(500)
+    `)
+    for (const command of createIngestPlugin().commands) {
+      const output: unknown[] = []
+      const code = await command.run({
+        args: [], flags: {}, jsonMode: true,
+        options: { journalTable: 'test_journal', maxDurationSeconds: 1, prefetchBatches: 1 },
+        config: resolveConfig({ entry }), configPath: entry,
+        print: (value) => { output.push(value) },
+      })
+      expect(code).toBe(2)
+      expect(output[0]).toMatchObject({ ok: false, command: command.name, error: expect.stringContaining('pageSize must be at most 100') })
+    }
   })
 })

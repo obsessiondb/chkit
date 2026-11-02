@@ -1,23 +1,21 @@
-import { IngestConfigError, rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawTable, type SourceContext } from '@chkit/plugin-ingest'
+import { z } from 'zod'
 
-import { numericId, readCirclebackPages, tagNames, toCirclebackRows, type CirclebackClientDeps } from '../client.js'
-import { circlebackConfig } from '../config.js'
+import { circlebackId, circlebackTags, createCirclebackClient, nonBlankString, toCirclebackRows } from '../client.js'
+import { circlebackConfig, type CirclebackReaderConfig } from '../config.js'
 
 // The official OpenAPI and Circleback CLI enumerate exactly these native completion statuses.
 const statuses = ['PENDING', 'DONE']
+const actionItem = z.looseObject({ id: circlebackId, meetingIds: z.array(nonBlankString), tags: circlebackTags })
 
 export const circleback_actionItemsRaw = rawTable({ database: circlebackConfig.database, name: 'circleback_action_items_raw' })
 
-export async function* readActionItems(context: FetchContext, deps: CirclebackClientDeps) {
+export async function* readActionItems(context: SourceContext, config: CirclebackReaderConfig) {
+  const client = createCirclebackClient(context, config)
   for (const status of statuses) {
-    for await (const page of readCirclebackPages(context, { path: '/action-items', query: { assigneeType: 'Anyone', status } }, deps)) {
-      for (const item of page.items) {
-        if (item.status !== status || !Array.isArray(item.meetingIds) ||
-          !item.meetingIds.every((id: unknown) => typeof id === 'string' && id.trim())) {
-          throw new IngestConfigError('Circleback action item has an unexpected status or invalid meeting IDs.')
-        }
-      }
-      yield { rows: toCirclebackRows(page.items.map(tagNames), (item) => numericId(item.id, 'action item'), deps.config.sourceId) }
+    for await (const page of client.pages('/action-items', actionItem, { assigneeType: 'Anyone', status })) {
+      if (page.items.some((item) => item.status !== status)) throw new Error(`Circleback returned an action item outside the ${status} status partition.`)
+      yield { rows: toCirclebackRows(page.items, (item) => item.id, client.settings.sourceId) }
     }
   }
 }

@@ -43,9 +43,27 @@ Journal reads disable the query cache and request `select_sequential_consistency
 
 ## Retries and provider errors
 
-Start with built-in HTTP/network classification. Throw `HttpError.fromResponse(response)` for unsuccessful HTTP responses. The default classification treats 429 as rate limiting, 408/425/5xx as transient, and other 4xx as permanent. `Retry-After` is respected for rate-limited failures.
+Start with built-in HTTP/network classification. `context.fetch` throws `HttpError` for unsuccessful responses; requests made another way throw `HttpError.fromResponse(response)` themselves. The default classification treats 429 as rate limiting, 408/425/5xx as transient, and other 4xx as permanent.
+
+Requests of one pipeline share a request queue across its streams. `maxFetches` limits how many run at once, and a rate-limited response with `Retry-After` pauses the whole queue until then, so other streams of the pipeline do not run into the same limit. A rate-limit retry that the provider schedules at least `minTimeout` ahead does not count against `retries`; the retry time budget and the execution budget still bound it. Templates therefore send requests without fixed pauses.
 
 Set `retry` on a pipeline for shared defaults, then override individual fields on a stream. Use stream `classifyError(cause, fallback)` for SDK error types or provider-specific semantics; returning `undefined` keeps the fallback. Classification values are `cancelled`, `rate_limited`, `transient`, `permanent`, and `unknown`.
+
+### Retry boundaries
+
+Only transient failures are retried: network error codes, including those in an error's `cause` chain, timeouts, `HttpError` 408/425/429/5xx, and whatever `classifyError` returns as `transient` or `rate_limited`. Any other failure fails the stream once, wherever it is thrown: a malformed payload, a `ZodError`, a missing credential, an invalid checkpoint, or a bug. No special error type is needed.
+
+Only requests are retried:
+
+| Where | Retried |
+|---|---|
+| `context.fetch`, `context.attempt`, and each `paginate` page | That request, under the stream's `retry` policy |
+| Destination inserts | A fixed budget of 3 attempts |
+| Journal writes | A fixed budget of 4 attempts |
+
+A failure anywhere else in the reader, its strategy, or checkpoint parsing fails the stream, transient or not; the next run resumes from the last committed state. A request that exhausts its retries fails the stream the same way. `context.fetch` and `context.attempt` reject with exactly the thrown value, so a reader can handle its own errors. A `context.fetch` or `context.attempt` inside a `paginate` page shares that page's attempt instead of starting another.
+
+When a provider reports a failure inside a successful response, throw `HttpError.withStatus(response, status)` with the status it means, such as `429` for a rate limit; the original URL and headers, including `Retry-After`, are kept.
 
 <details>
 <summary>Retry defaults and advanced callbacks</summary>
@@ -63,7 +81,7 @@ Set `retry` on a pipeline for shared defaults, then override individual fields o
 
 Callbacks receive `attemptNumber`, `retriesLeft`, `retriesConsumed`, and a `FetchFailure` with its original `cause` and normalized `classification`. Returning false from `shouldConsumeRetry` skips consumption and exponential backoff; provider `Retry-After` still applies. Permanent failures and cancellation stop before policy callbacks can turn them into retries.
 
-An exhausted request retry budget fails the stream; reader recovery does not multiply that budget. Other reader failures can restart from the last committed state. Insert retries are separate from this source retry policy.
+The `retry` policy applies to requests. Insert and journal writes have separate fixed budgets.
 
 </details>
 
@@ -77,7 +95,7 @@ An exhausted request retry budget fails the stream; reader recovery does not mul
 | Stream `budget.maxChunkRows` | `100_000` | Fails a stream that yields a larger chunk |
 | `ingest({ journalTable })` | `_chkit_ingestion_journal` | Journal table in the configured database |
 
-A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. A configuration error exits `2` before any stream runs, for example a `--tag` that matches no stream, a missing ClickHouse connection, `--from`/`--to` without `--backfill`, or an invalid backfill id or `--max-duration` value. See [`chkit ingest` exit codes](/cli/ingest/#exit-codes). Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.
+A run that exhausts its budget retains committed progress and ends as incomplete. The CLI returns `1` for an incomplete execution; `0` means every selected stream succeeded. A configuration error exits `2` before any stream runs, for example an invalid pipeline definition, a definition module that fails to load, a `--tag` that matches no stream, a missing ClickHouse connection, `--from`/`--to` without `--backfill`, or an invalid backfill id or `--max-duration` value. See [`chkit ingest` exit codes](/cli/ingest/#exit-codes). Cancellation also retains committed progress. Shutdown and terminal journal writes have bounded grace periods, so shutdown can extend past the main duration budget.
 
 Treat the journal as durable operational state. Changing the journal name or configured target identity starts a different checkpoint history. Do not change them as routine retry handling.
 

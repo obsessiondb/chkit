@@ -1,36 +1,15 @@
-import { afterEach, expect, test } from 'bun:test'
-import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
+import { expect, test } from 'bun:test'
+import { runIngestion, selectStreams, type PipelineDefinition } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
-import { google_calendarPipeline } from '../index.js'
-import { googleCalendarConfig } from '../config.js'
+import { googleCalendarConfig, type GoogleCalendarReaderConfig } from '../config.js'
 import { createGoogleCalendarPipeline } from '../pipeline.js'
 
-const originalFetch = globalThis.fetch
-const originalToken = process.env.GOOGLE_CALENDAR_ACCESS_TOKEN
+const fixtureConfig = { ...googleCalendarConfig, accessToken: 'fixture' }
 
-function setFetch(handler: (url: URL) => Response | Promise<Response>, calendar = () => 'calendar@example.com'): void {
-  process.env.GOOGLE_CALENDAR_ACCESS_TOKEN = 'fixture'
-  globalThis.fetch = Object.assign(async (input: Parameters<typeof fetch>[0]) => {
-    const url = new URL(String(input))
-    return url.pathname.endsWith('/events') ? handler(url) : Response.json({ id: calendar() })
-  }, { preconnect: originalFetch.preconnect })
-}
-
-function request(maxChunks?: number) {
-  const pipeline = { ...google_calendarPipeline, retry: { retries: 0 }, streams: google_calendarPipeline.streams.map((stream) => ({ ...stream, ...(maxChunks === undefined ? {} : { budget: { maxChunks } }) })) }
-  return { selected: selectStreams([pipeline], []), backfill: undefined }
-}
-
-afterEach(() => {
-  globalThis.fetch = originalFetch
-  if (originalToken === undefined) delete process.env.GOOGLE_CALENDAR_ACCESS_TOKEN
-  else process.env.GOOGLE_CALENDAR_ACCESS_TOKEN = originalToken
-})
-
-test.serial('Calendar resumes an acknowledged page and promotes only the terminal sync token', async () => {
+test('Calendar resumes an acknowledged page and promotes only the terminal sync token', async () => {
   const urls: URL[] = []
-  setFetch((url) => {
+  const env = calendarEnv((url) => {
     urls.push(url)
     return Response.json(url.searchParams.has('pageToken')
       ? { items: [{ id: 'cancelled', status: 'cancelled' }], nextSyncToken: 'sync-1' }
@@ -38,10 +17,10 @@ test.serial('Calendar resumes an acknowledged page and promotes only the termina
   })
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  const interrupted = await runIngestion(request(1), { journal, destination })
+  const interrupted = await runIngestion(request(1), { ...env, journal, destination })
   expect(interrupted.streams[0]?.outcome).toBe('budget_exhausted')
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ pageToken: 'next' })
-  const resumed = await runIngestion(request(), { journal, destination })
+  const resumed = await runIngestion(request(), { ...env, journal, destination })
   expect(resumed.ok).toBe(true)
   expect(urls.map((url) => url.searchParams.get('pageToken'))).toEqual([null, 'next'])
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ syncToken: 'sync-1', calendarId: 'calendar@example.com' })
@@ -56,10 +35,10 @@ test.serial('Calendar resumes an acknowledged page and promotes only the termina
   }
 })
 
-test.serial('Calendar keeps the input sync token across empty delta pages', async () => {
+test('Calendar keeps the input sync token across empty delta pages', async () => {
   let bootstrap = true
   const inputs: Array<string | null> = []
-  setFetch((url) => {
+  const env = calendarEnv((url) => {
     inputs.push(url.searchParams.get('syncToken'))
     if (bootstrap) return Response.json({ items: [], nextSyncToken: 'sync-1' })
     return Response.json(url.searchParams.has('pageToken')
@@ -68,9 +47,9 @@ test.serial('Calendar keeps the input sync token across empty delta pages', asyn
   })
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(), { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(request(), { ...env, journal, destination })).ok).toBe(true)
   bootstrap = false
-  expect((await runIngestion(request(), { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(request(), { ...env, journal, destination })).ok).toBe(true)
   expect(inputs).toEqual([null, 'sync-1', 'sync-1'])
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ syncToken: 'sync-2' })
 })
@@ -87,22 +66,19 @@ test('Calendar preserves native event structure and replaces an exception with i
   const exception = { id: 'exception', recurringEventId: series.id, originalStartTime: { dateTime: '2026-10-06T09:00:00Z' }, summary: 'Moved occurrence' }
   const cancellation = { id: exception.id, status: 'cancelled', recurringEventId: series.id, originalStartTime: exception.originalStartTime }
   const calls: URL[] = []
-  const pipeline = createGoogleCalendarPipeline(googleCalendarConfig, {
-    config: googleCalendarConfig,
-    token: () => 'fixture',
-    fetch: async (input) => {
-      const url = new URL(input)
-      calls.push(url)
-      return Response.json(url.pathname.endsWith('/events')
-        ? url.searchParams.has('syncToken') ? { items: [cancellation], nextSyncToken: 'sync-2' } : { items: [series, exception], nextSyncToken: 'sync-1' }
-        : { id: 'calendar@example.com' })
-    },
-  })
+  const fetch = async (input: string | URL) => {
+    const url = new URL(input)
+    calls.push(url)
+    return Response.json(url.pathname.endsWith('/events')
+      ? url.searchParams.has('syncToken') ? { items: [cancellation], nextSyncToken: 'sync-2' } : { items: [series, exception], nextSyncToken: 'sync-1' }
+      : { id: 'calendar@example.com' })
+  }
+  const pipeline = createGoogleCalendarPipeline(fixtureConfig)
   const journal = createMemoryJournal(), destination = createMemoryDestination()
   const input = { selected: selectStreams([pipeline], ['resource:events']), backfill: undefined }
-  expect((await runIngestion(input, { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(input, { fetch, journal, destination })).ok).toBe(true)
   expect(destination.tables.get('default.google_calendar_events_raw')?.map((row) => row.raw)).toEqual([series, exception])
-  expect((await runIngestion(input, { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(input, { fetch, journal, destination })).ok).toBe(true)
   const latest = new Map(destination.tables.get('default.google_calendar_events_raw')?.map((row) => [row.id, row.raw]))
   expect(latest.size).toBe(2)
   expect(latest.get(JSON.stringify(['google-calendar.primary', 'calendar@example.com', exception.id]))).toEqual(cancellation)
@@ -110,13 +86,13 @@ test('Calendar preserves native event structure and replaces an exception with i
   expect(calls).toHaveLength(4)
 })
 
-test.serial('Calendar retains its page checkpoint after a lost terminal acknowledgement', async () => {
-  setFetch((url) => Response.json(url.searchParams.has('pageToken')
+test('Calendar retains its page checkpoint after a lost terminal acknowledgement', async () => {
+  const env = calendarEnv((url) => Response.json(url.searchParams.has('pageToken')
     ? { items: [{ id: 'second' }], nextSyncToken: 'sync-1' }
     : { items: [{ id: 'first' }], nextPageToken: 'next' }))
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  const first = await runIngestion(request(), { journal, destination: {
+  const first = await runIngestion(request(), { ...env, journal, destination: {
     insert: async (input) => {
       await destination.insert(input)
       if (input.rows.some((row) => JSON.stringify(row.raw).includes('second'))) throw new Error('fixture acknowledgement lost')
@@ -125,55 +101,55 @@ test.serial('Calendar retains its page checkpoint after a lost terminal acknowle
   expect(first.ok).toBe(false)
   expect(destination.tables.get('default.google_calendar_events_raw')).toHaveLength(2)
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ pageToken: 'next' })
-  expect((await runIngestion(request(), { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(request(), { ...env, journal, destination })).ok).toBe(true)
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ syncToken: 'sync-1' })
   expect(destination.tables.get('default.google_calendar_events_raw')).toHaveLength(2)
 })
 
-test.serial('Calendar reboots an expired sync without deleting raw observations', async () => {
+test('Calendar reboots an expired sync without deleting raw observations', async () => {
   let changed = false
   const inputs: Array<string | null> = []
-  setFetch((url) => {
+  const env = calendarEnv((url) => {
     inputs.push(url.searchParams.get('syncToken'))
     if (!changed) return Response.json({ items: [{ id: 'old' }], nextSyncToken: 'expired' })
     return url.searchParams.has('syncToken') ? new Response('expired', { status: 410 }) : Response.json({ items: [], nextSyncToken: 'fresh' })
   })
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(), { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(request(), { ...env, journal, destination })).ok).toBe(true)
   changed = true
-  expect((await runIngestion(request(), { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(request(), { ...env, journal, destination })).ok).toBe(true)
   expect(inputs).toEqual([null, 'expired', null])
   expect(destination.tables.get('default.google_calendar_events_raw')).toHaveLength(1)
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ syncToken: 'fresh' })
 })
 
-test.serial('Calendar rejects malformed terminal pages and repeated page tokens', async () => {
-  setFetch(() => Response.json({ items: [] }))
-  expect((await runIngestion(request(), { journal: createMemoryJournal(), destination: createMemoryDestination() })).ok).toBe(false)
-  setFetch(() => Response.json({ items: [], nextPageToken: 'same' }))
-  expect((await runIngestion(request(), { journal: createMemoryJournal(), destination: createMemoryDestination() })).ok).toBe(false)
-  expect(() => google_calendarPipeline.streams[0]?.incremental.parseState({ scope: 'another source' })).toThrow('scope')
+test('Calendar rejects malformed terminal pages and repeated page tokens', async () => {
+  const missingSyncToken = calendarEnv(() => Response.json({ items: [] }))
+  expect((await runIngestion(request(), { ...missingSyncToken, journal: createMemoryJournal(), destination: createMemoryDestination() })).ok).toBe(false)
+  const repeatedPageToken = calendarEnv(() => Response.json({ items: [], nextPageToken: 'same' }))
+  expect((await runIngestion(request(), { ...repeatedPageToken, journal: createMemoryJournal(), destination: createMemoryDestination() })).ok).toBe(false)
+  expect(() => fixturePipeline().streams[0]?.incremental.parseState({ scope: 'another source' })).toThrow('scope')
 })
 
-test.serial('Calendar refuses to reuse a checkpoint after primary changes accounts', async () => {
+test('Calendar refuses to reuse a checkpoint after primary changes accounts', async () => {
   let calendar = 'first@example.com'
   let eventRequests = 0
-  setFetch(() => { eventRequests += 1; return Response.json({ items: [], nextSyncToken: 'sync-1' }) }, () => calendar)
+  const env = calendarEnv(() => { eventRequests += 1; return Response.json({ items: [], nextSyncToken: 'sync-1' }) }, () => calendar)
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(), { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(request(), { ...env, journal, destination })).ok).toBe(true)
   calendar = 'second@example.com'
-  const result = await runIngestion(request(), { journal, destination })
+  const result = await runIngestion(request(), { ...env, journal, destination })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('different authenticated calendar')
   expect(eventRequests).toBe(1)
 })
 
-test.serial('Calendar safely restarts a rejected page token within the same sync', async () => {
+test('Calendar safely restarts a rejected page token within the same sync', async () => {
   let reject = true
   const inputs: Array<string | null> = []
-  setFetch((url) => {
+  const env = calendarEnv((url) => {
     inputs.push(url.searchParams.get('pageToken'))
     if (url.searchParams.has('pageToken') && reject) { reject = false; return new Response('invalid page token', { status: 400 }) }
     return Response.json(url.searchParams.has('pageToken')
@@ -182,84 +158,74 @@ test.serial('Calendar safely restarts a rejected page token within the same sync
   })
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  expect((await runIngestion(request(), { journal, destination })).ok).toBe(true)
+  expect((await runIngestion(request(), { ...env, journal, destination })).ok).toBe(true)
   expect(inputs).toEqual([null, 'next', null, 'next'])
   expect(new Set(destination.tables.get('default.google_calendar_events_raw')?.map((row) => row.id)).size).toBe(1)
   expect((await journal.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ syncToken: 'sync-1' })
 })
 
-test.serial('Calendar rejects unsupported explicit occurrence backfill bounds before requesting Google', async () => {
+test('Calendar rejects unsupported explicit occurrence backfill bounds before requesting Google', async () => {
   let requested = false
-  setFetch(() => { requested = true; return Response.json({ items: [], nextSyncToken: 'sync-1' }) })
-  const result = await runIngestion({ ...request(), backfill: { id: 'dates', from: new Date('2026-10-01T00:00:00Z'), to: new Date('2026-10-05T00:00:00Z') } }, { journal: createMemoryJournal(), destination: createMemoryDestination() })
+  const env = calendarEnv(() => { requested = true; return Response.json({ items: [], nextSyncToken: 'sync-1' }) })
+  const result = await runIngestion({ ...request(), backfill: { id: 'dates', from: new Date('2026-10-01T00:00:00Z'), to: new Date('2026-10-05T00:00:00Z') } }, { ...env, journal: createMemoryJournal(), destination: createMemoryDestination() })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('does not accept date bounds')
   expect(requested).toBe(false)
 })
 
-test.serial('Calendar carries reset debt through serialized fresh runs and successful nonterminal replay', async () => {
+test('Calendar carries reset debt through serialized fresh runs and successful nonterminal replay', async () => {
   let rejected = 0
-  setFetch((url) => {
+  const env = calendarEnv((url) => {
     if (url.searchParams.has('pageToken')) { rejected += 1; return new Response('expired page token', { status: 400 }) }
     return Response.json({ items: [{ id: 'first' }], nextPageToken: 'next' })
   })
   const destination = createMemoryDestination()
   const initial = createMemoryJournal()
-  expect((await runIngestion(request(1), { journal: initial, destination })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(1), { ...env, journal: initial, destination })).streams[0]?.outcome).toBe('budget_exhausted')
   const afterInitial = restoredJournal(initial)
-  expect((await runIngestion(request(1), { journal: afterInitial, destination })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(1), { ...env, journal: afterInitial, destination })).streams[0]?.outcome).toBe('budget_exhausted')
   expect((await afterInitial.readCheckpoint('google-calendar.events')).envelope?.state).toMatchObject({ recoveryCount: 1 })
   expect((await afterInitial.readCheckpoint('google-calendar.events')).envelope?.state).not.toHaveProperty('pageToken')
   const afterReset = restoredJournal(afterInitial)
-  expect((await runIngestion(request(1), { journal: afterReset, destination })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion(request(1), { ...env, journal: afterReset, destination })).streams[0]?.outcome).toBe('budget_exhausted')
   const replayCheckpoint = await afterReset.readCheckpoint('google-calendar.events')
   expect(replayCheckpoint.envelope?.state).toMatchObject({ recoveryCount: 1, pageToken: 'next' })
   const afterReplay = restoredJournal(afterReset)
-  const stopped = await runIngestion(request(2), { journal: afterReplay, destination })
+  const stopped = await runIngestion(request(2), { ...env, journal: afterReplay, destination })
   expect(stopped.ok).toBe(false)
   expect(stopped.streams[0]?.error).toContain('across resumed runs')
   expect(stopped.streams[0]?.error).toContain('editable stream chunk budget')
   expect((await afterReplay.readCheckpoint('google-calendar.events')).version).toBe(replayCheckpoint.version)
   expect(rejected).toBe(2)
-  expect(() => google_calendarPipeline.streams[0]?.incremental.parseState({ ...JSON.parse(JSON.stringify(replayCheckpoint.envelope?.state)), recoveryCount: 2 })).toThrow('recoveryCount')
+  expect(() => fixturePipeline().streams[0]?.incremental.parseState({ ...JSON.parse(JSON.stringify(replayCheckpoint.envelope?.state)), recoveryCount: 2 })).toThrow('recoveryCount')
 })
 
-function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {
-  const journal = createMemoryJournal()
-  journal.events.push(...previous.events.map((event) => ({ ...event, checkpoint: event.checkpoint === undefined ? undefined : JSON.parse(JSON.stringify(event.checkpoint)) })))
-  return journal
-}
-
-test('Calendar factory snapshots installation settings and injected credentials while resuming an empty terminal page', async () => {
-  const config = { ...googleCalendarConfig, sourceId: 'calendar.work', streamPrefix: 'calendar.work', calendarId: 'work', maxChunks: 1 }
-  let token = 'initial'
+test('Calendar factory snapshots installation settings and its access token while resuming an empty terminal page', async () => {
+  const settings = { ...googleCalendarConfig, sourceId: 'calendar.work', streamPrefix: 'calendar.work', calendarId: 'work' }
+  const config = { ...settings, maxChunks: 1, accessToken: 'initial' }
   const requests: Array<{ url: URL; authorization: string | null }> = []
-  const deps = {
-    config: googleCalendarConfig,
-    token: () => token,
-    fetch: async (input: string, init: RequestInit) => {
-      const url = new URL(input)
-      requests.push({ url, authorization: new Headers(init.headers).get('Authorization') })
-      return Response.json(url.pathname.endsWith('/events')
-        ? url.searchParams.has('pageToken')
-          ? { items: [], nextSyncToken: 'work-sync' }
-          : { items: [{ id: 'first', custom: { original: true } }], nextPageToken: 'work-next' }
-        : { id: 'work@example.com' })
-    },
+  const fetch = async (input: string | URL, init?: RequestInit) => {
+    const url = new URL(input)
+    requests.push({ url, authorization: new Headers(init?.headers).get('Authorization') })
+    return Response.json(url.pathname.endsWith('/events')
+      ? url.searchParams.has('pageToken')
+        ? { items: [], nextSyncToken: 'work-sync' }
+        : { items: [{ id: 'first', custom: { original: true } }], nextPageToken: 'work-next' }
+      : { id: 'work@example.com' })
   }
-  const pipeline = createGoogleCalendarPipeline(config, deps)
+  const pipeline = createGoogleCalendarPipeline(config)
   config.sourceId = 'edited-after-construction'
   config.streamPrefix = 'edited-after-construction'
   config.calendarId = 'edited-after-construction'
+  config.accessToken = 'edited-after-construction'
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
   expect(pipeline.id).toBe('calendar.work')
   expect(pipeline.streams[0]?.incremental.id).toBe('calendar.work.sync-token')
-  expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:events']), backfill: undefined }, { journal, destination })).streams[0]?.outcome).toBe('budget_exhausted')
+  expect((await runIngestion({ selected: selectStreams([pipeline], ['resource:events']), backfill: undefined }, { fetch, journal, destination })).streams[0]?.outcome).toBe('budget_exhausted')
   expect((await journal.readCheckpoint('calendar.work.events')).envelope?.state).toMatchObject({ pageToken: 'work-next' })
-  token = 'rotated'
-  const resumed = { ...pipeline, streams: pipeline.streams.map((stream) => ({ ...stream, budget: { ...stream.budget, maxChunks: 20 } })) }
-  expect((await runIngestion({ selected: selectStreams([resumed], []), backfill: undefined }, { journal, destination })).ok).toBe(true)
+  const rotated = createGoogleCalendarPipeline({ ...settings, maxChunks: 20, accessToken: 'rotated' })
+  expect((await runIngestion({ selected: selectStreams([rotated], []), backfill: undefined }, { fetch, journal, destination })).ok).toBe(true)
   expect(requests.map(({ authorization }) => authorization)).toEqual(['Bearer initial', 'Bearer initial', 'Bearer rotated', 'Bearer rotated'])
   expect(requests.map(({ url }) => [url.pathname, url.searchParams.get('pageToken')])).toEqual([
     ['/calendar/v3/calendars/work', null], ['/calendar/v3/calendars/work%40example.com/events', null],
@@ -274,19 +240,16 @@ test('Calendar factory snapshots installation settings and injected credentials 
 
 test('Calendar factory rejects source changes under an existing stream prefix before another request', async () => {
   let requests = 0
-  const deps = {
-    config: googleCalendarConfig, token: () => 'fixture',
-    fetch: async (input: string) => {
-      requests += 1
-      return Response.json(new URL(input).pathname.endsWith('/events') ? { items: [], nextSyncToken: 'first' } : { id: 'calendar@example.com' })
-    },
+  const fetch = async (input: string | URL) => {
+    requests += 1
+    return Response.json(new URL(input).pathname.endsWith('/events') ? { items: [], nextSyncToken: 'first' } : { id: 'calendar@example.com' })
   }
   const journal = createMemoryJournal()
   const destination = createMemoryDestination()
-  const pipeline = createGoogleCalendarPipeline(googleCalendarConfig, deps)
-  expect((await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination })).ok).toBe(true)
-  const changed = createGoogleCalendarPipeline({ ...googleCalendarConfig, sourceId: 'different-installation' }, deps)
-  const result = await runIngestion({ selected: selectStreams([changed], []), backfill: undefined }, { journal, destination })
+  const pipeline = createGoogleCalendarPipeline(fixtureConfig)
+  expect((await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { fetch, journal, destination })).ok).toBe(true)
+  const changed = createGoogleCalendarPipeline({ ...fixtureConfig, sourceId: 'different-installation' })
+  const result = await runIngestion({ selected: selectStreams([changed], []), backfill: undefined }, { fetch, journal, destination })
   expect(result.ok).toBe(false)
   expect(result.streams[0]?.error).toContain('scope changed')
   expect(requests).toBe(2)
@@ -296,16 +259,15 @@ test('Calendar retries Google 403 rate-limit reasons like 429 and keeps other 40
   for (const [reason, retried] of [['rateLimitExceeded', true], ['userRateLimitExceeded', true], ['forbidden', false], ['quotaExceeded', false]] as const) {
     let rejected = false
     const requests: string[] = []
-    const pipeline = createGoogleCalendarPipeline(googleCalendarConfig, { config: googleCalendarConfig, token: () => 'fixture', fetch: async (input) => {
-      const url = new URL(input)
-      if (!url.pathname.endsWith('/events')) return Response.json({ id: 'calendar@example.com' })
+    const env = calendarEnv((url) => {
       requests.push(url.pathname)
       if (rejected) return Response.json({ items: [{ id: 'after-limit' }], nextSyncToken: 'sync-1' })
       rejected = true
       return Response.json({ error: { errors: [{ domain: 'usageLimits', reason, message: reason }], code: 403, message: reason } }, { status: 403, headers: { 'Retry-After': '0' } })
-    } })
+    })
+    const pipeline = createGoogleCalendarPipeline(fixtureConfig)
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    const result = await runIngestion({ selected: selectStreams([{ ...pipeline, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } }], []), backfill: undefined }, { journal, destination })
+    const result = await runIngestion({ selected: selectStreams([{ ...pipeline, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } }], []), backfill: undefined }, { ...env, journal, destination })
     expect(result.ok, reason).toBe(retried)
     expect(requests, reason).toHaveLength(retried ? 2 : 1)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass), reason).toEqual(retried ? ['rate_limited'] : [])
@@ -313,8 +275,85 @@ test('Calendar retries Google 403 rate-limit reasons like 429 and keeps other 40
   }
 })
 
-test('Calendar factory rejects an invalid chunk budget before any request', () => {
-  for (const maxChunks of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY, Number.MAX_SAFE_INTEGER + 1]) {
-    expect(() => createGoogleCalendarPipeline({ ...googleCalendarConfig, maxChunks }, { config: googleCalendarConfig, token: () => 'fixture', fetch: async () => { throw new Error('must not fetch') } })).toThrow('maxChunks')
+test('Calendar rejects an invalid chunk budget before any request', async () => {
+  for (const maxChunks of [0, -1, 1.5, Number.NaN, Number.POSITIVE_INFINITY]) {
+    expect(() => request(undefined, fixturePipeline({ ...fixtureConfig, maxChunks }))).toThrow('maxChunks')
+  }
+  let requests = 0
+  const unsafe = fixturePipeline({ ...fixtureConfig, maxChunks: Number.MAX_SAFE_INTEGER + 1 })
+  const result = await runIngestion(request(undefined, unsafe), { fetch: async () => { requests += 1; return Response.json({}) }, journal: createMemoryJournal(), destination: createMemoryDestination() })
+  expect(result.streams[0]?.outcome).toBe('failed')
+  expect(result.streams[0]?.error).toContain('at maxChunks')
+  expect(requests).toBe(0)
+})
+
+test('Calendar fails a missing or blank access token before any request without retrying', async () => {
+  for (const accessToken of [undefined, '  ']) {
+    let requests = 0
+    const journal = createMemoryJournal()
+    const pipeline = createGoogleCalendarPipeline({ ...fixtureConfig, accessToken })
+    const result = await runIngestion(request(undefined, pipeline), { fetch: async () => { requests += 1; return Response.json({}) }, journal, destination: createMemoryDestination() })
+    expect(result.streams[0]?.outcome).toBe('failed')
+    expect(result.streams[0]?.error).toContain('Set GOOGLE_CALENDAR_ACCESS_TOKEN or pass accessToken.')
+    expect(requests).toBe(0)
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
   }
 })
+
+test('Calendar checks its configuration when a stream runs, not when the module loads or a stream is selected', async () => {
+  let requests = 0
+  const pipeline = createGoogleCalendarPipeline({ ...fixtureConfig, sourceId: ' ', calendarId: '' })
+  const selected = selectStreams([pipeline], [])
+  expect(selected).toHaveLength(1)
+  const result = await runIngestion({ selected, backfill: undefined }, { fetch: async () => { requests += 1; return Response.json({}) }, journal: createMemoryJournal(), destination: createMemoryDestination() })
+  expect(result.streams.every((stream) => stream.outcome === 'failed' && /at sourceId[\s\S]*at calendarId/.test(stream.error ?? ''))).toBe(true)
+  expect(requests).toBe(0)
+})
+
+test('Calendar fails a malformed provider payload at once and retries only a transient response', async () => {
+  const run = async (events: () => Response) => {
+    const pipeline = createGoogleCalendarPipeline(fixtureConfig)
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ selected: selectStreams([{ ...pipeline, retry: { retries: 2, minTimeout: 0 } }], []), backfill: undefined }, { ...calendarEnv(events), journal, destination: createMemoryDestination() })
+    return { result, retries: journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass) }
+  }
+
+  let calls = 0
+  const malformed = await run(() => { calls += 1; return Response.json({ items: 'not-a-list', nextSyncToken: 'sync-1' }) })
+  expect(malformed.result.streams[0]?.outcome).toBe('failed')
+  expect(malformed.result.streams[0]?.error).toContain('Invalid input: expected array, received string')
+  expect(calls).toBe(1)
+  expect(malformed.retries).toEqual([])
+
+  let unavailable = true
+  const flaky = await run(() => {
+    if (unavailable) { unavailable = false; return new Response('busy', { status: 503 }) }
+    return Response.json({ items: [{ id: 'after-outage' }], nextSyncToken: 'sync-1' })
+  })
+  expect(flaky.result.ok).toBe(true)
+  expect(flaky.retries).toEqual(['transient'])
+})
+
+function fixturePipeline(config: GoogleCalendarReaderConfig = fixtureConfig) {
+  return { ...createGoogleCalendarPipeline(config), retry: { retries: 0 } }
+}
+
+function calendarEnv(events: (url: URL) => Response | Promise<Response>, calendar = () => 'calendar@example.com') {
+  return {
+    fetch: async (input: string | URL) => {
+      const url = new URL(input)
+      return url.pathname.endsWith('/events') ? events(url) : Response.json({ id: calendar() })
+    },
+  }
+}
+
+function request(maxChunks?: number, pipeline: PipelineDefinition = fixturePipeline()) {
+  const bounded = maxChunks === undefined ? pipeline : { ...pipeline, streams: pipeline.streams.map((stream) => ({ ...stream, budget: { ...stream.budget, maxChunks } })) }
+  return { selected: selectStreams([bounded], []), backfill: undefined }
+}
+
+function restoredJournal(previous: ReturnType<typeof createMemoryJournal>) {
+  const journal = createMemoryJournal()
+  journal.events.push(...previous.events.map((event) => ({ ...event, checkpoint: event.checkpoint === undefined ? undefined : JSON.parse(JSON.stringify(event.checkpoint)) })))
+  return journal
+}

@@ -1,16 +1,27 @@
-export interface CirclebackConfig {
+import { z } from 'zod'
+
+const missingApiKey = 'Set CIRCLEBACK_API_KEY or pass apiKey.'
+const apiKey = z.string().optional().pipe(z.string({ error: missingApiKey }).trim().min(1, missingApiKey))
+
+export const circlebackConfigSchema = z.object({
   /** Stable account/installation namespace. Use a new sourceId when changing accounts or filters. */
-  sourceId: string
+  sourceId: z.string().refine((value) => value.trim() !== '', 'must not be blank'),
   /** Schema setup only; runtime pipeline factories do not change raw tables. */
-  database: string
-  ownership: 'All' | 'Mine' | 'Shared'
-}
+  database: z.string(),
+  ownership: z.enum(['All', 'Mine', 'Shared']),
+  /** Circleback API key; read when a stream runs, never by schema commands. */
+  apiKey,
+})
 
-export type CirclebackReaderConfig = Omit<CirclebackConfig, 'database'>
+export type CirclebackConfig = z.input<typeof circlebackConfigSchema>
 
-// Credentials are read at request time; collections are fully revisited on every run.
+export const circlebackReaderConfigSchema = circlebackConfigSchema.omit({ database: true })
+export type CirclebackReaderConfig = z.input<typeof circlebackReaderConfigSchema>
+
+// Collections are fully revisited on every run.
 export const circlebackConfig: CirclebackConfig = {
   sourceId: 'circleback',
   database: 'default',
   ownership: 'All',
+  apiKey: process.env.CIRCLEBACK_API_KEY,
 }

@@ -5,8 +5,9 @@
   "title": "Attio",
   "description": "Editable Attio CRM schemas, raw data readers, typed views, and independent streams for People, Companies, configured custom types, and workspace resources.",
   "dependencies": [
-    "@chkit/core@^0.2.0-beta.10",
-    "@chkit/plugin-ingest@^0.2.0-beta.10"
+    "@chkit/core@^0.2.0-beta.12",
+    "@chkit/plugin-ingest@^0.2.0-beta.12",
+    "zod@^4.3.6"
   ],
   "files": [
     {
@@ -33,6 +34,11 @@
       "path": "pipeline.ts",
       "type": "registry:file",
       "target": "src/integrations/attio/pipeline.ts"
+    },
+    {
+      "path": "sources/common.ts",
+      "type": "registry:file",
+      "target": "src/integrations/attio/sources/common.ts"
     },
     {
       "path": "sources/objects.ts",
@@ -95,8 +101,17 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.2.0",
+      "version": "0.3.0",
       "changelog": [
+        {
+          "version": "0.3.0",
+          "changes": [
+            "Read configuration and the API token when a stream runs, so `generate`, `migrate`, and `chkit check` never depend on them; invalid settings or a missing token fail that run before any request. Requires zod 4 and chkit 0.2.0-beta.12.",
+            "Send requests through the ingestion runtime, which retries only network failures, timeouts, and retryable HTTP statuses; malformed payloads and missing identities fail at once.",
+            "Set `apiToken` in the configuration to use another token, for example for a second installation; it defaults to `ATTIO_API_TOKEN`.",
+            "Send requests without fixed pauses; a `429` pauses the pipeline until its `Retry-After`."
+          ]
+        },
         {
           "version": "0.2.0",
           "changes": [
@@ -130,8 +145,8 @@
       "logo": "https://chkit.obsessiondb.com/logos/attio.svg",
       "language": "typescript",
       "license": "MIT",
-      "chkit": "^0.2.0-beta.10",
-      "ingest": "^0.2.0-beta.10",
+      "chkit": "^0.2.0-beta.12",
+      "ingest": "^0.2.0-beta.12",
       "clickhouse": ">=25.3.0",
       "root": "src/integrations/attio",
       "entry": "index.ts",

@@ -15,6 +15,25 @@ Use fixture responses and the in-memory adapters to test source behavior before 
 
 Import the testing adapters from `@chkit/plugin-ingest/testing`. `runIngestion`, `selectStreams`, and the ClickHouse runtime adapters are public APIs; embedding them means the host supplies the journal, destination, cancellation, and other runtime settings normally provided by the CLI.
 
+## Fixture responses
+
+Pass a `fetch` to `runIngestion` to answer the source's `context.fetch` requests. The pipeline factory from [Incremental syncs](/api-sync/incremental-syncs/#timestamp-windows) and its client stay exactly as in production; the test passes its own config with a fixture token:
+
+```ts
+const pipeline = createHelpdeskPipeline({ ...helpdeskConfig, baseUrl: 'https://helpdesk.example/', token: 'fixture' })
+const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, {
+  journal: createMemoryJournal(),
+  destination: createMemoryDestination(),
+  fetch: async (url) => new URL(url).pathname === '/tickets'
+    ? Response.json({ data: [{ id: 't1', updated_at: '2026-01-01T00:00:00Z' }], next_cursor: null })
+    : new Response('not found', { status: 404 }),
+})
+```
+
+Return a `503` to exercise a retried request, and a malformed body to check that validation fails the stream without retries.
+
+To call a client or reader directly, for example to inspect chunks one at a time, build its context with `createSourceContext({ fetch })` or `createReadContext({ fetch, selection })` from `@chkit/plugin-ingest/testing`. Requests behave as they do in a run, including `HttpError` for unsuccessful responses, but are not retried unless the options pass a `retry` policy.
+
 ## Example: a lost acknowledgement
 
 Save as `src/ingestion.test.ts` and run `bun test src/ingestion.test.ts`. The memory destination accepts the second row, then the simulated transport reports failure. A new run must resume from the previous durable checkpoint and replay the ambiguous write without adding a duplicate:
@@ -46,7 +65,6 @@ test('replays an acknowledged write whose response was lost', async () => {
       }
     },
   })
-  // Disable reader restarts so the first execution exposes the write failure.
   const pipeline = definePipeline({ id: 'fixture', streams: [stream], retry: { retries: 0 } })
   const selected = selectStreams([pipeline], [])
   const journal = createMemoryJournal()

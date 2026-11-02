@@ -1,12 +1,12 @@
 import { expect, test } from 'bun:test'
-import { IngestConfigError, runIngestion, selectStreams } from '@chkit/plugin-ingest'
+import { runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { createCirclebackPipeline, circlebackPipeline } from '../index.js'
-import { circlebackConfig, type CirclebackConfig } from '../config.js'
-import { defaultCirclebackClientDeps } from '../client.js'
+import { circlebackConfig, type CirclebackReaderConfig } from '../config.js'
 
 const cutoff = new Date('2026-01-02T00:00:00Z')
+const fixtureConfig = { ...circlebackConfig, apiKey: 'fixture' }
 const resources = ['meetings', 'meeting_transcripts', 'action_items', 'people', 'companies']
 const meeting = { id: 'meeting-a', name: 'Old meeting', updatedAt: '2020-01-01T00:00:00Z', notes: 'Provider notes',
   tags: [{ id: 10, name: 'Customer' }, { id: 11, name: 'Follow up' }], attendees: [{ profileId: 1 }],
@@ -23,11 +23,11 @@ type Pipeline = ReturnType<typeof createCirclebackPipeline>
 type Responder = (url: URL, init: RequestInit) => Response | Promise<Response>
 
 test('Circleback publishes five raw resources with scoped native IDs and string tag names', async () => {
-  const calls: URL[] = [], pipeline = fixturePipeline((url, init) => { calls.push(url); return fixtureResponse(url, init) })
+  const calls: URL[] = [], env = circlebackEnv((url, init) => { calls.push(url); return fixtureResponse(url, init) }), pipeline = fixturePipeline()
   expect(circlebackPipeline.streams).toHaveLength(5)
   expect(pipeline.streams.map((stream) => stream.id).sort()).toEqual(resources.map((resource) => `circleback.${resource}`).sort())
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const result = await runIngestion(request(pipeline), { journal, destination, now: () => cutoff })
+  const result = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })
   expect(result.ok, JSON.stringify(result)).toBe(true)
   const expected = {
     meetings: [{ id: rowId('meeting-a'), raw: envelope({ ...meeting, tags: ['Customer', 'Follow up'] }) }],
@@ -51,13 +51,13 @@ test('Circleback publishes five raw resources with scoped native IDs and string 
 test('all resources run alone and reversing stream order preserves their raw observations', async () => {
   const pipeline = fixturePipeline(), combined = createMemoryDestination()
   expect((await runIngestion(request({ ...pipeline, streams: [...pipeline.streams].reverse() }),
-    { journal: createMemoryJournal(), destination: combined, now: () => cutoff })).ok).toBe(true)
+    { ...circlebackEnv(), journal: createMemoryJournal(), destination: combined, now: () => cutoff })).ok).toBe(true)
   for (const resource of resources) {
     const calls: URL[] = [], destination = createMemoryDestination()
-    const isolated = fixturePipeline((url, init) => { calls.push(url); return fixtureResponse(url, init) })
-    const selected = request(isolated, resource)
+    const env = circlebackEnv((url, init) => { calls.push(url); return fixtureResponse(url, init) })
+    const selected = request(pipeline, resource)
     expect(selected.selected.map((entry) => entry.stream.id)).toEqual([`circleback.${resource}`])
-    expect((await runIngestion(selected, { journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(selected, { ...env, journal: createMemoryJournal(), destination, now: () => cutoff })).ok).toBe(true)
     expect(destination.tables.size).toBe(1)
     expect(destination.tables.get(`default.circleback_${resource}_raw`)?.map(({ id, raw }) => ({ id, raw })))
       .toEqual(combined.tables.get(`default.circleback_${resource}_raw`)?.map(({ id, raw }) => ({ id, raw })))
@@ -71,7 +71,7 @@ test('all resources run alone and reversing stream order preserves their raw obs
 
 test('action items enumerate both native completion statuses for anyone and follow each partition to exhaustion', async () => {
   const calls: URL[] = []
-  const pipeline = fixturePipeline((url) => {
+  const env = circlebackEnv((url) => {
     calls.push(url)
     expect(url.searchParams.get('assigneeType')).toBe('Anyone')
     const status = url.searchParams.get('status')
@@ -80,8 +80,9 @@ test('action items enumerate both native completion statuses for anyone and foll
     if (url.searchParams.has('cursor')) return Response.json([{ ...item, id: item.id + 10 }])
     return Response.json([item], { headers: { Link: `</api/action-items?assigneeType=Anyone&status=${status}&cursor=next>; rel="next"` } })
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  expect((await runIngestion(request(pipeline, 'action_items'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'action_items'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(calls.map((url) => [url.searchParams.get('status'), url.searchParams.get('cursor')])).toEqual([
     ['PENDING', null], ['PENDING', 'next'], ['DONE', null], ['DONE', 'next'],
   ])
@@ -92,13 +93,14 @@ test('action items enumerate both native completion statuses for anyone and foll
 test('cursor-only continuations retain ownership and completion filters and conflicting links fail visibly', async () => {
   for (const resource of ['meetings', 'action_items']) {
     const calls: URL[] = []
-    const pipeline = fixturePipeline((url) => {
+    const env = circlebackEnv((url) => {
       calls.push(url)
       if (resource === 'action_items' && url.searchParams.get('status') === 'PENDING') return Response.json([])
       if (url.searchParams.has('cursor')) return Response.json(resource === 'meetings' ? [meeting] : [done])
       return Response.json([], { headers: { Link: `<${url.pathname}?cursor=next>; rel="next"` } })
     })
-    expect((await runIngestion(request(pipeline, resource), { journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
+    const pipeline = fixturePipeline()
+    expect((await runIngestion(request(pipeline, resource), { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(true)
     const continued = calls.at(-1)
     expect(continued?.searchParams.get('cursor')).toBe('next')
     if (resource === 'meetings') expect(continued?.searchParams.get('ownership')).toBe('All')
@@ -109,12 +111,13 @@ test('cursor-only continuations retain ownership and completion filters and conf
   }
   for (const [resource, conflict] of [['meetings', 'ownership=Mine'], ['action_items', 'status=DONE'], ['action_items', 'assigneeType=Me']] satisfies [string, string][]) {
     let calls = 0
-    const pipeline = fixturePipeline((url) => {
+    const env = circlebackEnv((url) => {
       calls++
       return Response.json([], { headers: { Link: `<${url.pathname}?cursor=next&${conflict}>; rel="next"` } })
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
-    expect((await runIngestion(request(pipeline, resource), { journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, resource), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(false)
     expect(calls).toBe(1)
     expect((await journal.readCheckpoint(`circleback.${resource}`)).lastSuccessSeq).toBe(0)
   }
@@ -123,7 +126,7 @@ test('cursor-only continuations retain ownership and completion filters and conf
 test('late transcripts on unchanged old meetings are revisited without running the meetings stream', async () => {
   let available = false
   const starts: string[] = [], calls: string[] = []
-  const pipeline = fixturePipeline((url) => {
+  const env = circlebackEnv((url) => {
     calls.push(url.pathname)
     if (url.pathname.endsWith('/transcript')) {
       if (!available) return new Response('unavailable', { status: url.pathname.includes('/meeting-a/') ? 403 : 404 })
@@ -132,14 +135,15 @@ test('late transcripts on unchanged old meetings are revisited without running t
     starts.push(url.search)
     return Response.json([meeting, { ...meeting, id: 'meeting-b' }])
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'meeting_transcripts')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(destination.tables.get('default.circleback_meeting_transcripts_raw')?.map((row) => row.raw)).toEqual([
     { source_id: 'circleback', meeting_id: 'meeting-a', kind: 'availability', status: 'forbidden' },
     { source_id: 'circleback', meeting_id: 'meeting-b', kind: 'availability', status: 'not_found' },
   ])
   available = true
-  expect((await runIngestion(selected, { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
   expect(starts).toEqual(['?ownership=All', '?ownership=All'])
   expect(calls.filter((path) => path.endsWith('/transcript'))).toHaveLength(4)
   expect(destination.tables.get('default.circleback_meeting_transcripts_raw')?.slice(-4).map((row) => row.raw)).toEqual([
@@ -154,12 +158,13 @@ test('late transcripts on unchanged old meetings are revisited without running t
 
 test('forbidden and not-found observations preserve prior transcript content while a successful empty transcript replaces it', async () => {
   let status = 200, empty = false
-  const pipeline = fixturePipeline((url) => url.pathname === '/api/meetings' ? Response.json([meeting])
+  const env = circlebackEnv((url) => url.pathname === '/api/meetings' ? Response.json([meeting])
     : status === 200 ? Response.json(empty ? [] : transcript) : new Response('unavailable', { status }))
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'meeting_transcripts')
   for (const nextStatus of [200, 403, 404, 200]) {
     status = nextStatus
-    expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+    expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
     const snapshots = destination.tables.get('default.circleback_meeting_transcripts_raw')?.filter((row) => row.id === rowId(meeting.id)) ?? []
     expect(snapshots.at(-1)?.raw).toMatchObject({ kind: 'transcript', status: 'available', data: empty ? [] : transcript })
     if (status === 404) empty = true
@@ -174,15 +179,16 @@ test('forbidden and not-found observations preserve prior transcript content whi
 test('a transcript source failure leaves its full sync incomplete while all other resource streams succeed', async () => {
   let fail = true
   const transcriptCalls: string[] = []
-  const pipeline = fixturePipeline((url, init) => {
+  const env = circlebackEnv((url, init) => {
     if (url.pathname.endsWith('/transcript')) {
       transcriptCalls.push(url.pathname)
       if (fail) return new Response('unavailable', { status: 500 })
     }
     return fixtureResponse(url, init)
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const failed = await runIngestion(request(pipeline), { journal, destination, now: () => cutoff })
+  const failed = await runIngestion(request(pipeline), { ...env, journal, destination, now: () => cutoff })
   expect(failed.ok).toBe(false)
   expect(failed.streams.filter((stream) => stream.outcome === 'failed').map((stream) => stream.streamId)).toEqual(['circleback.meeting_transcripts'])
   expect(destination.tables.get('default.circleback_meetings_raw')?.[0]?.raw).toEqual(envelope({ ...meeting, tags: ['Customer', 'Follow up'] }))
@@ -191,21 +197,22 @@ test('a transcript source failure leaves its full sync incomplete while all othe
     expect((await journal.readCheckpoint(`circleback.${resource}`)).lastSuccessSeq).toBeGreaterThan(0)
   }
   fail = false
-  expect((await runIngestion(request(pipeline, 'meeting_transcripts'), { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(request(pipeline, 'meeting_transcripts'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(transcriptCalls).toEqual(['/api/meeting/meeting-a/transcript', '/api/meeting/meeting-a/transcript'])
 })
 
 test('a failed transcript write replays its own parent discovery before recording successful completion', async () => {
   const starts: string[] = []
-  const pipeline = fixturePipeline((url, init) => {
+  const env = circlebackEnv((url, init) => {
     if (url.pathname === '/api/meetings') starts.push(url.search)
     return fixtureResponse(url, init)
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'meeting_transcripts')
-  expect((await runIngestion(selected, { journal, destination: { insert: async () => { throw new IngestConfigError('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('circleback.meeting_transcripts')).lastSuccessSeq).toBe(0)
   expect((await journal.readCheckpoint('circleback.meeting_transcripts')).envelope).toBeUndefined()
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   expect(starts).toEqual(['?ownership=All', '?ownership=All'])
   expect(destination.tables.get('default.circleback_meeting_transcripts_raw')).toHaveLength(2)
 })
@@ -213,21 +220,22 @@ test('a failed transcript write replays its own parent discovery before recordin
 test('full meeting reads replay from page one after source and sink failures and retain changed observations', async () => {
   let fail = true, changed = false
   const starts: string[] = [], second = { ...meeting, id: 'meeting-b' }
-  const pipeline = fixturePipeline((url) => {
+  const env = circlebackEnv((url) => {
     if (url.searchParams.has('cursor')) return fail ? new Response('denied', { status: 403 }) : Response.json([second])
     starts.push(url.search)
     return Response.json([{ ...meeting, notes: changed ? 'Edited without an updatedAt change' : meeting.notes }],
       { headers: { Link: '</api/meetings?cursor=next>; rel="next"' } })
   })
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'meetings')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('circleback.meetings')).lastSuccessSeq).toBe(0)
   fail = false
-  expect((await runIngestion(selected, { journal, destination: { insert: async () => { throw new IngestConfigError('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
+  expect((await runIngestion(selected, { ...env, journal, destination: { insert: async () => { throw new Error('sink rejected') } }, now: () => cutoff })).ok).toBe(false)
   expect((await journal.readCheckpoint('circleback.meetings')).lastSuccessSeq).toBe(0)
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   changed = true
-  expect((await runIngestion(selected, { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
   expect(starts).toEqual(Array(4).fill('?ownership=All'))
   expect((await journal.readCheckpoint('circleback.meetings')).envelope).toBeUndefined()
   expect(destination.tables.get('default.circleback_meetings_raw')?.filter((row) => row.id === rowId('meeting-a')).map((row) => row.raw)).toEqual([
@@ -237,10 +245,10 @@ test('full meeting reads replay from page one after source and sink failures and
 })
 
 test('empty full resources record completion and scan again without custom provider state', async () => {
-  const calls: string[] = [], pipeline = fixturePipeline((url) => { calls.push(url.pathname); return Response.json([]) })
+  const calls: string[] = [], env = circlebackEnv((url) => { calls.push(url.pathname); return Response.json([]) }), pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination()
   for (const now of [cutoff, new Date('2026-01-03')]) {
-    expect((await runIngestion(request(pipeline), { journal, destination, now: () => now })).ok).toBe(true)
+    expect((await runIngestion(request(pipeline), { ...env, journal, destination, now: () => now })).ok).toBe(true)
   }
   expect(destination.tables.size).toBe(0)
   for (const resource of resources) {
@@ -253,13 +261,14 @@ test('empty full resources record completion and scan again without custom provi
 
 test('company domains stay stable while optional native numeric IDs preserve downstream joins', async () => {
   let identified = false
-  const pipeline = fixturePipeline((url) => url.pathname === '/api/companies'
+  const env = circlebackEnv((url) => url.pathname === '/api/companies'
     ? Response.json([{ ...company, ...(identified ? { id: 3 } : {}) }])
     : Response.json({ ...company, externalLinks: [], people: [] }))
+  const pipeline = fixturePipeline()
   const journal = createMemoryJournal(), destination = createMemoryDestination(), selected = request(pipeline, 'companies')
-  expect((await runIngestion(selected, { journal, destination, now: () => cutoff })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => cutoff })).ok).toBe(true)
   identified = true
-  expect((await runIngestion(selected, { journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
+  expect((await runIngestion(selected, { ...env, journal, destination, now: () => new Date('2026-01-03') })).ok).toBe(true)
   const rows = destination.tables.get('default.circleback_companies_raw') ?? []
   expect(rows.map((row) => row.id)).toEqual([rowId('initech.com'), rowId('initech.com')])
   expect(rows.map((row) => row.raw)).toEqual([
@@ -271,13 +280,14 @@ test('company domains stay stable while optional native numeric IDs preserve dow
 
 test('company detail failures and conflicting native IDs cannot complete or fabricate company joins', async () => {
   for (const mode of ['forbidden', 'conflicting', 'different-domain']) {
-    const pipeline = fixturePipeline((url) => {
+    const env = circlebackEnv((url) => {
       if (url.pathname === '/api/companies') return Response.json([{ ...company, id: 3 }])
       if (mode === 'forbidden') return new Response('denied', { status: 403 })
       return Response.json({ ...companyDetail, ...(mode === 'different-domain' ? { domain: 'other.example' } : { people: [{ ...person, companyId: 4 }] }) })
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion(request(pipeline, 'companies'), { journal, destination, now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, 'companies'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
     expect(destination.tables.size).toBe(0)
     expect((await journal.readCheckpoint('circleback.companies')).lastSuccessSeq).toBe(0)
   }
@@ -286,14 +296,15 @@ test('company detail failures and conflicting native IDs cannot complete or fabr
 test('same-person detail retains raw external references and cannot publish a different or inaccessible person', async () => {
   for (const mode of ['denied', 'mismatched-id', 'missing-links']) {
     const calls: string[] = []
-    const pipeline = fixturePipeline((url) => {
+    const env = circlebackEnv((url) => {
       calls.push(url.pathname)
       if (url.pathname === '/api/people') return Response.json([person])
       if (mode === 'denied') return new Response('denied', { status: 403 })
       return Response.json({ ...personDetail, ...(mode === 'mismatched-id' ? { id: 2 } : { externalLinks: null }) })
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion(request(pipeline, 'people'), { journal, destination, now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, 'people'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
     expect(calls).toEqual(['/api/people', '/api/person/1'])
     expect(destination.tables.size).toBe(0)
     expect((await journal.readCheckpoint('circleback.people')).lastSuccessSeq).toBe(0)
@@ -301,21 +312,21 @@ test('same-person detail retains raw external references and cannot publish a di
 })
 
 test('factory configuration, tokens and selected resource progress stay independent between installations', async () => {
-  const config: CirclebackConfig = { ...circlebackConfig, sourceId: 'circleback.team', ownership: 'Shared' }
+  const config: CirclebackReaderConfig = { ...fixtureConfig, sourceId: 'circleback.team', ownership: 'Shared', apiKey: 'team-key' }
   const calls: URL[] = []
-  const pipeline = createCirclebackPipeline(config, { ...defaultCirclebackClientDeps, token: () => 'team-key', fetch: async (url, init) => {
-    expect(new Headers(init.headers).get('authorization')).toBe('Bearer team-key')
-    calls.push(new URL(url))
+  const env = circlebackEnv((url, init) => {
+    if (new Headers(init.headers).get('authorization') !== 'Bearer team-key') return new Response('denied', { status: 403 })
+    calls.push(url)
     return Response.json([meeting])
-  } })
+  })
+  const pipeline = createCirclebackPipeline(config)
   config.sourceId = 'changed'
   config.ownership = 'Mine'
-  const failing = createCirclebackPipeline({ ...circlebackConfig, sourceId: 'circleback.denied' }, {
-    ...defaultCirclebackClientDeps, token: () => 'denied', fetch: async () => new Response('denied', { status: 403 }),
-  })
+  config.apiKey = 'changed'
+  const failing = createCirclebackPipeline({ ...fixtureConfig, sourceId: 'circleback.denied', apiKey: 'denied' })
   const selected = selectStreams([failing, pipeline], ['resource:meetings']).map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 0 } } }))
   const journal = createMemoryJournal(), destination = createMemoryDestination()
-  const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => cutoff })
   expect(result.streams.map((stream) => stream.outcome)).toEqual(['failed', 'succeeded'])
   expect(calls.map((url) => url.searchParams.get('ownership'))).toEqual(['Shared'])
   expect(destination.tables.get('default.circleback_meetings_raw')?.[0]?.id).toBe(rowId(meeting.id, 'circleback.team'))
@@ -331,7 +342,7 @@ test('empty Link pages continue while cyclic, cross-collection, foreign and malf
   for (const mode of ['empty-first', 'same-initial', 'cyclic', 'cross-collection', 'foreign', 'malformed', 'multiple-next']) {
     const calls: string[] = []
     let details = 0
-    const pipeline = fixturePipeline((url) => {
+    const env = circlebackEnv((url) => {
       if (url.pathname.startsWith('/api/person/')) { details++; return Response.json(personDetail) }
       calls.push(url.toString())
       if (mode === 'empty-first' && url.searchParams.has('cursor')) return Response.json([person])
@@ -340,9 +351,10 @@ test('empty Link pages continue while cyclic, cross-collection, foreign and malf
       const link = mode === 'malformed' ? 'not-a-link; rel="next"' : mode === 'multiple-next' ? `<${next}>; rel="next", </api/people?cursor=another>; rel="next"` : `<${next}>; rel="next"`
       return Response.json([], { headers: { Link: link } })
     })
+    const pipeline = fixturePipeline()
     const selected = request(pipeline, 'people').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    const result = await runIngestion({ selected, backfill: undefined }, { journal, destination, now: () => cutoff })
+    const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination, now: () => cutoff })
     expect(result.ok).toBe(mode === 'empty-first')
     expect(calls).toHaveLength(['empty-first', 'cyclic'].includes(mode) ? 2 : 1)
     expect(details).toBe(mode === 'empty-first' ? 1 : 0)
@@ -359,9 +371,10 @@ test('malformed collections, identities, tag names and unsupported action status
     ['action_items', [{ ...pending, status: 'DONE' }]], ['action_items', [{ ...pending, meetingIds: null }]],
   ] satisfies [string, unknown][]) {
     let calls = 0
-    const pipeline = fixturePipeline(() => { calls++; return Response.json(payload) })
+    const env = circlebackEnv(() => { calls++; return Response.json(payload) })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal()
-    expect((await runIngestion(request(pipeline, resource), { journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, resource), { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(false)
     expect(calls).toBe(1)
     expect((await journal.readCheckpoint(`circleback.${resource}`)).lastSuccessSeq).toBe(0)
   }
@@ -370,13 +383,14 @@ test('malformed collections, identities, tag names and unsupported action status
 test('HTTP200 malformed transcripts fail without publishing an availability snapshot or completing the stream', async () => {
   for (const payload of [null, { error: 'denied' }, [{ speaker: null, text: 'Words' }], [{ speaker: 3, text: 'Words', timestamp: 1 }], [{ speaker: null, text: {}, timestamp: 1 }]]) {
     let calls = 0
-    const pipeline = fixturePipeline((url) => {
+    const env = circlebackEnv((url) => {
       if (url.pathname === '/api/meetings') return Response.json([meeting])
       calls++
       return Response.json(payload)
     })
+    const pipeline = fixturePipeline()
     const journal = createMemoryJournal(), destination = createMemoryDestination()
-    expect((await runIngestion(request(pipeline, 'meeting_transcripts'), { journal, destination, now: () => cutoff })).ok).toBe(false)
+    expect((await runIngestion(request(pipeline, 'meeting_transcripts'), { ...env, journal, destination, now: () => cutoff })).ok).toBe(false)
     expect(calls).toBe(1)
     expect(destination.tables.size).toBe(0)
     expect((await journal.readCheckpoint('circleback.meeting_transcripts')).lastSuccessSeq).toBe(0)
@@ -386,23 +400,74 @@ test('HTTP200 malformed transcripts fail without publishing an availability snap
 test('rate exhaustion consumes exactly one executor-owned page retry and malformed JSON remains permanent', async () => {
   for (const mode of ['rate', 'malformed-json']) {
     let calls = 0
-    const pipeline = fixturePipeline((url) => {
+    const env = circlebackEnv((url) => {
       if (url.pathname.startsWith('/api/person/')) return Response.json(personDetail)
       calls++
       if (mode === 'malformed-json') return new Response('{', { headers: { 'Content-Type': 'application/json' } })
       return calls === 1 ? new Response('rate limited', { status: 429, headers: { 'Retry-After': '0' } }) : Response.json([person])
     })
+    const pipeline = fixturePipeline()
     const selected = request(pipeline, 'people').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 1, minTimeout: 0, maxTimeout: 0 } } }))
     const journal = createMemoryJournal()
-    expect((await runIngestion({ selected, backfill: undefined }, { journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(mode === 'rate')
+    expect((await runIngestion({ selected, backfill: undefined }, { ...env, journal, destination: createMemoryDestination(), now: () => cutoff })).ok).toBe(mode === 'rate')
     expect(calls).toBe(mode === 'rate' ? 2 : 1)
     expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(mode === 'rate' ? 1 : 0)
   }
 })
 
-function fixturePipeline(respond: Responder = fixtureResponse): Pipeline {
-  return createCirclebackPipeline(circlebackConfig, { ...defaultCirclebackClientDeps, token: () => 'fixture',
-    fetch: (url, init) => Promise.resolve(respond(new URL(url), init)) })
+test('Circleback checks its configuration when a stream runs, not when the module loads or a stream is selected', async () => {
+  let requests = 0
+  const config = { ...fixtureConfig }
+  Object.assign(config, { ownership: 'Everyone' })
+  const pipeline = createCirclebackPipeline(config)
+  const selected = selectStreams([pipeline], [])
+  expect(selected).toHaveLength(5)
+  const env = circlebackEnv(() => { requests++; return Response.json([]) })
+  const result = await runIngestion({ selected, backfill: undefined }, { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+  expect(result.streams.every((stream) => stream.outcome === 'failed' && /at ownership/.test(stream.error ?? ''))).toBe(true)
+  expect(requests).toBe(0)
+})
+
+test('Circleback fails every stream before any request without an API key', async () => {
+  for (const apiKey of [undefined, ' ']) {
+    let requests = 0
+    const env = circlebackEnv(() => { requests++; return Response.json([]) })
+    const result = await runIngestion(request(fixturePipeline({ ...fixtureConfig, apiKey })), { ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff })
+    expect(result.streams).toHaveLength(5)
+    expect(result.streams.every((stream) => stream.outcome === 'failed' && stream.error?.includes('Set CIRCLEBACK_API_KEY or pass apiKey.'))).toBe(true)
+    expect(requests).toBe(0)
+  }
+})
+
+test('Circleback fails a malformed provider payload at once and retries only a transient response', async () => {
+  const run = async (respond: Responder) => {
+    const selected = request(fixturePipeline(), 'meetings').selected.map((entry) => ({ ...entry, stream: { ...entry.stream, retry: { retries: 2, minTimeout: 0 } } }))
+    const journal = createMemoryJournal()
+    const result = await runIngestion({ selected, backfill: undefined }, { ...circlebackEnv(respond), journal, destination: createMemoryDestination(), now: () => cutoff })
+    return { result, retries: journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass) }
+  }
+  let calls = 0
+  const malformed = await run(() => { calls += 1; return Response.json({ error: 'bad payload' }) })
+  expect(malformed.result.streams[0]?.outcome).toBe('failed')
+  expect(malformed.result.streams[0]?.error).toContain('Invalid input: expected array, received object')
+  expect(calls).toBe(1)
+  expect(malformed.retries).toEqual([])
+
+  let unavailable = true
+  const flaky = await run((url, init) => {
+    if (unavailable) { unavailable = false; return new Response('busy', { status: 503 }) }
+    return fixtureResponse(url, init)
+  })
+  expect(flaky.result.ok).toBe(true)
+  expect(flaky.retries).toEqual(['transient'])
+})
+
+function fixturePipeline(config: CirclebackReaderConfig = fixtureConfig): Pipeline {
+  return createCirclebackPipeline(config)
+}
+
+function circlebackEnv(respond: Responder = fixtureResponse) {
+  return { fetch: async (input: string | URL, init?: RequestInit) => respond(new URL(input), init ?? {}) }
 }
 
 function request(pipeline: Pipeline, resource?: string) {
@@ -419,7 +484,7 @@ function fixtureResponse(url: URL, _init: RequestInit): Response {
   if (url.pathname === '/api/person/1') return Response.json(personDetail)
   if (url.pathname === '/api/companies') return Response.json([company])
   if (url.pathname === '/api/company/initech.com') return Response.json(companyDetail)
-  throw new IngestConfigError(`Unexpected Circleback fixture request: ${url}`)
+  throw new Error(`Unexpected Circleback fixture request: ${url}`)
 }
 
 function rowId(id: string | number, sourceId = 'circleback'): string { return JSON.stringify([sourceId, id]) }
@@ -443,16 +508,11 @@ test('Circleback honors RateLimit-Reset over HTTP, gives Retry-After precedence,
       },
     })
     try {
-      const source = createCirclebackPipeline(circlebackConfig, {
-        config: circlebackConfig, token: () => 'fixture',
-        fetch: (input, init) => {
-          const url = new URL(input)
-          return fetch(`http://127.0.0.1:${server.port}${url.pathname}${url.search}`, init)
-        },
-      })
+      const source = fixturePipeline()
       const pipeline = { ...source, retry: { retries: 1, minTimeout: 0, maxTimeout: 0, maxRetryTime: scenario.maxRetryTime } }
       const journal = createMemoryJournal(), destination = createMemoryDestination()
-      const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:meetings']), backfill: undefined }, { journal, destination })
+      const env = circlebackEnv((url, init) => fetch(`http://127.0.0.1:${server.port}${url.pathname}${url.search}`, init))
+      const result = await runIngestion({ selected: selectStreams([pipeline], ['resource:meetings']), backfill: undefined }, { ...env, journal, destination })
       expect(result.ok).toBe(scenario.succeeds)
       expect(requestedAt).toHaveLength(scenario.succeeds ? 2 : 1)
       expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled').map((event) => event.errorClass))

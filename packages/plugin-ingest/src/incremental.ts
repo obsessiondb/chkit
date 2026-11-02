@@ -1,4 +1,3 @@
-import { IngestConfigError } from './errors.js'
 import type { IncrementalStrategy } from './types.js'
 
 export interface TimestampWindowState {
@@ -51,39 +50,30 @@ export function fullSync(): IncrementalStrategy<undefined, undefined> {
 export function timestampWindow(
   options: TimestampWindowOptions
 ): IncrementalStrategy<TimestampWindowState, TimestampRange> {
-  if (options.from === undefined) {
-    if (!(options.start instanceof Date) || !Number.isFinite(options.start.getTime())) {
-      throw new IngestConfigError('timestampWindow: start must be a valid Date.')
-    }
-    if (!Number.isFinite(options.overlapMs ?? 0) || (options.overlapMs ?? 0) < 0) {
-      throw new IngestConfigError('timestampWindow: overlapMs must be a finite non-negative number.')
-    }
-  } else if (options.start !== undefined || options.overlapMs !== undefined) {
-    throw new IngestConfigError('timestampWindow: use either start/overlapMs or from, not both.')
-  }
   return {
     id: 'chkit.timestamp_window',
     version: 1,
     parseState(raw) {
       if (typeof raw !== 'object' || raw === null || !('watermark' in raw) || typeof raw.watermark !== 'string') {
-        throw new IngestConfigError('timestampWindow: committed state has no string "watermark".')
+        throw new Error('timestampWindow: committed state has no string "watermark".')
       }
       if (Number.isNaN(Date.parse(raw.watermark))) {
-        throw new IngestConfigError(`timestampWindow: committed watermark "${raw.watermark}" is not a timestamp.`)
+        throw new Error(`timestampWindow: committed watermark "${raw.watermark}" is not a timestamp.`)
       }
       return { watermark: raw.watermark }
     },
     plan({ state, cutoff, range }) {
+      assertTimestampWindowOptions(options)
       const to = range?.to ?? cutoff
       const watermark = state ? new Date(state.watermark) : undefined
       const from = range?.from ?? (options.from
         ? options.from({ watermark, cutoff })
         : new Date(watermark ? watermark.getTime() - (options.overlapMs ?? 0) : options.start.getTime()))
       if (!Number.isFinite(from.getTime()) || !Number.isFinite(to.getTime())) {
-        throw new IngestConfigError('timestampWindow: planned bounds must be valid dates.')
+        throw new Error('timestampWindow: planned bounds must be valid dates.')
       }
       if (from.getTime() > to.getTime()) {
-        throw new IngestConfigError(
+        throw new Error(
           `timestampWindow: planned lower bound ${from.toISOString()} is after upper bound ${to.toISOString()}.`
         )
       }
@@ -106,5 +96,18 @@ export function cursorState<TState>(options: CursorStateOptions<TState>): Increm
     version: options.version,
     parseState: options.parse,
     plan: ({ state }) => state,
+  }
+}
+
+function assertTimestampWindowOptions(options: TimestampWindowOptions): void {
+  if (options.from === undefined) {
+    if (!(options.start instanceof Date) || !Number.isFinite(options.start.getTime())) {
+      throw new Error('timestampWindow: start must be a valid Date.')
+    }
+    if (!Number.isFinite(options.overlapMs ?? 0) || (options.overlapMs ?? 0) < 0) {
+      throw new Error('timestampWindow: overlapMs must be a finite non-negative number.')
+    }
+  } else if (options.start !== undefined || options.overlapMs !== undefined) {
+    throw new Error('timestampWindow: use either start/overlapMs or from, not both.')
   }
 }

@@ -1,22 +1,17 @@
-import { IngestConfigError, rawTable, type FetchContext } from '@chkit/plugin-ingest'
+import { rawRows, rawTable, type SourceContext } from '@chkit/plugin-ingest'
 
-import { readPages, requestLemlist, requireItems, toLemlistRows, type LemlistClientDeps } from '../client.js'
-import { lemlistConfig } from '../config.js'
+import { createLemlistClient } from '../client.js'
+import { lemlistConfig, type LemlistReaderConfig } from '../config.js'
 
 export const lemlist_contactsRaw = rawTable({ database: lemlistConfig.database, name: 'lemlist_contacts_raw' })
 
-export async function* readContacts(context: FetchContext, deps: LemlistClientDeps) {
-  for await (const page of readPages(context, 'contacts', undefined, deps)) {
+export async function* readContacts(context: SourceContext, config: LemlistReaderConfig) {
+  const client = createLemlistClient(context, config)
+  const { sourceId } = client.settings
+  for await (const page of client.list('contacts')) {
     if (page.items.length === 0) continue
     // List items omit custom fields; hydrate complete objects of the same resource in <=100-ID batches.
-    const contacts = await context.attempt(async (signal) => {
-      const items = requireItems(await requestLemlist('/contacts', { idsOrEmails: page.items.map((item) => item._id).join(',') }, signal, deps), 'contact lookup')
-      const expected = new Set(page.items.map((item) => item._id))
-      if (items.length !== page.items.length || items.some((item) => !expected.has(item._id))) {
-        throw new IngestConfigError('Lemlist contact lookup did not return every discovered contact; replay this stream.')
-      }
-      return items
-    }, { label: 'GET /contacts by IDs' })
-    yield { rows: toLemlistRows(contacts, deps) }
+    const contacts = await client.contacts(page.items.map((item) => item._id))
+    yield { rows: rawRows(contacts.map((data) => ({ source_id: sourceId, data })), ({ data }) => JSON.stringify([sourceId, data._id])) }
   }
 }

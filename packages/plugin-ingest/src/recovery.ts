@@ -2,7 +2,6 @@ import { randomUUID } from 'node:crypto'
 
 import { waitForTable, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
 
-import { IngestConfigError } from './errors.js'
 import { validateJournalHistory } from './journal-history.js'
 import { canonicalJson, DEFAULT_JOURNAL_TABLE, digest, journalTableSql, type JournalRow } from './journal.js'
 import type { CommittedCheckpoint } from './types.js'
@@ -94,8 +93,8 @@ export async function repairJournal(
   const source = await inspectSource(table, options)
   const plan = sourcePlan(source, namespaceId, table, options.targetId)
   if (fingerprint === undefined) return { applied: false, activated: false, plan }
-  if (fingerprint !== plan.fingerprint) throw new IngestConfigError('Journal changed since review. Stop all writers, run ingest repair again, and review the new fingerprint.')
-  if (!plan.repairable) throw new IngestConfigError(plan.problems.join(' '))
+  if (fingerprint !== plan.fingerprint) throw new Error('Journal changed since review. Stop all writers, run ingest repair again, and review the new fingerprint.')
+  if (!plan.repairable) throw new Error(plan.problems.join(' '))
   if (plan.healthy) return { applied: false, activated: false, plan }
 
   // Each attempt writes its own tables. Concurrent or interrupted repairs cannot
@@ -122,7 +121,7 @@ export async function repairJournal(
   }
   const finalSnapshot = await readSnapshot(table, options)
   if (repairFingerprint(finalSnapshot, namespaceId, table, options.targetId) !== fingerprint) {
-    throw new IngestConfigError('Journal changed while copying. Keep the original journal active, stop all writers, and review a new repair plan.')
+    throw new Error('Journal changed while copying. Keep the original journal active, stop all writers, and review a new repair plan.')
   }
   return { applied: true, activated: false, plan: materializedPlan }
 }
@@ -198,7 +197,7 @@ function qualified(database: string, table: string): string {
 }
 
 function identifier(value: string): void {
-  if (!IDENTIFIER.test(value)) throw new IngestConfigError(`Invalid journal identifier "${value}".`)
+  if (!IDENTIFIER.test(value)) throw new Error(`Invalid journal identifier "${value}".`)
 }
 
 function sqlString(value: string): string {

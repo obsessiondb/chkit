@@ -1,6 +1,6 @@
 import { definePipeline, defineStream, fullSync, timestampWindow } from '@chkit/plugin-ingest'
 
-import { classifyLinearError, defaultLinearClientDeps, type LinearClientDeps } from './client.js'
+import { classifyLinearError } from './client.js'
 import { linearConfig, type LinearConfig } from './config.js'
 import { linear_issuesRaw, readIssues } from './sources/issues.js'
 import { linear_commentsRaw, readComments } from './sources/comments.js'
@@ -12,7 +12,7 @@ import { linear_teamsRaw, readTeams } from './sources/teams.js'
 import { linear_issueRelationsRaw, readIssueRelations } from './sources/issue-relations.js'
 import { linear_issueHistoryRaw, readIssueHistory } from './sources/issue-history.js'
 
-export function createLinearPipeline(config: LinearConfig = linearConfig, deps: LinearClientDeps = defaultLinearClientDeps) {
+export function createLinearPipeline(config: LinearConfig = linearConfig) {
   const source = { ...config, start: new Date(config.start) }
   const options = { classifyError: classifyLinearError }
   return definePipeline({
@@ -21,47 +21,47 @@ export function createLinearPipeline(config: LinearConfig = linearConfig, deps: 
       defineStream({
         ...options, id: `${source.sourceId}.issues`, tags: ['resource:issues'], destination: linear_issuesRaw,
         incremental: timestampWindow({ start: source.start, overlapMs: source.overlapMs }),
-        read: (context) => readIssues(context, deps),
+        read: (context) => readIssues(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.comments`, tags: ['resource:comments'], destination: linear_commentsRaw,
         incremental: timestampWindow({ start: source.start, overlapMs: source.overlapMs }),
-        read: (context) => readComments(context, deps),
+        read: (context) => readComments(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.projects`, tags: ['resource:projects'], destination: linear_projectsRaw,
         incremental: timestampWindow({ start: source.start, overlapMs: source.overlapMs }),
-        read: (context) => readProjects(context, deps),
+        read: (context) => readProjects(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.project_updates`, tags: ['resource:project_updates'], destination: linear_projectUpdatesRaw,
         incremental: timestampWindow({ start: source.start, overlapMs: source.overlapMs }),
-        read: (context) => readProjectUpdates(context, deps),
+        read: (context) => readProjectUpdates(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.cycles`, tags: ['resource:cycles'], destination: linear_cyclesRaw,
         incremental: timestampWindow({ start: source.start, overlapMs: source.overlapMs }),
-        read: (context) => readCycles(context, deps),
+        read: (context) => readCycles(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.users`, tags: ['resource:users'], destination: linear_usersRaw,
         incremental: timestampWindow({ start: source.start, overlapMs: source.overlapMs }),
-        read: (context) => readUsers(context, deps),
+        read: (context) => readUsers(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.teams`, tags: ['resource:teams'], destination: linear_teamsRaw,
         incremental: timestampWindow({ start: source.start, overlapMs: source.overlapMs }),
-        read: (context) => readTeams(context, deps),
+        read: (context) => readTeams(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.issue_relations`, tags: ['resource:issue_relations'], destination: linear_issueRelationsRaw,
         incremental: fullSync(),
-        read: (context) => readIssueRelations(context, deps),
+        read: (context) => readIssueRelations(context, source),
       }),
       defineStream({
         ...options, id: `${source.sourceId}.issue_history`, tags: ['resource:issue_history'], destination: linear_issueHistoryRaw,
         incremental: fullSync(),
-        read: (context) => readIssueHistory(context, deps),
+        read: (context) => readIssueHistory(context, source),
       }),
     ],
   })

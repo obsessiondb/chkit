@@ -37,18 +37,21 @@ export interface AttemptOptions {
   label?: string
 }
 
-/** Source request capabilities, independent of selection and checkpoint types. */
-export interface FetchContext {
+export type Fetch = (input: string | URL, init?: RequestInit) => Promise<Response>
+
+/** Source services the run provides, independent of selection and checkpoint types. */
+export interface SourceContext {
   signal: AbortSignal
+  /** `fetch` with the pipeline's request queue, transient retries, a request timeout, and `HttpError` for unsuccessful responses. */
+  fetch(input: string | URL, init?: RequestInit): Promise<Response>
   /**
-   * Run one source operation under executor authority: fetch permit, retry
-   * policy, failure classification and cancellation. Operations that bypass it
-   * only get coarse recovery (reader recreation from the last checkpoint).
+   * Run one source operation that is not a plain request, such as an SDK call, with the
+   * same queue and retries. Only transient failures are retried; it rejects with the thrown value.
    */
   attempt<T>(operation: (signal: AbortSignal) => Promise<T>, options?: AttemptOptions): Promise<T>
 }
 
-export interface ReadContext<TSelection, TState> extends FetchContext {
+export interface ReadContext<TSelection, TState> extends SourceContext {
   streamId: string
   /** What to read this execution, planned by the incremental strategy. */
   selection: TSelection

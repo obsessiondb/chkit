@@ -6,18 +6,21 @@ import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
 
 import { toJsonRows } from './destination.js'
-import { BudgetExhausted, classifyFailure, FetchFailure, IngestConfigError } from './errors.js'
+import { BudgetExhausted, classifyFailure, describeError } from './errors.js'
 import { canonicalJson, digest, emptyCheckpoint } from './journal.js'
 import { simpleLoader } from './loader.js'
 import { createBoundedQueue } from './queue.js'
 import type { SelectedStream } from './registry.js'
-import { mergeRetry, runAttempt } from './retry.js'
+import { createRequestQueue, type RequestQueue } from './request-queue.js'
+import { mergeRetry } from './retry.js'
+import { createSourceServices } from './source-context.js'
 import type {
   AnyStreamDefinition,
   CheckpointEnvelope,
   CommittedCheckpoint,
   DestinationAdapter,
   ExecutionResult,
+  Fetch,
   Journal,
   JournalEvent,
   PipelineDefinition,
@@ -66,6 +69,7 @@ export interface ExecutionEnv {
   prefetchBatches?: number
   now?: () => Date
   log?: (message: string) => void
+  fetch?: Fetch
 }
 
 interface ResolvedEnv extends Required<Omit<ExecutionEnv, 'signal'>> {
@@ -77,7 +81,7 @@ interface ResolvedEnv extends Required<Omit<ExecutionEnv, 'signal'>> {
 
 interface PipelinePermits {
   streams: LimitFunction
-  fetches: LimitFunction
+  requests: RequestQueue
   loads: LimitFunction
 }
 
@@ -191,10 +195,10 @@ async function executeSelectedStream(
         env.log?.(`${namespaceId}: ${outcome} (${progress.rows} rows, ${progress.batches} batches, checkpoint v${progress.version})`)
         return result(outcome, undefined)
       } catch (error) {
-        const message = error instanceof Error ? error.message : String(error)
+        const message = describeError(error)
         const outcome: StreamOutcome = env.hostSignal.aborted ? 'cancelled' : env.signal.aborted ? 'budget_exhausted' : 'failed'
         recordFailure(span, error)
-        env.log?.(`${namespaceId}: ${outcome} — ${message}`)
+        env.log?.(`${namespaceId}: ${outcome}`)
         return result(outcome, message)
       } finally {
         span.end()
@@ -228,39 +232,19 @@ async function executeStream(input: {
   let failure: unknown
 
   try {
-    outcome = await runAttempt(async (attemptNo) => {
-      // Re-plan from the latest durable boundary on every reader (re)creation.
-      const state = restoreState(stream, progress.envelope, namespaceId)
-      const selection: unknown = stream.incremental.plan({
-        state,
-        cutoff: input.cutoff,
-        range: input.backfill ? { from: input.backfill.from, to: input.backfill.to } : undefined,
-      })
-      const nextWorkId = digest([namespaceId, progress.successId, progress.checkpointId, canonicalJson(selection)]).slice(0, 24)
-      // A newly planned unit of work and its first attempt share one insert.
-      const planned = nextWorkId === workId ? [] : [{
-        eventKind: 'work_planned' as const,
-        fields: { workId: nextWorkId, workState: 'planned' as const, detail: { selection, strategy: stream.incremental.id, strategyVersion: stream.incremental.version, pipelineId: pipeline.id } },
-      }]
-      workId = nextWorkId
-      await appendFacts(input, [...planned, { eventKind: 'attempt_started', fields: { workId, attemptNo, workState: 'running' } }])
-      return readAndLoad({ ...input, workId, attemptNo, state, selection, retry })
-    }, {
-      ...retry,
-      // Reader recreation consumes the same execution-wide chunk budget.
-      // Preserve the original failure when no further chunks may be pulled.
-      shouldRetry: (context) => progress.chunks < (stream.budget?.maxChunks ?? Infinity) && (retry.shouldRetry?.(context) ?? true),
-    }, {
-      signal: env.signal,
-      classifier: stream.classifyError,
-      onRetry: (context, retryAfterMs) => append(input, 'retry_scheduled', {
-        workId,
-        attemptNo: context.attemptNumber,
-        retryAt: retryAfterMs === undefined ? undefined : new Date(env.now().getTime() + retryAfterMs),
-        errorClass: context.error.classification.kind,
-        detail: { error: context.error.message },
-      }),
+    const state = restoreState(stream, progress.envelope, namespaceId)
+    const selection: unknown = stream.incremental.plan({
+      state,
+      cutoff: input.cutoff,
+      range: input.backfill ? { from: input.backfill.from, to: input.backfill.to } : undefined,
     })
+    workId = digest([namespaceId, progress.successId, progress.checkpointId, canonicalJson(selection)]).slice(0, 24)
+    // A planned unit of work and its attempt share one insert.
+    await appendFacts(input, [
+      { eventKind: 'work_planned', fields: { workId, workState: 'planned', detail: { selection, strategy: stream.incremental.id, strategyVersion: stream.incremental.version, pipelineId: pipeline.id } } },
+      { eventKind: 'attempt_started', fields: { workId, attemptNo: 1, workState: 'running' } },
+    ])
+    outcome = await readAndLoad({ ...input, workId, attemptNo: 1, state, selection, retry })
   } catch (error) {
     failure = error
     if (env.signal.aborted) {
@@ -274,7 +258,7 @@ async function executeStream(input: {
     workId,
     workState: failure === undefined ? outcome : outcome === 'cancelled' ? 'cancelled' : 'failed',
     errorClass: failure === undefined ? '' : failureKind(failure, env.signal, stream),
-    detail: { rows: progress.rows, batches: progress.batches, chunks: progress.chunks, error: failure === undefined ? undefined : messageOf(failure) },
+    detail: { rows: progress.rows, batches: progress.batches, chunks: progress.chunks, error: failure === undefined ? undefined : describeError(failure) },
   })
   if (failure !== undefined) throw failure
   return outcome
@@ -318,24 +302,22 @@ async function readAndLoad(input: {
       selection: input.selection,
       state: input.state,
       cutoff: input.cutoff,
-      signal,
-      attempt: (operation, options) =>
-        runAttempt(() => input.permits.fetches(() => {
-          signal.throwIfAborted()
-          return operation(signal)
-        }), input.retry, {
-          signal,
-          classifier: stream.classifyError,
-          onRetry: (context, retryAfterMs) =>
-            append(input, 'retry_scheduled', {
-              workId: input.workId,
-              attemptNo: input.attemptNo,
-              // p-retry owns the randomized backoff; record only a provider's known not-before time.
-              retryAt: retryAfterMs === undefined ? undefined : new Date(env.now().getTime() + retryAfterMs),
-              errorClass: context.error.classification.kind,
-              detail: { label: options?.label ?? 'source', sourceAttempt: context.attemptNumber, error: context.error.message },
-            }),
-        }),
+      ...createSourceServices({
+        signal,
+        fetch: env.fetch,
+        retry: input.retry,
+        classifier: stream.classifyError,
+        queue: input.permits.requests,
+        onRetry: (context, retryAfterMs, options) =>
+          append(input, 'retry_scheduled', {
+            workId: input.workId,
+            attemptNo: input.attemptNo,
+            // p-retry owns the randomized backoff; record only a provider's known not-before time.
+            retryAt: retryAfterMs === undefined ? undefined : new Date(env.now().getTime() + retryAfterMs),
+            errorClass: context.error.classification.kind,
+            detail: { label: options?.label ?? 'source', sourceAttempt: context.attemptNumber, error: context.error.message },
+          }),
+      }),
     })
 
     // Iterate by hand so a hung next() can be abandoned on abort; return() still
@@ -499,7 +481,7 @@ async function loadBatch(
 function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string): unknown {
   if (!envelope) return undefined
   if (envelope.strategy !== stream.incremental.id || envelope.version !== stream.incremental.version) {
-    throw new IngestConfigError(
+    throw new Error(
       `Checkpoint for "${namespaceId}" was written by strategy ${envelope.strategy}@${envelope.version}, but the stream now declares ${stream.incremental.id}@${stream.incremental.version}. ` +
         'ChKit never silently reinterprets a checkpoint: migrate the state explicitly, use a new stream id, or run a separately namespaced backfill.'
     )
@@ -606,13 +588,13 @@ function assertValidChunk(
   maxChunkRows: number
 ): asserts chunk is { rows: readonly Row[]; state?: unknown; id?: string } {
   if (typeof chunk !== 'object' || chunk === null || !('rows' in chunk) || !Array.isArray(chunk.rows)) {
-    throw new IngestConfigError(`Stream "${streamId}" yielded a chunk without a "rows" array.`)
+    throw new Error(`Stream "${streamId}" yielded a chunk without a "rows" array.`)
   }
   if ('id' in chunk && chunk.id !== undefined && typeof chunk.id !== 'string') {
-    throw new IngestConfigError(`Stream "${streamId}" yielded a chunk whose "id" is not a string.`)
+    throw new Error(`Stream "${streamId}" yielded a chunk whose "id" is not a string.`)
   }
   if (chunk.rows.length > maxChunkRows) {
-    throw new IngestConfigError(
+    throw new Error(
       `Stream "${streamId}" yielded a chunk of ${chunk.rows.length} rows, above the ${maxChunkRows}-row bound. Yield smaller chunks or raise budget.maxChunkRows.`
     )
   }
@@ -651,7 +633,7 @@ function permitsFor(cache: Map<string, PipelinePermits>, pipeline: PipelineDefin
   if (existing) return existing
   const created: PipelinePermits = {
     streams: pLimit(pipeline.maxStreams),
-    fetches: pLimit(pipeline.maxFetches),
+    requests: createRequestQueue(pipeline.maxFetches),
     loads: pLimit(pipeline.maxLoads),
   }
   cache.set(pipeline.id, created)
@@ -666,11 +648,11 @@ function resolveEnv(input: ExecutionEnv, deadlineSignal: AbortSignal): ResolvedE
   // setTimeout clamps a delay outside the signed 32-bit range (Infinity included) to 1 ms,
   // which would expire the budget before the first fetch instead of never.
   if (!Number.isFinite(maxDurationMs) || maxDurationMs <= 0 || maxDurationMs > MAX_DURATION_MS) {
-    throw new IngestConfigError(`maxDurationMs must be a positive number of milliseconds up to ${MAX_DURATION_MS}.`)
+    throw new Error(`maxDurationMs must be a positive number of milliseconds up to ${MAX_DURATION_MS}.`)
   }
   const prefetchBatches = input.prefetchBatches ?? DEFAULT_PREFETCH_BATCHES
   if (!Number.isInteger(prefetchBatches) || prefetchBatches <= 0) {
-    throw new IngestConfigError('prefetchBatches must be a positive integer.')
+    throw new Error('prefetchBatches must be a positive integer.')
   }
   return {
     journal: input.journal,
@@ -681,20 +663,16 @@ function resolveEnv(input: ExecutionEnv, deadlineSignal: AbortSignal): ResolvedE
     prefetchBatches,
     now,
     log: input.log ?? (() => undefined),
+    fetch: input.fetch ?? ((url, init) => fetch(url, init)),
   }
 }
 
 function failureKind(error: unknown, signal: AbortSignal, stream: AnyStreamDefinition): string {
-  if (error instanceof IngestConfigError) return 'config'
-  if (error instanceof FetchFailure) return error.classification.kind
   return classifyFailure(error, signal, stream.classifyError).kind
 }
 
 function recordFailure(span: Span, error: unknown): void {
-  span.setStatus({ code: SpanStatusCode.ERROR, message: messageOf(error) })
+  span.setStatus({ code: SpanStatusCode.ERROR, message: describeError(error) })
   if (error instanceof Error) span.recordException(error)
 }
 
-function messageOf(error: unknown): string {
-  return error instanceof Error ? error.message : String(error)
-}

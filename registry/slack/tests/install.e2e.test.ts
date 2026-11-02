@@ -1,18 +1,19 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
+import { mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, resolve } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
 import { createStatelessLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
-import { createClickHouseDestination, definePipeline, defineStream, runIngestion, selectStreams, type FetchContext, type SourceChunk } from '@chkit/plugin-ingest'
+import { createClickHouseDestination, runIngestion, selectStreams } from '@chkit/plugin-ingest'
 import { createMemoryJournal } from '@chkit/plugin-ingest/testing'
 
 import { buildRegistryCatalog } from '../../../packages/cli/src/registry/build.js'
 import { formatTestDiagnostic, runCli } from '../../../packages/cli/src/test/e2e-testkit.js'
 import { readRegistrySourceCatalog } from '../../../scripts/registry-catalog.js'
+import { linkWorkspaceModules } from '../../../scripts/registry-consumer.js'
 import { CLI_VERSION } from '../../../packages/cli/src/runtime/version.js'
-import { channel, fixtureDeps, parentMessage, replyMessage, standaloneMessage, user } from './fixtures.js'
+import { channel, fixture, parentMessage, replyMessage, slackEnv, standaloneMessage, user } from './fixtures.js'
 
 describe.serial('built Slack template installed into a consumer', () => {
   const env = getLiveEnv()
@@ -37,7 +38,7 @@ describe.serial('built Slack template installed into a consumer', () => {
     // Exercise source with workspace packages, retaining the template version and changelog.
     const sourceCatalog = await readRegistrySourceCatalog()
     const catalog = { ...sourceCatalog, items: sourceCatalog.items.map((item) => ({ ...item,
-      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`],
+      dependencies: [`@chkit/core@${CLI_VERSION}`, `@chkit/plugin-ingest@${CLI_VERSION}`, ...item.dependencies.filter((dependency) => !dependency.startsWith('@chkit/'))],
       meta: { chkit: { ...item.meta.chkit, chkit: CLI_VERSION, ingest: CLI_VERSION } },
     })) }
     await buildRegistryCatalog({ catalog, sourceRoot: join(root, 'registry'), outputDir })
@@ -79,36 +80,21 @@ describe.serial('built Slack template installed into a consumer', () => {
     expect(migrate.exitCode, formatTestDiagnostic('migrate', migrate)).toBe(0)
     for (const resource of ['channels', 'users', 'messages']) await waitForTable(executor, env.clickhouseDatabase, `${prefix}_${resource}_raw`)
 
-    const installed: typeof import('../index.js') = await import(pathToFileURL(join(project, 'src/integrations/slack/index.ts')).href)
-    const channels: typeof import('../sources/channels.js') = await import(pathToFileURL(join(project, 'src/integrations/slack/sources/channels.ts')).href)
-    const users: typeof import('../sources/users.js') = await import(pathToFileURL(join(project, 'src/integrations/slack/sources/users.ts')).href)
-    const messages: typeof import('../sources/messages.js') = await import(pathToFileURL(join(project, 'src/integrations/slack/sources/messages.ts')).href)
-    const state: typeof import('../state.js') = await import(pathToFileURL(join(project, 'src/integrations/slack/state.ts')).href)
+    const installed: typeof import('../pipeline.js') = await import(pathToFileURL(join(project, 'src/integrations/slack/pipeline.ts')).href)
+    const installedConfig: typeof import('../config.js') = await import(pathToFileURL(join(project, 'src/integrations/slack/config.ts')).href)
     let revision = 1
-    const defaults = fixtureDeps()
-    const deps = fixtureDeps((url, init) => {
+    const responses = slackEnv((url) => {
       const parent = { ...parentMessage, text: revision === 1 ? 'First observation' : 'Edited observation' }
       if (url.pathname === '/api/conversations.history') return Response.json({ ok: true, messages: [parent, standaloneMessage], response_metadata: { next_cursor: '' } })
       if (url.pathname === '/api/conversations.replies') return Response.json({ ok: true, messages: [parent, replyMessage], response_metadata: { next_cursor: '' } })
-      return defaults.fetch(url.toString(), init)
+      return fixture(url)
     })
-    const readers: Record<string, (context: FetchContext) => AsyncIterable<SourceChunk>> = {
-      channels: (context) => channels.readChannels(context, deps),
-      users: (context) => users.readUsers(context, deps),
-    }
-    const pipeline = definePipeline({
-      ...installed.slack, retry: { retries: 0 },
-      streams: installed.slack.streams.map((stream) => {
-        if (stream.id.endsWith('.messages')) return defineStream({ ...stream, incremental: state.slackMessageStrategy, read: (context) => messages.readMessages(context, deps) })
-        const read = readers[stream.id.split('.').at(-1) ?? '']
-        if (!read) throw new Error(`Installed fixture reader missing for ${stream.id}`)
-        return { ...stream, read }
-      }),
-    })
+    const fixtureConfig = { ...installedConfig.slackConfig, token: 'fixture' }
+    const pipeline = { ...installed.createSlackPipeline(fixtureConfig), retry: { retries: 0 } }
     const journal = createMemoryJournal()
     for (const next of [1, 2]) {
       revision = next
-      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal, destination: createClickHouseDestination(executor), now: () => new Date('2023-11-15T00:00:00Z') })
+      const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { ...responses, journal, destination: createClickHouseDestination(executor), now: () => new Date('2023-11-15T00:00:00Z') })
       expect(result.ok, JSON.stringify(result)).toBe(true)
     }
     const table = (resource: string) => `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}_${resource}_raw`)}`
@@ -148,8 +134,7 @@ describe.serial('built Slack template installed into a consumer', () => {
 })
 
 async function writeProject(project: string, root: string, database: string, prefix: string): Promise<void> {
-  await mkdir(project, { recursive: true })
-  await symlink(join(root, 'node_modules'), join(project, 'node_modules'), 'dir')
+  await linkWorkspaceModules(root, project)
   await writeFile(join(project, 'package.json'), JSON.stringify({ name: 'slack-fixture-consumer', private: true, type: 'module' }))
   await mkdir(join(project, 'src/db/schema'), { recursive: true })
   await writeFile(join(project, 'src/db/schema/existing.ts'), `import { table } from '@chkit/core'
