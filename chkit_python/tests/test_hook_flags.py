@@ -250,6 +250,7 @@ def test_migrate_hands_every_hook_the_parsed_flags(
     assert _recorded(tmp_path) == {
         "on_init": expected,
         "get_context": expected,
+        "on_config_loaded": expected,
         "on_before_apply": expected,
         "on_after_apply": expected,
     }

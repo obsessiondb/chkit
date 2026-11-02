@@ -329,7 +329,7 @@ def _run(
             command="migrate",
             config=config,
             table_scope=table_scope,
-            flags={},
+            flags=hook_flags,
             config_path=str(config_path or "clickhouse.config.py"),
             options={},
         )
