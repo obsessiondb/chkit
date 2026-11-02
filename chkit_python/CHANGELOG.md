@@ -127,6 +127,15 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- Database, table, view, dictionary and materialized view names are quoted in generated SQL,
+  as in TS (#448): a name that is not a plain identifier (`my-db`, `user-events`, `a.b`) is
+  backtick-quoted in `CREATE`, `ALTER`, `DROP`, `RENAME`, `CREATE DATABASE`, `TO` and
+  `DEPENDS ON`, and backticks and backslashes in quoted column, index, projection and
+  constraint names are escaped (`` `we\`ird\\c` ``). Before, such names produced invalid SQL.
+  Plain names stay bare, so SQL for existing schemas is unchanged. With `clickhouse.cluster`
+  set, `ON CLUSTER` now lands after a quoted name (`` `my db`.`a b` ON CLUSTER 'c' ``) instead
+  of inside it. The suggested column rename statement now uses `RENAME COLUMN IF EXISTS`, as
+  in TS.
 - `chkit migrate --json` prints the same JSON as TS (#460): every payload (plan, apply,
   nothing pending, `--retry`, `--abandon`, and the checksum, empty-migration and destructive
   refusals) starts with `"command": "migrate"` and `"schemaVersion": 1`, and has the
