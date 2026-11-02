@@ -127,6 +127,11 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit migrate --json` prints the same JSON as TS (#460): every payload (plan, apply,
+  nothing pending, `--retry`, `--abandon`, and the checksum, empty-migration and destructive
+  refusals) starts with `"command": "migrate"` and `"schemaVersion": 1`, and has the
+  `--table` `scope` after `mode`. **Behaviour change** for `--json` readers: each `applied`
+  entry has `appliedAt` instead of `applied_at`.
 - `chkit status`, `generate`, `migrate` and `check` print absolute paths, as in TS (#458):
   `status` `migrationsDir` (text and `--json`), `generate --json` `migrationFile` and
   `snapshotFile`, the `Generated empty migration: <path>` line, the `migrate --retry`
