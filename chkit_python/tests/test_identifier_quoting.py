@@ -20,9 +20,11 @@ from chkit.core.model import (
     MigrationPlan,
     TableConstraintDefinition,
     TableDefinition,
+    _RiskSummary,
     materialized_view,
     table,
 )
+from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
 from chkit.core.sql import (
     render_alter_add_column,
@@ -49,7 +51,11 @@ def _events_table(**overrides: Any) -> TableDefinition:
 
 
 def _plan(*operations: MigrationOperation) -> MigrationPlan:
-    return plan_diff([], []).model_copy(update={"operations": list(operations)})
+    return MigrationPlan(
+        operations=list(operations),
+        risk_summary=_RiskSummary(safe=0, caution=0, danger=0),
+        rename_suggestions=[],
+    )
 
 
 def test_helpers_match_ts() -> None:
@@ -190,4 +196,22 @@ def test_explicit_renames_quote_names() -> None:
     )
     assert [s.confirmation_sql for s in suggestions] == [
         "ALTER TABLE `my-db`.`user-events` RENAME COLUMN IF EXISTS `a\\`b` TO `c`;"
+    ]
+
+
+def test_on_cluster_lands_after_quoted_object_references() -> None:
+    plan = _plan(
+        MigrationOperation(
+            type="drop_table", key="k", risk="danger", sql="DROP TABLE IF EXISTS `my db`.`a b`;"
+        ),
+        MigrationOperation(
+            type="alter_table_add_column",
+            key="k",
+            risk="safe",
+            sql="ALTER TABLE app.`a\\` b` ADD COLUMN IF NOT EXISTS `x` String;",
+        ),
+    )
+    assert [op.sql for op in apply_on_cluster_to_plan(plan, "c").operations] == [
+        "DROP TABLE IF EXISTS `my db`.`a b` ON CLUSTER 'c';",
+        "ALTER TABLE app.`a\\` b` ON CLUSTER 'c' ADD COLUMN IF NOT EXISTS `x` String;",
     ]

@@ -132,8 +132,10 @@
   backtick-quoted in `CREATE`, `ALTER`, `DROP`, `RENAME`, `CREATE DATABASE`, `TO` and
   `DEPENDS ON`, and backticks and backslashes in quoted column, index, projection and
   constraint names are escaped (`` `we\`ird\\c` ``). Before, such names produced invalid SQL.
-  Plain names stay bare, so SQL for existing schemas is unchanged. The suggested column
-  rename statement now uses `RENAME COLUMN IF EXISTS`, as in TS.
+  Plain names stay bare, so SQL for existing schemas is unchanged. With `clickhouse.cluster`
+  set, `ON CLUSTER` now lands after a quoted name (`` `my db`.`a b` ON CLUSTER 'c' ``) instead
+  of inside it. The suggested column rename statement now uses `RENAME COLUMN IF EXISTS`, as
+  in TS.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured
