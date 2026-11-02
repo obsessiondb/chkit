@@ -13,7 +13,7 @@ export function createRequestQueue(concurrency: number): RequestQueue {
   return {
     run: (operation, signal) => limit(async () => {
       for (let remaining = resumeAt - performance.now(); remaining > 0; remaining = resumeAt - performance.now()) {
-        await sleep(remaining, undefined, { signal })
+        await sleep(Math.min(remaining, 2_147_483_647), undefined, { signal })
       }
       signal.throwIfAborted()
       return operation()

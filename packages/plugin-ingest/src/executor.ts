@@ -337,7 +337,7 @@ async function readAndLoad(input: {
           await queue.push(pending, signal)
           pending = emptyBatch()
         }
-        pending.rows.push(...chunk.rows)
+        for (const row of chunk.rows) pending.rows.push(row)
         if (pending.intervalIds) {
           if (chunk.id === undefined) pending.intervalIds = undefined
           else pending.intervalIds.push(chunk.id)
@@ -351,7 +351,7 @@ async function readAndLoad(input: {
       }
     } finally {
       // Never await an uncooperative reader: cleanup is best effort once we leave.
-      void Promise.resolve(iterator.return?.()).catch(() => undefined)
+      void (async () => iterator.return?.())().catch(() => undefined)
     }
 
     // Only a fully consumed selection may claim the strategy's completion state.
@@ -413,15 +413,19 @@ async function readAndLoad(input: {
   )
   // After a failure, a source operation that ignores its signal must not pin
   // the stream (and its permits) forever.
-  await Promise.race([settled, graceAfterAbort(signal, READER_SHUTDOWN_GRACE_MS)])
-  abandoned = true
-  if (rootCause) throw rootCause.error
-  signal.throwIfAborted()
-  if (budgetExhausted) {
-    env.log?.(`${namespaceId}: ${new BudgetExhausted('execution budget exhausted; committed progress is preserved').message}`)
-    return 'budget_exhausted'
+  try {
+    await Promise.race([settled, graceAfterAbort(signal, READER_SHUTDOWN_GRACE_MS)])
+    if (rootCause) throw rootCause.error
+    signal.throwIfAborted()
+    if (budgetExhausted) {
+      env.log?.(`${namespaceId}: ${new BudgetExhausted('execution budget exhausted; committed progress is preserved').message}`)
+      return 'budget_exhausted'
+    }
+    return 'succeeded'
+  } finally {
+    abandoned = true
+    local.abort(new DOMException('Reader attempt has ended', 'AbortError'))
   }
-  return 'succeeded'
 }
 
 // A fresh Loader instance per attempt. An ambiguous acknowledgement replays the
@@ -671,4 +675,3 @@ function recordFailure(span: Span, error: unknown): void {
   span.setStatus({ code: SpanStatusCode.ERROR, message: describeError(error) })
   if (error instanceof Error) span.recordException(error)
 }
-
