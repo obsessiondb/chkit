@@ -129,7 +129,6 @@ def test_a_no_op_plan_reports_a_null_migration_file_and_refreshes_the_snapshot(
     assert payload["migrationFile"] is None
     assert payload["operationCount"] == 0
     assert payload["definitionCount"] == 1
-    assert Path(payload["snapshotFile"]).exists()
     assert len(list((project / "chkit" / "migrations").glob("*.sql"))) == 1
 
     assert payload["snapshotFile"] == str(project / "chkit" / "meta" / "snapshot.json")

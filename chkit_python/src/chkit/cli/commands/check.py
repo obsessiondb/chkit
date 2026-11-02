@@ -16,6 +16,7 @@ not-ok result that has an error-severity finding.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -105,8 +106,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
         exit_no_target("check", msg, json_mode=output_json)
 
-    migrations_dir = Path(config.migrations_dir)
-    meta_dir = Path(config.meta_dir)
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
+    meta_dir = Path(os.path.abspath(config.meta_dir))
     migrations_dir.mkdir(parents=True, exist_ok=True)
 
     files = list_migration_filenames(migrations_dir)

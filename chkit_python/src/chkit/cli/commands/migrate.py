@@ -288,9 +288,9 @@ def _run(
         )
         exit_no_target("migrate", msg, json_mode=output_json)
 
-    migrations_dir = Path(config.migrations_dir)
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
     migrations_dir.mkdir(parents=True, exist_ok=True)
-    meta_dir = Path(config.meta_dir)
+    meta_dir = Path(os.path.abspath(config.meta_dir))
     files = list_migration_filenames(migrations_dir)
 
     # --abandon only changes the journal and rejects --table, so it does not

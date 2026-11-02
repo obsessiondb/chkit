@@ -660,6 +660,41 @@ def test_generate_and_drift_name_the_conflict_markers_and_point_to_rebuild(
     assert "https://chkit.obsessiondb.com/cli/snapshot/" in message
 
 
+def test_check_and_migrate_print_the_absolute_paths_like_ts(project_dir: Path) -> None:
+    # Both errors are raised before connecting, so the target is never reached.
+    project = create_project(
+        project_dir,
+        INITIAL_SCHEMA,
+        config_body=(
+            "from chkit import define_config\n\n"
+            'config = define_config({"schema": "./schema.py", "outDir": "./chkit", '
+            '"migrationsDir": "./chkit/migrations", "metaDir": "./chkit/meta", '
+            '"clickhouse": {"url": "http://127.0.0.1:1"}})\n'
+        ),
+    )
+    assert chkit(project, ["generate", "--name", "init", "--json"]).exit_code == 0
+
+    retry = chkit(project, ["migrate", "--retry", "20260101000000_nope.sql"])
+
+    assert retry.exit_code == 1
+    assert (
+        "--retry: no migration file named 20260101000000_nope.sql in "
+        f"{project.dir / 'chkit' / 'migrations'}."
+    ) in retry.stderr
+
+    project.snapshot_path.write_text(
+        conflict_on_generated_at(project.snapshot_path.read_text(encoding="utf-8")),
+        encoding="utf-8",
+    )
+    for command in ("check", "migrate"):
+        result = chkit(project, [command])
+
+        assert result.exit_code == 1, command
+        assert result.stderr.startswith(
+            f"Snapshot {project.snapshot_path} contains unresolved merge conflict markers."
+        ), command
+
+
 def test_invalid_json_suggests_restoring_or_rebuilding_not_removing(project_dir: Path) -> None:
     project = create_project(project_dir, INITIAL_SCHEMA)
     project.meta_dir.mkdir(parents=True)
