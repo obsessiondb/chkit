@@ -105,7 +105,9 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
     table = f"`{database}`.`{name}`"
     operation_key = f"table:{database}.{name}"
     migration_name = f"20990101000000_{name}.sql"
-    query_id = make_deterministic_query_id(migration_name, 0)
+    query_id = make_deterministic_query_id(
+        database, "_chkit_migrations", migration_name, 0
+    )
     outcome: list[str] = []
     # The attempt of a run that lost its connection while the statement ran.
     worker = threading.Thread(

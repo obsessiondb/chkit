@@ -4,10 +4,11 @@ import { setTimeout as defaultSleep } from 'node:timers/promises'
 import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit/clickhouse'
 
 import { debug } from '../../runtime/debug.js'
-import type {
-  JournalStore,
-  MigrationRowState,
-  OperationState,
+import {
+  type JournalStore,
+  type MigrationRowState,
+  type OperationState,
+  resolveJournalTableName,
 } from '../../runtime/journal-store.js'
 import { inProgressChecksumMismatchError } from './errors.js'
 import { hasStatementProgress } from './recovery.js'
@@ -76,12 +77,6 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     now = Date.now,
   } = input
 
-  const queryId = makeDeterministicQueryId(migrationName, statementIndex)
-  debug(
-    'migrate:async',
-    `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
-  )
-
   const initialMigrationState = acceptChangedChecksum(
     await journalStore.readMigrationState(migrationName),
     migrationName,
@@ -94,7 +89,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // 1. Already completed → skip entirely
   if (priorOpState?.status === 'completed') {
     log(
-      `  ${operationType}: query_id=${queryId} already completed in prior run — skipping`,
+      `  ${operationType}: query_id=${priorOpState.queryId} already completed in prior run — skipping`,
     )
     return { kind: 'skipped', operation: priorOpState }
   }
@@ -102,7 +97,17 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // 2. Currently in flight on the server → attach. The server clock is read
   // before the check, so the start derived from it and the attempt's elapsed
   // time never falls after the start that query_log records for the attempt.
-  const serverNowMs = await readServerNowMs(db)
+  const { nowMs: serverNowMs, database } = await readServerState(db)
+  // A statement the journal already tracks keeps the id it was submitted
+  // with, which an older chkit derived from the migration alone (#463): a
+  // new id would miss that attempt while it still runs.
+  const queryId =
+    priorOpState?.queryId ||
+    makeDeterministicQueryId(database, resolveJournalTableName(), migrationName, statementIndex)
+  debug(
+    'migrate:async',
+    `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
+  )
   const inFlight = await checkInFlight(db, queryId, operationType)
   if (inFlight.status === 'running') {
     log(
@@ -397,7 +402,7 @@ async function checkInFlight(
 
 // Read just before a submission, as an ISO UTC string for queryStatus.
 async function readSubmissionLowerBound(db: ClickHouseExecutor): Promise<string> {
-  return queryLogLowerBound(await readServerNowMs(db), 0)
+  return queryLogLowerBound((await readServerState(db)).nowMs, 0)
 }
 
 // The attached attempt had run for elapsedMs when the in-flight check, which
@@ -411,15 +416,15 @@ function queryLogLowerBound(serverNowMs: number, startedMsAgo: number): string {
   return new Date(serverNowMs - startedMsAgo - QUERY_LOG_SKEW_MARGIN_MS).toISOString()
 }
 
-async function readServerNowMs(db: ClickHouseExecutor): Promise<number> {
-  const [row] = await db.query<{ now_ms: number | string }>(
-    'SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms',
+async function readServerState(db: ClickHouseExecutor): Promise<{ nowMs: number; database: string }> {
+  const [row] = await db.query<{ now_ms: number | string; database: string }>(
+    'SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database',
   )
-  const serverNowMs = Number(row?.now_ms)
-  if (!Number.isFinite(serverNowMs)) {
-    throw new Error('Could not read the ClickHouse server time for an async statement.')
+  const nowMs = Number(row?.now_ms)
+  if (!Number.isFinite(nowMs) || typeof row?.database !== 'string' || row.database === '') {
+    throw new Error('Could not read the ClickHouse server time and database for an async statement.')
   }
-  return serverNowMs
+  return { nowMs, database: row.database }
 }
 
 export function upsertOperation(
@@ -456,12 +461,20 @@ export function freshMigrationState(
   }
 }
 
+/**
+ * The id of an async statement's query. It names the database and journal
+ * table too, so runs of one migration file against other databases, or by
+ * other projects in the same database, never share it (#463), while a re-run
+ * against the same target gets the same id and attaches to its attempt.
+ */
 export function makeDeterministicQueryId(
+  database: string,
+  journalTable: string,
   migrationName: string,
   statementIndex: number,
 ): string {
   const hex = createHash('sha256')
-    .update(`chkit:${migrationName}:${statementIndex}`)
+    .update(`chkit:${database}:${journalTable}:${migrationName}:${statementIndex}`)
     .digest('hex')
   return [
     hex.slice(0, 8),
