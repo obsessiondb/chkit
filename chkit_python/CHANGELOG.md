@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit check` passes the plugins' `on_check` the flags that were passed, keyed by long name
+  as in TS (`--json`, `--strict`, `--table`, `--config`, `--force-shared-engines`,
+  `--no-shared-engines`, `--service`) (#450). Before, `on_check` always got `{}`, so
+  `check --force-shared-engines` had no effect: on a target not recognized as ObsessionDB the
+  ObsessionDB plugin did not reject a `Distributed` table, and check passed where TS fails with
+  `obsessiondb_distributed_unsupported`.
 - `chkit check` runs the plugins' `on_config_loaded` hooks, as in TS (#449): with command
   `check` and the resolved `--table` scope, right before `on_check`. Before, chkit-py
   never called them, so state a plugin set up there was missing in `on_check`. A hook
