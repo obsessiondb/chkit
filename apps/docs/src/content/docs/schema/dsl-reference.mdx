@@ -163,7 +163,6 @@ Creates a table definition.
 | `name` | `string` | Table name |
 | `columns` | `ColumnDefinition[]` | Column definitions (see [Columns](#columns)) |
 | `engine` | `string` | Engine clause, e.g. `'MergeTree'`, `'ReplacingMergeTree(ver)'` |
-| `primaryKey` | `string[]` | Primary key columns or expressions, e.g. `['toDate(ts)', 'id']` |
 | `orderBy` | `string[]` | ORDER BY columns or expressions, e.g. `['toStartOfHour(ts)', 'id']` |
 
 `orderBy` is required only on engines that support sort order. An omitted `primaryKey`
@@ -178,6 +177,7 @@ and column defaults. Its setting strings are escaped SQL literals.
 
 | Field | Type | Description |
 |-------|------|-------------|
+| `primaryKey` | `string[]` | Primary key columns or expressions, e.g. `['toDate(ts)', 'id']`; defaults to `orderBy` when omitted |
 | `partitionBy` | `string` | Partition expression, e.g. `'toYYYYMM(created_at)'` |
 | `uniqueKey` | `string[]` | Unique key columns |
 | `ttl` | `string` | TTL expression, e.g. `'created_at + INTERVAL 90 DAY'` |

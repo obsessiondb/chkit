@@ -923,7 +923,7 @@ def table(
     if not supports_sort_order(engine):
         pk = pk or []
         ob = ob or []
-    if pk is None or ob is None:
+    if ob is None:
         msg = "table() requires order_by/orderBy"
         raise ValueError(msg)
 

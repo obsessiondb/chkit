@@ -42,8 +42,8 @@ def test_table_without_primary_key_inherits_order_by() -> None:
         )
         assert definition.primary_key == ["id"]
         assert definition.order_by == ["id"]
-    sql = to_create_sql(canonicalize_definitions([definition])[0])
-    assert "PRIMARY KEY (`id`)\nORDER BY (`id`)" in sql
+        sql = to_create_sql(canonicalize_definitions([definition])[0])
+        assert "PRIMARY KEY (`id`)\nORDER BY (`id`)" in sql
 
 
 def test_render_view() -> None:
