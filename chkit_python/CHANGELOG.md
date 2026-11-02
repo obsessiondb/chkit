@@ -127,6 +127,14 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit status`, `generate`, `migrate` and `check` print absolute paths, as in TS (#458):
+  `status` `migrationsDir` (text and `--json`), `generate --json` `migrationFile` and
+  `snapshotFile`, the `Generated empty migration: <path>` line, the `migrate --retry`
+  not-found error, and the conflicted or invalid snapshot errors of `check` and `migrate`
+  resolve the configured dirs against the current directory instead of printing them as
+  configured. The `generate` text output now matches TS line for line (`Generated migration:
+  <path>`, `Updated snapshot:`, `Definitions:`, `Operations:`, `Risk summary:`, and the `Table
+  scope:` block with `--table`); the `generate --dryrun` text still differs (#461).
 - `chkit check` passes the plugins' `on_check` the flags that were passed, keyed by long name
   as in TS (`--json`, `--strict`, `--table`, `--config`, `--force-shared-engines`,
   `--no-shared-engines`, `--service`) (#450). Before, `on_check` always got `{}`, so

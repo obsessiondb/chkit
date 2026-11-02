@@ -70,15 +70,20 @@ def test_defaults_the_migration_name_to_manual(project: Path) -> None:
     )
 
     assert result.exit_code == 0, result.output
-    assert json.loads(result.stdout)["migrationFile"].endswith("20260101000000_manual.sql")
+    # Absolute, as TS resolves the migrations dir against the cwd.
+    assert json.loads(result.stdout)["migrationFile"] == str(
+        project / "chkit" / "migrations" / "20260101000000_manual.sql"
+    )
 
 
 def test_human_output_points_at_the_file(project: Path) -> None:
     result = CliRunner().invoke(app, ["generate", "--empty", "--migration-id", "20260101000000"])
 
     assert result.exit_code == 0, result.output
-    assert "Generated empty migration: " in result.stdout
-    assert 'Snapshot unchanged. Add your SQL to the file, then run "chkit migrate".' in result.stdout
+    assert result.stdout == (
+        f"Generated empty migration: {project}/chkit/migrations/20260101000000_manual.sql\n"
+        'Snapshot unchanged. Add your SQL to the file, then run "chkit migrate".\n'
+    )
 
 
 def test_writes_a_blank_migration_stub_without_touching_a_snapshot(tmp_path: Path) -> None:
@@ -124,9 +129,43 @@ def test_a_no_op_plan_reports_a_null_migration_file_and_refreshes_the_snapshot(
     assert payload["migrationFile"] is None
     assert payload["operationCount"] == 0
     assert payload["definitionCount"] == 1
-    assert Path(payload["snapshotFile"]).exists()
     assert len(list((project / "chkit" / "migrations").glob("*.sql"))) == 1
+
+    assert payload["snapshotFile"] == str(project / "chkit" / "meta" / "snapshot.json")
 
     text = CliRunner().invoke(app, ["generate"])
     assert text.exit_code == 0, text.output
-    assert "No migration generated: plan is empty." in text.stdout
+    # TS ``emitGenerateApplyOutput``, byte for byte.
+    assert text.stdout == (
+        "No migration generated: plan is empty.\n"
+        f"Updated snapshot:   {project}/chkit/meta/snapshot.json\n"
+        "Definitions:        1\n"
+        "Operations:         0\n"
+        "Risk summary:       safe=0, caution=0, danger=0\n"
+    )
+
+
+def test_prints_the_absolute_migration_and_snapshot_paths_like_ts(project: Path) -> None:
+    result = CliRunner().invoke(app, ["generate", "--name", "init", "--migration-id", "20260101000000"])
+
+    assert result.exit_code == 0, result.output
+    assert result.stdout == (
+        f"Generated migration: {project}/chkit/migrations/20260101000000_init.sql\n"
+        f"Updated snapshot:   {project}/chkit/meta/snapshot.json\n"
+        "Definitions:        1\n"
+        "Operations:         2\n"
+        "Risk summary:       safe=2, caution=0, danger=0\n"
+    )
+
+
+def test_json_reports_absolute_migration_and_snapshot_files(project: Path) -> None:
+    result = CliRunner().invoke(
+        app, ["generate", "--name", "init", "--migration-id", "20260101000000", "--json"]
+    )
+
+    assert result.exit_code == 0, result.output
+    payload = json.loads(result.stdout)
+    assert payload["migrationFile"] == str(
+        project / "chkit" / "migrations" / "20260101000000_init.sql"
+    )
+    assert payload["snapshotFile"] == str(project / "chkit" / "meta" / "snapshot.json")

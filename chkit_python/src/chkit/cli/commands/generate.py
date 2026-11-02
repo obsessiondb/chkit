@@ -18,6 +18,7 @@ Flag set matches the TypeScript ``generateCommand``:
 
 from __future__ import annotations
 
+import os
 from datetime import UTC, datetime
 from pathlib import Path
 from typing import Annotated, NoReturn
@@ -389,13 +390,17 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         _exit_error(str(error), output_json=output_json)
     now = datetime.now(tz=UTC)
     config = load_config(config_path, ChxConfigEnv(command="generate"))
+    # Absolute, as TS ``resolveDirs`` resolves them, so every printed path
+    # (``migrationFile``, ``snapshotFile``) reads the same in both CLIs.
+    meta_dir = Path(os.path.abspath(config.meta_dir))
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
     # `--empty` scaffolds a blank manual migration: no schema diff, no plugin
     # pipeline, and the snapshot is left untouched. Short-circuit before any of
     # that machinery so the file is a pristine stub for hand-editing.
     if empty:
         _emit_empty_migration(
             generate_empty_migration(
-                Path(config.migrations_dir),
+                migrations_dir,
                 migration_name=migration_name,
                 migration_id=migration_id,
                 cli_version=__version__,
@@ -454,9 +459,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     issues = validate_definitions(schema_canonical)
     if issues:
         _exit_validation_failed(ChxValidationError(issues), output_json=output_json)
-
-    meta_dir = Path(config.meta_dir)
-    migrations_dir = Path(config.migrations_dir)
 
     previous = read_snapshot(meta_dir)
     old_defs = list(previous.definitions) if previous is not None else []
@@ -671,17 +673,25 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
         return
 
-    if artifact is None:
+    # TS ``emitGenerateApplyOutput``.
+    if migration_file is not None:
+        typer.echo(f"Generated migration: {migration_file}")
+    else:
         typer.echo("No migration generated: plan is empty.")
-        typer.echo(f"  Snapshot: {snapshot_path}")
-        return
-    typer.secho(f"Generated migration {artifact.id}", fg=typer.colors.GREEN)
-    typer.echo(f"  SQL:      {artifact.sql_path}")
-    typer.echo(f"  Snapshot: {snapshot_path}")
-    typer.echo(f"  Operations: {len(plan.operations)}")
+    if table_scope.enabled:
+        typer.echo(
+            f"Table scope:        {table_scope.selector or ''} "
+            f"({table_scope.match_count} matched)"
+        )
+        for table_key in table_scope.matched_tables:
+            typer.echo(f"- {table_key}")
+    typer.echo(f"Updated snapshot:   {snapshot_path}")
+    typer.echo(f"Definitions:        {len(artifact_definitions)}")
+    typer.echo(f"Operations:         {len(plan.operations)}")
     risks = plan.risk_summary
     typer.echo(
-        f"  Risk: safe={risks.safe} caution={risks.caution} danger={risks.danger}"
+        f"Risk summary:       safe={risks.safe}, caution={risks.caution}, "
+        f"danger={risks.danger}"
     )
     for warning in dictionary_password_warnings:
         typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
