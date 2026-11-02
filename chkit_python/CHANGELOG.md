@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `table()` defaults an omitted `primary_key` / `primaryKey` to `order_by`, as in TS (#453):
+  a table with only `order_by=["id"]` gets ``PRIMARY KEY (`id`) ORDER BY (`id`)`` instead of
+  raising. A sort-order engine without `order_by` still raises, now with
+  "table() requires order_by/orderBy". On an engine without sort order, a table with only
+  `order_by` is now reported as "sets primaryKey, orderBy ... Remove them", as in TS (it said
+  "sets orderBy ... Remove it").
 - `check --json` and `status --json` leave `database` out when no database is configured, as
   in TS (#452). With a plugin target (such as an ObsessionDB service) and no `clickhouse`
   block, a missing target database wrote `"database": null`; now `databaseMissing` comes
