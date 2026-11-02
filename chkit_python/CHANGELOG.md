@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- Without a `clickhouse` block or a selected ObsessionDB service, `check`, `status`,
+  `migrate`, `drift`, `query` and `pull` fail with the TS message (#459), e.g. "clickhouse
+  config is required for check (journal is stored in ClickHouse)", on stderr and in the
+  `--json` error envelope, with exit 1. `pull` now reports it as the TS pull plugin does:
+  "Pull schema failed: pull needs a target: ..." on stdout (`{"ok": false, "command":
+  "schema", "error": ...}` under `--json`) and exit 2 instead of 1.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured

@@ -282,10 +282,7 @@ def _run(
         service=service,
     )
     if executor is None and config.clickhouse is None:
-        msg = (
-            "clickhouse.config.py must include a `clickhouse` block or select an "
-            "ObsessionDB service to migrate."
-        )
+        msg = "clickhouse config is required for migrate (journal is stored in ClickHouse)"
         exit_no_target("migrate", msg, json_mode=output_json)
 
     migrations_dir = Path(config.migrations_dir)
