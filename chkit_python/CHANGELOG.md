@@ -139,7 +139,16 @@
   resolve the configured dirs against the current directory instead of printing them as
   configured. The `generate` text output now matches TS line for line (`Generated migration:
   <path>`, `Updated snapshot:`, `Definitions:`, `Operations:`, `Risk summary:`, and the `Table
-  scope:` block with `--table`); the `generate --dryrun` text still differs (#461).
+  scope:` block with `--table`).
+- `chkit generate --dryrun` prints the same text and JSON as TS (#461). The text lists
+  `Planned operations:` and `Risk summary:` first, then `- <type> [<risk>] <key>` for each
+  operation, the warnings, the cutovers, and the rename suggestions with their reason and
+  confirmation SQL, which were missing. In `--json`, `scope` comes right after the envelope
+  and an operation has `warning` only when it is set (no more `"warning": null`). A
+  column rename suggestion's `confirmationSQL` is `RENAME COLUMN IF EXISTS`, as in TS. The
+  `--table` no-match `warning` in `--json` reads `No tables matched selector "<selector>".`
+  without the trailing `No changes planned.` (the text output keeps it), and `generate`
+  warnings print without color, as in TS.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured

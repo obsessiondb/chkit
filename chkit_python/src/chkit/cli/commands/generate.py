@@ -190,10 +190,10 @@ def _exit_validation_failed(error: ChxValidationError, *, output_json: bool) -> 
 
 
 def _operation_payload(op: MigrationOperation) -> dict[str, object]:
-    """An operation in ``--json`` output. ``mode``/``beforeRetry`` appear only
-    when set, like TS ``JSON.stringify`` omitting undefined fields."""
+    """An operation in ``--json`` output. ``warning``/``mode``/``beforeRetry``
+    appear only when set, like TS ``JSON.stringify`` omitting undefined fields."""
     payload = op.model_dump(by_alias=True)
-    for field in ("mode", "beforeRetry"):
+    for field in ("warning", "mode", "beforeRetry"):
         if payload.get(field) is None:
             payload.pop(field, None)
     return payload
@@ -475,9 +475,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     )
     table_scope = resolve_table_scope(table_selector, available_keys)
     if table_scope.enabled and table_scope.match_count == 0:
-        warning = (
-            f'No tables matched selector "{table_scope.selector or ""}". No changes planned.'
-        )
+        warning = f'No tables matched selector "{table_scope.selector or ""}".'
         if output_json:
             emit_json(
                 "generate",
@@ -492,7 +490,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 },
             )
         else:
-            typer.echo(warning)
+            typer.echo(f"{warning} No changes planned.")
         return
 
     # Mirror TS ``generate.command``: surface validation failures as a
@@ -570,10 +568,12 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     ]
 
     if dryrun:
+        # TS ``emitGeneratePlanOutput``.
         if output_json:
             emit_json(
                 "generate",
                 {
+                    "scope": scope_to_payload(table_scope),
                     "mode": "plan",
                     "operationCount": len(plan.operations),
                     "riskSummary": plan.risk_summary.model_dump(),
@@ -581,23 +581,32 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                     "renameSuggestions": [
                         s.model_dump(by_alias=True) for s in plan.rename_suggestions
                     ],
-                    "scope": scope_to_payload(table_scope),
                     "warnings": dictionary_password_warnings,
                     **cutover_payload,
                 },
             )
             return
-        typer.echo(f"Plan: {len(plan.operations)} operation(s)")
-        for op in plan.operations:
-            typer.echo(f"- [{op.risk}] {op.type} {op.key}")
+        typer.echo(f"Planned operations: {len(plan.operations)}")
         risks = plan.risk_summary
         typer.echo(
-            f"Risk: safe={risks.safe} caution={risks.caution} danger={risks.danger}"
+            f"Risk summary: safe={risks.safe}, caution={risks.caution}, "
+            f"danger={risks.danger}"
         )
+        for op in plan.operations:
+            typer.echo(f"- {op.type} [{op.risk}] {op.key}")
         for warning in dictionary_password_warnings:
-            typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
+            typer.echo(f"Warning: {warning}", err=True)
         for line in cutover_text_lines(cutover_summaries):
             typer.echo(line)
+        if plan.rename_suggestions:
+            typer.echo("\nRename suggestions (review and confirm manually):")
+            for suggestion in plan.rename_suggestions:
+                typer.echo(
+                    f"- {suggestion.kind} {suggestion.database}.{suggestion.table}: "
+                    f"{suggestion.from_} -> {suggestion.to} [{suggestion.confidence}]"
+                )
+                typer.echo(f"  {suggestion.reason}")
+                typer.echo(f"  Confirm with: {suggestion.confirmation_sql}")
         return
 
     scoped_definitions = (
@@ -678,6 +687,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         f"danger={risks.danger}"
     )
     for warning in dictionary_password_warnings:
-        typer.secho(f"Warning: {warning}", fg=typer.colors.YELLOW, err=True)
+        typer.echo(f"Warning: {warning}", err=True)
     for line in cutover_text_lines(cutover_summaries):
         typer.echo(line)
