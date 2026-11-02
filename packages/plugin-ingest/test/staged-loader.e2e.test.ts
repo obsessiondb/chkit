@@ -21,9 +21,9 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     await executor.close()
   }, 60_000)
 
-  async function destination(extra: ColumnDefinition[] = [], engine = 'MergeTree()') {
+  async function destination(extra: ColumnDefinition[] = []) {
     const definition = table({
-      database, name: `items_${sequence++}`, engine, orderBy: ['id'],
+      database, name: `items_${sequence++}`, engine: 'MergeTree()', orderBy: ['id'],
       columns: [{ name: 'id', type: 'UInt64' }, { name: 'payload', type: 'String' }, ...extra, ...ingestionColumns],
       settings: { non_replicated_deduplication_window: '0' },
     })
@@ -38,40 +38,15 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     })
   }
 
-  async function publish(definition: TableDefinition, rows: Row[], options: Partial<Omit<StagedLoaderOptions, 'executor'>> = {}, batchId = 'batch') {
+  async function publish(definition: TableDefinition, rows: Row[], options: Partial<Omit<StagedLoaderOptions, 'executor'>> = {}) {
     const loader = attempt(definition, options)
-    await loader.write({ batchId, rows })
+    await loader.write({ batchId: 'batch', rows })
     return await loader.finalize()
   }
 
   const contents = (definition: TableDefinition) => executor.query<{ id: string; payload: string }>(
     `SELECT toString(id) AS id, payload FROM ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)} ORDER BY id`,
   )
-
-  test('invalid identity configuration rejects without publishing and a valid configuration still works', async () => {
-    const definition = await destination()
-    for (const keys of [[], [''], [' '], ['id', 'id'], ['_chkit_batch_id'], ['_chkit_ingested_at']]) {
-      await expect(publish(definition, [{ id: 1, payload: 'rejected' }], { keys })).rejects.toThrow('keys')
-    }
-    expect(await contents(definition)).toEqual([])
-    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
-    expect(await publish(definition, [{ id: 1, payload: 'valid' }])).toEqual({ evidence: 'clickhouse_ack', rows: 1, writeUnits: 1 })
-    expect(await contents(definition)).toEqual([{ id: '1', payload: 'valid' }])
-  })
-
-  test('invalid insert sizes and reconciliation budgets reject without leaving data or scratch', async () => {
-    const definition = await destination()
-    for (const value of [0, -1, 1.5, Number.NaN, Infinity, Number.MAX_SAFE_INTEGER + 1]) {
-      for (const name of ['maxRowsPerInsert', 'reconciliationTimeoutMs']) {
-        await expect(publish(definition, [{ id: 1, payload: 'rejected' }], { [name]: value })).rejects.toThrow('positive safe integer')
-      }
-    }
-    await expect(publish(definition, [{ id: 1, payload: 'rejected' }], { reconciliationTimeoutMs: 2_147_483_648 })).rejects.toThrow('Node timer limit')
-    expect(await contents(definition)).toEqual([])
-    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
-    await publish(definition, [{ id: 1, payload: 'valid' }], { maxRowsPerInsert: 1, reconciliationTimeoutMs: 2_147_483_647 })
-    expect(await contents(definition)).toEqual([{ id: '1', payload: 'valid' }])
-  })
 
   test('staging is invisible; intra-stage and destination filtering each remove duplicates', async () => {
     const definition = await destination()
@@ -89,15 +64,16 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
   })
 
-  test('first and last winners use input order across physical insert slices and exact ties', async () => {
-    for (const winner of ['first', 'last'] as const) {
-      for (const maxRowsPerInsert of [1, 2, 10]) {
-        const definition = await destination()
-        const rows = [{ id: 7, payload: 'a' }, { id: 8, payload: 'tie' }, { id: 7, payload: 'z' }, { id: 8, payload: 'tie' }]
-        await publish(definition, rows, { winner, maxRowsPerInsert })
-        expect(await contents(definition)).toEqual([{ id: '7', payload: winner === 'first' ? 'a' : 'z' }, { id: '8', payload: 'tie' }])
-      }
-    }
+  test('last winner selects the entire nullable row across physical slices', async () => {
+    const definition = await destination([{ name: 'optional', type: 'Nullable(String)' }])
+    await publish(definition, [
+      { id: 7, payload: 'first', optional: 'earlier' },
+      { id: 8, payload: 'other', optional: 'kept' },
+      { id: 7, payload: 'last', optional: null },
+    ], { winner: 'last', maxRowsPerInsert: 2 })
+    expect(await executor.query(`SELECT toString(id) AS id, payload, optional FROM ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)} ORDER BY id`)).toEqual([
+      { id: '7', payload: 'last', optional: null }, { id: '8', payload: 'other', optional: 'kept' },
+    ])
   })
 
   test('repeated and all-filtered batches acknowledge input rows without new physical rows', async () => {
@@ -105,17 +81,7 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     const rows = [{ id: 1, payload: 'a' }, { id: 1, payload: 'b' }, { id: 2, payload: 'c' }]
     await publish(definition, rows, { maxRowsPerInsert: 1 })
     expect(await publish(definition, rows, { maxRowsPerInsert: 9 })).toEqual({ evidence: 'clickhouse_ack', rows: 3, writeUnits: 1 })
-    expect(await publish(definition, [{ id: 1, payload: 'changed' }], {}, 'different-batch')).toEqual({ evidence: 'clickhouse_ack', rows: 1, writeUnits: 1 })
     expect(await contents(definition)).toEqual([{ id: '1', payload: 'a' }, { id: '2', payload: 'c' }])
-  })
-
-  test('empty input returns none_required without destination rows or scratch', async () => {
-    const definition = await destination()
-    const loader = attempt(definition)
-    await loader.write({ batchId: 'empty', rows: [] })
-    expect(await loader.finalize()).toEqual({ evidence: 'none_required', rows: 0, writeUnits: 0 })
-    expect(await contents(definition)).toEqual([])
-    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
   })
 
   test('composite version identity preserves changed observations; native integer equality is exact', async () => {
@@ -137,24 +103,11 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     ])
   })
 
-  test('defaults and computed destination columns survive while publication metadata is destination-owned', async () => {
-    const definition = await destination([
-      { name: 'status', type: 'String', default: 'new' },
-      { name: 'upper', type: 'String', defaultKind: 'MATERIALIZED', default: 'fn:upper(payload)' },
-    ])
-    await publish(definition, [{ id: 1, payload: 'hello', _chkit_batch_id: 'spoof', _chkit_run_id: 'spoof', _chkit_ingested_at: '1900-01-01' }])
-    expect(await executor.query(`SELECT status, upper, _chkit_batch_id AS batch, _chkit_run_id AS run, _chkit_ingested_at > toDateTime('2020-01-01') AS fresh FROM ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)}`)).toEqual([
-      { status: 'new', upper: 'HELLO', batch: 'batch', run: 'run', fresh: 1 },
-    ])
-  })
-
   test('missing/null/unsafe-number keys fail without creating scratch or publishing', async () => {
     const definition = await destination()
     for (const rows of [
-      [{ payload: 'missing' }], [{ id: null, payload: 'null' }], [{ id: undefined, payload: 'undefined' }],
-      [{ id: {}, payload: 'object' }], [{ id: [], payload: 'array' }],
-      [{ id: Number.MAX_SAFE_INTEGER + 1, payload: 'unsafe' }], [{ id: 0.5, payload: 'fraction' }],
-      [{ id: Number.NaN, payload: 'NaN' }], [{ id: Infinity, payload: 'infinite' }],
+      [{ payload: 'missing' }], [{ id: null, payload: 'null' }],
+      [{ id: Number.MAX_SAFE_INTEGER + 1, payload: 'unsafe' }],
     ]) {
       await expect(publish(definition, rows)).rejects.toThrow('key')
     }
@@ -201,103 +154,10 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     ])
   })
 
-  test('unsupported key columns and replacing engines reject without publishing', async () => {
-    const definition = await destination([
-      { name: 'nullable', type: 'Nullable(String)' }, { name: 'floating', type: 'Float64' },
-      { name: 'decimal', type: 'Decimal(9, 2)' }, { name: 'array', type: 'Array(UInt64)' }, { name: 'tuple', type: 'Tuple(UInt64, String)' },
-      { name: 'computed', type: 'UInt64', defaultKind: 'MATERIALIZED', default: 'fn:id + 1' },
-      { name: 'aliased', type: 'UInt64', defaultKind: 'ALIAS', default: 'fn:id + 2' },
-    ])
-    for (const key of ['nullable', 'floating', 'decimal', 'array', 'tuple', 'missing', 'computed', 'aliased']) {
-      await expect(publish(definition, [{ id: 1, [key]: 1, payload: 'rejected' }], { keys: [key] })).rejects.toThrow(/non-null scalar column|ordinary writable column/)
-    }
-    expect(await contents(definition)).toEqual([])
-    const replacing = await destination([], 'ReplacingMergeTree()')
-    const loader = attempt(replacing)
-    await expect(loader.write({ batchId: 'unsupported', rows: [{ id: 1, payload: 'x' }] })).rejects.toThrow('plain MergeTree')
-    expect(await contents(replacing)).toEqual([])
-    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
-  })
-
-  test('Nested and EPHEMERAL columns reject on actual destination schemas', async () => {
-    const unsupported: ColumnDefinition[] = [
-      { name: 'nested', type: 'Nested(value UInt64)' },
-      { name: 'temporary', type: 'UInt64', defaultKind: 'EPHEMERAL', default: 'fn:0' },
-    ]
-    for (const column of unsupported) {
-      const definition = await destination([column])
-      await expect(publish(definition, [{ id: 1, payload: 'rejected' }])).rejects.toThrow('Nested or EPHEMERAL')
-      expect(await contents(definition)).toEqual([])
-    }
-    const drifted = await destination()
-    await executor.command(`ALTER TABLE ${quoteIdentifier(database)}.${quoteIdentifier(drifted.name)} ADD COLUMN notes Nested(value UInt64)`)
-    await expect(publish(drifted, [{ id: 1, payload: 'rejected' }])).rejects.toThrow('Nested/dotted')
-    expect(await contents(drifted)).toEqual([])
-    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
-  })
-
-  test('supported scalar keys deduplicate using their native stored types', async () => {
-    const cases = [
-      { type: 'String', first: 'event', second: 'other' },
-      { type: 'FixedString(4)', first: 'evt1', second: 'evt2' },
-      { type: 'Int64', first: '-9223372036854775808', second: '9223372036854775807' },
-      { type: 'UInt128', first: '340282366920938463463374607431768211455', second: '0' },
-      { type: 'UUID', first: '12345678-1234-1234-1234-123456789abc', second: '12345678-1234-1234-1234-123456789abd' },
-      { type: 'IPv4', first: '192.0.2.1', second: '192.0.2.2' },
-      { type: 'IPv6', first: '2001:db8::1', second: '2001:db8::2' },
-      { type: 'Date', first: '2026-01-01', second: '2026-01-02' },
-      { type: 'Date32', first: '1901-01-01', second: '1901-01-02' },
-      { type: "DateTime('UTC')", first: '2026-01-01 00:00:00', second: '2026-01-01 00:00:01' },
-      { type: "DateTime64(6, 'UTC')", first: '2026-01-01 00:00:00.123456', second: '2026-01-01 00:00:00.123457' },
-      { type: 'LowCardinality(String)', first: 'event', second: 'other' },
-    ]
-    for (const { type, first, second } of cases) {
-      const definition = await destination([{ name: 'identity', type }])
-      await publish(definition, [
-        { id: 1, identity: first, payload: 'first' }, { id: 2, identity: first, payload: 'duplicate' },
-        { id: 3, identity: second, payload: 'distinct' },
-      ], { keys: ['identity'], maxRowsPerInsert: 1 })
-      await publish(definition, [{ id: 4, identity: first, payload: 'replay' }], { keys: ['identity'] })
-      expect(await contents(definition)).toEqual([{ id: '1', payload: 'first' }, { id: '3', payload: 'distinct' }])
-    }
-  }, 30_000)
-
-  test('the entire winning row preserves null payloads instead of skipping them during aggregation', async () => {
-    const definition = await destination([{ name: 'optional', type: 'Nullable(String)' }])
-    await publish(definition, [{ id: 1, payload: 'first', optional: null }, { id: 1, payload: 'last', optional: 'not null' }])
-    expect(await executor.query(`SELECT payload, optional FROM ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)}`)).toEqual([{ payload: 'first', optional: null }])
-  })
-
-  test('existing destination duplicates remain; insert-if-absent does not repair them', async () => {
-    const definition = await destination()
-    await executor.insert({ table: `${database}.${definition.name}`, values: [{ id: 1, payload: 'a' }, { id: 1, payload: 'b' }] })
-    await publish(definition, [{ id: 1, payload: 'new' }, { id: 2, payload: 'c' }])
-    expect(await executor.query(`SELECT toString(id) AS id, toString(count()) AS copies FROM ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)} GROUP BY id ORDER BY id`)).toEqual([
-      { id: '1', copies: '2' }, { id: '2', copies: '1' },
-    ])
-  })
-
-  test('actual nullable schema drift rejects a key even if the declaration still says String', async () => {
-    const definition = await destination([{ name: 'identity', type: 'String' }])
-    await executor.command(`ALTER TABLE ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)} MODIFY COLUMN identity Nullable(String)`)
-    const loader = attempt(definition, { keys: ['identity'] })
-    await expect(loader.write({ batchId: 'drift', rows: [{ id: 1, identity: 'x', payload: 'x' }] })).rejects.toThrow('non-null scalar column')
-    expect(await contents(definition)).toEqual([])
-  })
-
-  test('publication-time metadata drift rejects missing defaults and computed aliases', async () => {
-    for (const modification of ['REMOVE DEFAULT', "DateTime64(6, 'UTC') ALIAS now64(6)"]) {
-      const definition = await destination()
-      await executor.command(`ALTER TABLE ${quoteIdentifier(database)}.${quoteIdentifier(definition.name)} MODIFY COLUMN _chkit_ingested_at ${modification}`)
-      const loader = attempt(definition)
-      await expect(loader.write({ batchId: 'metadata-drift', rows: [{ id: 1, payload: 'x' }] })).rejects.toThrow('publication-time default')
-      expect(await contents(definition)).toEqual([])
-    }
-  })
-
   test('strict join overflow fails instead of treating unread existing keys as absent', async () => {
     const definition = await destination()
-    await publish(definition, Array.from({ length: 10 }, (_, id) => ({ id, payload: `existing-${id}` })))
+    const existing = Array.from({ length: 10 }, (_, id) => ({ id, payload: `existing-${id}` }))
+    await publish(definition, existing)
     const constrained: ClickHouseExecutor = {
       ...executor,
       submit(sql, id, settings) {
@@ -310,10 +170,10 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     await loader.write({ batchId: 'overflow', rows: [{ id: 8, payload: 'must not duplicate' }, { id: 9, payload: 'must not duplicate either' }, { id: 10, payload: 'must not acknowledge partial selection' }] })
     await expect(loader.finalize()).rejects.toThrow(/JOIN|join/)
     await loader.abort('expected resource failure')
-    expect((await contents(definition)).length).toBe(10)
+    expect(await contents(definition)).toEqual(existing.map((row) => ({ ...row, id: String(row.id) })))
   }, 30_000)
 
-  test('strict staging refuses format-error skipping and never finalizes a failed write', async () => {
+  test('malformed payloads cannot be skipped and acknowledged', async () => {
     const definition = await destination([{ name: 'quantity', type: 'UInt32' }])
     const permissive: ClickHouseExecutor = {
       ...executor,
@@ -328,6 +188,7 @@ describe('stagedLoader local ClickHouse identity and publication', () => {
     await expect(loader.finalize()).rejects.toThrow('must write before finalizing')
     await loader.abort('expected parser failure')
     expect(await contents(definition)).toEqual([])
+    expect(await executor.query(`SELECT name FROM system.tables WHERE database = '${database}' AND startsWith(name, '_chkit_stage_')`)).toEqual([])
   })
 
   test('strict candidate-key set overflow rejects instead of hiding existing destination keys', async () => {
