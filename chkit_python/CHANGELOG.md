@@ -141,6 +141,17 @@
   `on_plan_created` got `{}`), the apply hooks and `on_pull_introspect` got `{}`, and
   `on_init` / `get_context` got only `--service`. To key them as TS does, pull's `--force`
   and `--overwrite` are now two options (either one overwrites; `-f` stays on `--force`).
+- `chkit check` runs the plugins' `on_config_loaded` hooks, as in TS (#449): with command
+  `check` and the resolved `--table` scope, right before `on_check`. Before, chkit-py
+  never called them, so state a plugin set up there was missing in `on_check`. A hook
+  error fails the check with exit 1 and `Plugin "<name>" failed in onConfigLoaded: ...`
+  (plus the `--json` error envelope). A `--table` selector that matches no table still
+  skips every plugin hook.
+- `chkit migrate` runs the plugins' `on_config_loaded` hooks, as in TS (#455): in plan and
+  apply mode (and with `--retry` / `--abandon`), with command `migrate` and the resolved
+  `--table` scope, after the scope is resolved and before the migrations are listed. Before,
+  chkit-py never called them. A hook error stops migrate before it reads the journal, with exit 1
+  and `Plugin "<name>" failed in onConfigLoaded: ...` (plus the `--json` error envelope).
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured
