@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit status` and `chkit generate` print absolute paths, as in TS (#458): `status`
+  `migrationsDir` (text and `--json`), `generate --json` `migrationFile` and `snapshotFile`,
+  and the `Generated empty migration: <path>` line resolve the configured dirs against the
+  current directory instead of printing them as configured. The `generate` text output now
+  matches TS line for line (`Generated migration: <path>`, `Updated snapshot:`,
+  `Definitions:`, `Operations:`, `Risk summary:`, and the `Table scope:` block with `--table`).
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured

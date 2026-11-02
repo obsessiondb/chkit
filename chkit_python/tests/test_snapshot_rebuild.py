@@ -652,9 +652,9 @@ def test_generate_and_drift_name_the_conflict_markers_and_point_to_rebuild(
 
     assert result.exit_code == 1
     message = result.stderr
-    # chkit-py commands keep config.meta_dir as given (relative here), so the path is too.
+    # Absolute, as TS generate resolves the meta dir against the cwd (#458).
     assert message.startswith(
-        "Snapshot chkit/meta/snapshot.json contains unresolved merge conflict markers."
+        f"Snapshot {project.snapshot_path} contains unresolved merge conflict markers."
     )
     assert "run `chkit snapshot rebuild`" in message
     assert "https://chkit.obsessiondb.com/cli/snapshot/" in message
