@@ -11,7 +11,7 @@ from __future__ import annotations
 from typing import Any
 
 from chkit.cli.plugin_runtime import PluginRuntime
-from chkit.cli.table_scope import TableScope
+from chkit.cli.table_scope import resolve_table_scope, table_keys_from_definitions
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import ChxResolvedConfig, SchemaDefinition
 from chkit.core.schema_loader import load_schema_definitions
@@ -31,6 +31,7 @@ def load_schema_definitions_with_hooks(
     flags: dict[str, Any],
     json_mode: bool,
     plugin_runtime: PluginRuntime,
+    table_selector: str | None = None,
 ) -> list[SchemaDefinition]:
     """Load schema definitions the way ``chkit generate`` does.
 
@@ -40,12 +41,15 @@ def load_schema_definitions_with_hooks(
     ``chkit snapshot rebuild`` uses the same pipeline so it writes exactly the
     snapshot ``generate`` would. The returned list is the hook output, not yet
     re-canonicalized.
+
+    As in TS, ``on_config_loaded`` gets ``table_selector`` resolved against no
+    tables, and ``on_schema_loaded`` gets it resolved against the loaded tables.
     """
     plugin_runtime.run_on_config_loaded(
         ChxOnConfigLoadedContext(
             command=command,
             config=config,
-            table_scope=TableScope(enabled=False),
+            table_scope=resolve_table_scope(table_selector, []),
             flags=flags,
             config_path=config_path,
             options={},
@@ -58,7 +62,9 @@ def load_schema_definitions_with_hooks(
             ChxOnSchemaLoadedContext(
                 command=command,
                 config=config,
-                table_scope=TableScope(enabled=False),
+                table_scope=resolve_table_scope(
+                    table_selector, table_keys_from_definitions(definitions)
+                ),
                 flags=flags,
                 definitions=list(definitions),
                 json_mode=json_mode,

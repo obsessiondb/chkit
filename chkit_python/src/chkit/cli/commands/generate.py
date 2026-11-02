@@ -432,6 +432,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         ),
         json_mode=output_json,
         plugin_runtime=plugin_runtime,
+        table_selector=table_selector,
     )
     schema_canonical = canonicalize_definitions(threaded_defs)
 
@@ -509,17 +510,9 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     except ChxValidationError as error:
         _exit_validation_failed(error, output_json=output_json)
 
-    if table_scope.enabled:
-        # TableRenameMapping is structurally compatible with table_scope's
-        # internal _RenameMapping Protocol but mypy can't infer that without help.
-        filtered = filter_plan_by_table_scope(
-            plan,
-            set(table_scope.matched_tables),
-            rename_mappings=active_table_mappings,  # type: ignore[arg-type]
-        )
-        plan = filtered.plan
-
-    # Plugins may rewrite the plan (e.g. inject pre/post statements).
+    # Plugins may rewrite the plan (e.g. inject pre/post statements). As in
+    # TS they see the full plan, and the scope filter then also drops what
+    # they add for tables outside --table.
     plan = plugin_runtime.run_on_plan_created(
         ChxOnPlanCreatedContext(
             command="generate",
@@ -529,6 +522,16 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             plan=plan,
         )
     )
+
+    if table_scope.enabled:
+        # TableRenameMapping is structurally compatible with table_scope's
+        # internal _RenameMapping Protocol but mypy can't infer that without help.
+        filtered = filter_plan_by_table_scope(
+            plan,
+            set(table_scope.matched_tables),
+            rename_mappings=active_table_mappings,  # type: ignore[arg-type]
+        )
+        plan = filtered.plan
 
     # A cutover replaces the DROP + CREATE of a structural change with a
     # zero-downtime copy and swap. It runs after scope filtering, so a table
