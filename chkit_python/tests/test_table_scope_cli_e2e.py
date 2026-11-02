@@ -14,7 +14,7 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit.cli.main import app
-from tests.e2e_testkit import resolve_live_env
+from tests.e2e_testkit import create_prefix, resolve_live_env
 
 CONFIG_TEMPLATE = """
 from chkit import define_config
@@ -154,6 +154,29 @@ def test_generate_table_scope_invalid_selector_rejected(
 ) -> None:
     runner.invoke(app, ["generate", "--name", "init"])
     result = runner.invoke(app, ["generate", "--dryrun", "--table", "ev*ents"])
+    assert result.exit_code != 0
+
+
+# ---------- chkit status --table ----------
+
+
+def test_status_ignores_table_selector(runner: CliRunner, project: Path) -> None:
+    """status accepts --table and ignores it, as in TS (#451)."""
+    # A unique name keeps the shared journal from holding a row for this file.
+    result = runner.invoke(app, ["generate", "--name", create_prefix("status_scope")])
+    assert result.exit_code == 0, result.output
+
+    unscoped = runner.invoke(app, ["status", "--json"])
+    assert unscoped.exit_code == 0, unscoped.output
+    assert json.loads(unscoped.output)["pending"] == 1
+
+    for selector in ("nomatch_*", "users"):
+        result = runner.invoke(app, ["status", "--json", "--table", selector])
+        assert result.exit_code == 0, result.output
+        assert result.output == unscoped.output
+
+    # The selector is still validated, as in TS.
+    result = runner.invoke(app, ["status", "--table", "ev*ents"])
     assert result.exit_code != 0
 
 

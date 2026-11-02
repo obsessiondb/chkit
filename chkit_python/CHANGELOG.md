@@ -127,6 +127,11 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit status --table` is accepted and ignored, as in TS and the docs (#451). Before,
+  chkit-py read the snapshot and kept only the pending migrations that touch the matched
+  tables, so `--table nomatch_*` reported `Pending: 0` (and `"pending": 0`,
+  `"pendingMigrations": []` in `--json`) with two migrations pending. The counts and the
+  pending list now always cover every migration; an invalid selector still fails, as in TS.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured
