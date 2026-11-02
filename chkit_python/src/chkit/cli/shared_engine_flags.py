@@ -1,10 +1,11 @@
 """``--force-shared-engines`` / ``--no-shared-engines`` for the commands that run
-the ``on_schema_loaded`` hooks (``generate`` and ``snapshot rebuild``).
+the ``on_schema_loaded`` hooks (``generate`` and ``snapshot rebuild``) and for
+``check``, whose ObsessionDB ``on_check`` reads them too.
 
 The TS ObsessionDB plugin registers these through ``extendCommands``. Typer
-commands are static, so chkit-py declares them on the two commands where they
-take effect and hands them to the hooks under the ``--``-prefixed keys the TS
-flag parser produces (``resolve_strip_behavior`` reads those keys).
+commands are static, so chkit-py declares them on the commands themselves and
+hands them to the hooks under the ``--``-prefixed keys the TS flag parser
+produces (``resolve_strip_behavior`` reads those keys).
 """
 
 from __future__ import annotations
