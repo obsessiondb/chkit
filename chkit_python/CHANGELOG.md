@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- Without a `clickhouse` block or a selected ObsessionDB service, `check`, `status`,
+  `migrate`, `drift`, `query` and `pull` fail with the TS message (#459), e.g. "clickhouse
+  config is required for check (journal is stored in ClickHouse)", on stderr and in the
+  `--json` error envelope, with exit 1. `pull` now reports it as the TS pull plugin does:
+  "Pull schema failed: pull needs a target: ..." on stdout (`{"ok": false, "command":
+  "schema", "error": ...}` under `--json`) and exit 2 instead of 1.
 - `chkit generate --table` gives plugin hooks the same scope and plan as TS (#457):
   `on_config_loaded` and `on_schema_loaded` get the resolved `table_scope` (no matched
   tables yet, then the tables of the loaded schema) instead of a disabled one, and

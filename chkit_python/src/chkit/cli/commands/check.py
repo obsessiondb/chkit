@@ -106,10 +106,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         service=service,
     )
     if executor is None and config.clickhouse is None:
-        msg = (
-            "clickhouse.config.py must include a `clickhouse` block or select an "
-            "ObsessionDB service (journal lives in ClickHouse)."
-        )
+        msg = "clickhouse config is required for check (journal is stored in ClickHouse)"
         exit_no_target("check", msg, json_mode=output_json)
 
     migrations_dir = Path(os.path.abspath(config.migrations_dir))

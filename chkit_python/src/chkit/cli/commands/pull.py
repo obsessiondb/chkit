@@ -29,7 +29,6 @@ import typer
 
 from chkit.cli.command_target import (
     ServiceOption,
-    exit_no_target,
     open_client,
     resolve_plugin_executor,
 )
@@ -424,7 +423,7 @@ def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None
     tmp_file.replace(out_file)
 
 
-def run(  # noqa: PLR0917
+def run(  # noqa: PLR0912, PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -498,11 +497,17 @@ def run(  # noqa: PLR0917
         flags=hook_flags,
     )
     if executor is None and config.clickhouse is None:
+        # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
+        # a config error on stdout and exits 2.
         msg = (
-            "clickhouse.config.py must include a `clickhouse` block or select an "
-            "ObsessionDB service (pull connects to ClickHouse to read the live schema)."
+            "pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service "
+            "(chkit obsessiondb service select)"
         )
-        exit_no_target("pull", msg, json_mode=output_json)
+        if output_json:
+            print_output({"ok": False, "command": "schema", "error": msg}, json_mode=True)
+        else:
+            typer.echo(f"Pull schema failed: {msg}")
+        raise typer.Exit(code=2)
 
     selected = sorted({d.strip() for d in (database or []) if d.strip()})
 
