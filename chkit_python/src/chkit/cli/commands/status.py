@@ -12,6 +12,7 @@ Followed by lists of pending filenames and any detected checksum mismatches.
 
 from __future__ import annotations
 
+import os
 from pathlib import Path
 from typing import Annotated
 
@@ -83,8 +84,10 @@ def run(  # noqa: PLR0917
         )
         exit_no_target("status", msg, json_mode=output_json)
 
-    migrations_dir = Path(config.migrations_dir)
-    meta_dir = Path(config.meta_dir)
+    # Absolute, as TS ``resolveDirs`` resolves them, so the printed
+    # ``migrationsDir`` reads the same in both CLIs.
+    migrations_dir = Path(os.path.abspath(config.migrations_dir))
+    meta_dir = Path(os.path.abspath(config.meta_dir))
     migrations_dir.mkdir(parents=True, exist_ok=True)
     files = list_migration_filenames(migrations_dir)
 
