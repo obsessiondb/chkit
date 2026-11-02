@@ -282,7 +282,7 @@ def _render_rename_column_suggestion_sql(
 ) -> str:
     return (
         f"ALTER TABLE {table.database}.{table.name} "
-        f"RENAME COLUMN `{from_}` TO `{to}`;"
+        f"RENAME COLUMN IF EXISTS `{from_}` TO `{to}`;"
     )
 
 
