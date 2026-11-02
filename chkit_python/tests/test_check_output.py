@@ -74,6 +74,30 @@ users = table(database="app", name="users", engine="MergeTree()",
 definitions = schema(events, users)
 """
 
+FLAG_PROBE = """
+import json
+
+
+class _Probe:
+    def on_check(self, ctx):
+        with open("flags.json", "w") as f:
+            json.dump(ctx.flags, f)
+
+
+_probe = ChxPlugin(manifest=ChxPluginManifest(name="probe"), hooks=_Probe())
+"""
+
+DISTRIBUTED_SCHEMA = """
+from chkit import ColumnDefinition, schema, table
+
+events_local = table(database="app", name="events_local", engine="MergeTree()",
+    columns=[ColumnDefinition(name="id", type="UInt64")], primary_key=["id"], order_by=["id"])
+events = table(database="app", name="events",
+    engine="Distributed('cluster', 'app', 'events_local', rand())",
+    columns=[ColumnDefinition(name="id", type="UInt64")])
+definitions = schema(events_local, events)
+"""
+
 EVENTS_ONLY_MIGRATION = """-- operation: add_column key=table:app.events:column:extra risk=safe
 ALTER TABLE app.events ADD COLUMN IF NOT EXISTS `extra` String;
 """
@@ -244,3 +268,53 @@ def test_schema_validation_is_left_to_generate(project: Path) -> None:
     generated = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
     assert generated.exit_code == 1
     assert json.loads(generated.stdout)["error"] == "validation_failed"
+
+
+def test_on_check_gets_the_passed_flags_keyed_as_in_ts(project: Path) -> None:
+    """As in TS, on_check gets only the flags that were passed, by long name (#450)."""
+    config = project / "clickhouse.config.py"
+    config.write_text(
+        CONFIG.replace("config = define_config", FLAG_PROBE + "\nconfig = define_config")
+        .replace("PLUGINS", "[_probe]"),
+        encoding="utf-8",
+    )
+
+    _check()
+    assert json.loads((project / "flags.json").read_text(encoding="utf-8")) == {}
+
+    _check(
+        "--config", "clickhouse.config.py", "--json", "--strict", "-t", "events",
+        "--force-shared-engines", "--no-shared-engines",
+    )
+    assert json.loads((project / "flags.json").read_text(encoding="utf-8")) == {
+        "--config": "clickhouse.config.py",
+        "--json": True,
+        "--table": "events",
+        "--strict": True,
+        "--force-shared-engines": True,
+        "--no-shared-engines": True,
+    }
+
+
+def test_force_shared_engines_fails_a_distributed_table(project: Path) -> None:
+    """As in TS, the ObsessionDB check reads --force-shared-engines (#450)."""
+    (project / "schema.py").write_text(DISTRIBUTED_SCHEMA, encoding="utf-8")
+    (project / "clickhouse.config.py").write_text(
+        "from chkit_plugin_obsessiondb import obsessiondb\n"
+        + CONFIG.replace("PLUGINS", "[obsessiondb()]"),
+        encoding="utf-8",
+    )
+
+    assert json.loads(_check("--json").stdout)["plugins"] == {}
+
+    result = _check("--json", "--force-shared-engines")
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert payload["failedChecks"] == ["plugin:obsessiondb"]
+    assert payload["plugins"] == {
+        "obsessiondb": {
+            "evaluated": True,
+            "ok": False,
+            "findingCodes": ["obsessiondb_distributed_unsupported"],
+        }
+    }

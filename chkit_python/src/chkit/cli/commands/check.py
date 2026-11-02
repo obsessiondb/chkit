@@ -30,6 +30,7 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json
 from chkit.cli.migration_store import (
@@ -79,10 +80,10 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             ),
         ),
     ] = None,
-    # Accepted so existing scripts keep working; only generate and snapshot
-    # rebuild run the on_schema_loaded hooks that read them (as in TS).
-    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
-    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    # As in TS, the ObsessionDB plugin's on_check reads these: a Distributed
+    # table fails check when the target counts as ObsessionDB.
+    force_shared_engines: ForceSharedEnginesOption = False,
+    no_shared_engines: NoSharedEnginesOption = False,
     service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="check"))
@@ -162,7 +163,17 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             command="check",
             config=config,
             table_scope=table_scope,
-            flags={},
+            flags=passed_flags(
+                {
+                    "--config": str(config_path) if config_path is not None else None,
+                    "--json": output_json,
+                    "--table": table_selector,
+                    "--strict": strict,
+                    "--force-shared-engines": force_shared_engines,
+                    "--no-shared-engines": no_shared_engines,
+                    "--service": service,
+                }
+            ),
             config_path=resolved_config_path,
             json_mode=output_json,
             options={},

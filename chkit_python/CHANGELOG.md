@@ -127,6 +127,12 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit check` passes the plugins' `on_check` the flags that were passed, keyed by long name
+  as in TS (`--json`, `--strict`, `--table`, `--config`, `--force-shared-engines`,
+  `--no-shared-engines`, `--service`) (#450). Before, `on_check` always got `{}`, so
+  `check --force-shared-engines` had no effect: on a target not recognized as ObsessionDB the
+  ObsessionDB plugin did not reject a `Distributed` table, and check passed where TS fails with
+  `obsessiondb_distributed_unsupported`.
 - Credentials in `clickhouse.url` (`http://user:password@host`) are used to sign in, as in TS
   (#432): each one the URL sets, percent-decoded, takes precedence over the configured
   `username` / `password`. Before, chkit-py ignored them and signed in with the configured
