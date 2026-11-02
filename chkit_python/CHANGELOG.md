@@ -602,6 +602,13 @@
   the wider cell widened the table column. Values now print as JavaScript prints a number:
   the shortest digits that read back as the same double, in exponent form (`1e-7`,
   `1.5e+21`) only below `1e-6` and from `1e21`.
+- Column types are trimmed as TS `String(type).trim()` trims them (#454). `to_create_sql`,
+  `render_alter_add_column` and `render_alter_modify_column` rendered the type of a
+  definition straight from `table()` untrimmed (`` `id`   UInt64 ``); they now emit
+  `` `id` UInt64 ``. The type trim in canonicalization, the planner, cutover and drift, and
+  of index projection types, used `str.strip()`, which keeps U+FEFF where TS removes it and
+  removes U+001C-U+001F and U+0085 where TS keeps them; it now trims the same characters as
+  TS. The new `render_column_type()` in `chkit.core.sql` is the one renderer.
 
 ## 0.2.0 — 2026-08-10
 

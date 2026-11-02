@@ -50,7 +50,7 @@ from chkit.core.model import (
     TableRetainedBy,
     ValidationIssue,
 )
-from chkit.core.sql import to_create_sql
+from chkit.core.sql import render_column_type, to_create_sql
 
 CutoverCopyMode: TypeAlias = Literal["migration", "backfill"]
 CutoverOldTableMode: TypeAlias = Literal["keep", "drop"]
@@ -979,10 +979,10 @@ def _copied_columns(
             continue
         if not _is_stored(old_column) or not _is_insertable(new_column):
             continue
-        if _column_type(old_column) != _column_type(new_column):
+        if render_column_type(old_column) != render_column_type(new_column):
             problems.append(
-                f"column {old_column.name} changes type ({_column_type(old_column)} to "
-                f"{_column_type(new_column)}). Change column types in a separate migration."
+                f"column {old_column.name} changes type ({render_column_type(old_column)} to "
+                f"{render_column_type(new_column)}). Change column types in a separate migration."
             )
             continue
         columns.append(old_column.name)
@@ -995,11 +995,6 @@ def _is_stored(column: ColumnDefinition) -> bool:
 
 def _is_insertable(column: ColumnDefinition) -> bool:
     return column.default_kind in (None, "DEFAULT")
-
-
-def _column_type(column: ColumnDefinition) -> str:
-    type_ = str(column.type).strip()
-    return f"Nullable({type_})" if column.nullable else type_
 
 
 def _replicated_path(engine: str) -> str | None:
