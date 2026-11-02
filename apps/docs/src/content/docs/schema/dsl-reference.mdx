@@ -565,6 +565,8 @@ Earlier versions of chkit and chkit-py rendered a `Delta` or `Gorilla` without `
 chkit migrate --apply --setting allow_experimental_codecs=1
 ```
 
+On ObsessionDB (ClickHouse 26.8), the other replicas of a table with an `ALP` column do not apply later `ALTER` statements on that table, so `migrate` stops waiting for them. Avoid `ALP` on replicated tables.
+
 ## Skip indexes
 
 Each entry in the `indexes` array is a `SkipIndexDefinition`. The shared base fields are:
