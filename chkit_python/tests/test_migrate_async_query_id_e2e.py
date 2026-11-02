@@ -41,6 +41,7 @@ _ROWS = 16
 _FAIL_AT = 12
 _CLI_TIMEOUT_SECONDS = 120.0
 _POLL_TIMEOUT_SECONDS = 90.0
+_PASSWORD_ENV = "CHKIT_E2E_PASSWORD"
 
 Target = Literal["staging", "prod"]
 
@@ -63,7 +64,10 @@ class Fixture:
 
 def _config_source(dir_: Path, database: str) -> str:
     env = resolve_live_env()
+    # The password reaches the CLI through its environment, not the file.
     return f"""
+import os
+
 from chkit import define_config
 
 config = define_config(
@@ -75,7 +79,7 @@ config = define_config(
         "clickhouse": {{
             "url": "{env.clickhouse_url}",
             "username": "{env.clickhouse_user}",
-            "password": "{env.clickhouse_password}",
+            "password": os.environ["{_PASSWORD_ENV}"],
             "database": "{database}",
         }},
     }}
@@ -155,6 +159,7 @@ def _start(fixture: Fixture, target: Target) -> subprocess.Popen[str]:
             **os.environ,
             "CHKIT_JOURNAL_TABLE": fixture.journal_table,
             "CI": "1",
+            _PASSWORD_ENV: resolve_live_env().clickhouse_password,
             # An empty config home, so a user profile config cannot change the run.
             "XDG_CONFIG_HOME": str(fixture.dir / "xdg"),
         },

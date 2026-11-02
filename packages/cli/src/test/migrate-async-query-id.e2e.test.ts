@@ -155,7 +155,8 @@ async function createFixture(label: string): Promise<Fixture> {
         `  clickhouse: {\n` +
         `    url: '${env.clickhouseUrl}',\n` +
         `    username: '${env.clickhouseUser}',\n` +
-        `    password: '${env.clickhousePassword}',\n` +
+        // The password reaches the CLI through its environment, not the file.
+        `    password: process.env.CHKIT_E2E_PASSWORD,\n` +
         `    database: '${databases[target]}',\n` +
         `  },\n}\n`,
       'utf8',
@@ -193,7 +194,7 @@ function migrate(fixture: Fixture, target: Target): { result: Promise<CliResult>
   return startCli(
     fixture.dir,
     ['migrate', '--config', fixture.configs[target], '--execute', '--json'],
-    { CHKIT_JOURNAL_TABLE: fixture.journalTable, CI: '1' },
+    { CHKIT_JOURNAL_TABLE: fixture.journalTable, CHKIT_E2E_PASSWORD: getLiveEnv().clickhousePassword, CI: '1' },
   )
 }
 
