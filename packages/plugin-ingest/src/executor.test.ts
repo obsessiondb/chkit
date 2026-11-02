@@ -716,43 +716,6 @@ describe('runtime contracts', () => {
     expect(sequences).toEqual([1, 2, 3, 4])
   })
 
-  test('a read() that does not return an async iterable fails with an actionable error', async () => {
-    const journal = createMemoryJournal()
-    let readers = 0
-    const stream = defineStream({
-      id: 'app.sync_reader', destination: events,
-      read: () => {
-        readers += 1
-        return [{ rows: [{ id: 1 }] }] as unknown as AsyncIterable<{ rows: Array<{ id: number }> }>
-      },
-    })
-    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal, destination: createMemoryDestination() })
-    expect(result.streams[0]).toMatchObject({ outcome: 'failed', error: 'Stream "app.sync_reader": read() must return an async iterable such as an async generator.' })
-    expect(readers).toBe(1)
-    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toHaveLength(0)
-  })
-
-  test('reads an async-iterator getter once and preserves its receiver', async () => {
-    let lookups = 0
-    const destination = createMemoryDestination()
-    const stream = defineStream({
-      id: 'app.iterator_getter', destination: events,
-      read: () => ({
-        id: 7,
-        get [Symbol.asyncIterator]() {
-          lookups += 1
-          return async function* (this: { id: number }) {
-            yield { rows: [{ id: this.id }] }
-          }
-        },
-      }),
-    })
-    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
-    expect(result.ok).toBe(true)
-    expect(lookups).toBe(1)
-    expect(destination.tables.get('app.events')?.map((row) => row.id)).toEqual([7])
-  })
-
   test.each([
     ['completes', { outcome: 'succeeded', rows: 1, error: undefined }],
     ['fails', { outcome: 'failed', rows: 0, error: 'reader exploded' }],

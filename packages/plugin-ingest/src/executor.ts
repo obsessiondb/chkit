@@ -321,7 +321,7 @@ async function readAndLoad(input: {
 
     // Iterate by hand so a hung next() can be abandoned on abort; return() still
     // runs on every exit so the reader's finally blocks own cursor cleanup.
-    const iterator = createReaderIterator(stream.id, reader)
+    const iterator = reader[Symbol.asyncIterator]()
     const maxChunkRows = stream.budget?.maxChunkRows ?? DEFAULT_MAX_CHUNK_ROWS
     try {
       while (!budgetExhausted) {
@@ -601,14 +601,6 @@ function assertValidChunk(
       `Stream "${streamId}" yielded a chunk of ${chunk.rows.length} rows, above the ${maxChunkRows}-row bound. Yield smaller chunks or raise budget.maxChunkRows.`
     )
   }
-}
-
-function createReaderIterator(streamId: string, reader: unknown): AsyncIterator<unknown> {
-  const factory = (typeof reader === 'object' || typeof reader === 'function') && reader !== null ? Reflect.get(reader, Symbol.asyncIterator) : undefined
-  if (typeof factory !== 'function') {
-    throw new Error(`Stream "${streamId}": read() must return an async iterable such as an async generator.`)
-  }
-  return Reflect.apply(factory, reader, [])
 }
 
 function emptyBatch(): PendingBatch {
