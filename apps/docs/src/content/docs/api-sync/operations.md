@@ -41,6 +41,10 @@ Before resuming, ChKit reads the complete namespace in one SELECT snapshot and v
 
 Journal reads disable the query cache and request `select_sequential_consistency = 1`. An older valid snapshot can cause work to be replayed. Run-scoped identities keep that replay independent of another process's journal facts. Destination delivery remains at-least-once; choose keys and versioning that reconcile repeats.
 
+On self-managed ClickHouse, automatic journal creation uses a local `MergeTree` table; `clickhouse.cluster` does not make that journal replicated. Before routing ingestion between nodes, provision a shared replicated journal with the matching schema and verify its visibility and engine on every serving node. Finish cluster DDL before starting ingestion: an overlapping `ensure()` can create a local table first, causing `CREATE TABLE IF NOT EXISTS ... ON CLUSTER` to leave it unreplicated. The read setting alone does not guarantee that every replica has received every write.
+
+Retain the complete active journal, not just recent partitions. Checkpoint ancestry can refer to older months; a TTL or partition deletion can make later checkpoints unverifiable and reset the selected progress to the beginning. Repair cannot reconstruct deleted evidence. Restore the missing history or plan an intentional re-sync rather than pruning the active journal as ordinary telemetry.
+
 ## Retries and provider errors
 
 Retries need no configuration. `context.fetch` throws `HttpError` for unsuccessful responses; requests made another way throw `HttpError.fromResponse(response)` themselves. The classification treats 429 as rate limiting, 408/425/5xx as transient, and other 4xx as permanent.
@@ -113,7 +117,7 @@ chkit ingest run --tag stream:helpdesk.tickets \
   --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
 ```
 
-`--from` and `--to` require `--backfill`. The ID creates an isolated checkpoint namespace, preserving the ordinary scheduled bookmark. Reusing an ID reuses that namespace; actual resumption depends on the strategy. With explicit timestamp bounds, the same bounds take precedence over a stored watermark, so rerunning that command rereads the range. A checkpointed custom strategy can resume within it.
+`--from` and `--to` require `--backfill`. Range validation belongs to the strategy: `timestampWindow` rejects reversed bounds but accepts equal bounds as an empty window; `fullSync` and `cursorState` ignore them. Date-times without a `Z` or UTC offset use the process's local time zone; date-only forms use UTC. Prefer explicit offsets in scheduled jobs. The ID creates an isolated checkpoint namespace, preserving the ordinary scheduled bookmark. Reusing an ID reuses that namespace; actual resumption depends on the strategy. With explicit timestamp bounds, the same bounds take precedence over a stored watermark, so rerunning that command rereads the range. A checkpointed custom strategy can resume within it.
 
 Isolation applies to checkpoints, not the destination table. Historical rows still use the stream's configured destination and version semantics. With `rawTable`, later ingestion time wins, so older source versions loaded later can replace newer objects. Use source-versioned destinations when that ordering matters.
 
@@ -134,6 +138,8 @@ chkit ingest status --tag pipeline:helpdesk --json
 | No pipeline / no matching streams | Entry exports and exact tag spelling |
 | No checkpoint after a successful run | The bundled `fullSync()` strategy has no checkpoint; custom full-scan strategies may record completion |
 | Window restarts from the beginning | Timestamp progress commits after the whole window; reduce work or use safe intermediate provider state |
+| Timestamp window never completes under `budget.maxChunks` | A window that needs at least as many chunks as the budget ends as `budget_exhausted` before completion is claimed, so the watermark never advances. Raise `maxChunks`, shrink the window, or use provider state |
+| `planned lower bound … is after upper bound` | The effective lower bound exceeds the cutoff or explicit upper bound. Check host clock skew, a future `start`, overlap, custom `from`, and backfill bounds. Committed progress is unchanged; planning can succeed once the upper bound reaches the effective lower bound |
 | Duplicated logical records | Destination keys/versioning, query reconciliation, deduplication settings, and volatile mapped fields |
 | Incompatible checkpoint | Strategy ID/version or state format changed |
 | Direct connection required | Configure `clickhouse`; workbench authentication alone is insufficient |

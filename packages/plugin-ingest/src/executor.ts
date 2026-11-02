@@ -478,6 +478,9 @@ async function loadBatch(
 }
 
 function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string): unknown {
+  if (typeof stream.incremental.id !== 'string' || stream.incremental.id === '' || !Number.isSafeInteger(stream.incremental.version) || stream.incremental.version < 1) {
+    throw new Error(`Stream "${stream.id}": incremental strategy must have a non-empty id and a safe integer version of at least 1, otherwise its checkpoints can never be read back.`)
+  }
   if (!envelope) return undefined
   if (envelope.strategy !== stream.incremental.id || envelope.version !== stream.incremental.version) {
     throw new Error(

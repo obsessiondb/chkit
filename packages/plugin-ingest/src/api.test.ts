@@ -2,6 +2,7 @@ import { afterEach, describe, expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { runInNewContext } from 'node:vm'
 
 import { resolveConfig } from '@chkit/core'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
@@ -51,6 +52,16 @@ describe('timestampWindow options', () => {
     }
     expect(() => timestampWindow({ start: cutoff }).plan({ state: undefined, cutoff: start, range: undefined })).toThrow('after upper bound')
     expect(() => timestampWindow({ from: () => new Date('invalid') }).plan({ state: undefined, cutoff, range: undefined })).toThrow('valid dates')
+  })
+
+  test('rejects non-Date planned bounds while preserving foreign-realm Dates and equal windows', () => {
+    const foreignDate: Date = runInNewContext('new Date("2026-09-19T00:00:00Z")')
+    const window = timestampWindow({ from: () => foreignDate })
+    const selection = window.plan({ state: undefined, cutoff, range: undefined })
+    expect(selection.from.getTime()).toBe(cutoff.getTime())
+    expect(window.complete?.({ state: undefined, selection })).toEqual({ watermark: cutoff.toISOString() })
+    expect(() => timestampWindow({ from: () => '2026-01-01' as unknown as Date }).plan({ state: undefined, cutoff, range: undefined })).toThrow('planned bounds must be valid dates')
+    expect(() => window.plan({ state: undefined, cutoff, range: { from: foreignDate, to: 'invalid' as unknown as Date } })).toThrow('planned bounds must be valid dates')
   })
 })
 

@@ -82,6 +82,44 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     await executor.close()
   }, 60_000)
 
+  test('invalid checkpoint identities fail only when their streams run and never reach the reader', async () => {
+    let invalidReads = 0
+    const invalid = [
+      { id: '', version: 1 },
+      { id: 1n as unknown as string, version: 1 },
+      { id: 'e2e.cursor', version: 0 },
+      { id: 'e2e.cursor', version: 1.5 },
+      { id: 'e2e.cursor', version: Number.MAX_SAFE_INTEGER + 1 },
+    ].map((identity, index) => defineStream({
+      id: `${prefix}invalid_${index}`, destination: destinationTable,
+      incremental: cursorState({ ...identity, parse: Number }),
+      async *read() { invalidReads += 1; yield { rows: [], state: 1 } },
+    }))
+    const valid = defineStream({
+      id: `${prefix}valid_identity`, destination: destinationTable,
+      incremental: cursorState({ id: 'e2e.cursor', version: 1, parse: Number }),
+      async *read({ selection }) { yield { rows: [], state: (selection ?? 0) + 1 } },
+    })
+    const pipeline = definePipeline({ id: `${prefix}identity`, streams: [...invalid, valid] })
+    const journal = () => createClickHouseJournal({ executor, database, targetId: `e2e/${prefix}`, table: journalTable })
+    const destination = createClickHouseDestination(executor)
+    const selected = selectStreams([pipeline], [`stream:${valid.id}`])
+    expect((await runIngestion({ selected, backfill: undefined }, { journal: journal(), destination })).ok).toBe(true)
+
+    const result = await runIngestion({ selected: selectStreams([pipeline], []), backfill: undefined }, { journal: journal(), destination })
+
+    expect(result.ok).toBe(false)
+    for (const stream of invalid) {
+      expect(result.streams.find((entry) => entry.streamId === stream.id)).toMatchObject({ outcome: 'failed', error: expect.stringContaining('incremental strategy must have a non-empty id and a safe integer version of at least 1') })
+      const checkpoint = await journal().readCheckpoint(stream.id)
+      expect(checkpoint.version).toBe(0)
+      expect(checkpoint.envelope).toBeUndefined()
+    }
+    expect(invalidReads).toBe(0)
+    expect(result.streams.find((entry) => entry.streamId === valid.id)?.outcome).toBe('succeeded')
+    expect((await journal().readCheckpoint(valid.id)).envelope?.state).toBe(2)
+  })
+
   test('a lost acknowledgement replays from the journaled checkpoint without skipping or duplicating rows', async () => {
     const source = Array.from({ length: 3 }, (_, page) => [0, 1].map((offset) => ({ id: page * 2 + offset, label: `row-${page * 2 + offset}` })))
     const stream = defineStream({

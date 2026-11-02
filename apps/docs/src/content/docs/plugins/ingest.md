@@ -176,7 +176,7 @@ Provider clients can accept the exported `SourceContext` type, containing `fetch
 
 With `cursorState`, `state` on a chunk must be the complete state that is safe to resume from once every row up to that chunk is saved. Omit it when you cannot make that claim; the run then restarts from the previous checkpoint after a failure.
 
-A checkpoint records its strategy id and version. Changing either makes the next run fail rather than reinterpret old state.
+A checkpoint records its strategy id and version. When a selected stream runs, the runtime requires a non-empty id and a safe integer version of at least 1 before planning or reading, because the journal cannot restore other identities. Constructing a definition does not perform this validation. Changing the strategy id or version makes the next run fail rather than reinterpret old state.
 
 ## Retry policy
 
