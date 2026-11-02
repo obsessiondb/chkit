@@ -58,6 +58,36 @@ describe('provider retry policy', () => {
     expect(scheduled).toBe(0)
   })
 
+  test('a request with a Retry-After above the timer limit waits without overflow warnings', async () => {
+    const controller = new AbortController()
+    const requested = Promise.withResolvers<void>()
+    const warnings: Error[] = []
+    const onWarning = (warning: Error) => { if (warning.name === 'TimeoutOverflowWarning') warnings.push(warning) }
+    let calls = 0
+    const context = createSourceContext({
+      signal: controller.signal,
+      retry: { ...immediate, retries: 1, maxRetryTime: Infinity },
+      fetch: async () => {
+        calls += 1
+        requested.resolve()
+        return new Response('slow down', { status: 429, headers: { 'retry-after': '2147484' } })
+      },
+    })
+    process.on('warning', onWarning)
+    const operation = context.fetch('https://api.example.com/items')
+    await requested.promise
+    const timer = setTimeout(() => controller.abort(new Error('host cancelled')), 40)
+    try {
+      await expect(operation).rejects.toThrow()
+      expect(calls).toBe(1)
+      expect(warnings).toHaveLength(0)
+    } finally {
+      clearTimeout(timer)
+      controller.abort()
+      process.off('warning', onWarning)
+    }
+  })
+
   test.each(['backoff', 'retry-after'] as const)('cancellation interrupts %s without calling the provider again', async (mode) => {
     const controller = new AbortController()
     let calls = 0
