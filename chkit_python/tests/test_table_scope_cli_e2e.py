@@ -157,6 +157,79 @@ def test_generate_table_scope_invalid_selector_rejected(
     assert result.exit_code != 0
 
 
+PROBE_PLUGIN = """
+import json
+
+from chkit.core.model import MigrationOperation
+from chkit.plugins import ChxPlugin, ChxPluginManifest
+
+
+def _log(hook, ctx, **extra):
+    scope = ctx.table_scope
+    entry = {{"hook": hook, "enabled": scope.enabled, "matched": list(scope.matched_tables), **extra}}
+    with open({log_path!r}, "a") as log:
+        log.write(json.dumps(entry) + "\\n")
+
+
+class Hooks:
+    def on_config_loaded(self, ctx):
+        _log("onConfigLoaded", ctx)
+
+    def on_schema_loaded(self, ctx):
+        _log("onSchemaLoaded", ctx)
+
+    def on_plan_created(self, ctx):
+        _log("onPlanCreated", ctx, ops=[op.key for op in ctx.plan.operations])
+        injected = MigrationOperation(
+            type="alter_table_add_column",
+            key="table:default.events:column:injected",
+            risk="safe",
+            sql="ALTER TABLE default.events ADD COLUMN IF NOT EXISTS injected UInt8;",
+        )
+        return ctx.plan.model_copy(update={{"operations": [*ctx.plan.operations, injected]}})
+
+
+probe = ChxPlugin(manifest=ChxPluginManifest(name="probe", api_version=1), hooks=Hooks())
+"""
+
+
+def test_generate_table_scope_reaches_plugin_hooks_as_in_ts(
+    runner: CliRunner, project: Path
+) -> None:
+    """Hooks get the resolved scope, and on_plan_created the unfiltered plan (#457)."""
+    runner.invoke(app, ["generate", "--name", "init"])
+    log_path = project / "hooks.log"
+    config_path = project / "clickhouse.config.py"
+    config_path.write_text(
+        PROBE_PLUGIN.format(log_path=str(log_path))
+        + config_path.read_text(encoding="utf-8").replace(
+            '"metaDir": "./chkit/meta",', '"metaDir": "./chkit/meta", "plugins": [probe],'
+        ),
+        encoding="utf-8",
+    )
+    (project / "schema_v1.py").write_text(
+        SCHEMA_TWO_TABLES_EVENTS_CHANGED, encoding="utf-8"
+    )
+
+    result = runner.invoke(app, ["generate", "--dryrun", "--json", "--table", "users"])
+
+    assert result.exit_code == 0, result.output
+    # The scope filter runs after the hook, so the operation it adds for
+    # events (outside --table users) is dropped too.
+    assert json.loads(result.output)["operationCount"] == 0
+    entries = [json.loads(line) for line in log_path.read_text(encoding="utf-8").splitlines()]
+    assert entries == [
+        {"hook": "onConfigLoaded", "enabled": True, "matched": []},
+        {"hook": "onSchemaLoaded", "enabled": True, "matched": ["default.users"]},
+        {
+            "hook": "onPlanCreated",
+            "enabled": True,
+            "matched": ["default.users"],
+            "ops": ["table:default.events:column:ts"],
+        },
+    ]
+
+
 # ---------- chkit status --table ----------
 
 

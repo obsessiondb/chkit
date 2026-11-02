@@ -127,6 +127,11 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `chkit generate --table` gives plugin hooks the same scope and plan as TS (#457):
+  `on_config_loaded` and `on_schema_loaded` get the resolved `table_scope` (no matched
+  tables yet, then the tables of the loaded schema) instead of a disabled one, and
+  `on_plan_created` gets the full plan, with the scope filter applied after it. An
+  operation a plugin adds for a table outside `--table` is now dropped, as in TS.
 - `table()` defaults an omitted `primary_key` / `primaryKey` to `order_by`, as in TS (#453):
   a table with only `order_by=["id"]` gets ``PRIMARY KEY (`id`) ORDER BY (`id`)`` instead of
   raising. A sort-order engine without `order_by` still raises, now with

@@ -1207,6 +1207,9 @@ e2e is deferred (see "Deferred" below).
   `plugin_runtime.run_on_plan_created(...)`, before the empty-plan
   check. `migrate` does NOT re-run this — the clause is baked into the
   migration file at generate time and re-executed verbatim.
+  (Since #457, `apply_on_cluster_to_plan` runs after
+  `run_on_plan_created`, the scope filter and cutovers, not immediately
+  after `run_on_plan_created`.)
 
 ### Tests added
 
@@ -1249,7 +1252,7 @@ e2e is deferred (see "Deferred" below).
 
 ### Follow-up observed during Category C (not fixed here)
 
-- **`generate.py` plan-transform ordering divergence** — TS order is
+- ~~**`generate.py` plan-transform ordering divergence** — TS order is
   `run_on_plan_created` → `filter_plan_by_table_scope` →
   `apply_on_cluster_to_plan`. Python order is
   `filter_plan_by_table_scope` → `run_on_plan_created` →
@@ -1257,7 +1260,8 @@ e2e is deferred (see "Deferred" below).
   `ad94a16`); noticed by the Category C reviewer. Consequence: in
   Python, plugin-added SQL touching out-of-scope tables is not filtered
   out before ON CLUSTER stamping. Out of scope for this port; track as
-  a separate parity fix.
+  a separate parity fix.~~ RESOLVED (#457): `run_on_plan_created` now runs
+  on the full plan before `filter_plan_by_table_scope`, as in TS.
 
 ### Not ported this pass (out of Category C scope)
 
