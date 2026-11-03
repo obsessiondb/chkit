@@ -82,16 +82,7 @@ Record streams carry `resource:records` and `object:<ref>`. Object-attribute str
 
 `pageSize` defaults to 500. Notes have a separate `notesPageSize` of 50, the documented maximum. Requests go through the ingestion runtime's `fetch`, which owns retries, cancellation, and a 30-second request timeout. The pipeline sends one request at a time. A `429` pauses the pipeline's requests until its `Retry-After` and does not use up a retry. Attio also limits query complexity; a permanently expensive query may need simpler filters/sorts rather than repeated retries. See [rate limits](https://docs.attio.com/rest-api/guides/rate-limiting).
 
-## Stored data and editable views
-
-Each raw table contains a stable `id`, native JSON `raw`, and chkit batch/run/ingestion-time metadata. The key includes source identity, resource kind, workspace ID, and every relevant object/list/entity ID. Names, emails, and domains are never keys.
-
-The complete returned entity is retained under `raw.data`. The envelope adds `source_id`; record and object-attribute rows also include `object_slug`, and list-entry/list-attribute rows include `list_slug`. No custom attributes or multivalued arrays are flattened away. For example:
-
-```sql
-SELECT id, raw.data, _chkit_ingested_at
-FROM default.attio_records_raw FINAL;
-```
+## Editable views
 
 `sources/records.ts` defines three ordinary `FINAL` views:
 
