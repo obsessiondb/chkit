@@ -39,8 +39,8 @@ chkit ingest repair [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--from <timestamp>` | string | — | Backfill range lower bound (ISO 8601). Date-times without an offset use the process's local time zone; date-only forms use UTC. Requires `--backfill` |
-| `--to <timestamp>` | string | — | Backfill range upper bound (ISO 8601; same time-zone rule as `--from`). Requires `--backfill` |
+| `--from <timestamp>` | string | — | Backfill lower bound, e.g. `2026-01-01T00:00:00Z` or `2026-01-01T00:00:00+01:00`. Requires `--backfill` |
+| `--to <timestamp>` | string | — | Backfill upper bound, e.g. `2026-02-01T00:00:00Z` or `2026-02-01T00:00:00+01:00`. Requires `--backfill` |
 | `--max-duration <seconds>` | string | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Overrides the plugin's `maxDurationSeconds` option |
 
 ### `repair` only
@@ -79,7 +79,17 @@ Overlapping processes write independent run-scoped identities. A stale valid rea
 
 `--backfill <id>` runs the selected streams under the checkpoint namespace `<stream id>#backfill:<id>`, so it never moves the scheduled checkpoint. Reusing an ID resumes that backfill's state. The ID must start with a letter or digit and contain only letters, digits, `_`, `.`, and `-`.
 
-`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. That strategy rejects a lower bound later than the upper bound during planning (run exit code 1); equal bounds are a valid empty window. The bundled `fullSync()` and `cursorState()` strategies ignore the bounds, even when reversed. Custom provider strategies may honor or reject date bounds; see the source's documentation. Passing an unparseable timestamp or `--from`/`--to` without `--backfill` fails with exit code 2 before any stream runs. Date-times without a `Z` or UTC offset (`2026-01-01T00:00:00`) are read in the process's local time zone, while date-only values (`2026-01-01`) are UTC; pass an explicit `Z` or offset in scheduled jobs.
+`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. Reversed bounds fail; equal bounds are valid. The bundled `fullSync()` and `cursorState()` strategies ignore date bounds; custom strategies may honor or reject them. Both flags require `--backfill`.
+
+```sh
+chkit ingest run --tag stream:helpdesk.tickets \
+  --backfill tickets-jan-2026-utc \
+  --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
+
+chkit ingest run --tag stream:helpdesk.tickets \
+  --backfill tickets-jan-2026-offset \
+  --from 2026-01-01T00:00:00+01:00 --to 2026-02-01T00:00:00+01:00
+```
 
 ### `list`
 

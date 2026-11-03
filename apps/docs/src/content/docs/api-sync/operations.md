@@ -117,7 +117,7 @@ chkit ingest run --tag stream:helpdesk.tickets \
   --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
 ```
 
-`--from` and `--to` require `--backfill`. Range validation belongs to the strategy: `timestampWindow` rejects reversed bounds but accepts equal bounds as an empty window; `fullSync` and `cursorState` ignore them. Date-times without a `Z` or UTC offset use the process's local time zone; date-only forms use UTC. Prefer explicit offsets in scheduled jobs. The ID creates an isolated checkpoint namespace, preserving the ordinary scheduled bookmark. Reusing an ID reuses that namespace; actual resumption depends on the strategy. With explicit timestamp bounds, the same bounds take precedence over a stored watermark, so rerunning that command rereads the range. A checkpointed custom strategy can resume within it.
+`--from` and `--to` require `--backfill`. Range validation belongs to the strategy: `timestampWindow` rejects reversed bounds but accepts equal bounds as an empty window; `fullSync` and `cursorState` ignore them. The ID creates an isolated checkpoint namespace, preserving the ordinary scheduled bookmark. Reusing an ID reuses that namespace; actual resumption depends on the strategy. With explicit timestamp bounds, the same bounds take precedence over a stored watermark, so rerunning that command rereads the range. A checkpointed custom strategy can resume within it.
 
 Isolation applies to checkpoints, not the destination table. Historical rows still use the stream's configured destination and version semantics. With `rawTable`, later ingestion time wins, so older source versions loaded later can replace newer objects. Use source-versioned destinations when that ordering matters.
 
