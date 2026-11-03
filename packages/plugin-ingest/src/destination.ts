@@ -94,16 +94,14 @@ function encodeJsonValue(_key: string, value: unknown): unknown {
   if (typeof value === 'bigint') return value.toString()
   if (typeof value === 'number' && !Number.isFinite(value)) return Number.isNaN(value) ? 'nan' : value > 0 ? 'inf' : '-inf'
   if (value instanceof Map) {
-    const entries: Array<[string, unknown]> = []
-    const keys = new Set<string>()
+    const entries = new Map<string, unknown>()
     for (const [key, entry] of value) {
       if (typeof key !== 'string' && typeof key !== 'number' && typeof key !== 'bigint') {
         throw new Error('Map keys must be strings, numbers or bigint for JSONEachRow.')
       }
       const encoded = String(key)
-      if (keys.has(encoded)) throw new Error(`Map keys collide after JSON encoding: "${encoded}".`)
-      keys.add(encoded)
-      entries.push([encoded, entry])
+      if (entries.has(encoded)) throw new Error(`Map keys collide after JSON encoding: "${encoded}".`)
+      entries.set(encoded, entry)
     }
     return Object.fromEntries(entries)
   }
