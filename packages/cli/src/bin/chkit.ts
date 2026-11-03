@@ -27,6 +27,7 @@ import { CLI_VERSION } from '../runtime/version.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
+  ingest: 'Ingest',
   pull: 'Pull',
 }
 
@@ -262,7 +263,7 @@ async function run(): Promise<void> {
 
   if (wantsHelp) {
     if (resolved) {
-      console.log(formatCommandHelp(resolved, registry.globalFlags))
+      console.log(formatCommandHelp(resolved, registry.globalFlags, firstPluginPositional(argv)))
     } else {
       reportUsageError({
         command: commandName,
@@ -321,8 +322,18 @@ async function run(): Promise<void> {
       config,
       configPath,
       pluginRuntime,
-      onAmbiguousPluginSubcommand() {
-        console.log(formatCommandHelp(resolved, registry.globalFlags))
+      onAmbiguousPluginSubcommand(token) {
+        if (token === undefined) {
+          console.log(formatCommandHelp(resolved, registry.globalFlags))
+          return
+        }
+        reportUsageError({
+          command: commandName,
+          code: 'unknown_subcommand',
+          message: `Unknown ${commandName} command "${token}". Available: ${(resolved.subcommands ?? []).map((sub) => sub.name).join(', ')}.`,
+          jsonMode: argv.includes('--json'),
+          onText: () => console.log(formatCommandHelp(resolved, registry.globalFlags)),
+        })
       },
     })
   } catch (error) {
