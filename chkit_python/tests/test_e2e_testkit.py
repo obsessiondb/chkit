@@ -43,7 +43,8 @@ def test_get_required_env_hard_fails_when_password_missing(
 def test_get_required_env_derives_url_from_host(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    monkeypatch.delenv("CLICKHOUSE_URL", raising=False)
+    for name in ("CLICKHOUSE_URL", "CLICKHOUSE_USER", "CLICKHOUSE_DB"):
+        monkeypatch.delenv(name, raising=False)
     monkeypatch.setenv("CLICKHOUSE_HOST", "ch.example.com")
     monkeypatch.setenv("CLICKHOUSE_PASSWORD", "s3cret")
     env = get_required_env()
