@@ -4,6 +4,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { SpanStatusCode, trace, type Span } from '@opentelemetry/api'
 import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
+import { z } from 'zod'
 
 import { ingestionColumns, toJsonRow } from './destination.js'
 import { BudgetExhausted, classifyFailure, describeError } from './errors.js'
@@ -46,6 +47,7 @@ const DEFAULT_MAX_CHUNK_ROWS = 100_000
 // How long a failed stream waits for an uncooperative reader before abandoning it.
 const READER_SHUTDOWN_GRACE_MS = 5000
 const tracer = trace.getTracer('@chkit/plugin-ingest')
+const StrategyIdentitySchema = z.object({ id: z.string().min(1), version: z.int().min(1) })
 
 export interface BackfillRequest {
   /** Stable identity: resuming the same backfill reuses its isolated checkpoint namespace. */
@@ -486,6 +488,9 @@ async function loadBatch(
 }
 
 function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string): unknown {
+  if (!StrategyIdentitySchema.safeParse(stream.incremental).success) {
+    throw new Error(`Stream "${stream.id}": incremental strategy must have a non-empty id and a safe integer version of at least 1, otherwise its checkpoints can never be read back.`)
+  }
   if (!envelope) return undefined
   if (envelope.strategy !== stream.incremental.id || envelope.version !== stream.incremental.version) {
     throw new Error(

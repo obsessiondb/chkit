@@ -52,6 +52,16 @@ describe('timestampWindow options', () => {
     expect(() => timestampWindow({ start: cutoff }).plan({ state: undefined, cutoff: start, range: undefined })).toThrow('after upper bound')
     expect(() => timestampWindow({ from: () => new Date('invalid') }).plan({ state: undefined, cutoff, range: undefined })).toThrow('valid dates')
   })
+
+  test('rejects invalid planned dates while preserving equal windows', () => {
+    const window = timestampWindow({ from: () => cutoff })
+    const selection = window.plan({ state: undefined, cutoff, range: undefined })
+    expect(selection.from.getTime()).toBe(cutoff.getTime())
+    expect(window.complete?.({ state: undefined, selection })).toEqual({ watermark: cutoff.toISOString() })
+    expect(() => timestampWindow({ from: () => '2026-01-01' as unknown as Date }).plan({ state: undefined, cutoff, range: undefined })).toThrow('planned bounds must be valid dates')
+    expect(() => window.plan({ state: undefined, cutoff, range: { from: cutoff, to: 'invalid' as unknown as Date } })).toThrow('planned bounds must be valid dates')
+    expect(() => window.plan({ state: undefined, cutoff, range: { from: cutoff, to: new Date('invalid') } })).toThrow('planned bounds must be valid dates')
+  })
 })
 
 function selecting(input: Partial<Parameters<typeof defineStream>[0]>) {
