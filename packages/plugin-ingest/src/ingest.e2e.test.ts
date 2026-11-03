@@ -118,7 +118,7 @@ describe('@chkit/plugin-ingest live env e2e', () => {
     expect(invalidReads).toBe(0)
     expect(result.streams.find((entry) => entry.streamId === valid.id)?.outcome).toBe('succeeded')
     expect((await journal().readCheckpoint(valid.id)).envelope?.state).toBe(2)
-  })
+  }, 120_000)
 
   test('a lost acknowledgement replays from the journaled checkpoint without skipping or duplicating rows', async () => {
     const source = Array.from({ length: 3 }, (_, page) => [0, 1].map((offset) => ({ id: page * 2 + offset, label: `row-${page * 2 + offset}` })))
