@@ -77,38 +77,6 @@ To read only messages:
 bunx chkit ingest run --tag provider:slack --tag resource:messages --max-duration 86400
 ```
 
-## Stored data and identities
-
-Every raw table contains stable `id`, native JSON `raw`, and chkit batch/run/ingestion-time columns. `raw` contains `source_id`, authenticated `team_id`, and the complete provider object under `data`. Messages also contain `channel_id`.
-
-Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
-
-The row IDs are JSON-encoded arrays:
-
-| Resource | Identity |
-|---|---|
-| Channels | `[sourceId, 'channels', teamId, conversation.id]` |
-| Users | `[sourceId, 'users', teamId, user.id]` |
-| Messages | `[sourceId, 'messages', teamId, channelId, message.ts]` |
-
-Message timestamps remain strings. A parent returned by `conversations.replies` has the same identity as its history observation. Replies use their own timestamps; their `thread_ts` retains the root reference. Channel names, user emails, and message text are never keys.
-
-The tables use `ReplacingMergeTree(_chkit_ingested_at)`. Later ingestion time wins; there is no Slack source-version ordering. Use `FINAL` for the latest observed row:
-
-```sql
-WITH toJSONString(raw) AS payload
-SELECT
-  JSONExtractString(payload, 'channel_id') AS channel_id,
-  JSONExtractString(payload, 'data', 'ts') AS ts,
-  JSONExtractString(payload, 'data', 'thread_ts') AS thread_ts,
-  JSONExtractString(payload, 'data', 'user') AS user_id,
-  JSONExtractString(payload, 'data', 'text') AS text
-FROM default.slack_messages_raw FINAL
-LIMIT 20;
-```
-
-There are no packaged typed views. Add SQL projections in the project's schema for the fields needed by the application. Preserve source and workspace identity in joins.
-
 ## Incremental messages and recovery
 
 The first messages run reads the recent 24 hours to a fixed execution cutoff. Set `historyFrom` to an exact timestamp string for a broader initial bootstrap; its default is `undefined`. Later runs begin at the completed watermark minus `overlapMs` (24 hours by default), so gaps between runs remain eligible. Newly discovered channels use the same selected range. There is no periodic historical reconciliation.

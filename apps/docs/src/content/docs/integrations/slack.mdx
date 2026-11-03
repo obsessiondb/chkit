@@ -203,52 +203,6 @@ Slack often reports errors in a successful HTTP response with `ok: false`. Authe
 
 Writes become visible batch by batch. A failed or interrupted run leaves already loaded rows in place. Repeated IDs reconcile in ClickHouse; this does not provide an atomic workspace snapshot or exactly-once delivery. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed.
 
-## Raw tables and identity
-
-All three tables use these columns:
-
-| Column | ClickHouse type | Meaning |
-|---|---|---|
-| `id` | `String` | JSON-encoded composite source, resource, workspace, and entity identity |
-| `raw` | `JSON` | Envelope with `source_id`, `team_id`, and the complete provider object under `data`; messages also include `channel_id` |
-| `_chkit_batch_id` | `String` | Runtime batch identity |
-| `_chkit_run_id` | `String` | Ingestion run identity |
-| `_chkit_ingested_at` | `DateTime64(6, 'UTC')` | ClickHouse publication time, populated with `now64(6)` |
-
-Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as the primary and ordering key. Later ingestion time wins during replacement; source edits are not ordered by a Slack version field. Use `FINAL` to query the latest observed row while physical tables still contain earlier versions awaiting merges.
-
-Provider fields are retained subject to ClickHouse native JSON normalization, not as an exact copy of the original JSON: explicit null paths and empty objects may be absent. Large integer values returned as decimal strings retain their precision; JSON numbers pass through JavaScript number parsing.
-
-| Resource | Composite identity |
-|---|---|
-| `channels` | `[sourceId, 'channels', teamId, conversation.id]` |
-| `users` | `[sourceId, 'users', teamId, user.id]` |
-| `messages` | `[sourceId, 'messages', teamId, channelId, message.ts]` |
-
-Slack message timestamps remain strings throughout ingestion. Channel ID is part of message identity because a timestamp alone does not identify a message across channels. Names, email addresses, and message text are never row keys.
-
-The integration packages raw tables only. Create projections in the project's schema when typed fields or views are needed; the retained payloads support new SQL projections without another API fetch.
-
-### Query messages and threads
-
-**Inspect latest observed messages:**
-
-```sql
-WITH toJSONString(raw) AS payload
-SELECT
-  JSONExtractString(payload, 'team_id') AS team_id,
-  JSONExtractString(payload, 'channel_id') AS channel_id,
-  JSONExtractString(payload, 'data', 'ts') AS ts,
-  JSONExtractString(payload, 'data', 'thread_ts') AS thread_ts,
-  JSONExtractString(payload, 'data', 'user') AS user_id,
-  JSONExtractString(payload, 'data', 'text') AS text,
-  _chkit_ingested_at
-FROM default.slack_messages_raw FINAL
-LIMIT 20;
-```
-
-Preserve `source_id` and `team_id` when joining messages to users or conversations. Use `channel_id` and the string `thread_ts` to group replies with a root; a root without `thread_ts` uses its own `ts` as the thread identity.
-
 ## Scheduling, verification, and recovery
 
 Schedule a finite ingestion command through cron, CI, or a job runner. The scheduler supplies the project directory, credentials, cadence, and execution budget. ChKit records independent histories for [overlapping runs](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery). Scheduler concurrency controls limit provider requests and resource use; pipeline limits apply within a process.

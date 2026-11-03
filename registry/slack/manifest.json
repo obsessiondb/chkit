@@ -87,7 +87,7 @@
           "changes": [
             "Deduplicate discovered channel IDs before saving message windows so overlapping discovery pages remain resumable.",
             "Reject impossible new message windows before Slack requests while preserving frozen unfinished windows.",
-            "Clarify native JSON normalization and numeric precision limits in stored provider data."
+            "Remove detailed raw-storage and identity reference sections from the integration documentation."
           ]
         },
         {

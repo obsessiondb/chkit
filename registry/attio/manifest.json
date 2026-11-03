@@ -106,7 +106,7 @@
         {
           "version": "0.3.1",
           "changes": [
-            "Clarify native JSON normalization and numeric precision limits in stored provider data; runtime behavior is unchanged."
+            "Remove detailed raw-storage and identity reference sections from the integration documentation; runtime behavior is unchanged."
           ]
         },
         {
