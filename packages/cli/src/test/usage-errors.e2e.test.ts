@@ -17,13 +17,8 @@ function runCli(args: string[]) {
 
 async function createIngestFixture(): Promise<{ dir: string; configPath: string }> {
   const fixture = await createFixture()
-  const entry = join(fixture.dir, 'entry.ts')
-  await writeFile(entry, `import { definePipeline, defineStream, rawTable } from ${JSON.stringify(INGEST_PLUGIN_ENTRY)}
-export const rows = rawTable({ database: 'default', name: 'rows' })
-export const pipeline = definePipeline({ id: 'demo', streams: [defineStream({ id: 'demo.rows', destination: rows, async *read() { yield { rows: [] } } })] })
-`)
   await writeFile(fixture.configPath, `import { ingest } from ${JSON.stringify(INGEST_PLUGIN_ENTRY)}
-export default { entry: ${JSON.stringify(entry)}, plugins: [ingest()] }
+export default { schema: [], plugins: [ingest()] }
 `)
   return fixture
 }

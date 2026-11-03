@@ -59,13 +59,6 @@ export function formatCommandHelp(command: RegisteredCommand, globalFlags: reado
   if (subcommand) {
     lines.push(`chkit ${command.name} ${subcommand.name} [options]`)
     lines.push(`  ${subcommand.description}`)
-    if (subcommand.flags.length > 0) {
-      lines.push('')
-      lines.push('Options:')
-      for (const flag of subcommand.flags) {
-        lines.push(formatFlagLine(flag))
-      }
-    }
   } else if (command.subcommands) {
     lines.push(`chkit ${command.name} <command> [options]`)
     lines.push(`  ${command.description}`)
@@ -79,10 +72,11 @@ export function formatCommandHelp(command: RegisteredCommand, globalFlags: reado
     lines.push(`  ${command.description}`)
   }
 
-  if (command.flags.length > 0) {
+  const flags = subcommand?.flags ?? command.flags
+  if (flags.length > 0) {
     lines.push('')
     lines.push('Options:')
-    for (const flag of command.flags) {
+    for (const flag of flags) {
       lines.push(formatFlagLine(flag))
     }
   }
