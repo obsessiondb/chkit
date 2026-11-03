@@ -129,7 +129,7 @@ A pagination token may expire between runs. Confirm expiration, snapshot lifetim
 <details>
 <summary>Extend planning or change an existing checkpoint format</summary>
 
-Implement `IncrementalStrategy` only when `cursorState`'s opaque state or timestamp windows are insufficient. A custom strategy has a stable non-empty `id` and a safe integer `version` of at least 1, validates existing state with `parseState`, and plans selections from `{ state, cutoff, range }`. The runtime rejects an invalid strategy identity when its selected stream runs, before planning or reading; definition construction remains lazy. Its optional `complete` runs only after the whole selection is consumed.
+Implement `IncrementalStrategy` only when `cursorState`'s opaque state or timestamp windows are insufficient. A custom strategy has a stable `id` and `version`, validates existing state with `parseState`, and plans selections from `{ state, cutoff, range }`. Its optional `complete` runs only after the whole selection is consumed.
 
 Changing the strategy ID or version makes an existing checkpoint incompatible and fails the run. Plan an explicit state migration or a new stream identity; renaming a stream starts a separate checkpoint history. Moving it between pipelines does not reset state.
 

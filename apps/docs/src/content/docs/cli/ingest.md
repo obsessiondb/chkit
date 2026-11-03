@@ -79,17 +79,7 @@ Overlapping processes write independent run-scoped identities. A stale valid rea
 
 `--backfill <id>` runs the selected streams under the checkpoint namespace `<stream id>#backfill:<id>`, so it never moves the scheduled checkpoint. Reusing an ID resumes that backfill's state. The ID must start with a letter or digit and contain only letters, digits, `_`, `.`, and `-`.
 
-`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. Reversed bounds fail; equal bounds are valid. The bundled `fullSync()` and `cursorState()` strategies ignore date bounds; custom strategies may honor or reject them. Both flags require `--backfill`.
-
-```sh
-chkit ingest run --tag stream:helpdesk.tickets \
-  --backfill tickets-jan-2026-utc \
-  --from 2026-01-01T00:00:00Z --to 2026-02-01T00:00:00Z
-
-chkit ingest run --tag stream:helpdesk.tickets \
-  --backfill tickets-jan-2026-offset \
-  --from 2026-01-01T00:00:00+01:00 --to 2026-02-01T00:00:00+01:00
-```
+`--from` and `--to` set explicit bounds for `timestampWindow` streams and take precedence over the backfill's watermark. The bundled `fullSync()` and `cursorState()` strategies do not interpret them. Custom provider strategies may honor or reject date bounds; see the source's documentation. Passing `--from` or `--to` without `--backfill` fails with exit code 2.
 
 ### `list`
 
