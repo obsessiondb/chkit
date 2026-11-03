@@ -8,7 +8,7 @@ A loader writes the rows yielded by the reader, whether they contain raw objects
 ## Start with the default loader
 
 - Omit `loader`, as in the [quickstart](/api-sync/quickstart/), for `simpleLoader()`: cheap, direct, at-least-once inserts with ingestion metadata.
-- Each physical write unit gets a stable retry token. Native deduplication depends on engine settings and finite token retention, not logical row keys; keep insert sizing stable across retries.
+- Each physical write unit gets a stable retry token naming its batch and row range. Native deduplication depends on engine settings and finite token retention, not logical row keys. Resizing inserts during replay may reinsert overlapping rows, but cannot suppress a larger range as though a smaller one had already saved it.
 - Use it for raw or shaped rows when duplicates are acceptable or reconciled downstream. Mapping, embedded children, SDKs and concurrency tuning do not require another loader.
 
 ## Opt into staged deduplication
@@ -137,6 +137,8 @@ try {
 
 Start with the defaults. If measured request size or memory use requires smaller physical inserts, import `simpleLoader` from `@chkit/plugin-ingest` and set `loader: simpleLoader({ maxRowsPerInsert: 20_000 })` on the stream. This configures the same loader; it does not change mapping or checkpoint behavior.
 
+`maxRowsPerInsert` must be a positive integer. Invalid values fail when the loader is instantiated for execution, not when its definition is imported. Keep sizing stable during recovery for the best native retry suppression.
+
 ## Size the three boundaries
 
 | Boundary | Control | Default | Choose based on |
@@ -164,6 +166,8 @@ Increase buffering only when it helps overlap fetching and writing without exces
 
 Cancellation is cooperative. A source request or load that ignores its signal continues holding its fetch or load permit until the operation settles, even after the executor stops waiting for that stream. A sibling sharing the pipeline can therefore exhaust its budget while waiting for capacity; the runtime does not exceed the physical concurrency cap to bypass an unresolved operation.
 
+Content hashing and JSON conversion process one row at a time. The direct ClickHouse destination streams its physical INSERT encoding rather than joining the whole INSERT into one string. Rows are still buffered in memory; there is no byte quota or disk spool. Bound source pages and lower batch/insert sizes for wide records; a single row must still fit the runtime's JSON/string limits.
+
 ## Batch identity
 
 Without a chunk `id`, batch identity includes row content. This prefers a possible duplicate over suppressing data that changed between attempts. Adding a volatile field such as `synced_at: new Date()` changes identity on replay; use destination-owned ingestion time instead.
@@ -174,6 +178,8 @@ Without a chunk `id`, batch identity includes row content. This prefers a possib
 Set `SourceChunk.id` only when it identifies a stable logical source interval whose replay is the same write. It is not a record primary key or a checkpoint. Explicit IDs make a chunk its own load batch and exclude row content from its identity; an offset into a changing dataset is not necessarily a stable interval.
 
 Successful syncs rotate the identity cycle so subsequent updates can load. Failed/interrupted syncs retain their replay cycle. With `simpleLoader`, native suppression depends on the destination's engine, settings, and retention window. `stagedLoader` instead uses retained row keys within its publication contract. Neither is a universal exactly-once guarantee.
+
+Stock ClickHouse 26.3 defaults `non_replicated_deduplication_window` to `0` (off), `replicated_deduplication_window` to `10_000` blocks and `replicated_deduplication_window_seconds` to `3_600` seconds. These are version-specific server defaults, not settings chkit applies; check effective settings on managed/Shared engines. Replays outside retention can duplicate rows, and replaying old blocks can evict newer tokens. These transport limits do not describe stagedLoader's separate row-key deduplication policy.
 
 </details>
 
@@ -193,6 +199,8 @@ The executor constructs a loader for each batch attempt. Its context supplies `s
 Use `context.destination.insert({ table, rows, token })` for direct ClickHouse writes. If a loader uses another publication mechanism, it must still establish the required write evidence before returning success. Do not claim durability for queued, fire-and-forget, or staged data.
 
 Load attempts have their own fixed retry budget, separate from request retries. An insert that exhausts its budget fails the stream without restarting the reader.
+
+The direct loader makes up to three load attempts. Schema errors remain retryable: a missing table or column can become visible between attempts. A failed batch never advances its checkpoint, but already-written slices or blocks can remain. The direct destination requires synchronous completion or an awaited async flush (`wait_for_async_insert=1`); this is not a replica-quorum or exactly-once guarantee.
 
 </details>
 
