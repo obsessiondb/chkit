@@ -226,60 +226,6 @@ Destination writes have a separate retry policy and reuse an insert deduplicatio
 
 Writes become visible batch by batch. A failed or interrupted run can leave already loaded pages visible, with no rollback to the previous complete workspace snapshot. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed; an incomplete execution exits with `1`.
 
-## Raw tables and record identity
-
-Every raw table uses the same five columns:
-
-| Column | ClickHouse type | Meaning |
-|---|---|---|
-| `id` | `String` | JSON-encoded composite identity for the source, resource, and entity IDs |
-| `raw` | `JSON` | Envelope containing `source_id`, optional parent slug, and the complete entity under `data` |
-| `_chkit_batch_id` | `String` | Runtime batch identity |
-| `_chkit_run_id` | `String` | Ingestion run identity |
-| `_chkit_ingested_at` | `DateTime64(6, 'UTC')` | ClickHouse publication time, populated with `now64(6)` |
-
-Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as both the primary key and ordering key. Later ingestion time wins during replacement; the integration does not order rows by an Attio source version. Physical rows can include earlier observations until merges occur. Use `FINAL` when directly querying raw tables for the reconciled result.
-
-Each ID is built as `JSON.stringify([sourceId, resource, ...entityIds])`. The resource names and entity ID fields are:
-
-| Resource | Entity ID fields, in order | Extra envelope field |
-|---|---|---|
-| `objects` | `workspace_id`, `object_id` | None |
-| `object_attributes` | `workspace_id`, `object_id`, `attribute_id` | `object_slug` |
-| `records` | `workspace_id`, `object_id`, `record_id` | `object_slug` |
-| `lists` | `workspace_id`, `list_id` | None |
-| `list_attributes` | `workspace_id`, `object_id`, `attribute_id` | `list_slug` |
-| `entries` | `workspace_id`, `list_id`, `entry_id` | `list_slug` |
-| `notes` | `workspace_id`, `note_id` | None |
-| `tasks` | `workspace_id`, `task_id` | None |
-| `members` | `workspace_id`, `workspace_member_id` | None |
-
-Attio's shared attribute response calls the parent list's ID `object_id`; the list-attribute key follows that response shape. Names, email addresses, and domains are never row keys. The resource name is part of `id`, not an additional field in `raw`.
-
-A record envelope has this shape, with illustrative IDs:
-
-```json
-{
-  "source_id": "attio.primary",
-  "object_slug": "people",
-  "data": {
-    "id": {
-      "workspace_id": "workspace-id",
-      "object_id": "people-object-id",
-      "record_id": "person-record-id"
-    },
-    "created_at": "2026-01-01T00:00:00Z",
-    "web_url": "https://app.attio.com/example/person/person-record-id",
-    "values": {
-      "name": [{ "full_name": "Ada Example" }],
-      "email_addresses": [{ "email_address": "ada@example.test" }]
-    }
-  }
-}
-```
-
-The original entity lives under `data`, so custom provider fields cannot overwrite chkit's envelope metadata. Nested arrays and fields omitted from the packaged views remain available for new SQL projections.
-
 ## Included people, company, and deal views
 
 The integration creates ordinary SQL views over `attio_records_raw FINAL`, filtered by `object_slug`. These views project the collected record rows; they do not make additional API requests.

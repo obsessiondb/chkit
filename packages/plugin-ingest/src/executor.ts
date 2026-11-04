@@ -4,8 +4,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { SpanStatusCode, trace, type Span } from '@opentelemetry/api'
 import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
+import { z } from 'zod'
 
-import { toJsonRows } from './destination.js'
+import { ingestionColumns, toJsonRow } from './destination.js'
 import { BudgetExhausted, classifyFailure, describeError } from './errors.js'
 import { canonicalJson, digest, emptyCheckpoint } from './journal.js'
 import { simpleLoader } from './loader.js'
@@ -46,6 +47,7 @@ const DEFAULT_MAX_CHUNK_ROWS = 100_000
 // How long a failed stream waits for an uncooperative reader before abandoning it.
 const READER_SHUTDOWN_GRACE_MS = 5000
 const tracer = trace.getTracer('@chkit/plugin-ingest')
+const StrategyIdentitySchema = z.object({ id: z.string().min(1), version: z.int().min(1) })
 
 export interface BackfillRequest {
   /** Stable identity: resuming the same backfill reuses its isolated checkpoint namespace. */
@@ -233,6 +235,10 @@ async function executeStream(input: {
   let failure: unknown
 
   try {
+    const missing = ingestionColumns.filter((required) => !stream.destination.columns.some((column) => column.name === required.name))
+    if (missing.length > 0) {
+      throw new Error(`Stream "${stream.id}" destination ${stream.destination.database}.${stream.destination.name} is missing ${missing.map((column) => column.name).join(', ')}. Spread ingestionColumns into its columns.`)
+    }
     const state = restoreState(stream, progress.envelope, namespaceId)
     const selection: unknown = stream.incremental.plan({
       state,
@@ -372,7 +378,7 @@ async function readAndLoad(input: {
     // that changed between attempts.
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
-      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(toJsonRows(batch.rows))}`
+      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${digest(rowContents(batch.rows))}`
       const batchId = digest([namespaceId, progress.successId, progress.checkpointId, String(sinceBoundary), discriminator]).slice(0, 32)
       const receipt = await loadBatch(input, batchId, batch.rows, signal)
       if (abandoned) return
@@ -482,6 +488,9 @@ async function loadBatch(
 }
 
 function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string): unknown {
+  if (!StrategyIdentitySchema.safeParse(stream.incremental).success) {
+    throw new Error(`Stream "${stream.id}": incremental strategy must have a non-empty id and a safe integer version of at least 1, otherwise its checkpoints can never be read back.`)
+  }
   if (!envelope) return undefined
   if (envelope.strategy !== stream.incremental.id || envelope.version !== stream.incremental.version) {
     throw new Error(
@@ -605,6 +614,10 @@ function assertValidChunk(
 
 function emptyBatch(): PendingBatch {
   return { rows: [], intervalIds: [], state: undefined }
+}
+
+function* rowContents(rows: readonly Row[]): Iterable<string> {
+  for (const row of rows) yield canonicalJson(toJsonRow(row))
 }
 
 /** Resolves a fixed grace period after the signal aborts; never resolves otherwise. */

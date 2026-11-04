@@ -1,5 +1,19 @@
 # @chkit/plugin-obsessiondb
 
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- 640ca7a: `chkit check` judges a backfill plan sent with ObsessionDB `submit` by its job instead of reporting it as pending until the plan file is deleted; an unfinished, failed or unverifiable job fails the check (#304). CI that runs `chkit check` needs an ObsessionDB session until every submitted job is confirmed completed.
+- 9a52cde: `chkit plugin backfill status --job-id` and `cancel --job-id` now work, because `chkit plugin <name> <command>` accepts flags that other plugins add (#303). The ObsessionDB job commands print the job in text mode, where they printed nothing, and return the standard `--json` envelope instead of the raw console API object.
+- c0b5a23: `chkit plugin backfill list` lists an ObsessionDB service's backfill jobs, using the selected service when `--service-slug` is omitted (#311).
+- 3be3fd8: `chkit plugin backfill submit --plan-id <id>` re-submits a saved plan whose ObsessionDB job failed or was cancelled, skipping chunks that already finished, and `chkit check` follows the new job (#313).
+- 15c0e67: With `--json`, ObsessionDB `backfill status --service-slug` and `backfill list` report `service_not_found` or `service_not_in_active_organization` instead of a generic `error` code.
+- dc55385: ObsessionDB `chkit plugin backfill submit` now applies the `backfill({...})` options such as `stateDir` and `maxChunkBytes`, so `chkit check` finds its submissions in a custom `stateDir` (#309).
+- c230ec3: `JobsClient` types `lastError` and `metadata` on every returned job, including from `list` (#327).
+- 55c1fe9: A service outside the chkit session's active organization now fails with `service_not_in_active_organization` or `service_not_found`, naming the organizations and pointing to `chkit obsessiondb service select`, instead of a bare `Not Found` (#305).
+- Updated dependencies: `@chkit/plugin-backfill@0.2.0-beta.12`, `@chkit/core@0.2.0-beta.12`, `@chkit/clickhouse@0.2.0-beta.12`
+
 ## 0.2.0-beta.11
 
 ### Patch Changes
