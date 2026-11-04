@@ -53,7 +53,9 @@ def test_rerun_through_another_replica_attaches_to_running_attempt() -> None:
     name = f"py_twoshard_async_{int(time.time())}_{uuid.uuid4().hex[:6]}_dst"
     table = f"{_DATABASE}.`{name}`"
     migration_name = f"20990101000000_{name}.sql"
-    query_id = make_deterministic_query_id(migration_name, 0)
+    query_id = make_deterministic_query_id(
+        _DATABASE, "_chkit_migrations", migration_name, 0
+    )
     operation_key = f"table:{_DATABASE}.{name}"
     attempt_outcome: list[str] = []
 

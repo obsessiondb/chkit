@@ -39,8 +39,8 @@ chkit ingest repair [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--from <timestamp>` | string | — | Backfill range lower bound (ISO timestamp). Requires `--backfill` |
-| `--to <timestamp>` | string | — | Backfill range upper bound (ISO timestamp). Requires `--backfill` |
+| `--from <timestamp>` | string | — | Backfill lower bound, e.g. `2026-01-01T00:00:00Z` or `2026-01-01T00:00:00+01:00`. Requires `--backfill` |
+| `--to <timestamp>` | string | — | Backfill upper bound, e.g. `2026-02-01T00:00:00Z` or `2026-02-01T00:00:00+01:00`. Requires `--backfill` |
 | `--max-duration <seconds>` | string | `3600` | Execution budget, at most `2147483` seconds (about 24.8 days). Overrides the plugin's `maxDurationSeconds` option |
 
 ### `repair` only
@@ -154,6 +154,8 @@ chkit ingest repair --tag stream:helpdesk.tickets --apply <fingerprint>
 | 2 | Configuration error: an invalid pipeline definition, a definition module that fails to load, no exported pipeline, no matching stream, an invalid `--backfill`, `--from`, `--to`, or `--max-duration` value, `--from`/`--to` without `--backfill`, or missing direct connection |
 
 ## JSON output
+
+Errors before the ingestion command runs use the CLI envelope with `command: "ingest"`, `schemaVersion: 1`, `ok: false`, and an `error` object containing `code` and `message`. Unknown subcommands use `unknown_subcommand`; unknown flags and missing flag values use `usage`; an unregistered plugin uses `plugin_not_configured`. The forwarded `chkit plugin ingest ...` form retains its existing string-error output for subcommand and flag errors. Use `chkit ingest <command> --help` for command-specific flags; forwarded `chkit plugin ... --help` shows generic plugin help.
 
 **`run`:**
 

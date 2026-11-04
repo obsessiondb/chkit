@@ -333,7 +333,9 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
     name = f"{prefix}dst"
     table = _create_table(live, live_env.clickhouse_database, name)
     migration_name = f"20990101000000_{prefix}attach.sql"
-    query_id = make_deterministic_query_id(migration_name, 0)
+    query_id = make_deterministic_query_id(
+        live_env.clickhouse_database, "_chkit_migrations", migration_name, 0
+    )
     operation_key = f"table:{live_env.clickhouse_database}.{name}"
     attached_outcome: list[str] = []
 

@@ -24,6 +24,9 @@ export async function resolveRegistryItem(reference: string, registry = DEFAULT_
     const catalogLocation = registryLocation(registry)
     const path = version ? `${name}/${version}.json` : `${name}.json`
     origin = isHttp(catalogLocation) ? new URL(path, catalogLocation).href : resolve(dirname(catalogLocation), path)
+    if (!isHttp(origin) && !(await stat(origin).catch(() => undefined))) {
+      throw new Error(`Template ${reference} is not in registry ${registry}: ${origin} does not exist. Run chkit registry list --registry ${registry} to see its templates.`)
+    }
   }
   const item = parseRegistryItem(await readJson(origin))
   if (expectedName !== undefined && item.name !== expectedName) throw new Error(`Registry returned ${item.name} for requested template ${expectedName}`)
@@ -92,6 +95,10 @@ async function readJson(location: string): Promise<unknown> {
   const response = await fetch(url, {
     signal: AbortSignal.timeout(15_000), redirect: 'error',
     ...(url.hostname === 'api.github.com' ? { headers: { Accept: 'application/vnd.github+json', 'X-GitHub-Api-Version': '2022-11-28' } } : {}),
+  }).catch((error: unknown) => {
+    const cause = error instanceof Error && error.cause instanceof Error ? error.cause : error
+    const reason = cause instanceof Error ? ('code' in cause && typeof cause.code === 'string' ? cause.code : cause.message) : String(cause)
+    throw new Error(`Registry request failed for ${url.origin}${url.pathname}: ${reason}. Check the network connection or pass --registry with a reachable catalog.`, { cause: error })
   })
   if (!response.ok) throw new Error(`Registry request failed (${response.status}): ${url.origin}${url.pathname}`)
   if (!response.body) throw new Error('Registry response is empty')

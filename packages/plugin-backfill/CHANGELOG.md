@@ -1,5 +1,18 @@
 # @chkit/plugin-backfill
 
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- 56a4a54: Backfill chunks no longer break when a settings profile makes `SELECT *` include MATERIALIZED and ALIAS columns, which failed copy backfills and could write mv_replay values into the wrong target columns.
+- 6d51fb8: `chkit check` no longer passes a submitted backfill plan when no ObsessionDB plugin is loaded to verify it; it reports `backfill_submitted_unverified` with the same severity as `backfill_required_pending` (#326).
+- a1e3d62: `chkit plugin backfill plan --from/--to` now selects the right partitions for tables partitioned on a `Date` column, instead of none or all of them (#352).
+- 5f9c453: Backfill resume finds a plan's chunks exactly when its query ID prefix contains backslashes, quotes or LIKE wildcards, without matching unrelated queries.
+- 9328651: mv_replay backfills insert by column name, so a `SELECT *` view into a target with reordered columns or extra `DEFAULT`, `MATERIALIZED` or `ALIAS` columns now replays. Planning, `run` and `resume` fail with a clear error when the view's columns do not fit the target.
+- 29cd6e4: `backfill plan --from/--to` no longer selects a partition outside the window because an empty part, for example one left by a DELETE mutation, reports a 1970 `min_time` (#320).
+- 65bac5c: `backfill resume` checks chunk status on every replica of a multi-replica target, so it no longer resubmits a chunk that is running or finished on another replica (#289).
+- Updated dependencies: `@chkit/core@0.2.0-beta.12`, `@chkit/clickhouse@0.2.0-beta.12`
+
 ## 0.2.0-beta.11
 
 ### Patch Changes

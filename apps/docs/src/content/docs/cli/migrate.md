@@ -208,7 +208,7 @@ INSERT INTO default.hits SELECT * FROM s3(...);
 
 When `chkit migrate --apply` encounters an async operation it:
 
-1. Computes a deterministic `query_id` from `sha256(migration_filename + ':' + statement_index)`.
+1. Computes a deterministic `query_id` from `sha256('chkit:' + database + ':' + journal_table + ':' + migration_filename + ':' + statement_index)`, where `database` is the server's `currentDatabase()` and `journal_table` is the [journal](#journal) table (`_chkit_migrations`, or `CHKIT_JOURNAL_TABLE`). Runs of one migration file against other databases, or by other projects that keep their journal in the same database, never share a query id; a re-run against the same database and journal gets the same id. A statement the journal already tracks keeps the `queryId` it recorded, including one an earlier chkit derived from the file name and statement index alone.
 2. Checks `system.processes` for an attempt with that id that is still running, and attaches to it instead of submitting again. On a [multi-replica target](#multi-replica-targets) the check reads every replica. When a replica cannot be read, `migrate` stops with an error before it runs `-- before-retry:` SQL or submits again; re-run it once the replica is back. The polls that follow skip a replica they cannot reach.
 3. Otherwise submits the query without blocking on the HTTP response.
 4. Polls every 5 seconds and prints a one-line progress update (`written=N.NM rows (N.N GiB), elapsed Ns`). Only `system.query_log` entries of queries that started no earlier than this submission, or than the attempt chkit attached to, count. Both are measured on the server clock with a 2-second margin, so an earlier attempt with the same id is never mistaken for this one.

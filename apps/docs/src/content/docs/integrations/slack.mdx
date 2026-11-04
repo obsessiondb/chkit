@@ -179,6 +179,8 @@ For each channel, history advances newest first. Read every selected reply for o
 
 Channels and users remain full metadata reads. Messages initially read the recent 24 hours to a fixed cutoff; an explicit `historyFrom` expands that first bootstrap. Later runs select the completed watermark minus `overlapMs` (24 hours by default) through the new cutoff, preserving catch-up coverage between runs. Newly discovered channels use that same selected range. There is no periodic historical reconciliation. Old edits and late replies on roots outside the selected history range are outside normal coverage. Coverage depends on retention, API visibility, scopes, and access.
 
+A new message window whose lower bound exceeds its cutoff fails before any Slack request. An unfinished window resumes its saved bounds even if the new execution cutoff moves backward.
+
 Message checkpoints retain workspace/query scope, fixed bounds, channel position, and the exact completed history frontier. Child rows carry no advanced state. An empty progress marker flushes rows and advances history only after the entire page and its replies have destination acknowledgement. Failed or budget-limited runs keep the original bounds and replay the unfinished page, including previously loaded replies. The completed watermark moves only after all selected channels and their selected child work finish.
 
 Keep source identity, selection, reply policy, and time configuration stable. Changing them fails against saved state instead of reinterpreting progress. The message strategy uses version 2; incompatible checkpoints require explicit migration or a new stream identity. Earlier released templates had no message checkpoint: upgrading to version 0.2.0 bootstraps once while preserving raw tables and identities.
@@ -200,50 +202,6 @@ Requests have a 30-second timeout and run through the ingestion executor's cance
 Slack often reports errors in a successful HTTP response with `ok: false`. Authentication, permission, missing-scope, and unsupported-token errors fail with the Slack code and required scopes when supplied. Invalid payloads, identity fields, and checkpoints fail at once without a retry. A request that keeps failing transiently exhausts its budget before the stream fails; restarting the reader does not multiply its request retries.
 
 Writes become visible batch by batch. A failed or interrupted run leaves already loaded rows in place. Repeated IDs reconcile in ClickHouse; this does not provide an atomic workspace snapshot or exactly-once delivery. A normal stream failure allows other selected streams to be attempted. `ingest run` exits with `0` only when all selected streams succeed.
-
-## Raw tables and identity
-
-All three tables use these columns:
-
-| Column | ClickHouse type | Meaning |
-|---|---|---|
-| `id` | `String` | JSON-encoded composite source, resource, workspace, and entity identity |
-| `raw` | `JSON` | Envelope with `source_id`, `team_id`, and the complete provider object under `data`; messages also include `channel_id` |
-| `_chkit_batch_id` | `String` | Runtime batch identity |
-| `_chkit_run_id` | `String` | Ingestion run identity |
-| `_chkit_ingested_at` | `DateTime64(6, 'UTC')` | ClickHouse publication time, populated with `now64(6)` |
-
-Tables use `ReplacingMergeTree(_chkit_ingested_at)` with `id` as the primary and ordering key. Later ingestion time wins during replacement; source edits are not ordered by a Slack version field. Use `FINAL` to query the latest observed row while physical tables still contain earlier versions awaiting merges.
-
-| Resource | Composite identity |
-|---|---|
-| `channels` | `[sourceId, 'channels', teamId, conversation.id]` |
-| `users` | `[sourceId, 'users', teamId, user.id]` |
-| `messages` | `[sourceId, 'messages', teamId, channelId, message.ts]` |
-
-Slack message timestamps remain strings throughout ingestion. Channel ID is part of message identity because a timestamp alone does not identify a message across channels. Names, email addresses, and message text are never row keys.
-
-The integration packages raw tables only. Create projections in the project's schema when typed fields or views are needed; the retained payloads support new SQL projections without another API fetch.
-
-### Query messages and threads
-
-**Inspect latest observed messages:**
-
-```sql
-WITH toJSONString(raw) AS payload
-SELECT
-  JSONExtractString(payload, 'team_id') AS team_id,
-  JSONExtractString(payload, 'channel_id') AS channel_id,
-  JSONExtractString(payload, 'data', 'ts') AS ts,
-  JSONExtractString(payload, 'data', 'thread_ts') AS thread_ts,
-  JSONExtractString(payload, 'data', 'user') AS user_id,
-  JSONExtractString(payload, 'data', 'text') AS text,
-  _chkit_ingested_at
-FROM default.slack_messages_raw FINAL
-LIMIT 20;
-```
-
-Preserve `source_id` and `team_id` when joining messages to users or conversations. Use `channel_id` and the string `thread_ts` to group replies with a root; a root without `thread_ts` uses its own `ts` as the thread identity.
 
 ## Scheduling, verification, and recovery
 

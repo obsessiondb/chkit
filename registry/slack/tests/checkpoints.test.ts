@@ -5,10 +5,48 @@ import { createMemoryDestination, createMemoryJournal } from '@chkit/plugin-inge
 import type { SlackReaderConfig } from '../config.js'
 import { readMessages, slackMessagesRaw } from '../sources/messages.js'
 import { dateTimestamp, parseMessageState, slackMessageStrategy, timestampMicros } from '../state.js'
-import { fixture, fixtureConfig, parentMessage, replyMessage, slackEnv, standaloneMessage } from './fixtures.js'
+import { channel, fixture, fixtureConfig, parentMessage, replyMessage, slackEnv, standaloneMessage } from './fixtures.js'
 
 const cutoff = new Date('2023-11-15T00:00:00Z')
 const retry = { retries: 0 }
+
+test('overlapping discovery pages leave a resumable unique channel frontier', async () => {
+  const env = slackEnv((url) => {
+    if (url.pathname !== '/api/conversations.list') return fixture(url)
+    return Response.json({ ok: true, channels: [channel], response_metadata: { next_cursor: url.searchParams.has('cursor') ? '' : 'second' } })
+  })
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  const first = await runIngestion(request(pipeline(fixtureConfig, { maxChunks: 2 })), { ...env, journal, destination, now: () => cutoff, retry })
+  expect(first.streams[0]?.outcome).toBe('budget_exhausted')
+  const resumed = await runIngestion(request(pipeline()), { ...env, journal, destination, now: () => cutoff, retry })
+  expect(resumed.ok, JSON.stringify(resumed)).toBe(true)
+  expect(parseMessageState((await journal.readCheckpoint('slack.primary.messages')).envelope?.state).active).toBeUndefined()
+  expect(destination.tables.get('default.slack_messages_raw')).toHaveLength(4)
+  expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: replyMessage })
+})
+
+test('an impossible initial window fails before making provider requests', async () => {
+  let calls = 0
+  const env = slackEnv((url) => { calls += 1; return fixture(url) })
+  const result = await runIngestion(request(pipeline({ ...fixtureConfig, historyFrom: '1700006400.000001' })), {
+    ...env, journal: createMemoryJournal(), destination: createMemoryDestination(), now: () => cutoff, retry,
+  })
+  expect(result.ok).toBe(false)
+  expect(result.streams[0]?.error).toContain('starts after its cutoff')
+  expect(calls).toBe(0)
+})
+
+test('an unfinished window resumes when the execution cutoff moves behind its start', async () => {
+  const config = { ...fixtureConfig, historyFrom: '1699920000.000000' }
+  const journal = createMemoryJournal(), destination = createMemoryDestination()
+  const env = slackEnv()
+  const first = await runIngestion(request(pipeline(config, { maxChunks: 2 })), { ...env, journal, destination, now: () => cutoff, retry })
+  expect(first.streams[0]?.outcome).toBe('budget_exhausted')
+  const resumed = await runIngestion(request(pipeline(config)), { ...env, journal, destination, now: () => new Date('2023-11-13T00:00:00Z'), retry })
+  expect(resumed.ok, JSON.stringify(resumed)).toBe(true)
+  expect(parseMessageState((await journal.readCheckpoint('slack.primary.messages')).envelope?.state).watermark).toBe(dateTimestamp(cutoff))
+  expect(destination.tables.get('default.slack_messages_raw')?.map((row) => row.raw)).toContainEqual({ source_id: 'slack.primary', team_id: 'T1', channel_id: 'C1', data: replyMessage })
+})
 
 test('an incomplete history page replays its replies under the original frozen bounds', async () => {
   const journal = createMemoryJournal(), destination = createMemoryDestination()

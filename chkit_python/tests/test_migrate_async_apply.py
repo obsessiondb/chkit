@@ -25,13 +25,16 @@ from chkit.clickhouse.client import QueryResult, QueryStatus
 # The server clock differs from the client clock on purpose: the query_log
 # bound must come from the server.
 SERVER_NOW_MS = 1_700_000_100_000
+SERVER_DATABASE = "analytics"
 # SERVER_NOW_MS minus the 2 s skew margin.
 SUBMISSION_BOUND = "2023-11-14T22:14:58.000Z"
 # How long the attempt an attach finds has been running.
 RUNNING_ELAPSED_MS = 30_000
 # SERVER_NOW_MS minus RUNNING_ELAPSED_MS and the 2 s skew margin.
 ATTACH_BOUND = "2023-11-14T22:14:28.000Z"
-SERVER_TIME_QUERY = "query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms"
+SERVER_TIME_QUERY = (
+    "query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database"
+)
 
 
 @pytest.fixture(autouse=True)
@@ -44,18 +47,21 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
 
 
 def test_make_deterministic_query_id_is_stable() -> None:
-    a = make_deterministic_query_id("m1.sql", 0)
-    b = make_deterministic_query_id("m1.sql", 0)
+    a = make_deterministic_query_id("staging", "_chkit_migrations", "20260526_load.sql", 0)
+    b = make_deterministic_query_id("staging", "_chkit_migrations", "20260526_load.sql", 0)
     assert a == b
-    assert "-" in a
-    assert len(a) == 36
+    # The TS CLI builds the same id (async-apply.test.ts).
+    assert a == "ff8138de-dce9-96af-69dc-cd30f8f4a7bb"
 
 
 def test_make_deterministic_query_id_varies_by_inputs() -> None:
-    a = make_deterministic_query_id("m1.sql", 0)
-    b = make_deterministic_query_id("m1.sql", 1)
-    c = make_deterministic_query_id("m2.sql", 0)
-    assert len({a, b, c}) == 3
+    a = make_deterministic_query_id("staging", "_chkit_migrations", "m1.sql", 0)
+    b = make_deterministic_query_id("staging", "_chkit_migrations", "m1.sql", 1)
+    c = make_deterministic_query_id("staging", "_chkit_migrations", "m2.sql", 0)
+    # #463: another database, or another project's journal in the same database.
+    d = make_deterministic_query_id("prod", "_chkit_migrations", "m1.sql", 0)
+    e = make_deterministic_query_id("staging", "_chkit_migrations_b", "m1.sql", 0)
+    assert len({a, b, c, d, e}) == 5
 
 
 def test_iso_without_zone_returns_3_digit_millis() -> None:
@@ -183,6 +189,7 @@ class _ScriptedClient:
         # The settings each submit / execute call received, in call order.
         self.sent_settings: list[tuple[str, dict[str, Any] | None]] = []
         self.after_times: list[str | None] = []
+        self.status_ids: list[str] = []
         self.every_replica: list[bool] = []
         # Server-time reads, status checks and submissions, in call order.
         self.events: list[str] = []
@@ -190,7 +197,10 @@ class _ScriptedClient:
 
     def query(self, statement: str) -> QueryResult:
         self.events.append(f"query: {statement}")
-        return QueryResult(column_names=["now_ms"], rows=[{"now_ms": str(SERVER_NOW_MS)}])
+        return QueryResult(
+            column_names=["now_ms", "database"],
+            rows=[{"now_ms": str(SERVER_NOW_MS), "database": SERVER_DATABASE}],
+        )
 
     def submit(
         self,
@@ -207,12 +217,13 @@ class _ScriptedClient:
 
     def query_status(
         self,
-        _query_id: str,
+        query_id: str,
         *,
         after_time: str | None = None,
         every_replica: bool = False,
     ) -> QueryStatus:
         self.events.append("status")
+        self.status_ids.append(query_id)
         self.after_times.append(after_time)
         self.every_replica.append(every_replica)
         if not self._statuses:
@@ -259,7 +270,14 @@ def test_apply_async_happy_path_writes_started_then_completed() -> None:
     result = apply_async_statement(_input(client=client, journal=journal))
     assert result.kind == "completed"
     assert result.operation.status == "completed"
-    assert len(client.submitted) == 1
+    assert client.submitted == [
+        (
+            "ALTER TABLE db.t MODIFY COLUMN x UInt64",
+            make_deterministic_query_id(
+                SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
+            ),
+        )
+    ]
     # Without migrate --setting the submission carries no settings.
     assert client.sent_settings == [("submit", None)]
     assert journal.writes is not None
@@ -311,7 +329,9 @@ def test_apply_async_already_completed_skips_entirely() -> None:
         operation_index=0,
         operation_key="table:db.t:column:x",
         operation_type="alter_table_modify_column",
-        query_id=make_deterministic_query_id("20260101_000000_async.sql", 0),
+        query_id=make_deterministic_query_id(
+            SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
+        ),
         status="completed",
         started_at="2026-01-01T00:00:00.000",
         finished_at="2026-01-01T00:00:10.000",
@@ -331,6 +351,34 @@ def test_apply_async_already_completed_skips_entirely() -> None:
     assert result.kind == "skipped"
     assert result.operation == prior
     assert client.submitted == []
+
+
+def test_apply_async_keeps_the_journaled_query_id() -> None:
+    # #463: an older chkit derived the id from the migration alone. A statement
+    # it journaled keeps that id, so an upgrade mid-load still finds the attempt.
+    legacy_id = "f2d1c4e0-1111-2222-3333-444455556666"
+    prior = _op("started").model_copy(update={"query_id": legacy_id})
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="running", written_rows=5, elapsed_ms=RUNNING_ELAPSED_MS),
+            QueryStatus(status="finished", written_rows=12, duration_ms=12_000),
+        ]
+    )
+    journal = _FakeJournalStore(state=_state(prior, checksum="abc"))
+    result = apply_async_statement(
+        _input(
+            client=client,
+            journal=journal,
+            migration_name="m.sql",
+            before_retry="TRUNCATE TABLE db.t",
+        )
+    )
+    assert result.kind == "completed"
+    assert client.status_ids == [legacy_id, legacy_id]
+    assert client.submitted == []
+    assert client.executed == []
+    assert journal.writes is not None
+    assert [w.operations[0].query_id for w in journal.writes] == [legacy_id]
 
 
 def test_apply_async_failed_status_raises_and_writes_failure() -> None:
@@ -354,7 +402,9 @@ def test_apply_async_resubmit_runs_before_retry() -> None:
         operation_index=0,
         operation_key="table:db.t:column:x",
         operation_type="alter_table_modify_column",
-        query_id=make_deterministic_query_id("20260101_000000_async.sql", 0),
+        query_id=make_deterministic_query_id(
+            SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
+        ),
         status="failed",
         started_at="2026-01-01T00:00:00.000",
         finished_at="2026-01-01T00:00:01.000",
@@ -432,7 +482,9 @@ def _op(status: str, *, last_error: str = "", index: int = 0) -> OperationState:
         operation_index=index,
         operation_key="table:db.t:column:x",
         operation_type="alter_table_modify_column",
-        query_id=make_deterministic_query_id("m.sql", index),
+        query_id=make_deterministic_query_id(
+            SERVER_DATABASE, "_chkit_migrations", "m.sql", index
+        ),
         status=status,  # type: ignore[arg-type]
         started_at="2023-11-14 22:14:00.000",
         finished_at=None if status == "started" else "2023-11-14 22:14:01.000",

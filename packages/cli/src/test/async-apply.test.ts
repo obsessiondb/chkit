@@ -24,7 +24,7 @@ function makeDb(sequence: Array<QueryStatus | 'throw524'>): ClickHouseExecutor {
   return {
     async query() {
       // Server clock reads, before the in-flight check and before each submission.
-      return [{ now_ms: 0 }]
+      return [{ now_ms: 0, database: 'default' }]
     },
     async submit() {
       return 'submitted'
