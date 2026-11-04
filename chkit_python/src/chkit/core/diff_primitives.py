@@ -7,6 +7,8 @@ from typing import Generic, Literal, TypeAlias, TypeVar
 
 from pydantic import BaseModel, ConfigDict
 
+from chkit.core.sql import _render_setting_value
+
 _T = TypeVar("_T")
 
 
@@ -95,7 +97,9 @@ def diff_settings(
                 changes.append(_SettingReset(key=key))
             continue
         next_value = new_settings[key]
-        if not had or old_settings[key] != next_value:
+        # Compared as rendered: ``index_granularity=4096`` and the "4096" pull
+        # reads back are the same.
+        if not had or _render_setting_value(old_settings[key]) != _render_setting_value(next_value):
             changes.append(_SettingModify(key=key, value=next_value))
     return SettingDiffResult(changes=changes)
 

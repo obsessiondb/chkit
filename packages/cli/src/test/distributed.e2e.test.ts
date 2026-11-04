@@ -216,12 +216,10 @@ async function writeSchema(
     fixture.schemaPath,
     `import { schema, table } from '${CORE_ENTRY}'
 
-// index_granularity is spelled out, as a string, because pull writes the
-// server default and reads settings back as strings.
 const columns = ${JSON.stringify(columns)}
 
 export default schema(
-  table({ database: '${database}', name: '${local}', engine: 'MergeTree()', columns, orderBy: ['id'], partitionBy: 'toYYYYMM(ts)', settings: { index_granularity: '8192' } }),
+  table({ database: '${database}', name: '${local}', engine: 'MergeTree()', columns, orderBy: ['id'], partitionBy: 'toYYYYMM(ts)' }),
   table({ database: '${database}', name: '${distributed}', engine: 'Distributed(${CLUSTER}, ${database}, ${local}, ${shardingKey})', columns }),
 )
 `,

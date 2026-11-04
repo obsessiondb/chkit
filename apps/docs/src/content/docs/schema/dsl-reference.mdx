@@ -994,7 +994,7 @@ Creates a [ClickHouse dictionary](https://clickhouse.com/docs/sql-reference/dict
 | `primaryKey` | `string[]` | Key attribute name(s) — every entry must name a declared attribute |
 | `source` | `string` | Raw `SOURCE(...)` body, e.g. `` `MYSQL(host '...' password '...' ...)` `` |
 | `layout` | `string` | Raw `LAYOUT(...)` body, e.g. `` `HASHED()` `` or `` `COMPLEX_KEY_HASHED()` `` |
-| `lifetime` | `string` | Raw `LIFETIME(...)` body, e.g. `` `300` `` or `` `MIN 300 MAX 360` `` |
+| `lifetime` | `string` | Raw `LIFETIME(...)` body, e.g. `` `300` `` or `` `MIN 300 MAX 360` ``. `generate` compares it in the form ClickHouse stores, so `300` and `MIN 0 MAX 300` are the same lifetime |
 
 ### Optional fields
 

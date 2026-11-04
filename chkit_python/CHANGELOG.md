@@ -127,6 +127,14 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- `pull` then `generate` plans nothing on a database chkit migrated (#466, fixed in TS too). `pull`
+  leaves out chkit's migration journal (`_chkit_migrations` or `CHKIT_JOURNAL_TABLE`) and the
+  settings the server fills in: a MergeTree setting at its `system.merge_tree_settings` value
+  (such as `index_granularity = 8192`) and ObsessionDB's `storage_policy = 's3'` on `Shared`
+  tables. `generate` compares a literal default with the expression pull reads back by the
+  SQL it renders (`7` and `{"expression": "7"}`), settings by their rendered value (`4096`
+  and `"4096"`), and a dictionary `lifetime` in the form ClickHouse stores (`300` and
+  `MIN 0 MAX 300`).
 - Concurrent `migrate --apply` runs of one migration file against other databases, or by
   projects with other journal tables in one database, no longer share async query ids
   (#463), as in TS. A run used to attach to the other run's query or read its result:

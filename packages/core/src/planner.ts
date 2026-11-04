@@ -1,6 +1,7 @@
 import { canonicalizeDefinitions, definitionKey } from './canonical.js'
 import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
+  ColumnDefaultValue,
   ColumnDefinition,
   ColumnRenameSuggestion,
   DictionaryDefinition,
@@ -34,6 +35,7 @@ import {
   renderColumnType,
   toCreateSQL,
 } from './sql.js'
+import { parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
@@ -220,7 +222,19 @@ function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name
   const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, ...rest } = column
   // Compare what the DSL renders: inline Nullable(T) and nullable: true are
   // equivalent, while an additional or differently placed wrapper is not.
-  return { type: renderColumnType(column), ...rest }
+  return {
+    type: renderColumnType(column),
+    ...rest,
+    ...(column.default === undefined ? {} : { default: defaultFingerprint(column.default) }),
+  }
+}
+
+// A literal compares by the SQL it renders, so the literal 7 and the
+// expression '7' that pull reads back are the same default (#466). An
+// expression keeps its comments, which the snapshot records as written.
+function defaultFingerprint(value: ColumnDefaultValue): string {
+  const parsed = parseColumnDefault(value)
+  return parsed.kind === 'expression' ? parsed.sql : renderDefault(value)
 }
 
 function normalizeColumnWithoutCodec(
@@ -359,9 +373,29 @@ function dictionarySourceIsHidden(source: string): boolean {
 }
 
 function dictionaryComparisonShape(def: DictionaryDefinition, omitSource: boolean) {
-  if (!omitSource) return def
   const { source, ...rest } = def
-  return rest
+  const shape = { ...rest, lifetime: dictionaryLifetimeFingerprint(def.lifetime) }
+  return omitSource ? shape : { ...shape, source }
+}
+
+const LIFETIME_RANGE_RE = /^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$/i
+
+/**
+ * ClickHouse stores `LIFETIME(300)` as `LIFETIME(MIN 0 MAX 300)` and
+ * `LIFETIME(MAX 300 MIN 10)` as `LIFETIME(MIN 10 MAX 300)`, so a dictionary
+ * pulled back compares by that stored form.
+ */
+function dictionaryLifetimeFingerprint(lifetime: string): string {
+  const trimmed = lifetime.trim()
+  if (/^\d+$/.test(trimmed)) return `MIN 0 MAX ${trimmed}`
+  const range = LIFETIME_RANGE_RE.exec(trimmed)
+  if (!range) return trimmed
+  return range[1] !== undefined ? `MIN ${range[1]} MAX ${range[2]}` : `MIN ${range[4]} MAX ${range[3]}`
+}
+
+function sortObjectKeys(_key: string, value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
+  return Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 }
 
 function diffDictionary(
@@ -369,9 +403,11 @@ function diffDictionary(
   newDef: DictionaryDefinition
 ): MigrationOperation[] {
   const omitSource = dictionarySourceIsHidden(newDef.source)
+  // Keys sorted: their order follows how the schema spelled the dictionary,
+  // which pull writes in its own order.
   const unchanged =
-    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource)) ===
-    JSON.stringify(dictionaryComparisonShape(newDef, omitSource))
+    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource), sortObjectKeys) ===
+    JSON.stringify(dictionaryComparisonShape(newDef, omitSource), sortObjectKeys)
   if (unchanged) return []
 
   return [
