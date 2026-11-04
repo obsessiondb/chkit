@@ -1,5 +1,4 @@
 ---
-"@chkit/plugin-backfill": patch
 "@chkit/plugin-obsessiondb": patch
 ---
 

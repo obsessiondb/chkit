@@ -1,6 +1,5 @@
 ---
 "@chkit/plugin-ingest": patch
-"@chkit/clickhouse": patch
 ---
 
 Ingestion loading keeps rows and values intact in more cases:

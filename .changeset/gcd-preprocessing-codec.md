@@ -1,5 +1,4 @@
 ---
-"chkit": patch
 "@chkit/core": patch
 ---
 

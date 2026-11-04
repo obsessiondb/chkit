@@ -1,6 +1,5 @@
 ---
 "chkit": patch
-"@chkit/clickhouse": patch
 ---
 
 `chkit query` no longer rounds 64-bit and wider integers and Decimals, in the table or in `--json` (#381).

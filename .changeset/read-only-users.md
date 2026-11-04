@@ -1,6 +1,5 @@
 ---
 "chkit": patch
-"@chkit/clickhouse": patch
 ---
 
 chkit works with a read-only ClickHouse user (`readonly = 1` or `2`, granted `SELECT`) for `query`, `status`, `check`, `drift`, `pull` and `migrate` without `--apply` (#402).

@@ -1,5 +1,4 @@
 ---
-"@chkit/clickhouse": patch
 "chkit": patch
 ---
 

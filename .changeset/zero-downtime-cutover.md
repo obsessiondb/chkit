@@ -1,10 +1,5 @@
 ---
 "chkit": patch
-"@chkit/core": patch
-"@chkit/clickhouse": patch
-"@chkit/codegen": patch
-"@chkit/plugin-backfill": patch
-"@chkit/plugin-obsessiondb": patch
 ---
 
 Add zero-downtime cutovers for structural table changes (#202):
