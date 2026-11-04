@@ -1,7 +1,7 @@
 // @ts-check
 const { default: defaultChangelog } = require('@changesets/cli/changelog')
 
-/** @type {import('@changesets/types').ChangelogFunctions} */
+/** @type {typeof defaultChangelog} */
 const changelog = {
 	getReleaseLine: defaultChangelog.getReleaseLine,
 	getDependencyReleaseLine: async (_changesets, dependenciesUpdated) =>
