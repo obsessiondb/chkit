@@ -105,7 +105,7 @@ A test may skip itself on `CHKIT_E2E_TARGET=obsessiondb` only for a known Obsess
 
 ## Release
 
-User-facing npm package changes use changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump package versions. Registry templates have independent versions and changelogs; template-only updates must not add package changesets or bump `chkit` or the fixed npm package group.
+User-facing npm package changes use changesets. Run `bun run changeset` to create a changeset, then `bun run version-packages` to bump package versions. Write each changeset and `meta.chkit.changelog` entry as one or two user-facing sentences, as the `pr-creation` skill describes. Registry templates have independent versions and changelogs; template-only updates must not add package changesets or bump `chkit` or the fixed npm package group.
 
 ### Registry integration releases
 

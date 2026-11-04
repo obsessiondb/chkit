@@ -28,6 +28,7 @@ interface FakeExecutor {
 // The server clock differs from the client clock (FIXED_NOW) on purpose: the
 // query_log bound must come from the server.
 const SERVER_NOW_MS = 1_700_000_100_000
+const SERVER_DATABASE = 'analytics'
 // SERVER_NOW_MS minus the 2 s skew margin.
 const SUBMISSION_BOUND = '2023-11-14T22:14:58.000Z'
 // How long the attempt an attach finds has been running.
@@ -48,7 +49,7 @@ function createFakeExecutor(
   const db = {
     async query(sql: string) {
       events.push(`query: ${sql}`)
-      return [{ now_ms: String(SERVER_NOW_MS) }]
+      return [{ now_ms: String(SERVER_NOW_MS), database: SERVER_DATABASE }]
     },
     async submit(sql: string, queryId?: string, settings?: ClickHouseSettings) {
       events.push('submit')
@@ -100,7 +101,7 @@ function createFakeJournalStore(initial: MigrationRowState | null = null): FakeS
   return { store, writes }
 }
 
-const SERVER_TIME_QUERY = 'query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms'
+const SERVER_TIME_QUERY = 'query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database'
 
 const NO_SLEEP = (_ms: number) => Promise.resolve()
 const FIXED_NOW = () => 1_700_000_000_000
@@ -115,6 +116,14 @@ const BASE_INPUT = {
   beforeRetry: null,
 } as const
 
+// The id a statement with no journal row gets on SERVER_DATABASE.
+const QUERY_ID = makeDeterministicQueryId(
+  SERVER_DATABASE,
+  '_chkit_migrations',
+  BASE_INPUT.migrationName,
+  BASE_INPUT.statementIndex,
+)
+
 function freshStateWith(op: OperationState): MigrationRowState {
   return {
     name: BASE_INPUT.migrationName,
@@ -127,17 +136,24 @@ function freshStateWith(op: OperationState): MigrationRowState {
 }
 
 describe('applyAsyncStatement', () => {
-  test('produces a deterministic UUID-shaped query_id from (migration, statement_index)', () => {
-    const a = makeDeterministicQueryId('20260526_load.sql', 0)
-    const b = makeDeterministicQueryId('20260526_load.sql', 0)
-    const c = makeDeterministicQueryId('20260526_load.sql', 1)
-    expect(a).toBe(b)
-    expect(a).not.toBe(c)
+  test('produces a deterministic UUID-shaped query_id from (database, journal table, migration, statement_index)', () => {
+    const a = makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_load.sql', 0)
+    expect(makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_load.sql', 0)).toBe(a)
+    // chkit-py builds the same id (test_migrate_async_apply.py).
+    expect(a).toBe('ff8138de-dce9-96af-69dc-cd30f8f4a7bb')
+    const others = [
+      makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_load.sql', 1),
+      makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_other.sql', 0),
+      // #463: another database, or another project's journal in the same database.
+      makeDeterministicQueryId('prod', '_chkit_migrations', '20260526_load.sql', 0),
+      makeDeterministicQueryId('staging', '_chkit_migrations_b', '20260526_load.sql', 0),
+    ]
+    expect(new Set([a, ...others]).size).toBe(5)
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   })
 
   test('first attempt: writes started, submits, polls to completion', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
       { status: 'unknown' }, // initial in-flight check
       { status: 'running', writtenRows: 50_000 },
@@ -178,7 +194,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('refuses to resume in-progress async state when the migration checksum changed', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([])
     const { store, writes } = createFakeJournalStore(
       freshStateWith({
@@ -214,7 +230,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('completed-skip: prior operation marked completed → no submit, no command', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([])
     const { store, writes } = createFakeJournalStore(
       freshStateWith({
@@ -248,7 +264,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('in-flight attach: query already running on server → poll without resubmit', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
       { status: 'running', writtenRows: 50, elapsedMs: RUNNING_ELAPSED_MS }, // initial check sees it running
       { status: 'running', writtenRows: 75 },
@@ -294,14 +310,14 @@ describe('applyAsyncStatement', () => {
   // entry can still be missing while an earlier attempt with the same query id
   // (abandoned, or retried after an edit, #233) has its QueryFinish there.
   test('an attach ignores query_log entries of an earlier attempt', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const attachedStartSec = Math.floor((SERVER_NOW_MS - RUNNING_ELAPSED_MS) / 1000)
     const earlierStartSec = attachedStartSec - 3_600
     const phases = ['running', 'running', 'flush gap', 'flush gap', 'flushed']
     const statusCalls: StatusCall[] = []
     const db = {
       async query() {
-        return [{ now_ms: SERVER_NOW_MS }]
+        return [{ now_ms: SERVER_NOW_MS, database: SERVER_DATABASE }]
       },
       async submit() {
         throw new Error('an attach never submits')
@@ -373,8 +389,46 @@ describe('applyAsyncStatement', () => {
     expect(statusCalls.map((call) => call.afterTime)).toEqual([undefined, '1970-01-01 00:00:00'])
   })
 
+  // #463: an older chkit derived the id from the migration alone. A statement
+  // it journaled keeps that id, so an upgrade mid-load still finds the attempt.
+  test('a statement the journal tracks keeps its journaled query id', async () => {
+    const legacyId = 'f2d1c4e0-1111-2222-3333-444455556666'
+    const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
+      { status: 'running', writtenRows: 5, elapsedMs: RUNNING_ELAPSED_MS },
+      { status: 'finished', writtenRows: 12, durationMs: 12_000 },
+    ])
+    const { store, writes } = createFakeJournalStore(
+      freshStateWith({
+        operationIndex: 0,
+        operationKey: BASE_INPUT.operationKey,
+        operationType: BASE_INPUT.operationType,
+        queryId: legacyId,
+        status: 'started',
+        startedAt: '2026-05-26 11:00:00.000',
+        finishedAt: null,
+        lastError: '',
+      }),
+    )
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      beforeRetry: 'TRUNCATE TABLE t',
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(statusCalls.map((call) => call.queryId)).toEqual([legacyId, legacyId])
+    expect(submitCalls).toEqual([])
+    expect(commandCalls).toEqual([])
+    expect(writes.map((state) => state.operations[0]?.queryId)).toEqual([legacyId])
+  })
+
   test('retry: prior failed op + query no longer running → run before-retry, then resubmit', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
       { status: 'unknown' }, // initial check: not running on server anymore
       { status: 'running', writtenRows: 25_000 },
@@ -426,7 +480,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('migrate --setting reaches the before-retry SQL and the resubmission (#321)', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, submitCalls, commandCalls } = createFakeExecutor([
       { status: 'unknown' },
       { status: 'finished', writtenRows: 1, durationMs: 10 },
@@ -461,7 +515,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('retry without before-retry SQL: still resubmits forward', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, submitCalls, commandCalls } = createFakeExecutor([
       { status: 'unknown' },
       { status: 'finished', writtenRows: 1, durationMs: 100 },
@@ -497,7 +551,7 @@ describe('applyAsyncStatement', () => {
   // Running before-retry SQL (a TRUNCATE) or resubmitting then would race it.
   for (const prior of ['started', 'failed'] as const) {
     test(`an in-flight check that cannot read every replica neither compensates nor resubmits (prior op: ${prior})`, async () => {
-      const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+      const queryId = QUERY_ID
       const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
         new Error('ALL_CONNECTION_TRIES_FAILED: clickhouse-1'),
       ])
@@ -589,14 +643,14 @@ describe('applyAsyncStatement', () => {
   // then fails before it starts (no query_log row) must not inherit it.
   for (const prior of ['none', 'abandoned'] as const) {
     test(`a new submission ignores query_log entries of an earlier attempt (prior op: ${prior})`, async () => {
-      const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+      const queryId = QUERY_ID
       // The earlier attempt started one 5 s poll interval before this
       // submission: the youngest it can be once a previous run polled it to its end.
       const staleQueryStartSec = Math.floor((SERVER_NOW_MS - 5_000) / 1000)
       const statusCalls: StatusCall[] = []
       const db = {
         async query() {
-          return [{ now_ms: SERVER_NOW_MS }]
+          return [{ now_ms: SERVER_NOW_MS, database: SERVER_DATABASE }]
         },
         async submit() {
           throw new Error("Unknown table expression identifier 'default.src_typo'")
@@ -644,7 +698,7 @@ describe('applyAsyncStatement', () => {
   }
 
   test('accepts a changed checksum when no statement completed or started (#233)', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, submitCalls, commandCalls } = createFakeExecutor([
       { status: 'unknown' },
       { status: 'finished', writtenRows: 1, durationMs: 100 },

@@ -114,6 +114,16 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   // Parse plugin-specific flags when the command declares them or another plugin
   // extends this plugin's namespace (the same flags `chkit <plugin> <command>` accepts).
   const targetCommand = (selectedPlugin.plugin.commands ?? []).find((cmd) => cmd.name === commandName)
+  if (!targetCommand) {
+    const known = (selectedPlugin.plugin.commands ?? []).map((command) => command.name)
+    const message = `Unknown ${pluginName} command "${commandName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
+    if (jsonMode) {
+      emitJson('plugin', { ok: false, error: message })
+    } else {
+      console.error(message)
+    }
+    return 1
+  }
   const commandFlags = [
     ...(targetCommand?.flags ?? []),
     ...collectExtensionFlags(pluginRuntime.plugins, pluginName),

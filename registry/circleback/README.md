@@ -75,9 +75,9 @@ The transcript table contains two explicitly distinguished observations per meet
 - `kind: 'transcript'`: the last successfully retrieved full segment array under `data`, with `status: 'available'`.
 - `kind: 'availability'`: the latest read outcome, `available`, `forbidden` for HTTP 403, or `not_found` for HTTP 404.
 
-A 403/404 updates the outcome key and preserves earlier successful text. It proves neither deletion nor temporary processing. A valid HTTP 200 empty array replaces the prior snapshot with `[]`; malformed HTTP 200 content fails without publishing success. Segments retain their provider fields without synthetic segment IDs, subject to native JSON storage normalization.
+A 403/404 updates the outcome key and preserves earlier successful text. It proves neither deletion nor temporary processing. A valid HTTP 200 empty array replaces the prior snapshot with `[]`; malformed HTTP 200 content fails without publishing success. Segments retain their provider fields without synthetic segment IDs.
 
-ClickHouse native JSON is not byte- or shape-exact archival storage: explicit null paths and empty objects may be absent when queried, including a transcript segment's `speaker: null`. See [native JSON storage fidelity](https://chkit.obsessiondb.com/api-sync/destinations/).
+See [destinations](https://chkit.obsessiondb.com/api-sync/destinations/).
 
 Use `FINAL` for latest observations and filter successful snapshots explicitly:
 

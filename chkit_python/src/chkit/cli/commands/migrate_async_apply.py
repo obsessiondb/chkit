@@ -3,7 +3,8 @@
 1:1 port of ``packages/cli/src/commands/migrate/async-apply.ts``.
 
 Submits the statement via ``ClickHouseClient.submit`` with a deterministic
-``query_id`` derived from ``(migration_name, statement_index)``, then
+``query_id`` derived from ``(database, journal table, migration_name,
+statement_index)``, then
 polls ``query_status`` until terminal. The per-statement journal state
 is written before submit (intent), after each progress poll (heartbeat),
 and on terminal (completed | failed) so a CLI crash or kill mid-migration
@@ -42,6 +43,7 @@ from chkit.cli.journal_store import (
     JournalStore,
     MigrationRowState,
     OperationState,
+    resolve_journal_table_name,
 )
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus, clickhouse_error_message
 
@@ -91,10 +93,18 @@ def iso_without_zone(dt: datetime) -> str:
     return dt.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
 
 
-def make_deterministic_query_id(migration_name: str, statement_index: int) -> str:
-    """SHA-256 of ``chkit:{migration}:{index}`` formatted as a UUID."""
+def make_deterministic_query_id(
+    database: str, journal_table: str, migration_name: str, statement_index: int
+) -> str:
+    """SHA-256 of ``chkit:{database}:{journal table}:{migration}:{index}`` as a UUID.
+
+    The database and journal table keep runs of one migration file against
+    other databases, or by other projects in the same database, from sharing
+    the id (#463), while a re-run against the same target gets the same id
+    and attaches to its attempt.
+    """
     digest = hashlib.sha256(
-        f"chkit:{migration_name}:{statement_index}".encode()
+        f"chkit:{database}:{journal_table}:{migration_name}:{statement_index}".encode()
     ).hexdigest()
     return (
         f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
@@ -168,9 +178,6 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     client = input_.client
     journal_store = input_.journal_store
 
-    query_id = make_deterministic_query_id(
-        input_.migration_name, input_.statement_index
-    )
     initial_state = _accept_changed_checksum(
         journal_store.read_migration_state(input_.migration_name),
         input_.migration_name,
@@ -190,8 +197,8 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     # 1. Already completed → skip entirely
     if prior_op is not None and prior_op.status == "completed":
         input_.log(
-            f"  {input_.operation_type}: query_id={query_id} already completed "
-            f"in prior run — skipping"
+            f"  {input_.operation_type}: query_id={prior_op.query_id} already "
+            f"completed in prior run — skipping"
         )
         return AsyncApplyResult(kind="skipped", operation=prior_op)
 
@@ -199,7 +206,16 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     # The server clock is read before the check, so the start derived from it
     # and the attempt's elapsed time never falls after the start that
     # query_log records for the attempt.
-    server_now_ms = _read_server_now_ms(client)
+    server_now_ms, database = _read_server_state(client)
+    # A statement the journal already tracks keeps the id it was submitted
+    # with, which an older chkit derived from the migration alone (#463): a
+    # new id would miss that attempt while it still runs.
+    query_id = (prior_op.query_id if prior_op is not None else "") or make_deterministic_query_id(
+        database,
+        resolve_journal_table_name(),
+        input_.migration_name,
+        input_.statement_index,
+    )
     in_flight = _check_in_flight(client, query_id, input_.operation_type)
     if in_flight.status == "running":
         input_.log(
@@ -259,7 +275,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
 
     state_after_start = journal_store.read_migration_state(input_.migration_name)
 
-    poll_after_time = _query_log_lower_bound(_read_server_now_ms(client), 0)
+    poll_after_time = _query_log_lower_bound(_read_server_state(client)[0], 0)
     submit_error: Exception | None = None
     try:
         client.submit(input_.sql, query_id=query_id, settings=input_.settings)
@@ -473,10 +489,16 @@ def _query_log_lower_bound(server_now_ms: int, started_ms_ago: int) -> str:
     )
 
 
-def _read_server_now_ms(client: ClickHouseClient) -> int:
-    rows = client.query("SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms").rows
+def _read_server_state(client: ClickHouseClient) -> tuple[int, str]:
+    rows = client.query(
+        "SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database"
+    ).rows
+    msg = "Could not read the ClickHouse server time and database for an async statement."
     try:
-        return int(rows[0]["now_ms"])
+        now_ms = int(rows[0]["now_ms"])
+        database = rows[0]["database"]
     except (IndexError, KeyError, TypeError, ValueError) as error:
-        msg = "Could not read the ClickHouse server time for an async statement."
         raise RuntimeError(msg) from error
+    if not isinstance(database, str) or database == "":
+        raise RuntimeError(msg)
+    return now_ms, database

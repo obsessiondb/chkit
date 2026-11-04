@@ -352,7 +352,7 @@ describe('chkit cluster mode (ON CLUSTER) — async statement on another node', 
     const tableName = `${createPrefix('twoshard_async')}dst`
     const table = `${DATABASE}.\`${tableName}\``
     const migrationName = `20990101000000_${tableName}.sql`
-    const queryId = makeDeterministicQueryId(migrationName, 0)
+    const queryId = makeDeterministicQueryId(DATABASE, '_chkit_migrations', migrationName, 0)
     const submitter = executorFor(SHARD1_ENDPOINT)
     // The other replica of shard 1, configured like the run that re-applies.
     const otherReplica = createClickHouseExecutor({

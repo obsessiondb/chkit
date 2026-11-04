@@ -19,6 +19,7 @@ export interface SourceServicesInput {
 export function createSourceServices(input: SourceServicesInput): SourceContext {
   const { signal } = input
   const attempt: SourceContext['attempt'] = (operation, options) => {
+    if (signal.aborted) return Promise.reject(signal.reason)
     if (insideAttempt.getStore()) return operation(signal)
     return insideAttempt.run(true, () => runAttempt(() => input.queue.run(() => operation(signal), signal), input.retry, {
       signal,
