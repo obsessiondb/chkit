@@ -1,5 +1,19 @@
 # @chkit/core
 
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- e8f8e06: `clickhouse.secure` now follows the `clickhouse.url` scheme and defaults to `true` for `https://` (#298).
+
+  Breaking: a `secure` that contradicts the URL scheme is now a config error instead of being ignored.
+
+- aba9e86: Support Distributed, Memory, Null, Log, Buffer and Merge tables in schemas, pull and drift without `orderBy` or other key clauses; setting a key on them fails validation with `engine_unsupported_clause`. The ObsessionDB plugin rejects Distributed tables when targeting ObsessionDB.
+- cad89db: Typed `GCD` codec chains such as `[{ kind: 'GCD' }, { kind: 'LZ4' }]` now validate (#408). A chain of only `Delta` and `GCD` steps, which ClickHouse rejects, now fails validation with `codec_chain_must_end_with_general`.
+- ae1caf7: The typed `T64` codec can now precede a general codec, as in `CODEC(T64, LZ4)`, without `codec.raw`; `T64` after a general codec fails validation (#434).
+- 0062ee8: Support `vector_similarity` skip indexes and table `constraints` (`CHECK`/`ASSUME`) in schemas, migrations, pull and drift. Pull keeps an index it cannot express as a `type: 'raw'` index instead of rewriting it, and dropping a column together with an index or constraint that reads it no longer fails.
+- b769649: `view({ comment })` and `materializedView({ comment })` now set the comment in ClickHouse instead of dropping it (#406).
+
 ## 0.2.0-beta.11
 
 ### Patch Changes

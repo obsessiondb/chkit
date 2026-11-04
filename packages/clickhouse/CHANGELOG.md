@@ -1,5 +1,14 @@
 # @chkit/clickhouse
 
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- a07fb3e: `@chkit/clickhouse/e2e-testkit` builds the local test stack URL from `CHKIT_TEST_PORT` (default 8123).
+- 4094b95: `executor.query()` returns 64-bit and wider integers and Decimals that a double cannot hold exactly as strings of their digits instead of rounded numbers.
+- 3cd7c07: `queryStatus()` decodes its rows the same way as `executor.query()`; the returned `QueryStatus` is unchanged.
+- Updated dependencies: `@chkit/core@0.2.0-beta.12`
+
 ## 0.2.0-beta.11
 
 ### Patch Changes
