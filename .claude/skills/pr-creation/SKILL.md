@@ -86,6 +86,8 @@ If the PR introduces a **user-facing npm package change** (new feature, bug fix,
 One sentence on what changed for users.
 ```
 
+List only the package where users meet the change, normally exactly one and at most two. All 10 npm packages are one fixed group and always release together, so listing every touched package just copies the same entry into every package's changelog.
+
 Bump `patch` for fixes, `minor` for additions and `major` for breaking changes. **BETA NOTICE:** While chkit is in BETA, **always use `patch`** for all releases regardless of change type.
 
 If the PR is purely internal (CI, docs, refactoring with no user-facing effect), a changeset is not required.
