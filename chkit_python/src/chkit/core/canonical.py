@@ -51,6 +51,12 @@ def _sort_kind(kind: SchemaKind) -> int:
     return 3
 
 
+def _canonicalize_comment(comment: str | None) -> str | None:
+    # An empty comment is no comment: ClickHouse stores both as ''. Trimmed as
+    # TS ``String.prototype.trim`` does.
+    return (js_trim(comment) or None) if comment is not None else None
+
+
 def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
     type_value = column.type
     canon_type = js_trim(type_value) if isinstance(type_value, str) else type_value
@@ -62,7 +68,7 @@ def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
             if column.renamed_from is not None
             else None,
             "type": canon_type,
-            "comment": column.comment.strip() if column.comment is not None else None,
+            "comment": _canonicalize_comment(column.comment),
             "codec": canonicalize_codec(column.codec) if column.codec is not None else None,
             # `SQLExpression` becomes the legacy `fn:` string, so snapshots,
             # plans, drift and chkit (TS) share one representation (#234).
@@ -153,7 +159,7 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
             "indexes": indexes,
             "projections": projections,
             "constraints": constraints,
-            "comment": definition.comment.strip() if definition.comment is not None else None,
+            "comment": _canonicalize_comment(definition.comment),
         }
     )
 
@@ -164,7 +170,7 @@ def _canonicalize_view(definition: ViewDefinition) -> ViewDefinition:
             "database": definition.database.strip(),
             "name": definition.name.strip(),
             "as_": normalize_sql_fragment(definition.as_),
-            "comment": definition.comment.strip() if definition.comment is not None else None,
+            "comment": _canonicalize_comment(definition.comment),
         }
     )
 
@@ -251,7 +257,7 @@ def _canonicalize_materialized_view(
                 name=definition.to.name.strip(),
             ),
             "as_": normalize_sql_fragment(definition.as_),
-            "comment": definition.comment.strip() if definition.comment is not None else None,
+            "comment": _canonicalize_comment(definition.comment),
             "refresh": canonical_refresh,
         }
     )
@@ -301,9 +307,7 @@ def _canonicalize_dictionary(definition: DictionaryDefinition) -> DictionaryDefi
             if definition.range is not None
             else None,
             "settings": settings,
-            "comment": definition.comment.strip()
-            if definition.comment is not None
-            else None,
+            "comment": _canonicalize_comment(definition.comment),
         }
     )
 

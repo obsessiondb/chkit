@@ -109,6 +109,7 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
   if (definition.constraints && definition.constraints.length > 0) {
     lines.push(...renderConstraintLines(definition.constraints))
   }
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
 }
@@ -116,6 +117,7 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
 function renderViewDefinition(definition: ViewDefinition, variableName: string): string[] {
   const lines = renderDeclarationHeader('view', variableName, definition.database, definition.name)
   lines.push(`  as: ${renderString(definition.as)},`)
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
 }
@@ -130,6 +132,7 @@ function renderMaterializedViewDefinition(
     lines.push(...renderRefreshLines(definition.refresh))
   }
   lines.push(`  as: ${renderString(definition.as)},`)
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
 }
@@ -160,11 +163,13 @@ function renderDictionaryDefinition(definition: DictionaryDefinition, variableNa
   if (definition.settings && Object.keys(definition.settings).length > 0) {
     lines.push(...renderSettingsLines(definition.settings, '  '))
   }
-  if (definition.comment) {
-    lines.push(`  comment: ${renderString(definition.comment)},`)
-  }
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
+}
+
+function renderCommentLines(comment: string | undefined): string[] {
+  return comment ? [`  comment: ${renderString(comment)},`] : []
 }
 
 function renderDictionaryAttribute(attribute: DictionaryAttribute): string {

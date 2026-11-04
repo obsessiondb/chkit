@@ -56,6 +56,7 @@ _KEY_SUFFIXES: dict[str, str] = {
     "alter_table_modify_setting": ":setting:",
     "alter_table_reset_setting": ":setting:",
     "alter_table_modify_ttl": ":ttl",
+    "alter_table_modify_comment": ":comment",
     "alter_table_rename_table": ":rename_table",
     "rename_dictionary": ":rename_dictionary",
 }
@@ -116,7 +117,7 @@ def wait_for_table(
         source="system.tables",
         where=f"database = '{_quote(database)}' AND name = '{_quote(table_name)}'",
         want="present",
-        label=f"wait_for_table: {database}.{table_name} not yet visible",
+        label=f"waitForTable: {database}.{table_name} not yet visible",
         cluster=cluster,
     )
 
@@ -132,7 +133,7 @@ def wait_for_view(
             "AND engine LIKE '%View%'"
         ),
         want="present",
-        label=f"wait_for_view: {database}.{view_name} not yet visible",
+        label=f"waitForView: {database}.{view_name} not yet visible",
         cluster=cluster,
     )
 
@@ -158,7 +159,7 @@ def wait_for_dictionary(
         f"database = '{_quote(database)}' AND name = '{_quote(dictionary_name)}' "
         "AND engine = 'Dictionary'"
     )
-    label = f"wait_for_dictionary: {database}.{dictionary_name} not yet visible"
+    label = f"waitForDictionary: {database}.{dictionary_name} not yet visible"
     fanout = resolve_replica_fanout(client, cluster)
 
     def _check() -> bool:
@@ -186,7 +187,7 @@ def wait_for_column(
             f"AND name = '{_quote(column_name)}'"
         ),
         want="present",
-        label=f"wait_for_column: {database}.{table_name}.{column_name} not yet visible",
+        label=f"waitForColumn: {database}.{table_name}.{column_name} not yet visible",
         cluster=cluster,
     )
 
@@ -199,7 +200,7 @@ def wait_for_table_absent(
         source="system.tables",
         where=f"database = '{_quote(database)}' AND name = '{_quote(table_name)}'",
         want="absent",
-        label=f"wait_for_table_absent: {database}.{table_name} still present",
+        label=f"waitForTableAbsent: {database}.{table_name} still present",
         cluster=cluster,
     )
 
@@ -221,7 +222,7 @@ def wait_for_column_absent(
             f"AND name = '{_quote(column_name)}'"
         ),
         want="absent",
-        label=f"wait_for_column_absent: {database}.{table_name}.{column_name} still present",
+        label=f"waitForColumnAbsent: {database}.{table_name}.{column_name} still present",
         cluster=cluster,
     )
 
@@ -243,7 +244,7 @@ def wait_for_index(
             f"AND name = '{_quote(index_name)}'"
         ),
         want="present",
-        label=f"wait_for_index: {database}.{table_name}.{index_name} not yet visible",
+        label=f"waitForIndex: {database}.{table_name}.{index_name} not yet visible",
         cluster=cluster,
     )
 
@@ -265,7 +266,7 @@ def wait_for_index_absent(
             f"AND name = '{_quote(index_name)}'"
         ),
         want="absent",
-        label=f"wait_for_index_absent: {database}.{table_name}.{index_name} still present",
+        label=f"waitForIndex: {database}.{table_name}.{index_name} still present",
         cluster=cluster,
     )
 
@@ -287,7 +288,7 @@ def wait_for_projection(
             f"AND name = '{_quote(projection_name)}'"
         ),
         want="present",
-        label=f"wait_for_projection: {database}.{table_name}.{projection_name} not yet visible",
+        label=f"waitForProjection: {database}.{table_name}.{projection_name} not yet visible",
         cluster=cluster,
     )
 
@@ -310,7 +311,7 @@ def wait_for_projection_absent(
         ),
         want="absent",
         label=(
-            f"wait_for_projection_absent: {database}.{table_name}.{projection_name} "
+            f"waitForProjectionAbsent: {database}.{table_name}.{projection_name} "
             "still present"
         ),
         cluster=cluster,
@@ -335,7 +336,7 @@ def wait_for_constraint(
         source="system.tables",
         where=_constraint_where(database, table_name, constraint_name),
         want="present",
-        label=f"wait_for_constraint: {database}.{table_name}.{constraint_name} not yet visible",
+        label=f"waitForConstraint: {database}.{table_name}.{constraint_name} not yet visible",
         cluster=cluster,
     )
 
@@ -355,7 +356,7 @@ def wait_for_constraint_absent(
         where=_constraint_where(database, table_name, constraint_name),
         want="absent",
         label=(
-            f"wait_for_constraint_absent: {database}.{table_name}.{constraint_name} "
+            f"waitForConstraintAbsent: {database}.{table_name}.{constraint_name} "
             "still present"
         ),
         cluster=cluster,
@@ -461,7 +462,7 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
             break
         time.sleep(RETRY_DELAY_SECONDS)
     msg = (
-        f"wait_for_ddl_propagation: {subject} not applied on every replica "
+        f"waitForDDLPropagation: {subject} not applied on every replica "
         f"after {checks} checks: {detail}"
     )
     raise RuntimeError(msg)

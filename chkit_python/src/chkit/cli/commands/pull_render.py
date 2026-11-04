@@ -235,8 +235,13 @@ def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
         lines.append("    constraints=[")
         lines.extend(f"        {_render_constraint(c)}," for c in definition.constraints)
         lines.append("    ],")
+    lines.extend(_render_comment_lines(definition.comment))
     lines.append(")")
     return lines
+
+
+def _render_comment_lines(comment: str | None) -> list[str]:
+    return [f"    comment={_render_string(comment)},"] if comment else []
 
 
 def _render_constraint(constraint: TableConstraintDefinition) -> str:
@@ -380,8 +385,7 @@ def _render_dictionary(
             value = definition.settings[key]
             lines.append(f"        {_render_string(key)}: {_render_literal(value)},")
         lines.append("    },")
-    if definition.comment:
-        lines.append(f"    comment={_render_string(definition.comment)},")
+    lines.extend(_render_comment_lines(definition.comment))
     lines.append(")")
     return lines
 
@@ -415,6 +419,7 @@ def _render_view(variable_name: str, definition: ViewDefinition) -> list[str]:
         f"    database={_render_string(definition.database)},",
         f"    name={_render_string(definition.name)},",
         f"    as_={_render_string(definition.as_)},",
+        *_render_comment_lines(definition.comment),
         ")",
     ]
 
@@ -437,6 +442,7 @@ def _render_materialized_view(
     if definition.refresh is not None:
         lines.extend(_render_refresh(definition.refresh))
     lines.append(f"    as_={_render_string(definition.as_)},")
+    lines.extend(_render_comment_lines(definition.comment))
     lines.append(")")
     return lines
 
@@ -498,7 +504,10 @@ def _sanitize_identifier(value: str) -> str:
 
 
 def _render_string(value: str) -> str:
-    return json.dumps(value)
+    # Non-ASCII stays as is, as in TS: json.dumps would escape a character
+    # outside the BMP (an emoji) as a surrogate pair, which Python reads back as
+    # two lone surrogates, not the character.
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _render_string_list(values: Sequence[str]) -> str:

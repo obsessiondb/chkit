@@ -34,6 +34,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 - **Objects:** every table, view, materialized view and dictionary in the snapshot exists in ClickHouse with the same kind. An object in the schema's databases that the snapshot does not list reports `extra_object`.
 - **Tables:** columns matched by name, with their type, default, default kind, comment and codec; the engine, `ORDER BY`, `PRIMARY KEY`, `PARTITION BY`, unique key and `TTL`; skip indexes, projections and constraints; and the settings the schema declares.
 - **Views and materialized views:** the query, and a materialized view's `TO` target; see [View and materialized view queries](#view-and-materialized-view-queries).
+- **Comments:** the comment of every table, view, materialized view and dictionary, compared with `system.tables.comment`. A changed comment reports `comment_mismatch` with the schema's comment in `expected` and the live one in `actual`. A changed column comment reports `changed_column`.
 
 ### What drift does not compare
 
@@ -43,7 +44,6 @@ A server-side change to any of these reports no drift, so neither `chkit drift` 
 - The `REFRESH` clause of a refreshable materialized view.
 - Column order: columns are matched by name.
 - Dictionary definitions: attributes, primary key, `SOURCE`, `LAYOUT`, `LIFETIME`, `RANGE` and settings.
-- Table comments.
 - Table settings the schema does not declare.
 
 Check these properties against `SHOW CREATE` output.
@@ -89,6 +89,7 @@ Column codecs are compared with `compression_codec` in `system.columns`. ClickHo
 | `kind_mismatch` | Object exists but is a different kind (e.g. table vs view) |
 | `query_mismatch` | A view or materialized view query differs from the snapshot |
 | `target_mismatch` | A materialized view writes to a different `TO` table than the snapshot |
+| `comment_mismatch` | A table, view, materialized view or dictionary comment differs from the snapshot |
 
 **Table-level drift:**
 
