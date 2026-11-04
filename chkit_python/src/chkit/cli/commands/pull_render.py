@@ -526,13 +526,24 @@ def _render_codec_step(step: ColumnCodec) -> str:
         level = getattr(step, "level", None)
         if level is not None:
             parts.append(f'"level": {level}')
-    elif step.kind in {"Delta", "DoubleDelta", "Gorilla"}:
+        window_log = getattr(step, "window_log", None)
+        if window_log is not None:
+            parts.append(f'"windowLog": {window_log}')
+    elif step.kind in {"Delta", "Gorilla"}:
         size = getattr(step, "size", None)
         if size is not None:
             parts.append(f'"size": {size}')
+    elif step.kind == "T64":
+        mode = getattr(step, "mode", None)
+        if mode is not None:
+            parts.append(f'"mode": {_render_string(mode)}')
     elif step.kind == "FPC":
-        parts.append(f'"level": {step.level}')
-        parts.append(f'"floatSize": {step.float_size}')
+        level = getattr(step, "level", None)
+        if level is not None:
+            parts.append(f'"level": {level}')
+        float_size = getattr(step, "float_size", None)
+        if float_size is not None:
+            parts.append(f'"floatSize": {float_size}')
     return "{" + ", ".join(parts) + "}"
 
 

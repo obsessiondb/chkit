@@ -13,7 +13,16 @@ from collections.abc import Callable
 from typing import Annotated, Any, Final, Literal, TypeAlias
 from urllib.parse import urlparse
 
-from pydantic import BaseModel, ConfigDict, Field, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    TypeAdapter,
+    ValidationError,
+    ValidatorFunctionWrapHandler,
+    field_validator,
+    model_validator,
+)
 from pydantic.dataclasses import dataclass
 
 _STRICT_MODEL_CONFIG: Final[ConfigDict] = ConfigDict(
@@ -60,8 +69,17 @@ PrimitiveColumnType: TypeAlias = Literal[
 ]
 
 
+_ALIASED_MODEL_CONFIG: Final[ConfigDict] = ConfigDict(
+    frozen=True,
+    extra="forbid",
+    strict=True,
+    validate_assignment=True,
+    populate_by_name=True,
+)
+
+
 class _GeneralCodecSimple(_StrictModel):
-    kind: Literal["NONE", "LZ4", "ALP"]
+    kind: Literal["NONE", "LZ4", "Default"]
 
 
 class _CodecLZ4HC(_StrictModel):
@@ -72,15 +90,27 @@ class _CodecLZ4HC(_StrictModel):
 class _CodecZSTD(_StrictModel):
     kind: Literal["ZSTD"] = "ZSTD"
     level: int | None = None
+    window_log: int | None = Field(default=None, alias="windowLog")
+
+    model_config = _ALIASED_MODEL_CONFIG
 
 
 GeneralColumnCodec: TypeAlias = _GeneralCodecSimple | _CodecLZ4HC | _CodecZSTD
+"""General-purpose codecs: at most one per chain, followed only by encryption.
+
+``NONE`` stores data uncompressed and must be the only codec of its column;
+``Default`` is the server's default compression.
+"""
 
 
 _PreprocessorSize: TypeAlias = Literal[1, 2, 4, 8]
 
 
 class _CodecDeltaLike(_StrictModel):
+    """``Delta``/``Gorilla`` without a size render bare: ClickHouse uses the
+    byte width of the column's values. ``DoubleDelta`` never renders its size,
+    which ClickHouse ignores."""
+
     kind: Literal["Delta", "DoubleDelta", "Gorilla"]
     size: _PreprocessorSize | None = None
 
@@ -89,45 +119,72 @@ class _CodecGCD(_StrictModel):
     kind: Literal["GCD"] = "GCD"
 
 
+class _CodecALP(_StrictModel):
+    """Experimental: ClickHouse needs ``allow_experimental_codecs = 1``."""
+
+    kind: Literal["ALP"] = "ALP"
+
+
 class _CodecT64(_StrictModel):
     kind: Literal["T64"] = "T64"
+    mode: Literal["byte", "bit"] | None = None
 
 
 class _CodecFPC(_StrictModel):
+    """``level`` 1-28 (default 12). ClickHouse ignores ``float_size``."""
+
     kind: Literal["FPC"] = "FPC"
-    level: int
-    float_size: Literal[4, 8] = Field(..., alias="floatSize")
+    level: int | None = None
+    float_size: Literal[4, 8] | None = Field(default=None, alias="floatSize")
 
-    model_config = ConfigDict(
-        frozen=True,
-        extra="forbid",
-        strict=True,
-        validate_assignment=True,
-        populate_by_name=True,
-    )
+    model_config = _ALIASED_MODEL_CONFIG
 
 
-PreprocessingColumnCodec: TypeAlias = _CodecDeltaLike | _CodecGCD | _CodecT64 | _CodecFPC
+PreprocessingColumnCodec: TypeAlias = (
+    _CodecDeltaLike | _CodecGCD | _CodecALP | _CodecT64 | _CodecFPC
+)
 
 
 class RawColumnCodec(_StrictModel):
     """Escape hatch for codecs the typed model does not cover.
 
-    Canonicalization is whitespace-only, so round-trips are best-effort.
+    Atoms that parse as typed codecs are validated and compared like them.
     """
 
     kind: Literal["raw"] = "raw"
     expression: str
 
 
+class InvalidColumnCodec(_StrictModel):
+    """A codec atom no typed model accepts, kept as written.
+
+    ``validate_definitions`` reports it with the issue code and message chkit
+    (TS) gives the same atom, instead of a pydantic error when the schema loads.
+    """
+
+    kind: Literal["invalid"] = "invalid"
+    value: Any
+
+
 ColumnCodec: TypeAlias = Annotated[
-    GeneralColumnCodec | PreprocessingColumnCodec | RawColumnCodec,
+    GeneralColumnCodec | PreprocessingColumnCodec | RawColumnCodec | InvalidColumnCodec,
     Field(discriminator="kind"),
 ]
 """Single codec atom — one step of a chain."""
 
 ColumnCodecSpec: TypeAlias = ColumnCodec | list[ColumnCodec]
-"""Either a single atom or a list of atoms (preprocessors then one general)."""
+"""Either a single atom or a list of atoms (at most one general codec, last)."""
+
+_CODEC_ATOM_ADAPTER: Final[TypeAdapter[ColumnCodec]] = TypeAdapter(ColumnCodec)
+
+
+def _codec_atom_or_invalid(atom: object) -> ColumnCodec:
+    if isinstance(atom, BaseModel):
+        return atom  # type: ignore[return-value]
+    try:
+        return _CODEC_ATOM_ADAPTER.validate_python(atom)
+    except ValidationError:
+        return InvalidColumnCodec(value=atom)
 
 
 ColumnType: TypeAlias = PrimitiveColumnType | str
@@ -171,6 +228,17 @@ class ColumnDefinition(_StrictModel):
         validate_assignment=True,
         populate_by_name=True,
     )
+
+    @field_validator("codec", mode="wrap")
+    @classmethod
+    def _keep_invalid_codec(cls, value: object, handler: ValidatorFunctionWrapHandler) -> object:
+        # A malformed atom reaches validate_definitions, which reports it like chkit (#465).
+        try:
+            return handler(value)
+        except ValidationError:
+            if isinstance(value, list):
+                return [_codec_atom_or_invalid(atom) for atom in value]
+            return _codec_atom_or_invalid(value)
 
 
 class _SkipIndexBase(_StrictModel):
@@ -828,6 +896,13 @@ ValidationIssueCode: TypeAlias = Literal[
     "codec_chain_must_end_with_general",
     "codec_chain_multiple_general",
     "codec_chain_empty",
+    "codec_unknown",
+    "codec_parameter_invalid",
+    "codec_none_combined",
+    "codec_chain_encryption_not_last",
+    "codec_chain_no_compression",
+    "codec_chain_float_order",
+    "codec_type_unsupported",
     "column_default_kind_invalid",
     "column_expression_required",
     "column_expression_requires_fn",

@@ -34,6 +34,7 @@ import {
   renderColumnType,
   toCreateSQL,
 } from './sql.js'
+import { codecFingerprint } from './codec.js'
 import { constraintKind } from './constraint.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
@@ -216,11 +217,15 @@ interface TableDiffResult {
   renameSuggestions: ColumnRenameSuggestion[]
 }
 
-function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable'> {
-  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, ...rest } = column
+function normalizeColumn(
+  column: ColumnDefinition
+): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> & { codec: string } {
+  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, codec, ...rest } = column
   // Compare what the DSL renders: inline Nullable(T) and nullable: true are
   // equivalent, while an additional or differently placed wrapper is not.
-  return { type: renderColumnType(column), ...rest }
+  const type = renderColumnType(column)
+  // Codecs compare in the form ClickHouse stores them, like drift (#465).
+  return { type, ...rest, codec: codecFingerprint(codec, type) }
 }
 
 function normalizeColumnWithoutCodec(
@@ -228,14 +233,6 @@ function normalizeColumnWithoutCodec(
 ): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
   const { codec: _codec, ...rest } = normalizeColumn(column)
   return rest
-}
-
-function isCodecRemoval(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
-  if (!oldCol.codec || newCol.codec) return false
-  return (
-    JSON.stringify(normalizeColumnWithoutCodec(oldCol)) ===
-    JSON.stringify(normalizeColumnWithoutCodec(newCol))
-  )
 }
 
 function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, to: string): string {
@@ -455,14 +452,16 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     const removeExpression = renderAlterRemoveColumnExpression(newDef, newItem, oldItem)
     // Its own operation: migrate pairs each `-- operation:` marker with exactly one statement.
     if (removeExpression) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: removeExpression })
-    const sql = isCodecRemoval(oldItem, newItem)
-      ? renderAlterRemoveCodec(newDef, name)
-      : renderAlterModifyColumn(newDef, newItem)
+    // MODIFY COLUMN without a codec keeps the stored one: a removal is always
+    // REMOVE CODEC, its own operation before any other change (#465).
+    const codecRemoved = Boolean(oldItem.codec) && !newItem.codec
+    if (codecRemoved) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: renderAlterRemoveCodec(newDef, name) })
+    if (codecRemoved && JSON.stringify(normalizeColumnWithoutCodec(oldItem)) === JSON.stringify(normalizeColumnWithoutCodec(newItem))) continue
     ops.push( {
       type: 'alter_table_modify_column',
       key,
       risk: 'caution',
-      sql,
+      sql: renderAlterModifyColumn(newDef, newItem),
       ...((oldKind === 'DEFAULT' || oldKind === 'MATERIALIZED' || newKind === 'DEFAULT' || newKind === 'MATERIALIZED') && (oldItem.default !== newItem.default || oldKind !== newKind)
         ? { warning: `Changing the expression for ${newDef.database}.${newDef.name}.${name} does not rewrite stored historical values. Review a separate MATERIALIZE COLUMN migration if a rewrite is required; never reconstruct values from discarded EPHEMERAL inputs.` }
         : {}),

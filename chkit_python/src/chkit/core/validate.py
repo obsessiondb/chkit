@@ -9,7 +9,7 @@ from collections.abc import Iterable
 from typing import Final
 
 from chkit.core.canonical import definition_key
-from chkit.core.codec import canonicalize_codec, is_general_codec, is_raw_codec
+from chkit.core.codec_rules import column_codec_problem
 from chkit.core.column_default import (
     LEGACY_EXPRESSION_PREFIX,
     column_type_accepts_string_literal,
@@ -73,50 +73,17 @@ def _validate_column_codec(
 ) -> None:
     if column.codec is None:
         return
-    steps = canonicalize_codec(column.codec)
-    if len(steps) == 0:
-        _push(
-            issues,
-            definition,
-            "codec_chain_empty",
-            f'Table {definition.database}.{definition.name} column "{column.name}" '
-            f"codec chain is empty; provide at least one codec or omit the field",
-        )
+    # The type as rendered (`nullable=True` is `Nullable(T)`), like render_column_type.
+    type_ = str(column.type).strip()
+    problem = column_codec_problem(column.codec, f"Nullable({type_})" if column.nullable else type_)
+    if problem is None:
         return
-
-    general_count = 0
-    general_index = -1
-    for i, step in enumerate(steps):
-        if is_raw_codec(step):
-            continue
-        if is_general_codec(step):
-            general_count += 1
-            general_index = i
-
-    if general_count > 1:
-        _push(
-            issues,
-            definition,
-            "codec_chain_multiple_general",
-            f'Table {definition.database}.{definition.name} column "{column.name}" '
-            f"codec chain has more than one general codec; only one general codec is "
-            f"allowed at the end of a chain",
-        )
-        return
-
-    # Delta and GCD only transform the data: ClickHouse rejects a chain of nothing else.
-    only_transforms = all(step.kind in {"Delta", "GCD"} for step in steps)
-    if only_transforms or (
-        len(steps) > 1 and general_count == 1 and general_index != len(steps) - 1
-    ):
-        _push(
-            issues,
-            definition,
-            "codec_chain_must_end_with_general",
-            f'Table {definition.database}.{definition.name} column "{column.name}" '
-            f"codec chain must end with a general codec "
-            f"(NONE, LZ4, LZ4HC, ZSTD, ALP)",
-        )
+    _push(
+        issues,
+        definition,
+        problem.code,
+        f'Table {definition.database}.{definition.name} column "{column.name}" {problem.message}',
+    )
 
 
 def _validate_indexes(definition: TableDefinition, issues: list[ValidationIssue]) -> None:

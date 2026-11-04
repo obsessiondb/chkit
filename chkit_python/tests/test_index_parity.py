@@ -915,7 +915,7 @@ def test_plan_remove_codec_emits_REMOVE_CODEC_when_other_fields_unchanged() -> N
     )
 
 
-def test_plan_drop_codec_plus_other_change_emits_single_modify_no_separate_remove() -> None:
+def test_plan_drop_codec_plus_other_change_emits_remove_codec_then_modify() -> None:
     old = [
         table(
             database="app",
@@ -942,12 +942,73 @@ def test_plan_drop_codec_plus_other_change_emits_single_modify_no_separate_remov
             orderBy=["id"],
         )
     ]
+    # #465: MODIFY COLUMN without a codec keeps the stored one.
     plan = plan_diff(old, new)
-    assert len(plan.operations) == 1
-    assert plan.operations[0].type == "alter_table_modify_column"
-    sql = plan.operations[0].sql
-    assert "LowCardinality(String)" in sql
-    assert "REMOVE CODEC" not in sql
+    assert [(op.type, op.sql) for op in plan.operations] == [
+        ("alter_table_modify_column", "ALTER TABLE app.events MODIFY COLUMN `payload` REMOVE CODEC;"),
+        (
+            "alter_table_modify_column",
+            "ALTER TABLE app.events MODIFY COLUMN `payload` LowCardinality(String);",
+        ),
+    ]
+
+
+def _codec_events(columns: list[dict[str, Any]]) -> Any:
+    return table(
+        database="app",
+        name="events",
+        columns=[{"name": "id", "type": "UInt64"}, *columns],
+        engine="MergeTree()",
+        primaryKey=["id"],
+        orderBy=["id"],
+    )
+
+
+def test_plan_bare_delta_gorilla_replaces_the_size_1_of_an_old_snapshot() -> None:
+    old = [_codec_events([
+        {"name": "ts", "type": "UInt64", "codec": [{"kind": "Delta", "size": 1}, {"kind": "ZSTD", "level": 1}]},
+        {"name": "value", "type": "Float64", "codec": {"kind": "Gorilla", "size": 1}},
+        {"name": "small", "type": "UInt8", "codec": [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}]},
+        {"name": "pinned", "type": "UInt64", "codec": [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}]},
+    ])]
+    new = [_codec_events([
+        {"name": "ts", "type": "UInt64", "codec": [{"kind": "Delta"}, {"kind": "ZSTD"}]},
+        {"name": "value", "type": "Float64", "codec": {"kind": "Gorilla"}},
+        {"name": "small", "type": "UInt8", "codec": [{"kind": "Delta"}, {"kind": "LZ4"}]},
+        {"name": "pinned", "type": "UInt64", "codec": [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}]},
+    ])]
+    assert [op.sql for op in plan_diff(old, new).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `ts` UInt64 CODEC(Delta, ZSTD(1));",
+        "ALTER TABLE app.events MODIFY COLUMN `value` Float64 CODEC(Gorilla);",
+    ]
+
+
+def test_plan_codecs_clickhouse_stores_the_same_yield_no_operation() -> None:
+    pairs: list[tuple[str, Any, Any]] = [
+        ("String", {"kind": "ZSTD"}, {"kind": "ZSTD", "level": 1}),
+        ("String", {"kind": "LZ4HC"}, {"kind": "LZ4HC", "level": 0}),
+        ("UInt64", {"kind": "DoubleDelta", "size": 8}, {"kind": "DoubleDelta"}),
+        ("Float64", {"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "FPC"}),
+        ("String", [{"kind": "LZ4"}], {"kind": "LZ4"}),
+        ("String", codec_raw("NONE"), {"kind": "NONE"}),
+        ("UInt64", [{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], [{"kind": "Delta"}, {"kind": "LZ4"}]),
+        ("UInt64", codec_raw("Delta(8), Default"), codec_raw("Delta, Default")),
+    ]
+    for type_, before, after in pairs:
+        old = [_codec_events([{"name": "c", "type": type_, "codec": before}])]
+        new = [_codec_events([{"name": "c", "type": type_, "codec": after}])]
+        assert plan_diff(old, new).operations == []
+
+
+def test_plan_removing_a_codec_while_changing_the_type_removes_it_first() -> None:
+    old = [_codec_events([
+        {"name": "n", "type": "UInt32", "comment": "c", "codec": [{"kind": "Delta"}, {"kind": "LZ4"}]}
+    ])]
+    new = [_codec_events([{"name": "n", "type": "UInt64", "comment": "c"}])]
+    assert [op.sql for op in plan_diff(old, new).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `n` REMOVE CODEC;",
+        "ALTER TABLE app.events MODIFY COLUMN `n` UInt64 COMMENT 'c';",
+    ]
 
 
 def test_plan_equal_codec_across_canonicalization_yields_no_diff() -> None:
@@ -1074,7 +1135,7 @@ def test_flags_chain_of_only_delta_and_gcd() -> None:
     flagged = [
         i.message.split('"')[1]
         for i in validate_definitions(defs)
-        if i.code == "codec_chain_must_end_with_general"
+        if i.code == "codec_chain_no_compression"
     ]
     assert flagged == ["gcd", "delta", "delta_gcd"]
 

@@ -27,6 +27,7 @@ import typer
 
 from chkit import __version__
 from chkit.cli.command_target import ServiceOption, resolve_plugin_executor
+from chkit.cli.commands.codec_warnings import detect_experimental_codec_warnings
 from chkit.cli.commands.dictionary_password_warnings import (
     detect_dictionary_password_warnings,
 )
@@ -582,9 +583,11 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         plan, config.clickhouse.cluster if config.clickhouse else None
     )
 
-    dictionary_password_warnings = detect_dictionary_password_warnings(plan) + [
-        op.warning for op in plan.operations if op.warning
-    ]
+    dictionary_password_warnings = (
+        detect_dictionary_password_warnings(plan)
+        + detect_experimental_codec_warnings(plan)
+        + [op.warning for op in plan.operations if op.warning]
+    )
 
     if dryrun:
         # TS ``emitGeneratePlanOutput``.

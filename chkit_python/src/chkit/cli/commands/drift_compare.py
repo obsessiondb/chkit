@@ -296,12 +296,13 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
     )
 
     # Introspection unwraps Nullable(T) into type=T plus nullable=True.
+    rendered_type = render_column_type(column)
     parts = [
-        f"type={render_column_type(column)}",
+        f"type={rendered_type}",
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
-        f"codec={codec_fingerprint(column.codec)}",
+        f"codec={codec_fingerprint(column.codec, rendered_type)}",
     ]
     return "|".join(parts)
 

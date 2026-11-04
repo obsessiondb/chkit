@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
+from chkit.core.codec import codec_fingerprint
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
@@ -237,6 +238,8 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
     data.pop("renamed_from", None)
     data.pop("nullable", None)
     data["type"] = render_column_type(column)
+    # Codecs compare in the form ClickHouse stores them, like drift (#465).
+    data["codec"] = codec_fingerprint(column.codec, data["type"])
     return data
 
 
@@ -263,12 +266,6 @@ def _indexes_equal(left: SkipIndexDefinition, right: SkipIndexDefinition) -> boo
     if left.type == "text" and right.type == "text":
         return text_index_fingerprint(left) == text_index_fingerprint(right)
     return _index_identity(left) == _index_identity(right)
-
-
-def _is_codec_removal(old: ColumnDefinition, new: ColumnDefinition) -> bool:
-    if old.codec is None or new.codec is not None:
-        return False
-    return _column_identity_without_codec(old) == _column_identity_without_codec(new)
 
 
 def _same_default(left: ColumnDefaultValue | None, right: ColumnDefaultValue | None) -> bool:
@@ -407,7 +404,7 @@ def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
     return "danger" if disabled else "caution"
 
 
-def _diff_tables(
+def _diff_tables(  # noqa: PLR0915 — mirrors TS diffTables
     old: TableDefinition, new: TableDefinition
 ) -> tuple[list[MigrationOperation], list[ColumnRenameSuggestion]]:
     if is_kafka_engine(old.engine) or is_kafka_engine(new.engine):
@@ -514,17 +511,30 @@ def _diff_tables(
                     type="alter_table_modify_column", key=key, risk="caution", sql=remove_expression
                 )
             )
-        sql = (
-            render_alter_remove_codec(new, column_change.name)
-            if _is_codec_removal(column_change.old_item, column_change.new_item)
-            else render_alter_modify_column(new, column_change.new_item)
+        # MODIFY COLUMN without a codec keeps the stored one: a removal is always
+        # REMOVE CODEC, its own operation before any other change (#465).
+        codec_removed = (
+            column_change.old_item.codec is not None and column_change.new_item.codec is None
         )
+        if codec_removed:
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="caution",
+                    sql=render_alter_remove_codec(new, column_change.name),
+                )
+            )
+        if codec_removed and _column_identity_without_codec(
+            column_change.old_item
+        ) == _column_identity_without_codec(column_change.new_item):
+            continue
         ops.append(
             MigrationOperation(
                 type="alter_table_modify_column",
                 key=key,
                 risk="caution",
-                sql=sql,
+                sql=render_alter_modify_column(new, column_change.new_item),
                 warning=(
                     f"Changing the expression for {new.database}.{new.name}.{column_change.name} "
                     "does not rewrite stored historical values. "
