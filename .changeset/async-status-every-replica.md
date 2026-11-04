@@ -4,6 +4,4 @@
 "@chkit/plugin-obsessiondb": patch
 ---
 
-Read an async `migrate` statement's status on every replica of a multi-replica target such as a multi-replica ObsessionDB service (#246). The query runs only on the replica that received it, so the check for a still-running attempt could miss it, resubmit with the same query id (`QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING`) and run the statement's `-- before-retry:` SQL while the attempt was still writing. `queryStatus` in the native and ObsessionDB remote executors now reads `system.processes` and `system.query_log` through `clusterAllReplicas` when the target has more than one replica, also without `clickhouse.cluster`. The in-flight check fails when a replica cannot be read, before any before-retry SQL runs or the statement is resubmitted; polls skip an unreachable replica as before.
-
-The ObsessionDB remote executor now sends a submission's query id as the workbench API's top-level `queryId`. The API ignored the `query_id` setting chkit sent before, so async statements ran under a random id that `queryStatus` and a re-run could never find.
+On multi-replica targets such as multi-replica ObsessionDB services, async `migrate` checks every replica for a running attempt, so it no longer resubmits a statement or runs its `-- before-retry:` SQL while an earlier attempt is still writing (#246). Async statements sent through ObsessionDB now run under chkit's query id, so status checks and re-runs can find them.
