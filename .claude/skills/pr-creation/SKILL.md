@@ -65,7 +65,7 @@ Review the whole diff before choosing a release path:
 
 ### Registry template releases
 
-Update `registry/<provider>/manifest.json`: advance `meta.chkit.version` beyond the merged release and add the current `meta.chkit.changelog` entry. Keep at most one new artifact per integration per PR; later edits refresh that same unmerged draft and its changelog entry. Preserve released artifacts and earlier changelog entries.
+Update `registry/<provider>/manifest.json`: advance `meta.chkit.version` beyond the merged release and add the current `meta.chkit.changelog` entry (see [Writing changelog entries](#writing-changelog-entries)). Keep at most one new artifact per integration per PR; later edits refresh that same unmerged draft and its changelog entry. Preserve released artifacts and earlier changelog entries.
 
 ```bash
 bun run registry:release -- --base origin/main <provider>
@@ -76,27 +76,17 @@ Use the actual PR base if different. Commit the generated `registry/<provider>/r
 
 ### Package changesets
 
-If the PR introduces a **user-facing npm package change** (new feature, bug fix, API change, behavior change):
-
-1. Create a changeset file manually at `.changeset/<descriptive-name>.md`
-2. The interactive `bun run changeset` CLI does not work in this environment — create the file directly
-3. Use this format:
+If the PR introduces a **user-facing npm package change** (new feature, bug fix, API change, behavior change), create `.changeset/<descriptive-name>.md` directly; the interactive `bun run changeset` CLI does not work in this environment. Existing `.changeset/*.md` files show the package names.
 
 ```markdown
 ---
-"package-name": patch|minor|major
+"package-name": patch
 ---
 
-Short description of the change.
+One sentence on what changed for users.
 ```
 
-4. Look at existing `.changeset/*.md` files for reference on package names and format
-5. Choose the bump type:
-   - `patch` — bug fixes, internal changes
-   - `minor` — new features, non-breaking additions
-   - `major` — breaking changes
-
-   **BETA NOTICE:** While chkit is in BETA, **always use `patch`** for all releases regardless of change type.
+Bump `patch` for fixes, `minor` for additions and `major` for breaking changes. **BETA NOTICE:** While chkit is in BETA, **always use `patch`** for all releases regardless of change type.
 
 If the PR is purely internal (CI, docs, refactoring with no user-facing effect), a changeset is not required.
 
@@ -118,6 +108,36 @@ Examples that **do NOT require** a changeset:
 - Documentation-only changes (docs site, README)
 - Dev tooling (linter config, test infra)
 - Pure refactors where behavior is identical before and after
+
+### Writing changelog entries
+
+These rules cover changeset summaries and registry `meta.chkit.changelog` items. Users read them in release notes, `CHANGELOG.md` and `chkit registry inspect`, so write for someone deciding whether to upgrade:
+
+- One entry per user-facing change, normally one sentence and at most two. A PR with several user-facing changes gets one changeset (or changelog item) for each.
+- Say what changed for the user (fixed, added, now behaves like X), naming the command, option or export they touch. Don't describe the implementation.
+- Leave out internal mechanisms, tests, rationale, edge-case lists and lists of removed internals. The code, docs and PR carry those.
+- Only when a user must act, add one short `- Breaking: …` line below the entry per breaking change or required action. In a template changelog, make it its own item starting with `Breaking:`.
+
+Examples from real entries:
+
+- Bad: "Retry only transient ingestion failures, each in exactly one layer." followed by 13 bullets on `cause` chains, queue slots, test helpers and every removed export. Good, with the new `context.fetch` in its own changeset:
+
+  ```markdown
+  Ingestion retries only transient request failures; any other failure stops the stream, and the next run resumes from its last checkpoint.
+
+  - Breaking: `classifyError` is removed; map rate limits with `HttpError.withStatus`.
+  - Breaking: remove `retry` from `defineStream` and `definePipeline`; retries need no configuration.
+  ```
+
+- Bad: four paragraphs on row hashing, write-unit tokens, `input_format_try_infer_datetimes` and replay mechanics. Good:
+
+  ```markdown
+  Ingestion rejects an invalid `maxRowsPerInsert` instead of hanging, and accepts ISO timestamps and `Date` values in DateTime columns.
+
+  - Breaking: finish interrupted runs before upgrading; replaying one across the upgrade can insert duplicate rows.
+  ```
+
+- Template item. Bad: "Add fixture-tested RateLimit-Reset seconds fallback on HTTP 429 when Retry-After is absent or not parsed by the shared HTTP parser, without changing permission failures or transcript availability handling." Good: "Wait for Circleback's `RateLimit-Reset` when a 429 response has no `Retry-After`."
 
 ## 5. Commit All Changes
 
