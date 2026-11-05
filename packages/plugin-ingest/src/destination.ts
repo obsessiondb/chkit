@@ -1,11 +1,12 @@
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
-import { insertColumnList, table, type ColumnDefinition, type TableDefinition } from '@chkit/core'
+import { insertColumnList, insertableColumnNames, table, type ColumnDefinition, type TableDefinition } from '@chkit/core'
 
 import type { DestinationAdapter, Row } from './types.js'
 
 export const BATCH_ID_COLUMN = '_chkit_batch_id'
 export const RUN_ID_COLUMN = '_chkit_run_id'
 export const INGESTED_AT_COLUMN = '_chkit_ingested_at'
+export const REST_COLUMN = '_chkit_rest'
 
 /**
  * Runtime-owned metadata every ingestion destination table carries. Spread it
@@ -58,11 +59,6 @@ export function createClickHouseDestination(executor: ClickHouseExecutor): Desti
   return {
     async insert({ table, rows, token }) {
       if (rows.length === 0) return
-      for (const column of table.columns) {
-        if (/^Nested\s*\(/i.test(column.type.trim()) && rows.some((row) => column.name in row)) {
-          throw new Error(`Destination ${table.database}.${table.name}: supply Nested column "${column.name}" as flattened "${column.name}.field" arrays, not a parent field.`)
-        }
-      }
       const columns = insertColumnList(table)
       await executor.insert({
         table: `${table.database}.${table.name}`,
@@ -78,6 +74,35 @@ export function createClickHouseDestination(executor: ClickHouseExecutor): Desti
       })
     },
   }
+}
+
+/**
+ * - Top-level keys the INSERT does not accept move into the table's `_chkit_rest` column as
+ *   `{ field: value }`; without that column they fail the stream. Keys inside values are untouched.
+ * - Returns the moved field names; rows without unknown keys are returned as they are.
+ */
+export function moveUnknownFields(streamId: string, table: TableDefinition, rows: readonly Row[]): { rows: Row[]; fields: string[] } {
+  const name = `${table.database}.${table.name}`
+  const accepted = new Set([...insertableColumnNames(table), BATCH_ID_COLUMN, RUN_ID_COLUMN, INGESTED_AT_COLUMN])
+  const nested = new Set(table.columns.filter((column) => /^Nested\s*\(/i.test(column.type.trim())).map((column) => column.name))
+  const unknown = new Set<string>()
+  const shaped = rows.map((row) => {
+    const extras: [string, unknown][] = []
+    for (const [key, value] of Object.entries(row)) {
+      if (value === undefined || (accepted.has(key) && key !== REST_COLUMN)) continue
+      if (key === REST_COLUMN) throw new Error(`Stream "${streamId}" sets ${REST_COLUMN} on a row for ${name}; ChKit fills it with the fields the table has no column for.`)
+      if (nested.has(key)) throw new Error(`Destination ${name}: supply Nested column "${key}" as flattened "${key}.field" arrays, not a parent field.`)
+      extras.push([key, value])
+      unknown.add(key)
+    }
+    if (extras.length === 0) return row
+    return { ...Object.fromEntries(Object.entries(row).filter(([key]) => accepted.has(key))), [REST_COLUMN]: Object.fromEntries(extras) }
+  })
+  const fields = [...unknown].sort()
+  if (fields.length > 0 && !accepted.has(REST_COLUMN)) {
+    throw new Error(`Stream "${streamId}" yielded fields ${name} has no column for: ${fields.join(', ')}. Map them to columns, or add a JSON column ${REST_COLUMN} to keep them.`)
+  }
+  return { rows: shaped, fields }
 }
 
 /** - Encode rows individually, including nested bigint, non-finite floats and Maps. */

@@ -3,7 +3,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { table, toCreateSQL, type TableDefinition } from '@chkit/core'
 import { createPrefix, createStatelessLiveExecutor, LOCAL_STACK_ENV, quoteIdent, waitForColumn, waitForTable } from '@chkit/clickhouse/e2e-testkit'
 
-import { createClickHouseDestination, cursorState, definePipeline, defineStream, ingestionColumns, runIngestion, selectStreams, simpleLoader, type DestinationAdapter, type Row } from './index.js'
+import { createClickHouseDestination, cursorState, definePipeline, defineStream, ingestionColumns, runIngestion, selectStreams, simpleLoader, stagedLoader, type DestinationAdapter, type Row } from './index.js'
 import { createMemoryJournal } from './testing.js'
 
 describe('ingestion load fidelity against ClickHouse', () => {
@@ -35,7 +35,10 @@ describe('ingestion load fidelity against ClickHouse', () => {
   const invalid = definition('invalid', [{ name: 'amount', type: 'UInt32' }])
   const nested = definition('nested', [{ name: 'items', type: 'Nested(sku String, qty UInt32)' }])
   const raw = definition('raw', [{ name: 'raw', type: 'JSON' }])
-  const definitions = [replay, timestamps, values, invalid, nested, raw]
+  const rest = definition('rest', [{ name: 'label', type: 'String' }, { name: 'raw', type: 'JSON' }, { name: '_chkit_rest', type: 'JSON' }])
+  const strict = definition('strict', [{ name: 'label', type: 'String' }])
+  const definitions = [replay, timestamps, values, invalid, nested, raw, rest, strict]
+  const loaders = { simple: simpleLoader(), staged: stagedLoader({ executor, keys: ['id'], winner: 'first', concurrency: 'single-process' }) }
   const qualified = (def: TableDefinition) => `${quoteIdent(database)}.${quoteIdent(def.name)}`
 
   beforeAll(async () => {
@@ -225,6 +228,50 @@ describe('ingestion load fidelity against ClickHouse', () => {
     expect(good.ok).toBe(true)
     expect(await executor.query(`SELECT id, items.sku AS skus, items.qty AS qty FROM ${qualified(nested)}`, { select_sequential_consistency: '1' })).toEqual([{ id: 'good', skus: ['a'], qty: [2] }])
   }, 30_000)
+
+  test.each(['simple', 'staged'] as const)('%s loader keeps unknown top-level fields intact in _chkit_rest and logs them once', async (loader) => {
+    const logs: string[] = []
+    const stream = defineStream({
+      id: `${prefix}rest_${loader}`, destination: rest, loader: loaders[loader],
+      async *read() {
+        yield { rows: [{ id: `${loader}_1`, lable: 'typo', raw: { payload: { kept: 'inside' } } }] }
+        yield { rows: [{ id: `${loader}_2`, label: 'fine', extra: { list: ['a', 'b'], flag: true, count: 3 } }], id: 'second' }
+      },
+    })
+    const result = await runIngestion({ selected: selectStreams([definePipeline({ id: prefix, streams: [stream] })], []), backfill: undefined }, {
+      journal: createMemoryJournal(), destination, log: (message) => logs.push(message),
+    })
+    expect(result.streams[0]).toMatchObject({ outcome: 'succeeded', rows: 2, batches: 2 })
+    const stored = await executor.query<{ id: string; label: string; rest: string; raw: string }>(
+      `SELECT id, label, toJSONString(_chkit_rest) AS rest, toJSONString(raw) AS raw FROM ${qualified(rest)} WHERE startsWith(id, '${loader}_') ORDER BY id`,
+      { select_sequential_consistency: '1', output_format_json_quote_64bit_integers: 0 },
+    )
+    expect(stored.map((row) => ({ ...row, rest: JSON.parse(row.rest), raw: JSON.parse(row.raw) }))).toEqual([
+      { id: `${loader}_1`, label: '', rest: { lable: 'typo' }, raw: { payload: { kept: 'inside' } } },
+      { id: `${loader}_2`, label: 'fine', rest: { extra: { list: ['a', 'b'], flag: true, count: 3 } }, raw: {} },
+    ])
+    expect(logs.filter((line) => line.includes('_chkit_rest'))).toEqual([expect.stringContaining('extra, lable')])
+  }, 30_000)
+
+  test.each(['simple', 'staged'] as const)('%s loader fails a stream whose field has no column, naming it, and inserts nothing', async (loader) => {
+    const journal = createMemoryJournal()
+    const stream = defineStream({
+      id: `${prefix}strict_${loader}`, destination: strict, loader: loaders[loader],
+      incremental: cursorState({ id: 'test.strict', version: 1, parse: (state) => state }),
+      async *read() { yield { rows: [{ id: `${loader}_ok`, label: 'fine' }, { id: `${loader}_typo`, lable: 'typo' }], state: 'saved' } },
+    })
+    const result = await runIngestion({ selected: selectStreams([definePipeline({ id: prefix, streams: [stream] })], []), backfill: undefined }, { journal, destination })
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', rows: 0 })
+    for (const name of [stream.id, `${database}.${strict.name}`, 'lable']) expect(result.streams[0]?.error).toContain(name)
+    expect((await journal.readCheckpoint(stream.id)).envelope).toBeUndefined()
+    expect(await executor.query(`SELECT id FROM ${qualified(strict)} WHERE startsWith(id, '${loader}_')`, { select_sequential_consistency: '1' })).toEqual([])
+  }, 30_000)
+
+  test('a row that sets _chkit_rest itself fails instead of being overwritten', async () => {
+    const result = await runRows('rest_reserved', rest, [{ id: 'reserved', _chkit_rest: { mine: 1 }, extra: 2 }])
+    expect(result.streams[0]).toMatchObject({ outcome: 'failed', rows: 0, error: expect.stringContaining('_chkit_rest') })
+    expect(await executor.query(`SELECT id FROM ${qualified(rest)} WHERE id = 'reserved'`)).toEqual([])
+  })
 
   test('a missing-metadata failure retains the reported checkpoint and journals its configuration diagnostic', async () => {
     const journal = createMemoryJournal()
