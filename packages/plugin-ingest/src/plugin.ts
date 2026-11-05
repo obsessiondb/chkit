@@ -108,6 +108,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
                     database: target.database,
                     targetId: target.targetId,
                     table: context.options.journalTable,
+                    cluster: target.cluster,
                   }),
                   destination: createClickHouseDestination(target.executor),
                   signal: abort.signal,
@@ -371,7 +372,7 @@ function openTarget(context: IngestPluginCommandContext) {
   // bound to one ClickHouse HTTP session (a session allows one in-flight query).
   if (clickhouse) {
     const executor = createStatelessClickHouseExecutor(clickhouse)
-    return { executor, database: clickhouse.database, targetId: targetIdOf(clickhouse.url, clickhouse.database), close: () => executor.close() }
+    return { executor, database: clickhouse.database, cluster: clickhouse.cluster, targetId: targetIdOf(clickhouse.url, clickhouse.database), close: () => executor.close() }
   }
   throw new IngestConfigError('Ingestion requires a direct ClickHouse connection for JSON rows and deduplication settings. Configure clickhouse in your clickhouse.config.ts; a host-provided executor is not supported.')
 }
