@@ -86,7 +86,7 @@ async function streamRows(
 ): Promise<unknown[]> {
   expect(executor.queryBatches).toBeDefined()
   const rows: unknown[] = []
-  for await (const batch of executor.queryBatches!<unknown>(sql, settings)) rows.push(...batch)
+  for await (const batch of executor.queryBatches?.<unknown>(sql, settings) ?? []) rows.push(...batch)
   return rows
 }
 
