@@ -72,7 +72,7 @@ export function createClickHouseJournal(options: ClickHouseJournalOptions): Jour
 }
 
 interface ReplicaJournal {
-  host: string
+  replica: string
   engine: string | undefined
   keeperPath: string | undefined
 }
@@ -90,11 +90,11 @@ async function ensureReplicatedJournal(executor: ClickHouseExecutor, database: s
     const replicas = await inspectReplicas(executor, database, table, cluster)
     const local = replicas.filter((replica) => replica.engine !== undefined && !/^(Replicated|Shared)/.test(replica.engine))
     if (local.length > 0) {
-      throw new Error(`Ingest journal ${name} is not replicated on cluster '${cluster}': it is a local table on ${local.map((replica) => `${replica.host} (${replica.engine})`).join(', ')}, which keeps its own checkpoints. ${NO_CONVERSION}`)
+      throw new Error(`Ingest journal ${name} is not replicated on cluster '${cluster}': it is a local table on ${local.map((replica) => `${replica.replica} (${replica.engine})`).join(', ')}, which keeps its own checkpoints. ${NO_CONVERSION}`)
     }
     const keeperPaths = new Set(replicas.flatMap((replica) => (replica.keeperPath ? [replica.keeperPath] : [])))
     if (keeperPaths.size > 1) {
-      throw new Error(`Ingest journal ${name} is not one table on cluster '${cluster}': its replicas use ${keeperPaths.size} Keeper paths (${replicas.filter((replica) => replica.keeperPath).map((replica) => `${replica.host}: ${replica.keeperPath}`).join(', ')}), each with its own checkpoints. ${NO_CONVERSION}`)
+      throw new Error(`Ingest journal ${name} is not one table on cluster '${cluster}': its replicas use ${keeperPaths.size} Keeper paths (${replicas.filter((replica) => replica.keeperPath).map((replica) => `${replica.replica}: ${replica.keeperPath}`).join(', ')}), each with its own checkpoints. ${NO_CONVERSION}`)
     }
     const missing = replicas.filter((replica) => replica.engine === undefined)
     if (missing.length === 0) return
@@ -105,26 +105,30 @@ async function ensureReplicatedJournal(executor: ClickHouseExecutor, database: s
     }
     if (check >= REPLICA_CHECKS) {
       const [keeperPath] = keeperPaths
-      throw new Error(`Ingest journal ${name} is missing on ${missing.map((replica) => replica.host).join(', ')} of cluster '${cluster}' after ${check} checks. Wait until those replicas apply the ON CLUSTER DDL, or create it there with the Keeper path of the other replicas${keeperPath ? ` (${keeperPath})` : ''}, then run again.`)
+      throw new Error(`Ingest journal ${name} is missing on ${missing.map((replica) => replica.replica).join(', ')} of cluster '${cluster}' after ${check} checks. Wait until those replicas apply the ON CLUSTER DDL, or create it there with the Keeper path of the other replicas${keeperPath ? ` (${keeperPath})` : ''}, then run again.`)
     }
     await sleep(REPLICA_CHECK_INTERVAL_MS)
   }
 }
 
-/** The journal as each replica of the cluster sees it; a replica without it has no engine. */
+/**
+ * The journal as each replica of the cluster sees it; a replica without it has
+ * no engine. Instances on one host differ in their port.
+ */
 async function inspectReplicas(executor: ClickHouseExecutor, database: string, table: string, cluster: string): Promise<ReplicaJournal[]> {
   const everyReplica = (source: string) => `clusterAllReplicas(${sqlString(cluster)}, ${source})`
-  const [hosts, tables, replicated] = await Promise.all([
-    executor.query<{ host: string }>(`SELECT DISTINCT hostName() AS host FROM ${everyReplica('system.one')}`),
-    executor.query<{ host: string; engine: string }>(
-      `SELECT hostName() AS host, engine FROM ${everyReplica('system.tables')} WHERE database = ${sqlString(database)} AND name = ${sqlString(table)}`),
-    executor.query<{ host: string; keeper_path: string }>(
-      `SELECT hostName() AS host, zookeeper_path AS keeper_path FROM ${everyReplica('system.replicas')} WHERE database = ${sqlString(database)} AND table = ${sqlString(table)}`),
+  const replicaId = "hostName() || ':' || toString(tcpPort()) AS replica"
+  const [ids, tables, replicated] = await Promise.all([
+    executor.query<{ replica: string }>(`SELECT DISTINCT ${replicaId} FROM ${everyReplica('system.one')}`),
+    executor.query<{ replica: string; engine: string }>(
+      `SELECT ${replicaId}, engine FROM ${everyReplica('system.tables')} WHERE database = ${sqlString(database)} AND name = ${sqlString(table)}`),
+    executor.query<{ replica: string; keeper_path: string }>(
+      `SELECT ${replicaId}, zookeeper_path AS keeper_path FROM ${everyReplica('system.replicas')} WHERE database = ${sqlString(database)} AND table = ${sqlString(table)}`),
   ])
-  return hosts.map(({ host }) => ({
-    host,
-    engine: tables.find((row) => row.host === host)?.engine,
-    keeperPath: replicated.find((row) => row.host === host)?.keeper_path,
+  return ids.map(({ replica }) => ({
+    replica,
+    engine: tables.find((row) => row.replica === replica)?.engine,
+    keeperPath: replicated.find((row) => row.replica === replica)?.keeper_path,
   }))
 }
 

@@ -112,7 +112,7 @@ describe('chkit ingest journal on a multi-shard cluster', () => {
     {
       name: 'a local journal an earlier chkit created on one node',
       create: (table, executors) => (executors[1] as ClickHouseExecutor).command(journalTableSql(qualified(table))),
-      error: /is not replicated on cluster 'test_cluster_2s': it is a local table on ch2 \(MergeTree\)/,
+      error: /is not replicated on cluster 'test_cluster_2s': it is a local table on ch2:9000 \(MergeTree\)/,
       tables: 1,
     },
     {
@@ -130,7 +130,7 @@ describe('chkit ingest journal on a multi-shard cluster', () => {
           await executor.command(`CREATE TABLE ${qualified(table)} (id UInt64) ENGINE = ReplicatedMergeTree('/clickhouse/tables/${table}', '{shard}_{replica}') ORDER BY id`)
         }
       },
-      error: /is missing on ch4 of cluster 'test_cluster_2s' after 20 checks/,
+      error: /is missing on ch4:9000 of cluster 'test_cluster_2s' after 20 checks/,
       tables: 3,
     },
   ]
