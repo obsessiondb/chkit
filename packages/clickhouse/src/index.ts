@@ -15,7 +15,7 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { parseJsonEachRow, parseJsonResult } from './exact-json.js'
+import { parseJsonEachRow, parseJsonEachRowLine, parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -90,6 +90,9 @@ export interface ClickHouseExecutor {
 	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
 	 *  its digits; the ObsessionDB console API returns every value as a string. */
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
+	/** Rows as `query` decodes them, in batches as the response arrives, so a
+	 *  large result is never held whole. */
+	queryBatches?<T>(sql: string, settings?: ClickHouseSettings): AsyncIterable<T[]>
 	queryJson?<T extends Record<string, unknown>>(
 		sql: string,
 		settings?: ClickHouseSettings,
@@ -843,6 +846,33 @@ export function createExecutorWithClient(
 					parseSummaryFromHeaders(result.response_headers),
 				)
 				return rows
+			} catch (error) {
+				wrapConnectionError(error, config.url, config.username)
+			}
+		},
+		async *queryBatches<T>(sql: string, settings?: ClickHouseSettings): AsyncGenerator<T[]> {
+			try {
+				const clickhouseSettings = await readSettings(settings)
+				const result = await client.query({
+					query: sql,
+					format: 'JSONEachRow',
+					http_headers: { 'X-DDL': '1' },
+					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
+				})
+				assertStreamedQuerySucceeded({
+					response_headers: result.response_headers,
+					query_id: result.query_id,
+					sql,
+				})
+				for await (const rows of result.stream()) {
+					yield rows.map((row) => parseJsonEachRowLine<T>(row.text))
+				}
+				logProfiling(
+					profiler,
+					sql,
+					result.query_id,
+					parseSummaryFromHeaders(result.response_headers),
+				)
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}

@@ -95,6 +95,8 @@ Prints the committed checkpoint of each selected stream's scheduled namespace. S
 
 Reads one complete source-table snapshot and validates the selected namespace's run histories. Reports the selected checkpoint, run count, evidence counts, and malformed tails. Valid overlapping runs are healthy. It does not create or mutate tables, fetch source data, or change destination rows.
 
+`doctor` and `repair` stream the snapshot, so memory grows with the selected namespace's history. On large journals they sort evidence through the system temporary directory, which needs free space about the size of the journal table.
+
 ### `repair`
 
 Without `--apply`, prints a read-only recovery plan with its fingerprint, selected valid checkpoint, evidence counts, and activation instructions. Materializing a plan requires exactly one selected stream and the fingerprint from its preview. Stop all writers using the journal table before previewing and applying recovery. Any source-table change invalidates the fingerprint and requires a new review.
