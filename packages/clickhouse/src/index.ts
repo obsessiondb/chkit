@@ -15,7 +15,7 @@ import {
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { parseJsonEachRow, parseJsonEachRowLine, parseJsonResult } from './exact-json.js'
+import { parseJsonEachRow, parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -853,9 +853,10 @@ export function createExecutorWithClient(
 		async *queryBatches<T>(sql: string, settings?: ClickHouseSettings): AsyncGenerator<T[]> {
 			try {
 				const clickhouseSettings = await readSettings(settings)
-				const result = await client.query({
-					query: sql,
-					format: 'JSONEachRow',
+				// exec, not query: the client's JSONEachRow stream() drops a final
+				// row without a trailing newline, the case query() handles too.
+				const result = await client.exec({
+					query: `${sql.trim().replace(/;+$/, '')} \nFORMAT JSONEachRow`,
 					http_headers: { 'X-DDL': '1' },
 					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
@@ -864,9 +865,17 @@ export function createExecutorWithClient(
 					query_id: result.query_id,
 					sql,
 				})
-				for await (const rows of result.stream()) {
-					yield rows.map((row) => parseJsonEachRowLine<T>(row.text))
+				const decoder = new TextDecoder()
+				let pending = ''
+				for await (const chunk of result.stream) {
+					const text = pending + decoder.decode(chunk, { stream: true })
+					const end = text.lastIndexOf('\n') + 1
+					pending = text.slice(end)
+					const rows = parseJsonEachRow<T>(text.slice(0, end))
+					if (rows.length > 0) yield rows
 				}
+				const rows = parseJsonEachRow<T>(pending + decoder.decode())
+				if (rows.length > 0) yield rows
 				logProfiling(
 					profiler,
 					sql,
