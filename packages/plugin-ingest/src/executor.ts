@@ -6,7 +6,7 @@ import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
 import { z } from 'zod'
 
-import { ingestionColumns, toJsonRow } from './destination.js'
+import { ingestionColumns, moveUnknownFields, REST_COLUMN, toJsonRow } from './destination.js'
 import { BudgetExhausted, classifyFailure, describeError } from './errors.js'
 import { canonicalJson, digest, emptyCheckpoint } from './journal.js'
 import { simpleLoader } from './loader.js'
@@ -111,6 +111,8 @@ interface StreamProgress {
   rows: number
   batches: number
   chunks: number
+  /** Unknown fields committed into `_chkit_rest` during this run. */
+  restFields: Set<string>
 }
 
 type AppendInput = { namespaceId: string; runId: string; progress: StreamProgress; env: ResolvedEnv }
@@ -173,7 +175,7 @@ async function executeSelectedStream(
 ): Promise<StreamResult> {
   const { stream, pipeline } = entry
   const namespaceId = backfill ? `${stream.id}#backfill:${backfill.id}` : stream.id
-  const progress: StreamProgress = { base: emptyCheckpoint(), startedAt: cutoff.toISOString(), seq: 0, appendChain: Promise.resolve(), version: 0, checkpointId: '', successId: '', envelope: undefined, rows: 0, batches: 0, chunks: 0 }
+  const progress: StreamProgress = { base: emptyCheckpoint(), startedAt: cutoff.toISOString(), seq: 0, appendChain: Promise.resolve(), version: 0, checkpointId: '', successId: '', envelope: undefined, rows: 0, batches: 0, chunks: 0, restFields: new Set() }
   const result = (outcome: StreamOutcome, error: string | undefined): StreamResult => ({
     streamId: stream.id,
     pipelineId: pipeline.id,
@@ -261,6 +263,9 @@ async function executeStream(input: {
     }
   }
 
+  if (progress.restFields.size > 0) {
+    env.log?.(`${namespaceId}: kept fields without a column in ${REST_COLUMN}: ${[...progress.restFields].sort().join(', ')}`)
+  }
   await append(input, 'work_finished', {
     workId,
     workState: failure === undefined ? outcome : outcome === 'cancelled' ? 'cancelled' : 'failed',
@@ -378,9 +383,10 @@ async function readAndLoad(input: {
     // that changed between attempts.
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
-      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${digest(rowContents(batch.rows))}`
+      const shaped = moveUnknownFields(stream.id, stream.destination, batch.rows)
+      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${digest(rowContents(shaped.rows))}`
       const batchId = digest([namespaceId, progress.successId, progress.checkpointId, String(sinceBoundary), discriminator]).slice(0, 32)
-      const receipt = await loadBatch(input, batchId, batch.rows, signal)
+      const receipt = await loadBatch(input, batchId, shaped.rows, signal)
       if (abandoned) return
       const envelope: CheckpointEnvelope | undefined = batch.state
         ? { strategy: stream.incremental.id, version: stream.incremental.version, state: batch.state.value }
@@ -403,6 +409,7 @@ async function readAndLoad(input: {
       progress.envelope = envelope
       progress.rows += receipt.rows
       progress.batches += 1
+      for (const field of shaped.fields) progress.restFields.add(field)
     }
   }
 

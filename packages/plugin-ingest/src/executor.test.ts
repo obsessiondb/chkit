@@ -15,7 +15,13 @@ import type { DestinationAdapter, SourceContext } from './types.js'
 const events = table({
   database: 'app',
   name: 'events',
-  columns: [{ name: 'id', type: 'UInt64' }, ...ingestionColumns],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'label', type: 'String' },
+    { name: 'value', type: 'String' },
+    { name: 'nested', type: 'JSON' },
+    ...ingestionColumns,
+  ],
   engine: 'MergeTree()',
   primaryKey: ['id'],
   orderBy: ['id'],
