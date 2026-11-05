@@ -237,6 +237,7 @@ class RemoteClickHouseClient:
         *,
         after_time: str | None = None,
         every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         """Mirror of :meth:`ClickHouseClient.query_status`, proxied via workbench."""
         # after_time bounds the query's start, as in the native client. A
@@ -272,6 +273,8 @@ class RemoteClickHouseClient:
                 status="running",
                 elapsed_ms=_elapsed_ms(running.rows[0].get("elapsed")),
             )
+        if running_only:
+            return QueryStatus(status="unknown")
         log = self.query(
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
             f"FROM {source('system.query_log')} "

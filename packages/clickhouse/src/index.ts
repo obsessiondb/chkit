@@ -48,6 +48,7 @@ export interface QueryStatus {
 export interface QueryStatusOptions {
 	afterTime?: string
 	everyReplica?: boolean
+	runningOnly?: boolean
 }
 
 export type { ClickHouseSettings }
@@ -117,7 +118,9 @@ export interface ClickHouseExecutor {
 	 *    Useful when resubmitting with the same query_id to ignore stale entries from previous attempts.
 	 *  @param options.everyReplica - Fail when a replica cannot be read instead of skipping it, so a
 	 *    status other than 'running' means that no replica runs the query. Polls leave it unset and
-	 *    keep going while a replica is unavailable. */
+	 *    keep going while a replica is unavailable.
+	 *  @param options.runningOnly - Read only system.processes, so the status is 'running' or 'unknown'.
+	 *    A server creates system.query_log on its first log flush, so a fresh one has none yet. */
 	queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus>
 
 	/** Optional capability: FROM-clause source for cluster-aware system table polling.
@@ -979,6 +982,7 @@ export function createExecutorWithClient(
 						elapsedMs: Math.round(Number(proc.elapsed) * 1000),
 					}
 				}
+				if (options?.runningOnly) return { status: 'unknown' }
 
 				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
 				const queryLogFrom = from('query_log')

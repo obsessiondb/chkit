@@ -455,10 +455,12 @@ def _check_in_flight(
     (e.g. a TRUNCATE) and resubmits, so the answer must cover every replica:
     the attempt runs on the replica that received it. A replica that cannot be
     read fails the check instead of being skipped, and a failed check stops
-    here, before anything is compensated or resubmitted.
+    here, before anything is compensated or resubmitted. Only
+    ``system.processes`` is read: the check needs no outcome, and a fresh
+    server has no ``system.query_log`` until its first log flush.
     """
     try:
-        return client.query_status(query_id, every_replica=True)
+        return client.query_status(query_id, every_replica=True, running_only=True)
     except Exception as error:
         msg = (
             f"Async migration step {operation_type} (query_id {query_id}): could "
