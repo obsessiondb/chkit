@@ -853,10 +853,13 @@ export function createExecutorWithClient(
 		async *queryBatches<T>(sql: string, settings?: ClickHouseSettings): AsyncGenerator<T[]> {
 			try {
 				const clickhouseSettings = await readSettings(settings)
+				const statement = sql.trim()
+				let end = statement.length
+				while (statement[end - 1] === ';') end--
 				// exec, not query: the client's JSONEachRow stream() drops a final
 				// row without a trailing newline, the case query() handles too.
 				const result = await client.exec({
-					query: `${sql.trim().replace(/;+$/, '')} \nFORMAT JSONEachRow`,
+					query: `${statement.slice(0, end)} \nFORMAT JSONEachRow`,
 					http_headers: { 'X-DDL': '1' },
 					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
