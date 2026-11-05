@@ -91,6 +91,9 @@ export interface ClickHouseExecutor {
 	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
 	 *  its digits; the ObsessionDB console API returns every value as a string. */
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
+	/** Rows as `query` decodes them, in batches as the response arrives, so a
+	 *  large result is never held whole. */
+	queryBatches?<T>(sql: string, settings?: ClickHouseSettings): AsyncIterable<T[]>
 	queryJson?<T extends Record<string, unknown>>(
 		sql: string,
 		settings?: ClickHouseSettings,
@@ -846,6 +849,45 @@ export function createExecutorWithClient(
 					parseSummaryFromHeaders(result.response_headers),
 				)
 				return rows
+			} catch (error) {
+				wrapConnectionError(error, config.url, config.username)
+			}
+		},
+		async *queryBatches<T>(sql: string, settings?: ClickHouseSettings): AsyncGenerator<T[]> {
+			try {
+				const clickhouseSettings = await readSettings(settings)
+				const statement = sql.trim()
+				let end = statement.length
+				while (statement[end - 1] === ';') end--
+				// exec, not query: the client's JSONEachRow stream() drops a final
+				// row without a trailing newline, the case query() handles too.
+				const result = await client.exec({
+					query: `${statement.slice(0, end)} \nFORMAT JSONEachRow`,
+					http_headers: { 'X-DDL': '1' },
+					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
+				})
+				assertStreamedQuerySucceeded({
+					response_headers: result.response_headers,
+					query_id: result.query_id,
+					sql,
+				})
+				const decoder = new TextDecoder()
+				let pending = ''
+				for await (const chunk of result.stream) {
+					const text = pending + decoder.decode(chunk, { stream: true })
+					const end = text.lastIndexOf('\n') + 1
+					pending = text.slice(end)
+					const rows = parseJsonEachRow<T>(text.slice(0, end))
+					if (rows.length > 0) yield rows
+				}
+				const rows = parseJsonEachRow<T>(pending + decoder.decode())
+				if (rows.length > 0) yield rows
+				logProfiling(
+					profiler,
+					sql,
+					result.query_id,
+					parseSummaryFromHeaders(result.response_headers),
+				)
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}
