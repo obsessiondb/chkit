@@ -130,7 +130,9 @@ export default schema(
 /**
  * Inserts batches of fresh ids until stopped, alternating a direct INSERT and
  * an INSERT into the chained source, round robin over the writer executors.
- * Only batches that succeeded count.
+ * Only batches that succeeded count. A batch rejected with TABLE_UUID_MISMATCH
+ * (741) overlapped the swap and wrote nothing, so it is retried once, as the
+ * cutover guide tells writers to; any other error fails the scenario.
  */
 function startWriters(target: CutoverTarget, project: CutoverProject, parallel = 2): { stop: () => Promise<WriterReport> } {
   let stopped = false
@@ -144,10 +146,15 @@ function startWriters(target: CutoverTarget, project: CutoverProject, parallel =
       const executor = target.writers[batch % target.writers.length] as ClickHouseExecutor
       const into = batch % 2 === 0 ? project.table : project.ingest
       const start = 1_000_000_000 + batch * BATCH_ROWS
-      try {
-        await executor.command(
+      const insert = () =>
+        executor.command(
           `INSERT INTO ${db}.${into} (id, user_id, payload) SELECT ${start} + number, number % 97, 'live-${worker}' FROM numbers(${BATCH_ROWS})`,
         )
+      try {
+        await insert().catch((error: unknown) => {
+          if (!(error instanceof Error && 'code' in error && String(error.code) === '741')) throw error
+          return insert()
+        })
         report.batches += 1
         report.rows += BATCH_ROWS
       } catch (error) {
