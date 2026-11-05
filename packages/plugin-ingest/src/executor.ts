@@ -318,15 +318,18 @@ async function readAndLoad(input: {
         fetch: env.fetch,
         retry: env.retry,
         queue: input.permits.requests,
-        onRetry: (context, retryAfterMs, options) =>
-          append(input, 'retry_scheduled', {
+        onRetry: (context, retryAfterMs, options) => {
+          // p-retry owns the randomized backoff; record only a provider's known not-before time,
+          // and none when it lies beyond the range of a Date.
+          const retryAt = new Date(env.now().getTime() + (retryAfterMs ?? Number.NaN))
+          return append(input, 'retry_scheduled', {
             workId: input.workId,
             attemptNo: input.attemptNo,
-            // p-retry owns the randomized backoff; record only a provider's known not-before time.
-            retryAt: retryAfterMs === undefined ? undefined : new Date(env.now().getTime() + retryAfterMs),
+            retryAt: Number.isNaN(retryAt.getTime()) ? undefined : retryAt,
             errorClass: context.error.classification.kind,
             detail: { label: options?.label ?? 'source', sourceAttempt: context.attemptNumber, error: context.error.message },
-          }),
+          })
+        },
       }),
     })
 
