@@ -384,14 +384,16 @@ function acceptChangedChecksum(
 // (e.g. a TRUNCATE) and resubmits, so the answer must cover every replica: the
 // attempt runs on the replica that received it (#246). A replica that cannot be
 // read fails the check instead of being skipped, and a failed check stops here,
-// before anything is compensated or resubmitted.
+// before anything is compensated or resubmitted. Only system.processes is read:
+// the check needs no outcome, and a fresh server has no system.query_log until
+// its first log flush.
 async function checkInFlight(
   db: ClickHouseExecutor,
   queryId: string,
   operationType: string,
 ): Promise<QueryStatus> {
   try {
-    return await db.queryStatus(queryId, { everyReplica: true })
+    return await db.queryStatus(queryId, { everyReplica: true, runningOnly: true })
   } catch (error) {
     throw new Error(
       `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,

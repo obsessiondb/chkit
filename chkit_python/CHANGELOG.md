@@ -127,6 +127,8 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
+- Async `migrate` statements no longer fail on a fresh ClickHouse server that has not
+  created `system.query_log` yet, as in TS.
 - Concurrent `migrate --apply` runs of one migration file against other databases, or by
   projects with other journal tables in one database, no longer share async query ids
   (#463), as in TS. A run used to attach to the other run's query or read its result:

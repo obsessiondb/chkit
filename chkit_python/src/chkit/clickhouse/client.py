@@ -269,6 +269,7 @@ class ClickHouseClient:
         *,
         after_time: str | None = None,
         every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         """Check whether a previously-submitted query is running / finished / failed.
 
@@ -279,7 +280,10 @@ class ClickHouseClient:
         through ``clusterAllReplicas``. A replica that cannot be read is
         skipped, so a poll keeps going while one is down; ``every_replica``
         fails the read instead, so a status other than ``running`` means that
-        no replica runs the query.
+        no replica runs the query. ``running_only`` reads only
+        ``system.processes``, so the status is ``running`` or ``unknown``: a
+        server creates ``system.query_log`` on its first log flush, so a fresh
+        one has none yet.
         """
         fanout = resolve_replica_fanout(self, self._config.cluster)
 
@@ -303,6 +307,8 @@ class ClickHouseClient:
                 written_bytes=_safe_int(row.get("written_bytes")),
                 elapsed_ms=_safe_round_ms(row.get("elapsed")),
             )
+        if running_only:
+            return QueryStatus(status="unknown")
 
         after = after_time or "1970-01-01 00:00:00"
         log_sql = (
