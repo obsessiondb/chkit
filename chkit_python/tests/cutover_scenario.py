@@ -28,7 +28,7 @@ from typer.testing import CliRunner
 from chkit.cli.commands.migrate_async_apply import iso_without_zone
 from chkit.cli.journal_store import JournalStore, MigrationRowState
 from chkit.cli.main import app
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_code
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
@@ -187,7 +187,9 @@ definitions = schema(events, by_user, by_user_mv, ingest, ingest_mv)
 class Writers:
     """Insert batches of fresh ids until stopped, alternating a direct INSERT and
     an INSERT into the chained source, round robin over the writer connections.
-    Only batches that succeeded count."""
+    Only batches that succeeded count. A batch rejected with TABLE_UUID_MISMATCH
+    (741) overlapped the swap and wrote nothing, so it is retried once, as the
+    cutover guide tells writers to; any other error fails the scenario."""
 
     def __init__(self, target: CutoverTarget, project: CutoverProject, parallel: int = 2) -> None:
         self._target = target
@@ -219,11 +221,17 @@ class Writers:
                 client = clients[batch % len(clients)]
                 into = self._project.table if batch % 2 == 0 else self._project.ingest
                 start = 1_000_000_000 + batch * BATCH_ROWS
+                insert = (
+                    f"INSERT INTO {db}.{into} (id, user_id, payload) SELECT {start} + number, "
+                    f"number % 97, 'live-{worker}' FROM numbers({BATCH_ROWS})"
+                )
                 try:
-                    client.execute(
-                        f"INSERT INTO {db}.{into} (id, user_id, payload) SELECT {start} + number, "
-                        f"number % 97, 'live-{worker}' FROM numbers({BATCH_ROWS})"
-                    )
+                    try:
+                        client.execute(insert)
+                    except Exception as error:
+                        if clickhouse_error_code(error) != "741":
+                            raise
+                        client.execute(insert)
                     with self._lock:
                         self.report.batches += 1
                         self.report.rows += BATCH_ROWS
