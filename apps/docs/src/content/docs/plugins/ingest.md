@@ -41,6 +41,8 @@ export default defineConfig({
 
 The target needs CREATE, SELECT, and INSERT permissions for the journal and destination tables. ChKit stores checkpoints entirely in ClickHouse journal evidence.
 
+With `clickhouse.cluster` set, `ingest run` creates the journal `ON CLUSTER` as one `ReplicatedMergeTree` shared by every replica and waits until each replica has it. A journal that is local to a node, replicated per shard, or missing on a replica fails the run before ingestion; chkit does not convert it.
+
 Every run records its starting checkpoint and local event sequence. Event identity includes the run, so overlapping executions and stale reads cannot reuse another run's identities. Complete snapshot validation selects acknowledged progress from valid histories. Malformed tails are diagnosed and excluded; normal overlapping runs need no repair. A stale valid snapshot may replay work, so destination keys and versioning must reconcile repeats.
 
 See [Scheduling and recovery](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) for execution and recovery behavior.
