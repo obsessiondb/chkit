@@ -48,6 +48,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.core.model import ChxConfigEnv
+from chkit.core.validate import collect_definition_warnings
 from chkit.plugins import (
     ChxOnCheckContext,
     ChxOnCheckResult,
@@ -199,6 +200,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         f"plugin:{result.plugin}" for result in plugin_results if _plugin_failed(result)
     )
     ok = not failed_checks
+    snapshot_definitions = snapshot.definitions if snapshot is not None else []
+    warnings = [issue.message for issue in collect_definition_warnings(snapshot_definitions)]
 
     # TS envelope: top-level ``policy`` + ``driftEvaluated`` + scope + plugins map.
     policy_payload: dict[str, bool] = {
@@ -233,6 +236,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             for r in plugin_results
         },
         "scope": scope_to_payload(table_scope),
+        "warnings": warnings,
     }
     database = config.clickhouse.database if config.clickhouse else None
     if database_missing:
@@ -277,6 +281,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 codes = [f.code for f in r.findings]
                 suffix = f" ({', '.join(codes)})" if codes else ""
                 typer.echo(f"- {r.plugin}: {'ok' if r.ok else 'failed'}{suffix}")
+        for warning in warnings:
+            typer.echo(f"Warning: {warning}", err=True)
         if failed_checks:
             typer.echo(f"Failed checks: {', '.join(failed_checks)}")
         plugin_runtime.run_on_check_report(plugin_results, typer.echo)

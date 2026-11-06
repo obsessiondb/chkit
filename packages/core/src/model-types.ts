@@ -592,6 +592,7 @@ export type ValidationIssueCode =
   | 'column_kind_codec_unsupported'
   | 'column_default_looks_like_expression'
   | 'column_default_invalid'
+  | 'quoted_string_default'
   | 'dictionary_missing_primary_key'
   | 'dictionary_primary_key_missing_attribute'
   | 'dictionary_missing_source'
