@@ -74,6 +74,10 @@ Returns a list of `ValidationIssue` objects — empty when the definitions are v
 
 Same checks, but raises `ChxValidationError` (carrying the issue list as `.issues`) instead of returning them. The planner and SQL renderer call this internally, so invalid definitions cannot reach SQL generation.
 
+### `collect_definition_warnings(definitions)`
+
+Returns the `ValidationIssue` objects that `generate` and `check` print as warnings but never fail on, such as `quoted_string_default` for a plain string default written as a quoted SQL literal (`"'standard'"`).
+
 ## Planning
 
 ### `plan_diff(old_definitions, new_definitions)`

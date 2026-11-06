@@ -1,5 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 
+import { collectDefinitionWarnings } from '@chkit/core'
+
 import { typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
 import { debug } from '../../runtime/debug.js'
@@ -101,6 +103,7 @@ export const checkCommand: ChxPluginCommand = {
       tableScope,
       databaseMissing,
       database,
+      warnings: collectDefinitionWarnings(snapshot?.definitions ?? []).map((issue) => issue.message),
     }
     const result = evaluateCheck(inputs)
 

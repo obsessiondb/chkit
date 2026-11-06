@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- `generate` and `check` warn when a plain string default is written as a quoted SQL
+  literal, such as `default="'standard'"`, which stores the quotes in the value, as in TS.
+  0.2.0's `pull` wrote column defaults as plain SQL strings, so recheck schemas pulled with it.
 - The user profile config is applied, as in TS (#372): when
   `$XDG_CONFIG_HOME/chkit/config.py` (default `~/.config/chkit/config.py`) exists, its
   `config` is layered under the project's `clickhouse.config.py` for every command, with
