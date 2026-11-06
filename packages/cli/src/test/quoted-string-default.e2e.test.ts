@@ -24,6 +24,7 @@ const plans = table({
     { name: 'tier', type: 'String', default: "'standard'" },
     { name: 'label', type: 'String', default: 'standard' },
     { name: 'code', type: 'String', default: { expression: "'standard'" } },
+    { name: 'note', type: 'String', default: "'line1\\\\nline2'" },
   ],
   engine: 'MergeTree()',
   primaryKey: ['id'],
@@ -58,7 +59,9 @@ export default schema(plans, plansDict)
 }
 `, 'utf8')
     const expected = [
-      `Table ${table} column "tier" has plain string default "'standard'", which renders as DEFAULT '''standard''' and keeps the quotes in the value. Use default: "standard" for the value, or default: { expression: "'standard'" } for SQL. If the quotes belong to the value, ignore this warning.`,
+      `Table ${table} column "tier" has plain string default "'standard'", which renders as DEFAULT '''standard''' and keeps the quotes in the value. Use default: "standard" for the value, or use default: { expression: "'standard'" } for SQL. If the quotes belong to the value, ignore this warning.`,
+      // SQL escapes are not decoded, so no value is suggested for them.
+      `Table ${table} column "note" has plain string default "'line1\\\\nline2'", which renders as DEFAULT '''line1\\\\nline2''' and keeps the quotes in the value. Write the value itself, without SQL quotes or escapes, as a plain string, or use default: { expression: "'line1\\\\nline2'" } for SQL. If the quotes belong to the value, ignore this warning.`,
       `Dictionary ${dictionary} attribute "tier" has plain string default "'standard'", which renders as DEFAULT '''standard''' and keeps the quotes in the value. Use default: "standard" for the value; dictionary defaults are literals only. If the quotes belong to the value, ignore this warning.`,
     ]
     try {

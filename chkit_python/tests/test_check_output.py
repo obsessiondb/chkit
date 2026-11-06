@@ -130,6 +130,7 @@ plans = table(database="app", name="plans", engine="MergeTree()", columns=[
     {"name": "tier", "type": "String", "default": "'standard'"},
     {"name": "label", "type": "String", "default": "standard"},
     {"name": "code", "type": "String", "default": SQLExpression(expression="'standard'")},
+    {"name": "note", "type": "String", "default": "'line1\\\\nline2'"},
 ], primary_key=["id"], order_by=["id"])
 plans_dict = dictionary(database="app", name="plans_dict", attributes=[
     {"name": "id", "type": "UInt64"},
@@ -259,8 +260,14 @@ def test_generate_and_check_warn_about_a_quoted_string_default(project: Path) ->
     expected = [
         "Table app.plans column \"tier\" has plain string default \"'standard'\", which renders "
         "as DEFAULT '''standard''' and keeps the quotes in the value. Use default: \"standard\" "
-        "for the value, or default: { expression: \"'standard'\" } for SQL. If the quotes belong "
-        "to the value, ignore this warning.",
+        "for the value, or use default: { expression: \"'standard'\" } for SQL. If the quotes "
+        "belong to the value, ignore this warning.",
+        # SQL escapes are not decoded, so no value is suggested for them.
+        "Table app.plans column \"note\" has plain string default \"'line1\\\\nline2'\", which "
+        "renders as DEFAULT '''line1\\\\nline2''' and keeps the quotes in the value. Write the "
+        "value itself, without SQL quotes or escapes, as a plain string, or use default: "
+        "{ expression: \"'line1\\\\nline2'\" } for SQL. If the quotes belong to the value, ignore "
+        "this warning.",
         "Dictionary app.plans_dict attribute \"tier\" has plain string default \"'standard'\", "
         "which renders as DEFAULT '''standard''' and keeps the quotes in the value. Use default: "
         "\"standard\" for the value; dictionary defaults are literals only. If the quotes belong "

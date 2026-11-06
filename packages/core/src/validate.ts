@@ -816,7 +816,7 @@ export function collectDefinitionWarnings(definitions: SchemaDefinition[]): Vali
         const quoted = quotedStringDefault(column.default)
         if (quoted === undefined || (kind !== 'DEFAULT' && kind !== 'EPHEMERAL')) continue
         pushValidationIssue(issues, def, 'quoted_string_default',
-          `${describeQuotedStringDefault(`Table ${def.database}.${def.name} column "${column.name}"`, kind, quoted)}, or default: { expression: ${JSON.stringify(quoted.raw.trim())} } for SQL. If the quotes belong to the value, ignore this warning.`)
+          `${describeQuotedStringDefault(`Table ${def.database}.${def.name} column "${column.name}"`, kind, quoted)}, or use default: { expression: ${JSON.stringify(quoted.raw.trim())} } for SQL. If the quotes belong to the value, ignore this warning.`)
       }
     } else if (def.kind === 'dictionary') {
       for (const attribute of def.attributes) {
@@ -830,18 +830,24 @@ export function collectDefinitionWarnings(definitions: SchemaDefinition[]): Vali
   return issues
 }
 
-/** A plain string default that is exactly one `'…'` literal, with its unquoted value. `fn:` strings are expressions. */
-function quotedStringDefault(value: ColumnDefaultValue | undefined): { raw: string; value: string } | undefined {
+/**
+ * A plain string default that is exactly one terminated `'…'` literal, with
+ * its value, or no value when the literal has backslash escapes (`\n`,
+ * `\x41`), which chkit does not decode. `fn:` strings are expressions.
+ */
+function quotedStringDefault(value: ColumnDefaultValue | undefined): { raw: string; value: string | undefined } | undefined {
   if (value === undefined) return undefined
   const parsed = parseColumnDefault(value)
   if (parsed.kind !== 'literal' || typeof parsed.value !== 'string') return undefined
   const tokens = tokenizeSQL(parsed.value.trim())
   const [token] = tokens
-  if (tokens.length !== 1 || token === undefined || !token.text.startsWith("'")) return undefined
-  const unquoted = stringLiteralValue(token)
-  return unquoted === undefined ? undefined : { raw: parsed.value, value: unquoted }
+  if (tokens.length !== 1 || token === undefined || !token.text.startsWith("'") || !token.terminated) return undefined
+  return { raw: parsed.value, value: token.text.includes('\\') ? undefined : stringLiteralValue(token) }
 }
 
-function describeQuotedStringDefault(subject: string, kind: string, quoted: { raw: string; value: string }): string {
-  return `${subject} has plain string default ${JSON.stringify(quoted.raw)}, which renders as ${kind} ${renderDefault(quoted.raw)} and keeps the quotes in the value. Use default: ${JSON.stringify(quoted.value)} for the value`
+function describeQuotedStringDefault(subject: string, kind: string, quoted: { raw: string; value: string | undefined }): string {
+  const asValue = quoted.value === undefined
+    ? 'Write the value itself, without SQL quotes or escapes, as a plain string'
+    : `Use default: ${JSON.stringify(quoted.value)} for the value`
+  return `${subject} has plain string default ${JSON.stringify(quoted.raw)}, which renders as ${kind} ${renderDefault(quoted.raw)} and keeps the quotes in the value. ${asValue}`
 }

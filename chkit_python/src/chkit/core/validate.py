@@ -907,7 +907,7 @@ def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list
                     issues,
                     definition,
                     "quoted_string_default",
-                    f"{_describe_quoted_string_default(subject, kind, quoted)}, or default: "
+                    f"{_describe_quoted_string_default(subject, kind, quoted)}, or use default: "
                     f"{{ expression: {_js_string(js_trim(quoted[0]))} }} for SQL. "
                     "If the quotes belong to the value, ignore this warning.",
                 )
@@ -931,10 +931,11 @@ def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list
     return issues
 
 
-def _quoted_string_default(value: ColumnDefaultValue | None) -> tuple[str, str] | None:
-    """A plain string default that is exactly one ``'…'`` literal, as (raw, unquoted value).
+def _quoted_string_default(value: ColumnDefaultValue | None) -> tuple[str, str | None] | None:
+    """A plain string default that is exactly one terminated ``'…'`` literal, as (raw, value).
 
-    ``fn:`` strings are expressions.
+    The value is None when the literal has backslash escapes (``\\n``,
+    ``\\x41``), which chkit does not decode. ``fn:`` strings are expressions.
     """
     if value is None:
         return None
@@ -942,16 +943,22 @@ def _quoted_string_default(value: ColumnDefaultValue | None) -> tuple[str, str] 
     if parsed.kind != "literal" or not isinstance(parsed.value, str):
         return None
     tokens = tokenize_sql(js_trim(parsed.value))
-    if len(tokens) != 1 or not tokens[0].text.startswith("'"):
+    if len(tokens) != 1 or not tokens[0].text.startswith("'") or not tokens[0].terminated:
         return None
-    unquoted = string_literal_value(tokens[0])
-    return None if unquoted is None else (parsed.value, unquoted)
+    token = tokens[0]
+    return (parsed.value, None if "\\" in token.text else string_literal_value(token))
 
 
-def _describe_quoted_string_default(subject: str, kind: str, quoted: tuple[str, str]) -> str:
+def _describe_quoted_string_default(
+    subject: str, kind: str, quoted: tuple[str, str | None]
+) -> str:
     raw, value = quoted
+    as_value = (
+        "Write the value itself, without SQL quotes or escapes, as a plain string"
+        if value is None
+        else f"Use default: {_js_string(value)} for the value"
+    )
     return (
         f"{subject} has plain string default {_js_string(raw)}, which renders as "
-        f"{kind} {render_default(raw)} and keeps the quotes in the value. "
-        f"Use default: {_js_string(value)} for the value"
+        f"{kind} {render_default(raw)} and keeps the quotes in the value. {as_value}"
     )
