@@ -1,5 +1,6 @@
 import {
   codecFingerprint,
+  compareCodePoints,
   constraintExpression,
   constraintKind,
   identifierName,
@@ -527,9 +528,9 @@ export function compareTableShape(
   return {
     table: `${expected.database}.${expected.name}`,
     reasonCodes,
-    missingColumns: missingColumns.sort((a, b) => a.localeCompare(b)),
-    extraColumns: extraColumns.sort((a, b) => a.localeCompare(b)),
-    changedColumns: changedColumns.sort((a, b) => a.localeCompare(b)),
+    missingColumns: missingColumns.sort((a, b) => compareCodePoints(a, b)),
+    extraColumns: extraColumns.sort((a, b) => compareCodePoints(a, b)),
+    changedColumns: changedColumns.sort((a, b) => compareCodePoints(a, b)),
     settingDiffs,
     indexDiffs,
     ttlMismatch,

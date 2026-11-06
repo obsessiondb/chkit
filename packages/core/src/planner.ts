@@ -1,4 +1,5 @@
 import { canonicalizeDefinitions, definitionKey } from './canonical.js'
+import { compareCodePoints } from './order.js'
 import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefinition,
@@ -285,11 +286,11 @@ function inferColumnRenameSuggestions(
   }
 
   return suggestions.sort((a, b) => {
-    const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+    const tableOrder = compareCodePoints(`${a.database}.${a.table}`, `${b.database}.${b.table}`)
     if (tableOrder !== 0) return tableOrder
-    const fromOrder = a.from.localeCompare(b.from)
+    const fromOrder = compareCodePoints(a.from, b.from)
     if (fromOrder !== 0) return fromOrder
-    return a.to.localeCompare(b.to)
+    return compareCodePoints(a.to, b.to)
   })
 }
 
@@ -681,7 +682,7 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     pushCreateOperation(operations, newDef, 'safe')
   }
 
-  for (const database of [...databasesToCreate].sort((a, b) => a.localeCompare(b))) {
+  for (const database of [...databasesToCreate].sort((a, b) => compareCodePoints(a, b))) {
     pushCreateDatabaseOperation(operations, database, 'safe')
   }
 
@@ -699,11 +700,11 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     operations: ordered,
     riskSummary,
     renameSuggestions: renameSuggestions.sort((a, b) => {
-      const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+      const tableOrder = compareCodePoints(`${a.database}.${a.table}`, `${b.database}.${b.table}`)
       if (tableOrder !== 0) return tableOrder
-      const fromOrder = a.from.localeCompare(b.from)
+      const fromOrder = compareCodePoints(a.from, b.from)
       if (fromOrder !== 0) return fromOrder
-      return a.to.localeCompare(b.to)
+      return compareCodePoints(a.to, b.to)
     }),
   }
 }
@@ -730,7 +731,7 @@ function operationRank(op: MigrationOperation): number {
 // The sort is stable, so operations that share a key keep the order diffTables
 // pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
 function compareOperations(a: MigrationOperation, b: MigrationOperation): number {
-  return operationRank(a) - operationRank(b) || alterRank(a) - alterRank(b) || a.key.localeCompare(b.key)
+  return operationRank(a) - operationRank(b) || alterRank(a) - alterRank(b) || compareCodePoints(a.key, b.key)
 }
 
 function alterRank(op: MigrationOperation): number {

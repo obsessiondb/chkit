@@ -1,3 +1,5 @@
+import { compareCodePoints } from '@chkit/core'
+
 export function diffByName<T>(
   expectedItems: readonly T[],
   actualItems: readonly T[],
@@ -50,7 +52,10 @@ export function diffNamedShapeMaps(
   expected: ReadonlyMap<string, string>,
   actual: ReadonlyMap<string, string>
 ): string[] {
-  const keys = [...new Set([...expected.keys(), ...actual.keys()])].sort()
+  // Code-point order, like every other name comparison here: a bare sort()
+  // compares UTF-16 units, so U+E000 and U+1F600 come out in the opposite
+  // order from Python's str ordering and live drift reports only one side.
+  const keys = [...new Set([...expected.keys(), ...actual.keys()])].sort(compareCodePoints)
   const diffs: string[] = []
   for (const key of keys) {
     if ((expected.get(key) ?? '') !== (actual.get(key) ?? '')) {
