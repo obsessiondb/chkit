@@ -2,6 +2,15 @@
 
 ## Unreleased
 
+## 0.3.0 — 2026-11-06
+
+**`pull` writes SQL column defaults correctly:** 0.2.0 wrote them as plain strings
+(`default="'standard'"`, `default="now()"`), which `generate` rendered as
+`DEFAULT '''standard'''` and `DEFAULT 'now()'`.
+
+- Action: re-run `chkit pull` for schemas pulled with 0.2.0, then `chkit generate`. Fix the
+  `DEFAULT` lines in any migration generated from a 0.2.0 pull that is not applied yet.
+
 ### Added
 - `generate` and `check` warn when a plain string default is written as a quoted SQL
   literal, such as `default="'standard'"`, which stores the quotes in the value, as in TS.
@@ -12,17 +21,11 @@
   the TS merge rules: project values win, `clickhouse`, `check` and `safety` merge per key,
   and profile plugins are added unless the project registers one with the same name. The
   profile may leave out `schema`. A profile that fails to load fails the command.
-- As in TS, ObsessionDB credentials stand in for a missing profile, and commands other than
-  `generate`, `migrate`, `status`, `drift`, `check`, `snapshot`, `codegen` and `pull` run
-  without a project config (#375). When `config.py` is missing but
-  `$XDG_CONFIG_HOME/chkit/credentials.json` exists (after `chkit obsessiondb login`),
-  chkit-py layers a profile with only `obsessiondb()` under the project config. **Behaviour
-  change:** on a logged-in machine, a project that does not register `obsessiondb()` now
-  loads the ObsessionDB plugin (its selected-service executor, `--service`, the `Shared`
-  engine rewrite and its checks); a project that registers it keeps its own. Without a
-  project config, `query`, `plugin` and `obsessiondb` run from the profile, and
-  `obsessiondb` / `plugin obsessiondb` load the plugin even without credentials; the
-  project-scoped commands fail with `project_config_required`.
+- As in TS, ObsessionDB credentials stand in for a missing profile (#375): after
+  `chkit obsessiondb login`, chkit-py adds `obsessiondb()` under the project config, and
+  `query`, `plugin` and `obsessiondb` run without a project config. **Behaviour change:**
+  on a logged-in machine, a project that does not register `obsessiondb()` now uses the
+  ObsessionDB plugin and its selected service.
 - `--service <name>` on `generate`, `migrate`, `status`, `drift`, `check`, `query` and
   `pull` overrides the selected ObsessionDB service for one command, as in TS (#357). The
   name is looked up among the services the login can see, then the saved aliases; an
@@ -38,15 +41,10 @@
   settings.
 - `chkit generate --cutover <db.table>=<key>[,<key>]` (repeatable) plans a zero-downtime
   cutover of a structural change (engine, ORDER BY, PRIMARY KEY, PARTITION BY) instead of
-  DROP + CREATE (#202): a shadow table with the new definition, a mirror materialized
-  view, insert barriers, an `ATTACH PARTITION ALL` snapshot, a key-based copy, a per-key
-  verification, a guarded `EXCHANGE TABLES` (operation `exchange_tables`, risk `caution`)
-  and a reconcile of rows an INSERT racing the swap left in the old table.
-  `--cutover-copy backfill` leaves the copy to `chkit plugin backfill plan|submit
-  --cutover <db.table>`; `--cutover-old keep|drop` keeps the old table as
-  `<table>_previous` (recorded in the snapshot with `retainedBy`, so `generate`, `drift`
-  and `check` treat it as managed) or drops it. `--drop-retained <db.table>` plans its
-  drop later. Unsupported changes fail with `cutover_unsupported`.
+  DROP + CREATE (#202): a shadow table, a key-based copy and verification, then a guarded
+  `EXCHANGE TABLES`. `--cutover-copy backfill` leaves the copy to `chkit plugin backfill`,
+  and `--cutover-old keep|drop` keeps the old table as `<table>_previous` (dropped later
+  with `--drop-retained <db.table>`) or drops it.
 - Migration operations render `mode=` on their marker and a `-- before-retry:` line.
   `migrate` now runs a synchronous statement's `-- before-retry:` SQL before it retries
   the statement (it ran only for `mode=async` before), and before retrying an
@@ -187,16 +185,9 @@
   configured. The `generate` text output now matches TS line for line (`Generated migration:
   <path>`, `Updated snapshot:`, `Definitions:`, `Operations:`, `Risk summary:`, and the `Table
   scope:` block with `--table`).
-- `chkit generate --dryrun` prints the same text and JSON as TS (#461). The text lists
-  `Planned operations:` and `Risk summary:` first, then `- <type> [<risk>] <key>` for each
-  operation, the warnings, the cutovers, and the rename suggestions with their reason and
-  confirmation SQL, which were missing. In `--json`, `scope` comes right after the envelope
-  and an operation has `warning` only when it is set (no more `"warning": null`). A
-  column rename suggestion's `confirmationSQL` is `RENAME COLUMN IF EXISTS`, as in TS. The
-  `--table` no-match `warning` in `--json` reads `No tables matched selector "<selector>".`
-  without the trailing `No changes planned.` (the text output keeps it), and `generate`
-  warnings print without color, as in TS.
-  scope:` block with `--table`); the `generate --dryrun` text still differs (#461).
+- `chkit generate --dryrun` prints the same text and JSON as TS (#461), including the
+  rename suggestions with their reason and confirmation SQL, which were missing. In
+  `--json`, an operation has `warning` only when it is set (no more `"warning": null`).
 - `chkit check` passes the plugins' `on_check` the flags that were passed, keyed by long name
   as in TS (`--json`, `--strict`, `--table`, `--config`, `--force-shared-engines`,
   `--no-shared-engines`, `--service`) (#450). Before, `on_check` always got `{}`, so
@@ -234,18 +225,10 @@
   digits ClickHouse sent only when a float cannot hold it: `2.5`, `1` and `0.1` stay
   numbers, `18446744073709551615` stays a string, in the table and in `--json`.
 - `chkit check` prints the same JSON and text as TS and judges the same way (#435).
-  **Behaviour change** for `--json` readers: the payload no longer has `issues`,
-  `pendingMigrations`, `checksumMismatches` or `pluginCheckResults` (use `chkit status
-  --json` for the migration names), and always has `plugins` (`{}` without plugin checks),
-  written before `scope` as in TS. The text starts with `Check status:` and `Policy:`, uses
-  `Pending migrations: N` / `Checksum mismatches: N`, lists the `--table` scope and the
-  plugin checks, and prints each plugin's `on_check_report` lines, without the
-  `Validation issues:` line or the blank line before `Failed checks:`. **Behaviour change:**
-  check no longer validates the schema files (no `validation` failed check; `generate` and
-  `snapshot rebuild` still fail on an invalid schema), a plugin fails the check only with an
-  evaluated, not-ok result that has an `error` finding (a `warn`-only or unevaluated result
-  no longer fails it), and `--table` scopes only the drift and plugin checks: pending
-  migrations of other tables count again, as documented.
+  **Behaviour change:** `check` no longer validates the schema files, a plugin fails it
+  only with an evaluated `error` finding, `--table` scopes only the drift and plugin
+  checks, and `--json` drops `issues`, `pendingMigrations`, `checksumMismatches` and
+  `pluginCheckResults` (use `chkit status --json` for the migration names).
 - The typed `T64` codec is accepted before a general codec, as in TS (#434). ClickHouse accepts
   `CODEC(T64, LZ4)`, `CODEC(T64, ZSTD(3))` and `CODEC(Delta, T64, LZ4)`, but chkit-py classed
   `T64` as a general codec, so those chains failed validation with
@@ -275,44 +258,19 @@
   `CREATE VIEW` / `CREATE MATERIALIZED VIEW` carries `COMMENT '...'` before `AS`, so
   `system.tables.comment` is set. Before, the comment was dropped, and a comment change
   recreated the view still without it.
-- ClickHouse errors print ClickHouse's message, as in TS (#413): `chkit query` (text and
-  `--json`'s `error.message`), `chkit migrate` (including a failed statement and the error
-  it journals) and every command's `--json` error envelope drop clickhouse-connect's
-  `Received ClickHouse exception, code: N, server response: Code: N. DB::Exception:` prefix
-  and the `(NAME) (for url ...)` suffix; `error.code` is still the ClickHouse code. A wrong
-  password reads `Authentication failed for user "<user>" at <url>. Check CLICKHOUSE_USER /
-  CLICKHOUSE_PASSWORD.` instead of the server's reset instructions, and an unreachable
-  server `Could not connect to ClickHouse at <url> (connection refused)` (or `host not
-  found`, `connection timed out`, ...) without the driver's `Unexpected Http Driver
-  Exception` warning. Unlike TS, these messages leave out credentials written in the URL.
-  `format_connection_error` now returns `None` for an error it does not recognize, and
-  `wrap_connection_error` raises instead of returning the error.
+- ClickHouse errors print ClickHouse's message, as in TS (#413): `chkit query`,
+  `chkit migrate` and every `--json` error envelope drop clickhouse-connect's prefix and
+  suffix, and a wrong password or an unreachable server gets a short message without the
+  credentials written in the URL.
 - `chkit drift` and `chkit check` compare the snapshot with the live server by default, as
-  in TS (#405). **Behaviour change:** without `--live`, `check` now reports `schema_drift`
-  (e.g. `missing_object` for a migration not yet applied) and `drift` prints the live
-  comparison (`missing`, `extra`, `objectDrift`, `tableDrift`, now with `scope`). `--live`
-  is still accepted and does nothing. Both now need a `clickhouse` block or a selected
-  ObsessionDB service; `drift` without a snapshot still exits 1. The offline comparison of
-  the schema files with the snapshot is removed, as TS has none: `drift --json` no longer
-  returns `operations` / `renameSuggestions` / `issues`, `check --json` no longer returns
-  `driftOperations` / `liveDrifted`, and a schema change that `generate` has not written
-  yet (including a Kafka change that requires replacement) is no longer drift; run
-  `chkit generate --dryrun` to see it. `check --json` always includes `driftReasonCounts`
-  and `driftReasonTotals` (whose `object` / `table` counts were always 0 before). A
-  `--table` selector that matches no snapshot table makes both commands a no-op with a
-  `warning`, as in TS, instead of comparing every table.
+  in TS (#405); `--live` is still accepted. **Behaviour change:** both now need a
+  `clickhouse` block or a selected ObsessionDB service, and the offline comparison of the
+  schema files with the snapshot is removed with its `--json` fields (run
+  `chkit generate --dryrun` to see schema changes not written yet).
 - `chkit drift --live` prints the same JSON and text as TS (#410). **Behaviour change** for
-  `--json` readers: `objectDrift` entries use `expectedKind` / `actualKind` and leave out
-  unset fields instead of writing `null`, `tableDrift` entries use camelCase keys
-  (`reasonCodes`, `missingColumns`, `constraintDiffs`, ...), the payload starts with the
-  `scope` object, `snapshotFile` is an absolute path, and `databaseMissing` / `database`
-  come right after `drifted`. The text output has the TS sections and wording: `Missing
-  objects:`, `Unexpected objects:`, `Kind mismatches:` with `expected=... actual=...`,
-  `Object drift reasons:` for every object code (it was `View drift:`, with only
-  `query_mismatch` / `target_mismatch`), a `Table shape drift:` block with one line per
-  difference, and the `Table scope:` lines; it no longer prints `Snapshot file:`. A
-  `--table` selector that matches no table is a no-op that says so (with `warning` under
-  `--json`), as in TS; before, it compared every table.
+  `--json` readers: `objectDrift` entries use `expectedKind` / `actualKind`, `tableDrift`
+  entries use camelCase keys, unset fields are left out instead of `null`, and
+  `snapshotFile` is an absolute path.
 - `chkit drift` and `chkit check --live` compare a column's type as rendered, as in TS
   (#409, port of #275), so `type="Nullable(Int64)"` and `type="Int64", nullable=True` both
   match a live `Nullable(Int64)` column. Before, a column spelled `Nullable(...)` inline
@@ -320,14 +278,8 @@
   underlying type still reports `changed_column`.
 - `chkit drift --live` and `chkit check` compare the query of each managed view and
   materialized view, and a materialized view's `TO` target, with the live ones, as in TS
-  (#382). A changed query reports `query_mismatch` and a changed target `target_mismatch`
-  (also for a materialized view recreated with an inner table), with the compared values in
-  `expected` and `actual`; before, a view recreated on the server with another query passed
-  `check --strict`. Both queries go through ClickHouse's formatter and drop the qualifier
-  ClickHouse adds for the connection's database (to table names and to the dictionary name
-  in `dictGet('users', …)`), so an unchanged view reads clean. A query the server can't
-  format is not compared, nor is one in which ClickHouse hid a secret as `'[HIDDEN]'` (a
-  table function's password), whose schema side is then never sent to the formatter.
+  (#382), and report `query_mismatch` or `target_mismatch`. Queries are compared after
+  ClickHouse's formatter, so an unchanged view reads clean.
 - `chkit drift` and `chkit check --live` compare column codecs, as in TS (#383): a codec
   added, removed or changed on the server reports `changed_column`. Codecs are compared in
   the form ClickHouse stores them, so `ZSTD` matches `ZSTD(1)`, `LZ4HC` matches `LZ4HC(0)`,
@@ -335,37 +287,14 @@
   keeps. Introspection reads a negative codec level (`ZSTD(-1)`, stored as
   `ZSTD(18446744073709551615)`) back as negative.
 - `chkit query` keeps every digit of 64-bit and wider integers and Decimals and prints the
-  same output as TS, in `--json` and in the table (#381). `query_json` parses ClickHouse's
-  `FORMAT JSON` body without losing digits (`parse_json_result`) and, in every column whose
-  type is or contains `Int64`/`UInt64`, a 128/256-bit integer, a `Decimal`, `JSON`, `Object`
-  or `Dynamic`, returns each number as a string of the digits ClickHouse sent, in `data` and
-  in the `totals` (`WITH TOTALS`) and `extremes` rows. A
-  `Decimal128(9)` such as `12345678901234567890.123456789` was printed as the float
-  `1.2345678901234567e+19`. It sends no settings, so it works for a `readonly = 1` user.
-  **Behaviour change:** in `--json`, `UInt64`, `Int64`, 128/256-bit integer and `Decimal`
-  values are JSON strings now (they were numbers), also inside arrays, maps and tuples;
-  `meta[].type` still gives the type. The table output now reads through `query_json` too,
-  so it prints the `--json` values as TS does: a Decimal without quotes (it printed
-  `"12.345"`), `true`/`false`, `DateTime` as ClickHouse formats it, and arrays, maps and
-  tuples as compact JSON (`[1,2,3]`). `--json` prints the envelope keys in the TS order
-  (`data`, `meta`, the rest as ClickHouse writes them, then `query_id`), also with `LIMIT`
-  (`rows_before_limit_at_least`) and `WITH TOTALS`. A statement without a result set
-  (`CREATE`, `DROP`, `OPTIMIZE`, `INSERT ... SELECT`) prints `(no rows)` and an envelope
-  with empty `data`. **Behaviour change:** `INSERT ... VALUES` with inline data is no longer
-  accepted, because `FORMAT JSON` is appended to the statement, as in TS; use
+  same output as TS, in `--json` and in the table (#381). **Behaviour change:** in `--json`,
+  `UInt64`, `Int64`, 128/256-bit integer and `Decimal` values are strings (they were
+  numbers), and `INSERT ... VALUES` with inline data is no longer accepted; use
   `INSERT ... SELECT`.
 - chkit-py works with a read-only ClickHouse user (`readonly = 1` or `readonly = 2`, granted
   `SELECT`) for `query`, `status`, `check`, `drift`, `pull` and `migrate` without `--apply`,
-  as in TS (#402). Reading the journal no longer writes: `status`, `check` and `migrate`
-  failed with `ACCESS_DENIED` on `CREATE TABLE ... _chkit_migrations`. A missing journal
-  now reads as no applied migrations and is created by the first journal write of
-  `migrate --apply`; the `ALTER TABLE ... ADD COLUMN IF NOT EXISTS` upgrade runs only for a
-  journal that lacks the per-operation columns, and a `readonly = 1` user reads the journal
-  without `select_sequential_consistency`. `migrate --apply` with a read-only user fails
-  with the ClickHouse error, as before. A journal created before per-operation tracking
-  needs that `ALTER` once: with a read-only user, `status`, `check` and `migrate` fail with
-  `The journal table ... predates per-operation tracking and needs its new columns added.
-  Run chkit once as a user that can ALTER it`, followed by the ClickHouse error, as in TS.
+  as in TS (#402): reading the journal no longer creates it. A journal created before
+  per-operation tracking needs one run as a user that can `ALTER` it.
 - `chkit query --json` prints ClickHouse's `JSON` format envelope plus the `query_id`, as
   in TS (#377): `meta[].type` is the ClickHouse type name (it was a Python object repr),
   values are formatted by ClickHouse (`DateTime64(3)` as `"2026-10-31 00:32:27.123"`, not
@@ -444,15 +373,9 @@
   in the user-global `~/.config/chkit/obsessiondb.json`, so such an entry would have sent
   `check` (and backfill commands) to that service in every project with the plugin.
 - `status`, `migrate`, `drift --live`, `query` and `pull` now run through the selected
-  ObsessionDB service too, like `check` and the TS CLI (#340). They used only the
-  `clickhouse` block, so a project with both a selected service and a `clickhouse`
-  block split targets: `migrate` applied to the `clickhouse` block while `check` read
-  the journal from the service and reported those migrations as pending. Every command
-  that talks to ClickHouse now takes the plugin executor first, else the `clickhouse`
-  block, and names the selected service in text mode. `migrate` now records
-  `applied_at` without a zone suffix, as TS does: the ObsessionDB API rejected the
-  journal row (`Cannot parse string ... as DateTime64(3, 'UTC')`). The
-  `--service <name>` override is not ported yet.
+  ObsessionDB service too, like `check` and the TS CLI (#340), so a project with both a
+  selected service and a `clickhouse` block no longer applies migrations to one target and
+  reads the journal from the other.
 - `chkit plugin backfill list` lists a managed service's backfill jobs (#311). The
   ObsessionDB plugin handled `list`, but the backfill plugin registered no `list`
   command, so the CLI rejected it before the hook ran. `--service-slug` is now optional
@@ -471,23 +394,11 @@
   `command`/`schemaVersion`/`ok` envelope instead of the raw console API object. A missing
   flag or an API failure now prints an error (an error envelope under `--json`) and exits
   1 instead of raising (#303).
-- backfill: `chkit check` now judges a plan sent with the ObsessionDB managed `submit`
-  by its job (#304). The job runs server-side and never writes a local run, so the
-  check counted the saved plan as pending (`backfill_required_pending`) until the plan
-  file was deleted by hand, even after the job completed. `submit` now records the job
-  ID in `<meta_dir>/backfill/submissions/<plan_id>.json` (same layout as the TS CLI).
-  The backfill check leaves such a plan to its job backend and counts it in a new
-  `submittedCount`; a local run of the plan, once it exists, still decides its result.
-  The ObsessionDB plugin's check asks the jobs API for each submitted job without a
-  local run, whatever the check target: a completed job passes and its confirmation is
-  saved in the submission file, so later checks skip the API call; a pending or
-  running job fails with `obsessiondb_backfill_job_incomplete`, a failed or cancelled
-  one with `obsessiondb_backfill_job_failed`, and a missing or expired session or an
-  API error with `obsessiondb_backfill_job_unverified`. Projects without submitted
-  plans make no API call. CI that runs `chkit check` needs an ObsessionDB session until
-  every submitted job is confirmed completed. `sdk` exports
-  `record_backfill_submission`, `list_remote_submissions` and
-  `confirm_backfill_submission`.
+- backfill: `chkit check` judges a plan sent with the ObsessionDB managed `submit` by its
+  job (#304): a completed job passes, and a pending, running, failed, cancelled or
+  unverifiable one fails the check, instead of the plan counting as pending until its file was deleted by
+  hand. **Behaviour change:** CI that runs `chkit check` needs an ObsessionDB session until
+  every submitted job is confirmed completed.
 - `clickhouse.url` with an `https://` scheme now connects over HTTPS when `secure` is
   not set (#298). Before, an unset `secure` meant plain HTTP, so
   `"url": "https://host"` connected to `http://host:8123`. The URL scheme now sets the
@@ -500,16 +411,10 @@
 - **Behaviour change:** an explicit `secure` that contradicts the URL scheme
   (`secure=True` with `http://`, or `secure=False` with `https://`) is now a config
   error. Before, it overrode the scheme (#298).
-- backfill: mv_replay writes each target column by name, the way ClickHouse does
-  when a materialized view inserts into its `TO` table. `plan` reads the live
-  target's insertable columns and each view's output columns (`DESCRIBE`), saves
-  the matching list as `execution.targetColumns`, and every chunk renders it on
-  both sides of `INSERT … SELECT`. A `SELECT *` view into a target with reordered
-  columns or extra DEFAULT/MATERIALIZED/ALIAS columns now replays instead of failing
-  with a column-count mismatch or an unknown identifier. Planning fails clearly when
-  a view outputs a column the target cannot take or views feeding one target output
-  different columns; `run`/`resume` refuse a plan whose target lost a planned
-  column. ObsessionDB managed submit renders the same SQL (#291).
+- backfill: mv_replay writes each target column by name, the way ClickHouse does when a
+  materialized view inserts into its `TO` table (#291), so a `SELECT *` view into a target
+  with reordered columns or extra DEFAULT/MATERIALIZED/ALIAS columns replays instead of
+  failing. Planning fails clearly when a view's columns do not fit the target.
 - obsessiondb: a console call for a service outside the session's active organization
   no longer fails with a bare 404 (#305). The API looks a service slug up in the active
   organization only. On a 404 for a call with a `serviceSlug` (workbench queries, job
@@ -531,16 +436,10 @@
   both through `clusterAllReplicas` when `resolve_replica_fanout` finds more than
   one replica of `clickhouse.cluster` (or `default`), and raises without submitting
   anything when a replica cannot be read. `execute_backfill` takes `cluster`.
-- migrate: the DDL propagation wait checks a changed column's definition, not only
-  that the column is listed (#290). After `ADD COLUMN` and `MODIFY COLUMN` it waits
-  until every replica reports the same `type`, `default_kind`, `default_expression`,
-  `comment` and `compression_codec`; after `MODIFY COLUMN` also until they show what
-  the statement sets (default kind, the default expression formatted by the server
-  with `formatQuerySingleLine`, comment, a removed default or codec).
-  `RENAME COLUMN` waits until no replica lists the old name and every replica lists
-  the new one. `wait_for_ddl_propagation` takes the executed `statement=`. A timeout
-  names the replica and field that differ, and says when every replica kept the old
-  value (ObsessionDB ignores `MODIFY COLUMN ... EPHEMERAL <default>`, #285).
+- migrate: on multi-replica targets, the DDL propagation wait after `ADD COLUMN`,
+  `MODIFY COLUMN` and `RENAME COLUMN` holds until every replica shows the column's new
+  definition, not only until the column is listed (#290). A timeout names the replica and
+  field that differ.
 - backfill: chunk INSERTs set `asterisk_include_materialized_columns=0` and
   `asterisk_include_alias_columns=0`, ahead of any `insert_settings`. A settings
   profile that enabled them made `SELECT *` return MATERIALIZED and ALIAS columns:
@@ -563,16 +462,10 @@
   (#288). `service list`, `service select`, `service alias set` and `service claim`
   failed with a validation error on every service, and `signup` did not see an
   existing active organization, so it created another one.
-- Distributed tables (#279): `PARTITION BY`, `PRIMARY KEY` and `ORDER BY` render only
-  for engines that accept them (MergeTree family, EmbeddedRocksDB, KeeperMap, S3, ...),
-  so Distributed, Memory, Null, Log, Buffer and Merge tables create cleanly; `table()`
-  no longer requires keys for them, and setting one fails validation with
-  `engine_unsupported_clause`. `pull` writes them without keys, Distributed engine
-  arguments compare equal to the quoted literals ClickHouse stores, and recreating a
-  Distributed table is `risk=caution` (`danger` with `flush_on_detach = 0`). The
-  ObsessionDB plugin rejects Distributed tables in `generate`, `snapshot rebuild` and
-  `check` when targeting ObsessionDB, which has no shards. The README now says beta,
-  matching the package classifier.
+- Distributed, Memory, Null, Log, Buffer and Merge tables create cleanly (#279):
+  `PARTITION BY`, `PRIMARY KEY` and `ORDER BY` render only for engines that accept them,
+  and setting one elsewhere fails with `engine_unsupported_clause`. The ObsessionDB plugin
+  rejects Distributed tables when targeting ObsessionDB, which has no shards.
 - Introspection keeps an index type or argument list it cannot express structurally
   (`sparse_grams(...)`, a bare `set`, `tokenbf_v1` with missing arguments, an unknown
   text parameter) as `SkipIndexRaw` instead of guessing: an unknown type was read as
@@ -611,7 +504,6 @@
 - Preserve quoted clause names, delimiters, whitespace, and escaped trailing
   backslashes in table introspection and migration statement splitting.
 - Escape backslashes in string defaults: `C:\temp` renders as `DEFAULT 'C:\\temp'`.
-- `pull` writes introspected defaults as `fn:` expressions.
 - `generate` prints validation issues as `- [code] message` lines and exits 1
   instead of raising a traceback.
 - Validation flags column kinds ClickHouse cannot honor: plain-string `MATERIALIZED`
