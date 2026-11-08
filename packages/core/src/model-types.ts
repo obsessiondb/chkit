@@ -1,3 +1,5 @@
+import type { z } from 'zod'
+
 export type PrimitiveColumnType =
   | 'String'
   | 'UInt8'
@@ -251,15 +253,30 @@ export interface TableDefinition {
   retainedBy?: { cutover: string }
 }
 
+/** A column as `table()` takes it: its type is a type string or a `t` type. */
+export interface ColumnInput extends Omit<ColumnDefinition, 'type'> {
+  type: ColumnDefinition['type'] | z.ZodType
+}
+
+/** A table from `table()`. */
+export interface TableColumns<C extends ColumnInput = ColumnInput> {
+  /** The `t` type a column was declared with: `p('city', events.column('city'))`. */
+  column<const N extends TypedColumnName<C>>(name: N): Extract<C, { name: N }>['type']
+}
+
+type TypedColumnName<C> = C extends { name: infer N extends string; type: z.ZodType } ? N : never
+
 /** Omitted primary keys inherit ORDER BY, matching ClickHouse MergeTree semantics. */
-export type TableInput = Omit<TableDefinition, 'kind' | 'primaryKey' | 'retainedBy'> & {
+export type TableInput<C extends ColumnInput = ColumnInput> = Omit<TableDefinition, 'kind' | 'primaryKey' | 'retainedBy' | 'columns'> & {
+  columns: C[]
   primaryKey?: string[]
 }
 
 /** Kafka queues do not have MergeTree sorting/storage clauses. */
-export type KafkaTableInput = Omit<TableDefinition,
-  'kind' | 'retainedBy' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections' | 'constraints'
+export type KafkaTableInput<C extends ColumnInput = ColumnInput> = Omit<TableDefinition,
+  'kind' | 'retainedBy' | 'columns' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy' | 'uniqueKey' | 'ttl' | 'indexes' | 'projections' | 'constraints'
 > & {
+  columns: C[]
   engine: 'Kafka' | `Kafka(${string})`
   primaryKey?: never
   orderBy?: never
@@ -289,9 +306,10 @@ export type KeylessTableEngine =
   | `Join(${string})`
 
 /** A table on a `KeylessTableEngine`, e.g. a Distributed table over a local table. */
-export type KeylessTableInput = Omit<TableDefinition,
-  'kind' | 'retainedBy' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy'
+export type KeylessTableInput<C extends ColumnInput = ColumnInput> = Omit<TableDefinition,
+  'kind' | 'retainedBy' | 'columns' | 'engine' | 'primaryKey' | 'orderBy' | 'partitionBy'
 > & {
+  columns: C[]
   engine: KeylessTableEngine
   primaryKey?: []
   orderBy?: []

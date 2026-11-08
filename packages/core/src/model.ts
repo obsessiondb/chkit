@@ -1,16 +1,19 @@
 import { join } from 'node:path'
 
+import { clickhouseType } from './clickhouse-type.js'
 import type {
   ChxConfigFn,
   ChxConfigInput,
   ChxResolvedConfig,
   ChxUserClickHouseConfig,
   ChxUserConfig,
+  ColumnInput,
   DictionaryDefinition,
   KafkaTableInput,
   KeylessTableInput,
   MaterializedViewDefinition,
   SchemaDefinition,
+  TableColumns,
   TableDefinition,
   TableInput,
   ValidationIssue,
@@ -110,11 +113,29 @@ function resolveSecure(clickhouse: ChxUserClickHouseConfig): boolean {
   return fromUrl
 }
 
-export function table(input: KafkaTableInput): TableDefinition
-export function table(input: KeylessTableInput): TableDefinition
-export function table(input: TableInput): TableDefinition
-export function table(input: KafkaTableInput | KeylessTableInput | TableInput): TableDefinition {
-  return { ...input, primaryKey: input.primaryKey ?? input.orderBy ?? [], orderBy: input.orderBy ?? [], kind: 'table' }
+/** Defines a table. A column's `t` type renders as its ClickHouse type string. */
+export function table<const C extends ColumnInput>(input: KafkaTableInput<C>): TableDefinition & TableColumns<C>
+export function table<const C extends ColumnInput>(input: KeylessTableInput<C>): TableDefinition & TableColumns<C>
+export function table<const C extends ColumnInput>(input: TableInput<C>): TableDefinition & TableColumns<C>
+export function table(input: KafkaTableInput | KeylessTableInput | TableInput): TableDefinition & TableColumns {
+  const definition: TableDefinition = {
+    ...input,
+    columns: input.columns.map((column) => ({
+      ...column,
+      type: typeof column.type === 'string' ? column.type : clickhouseType(column.type),
+    })),
+    primaryKey: input.primaryKey ?? input.orderBy ?? [],
+    orderBy: input.orderBy ?? [],
+    kind: 'table',
+  }
+  const column = (name: string) => {
+    const type = input.columns.find((candidate) => candidate.name === name)?.type
+    if (type === undefined || typeof type === 'string') {
+      throw new Error(`${input.database}.${input.name} has no column "${name}" with a t type`)
+    }
+    return type
+  }
+  return Object.defineProperty(definition, 'column', { value: column }) as TableDefinition & TableColumns
 }
 
 export function view(input: Omit<ViewDefinition, 'kind'>): ViewDefinition {

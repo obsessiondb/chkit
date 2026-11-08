@@ -2,7 +2,7 @@ import { z } from 'zod'
 
 import { quoteIdentifier } from './identifier.js'
 import type { DictionaryDefinition, MaterializedViewDefinition, TableDefinition, ViewDefinition } from './model-types.js'
-import { clickhouseType, type NamedParam, paramDefault, paramName } from './query-param.js'
+import { type NamedParam, paramDefault, paramName, paramType } from './query-param.js'
 import { tokenizeSQL } from './sql-lexer.js'
 
 export interface QueryOptions {
@@ -103,9 +103,9 @@ function defineQuery(strings: TemplateStringsArray, values: readonly unknown[], 
     specs.set(name, { ...seen, schemas: [...new Set([...seen.schemas, ...spec.schemas])] })
   }
 
-  const paramType = (name: string, schema: z.ZodType): string => {
+  const typeOf = (name: string, schema: z.ZodType): string => {
     try {
-      return clickhouseType(schema)
+      return paramType(schema)
     } catch (error) {
       throw new Error(`${label}: param "${name}": ${error instanceof Error ? error.message : String(error)}`, { cause: error })
     }
@@ -123,7 +123,7 @@ function defineQuery(strings: TemplateStringsArray, values: readonly unknown[], 
       const name = paramName(value)
       if (!name) throw new Error(`${label}: a param needs a name, e.g. p.string('city') or p('tags', schema)`)
       if (!PARAM_NAME.test(name)) throw new Error(`${label}: param name "${name}" must match ${PARAM_NAME.source}`)
-      const type = paramType(name, value)
+      const type = typeOf(name, value)
       addParam(name, { schemas: [value], clickhouseType: type, defaultValue: paramDefault(value) })
       return `{${name}:${type}}`
     }

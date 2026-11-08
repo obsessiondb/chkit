@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { z } from 'zod'
 
-import { p, type QueryInterpolation, query, table } from './index.js'
+import { p, type QueryInterpolation, query, t, table } from './index.js'
 
 const events = table({
   database: 'app',
@@ -54,7 +54,7 @@ describe('query definitions', () => {
     expect(Object.keys(busy.params.shape)).toEqual(['since', 'label', 'tags'])
   })
 
-  test('maps every p helper and plain Zod schema to its ClickHouse type', () => {
+  test('maps every p shorthand, t type and plain Zod schema to its ClickHouse type', () => {
     const cases: Array<[QueryInterpolation, string]> = [
       [p.string('v'), 'String'],
       [p.bool('v'), 'Bool'],
@@ -74,13 +74,31 @@ describe('query definitions', () => {
       [p.dateTime64('v', 6), 'DateTime64(6)'],
       [p.uuid('v'), 'UUID'],
       [p.identifier('v'), 'Identifier'],
+      [p('v', t.fixedString(16)), 'FixedString(16)'],
+      [p('v', t.int128()), 'Int128'],
+      [p('v', t.int256()), 'Int256'],
+      [p('v', t.uint128()), 'UInt128'],
+      [p('v', t.uint256()), 'UInt256'],
+      [p('v', t.decimal(10, 2)), 'Decimal(10, 2)'],
+      [p('v', t.date32()), 'Date32'],
+      [p('v', t.dateTime('Asia/Tokyo')), "DateTime('Asia/Tokyo')"],
+      [p('v', t.dateTime64(6, 'UTC')), "DateTime64(6, 'UTC')"],
+      [p('v', t.ipv4()), 'IPv4'],
+      [p('v', t.ipv6()), 'IPv6'],
+      [p('v', t.enum8({ view: 1, "it's": 2 })), "Enum8('view' = 1, 'it\\'s' = 2)"],
+      [p('v', t.enum16({ a: -1000 })), "Enum16('a' = -1000)"],
+      [p('v', t.json()), 'JSON'],
+      [p('v', t.array(t.lowCardinality(t.string()))), 'Array(LowCardinality(String))'],
+      [p('v', t.map(t.string(), t.nullable(t.uint8()))), 'Map(String, Nullable(UInt8))'],
+      [p('v', t.lowCardinality(t.nullable(t.string()))), 'LowCardinality(Nullable(String))'],
+      [p('v', t.simpleAggregateFunction('max', t.dateTime())), 'SimpleAggregateFunction(max, DateTime)'],
       [p('v', z.string()), 'String'],
       [p('v', z.int()), 'Int64'],
       [p('v', z.number()), 'Float64'],
       [p('v', z.boolean()), 'Bool'],
       [p('v', z.date()), 'DateTime64(3)'],
       [p('v', z.array(z.string())), 'Array(String)'],
-      [p('v', z.array(p.date())), 'Array(Date)'],
+      [p('v', z.array(t.date())), 'Array(Date)'],
       [p('v', z.record(z.string(), z.int())), 'Map(String, Int64)'],
       [p('v', z.uuid()), 'UUID'],
       [p('v', z.ipv4()), 'IPv4'],
@@ -121,11 +139,22 @@ describe('query definitions', () => {
     expect(() => query({ name: 'outer' })`SELECT * FROM ${inner} LIMIT ${p.uint32('limit').default(5)}`).toThrow(
       'query "outer": param "limit" has different defaults (10 and 5)',
     )
-    expect(() => query`SELECT ${p.string() as unknown as QueryInterpolation}`).toThrow('a param needs a name')
+    expect(() => query`SELECT ${t.string() as unknown as QueryInterpolation}`).toThrow('a param needs a name')
     expect(() => query`SELECT ${'Berlin' as unknown as QueryInterpolation}`).toThrow('only p params, queries and chkit')
     expect(() => query`SELECT ${p.string('city name')}`).toThrow('param name "city name" must match')
-    expect(() => query`SELECT ${p('tags', z.array(z.string()).optional())}`).toThrow(
+    expect(() => query`SELECT ${p('tags', z.array(z.string())).optional()}`).toThrow(
       'query: param "tags": ClickHouse has no Nullable(Array(String)); use .default() instead of .optional() or .nullable()',
     )
+  })
+
+  test('p throws for a type ClickHouse cannot take as a param', () => {
+    expect(() => p('tags', z.array(z.string()).optional())).toThrow('p("tags"): ClickHouse has no Nullable(Array(String))')
+    expect(() => p('pair', t.tuple([t.string(), t.uint8()]) as never)).toThrow(
+      "p(\"pair\"): Tuple(String, UInt8) can't be a query param: Tuple is a column-only type",
+    )
+    expect(() => p('state', z.array(t.aggregateFunction('uniq', t.string())) as never)).toThrow(
+      "Array(AggregateFunction(uniq, String)) can't be a query param: AggregateFunction is a column-only type",
+    )
+    expect(() => p('doc', z.object({ a: z.string() }))).toThrow('p("doc"): No ClickHouse type for Zod "object"')
   })
 })

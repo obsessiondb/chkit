@@ -1,6 +1,6 @@
 import { z } from 'zod'
 
-import { p, query, table } from '../src/index.js'
+import { p, query, t, table } from '../src/index.js'
 
 // Compile-time checks of the query API's inference; `bun run typecheck` runs them.
 // Queries are exported so declaration emit is checked too.
@@ -12,11 +12,16 @@ function assertType<T extends true>(): T | undefined {
   return undefined
 }
 
-const events = table({
+export const events = table({
   database: 'app',
   name: 'events',
   engine: 'MergeTree',
-  columns: [{ name: 'city', type: 'String' }],
+  columns: [
+    { name: 'city', type: t.lowCardinality(t.string()) },
+    { name: 'kind', type: t.enum8({ view: 1, click: 2 }) },
+    { name: 'pair', type: t.tuple([t.string(), t.uint8()]) },
+    { name: 'ts', type: 'DateTime64(3)' },
+  ],
   orderBy: ['city'],
 })
 
@@ -50,7 +55,7 @@ export const noInputs: Input<typeof noParams>[] = [
 export const wrapped = query`
   SELECT ${p.string('a').min(1).optional()}, ${p('b', z.int().nullable())},
     ${p.uint8('c').refine((c) => c > 0).default(1)}, ${p.date('d').optional().default('2026-01-01')},
-    ${p.int64('e')}, ${p('f', z.array(p.date()))}
+    ${p.int64('e')}, ${p('f', t.array(t.date()))}
 `
 assertType<
   Equal<
@@ -76,11 +81,48 @@ export const inputs: Input<typeof topCities>[] = [
   { city: 'Berlin', nope: 1 },
 ]
 
+// t types and table columns infer their values.
+export const typed = query`
+  SELECT * FROM ${events} WHERE city = ${p('city', events.column('city'))} AND kind = ${p('kind', events.column('kind'))}
+    AND ${p('amount', t.decimal(10, 2))} > 0 AND ${p('big', t.int128())} > 0 AND ${p('day', t.date32())} > 0
+    AND ${p('at', t.dateTime64(3, 'Asia/Tokyo'))} > 0 AND ${p('tags', t.array(t.lowCardinality(t.string())))} = []
+    AND ${p('counts', t.map(t.string(), t.nullable(t.uint8())))} = map() AND ${p('id', t.fixedString(16))} = ''
+`
+assertType<
+  Equal<
+    Input<typeof typed>,
+    {
+      city: string
+      kind: 'view' | 'click'
+      amount: number | string
+      big: bigint | number
+      day: Date | string
+      at: Date | string
+      tags: string[]
+      counts: Record<string, number | null>
+      id: string
+    }
+  >
+>()
+
+export const columns = [
+  // @ts-expect-error a column with a type string
+  events.column('ts'),
+  // @ts-expect-error no such column
+  events.column('nope'),
+]
+
 const rejected = [
   // @ts-expect-error a plain Zod schema has no name
   query`SELECT ${z.string()}`,
-  // @ts-expect-error a helper called without a name
+  // @ts-expect-error a shorthand called without a name
   query`SELECT ${p.string()}`,
+  // @ts-expect-error a column-only type
+  p('pair', t.tuple([t.string(), t.uint8()])),
+  // @ts-expect-error a column-only type inside an array
+  p('pairs', t.array(t.tuple({ name: t.string() }))),
+  // @ts-expect-error a column-only column
+  p('pair', events.column('pair')),
   // @ts-expect-error an unnamed wrapped schema
   query`SELECT ${z.string().optional()}`,
   // @ts-expect-error a plain value
