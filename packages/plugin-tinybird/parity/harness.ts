@@ -61,7 +61,13 @@ async function main(): Promise<void> {
 
   const proxy = await startProxy(target, Number(values.port))
   const workDir = join(REPO, '.tmp/tinybird-parity', runId)
-  const cleanup = async () => {
+  // Runs once, from the signal handler or from finally, whichever comes first.
+  let cleaning: Promise<void> | undefined
+  const cleanup = () => {
+    cleaning ??= cleanupOnce()
+    return cleaning
+  }
+  const cleanupOnce = async () => {
     await proxy.stop()
     if (values.keep) log(`kept database ${database} and ${workDir}`)
     else {
