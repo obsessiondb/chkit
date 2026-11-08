@@ -140,6 +140,7 @@ For existing tables, start with the [adoption guide](https://chkit.obsessiondb.c
 | [`chkit`](packages/cli) | Schema and migration CLI |
 | [`@chkit/core`](packages/core) | TypeScript schema DSL, configuration and diff engine |
 | [`@chkit/plugin-pull`](packages/plugin-pull) | Import live schema definitions |
+| [`@chkit/plugin-tinybird`](packages/plugin-tinybird) | Import a Tinybird project as a chkit schema and typed queries |
 | [`@chkit/plugin-codegen`](packages/plugin-codegen) | Generate TypeScript types and Zod schemas |
 | [`@chkit/plugin-backfill`](packages/plugin-backfill) | Checkpointed partition/sort-key backfills (beta) |
 | [`@chkit/plugin-obsessiondb`](packages/plugin-obsessiondb) | ObsessionDB connection and remote execution |

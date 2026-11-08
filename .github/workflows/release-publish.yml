@@ -17,7 +17,7 @@ name: "Release: publish"
 # in ci.yml's verify job, never the shared ObsessionDB test database.
 #
 # Prerequisites (configured once, out of band):
-#   - npm Trusted Publisher on each of the 10 packages -> GitHub Actions,
+#   - npm Trusted Publisher on each of the 11 packages -> GitHub Actions,
 #     obsessiondb/chkit, workflow release-publish.yml, environment release,
 #     with "Allow npm dist-tag" enabled (off by default).
 #   - GitHub environment `release`, deployment branches limited to main.
