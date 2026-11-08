@@ -18,8 +18,8 @@
   skip only names that start with `_chkit_`. `drift` lists such a table as an extra
   object, and `check` counts it. `pull` with no `--database` finds a database that holds
   only such tables.
-- `migrate` no longer splits a statement at a `;` inside a `$$ … $$` heredoc, or at a `;`
-  after a backslash-escaped backtick in a quoted name.
+- `migrate` no longer splits a statement at a `;` inside a `$$ … $$` heredoc, and a quote
+  or `$` inside a `//` or `#` comment no longer changes where statements end.
 
 ## 0.3.0 — 2026-11-06
 
