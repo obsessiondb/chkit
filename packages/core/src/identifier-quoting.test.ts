@@ -250,6 +250,21 @@ describe('key clauses keep declared column names whole', () => {
     expect(planDiff([def], [def]).operations).toEqual([])
   })
 
+  test('switching between separate columns and one comma column recreates the table', () => {
+    const columns = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'a', type: 'UInt8' },
+      { name: 'b', type: 'UInt8' },
+      { name: 'a, b', type: 'UInt8' },
+    ]
+    const separate = eventsTable({ columns, orderBy: ['id', 'a', 'b'] })
+    const combined = eventsTable({ columns, orderBy: ['id', 'a, b'] })
+    expect(planDiff([separate], [combined]).operations.map((op) => op.type)).toEqual([
+      'drop_table',
+      'create_table',
+    ])
+  })
+
   test('a comma-separated expression entry is still split', () => {
     const def = eventsTable({
       columns: [

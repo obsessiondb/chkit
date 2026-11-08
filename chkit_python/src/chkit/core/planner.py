@@ -221,7 +221,8 @@ def _strip_insignificant_formatting(token: str) -> str:
 
 
 def _join_clause(values: list[str] | None) -> str:
-    return ",".join(_strip_insignificant_formatting(value) for value in values or [])
+    # Keeps the key parts apart: a column named `a, b` is one part, not `a` and `b` (#523).
+    return json.dumps([_strip_insignificant_formatting(value) for value in values or []])
 
 
 def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool:

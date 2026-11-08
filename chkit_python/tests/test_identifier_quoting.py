@@ -237,6 +237,21 @@ def test_an_identical_definition_with_a_comma_column_plans_no_changes() -> None:
     assert plan_diff([definition], [definition]).operations == []
 
 
+def test_switching_between_separate_columns_and_one_comma_column_recreates_the_table() -> None:
+    columns = [
+        {"name": "id", "type": "UInt64"},
+        {"name": "a", "type": "UInt8"},
+        {"name": "b", "type": "UInt8"},
+        {"name": "a, b", "type": "UInt8"},
+    ]
+    separate = _events_table(columns=columns, order_by=["id", "a", "b"])
+    combined = _events_table(columns=columns, order_by=["id", "a, b"])
+    assert [op.type for op in plan_diff([separate], [combined]).operations] == [
+        "drop_table",
+        "create_table",
+    ]
+
+
 def test_a_comma_separated_expression_entry_is_still_split() -> None:
     definition = _events_table(
         columns=[{"name": "id", "type": "UInt64"}, {"name": "ts", "type": "DateTime"}],
