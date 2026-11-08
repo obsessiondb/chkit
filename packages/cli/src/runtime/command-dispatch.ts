@@ -1,4 +1,5 @@
 import {
+	expandShortFlags,
 	type FlagDef,
 	MissingFlagValueError,
 	type ParsedFlags,
@@ -25,9 +26,10 @@ function extractPositionals(
 	const byName = new Map<string, FlagDef>()
 	for (const def of flagDefs) byName.set(def.name, def)
 
+	const tokens = expandShortFlags(argv, flagDefs)
 	const positionals: string[] = []
-	for (let i = 0; i < argv.length; i += 1) {
-		const token = argv[i]
+	for (let i = 0; i < tokens.length; i += 1) {
+		const token = tokens[i]
 		if (token === undefined) continue
 		if (!token.startsWith('--')) {
 			positionals.push(token)
@@ -53,13 +55,14 @@ function splitQueryArgs(
 	const byName = new Map<string, FlagDef>()
 	for (const def of flagDefs) byName.set(def.name, def)
 
+	const tokens = expandShortFlags(argv, flagDefs)
 	const flagArgs: string[] = []
 	const positionals: string[] = []
-	for (let i = 0; i < argv.length; i += 1) {
-		const token = argv[i]
+	for (let i = 0; i < tokens.length; i += 1) {
+		const token = tokens[i]
 		if (token === undefined) continue
 		if (token === '--') {
-			positionals.push(...argv.slice(i + 1))
+			positionals.push(...tokens.slice(i + 1))
 			break
 		}
 
@@ -73,7 +76,7 @@ function splitQueryArgs(
 
 		flagArgs.push(token)
 		if (def.type !== 'boolean' && eqIdx === -1) {
-			const next = argv[i + 1]
+			const next = tokens[i + 1]
 			if (next !== undefined) {
 				flagArgs.push(next)
 				i += 1
@@ -245,7 +248,7 @@ function stripGlobalFlags(argv: string[]): {
 	return { jsonMode, tableSelector, rest }
 }
 
-function parseFlagsOrReport(
+export function parseFlagsOrReport(
 	commandName: string,
 	args: string[],
 	defs: readonly FlagDef[],

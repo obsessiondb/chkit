@@ -181,7 +181,8 @@ function validateAlias(alias: string): string | null {
 	if (alias.trim().length === 0) return 'Alias is required.'
 	if (alias !== alias.trim())
 		return 'Alias cannot start or end with whitespace.'
-	if (alias.startsWith('--')) return 'Alias cannot start with "--".'
+	// A leading dash reads as a flag on the command line (#491).
+	if (alias.startsWith('-')) return 'Alias cannot start with "-".'
 	return null
 }
 

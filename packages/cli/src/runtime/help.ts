@@ -45,7 +45,7 @@ export function formatGlobalHelp(registry: CommandRegistry, version: string): st
     lines.push(formatFlagLine(flag))
   }
   lines.push(formatFlagLine({ name: '-h, --help', type: 'boolean', description: 'Show help' }))
-  lines.push(formatFlagLine({ name: '-v, --version', type: 'boolean', description: 'Show version' }))
+  lines.push(formatFlagLine({ name: '-v, -V, --version', type: 'boolean', description: 'Show version' }))
 
   appendDocsHelp(lines)
 
@@ -109,7 +109,7 @@ function appendDocsHelp(lines: string[]): void {
 }
 
 function formatFlagLine(flag: FlagDef & { name?: string }): string {
-  const nameStr = flag.name ?? ''
+  const nameStr = flag.short ? `${flag.short}, ${flag.name}` : (flag.name ?? '')
   const placeholder = flag.placeholder ? ` ${flag.placeholder}` : ''
   const label = `${nameStr}${placeholder}`
   if (label.length >= 22) {

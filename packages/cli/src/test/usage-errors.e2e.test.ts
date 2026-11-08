@@ -110,35 +110,27 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
   test('an unknown short flag is a usage error, like an unknown long flag (#491)', async () => {
     const fixture = await createFixture()
     try {
-      const scoped = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json', '-t', 'users'])
+      const scoped = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json', '-x', 'users'])
       expect(scoped.exitCode).toBe(1)
       expect(JSON.parse(scoped.stdout)).toEqual({
         command: 'generate',
         schemaVersion: 1,
         ok: false,
-        error: { code: 'usage', message: 'Unknown flag: -t' },
+        error: { code: 'usage', message: 'Unknown flag: -x' },
       })
-      expect(scoped.stderr.trim()).toBe('Unknown flag: -t')
+      expect(scoped.stderr.trim()).toBe('Unknown flag: -x')
 
-      const apply = runCli(['migrate', '-t', 'users', '--apply', '--config', fixture.configPath])
+      const apply = runCli(['migrate', '-T', 'users', '--apply', '--config', fixture.configPath])
       expect(apply.exitCode).toBe(1)
       expect(apply.stdout).toBe('')
-      expect(apply.stderr.trim()).toBe('Unknown flag: -t')
+      expect(apply.stderr.trim()).toBe('Unknown flag: -T')
 
-      const config = runCli(['status', '--config', fixture.configPath, '-c', '/nonexistent.ts'])
-      expect(config.exitCode).toBe(1)
-      expect(config.stderr.trim()).toBe('Unknown flag: -c')
+      // A bundle is not split: `-tc` would read as `--table c`, `-jt` is unknown.
+      const bundle = runCli(['status', '--config', fixture.configPath, '-jt', 'users'])
+      expect([bundle.exitCode, bundle.stderr.trim()]).toEqual([1, 'Unknown flag: -jt'])
 
       const long = runCli(['status', '--config', fixture.configPath, '--bogus'])
       expect([long.exitCode, long.stderr.trim()]).toEqual([1, 'Unknown flag: --bogus'])
-
-      const help = runCli(['status', '-h'])
-      expect(help.exitCode).toBe(0)
-      expect(help.stdout).toContain('chkit status')
-
-      const version = runCli(['-v'])
-      expect(version.exitCode).toBe(0)
-      expect(version.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

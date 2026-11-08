@@ -53,7 +53,7 @@ import { applyCutovers, carryRetainedDefinitions, resolveCutoverFlags, summarize
 import { debug } from '../../runtime/debug.js'
 
 const GENERATE_FLAGS = defineFlags([
-  { name: '--name', type: 'string', description: 'Migration name', placeholder: '<name>' },
+  { name: '--name', short: '-n', type: 'string', description: 'Migration name', placeholder: '<name>' },
   { name: '--migration-id', type: 'string', description: 'Override the default timestamp migration prefix', placeholder: '<id>' },
   { name: '--rename-table', type: 'string[]', description: 'Explicit table rename mapping', placeholder: '<mapping>' },
   { name: '--rename-column', type: 'string[]', description: 'Explicit column rename mapping', placeholder: '<mapping>' },

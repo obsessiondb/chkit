@@ -17,12 +17,12 @@ chkit generate [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--name <name>` | string | — | Migration name (used in the filename) |
+| `-n`, `--name <name>` | string | — | Migration name (used in the filename) |
 | `--migration-id <id>` | string | — | Escape hatch: override the default timestamp migration prefix |
 | `--rename-table <mapping>` | string | — | Explicit table rename: `old_db.old_table=new_db.new_table` |
 | `--rename-column <mapping>` | string | — | Explicit column rename: `db.table.old_column=new_column` |
 | `--rename-dictionary <mapping>` | string | — | Explicit dictionary rename: `old_db.old_dict=new_db.new_dict` |
-| `--table <selector>` | string | — | Scope operations to matching tables |
+| `-t`, `--table <selector>` | string | — | Scope operations to matching tables |
 | `--dryrun` | boolean | `false` | Print the plan without writing any files |
 | `--empty` | boolean | `false` | Scaffold a blank manual migration without diffing the schema |
 | `--cutover <mapping>` | string | — | Cut a structural change of a table over without downtime instead of dropping and recreating it: `db.table=key_column[,key_column]`. Repeatable |

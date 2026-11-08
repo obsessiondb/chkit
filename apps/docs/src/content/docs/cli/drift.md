@@ -17,7 +17,7 @@ chkit drift [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--table <selector>` | string | — | Scope drift detection to matching tables |
+| `-t`, `--table <selector>` | string | — | Scope drift detection to matching tables |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 

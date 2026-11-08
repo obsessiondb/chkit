@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from 'node:process'
 import { format } from 'node:util'
-import type { ParsedFlags } from '@chkit/core'
+import { expandShortFlags, type ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
 import { cmdSkills } from '../commands/skills.js'
@@ -30,6 +30,9 @@ const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   ingest: 'Ingest',
   pull: 'Pull',
 }
+
+/** Commands that parse their own arguments before any config is loaded. */
+const OWN_PARSER_COMMANDS = new Set(['init', 'skills', 'add', 'registry'])
 
 const PROJECT_ONLY_COMMANDS = new Set([
   'generate',
@@ -159,8 +162,16 @@ async function run(): Promise<void> {
   // to drain instead of losing what did not fit in the pipe buffer.
   console.log = (...args: unknown[]) => writeStdout(format(...args))
 
-  const argv = normalizeGlobalArgs(process.argv.slice(2))
-  const commandName = argv[0]
+  const normalized = normalizeGlobalArgs(process.argv.slice(2))
+  const commandName = normalized[0]
+  // Short flags (`-c`, `-t`, `generate -n`) read as their long form from here on,
+  // so config lookup, help and dispatch see only long flags (#491). Commands with
+  // their own parser expand their own short flags; plugin commands expand theirs
+  // once the config has registered them.
+  const argv =
+    commandName === undefined || OWN_PARSER_COMMANDS.has(commandName)
+      ? normalized
+      : [commandName, ...expandShortFlags(normalized.slice(1), createInternalRegistry().resolveFlags(commandName))]
   activeCommand = commandName ?? 'chkit'
   debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
   const includePluginHelp = argv.includes('--help-plugins')
@@ -171,7 +182,7 @@ async function run(): Promise<void> {
     return
   }
 
-  if (commandName === '-v' || commandName === '--version') {
+  if (commandName === '-v' || commandName === '-V' || commandName === '--version') {
     console.log(CLI_VERSION)
     return
   }

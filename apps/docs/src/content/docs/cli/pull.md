@@ -17,10 +17,10 @@ chkit pull [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--out-file <path>` | string | — | Override output file path |
-| `--database <db>` | string | — | Limit pull to specific databases (repeat or comma-separate) |
+| `-o`, `--out-file <path>` | string | — | Override output file path |
+| `-d`, `--database <db>` | string | — | Limit pull to specific databases (repeat or comma-separate) |
 | `--dryrun` | boolean | `false` | Print the operation plan without writing files |
-| `--force` | boolean | `false` | Allow overwriting an existing output file |
+| `-f`, `--force` | boolean | `false` | Allow overwriting an existing output file |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 

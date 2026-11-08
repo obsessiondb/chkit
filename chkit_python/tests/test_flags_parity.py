@@ -9,6 +9,7 @@ from chkit.core.flags import (
     MissingFlagValueError,
     UnknownFlagError,
     define_flags,
+    expand_short_flags,
     parse_flags,
 )
 
@@ -87,6 +88,61 @@ def test_keeps_values_that_start_with_a_dash_and_a_bare_dash() -> None:
     assert parse_flags(["--database", "-1,-2"], DEFS)["--database"] == ["-1", "-2"]
     assert parse_flags(["--name=-x"], DEFS)["--name"] == "-x"
     assert parse_flags(["-", "--dryrun"], DEFS)["--dryrun"] is True
+
+
+SHORT_DEFS: list[FlagDef] = [
+    {"name": "--table", "short": "-t", "type": "string", "description": "Table"},
+    {"name": "--database", "short": "-d", "type": "string[]", "description": "Databases"},
+    {"name": "--force", "short": "-f", "type": "boolean", "description": "Force"},
+    {"name": "--yes", "short": "-y", "type": "boolean", "description": "Yes"},
+    {"name": "--name", "type": "string", "description": "Name"},
+]
+
+
+def test_short_flags_parse_every_form_the_long_flag_accepts() -> None:
+    assert parse_flags(["-t", "users"], SHORT_DEFS) == {"--table": "users"}
+    assert parse_flags(["-t=users"], SHORT_DEFS) == {"--table": "users"}
+    assert parse_flags(["-tusers"], SHORT_DEFS) == {"--table": "users"}
+    assert parse_flags(["-d", "a,b", "-d=c"], SHORT_DEFS) == {"--database": ["a", "b", "c"]}
+    assert parse_flags(["-f", "--name", "x"], SHORT_DEFS) == {"--force": True, "--name": "x"}
+
+
+def test_short_flags_reject_a_bundle_as_one_unknown_flag() -> None:
+    for argv, flag in [(["-fy"], "-fy"), (["-ft", "users"], "-ft"), (["-ft=users"], "-ft")]:
+        with pytest.raises(UnknownFlagError, match=f"^Unknown flag: {flag}$"):
+            parse_flags(argv, SHORT_DEFS)
+
+
+def test_short_flags_keep_a_value_that_looks_like_a_short_flag() -> None:
+    assert parse_flags(["--name", "-t"], SHORT_DEFS) == {"--name": "-t"}
+    assert parse_flags(["-t", "-f"], SHORT_DEFS) == {"--table": "-f"}
+    assert parse_flags(["--name=-t", "-f"], SHORT_DEFS) == {"--name": "-t", "--force": True}
+
+
+def test_short_flags_reject_unknown_shorts_boolean_values_and_missing_values() -> None:
+    with pytest.raises(UnknownFlagError, match=r"^Unknown flag: -x$"):
+        parse_flags(["-x"], SHORT_DEFS)
+    with pytest.raises(UnknownFlagError, match=r"^Unknown flag: -fx$"):
+        parse_flags(["-fx"], SHORT_DEFS)
+    with pytest.raises(UnknownFlagError):
+        parse_flags(["-f=1"], SHORT_DEFS)
+    with pytest.raises(MissingFlagValueError, match=r"^Missing value for --table$"):
+        parse_flags(["-t"], SHORT_DEFS)
+    with pytest.raises(MissingFlagValueError, match=r"^Missing value for --table$"):
+        parse_flags(["-t", "--force"], SHORT_DEFS)
+
+
+def test_expand_short_flags_rewrites_known_shorts_and_leaves_everything_else() -> None:
+    assert expand_short_flags(
+        ["status", "-t", "u", "-x", "-", "--name", "-f", "-f"], SHORT_DEFS
+    ) == ["status", "--table", "u", "-x", "-", "--name", "-f", "--force"]
+    assert expand_short_flags(["-t=u", "-fy", "-ta=b", "--", "-f"], SHORT_DEFS) == [
+        "--table=u",
+        "-fy",
+        "--table=a=b",
+        "--",
+        "-f",
+    ]
 
 
 def test_throws_missing_value_for_string_flag_without_value() -> None:

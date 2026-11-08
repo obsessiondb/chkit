@@ -154,13 +154,14 @@ def _service_claim(ctx: ChxPluginCommandContext) -> int:
 
 
 def _validate_alias(alias: str) -> str | None:
-    """Mirror of TS ``validateAlias``: empty / whitespace / ``--`` prefix rejected."""
+    """Mirror of TS ``validateAlias``: empty / whitespace / ``-`` prefix rejected."""
     if not alias.strip():
         return "Alias is required."
     if alias != alias.strip():
         return "Alias cannot start or end with whitespace."
-    if alias.startswith("--"):
-        return 'Alias cannot start with "--".'
+    # A leading dash reads as a flag on the command line (#491).
+    if alias.startswith("-"):
+        return 'Alias cannot start with "-".'
     return None
 
 

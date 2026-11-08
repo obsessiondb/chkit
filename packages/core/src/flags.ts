@@ -4,6 +4,8 @@ export interface FlagDef {
   description: string
   placeholder?: string
   negation?: boolean
+  /** Short form such as `-t`, parsed as the long flag and keyed by `name` (#491). */
+  short?: string
 }
 
 export type ParsedFlags = Record<string, string | string[] | boolean | undefined>
@@ -124,7 +126,57 @@ export function resolveOptions<T>(
 
 // ───── Flag parsing ─────
 
-export function parseFlags<const T extends readonly FlagDef[]>(argv: string[], flagDefs: T): InferFlags<T> {
+/**
+ * Rewrites the short flags declared in `flagDefs` to their long form: `-t x`,
+ * `-t=x` and `-tx` read as `--table x` / `--table=x`. A flag's value is copied
+ * as is, even when it looks like a short flag (`--name -t`), the same tokens
+ * `parseFlags` takes as a value. Unknown short tokens, bundles such as `-fy`,
+ * positionals and everything after `--` are left untouched.
+ */
+export function expandShortFlags(argv: readonly string[], flagDefs: readonly FlagDef[]): string[] {
+  const byName = new Map<string, FlagDef>()
+  const byShort = new Map<string, FlagDef>()
+  for (const def of flagDefs) {
+    byName.set(def.name, def)
+    if (def.short) byShort.set(def.short, def)
+  }
+
+  const expanded: string[] = []
+  for (let i = 0; i < argv.length; i += 1) {
+    const token = argv[i] as string
+    if (token === '--') {
+      expanded.push(...argv.slice(i))
+      break
+    }
+    const short = token.startsWith('--') ? undefined : expandShortToken(token, byShort)
+    const def = short ? short.def : byName.get(token)
+    expanded.push(short ? short.token : token)
+    const next = argv[i + 1]
+    const needsValue = def !== undefined && def.type !== 'boolean' && !(short?.token.includes('=') ?? false)
+    if (needsValue && next !== undefined && !next.startsWith('--')) {
+      expanded.push(next)
+      i += 1
+    }
+  }
+  return expanded
+}
+
+/** Expands one `-x`, `-x=value` or `-xvalue` token, or returns undefined when it is not a declared short flag. */
+function expandShortToken(
+  token: string,
+  byShort: ReadonlyMap<string, FlagDef>,
+): { def: FlagDef; token: string } | undefined {
+  const def = byShort.get(token.slice(0, 2))
+  if (!def) return undefined
+  const rest = token.slice(2)
+  // `-f=1` becomes `--force=1`, which parseFlags rejects like the long form.
+  if (rest === '' || rest.startsWith('=')) return { def, token: `${def.name}${rest}` }
+  // Only a value flag takes an attached value: `-fy` is not a bundle and stays unknown.
+  return def.type === 'boolean' ? undefined : { def, token: `${def.name}=${rest}` }
+}
+
+export function parseFlags<const T extends readonly FlagDef[]>(argvInput: string[], flagDefs: T): InferFlags<T> {
+  const argv = expandShortFlags(argvInput, flagDefs)
   const lookup = new Map<string, FlagDef>()
   const negationMap = new Map<string, string>()
 
@@ -155,7 +207,7 @@ export function parseFlags<const T extends readonly FlagDef[]>(argv: string[], f
 
     const eqIdx = token.indexOf('=')
     const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
-    // No short flags are defined; skipping `-t` would run unscoped (#491).
+    // An undeclared short flag: skipping `-t` would run unscoped (#491).
     if (!token.startsWith('--')) {
       throw new UnknownFlagError(name)
     }

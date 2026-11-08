@@ -75,7 +75,7 @@ chkit obsessiondb service alias remove prod
 
 Aliases live in the same file as the service selection: `.chkit/obsessiondb.json` next to your config, or `~/.config/chkit/obsessiondb.json` when running without a project config. The TypeScript CLI and chkit-py read and write the same file, so an alias set with one resolves in the other.
 
-Aliases can't shadow real service names — if `prod` is already the name of a service, setting it as an alias is rejected.
+Aliases can't shadow real service names — if `prod` is already the name of a service, setting it as an alias is rejected. An alias also can't start with `-`, which the command line would read as a flag.
 
 ## Remote query routing
 

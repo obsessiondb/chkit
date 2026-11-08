@@ -89,6 +89,7 @@ export interface PullPlugin {
       description: string
       placeholder?: string
       negation?: boolean
+      short?: string
     }>
     optionsSchema?: SafeParseable<PullOptions>
     flagMapping?: FlagMapping
@@ -107,10 +108,10 @@ export type PullPluginRegistration = ChxInlinePluginRegistration<PullPlugin, Pul
 
 const PULL_SCHEMA_FLAGS = defineFlags([
   { name: '--dryrun', type: 'boolean', description: 'Preview without writing files' },
-  { name: '--force', type: 'boolean', description: 'Overwrite existing output file' },
+  { name: '--force', short: '-f', type: 'boolean', description: 'Overwrite existing output file' },
   { name: '--overwrite', type: 'boolean', description: 'Overwrite existing output file (alias for --force)' },
-  { name: '--out-file', type: 'string', description: 'Output file path', placeholder: '<path>' },
-  { name: '--database', type: 'string[]', description: 'Database names to pull', placeholder: '<name>' },
+  { name: '--out-file', short: '-o', type: 'string', description: 'Output file path', placeholder: '<path>' },
+  { name: '--database', short: '-d', type: 'string[]', description: 'Database names to pull', placeholder: '<name>' },
 ] as const)
 
 // ───── Flag mapping ─────

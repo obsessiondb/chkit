@@ -1,6 +1,9 @@
 import process from 'node:process'
 import { relative, resolve } from 'node:path'
 
+import { defineFlags, typedFlags } from '@chkit/core'
+
+import { parseFlagsOrReport } from '../runtime/command-dispatch.js'
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 import { ensureProjectDependencies } from '../runtime/deps.js'
 
@@ -32,10 +35,11 @@ Create a TypeScript config and example schema; install project dependencies.
 `)
     return
   }
+  const options = parseInitOptions(argv)
+  if (!options) return
   const cwd = process.cwd()
   const configPath = resolve(cwd, DEFAULT_CONFIG_FILE)
   const schemaPath = resolve(cwd, 'src/db/schema/example.ts')
-  const options = parseInitOptions(argv)
 
   const wroteConfig = await writeIfMissing(
     configPath,
@@ -117,21 +121,24 @@ function isPluginNotInstalled(error: unknown): boolean {
   )
 }
 
-function parseInitOptions(argv: string[]): InitOptions {
-  const options: InitOptions = { yes: false }
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (!token) continue
-    const eq = token.indexOf('=')
-    const name = eq === -1 ? token : token.slice(0, eq)
-    const inlineValue = eq === -1 ? undefined : token.slice(eq + 1)
-    const value = (): string | undefined => inlineValue ?? argv[++i]
+const INIT_FLAGS = defineFlags([
+  { name: '--yes', short: '-y', type: 'boolean', description: 'Skip interactive onboarding' },
+  { name: '--connect', type: 'string', description: 'claim, account, clickhouse, or later', placeholder: '<choice>' },
+  { name: '--email', type: 'string', description: 'Email for account onboarding', placeholder: '<email>' },
+  { name: '--code', type: 'string', description: 'Verification code', placeholder: '<code>' },
+  { name: '--org-name', type: 'string', description: 'Organization name', placeholder: '<name>' },
+] as const)
 
-    if (name === '--yes' || name === '-y') options.yes = true
-    else if (name === '--connect') options.connect = value() as ConnectChoice | undefined
-    else if (name === '--email') options.email = value()
-    else if (name === '--code') options.code = value()
-    else if (name === '--org-name') options.orgName = value()
+/** Returns null after reporting an unknown flag or a missing value, as other commands do (#491). */
+function parseInitOptions(argv: string[]): InitOptions | null {
+  const parsed = parseFlagsOrReport('init', argv, INIT_FLAGS)
+  if (!parsed) return null
+  const flags = typedFlags(parsed, INIT_FLAGS)
+  return {
+    yes: flags['--yes'] === true,
+    connect: flags['--connect'] as ConnectChoice | undefined,
+    email: flags['--email'],
+    code: flags['--code'],
+    orgName: flags['--org-name'],
   }
-  return options
 }
