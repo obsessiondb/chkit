@@ -1,5 +1,6 @@
 import { parseIntegerLiteral } from './codec-integer.js'
 import { splitTopLevelComma } from './key-clause.js'
+import { findQuoteEnd } from './sql-scan.js'
 import { tokenizeSQL } from './sql-lexer.js'
 
 /**
@@ -179,9 +180,14 @@ function enumWidth(argumentsText: string): number | undefined {
   const entries = splitTopLevelComma(argumentsText)
   if (entries.length === 0) return undefined
   for (const entry of entries) {
-    const match = entry.match(/^'(?:\\[\s\S]|''|[^'\\])*'(?:\s*=\s*([\s\S]+))?\s*$/)
-    if (!match) return undefined
-    const literal = match[1] === undefined ? previous + 1n : parseIntegerLiteral(match[1].trim().replace(/^([+-])\s+/, '$1'))
+    // A quoted label, then nothing or `= value`. Scanned, not matched with a
+    // regex, so a long run of whitespace cannot backtrack.
+    if (!entry.startsWith("'")) return undefined
+    const labelEnd = findQuoteEnd(entry, 0, "'")
+    if (labelEnd >= entry.length) return undefined
+    const rest = entry.slice(labelEnd + 1).trim()
+    if (rest !== '' && !rest.startsWith('=')) return undefined
+    const literal = rest === '' ? previous + 1n : parseIntegerLiteral(rest.slice(1).trim().replace(/^([+-])\s+/, '$1'))
     if (literal === undefined) return undefined
     // ClickHouse's integer AST reads UInt64 literals as signed Enum values.
     const value = BigInt.asIntN(64, literal)

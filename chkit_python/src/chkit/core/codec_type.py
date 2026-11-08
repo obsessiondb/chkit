@@ -15,6 +15,7 @@ from typing import Final, Literal, TypeAlias
 from chkit.core.codec_integer import parse_integer_literal
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.sql_lexer import JS_WHITESPACE, js_trim, tokenize_sql
+from chkit.core.sql_scan import find_quote_end
 
 CodecTypeFamily: TypeAlias = Literal[
     "int",
@@ -218,11 +219,6 @@ def _decimal_width(precision: int) -> int:
     return 32
 
 
-_ENUM_ENTRY_RE: Final = re.compile(
-    r"^'(?:\\[\s\S]|''|[^'\\])*'"
-    rf"(?:[{JS_WHITESPACE}]*=[{JS_WHITESPACE}]*([\s\S]+))?[{JS_WHITESPACE}]*$"
-)
-
 
 def _enum_width(arguments_text: str) -> int | None:
     previous = 0
@@ -231,12 +227,18 @@ def _enum_width(arguments_text: str) -> int | None:
     if not entries:
         return None
     for entry in entries:
-        match = _ENUM_ENTRY_RE.match(entry)
-        if match is None:
+        # A quoted label, then nothing or ``= value``. Scanned, not matched with
+        # a regex, so a long run of whitespace cannot backtrack.
+        if not entry.startswith("'"):
             return None
-        literal = match.group(1)
-        value = previous + 1 if literal is None else parse_integer_literal(
-            re.sub(rf"^([+-])[{JS_WHITESPACE}]+", r"\1", js_trim(literal))
+        label_end = find_quote_end(entry, 0, "'")
+        if label_end >= len(entry):
+            return None
+        rest = js_trim(entry[label_end + 1 :])
+        if rest and not rest.startswith("="):
+            return None
+        value = previous + 1 if not rest else parse_integer_literal(
+            re.sub(rf"^([+-])[{JS_WHITESPACE}]+", r"\1", js_trim(rest[1:]))
         )
         if value is None:
             return None
