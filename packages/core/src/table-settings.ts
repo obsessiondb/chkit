@@ -95,7 +95,9 @@ function canonicalDecimal(text: string): string | undefined {
   let digits = `${integer}${fraction}`.replace(/^0+/, '')
   if (digits === '') return '0'
   let exp = Number.parseInt(exponent, 10) - fraction.length
-  const trailing = /0+$/.exec(digits)?.[0].length ?? 0
+  // A loop, not /0+$/: that regex rescans from every position of a long run of zeros.
+  let trailing = 0
+  while (digits[digits.length - 1 - trailing] === '0') trailing += 1
   digits = digits.slice(0, digits.length - trailing)
   exp += trailing
   const prefix = sign === '-' ? '-' : ''
