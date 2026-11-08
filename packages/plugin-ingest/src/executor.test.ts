@@ -15,7 +15,13 @@ import type { DestinationAdapter, SourceContext } from './types.js'
 const events = table({
   database: 'app',
   name: 'events',
-  columns: [{ name: 'id', type: 'UInt64' }, ...ingestionColumns],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'label', type: 'String' },
+    { name: 'value', type: 'String' },
+    { name: 'nested', type: 'JSON' },
+    ...ingestionColumns,
+  ],
   engine: 'MergeTree()',
   primaryKey: ['id'],
   orderBy: ['id'],
@@ -895,6 +901,22 @@ describe('source services', () => {
     })
     expect(result.ok).toBe(true)
     expect(requested.get('/second')).toBeGreaterThanOrEqual(250)
+  })
+
+  test('a Retry-After past the Date range waits out the budget like any long hint', async () => {
+    const journal = createMemoryJournal()
+    const stream = defineStream({
+      id: 'app.limited', destination: events,
+      async *read(context) {
+        yield { rows: await (await context.fetch('https://api.example.com/items')).json() as Array<{ id: number }> }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal, maxDurationMs: 100, retry: { minTimeout: 0, maxRetryTime: Number.POSITIVE_INFINITY },
+      fetch: async () => new Response('slow down', { status: 429, headers: { 'retry-after': '1e13' } }),
+    })
+    expect(result.streams[0]?.outcome).toBe('budget_exhausted')
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toMatchObject([{ errorClass: 'rate_limited', retryAt: undefined }])
   })
 
   test('the testing source context handles requests like the runtime', async () => {

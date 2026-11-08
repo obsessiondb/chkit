@@ -19,6 +19,7 @@ export interface CheckInputs {
   tableScope: TableScope
   databaseMissing: boolean
   database: string | undefined
+  warnings: string[]
 }
 
 export interface CheckResult {
@@ -76,6 +77,7 @@ function buildPayload(inputs: CheckInputs, result: CheckResult) {
       ]),
     ),
     scope: inputs.tableScope,
+    warnings: inputs.warnings,
     ...(inputs.databaseMissing ? { databaseMissing: true, database: inputs.database } : {}),
   }
 }
@@ -86,7 +88,7 @@ export function emitCheckJson(inputs: CheckInputs, result: CheckResult): void {
 }
 
 export function renderCheckText(inputs: CheckInputs, result: CheckResult): void {
-  const { policy, pending, checksumMismatches, drift, pluginResults, tableScope, databaseMissing, database } = inputs
+  const { policy, pending, checksumMismatches, drift, pluginResults, tableScope, databaseMissing, database, warnings } = inputs
 
   if (databaseMissing) {
     console.log(`⚠ Database "${database ?? ''}" does not exist on the target server.`)
@@ -122,6 +124,7 @@ export function renderCheckText(inputs: CheckInputs, result: CheckResult): void 
       )
     }
   }
+  for (const warning of warnings) console.warn(`Warning: ${warning}`)
   if (!result.ok) {
     console.log(`Failed checks: ${result.failedChecks.join(', ')}`)
     process.exitCode = 1

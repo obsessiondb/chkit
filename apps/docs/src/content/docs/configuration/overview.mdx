@@ -113,8 +113,9 @@ For self-managed multi-node ClickHouse clusters, set `clickhouse.cluster` to the
 
 When `cluster` is set, chkit:
 
-- emits every generated DDL statement with an `ON CLUSTER <name>` clause, so `generate` bakes it into the migration files and `migrate` propagates each change to all nodes via ClickHouse's distributed DDL queue, and
-- creates its migration journal (`_chkit_migrations`) as a `ReplicatedReplacingMergeTree`, keeping applied-migration history consistent across every node — so running `migrate` against a load-balanced endpoint never re-applies migrations.
+- emits every generated DDL statement with an `ON CLUSTER <name>` clause, so `generate` bakes it into the migration files and `migrate` propagates each change to all nodes via ClickHouse's distributed DDL queue,
+- creates its migration journal (`_chkit_migrations`) as a `ReplicatedReplacingMergeTree`, keeping applied-migration history consistent across every node — so running `migrate` against a load-balanced endpoint never re-applies migrations, and
+- creates the [ingest journal](/plugins/ingest/#journal-and-overlapping-runs) as one `ReplicatedMergeTree` shared by every node, so ingestion runs through a load balancer continue one checkpoint.
 
 chkit does **not** rewrite your table engines: declare `ReplicatedMergeTree` (or another `Replicated*`/`Shared*` variant) yourself for tables whose data should replicate. Empty-argument engines (e.g. `ENGINE = ReplicatedMergeTree`) are recommended so the server's `default_replica_path` supplies a collision-free Keeper path, which also keeps drop-and-recreate safe.
 

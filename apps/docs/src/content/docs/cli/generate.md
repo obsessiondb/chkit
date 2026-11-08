@@ -126,6 +126,10 @@ The one exception: a dictionary whose `source` still carries ClickHouse's `[HIDD
 
 `generate` warns about every operation that sets the experimental [`ALP` codec](/schema/dsl-reference/#codec-columncodecspec-optional), which ClickHouse rejects unless `allow_experimental_codecs` is 1. Apply such a migration with `chkit migrate --apply --setting allow_experimental_codecs=1`. The warning prints to the console and is included in the `warnings` array of `--json` output.
 
+### Quoted string defaults
+
+`generate` warns when a plain string default, on a column or a dictionary attribute, is itself a quoted SQL string literal such as `default: "'standard'"`. It renders `DEFAULT '''standard'''`, so the stored value keeps the quotes. The warning names the table and column (or dictionary and attribute) and the fixes: `default: 'standard'` for the value, or `default: { expression: "'standard'" }` for SQL. The migration is still generated, because a value may contain quotes. The warning prints to the console and is included in the `warnings` array of `--json` output.
+
 ### Dryrun mode
 
 With `--dryrun`, the command prints the migration plan (operations with risk levels and SQL) without writing any files. Useful for previewing changes before committing.

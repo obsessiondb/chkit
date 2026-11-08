@@ -221,6 +221,7 @@ class _ScriptedClient:
         *,
         after_time: str | None = None,
         every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         self.events.append("status")
         self.status_ids.append(query_id)
@@ -588,6 +589,7 @@ class _QueryLogClient(_ScriptedClient):
         *,
         after_time: str | None = None,
         every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         self.after_times.append(after_time)
         self.every_replica.append(every_replica)

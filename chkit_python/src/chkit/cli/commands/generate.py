@@ -98,7 +98,7 @@ from chkit.core.model import (
 from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
-from chkit.core.validate import validate_definitions
+from chkit.core.validate import collect_definition_warnings, validate_definitions
 from chkit.plugins import (
     ChxOnPlanCreatedContext,
     ChxPlugin,
@@ -583,11 +583,12 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         plan, config.clickhouse.cluster if config.clickhouse else None
     )
 
-    dictionary_password_warnings = (
-        detect_dictionary_password_warnings(plan)
-        + detect_experimental_codec_warnings(plan)
-        + [op.warning for op in plan.operations if op.warning]
-    )
+    warnings = [
+        *(issue.message for issue in collect_definition_warnings(schema_canonical)),
+        *detect_dictionary_password_warnings(plan),
+        *detect_experimental_codec_warnings(plan),
+        *(op.warning for op in plan.operations if op.warning),
+    ]
 
     if dryrun:
         # TS ``emitGeneratePlanOutput``.
@@ -603,7 +604,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                     "renameSuggestions": [
                         s.model_dump(by_alias=True) for s in plan.rename_suggestions
                     ],
-                    "warnings": dictionary_password_warnings,
+                    "warnings": warnings,
                     **cutover_payload,
                 },
             )
@@ -616,7 +617,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
         for op in plan.operations:
             typer.echo(f"- {op.type} [{op.risk}] {op.key}")
-        for warning in dictionary_password_warnings:
+        for warning in warnings:
             typer.echo(f"Warning: {warning}", err=True)
         for line in cutover_text_lines(cutover_summaries):
             typer.echo(line)
@@ -682,7 +683,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 "definitionCount": len(artifact_definitions),
                 "operationCount": len(plan.operations),
                 "riskSummary": plan.risk_summary.model_dump(),
-                "warnings": dictionary_password_warnings,
+                "warnings": warnings,
                 **cutover_payload,
             },
         )
@@ -708,7 +709,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         f"Risk summary:       safe={risks.safe}, caution={risks.caution}, "
         f"danger={risks.danger}"
     )
-    for warning in dictionary_password_warnings:
+    for warning in warnings:
         typer.echo(f"Warning: {warning}", err=True)
     for line in cutover_text_lines(cutover_summaries):
         typer.echo(line)
