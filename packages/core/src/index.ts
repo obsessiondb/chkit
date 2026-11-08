@@ -42,7 +42,7 @@ export {
   type ConstraintKind,
 } from './constraint.js'
 export { splitTopLevelComma } from './key-clause.js'
-export { insertColumnList } from './insert-columns.js'
+export { insertColumnList, insertableColumnNames } from './insert-columns.js'
 export {
   quoteIdentifier,
   renderIdentifier,
@@ -87,7 +87,17 @@ export {
   parseCodec,
   renderCodec,
 } from './codec.js'
-export { assertValidDefinitions, validateDefinitions } from './validate.js'
+export { assertValidDefinitions, collectDefinitionWarnings, validateDefinitions } from './validate.js'
 export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plugin-error.js'
 export { splitSqlStatements, extractExecutableStatements } from './sql-splitter.js'
 export { importModuleFile } from './ts-import.js'
+export { t } from './clickhouse-type.js'
+export { p, type NamedParam } from './query-param.js'
+export {
+  query,
+  type QueryDefinition,
+  type QueryInterpolation,
+  type QueryObjectRef,
+  type QueryOptions,
+  type QueryTag,
+} from './query.js'

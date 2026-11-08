@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Added
+- `generate` and `check` warn when a plain string default is written as a quoted SQL
+  literal, such as `default="'standard'"`, which stores the quotes in the value, as in TS.
+  0.2.0's `pull` wrote column defaults as plain SQL strings, so recheck schemas pulled with it.
 - The user profile config is applied, as in TS (#372): when
   `$XDG_CONFIG_HOME/chkit/config.py` (default `~/.config/chkit/config.py`) exists, its
   `config` is layered under the project's `clickhouse.config.py` for every command, with
@@ -141,6 +144,8 @@
   as in TS (#464), instead of printing `⚠ DDL propagation wait failed` and recording the
   migration as applied. The wait errors use the TS names (`waitForTable: ... not yet
   visible`).
+- Async `migrate` statements no longer fail on a fresh ClickHouse server that has not
+  created `system.query_log` yet, as in TS.
 - Concurrent `migrate --apply` runs of one migration file against other databases, or by
   projects with other journal tables in one database, no longer share async query ids
   (#463), as in TS. A run used to attach to the other run's query or read its result:

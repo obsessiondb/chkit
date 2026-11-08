@@ -31,6 +31,7 @@ from chkit.core.key_clause import (
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefaultKind,
+    ColumnDefaultValue,
     ColumnDefinition,
     DictionaryDefinition,
     MaterializedViewDefinition,
@@ -43,7 +44,7 @@ from chkit.core.model import (
     ValidationIssueCode,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql_lexer import SQLToken, js_trim, tokenize_sql
+from chkit.core.sql_lexer import SQLToken, js_trim, string_literal_value, tokenize_sql
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.text_index import render_text_index_type
@@ -883,3 +884,81 @@ def assert_valid_definitions(definitions: Iterable[SchemaDefinition]) -> None:
     issues = validate_definitions(definitions)
     if len(issues) > 0:
         raise ChxValidationError(issues)
+
+
+def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list[ValidationIssue]:
+    """Schema issues that are reported but never fail (TS ``collectDefinitionWarnings``).
+
+    A plain string default that is one quoted SQL string literal, such as
+    ``"'standard'"``, renders as ``'''standard'''`` and keeps the quotes in the
+    value, which is usually SQL written without ``SQLExpression``. A value may
+    contain quotes, so it only warns.
+    """
+    issues: list[ValidationIssue] = []
+    for definition in definitions:
+        if isinstance(definition, TableDefinition):
+            for column in definition.columns:
+                kind = column.default_kind or "DEFAULT"
+                quoted = _quoted_string_default(column.default)
+                if quoted is None or kind not in ("DEFAULT", "EPHEMERAL"):
+                    continue
+                subject = f'Table {definition.database}.{definition.name} column "{column.name}"'
+                _push(
+                    issues,
+                    definition,
+                    "quoted_string_default",
+                    f"{_describe_quoted_string_default(subject, kind, quoted)}, or use default: "
+                    f"{{ expression: {_js_string(js_trim(quoted[0]))} }} for SQL. "
+                    "If the quotes belong to the value, ignore this warning.",
+                )
+        elif isinstance(definition, DictionaryDefinition):
+            for attribute in definition.attributes:
+                quoted = _quoted_string_default(attribute.default)
+                if quoted is None:
+                    continue
+                subject = (
+                    f'Dictionary {definition.database}.{definition.name} '
+                    f'attribute "{attribute.name}"'
+                )
+                _push(
+                    issues,
+                    definition,
+                    "quoted_string_default",
+                    f"{_describe_quoted_string_default(subject, 'DEFAULT', quoted)}; "
+                    "dictionary defaults are literals only. "
+                    "If the quotes belong to the value, ignore this warning.",
+                )
+    return issues
+
+
+def _quoted_string_default(value: ColumnDefaultValue | None) -> tuple[str, str | None] | None:
+    """A plain string default that is exactly one terminated ``'…'`` literal, as (raw, value).
+
+    The value is None when the literal has backslash escapes (``\\n``,
+    ``\\x41``), which chkit does not decode. ``fn:`` strings are expressions.
+    """
+    if value is None:
+        return None
+    parsed = parse_column_default(value)
+    if parsed.kind != "literal" or not isinstance(parsed.value, str):
+        return None
+    tokens = tokenize_sql(js_trim(parsed.value))
+    if len(tokens) != 1 or not tokens[0].text.startswith("'") or not tokens[0].terminated:
+        return None
+    token = tokens[0]
+    return (parsed.value, None if "\\" in token.text else string_literal_value(token))
+
+
+def _describe_quoted_string_default(
+    subject: str, kind: str, quoted: tuple[str, str | None]
+) -> str:
+    raw, value = quoted
+    as_value = (
+        "Write the value itself, without SQL quotes or escapes, as a plain string"
+        if value is None
+        else f"Use default: {_js_string(value)} for the value"
+    )
+    return (
+        f"{subject} has plain string default {_js_string(raw)}, which renders as "
+        f"{kind} {render_default(raw)} and keeps the quotes in the value. {as_value}"
+    )

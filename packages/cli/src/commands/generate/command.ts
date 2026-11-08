@@ -1,5 +1,11 @@
 import { generateArtifacts, generateEmptyMigration } from '@chkit/codegen'
-import { applyOnClusterToPlan, ChxValidationError, planDiff, type PlannedCutover } from '@chkit/core'
+import {
+  applyOnClusterToPlan,
+  ChxValidationError,
+  collectDefinitionWarnings,
+  planDiff,
+  type PlannedCutover,
+} from '@chkit/core'
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
@@ -217,13 +223,14 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   // post-pass, after all plan transforms (renames, plugins, scope filtering).
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
-  const dictionaryPasswordWarnings = [
+  const warnings = [
+    ...collectDefinitionWarnings(schemaDefinitions).map((issue) => issue.message),
     ...detectDictionaryPasswordWarnings(plan),
     ...plan.operations.flatMap((operation) => operation.warning ? [operation.warning] : []),
   ]
 
   if (planMode) {
-    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, dictionaryPasswordWarnings, cutoverSummaries)
+    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, warnings, cutoverSummaries)
     return 0
   }
 
@@ -272,7 +279,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     }
   }
 
-  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, dictionaryPasswordWarnings, cutoverSummaries)
+  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, warnings, cutoverSummaries)
   return 0
 }
 

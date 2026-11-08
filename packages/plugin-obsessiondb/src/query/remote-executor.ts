@@ -203,6 +203,7 @@ export function createRemoteExecutor(deps: {
 					elapsedMs: Math.round(Number(proc.elapsed) * 1000),
 				}
 			}
+			if (options?.runningOnly) return { status: 'unknown' as const }
 
 			const log = await executor.query<{
 				type: string

@@ -348,6 +348,8 @@ The value of the column's `DEFAULT` clause, or of the clause that [`defaultKind`
 
 Use `{ expression }` for anything ClickHouse evaluates: function calls, arithmetic, casts, and references to other columns.
 
+A string is the value itself, so do not quote it as SQL: `default: "'standard'"` renders `DEFAULT '''standard'''` and stores the quotes as part of the value. `chkit generate` and `chkit check` warn, without failing, when a plain string default is one quoted SQL string literal, and name both fixes: `default: 'standard'` for the value, or `default: { expression: "'standard'" }` for SQL. The same applies to [dictionary attribute](#dictionary-attributes) defaults, which accept only literals.
+
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts

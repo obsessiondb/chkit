@@ -12,6 +12,7 @@ const INPUTS: CheckInputs = {
   tableScope: { enabled: false, matchedTables: [], matchCount: 0 },
   databaseMissing: true,
   database: undefined,
+  warnings: [],
 }
 
 describe('renderCheckText', () => {

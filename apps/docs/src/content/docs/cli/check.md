@@ -48,6 +48,10 @@ Built-in plugins that integrate with check:
 - [Codegen plugin](/plugins/codegen/#ci--check-integration) — checks generated type freshness
 - [Backfill plugin](/plugins/backfill/#ci--check-integration) — checks pending backfill state
 
+### Schema warnings
+
+`check` reports the snapshot's schema warnings, such as a [quoted string default](/cli/generate/#quoted-string-defaults), as `Warning:` lines and in the `warnings` array of `--json` output. Warnings never fail the check.
+
 ### CI gate pattern
 
 ```sh
@@ -111,7 +115,8 @@ chkit check --json
       "ok": false,
       "findingCodes": ["codegen_stale_output"]
     }
-  }
+  },
+  "warnings": []
 }
 ```
 

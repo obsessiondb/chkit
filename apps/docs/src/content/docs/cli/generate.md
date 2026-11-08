@@ -122,6 +122,10 @@ A dictionary's `SOURCE(...)` clause is a raw string (see [Credentials in `source
 
 The one exception: a dictionary whose `source` still carries ClickHouse's `[HIDDEN]` introspection placeholder (written by [`chkit pull`](/plugins/pull/#credential-handling-hidden-passwords) when it can't recover the real password) never produces a migration on its own — chkit doesn't know the real value, so it can't safely diff or render it. Replace `[HIDDEN]` with a real credential in the schema file first.
 
+### Quoted string defaults
+
+`generate` warns when a plain string default, on a column or a dictionary attribute, is itself a quoted SQL string literal such as `default: "'standard'"`. It renders `DEFAULT '''standard'''`, so the stored value keeps the quotes. The warning names the table and column (or dictionary and attribute) and the fixes: `default: 'standard'` for the value, or `default: { expression: "'standard'" }` for SQL. The migration is still generated, because a value may contain quotes. The warning prints to the console and is included in the `warnings` array of `--json` output.
+
 ### Dryrun mode
 
 With `--dryrun`, the command prints the migration plan (operations with risk levels and SQL) without writing any files. Useful for previewing changes before committing.
