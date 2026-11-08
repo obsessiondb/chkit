@@ -17,6 +17,7 @@ const client = createClient({ url: 'http://localhost:8123' })
 export const query = createQuery(client)
 export const lazyQuery = createQuery(async () => createClient({ url: 'http://localhost:8123' }))
 export const syncQuery = createQuery(() => client)
+export const quietQuery = createQuery(client, { logComment: false })
 
 export const events = table({
   database: 'app',
@@ -139,6 +140,9 @@ export async function calls() {
   )
   await unboundQuery`SELECT ${p.string('city')}`({ city: 'Berlin' }, { client })
   await noParams()
+  await noParams({}, { logComment: false })
+  // @ts-expect-error logComment is a boolean
+  createQuery(client, { logComment: 'no' })
   // @ts-expect-error city is required
   await topCities({ limit: 3 })
   // @ts-expect-error limit is a number
