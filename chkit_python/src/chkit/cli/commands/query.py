@@ -25,6 +25,7 @@ from chkit.cli.command_target import (
     resolve_plugin_executor,
 )
 from chkit.cli.config_loader import load_config, loaded_config_path
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.clickhouse.client import ClickHouseJsonQueryResult, clickhouse_error_message
@@ -209,6 +210,14 @@ def run(
         config_path=loaded_config_path(config_path),
         json_mode=output_json,
         service=service,
+        # As in TS, the hooks get the flags that were passed, keyed by long name.
+        flags=passed_flags(
+            {
+                "--config": str(config_path) if config_path is not None else None,
+                "--json": output_json,
+                "--service": service,
+            }
+        ),
     )
     if executor is None and config.clickhouse is None:
         msg = (

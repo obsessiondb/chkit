@@ -43,7 +43,7 @@ from chkit.cli.commands.pull_view_parser import (
 from chkit.cli.config_loader import load_config
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
-from chkit.cli.plugin_runtime import load_plugin_runtime
+from chkit.cli.plugin_runtime import PluginExecutionError, PluginRuntime, load_plugin_runtime
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.create_dictionary_parser import (
@@ -94,7 +94,7 @@ from chkit.core.model import (
     view,
 )
 from chkit.core.sql_scan import strip_wrapping_parens
-from chkit.plugins import ChxOnPullIntrospectContext, ChxPlugin
+from chkit.plugins import ChxOnConfigLoadedContext, ChxOnPullIntrospectContext, ChxPlugin
 
 
 def _introspected_table_to_definition(
@@ -135,8 +135,8 @@ def _introspected_table_to_definition(
             if isinstance(column.default, str) else column
             for column in item.columns
         ],
-        primary_key=[] if kafka else _split_clause(item.primary_key) or [item.columns[0].name],
-        order_by=[] if kafka else _split_clause(item.order_by) or [item.columns[0].name],
+        primary_key=_split_clause(item.primary_key) or None,
+        order_by=_split_clause(item.order_by),
         unique_key=_split_clause(item.unique_key) or None,
         partition_by=item.partition_by or None,
         ttl=item.ttl or None,
@@ -258,6 +258,25 @@ def _assert_index_granularity(
         else:
             typer.echo(f"Pull schema failed: {error}")
         raise typer.Exit(code=1) from error
+
+
+def _run_on_config_loaded(
+    plugin_runtime: PluginRuntime, context: ChxOnConfigLoadedContext, *, output_json: bool
+) -> None:
+    """Run the on_config_loaded hooks. Report a hook error as the TS dispatcher
+    (``command-dispatch.ts``) reports it for a plugin command, and exit 2.
+
+    With ``--json`` the error goes to stdout as ``{ok: false, error}``.
+    Without it the message goes to stderr.
+    """
+    try:
+        plugin_runtime.run_on_config_loaded(context)
+    except PluginExecutionError as error:
+        if output_json:
+            print_output({"ok": False, "error": str(error)}, json_mode=True)
+        else:
+            typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
 
 
 def _pull_definitions(
@@ -556,14 +575,28 @@ def run(  # noqa: PLR0912, PLR0917
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    resolved_config_path = str(config_path or "clickhouse.config.py")
     executor = resolve_plugin_executor(
         plugin_runtime,
         config,
         command="pull",
-        config_path=str(config_path or "clickhouse.config.py"),
+        config_path=resolved_config_path,
         json_mode=output_json,
         service=service,
         flags=hook_flags,
+        # TS runs on_config_loaded for every plugin command, and pull is one.
+        after_init=lambda: _run_on_config_loaded(
+            plugin_runtime,
+            ChxOnConfigLoadedContext(
+                command="pull",
+                config=config,
+                table_scope=TableScope(enabled=False),
+                flags=hook_flags,
+                config_path=resolved_config_path,
+                options={},
+            ),
+            output_json=output_json,
+        ),
     )
     if executor is None and config.clickhouse is None:
         # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports

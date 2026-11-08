@@ -44,7 +44,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun test src",
+    "test": "bun run ../../scripts/infra-up.ts && bun test src --parallel",
     "clean": "rm -rf dist"
   },
   "dependencies": {

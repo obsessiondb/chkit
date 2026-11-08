@@ -99,6 +99,18 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
     resolved_config_path = str(config_path or "clickhouse.config.py")
+    # As in TS, every hook gets the parsed flags.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--json": output_json,
+            "--table": table_selector,
+            "--strict": strict,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
+    )
     executor = resolve_plugin_executor(
         plugin_runtime,
         config,
@@ -106,6 +118,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         config_path=resolved_config_path,
         json_mode=output_json,
         service=service,
+        flags=hook_flags,
     )
     if executor is None and config.clickhouse is None:
         msg = "clickhouse config is required for check (journal is stored in ClickHouse)"
@@ -164,18 +177,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         # Match the TS finding code: ``schema_drift`` (was ``drift``).
         failed_checks.append("schema_drift")
 
-    # As in TS, every hook gets the parsed flags.
-    hook_flags = passed_flags(
-        {
-            "--config": str(config_path) if config_path is not None else None,
-            "--json": output_json,
-            "--table": table_selector,
-            "--strict": strict,
-            "--force-shared-engines": force_shared_engines,
-            "--no-shared-engines": no_shared_engines,
-            "--service": service,
-        }
-    )
     # As in TS, the on_config_loaded hooks run right before on_check.
     plugin_runtime.run_on_config_loaded(
         ChxOnConfigLoadedContext(

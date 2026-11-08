@@ -406,7 +406,7 @@ async function runConfirmGate(ctx: MigrateContext): Promise<number | undefined> 
 async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promise<number | undefined> {
   const { migrationsDir, allowDestructive, config, jsonMode, tableScope } = ctx
   const destructive = await scanDestructive(migrationsDir, pending)
-  let destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
+  const destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
 
   if (destructive.migrations.length > 0 && !destructiveAllowed) {
     const error =
@@ -418,23 +418,20 @@ async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promi
 
     if (isBackgroundOrCI()) {
       printDestructiveOperationDetails(destructive.operations)
-      throw new Error(
+      console.error(
         `${error}\nDestructive migrations: ${destructive.migrations.join(', ')}\n` +
           'Non-interactive run detected. Pass --allow-destructive to proceed.',
       )
+      return 3
     }
 
     const confirmed = await confirmDestructiveExecution(destructive.operations)
     if (!confirmed) {
-      throw new Error(
+      console.error(
         `Destructive migration cancelled by user.\nDestructive migrations: ${destructive.migrations.join(', ')}`,
       )
+      return 3
     }
-    destructiveAllowed = true
-  }
-
-  if (destructive.migrations.length > 0 && !destructiveAllowed) {
-    throw new Error('Blocked destructive migration execution.')
   }
 
   return undefined

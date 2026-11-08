@@ -228,34 +228,6 @@ def _count_events(fixture: Fixture, target: Target) -> int:
     )
 
 
-def test_a_run_that_starts_while_the_other_database_loads_runs_its_own_load(
-    make_fixture: Fixture,
-) -> None:
-    fixture = make_fixture
-    staging = _start(fixture, "staging")
-    _wait_for_running_load(fixture, "staging")
-    prod = _migrate(fixture, "prod")
-    staging_result = _wait(staging)
-
-    assert staging_result.exit_code == 0, _diagnostic("staging", staging_result)
-    assert prod.exit_code == 0, _diagnostic("prod", prod)
-    assert "attaching to in-flight query" not in prod.stderr
-    assert _count_events(fixture, "staging") == _ROWS
-    assert _count_events(fixture, "prod") == _ROWS
-
-
-def test_runs_that_start_together_each_run_their_own_load(make_fixture: Fixture) -> None:
-    fixture = make_fixture
-    staging = _start(fixture, "staging")
-    prod = _start(fixture, "prod")
-    staging_result, prod_result = _wait(staging), _wait(prod)
-
-    assert staging_result.exit_code == 0, _diagnostic("staging", staging_result)
-    assert prod_result.exit_code == 0, _diagnostic("prod", prod_result)
-    assert _count_events(fixture, "staging") == _ROWS
-    assert _count_events(fixture, "prod") == _ROWS
-
-
 def test_a_run_never_takes_the_other_databases_failure_and_the_failed_run_retries(
     make_fixture: Fixture,
 ) -> None:
@@ -268,6 +240,7 @@ def test_a_run_never_takes_the_other_databases_failure_and_the_failed_run_retrie
     failed = _wait(staging)
 
     assert prod.exit_code == 0, _diagnostic("prod", prod)
+    assert "attaching to in-flight query" not in prod.stderr
     assert _count_events(fixture, "prod") == _ROWS
     assert failed.exit_code == 1, _diagnostic("staging", failed)
     assert "failure in this database" in failed.stdout

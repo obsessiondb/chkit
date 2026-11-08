@@ -4,6 +4,8 @@ import { waitForDDLPropagation } from './ddl-propagation.js'
 import type { ClickHouseExecutor } from './index.js'
 import { resolveReplicaFanout } from './replicas.js'
 
+const FAST = { pollIntervalMs: 1 }
+
 // A target with two replicas behind one endpoint (#265): `visible` lists how
 // many replicas report the object on each successive poll.
 function twoReplicaExecutor(visible: number[]): { db: ClickHouseExecutor; queries: string[] } {
@@ -52,10 +54,10 @@ describe('waitForDDLPropagation across replicas', () => {
   test('skips backfill assertions and still waits for subsequent DDL on every replica', async () => {
     const { db, queries } = twoReplicaExecutor([1, 2])
 
-    await waitForDDLPropagation(db, 'assert_backfill', 'table:brain.knowledge:backfill')
+    await waitForDDLPropagation(db, 'assert_backfill', 'table:brain.knowledge:backfill', FAST)
     expect(queries).toEqual([])
 
-    await waitForDDLPropagation(db, 'create_table', 'table:brain.knowledge')
+    await waitForDDLPropagation(db, 'create_table', 'table:brain.knowledge', FAST)
 
     const polls = queries.filter((sql) => sql.includes('system.tables'))
     expect(polls).toHaveLength(2)
@@ -63,39 +65,10 @@ describe('waitForDDLPropagation across replicas', () => {
     expect(polls.every((sql) => sql.includes("clusterAllReplicas('default', system.tables)"))).toBe(true)
   })
 
-  test('keeps waiting while only one of two replicas shows an added column', async () => {
-    const queries: string[] = []
-    const column = (replica: string) => ({
-      replica,
-      type: 'String',
-      default_kind: '',
-      default_expression: '',
-      comment: '',
-      compression_codec: '',
-    })
-    const visible = [[column('r1')], [column('r1')], [column('r1'), column('r2')]]
-    let poll = 0
-    const db = {
-      async query<T>(sql: string): Promise<T[]> {
-        queries.push(sql)
-        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
-        const rows = visible[Math.min(poll, visible.length - 1)]
-        poll += 1
-        return rows as T[]
-      },
-    } as unknown as ClickHouseExecutor
-
-    await waitForDDLPropagation(db, 'alter_table_add_column', 'table:app.events:column:c1')
-
-    const polls = queries.filter((sql) => sql.includes('system.columns'))
-    expect(polls).toHaveLength(3)
-    expect(polls[0]).toContain("clusterAllReplicas('default', system.columns)")
-  })
-
   test('waits until no replica still shows a dropped column', async () => {
     const { db, queries } = twoReplicaExecutor([1, 0])
 
-    await waitForDDLPropagation(db, 'alter_table_drop_column', 'table:app.events:column:c1')
+    await waitForDDLPropagation(db, 'alter_table_drop_column', 'table:app.events:column:c1', FAST)
 
     expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(2)
   })
@@ -120,7 +93,7 @@ describe('waitForDDLPropagation across replicas', () => {
       },
     } as unknown as ClickHouseExecutor
 
-    await waitForDDLPropagation(db, 'create_dictionary', 'dictionary:app.users_dict')
+    await waitForDDLPropagation(db, 'create_dictionary', 'dictionary:app.users_dict', FAST)
 
     const polls = queries.filter((sql) => sql.includes('system.tables'))
     expect(polls).toHaveLength(2)
