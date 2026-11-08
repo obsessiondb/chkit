@@ -42,15 +42,18 @@ from chkit.core.sql import (
     render_alter_add_constraint,
     render_alter_add_index,
     render_alter_add_projection,
+    render_alter_comment_column,
     render_alter_drop_column,
     render_alter_drop_constraint,
     render_alter_drop_index,
     render_alter_drop_projection,
     render_alter_modify_column,
+    render_alter_modify_comment,
     render_alter_modify_refresh,
     render_alter_modify_setting,
     render_alter_modify_ttl,
     render_alter_remove_codec,
+    render_alter_remove_column_comment,
     render_alter_remove_column_expression,
     render_alter_reset_setting,
     render_column_type,
@@ -271,6 +274,34 @@ def _is_codec_removal(old: ColumnDefinition, new: ColumnDefinition) -> bool:
     return _column_identity_without_codec(old) == _column_identity_without_codec(new)
 
 
+def _is_comment_only_change(old: ColumnDefinition, new: ColumnDefinition) -> bool:
+    old_data = _normalized_column(old)
+    new_data = _normalized_column(new)
+    old_data.pop("comment", None)
+    new_data.pop("comment", None)
+    return json.dumps(old_data, sort_keys=True, default=str) == json.dumps(
+        new_data, sort_keys=True, default=str
+    )
+
+
+def _diff_comment(old: SchemaDefinition, new: SchemaDefinition) -> list[MigrationOperation]:
+    """A comment change on a table, view, materialized view or dictionary.
+
+    It is an ALTER of the object in place: recreating a materialized view would
+    lose the rows its source receives in between.
+    """
+    if old.comment == new.comment:
+        return []
+    return [
+        MigrationOperation(
+            type="alter_table_modify_comment",
+            key=f"{definition_key(new)}:comment",
+            risk="safe",
+            sql=render_alter_modify_comment(new),
+        )
+    ]
+
+
 def _same_default(left: ColumnDefaultValue | None, right: ColumnDefaultValue | None) -> bool:
     """Mirror TS ``===``: Python treats ``0 == False`` and ``1 == True``."""
     return isinstance(left, bool) == isinstance(right, bool) and left == right
@@ -357,7 +388,6 @@ def _diff_materialized_view(
 
     structural = (
         new.as_ != old.as_
-        or new.comment != old.comment
         or new.to.database != old.to.database
         or new.to.name != old.to.name
         or has_old_refresh != has_new_refresh
@@ -380,8 +410,8 @@ def _diff_materialized_view(
             ),
         ]
 
-    if has_new_refresh and not _refresh_equal(old.refresh, new.refresh):
-        return [
+    refresh_ops = (
+        [
             MigrationOperation(
                 type="alter_materialized_view_modify_refresh",
                 key=f"materialized_view:{new.database}.{new.name}:refresh",
@@ -389,8 +419,10 @@ def _diff_materialized_view(
                 sql=render_alter_modify_refresh(new),
             )
         ]
-
-    return []
+        if has_new_refresh and not _refresh_equal(old.refresh, new.refresh)
+        else []
+    )
+    return [*refresh_ops, *_diff_comment(old, new)]
 
 
 def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
@@ -407,7 +439,7 @@ def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
     return "danger" if disabled else "caution"
 
 
-def _diff_tables(
+def _diff_tables(  # noqa: PLR0915
     old: TableDefinition, new: TableDefinition
 ) -> tuple[list[MigrationOperation], list[ColumnRenameSuggestion]]:
     if is_kafka_engine(old.engine) or is_kafka_engine(new.engine):
@@ -504,6 +536,21 @@ def _diff_tables(
         old_kind = column_change.old_item.default_kind or "DEFAULT"
         new_kind = column_change.new_item.default_kind or "DEFAULT"
         key = f"table:{new.database}.{new.name}:column:{column_change.name}"
+        remove_comment = (
+            column_change.old_item.comment is not None and column_change.new_item.comment is None
+        )
+        if _is_comment_only_change(column_change.old_item, column_change.new_item):
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="safe",
+                    sql=render_alter_remove_column_comment(new, column_change.name)
+                    if remove_comment
+                    else render_alter_comment_column(new, column_change.new_item),
+                )
+            )
+            continue
         remove_expression = render_alter_remove_column_expression(
             new, column_change.new_item, column_change.old_item
         )
@@ -512,6 +559,16 @@ def _diff_tables(
             ops.append(
                 MigrationOperation(
                     type="alter_table_modify_column", key=key, risk="caution", sql=remove_expression
+                )
+            )
+        # MODIFY COLUMN without COMMENT keeps the old comment.
+        if remove_comment:
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="safe",
+                    sql=render_alter_remove_column_comment(new, column_change.name),
                 )
             )
         sql = (
@@ -685,6 +742,7 @@ def _diff_tables(
                 sql=render_alter_modify_ttl(new, new.ttl),
             )
         )
+    ops.extend(_diff_comment(old, new))
 
     rename_suggestions = _infer_column_rename_suggestions(new, added_columns, dropped_columns)
     return ops, rename_suggestions
@@ -803,6 +861,7 @@ def _dictionary_comparison_shape(
     definition: DictionaryDefinition, omit_source: bool
 ) -> dict[str, object]:
     shape = definition.model_dump(by_alias=True)
+    shape.pop("comment", None)
     if omit_source:
         shape.pop("source", None)
     return shape
@@ -815,7 +874,7 @@ def _diff_dictionary(
     if _dictionary_comparison_shape(old, omit_source) == _dictionary_comparison_shape(
         new, omit_source
     ):
-        return []
+        return _diff_comment(old, new)
 
     return [
         MigrationOperation(
@@ -857,9 +916,11 @@ def plan_diff(
             continue
 
         if isinstance(new_def, ViewDefinition) and isinstance(matched, ViewDefinition):
-            if new_def.as_ != matched.as_ or new_def.comment != matched.comment:
+            if new_def.as_ != matched.as_:
                 _push_drop(operations, matched, "caution")
                 _push_create(operations, new_def, "caution")
+            else:
+                operations.extend(_diff_comment(matched, new_def))
             continue
 
         if isinstance(new_def, MaterializedViewDefinition) and isinstance(

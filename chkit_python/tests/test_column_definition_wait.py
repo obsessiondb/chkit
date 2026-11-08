@@ -304,7 +304,7 @@ def test_names_the_field_and_says_it_is_not_lag_when_every_replica_kept_the_old_
         )
 
     assert str(raised.value) == (
-        "wait_for_ddl_propagation: app.events.raw definition not applied on every replica "
+        "waitForDDLPropagation: app.events.raw definition not applied on every replica "
         "after 21 checks: replica r1 reports default_expression "
         "\"defaultValueOfTypeName('String')\", the statement sets \"'seed'\"; every replica "
         "reports the same, so this is not replication lag: the server accepted the statement "

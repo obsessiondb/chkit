@@ -1026,7 +1026,6 @@ def _apply(
             file="m.sql",
             retry=retry,
             log=log or (lambda _line: None),
-            warn=lambda _line: None,
         )
     )
 

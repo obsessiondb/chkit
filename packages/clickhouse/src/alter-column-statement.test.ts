@@ -46,6 +46,12 @@ describe('parseModifyColumnIntent', () => {
     expect(parseModifyColumnIntent('ALTER TABLE t MODIFY COLUMN `day` REMOVE COMMENT;', 'day')).toEqual({ comment: '' })
   })
 
+  test('reads the comment COMMENT COLUMN sets (#464)', () => {
+    expect(parseModifyColumnIntent("ALTER TABLE t COMMENT COLUMN `id` 'a\\\\b it''s';", 'id')).toEqual({ comment: "a\\b it's" })
+    expect(parseModifyColumnIntent("ALTER TABLE t COMMENT COLUMN IF EXISTS id '';", 'id')).toEqual({ comment: '' })
+    expect(parseModifyColumnIntent("ALTER TABLE t COMMENT COLUMN other 'x';", 'id')).toEqual({})
+  })
+
   test('sets nothing for another column or another statement', () => {
     expect(parseModifyColumnIntent("ALTER TABLE t MODIFY COLUMN a String DEFAULT 'x';", 'b')).toEqual({})
     expect(parseModifyColumnIntent("ALTER TABLE t ADD COLUMN a String DEFAULT 'x';", 'a')).toEqual({})

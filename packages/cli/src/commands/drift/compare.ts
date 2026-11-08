@@ -70,12 +70,14 @@ type ObjectDriftReasonCode =
   | 'kind_mismatch'
   | 'query_mismatch'
   | 'target_mismatch'
+  | 'comment_mismatch'
 type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
 
 interface SchemaObjectShape {
   kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
   database: string
   name: string
+  comment?: string
 }
 
 export interface ObjectDriftDetail {
@@ -83,7 +85,7 @@ export interface ObjectDriftDetail {
   object: string
   expectedKind?: SchemaObjectShape['kind']
   actualKind?: SchemaObjectShape['kind']
-  /** query_mismatch / target_mismatch: the compared query or `TO` target. */
+  /** query_mismatch / target_mismatch / comment_mismatch: the compared query, `TO` target or comment. */
   expected?: string
   actual?: string
 }
@@ -208,6 +210,33 @@ export function compareSchemaObjects(
     kindMismatches,
     objectDrift,
   }
+}
+
+/**
+ * Compares the comment of every table, view, materialized view and dictionary
+ * that exists on both sides with the same kind. The live comment is
+ * `system.tables.comment`, which ClickHouse has already decoded.
+ */
+export function compareObjectComments(
+  expectedObjects: SchemaObjectShape[],
+  actualObjects: SchemaObjectShape[]
+): ObjectDriftDetail[] {
+  const actualComments = new Map(actualObjects.map((item) => [schemaObjectKey(item), item.comment]))
+  return expectedObjects.flatMap((item): ObjectDriftDetail[] => {
+    const actual = actualComments.get(schemaObjectKey(item))
+    if (actual === undefined) return []
+    const expectedComment = item.comment?.trim() ?? ''
+    const actualComment = actual.trim()
+    if (expectedComment === actualComment) return []
+    return [
+      {
+        code: 'comment_mismatch',
+        object: `${item.database}.${item.name}`,
+        expected: expectedComment,
+        actual: actualComment,
+      },
+    ]
+  })
 }
 
 export function summarizeDriftReasons(input: {

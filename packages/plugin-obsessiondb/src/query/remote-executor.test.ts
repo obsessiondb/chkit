@@ -227,6 +227,63 @@ describe('createRemoteExecutor queryStatus', () => {
 	})
 })
 
+// drift and pull read object comments from system.tables.comment, as the
+// native executor does (#464).
+describe('createRemoteExecutor introspection', () => {
+	test('listSchemaObjects reads each object comment', async () => {
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			tables: {
+				meta: ['database', 'name', 'engine', 'comment'],
+				data: [
+					['app', 'events', 'MergeTree', 'Raw events'],
+					['app', 'events_v', 'View', ''],
+				],
+			},
+		})
+		try {
+			const remote = connect(workbench.url)
+
+			expect(await remote.listSchemaObjects()).toEqual([
+				{ kind: 'table', database: 'app', name: 'events', comment: 'Raw events' },
+				{ kind: 'view', database: 'app', name: 'events_v', comment: '' },
+			])
+			expect(workbench.queries[0]).toContain('SELECT database, name, engine, comment')
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('listTableDetails reads the table comment', async () => {
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			tables: {
+				meta: ['database', 'name', 'engine', 'create_table_query', 'comment'],
+				data: [
+					[
+						'app',
+						'events',
+						'MergeTree',
+						"CREATE TABLE app.events (`id` UInt64) ENGINE = MergeTree ORDER BY id COMMENT 'Raw events'",
+						'Raw events',
+					],
+				],
+			},
+		})
+		try {
+			const remote = connect(workbench.url)
+
+			const [table] = await remote.listTableDetails(['app'])
+
+			expect(table?.comment).toBe('Raw events')
+			const tablesQuery = workbench.queries.find((query) => query.includes('FROM system.tables'))
+			expect(tablesQuery).toContain('create_table_query, comment')
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
 function connect(baseUrl: string): ClickHouseExecutor {
 	return createRemoteExecutor({
 		credentials: { access_token: 'test', base_url: baseUrl },
@@ -235,8 +292,13 @@ function connect(baseUrl: string): ClickHouseExecutor {
 }
 
 // Stands in for the workbench API: answers the replica probe with `replicas`,
-// every status read with no rows (or `processesError`), and records each query.
-function startScriptedWorkbench(script: { replicas: number; processesError?: string }) {
+// a system.tables read with `tables`, every other read with no rows (or
+// `processesError`), and records each query.
+function startScriptedWorkbench(script: {
+	replicas: number
+	processesError?: string
+	tables?: { meta: string[]; data: string[][] }
+}) {
 	const queries: string[] = []
 	const inputs: Array<Record<string, unknown>> = []
 	const server = Bun.serve({
@@ -250,6 +312,12 @@ function startScriptedWorkbench(script: { replicas: number; processesError?: str
 			if (input.query.includes('system.one')) {
 				return Response.json({
 					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1 },
+				})
+			}
+			if (script.tables && input.query.includes('FROM system.tables')) {
+				const { meta, data } = script.tables
+				return Response.json({
+					json: { data, meta: meta.map((name) => ({ name, type: 'String' })), rows: data.length },
 				})
 			}
 			if (script.processesError && input.query.includes('system.processes')) {

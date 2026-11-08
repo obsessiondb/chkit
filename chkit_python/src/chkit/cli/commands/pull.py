@@ -45,7 +45,6 @@ from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.create_dictionary_parser import (
-    parse_comment_from_create_dictionary_query,
     parse_dictionary_attributes_from_create_dictionary_query,
     parse_dictionary_primary_key_from_create_dictionary_query,
     parse_dictionary_range_from_create_dictionary_query,
@@ -136,6 +135,7 @@ def _introspected_table_to_definition(
         indexes=indexes or None,
         projections=list(item.projections) or None,
         constraints=list(item.constraints or []) or None,
+        comment=item.comment or None,
     )
 
 
@@ -181,6 +181,27 @@ def _is_obsessiondb_metadata_table(item: object) -> bool:
     ) in _OBSESSIONDB_METADATA_TABLES
 
 
+def _is_materialized_view_inner_table(item: object) -> bool:
+    """The table that stores the rows of a materialized view without ``TO``.
+
+    ``.inner_id.<uuid>``, or ``.inner.<view>`` in an Ordinary database. It
+    belongs to the view, which pull skips, so it is not a user table either.
+    """
+    kind = getattr(item, "kind", None)
+    name = getattr(item, "name", None)
+    return (
+        (kind is None or kind == "table")
+        and isinstance(name, str)
+        and name.startswith((".inner_id.", ".inner."))
+    )
+
+
+def _is_pulled_object(item: object) -> bool:
+    return not _is_obsessiondb_metadata_table(item) and not _is_materialized_view_inner_table(
+        item
+    )
+
+
 def _refresh_shape_to_model(
     shape: MaterializedViewRefreshShape | None,
 ) -> MaterializedViewRefresh | None:
@@ -206,8 +227,11 @@ def _refresh_shape_to_model(
 
 def _pull_definitions(
     client: object, databases: Sequence[str]
-) -> list[SchemaDefinition]:
-    """Combine introspect.list_table_details + view parsing into SchemaDefinitions."""
+) -> tuple[list[SchemaDefinition], list[str]]:
+    """Combine introspect.list_table_details + view parsing into SchemaDefinitions.
+
+    Also returns a warning for each materialized view with an inner table.
+    """
     introspected_tables = list_table_details(client, list(databases))
     table_defs: list[SchemaDefinition] = []
     for it in introspected_tables:
@@ -218,18 +242,20 @@ def _pull_definitions(
     # Now pull views + MVs by querying system.tables for the relevant databases
     # and using view-parser on their create_table_query strings.
     if not databases:
-        return table_defs
+        return table_defs, []
     quoted = ", ".join("'" + d.replace("'", "''") + "'" for d in databases)
     sql = (
-        "SELECT database, name, engine, create_table_query "
+        "SELECT database, name, engine, create_table_query, comment "
         f"FROM system.tables WHERE is_temporary = 0 AND database IN ({quoted})"
     )
     raw_result = client.query(sql)  # type: ignore[attr-defined]
     view_defs: list[SchemaDefinition] = []
+    warnings: list[str] = []
     for row in raw_result.rows:
         kind = infer_schema_kind_from_engine(str(row.get("engine", "")))
         ctq = row.get("create_table_query")
         ctq_str = str(ctq) if ctq is not None else None
+        comment = str(row.get("comment") or "") or None
         if kind == "view":
             as_clause = parse_as_clause(ctq_str)
             if as_clause is None:
@@ -239,11 +265,18 @@ def _pull_definitions(
                     database=str(row["database"]),
                     name=str(row["name"]),
                     as_=as_clause,
+                    comment=comment,
                 )
             )
         elif kind == "materialized_view":
             as_clause = parse_as_clause(ctq_str)
             to_shape = parse_to_clause(ctq_str, str(row["database"]))
+            if to_shape is None:
+                warnings.append(
+                    f'Materialized view "{row["database"]}.{row["name"]}" stores its rows in '
+                    "an inner table (it has no TO table), which the schema DSL does not "
+                    "support. Pull skipped the view and its inner table."
+                )
             if as_clause is None or to_shape is None:
                 continue
             refresh_shape = parse_refresh_clause(ctq_str)
@@ -255,6 +288,7 @@ def _pull_definitions(
                     to=TableRef(database=to_shape.database, name=to_shape.name),
                     as_=as_clause,
                     refresh=refresh_model,
+                    comment=comment,
                 )
             )
         elif kind == "dictionary":
@@ -262,15 +296,16 @@ def _pull_definitions(
                 database=str(row["database"]),
                 name=str(row["name"]),
                 query=ctq_str,
+                comment=comment,
             )
             if dictionary_def is not None:
                 view_defs.append(dictionary_def)
 
-    return table_defs + view_defs
+    return table_defs + view_defs, warnings
 
 
 def _map_dictionary_row_to_definition(
-    *, database: str, name: str, query: str | None
+    *, database: str, name: str, query: str | None, comment: str | None
 ) -> DictionaryDefinition | None:
     """Reconstruct a DictionaryDefinition from a CREATE DICTIONARY query."""
     attributes = parse_dictionary_attributes_from_create_dictionary_query(query)
@@ -280,7 +315,6 @@ def _map_dictionary_row_to_definition(
     lifetime = parse_lifetime_from_create_dictionary_query(query)
     if not attributes or not primary_key or not source or not layout or not lifetime:
         return None
-    comment = parse_comment_from_create_dictionary_query(query)
     range_parts = parse_dictionary_range_from_create_dictionary_query(query)
     settings = parse_dictionary_settings_from_create_dictionary_query(query)
     return dictionary(
@@ -525,19 +559,18 @@ def run(  # noqa: PLR0912, PLR0917
         )
     )
     raw_objects: list[object] = []  # objects from system.tables (for skipped count)
+    inner_storage_warnings: list[str] = []
     if custom is not None:
         definitions = list(custom)
     else:
         with open_client(executor, config.clickhouse) as client:
             # Capture objects so we can summarize what got skipped, even when
             # --database was passed explicitly.
-            raw_objects = [
-                o for o in list_schema_objects(client) if not _is_obsessiondb_metadata_table(o)
-            ]
+            raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
             if not selected:
                 selected = sorted({getattr(o, "database", "") for o in raw_objects})
-            definitions = _pull_definitions(client, selected)
-    definitions = [d for d in definitions if not _is_obsessiondb_metadata_table(d)]
+            definitions, inner_storage_warnings = _pull_definitions(client, selected)
+    definitions = [d for d in definitions if _is_pulled_object(d)]
 
     content = render_schema_file(definitions)
     out_file_abs = (Path.cwd() / out_file).resolve()
@@ -551,8 +584,11 @@ def run(  # noqa: PLR0912, PLR0917
         raw_objects, definitions, selected
     )
 
-    warnings = _dictionary_password_warnings(definitions)
-    warnings.extend(_kafka_setting_warnings(definitions))
+    warnings = [
+        *inner_storage_warnings,
+        *_dictionary_password_warnings(definitions),
+        *_kafka_setting_warnings(definitions),
+    ]
 
     payload: dict[str, object] = {
         "command": "schema",

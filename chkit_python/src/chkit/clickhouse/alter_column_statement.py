@@ -49,14 +49,15 @@ class ColumnIntent:
 def parse_modify_column_intent(statement: str, column: str) -> ColumnIntent:  # noqa: PLR0911, PLR0912
     """Read what ``ALTER TABLE ... MODIFY COLUMN <column> ...`` sets.
 
-    Returns an empty intent when the statement is not a single MODIFY COLUMN of
-    ``column`` (hand-written or plugin-rewritten SQL), so the wait falls back
-    to checking that every replica agrees.
+    Also reads ``COMMENT COLUMN <column> '<text>'``. Returns an empty intent
+    when the statement is not a single MODIFY COLUMN of ``column``
+    (hand-written or plugin-rewritten SQL), so the wait falls back to checking
+    that every replica agrees.
     """
     tokens = _significant_tokens(statement)
     i = _find_top_level(tokens, ("MODIFY", "COLUMN"))
     if i < 0:
-        return ColumnIntent()
+        return _parse_comment_column_intent(tokens, column)
     if _word(tokens, i) == "IF" and _word(tokens, i + 1) == "EXISTS":
         i += 2
     if i >= len(tokens) or identifier_name(tokens[i]) != column:
@@ -107,6 +108,18 @@ def parse_modify_column_intent(statement: str, column: str) -> ColumnIntent:  # 
         type_default=type_default,
         comment=comment,
     )
+
+
+def _parse_comment_column_intent(tokens: list[SQLToken], column: str) -> ColumnIntent:
+    i = _find_top_level(tokens, ("COMMENT", "COLUMN"))
+    if i < 0:
+        return ColumnIntent()
+    if _word(tokens, i) == "IF" and _word(tokens, i + 1) == "EXISTS":
+        i += 2
+    if i + 1 >= len(tokens) or identifier_name(tokens[i]) != column:
+        return ColumnIntent()
+    value = string_literal_value(tokens[i + 1])
+    return ColumnIntent() if value is None else ColumnIntent(comment=value)
 
 
 def parse_rename_column(statement: str) -> tuple[str, str] | None:
