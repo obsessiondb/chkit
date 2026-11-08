@@ -53,27 +53,47 @@ function operationIsCompleted(state: MigrationRowState | null, index: number): b
 }
 
 /**
- * Whether the propagation wait of completed statement `index` may not have
- * passed: no later statement is recorded. A statement is marked completed
- * before its wait, and the next statement is recorded only after that wait
- * passed, so a later record means it passed in some run (#513). An earlier
- * statement's wait is not repeated: a later statement may have undone what it
- * waits for, as a cutover drops a table it created.
+ * `lastError` of a completed sync statement whose DDL propagation wait has not
+ * passed yet (#513). A statement is recorded completed before its wait, so a
+ * re-run never replays it; while this marker is set, a re-run waits for it
+ * again before it runs the next statement. A write after the wait passes
+ * clears it. --abandon replaces it, and --retry keeps it with the record.
  */
-function propagationWaitPending(state: MigrationRowState | null, index: number): boolean {
-  return state?.operations.every((op) => op.operationIndex <= index) ?? false
+export const PROPAGATION_WAIT_PENDING = 'executed; waiting for the change to reach every replica'
+
+function propagationWaitPending(state: MigrationRowState, index: number): boolean {
+  return state.operations.some(
+    (op) => op.operationIndex === index && op.status === 'completed' && op.lastError === PROPAGATION_WAIT_PENDING,
+  )
 }
 
-/** Waits until a sync statement's DDL reaches every replica; on resume too, with the same inputs. */
-async function waitForPropagation(
-  db: ClickHouseExecutor,
-  operation: MigrationOperationSummary | undefined,
-  statement: string,
-  cluster: string | undefined,
-): Promise<void> {
-  if (operation && operation.mode !== 'barrier') {
+function hasPropagationWait(operation: MigrationOperationSummary | undefined): operation is MigrationOperationSummary {
+  return operation !== undefined && operation.mode !== 'barrier'
+}
+
+/**
+ * Waits until a sync statement's DDL reaches every replica, then clears its
+ * pending marker. A resumed run calls it with the same inputs as the first.
+ */
+async function completePropagation(input: {
+  db: ClickHouseExecutor
+  journalStore: JournalStore
+  file: string
+  fallbackState: MigrationRowState
+  index: number
+  identity: { type: string; key: string }
+  operation: MigrationOperationSummary | undefined
+  statement: string
+  cluster: string | undefined
+}): Promise<void> {
+  const { db, journalStore, file, index, identity, operation, statement, cluster } = input
+  if (hasPropagationWait(operation)) {
     await waitForDDLPropagation(db, operation.type, operation.key, { cluster, statement })
   }
+  const state = (await journalStore.readMigrationState(file)) ?? input.fallbackState
+  await journalStore.writeMigrationState(
+    upsertOperation(state, syncOperationState(index, identity.type, identity.key, 'completed'), Date.now),
+  )
 }
 
 function errorMessage(error: unknown): string {
@@ -213,18 +233,28 @@ export async function applyMigration(input: {
     // Sync DDL path with per-statement journaling + resume. Re-read state each
     // iteration so async ops written above (or in a prior run) are preserved.
     const stateBefore = await journalStore.readMigrationState(file)
-    if (operationIsCompleted(stateBefore, i)) {
+    const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
+    if (stateBefore !== null && operationIsCompleted(stateBefore, i)) {
       if (propagationWaitPending(stateBefore, i)) {
-        // The run that completed it may have stopped in, or before the end
-        // of, its propagation wait (#513): wait again before the next one.
+        // The run that completed it stopped before its propagation wait
+        // passed (#513): wait again before the next statement runs.
         debug('migrate', `${file}#${i}: already completed in a prior run — waiting for DDL propagation again`)
-        await waitForPropagation(db, operation, statement, config.clickhouse?.cluster)
+        await completePropagation({
+          db,
+          journalStore,
+          file,
+          fallbackState: stateBefore,
+          index: i,
+          identity: { type: opType, key: opKey },
+          operation,
+          statement,
+          cluster: config.clickhouse?.cluster,
+        })
       } else {
         debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
       }
       continue
     }
-    const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
     if (priorAttempt !== undefined && operation?.beforeRetry) {
       try {
@@ -271,12 +301,30 @@ export async function applyMigration(input: {
     // DDL propagation. The statement already ran, so if the propagation wait
     // later times out and throws, a re-run must skip this statement rather than
     // replay it into an "already exists" error (the brick this fix prevents).
-    // The re-run waits for it again before the next statement (#513).
+    // Until its wait passes, the record carries PROPAGATION_WAIT_PENDING, so a
+    // re-run waits for it again before the next statement (#513).
+    const waits = hasPropagationWait(operation)
     const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
     await journalStore.writeMigrationState(
-      upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
+      upsertOperation(
+        stateAfter,
+        syncOperationState(i, opType, opKey, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
+        Date.now,
+      ),
     )
-    await waitForPropagation(db, operation, statement, config.clickhouse?.cluster)
+    if (waits) {
+      await completePropagation({
+        db,
+        journalStore,
+        file,
+        fallbackState: stateAfter,
+        index: i,
+        identity: { type: opType, key: opKey },
+        operation,
+        statement,
+        cluster: config.clickhouse?.cluster,
+      })
+    }
   }
 
   const entry: MigrationJournalEntry = {
