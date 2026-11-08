@@ -13,14 +13,16 @@ from typing import Any
 from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.table_scope import resolve_table_scope, table_keys_from_definitions
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxResolvedConfig, SchemaDefinition
+from chkit.core.model import ChxResolvedConfig, SchemaDefinition, configured_index_granularity
 from chkit.core.schema_loader import load_schema_definitions
 from chkit.plugins import ChxOnConfigLoadedContext, ChxOnSchemaLoadedContext
 
 
-def load_schema(patterns: list[str]) -> list[SchemaDefinition]:
+def load_schema(
+    patterns: list[str], *, index_granularity: int | None = None
+) -> list[SchemaDefinition]:
     """Walk schema modules and collect exported ``SchemaDefinition`` objects."""
-    return load_schema_definitions(patterns)
+    return load_schema_definitions(patterns, index_granularity=index_granularity)
 
 
 def load_schema_definitions_with_hooks(
@@ -56,7 +58,11 @@ def load_schema_definitions_with_hooks(
         )
     )
 
-    definitions = canonicalize_definitions(load_schema(config.schema_))
+    index_granularity = configured_index_granularity(config)
+    definitions = canonicalize_definitions(
+        load_schema(config.schema_, index_granularity=index_granularity),
+        index_granularity=index_granularity,
+    )
     return list(
         plugin_runtime.run_on_schema_loaded(
             ChxOnSchemaLoadedContext(

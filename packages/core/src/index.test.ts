@@ -459,7 +459,7 @@ describe('@chkit/core planner v1', () => {
         engine: 'MergeTree()',
         primaryKey: ['id'],
         orderBy: ['id'],
-        settings: { index_granularity: 8192 },
+        settings: { merge_with_ttl_timeout: 3600 },
       }),
     ]
 
@@ -475,7 +475,7 @@ describe('@chkit/core planner v1', () => {
         engine: 'MergeTree()',
         primaryKey: ['id'],
         orderBy: ['id'],
-        settings: { index_granularity: 4096 },
+        settings: { merge_with_ttl_timeout: 7200 },
         indexes: [
           {
             name: 'idx_source',
@@ -519,7 +519,7 @@ describe('@chkit/core planner v1', () => {
         primaryKey: ['id'],
         orderBy: ['id'],
         ttl: 'toDateTime(id)',
-        settings: { index_granularity: 8192, old_setting: 1 },
+        settings: { merge_with_ttl_timeout: 3600, old_setting: 1 },
         indexes: [
           {
             name: 'idx_source',
@@ -550,7 +550,7 @@ describe('@chkit/core planner v1', () => {
         engine: 'MergeTree()',
         primaryKey: ['id'],
         orderBy: ['id'],
-        settings: { index_granularity: 4096 },
+        settings: { merge_with_ttl_timeout: 7200 },
         indexes: [
           {
             name: 'idx_source',

@@ -32,6 +32,7 @@ from typer.exceptions import TyperException
 
 from chkit.cli.command_target import (
     ServiceOption,
+    assert_index_granularity_matches_server,
     exit_no_target,
     open_client,
     resolve_plugin_executor,
@@ -98,7 +99,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
-from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
+from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, configured_index_granularity
 from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
 
@@ -315,7 +316,11 @@ def _run(
 
     # --abandon only changes the journal and rejects --table, so it does not
     # read snapshot.json: a conflicted snapshot cannot block it.
-    snapshot = read_snapshot(meta_dir) if targets.abandon_target is None else None
+    snapshot = (
+        read_snapshot(meta_dir, index_granularity=configured_index_granularity(config))
+        if targets.abandon_target is None
+        else None
+    )
     snapshot_defs = list(snapshot.definitions) if snapshot is not None else []
     table_scope = resolve_table_scope(
         table_selector, table_keys_from_definitions(snapshot_defs)
@@ -386,6 +391,9 @@ def _run(
                 ),
             )
             return
+        # A migration generated for another index_granularity default would
+        # create tables unlike the ones chkit planned for (#466).
+        assert_index_granularity_matches_server("migrate", client, config, json_mode=output_json)
 
         _run_checksum_gate(ctx, journal)
         plan = _resolve_pending_plan(ctx)

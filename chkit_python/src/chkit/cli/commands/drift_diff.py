@@ -9,6 +9,8 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 from typing import TypeVar
 
+from chkit.core.table_settings import setting_value_fingerprint
+
 _T = TypeVar("_T")
 
 
@@ -47,13 +49,14 @@ def diff_by_name(
 
 def diff_settings(
     expected_settings: Mapping[str, str | int | float | bool],
-    actual_settings: Mapping[str, str],
+    actual_settings: Mapping[str, str | int | float | bool],
 ) -> list[str]:
-    """Return keys whose string-cast value differs between expected and actual."""
+    """Return keys whose value differs between expected and actual, compared by
+    ``setting_value_fingerprint`` (``8192`` and ``"8192"``, ``2.0`` and ``2.``)."""
     diffs: list[str] = []
     for key in sorted(expected_settings):
-        left = str(expected_settings[key])
-        right = str(actual_settings.get(key, ""))
+        left = setting_value_fingerprint(expected_settings[key])
+        right = setting_value_fingerprint(actual_settings[key]) if key in actual_settings else ""
         if left != right:
             diffs.append(key)
     return diffs

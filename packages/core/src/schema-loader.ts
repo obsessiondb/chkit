@@ -3,12 +3,12 @@ import process from 'node:process'
 
 import fg from 'fast-glob'
 
-import { canonicalizeDefinitions, collectDefinitionsFromModule } from './canonical.js'
+import { type CanonicalizeOptions, canonicalizeDefinitions, collectDefinitionsFromModule } from './canonical.js'
 import { hasConflictMarkers } from './conflict-markers.js'
 import type { SchemaDefinition } from './model.js'
 import { importModuleFile } from './ts-import.js'
 
-export interface SchemaLoaderOptions {
+export interface SchemaLoaderOptions extends CanonicalizeOptions {
   cwd?: string
 }
 
@@ -30,7 +30,11 @@ export async function loadSchemaDefinitions(
   options: SchemaLoaderOptions = {}
 ): Promise<SchemaDefinition[]> {
   const modules = await loadDefinitionModules(schemaGlobs, options)
-  return canonicalizeDefinitions(modules.flatMap(collectDefinitionsFromModule))
+  const canonical = { indexGranularity: options.indexGranularity }
+  return canonicalizeDefinitions(
+    modules.flatMap((mod) => collectDefinitionsFromModule(mod, canonical)),
+    canonical
+  )
 }
 
 /** Load configured entry/schema modules so plugins can inspect their exported definitions. */

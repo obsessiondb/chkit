@@ -3,6 +3,7 @@ import {
   applyOnClusterToPlan,
   ChxValidationError,
   collectDefinitionWarnings,
+  configuredIndexGranularity,
   planDiff,
   type PlannedCutover,
 } from '@chkit/core'
@@ -107,6 +108,8 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     dropRetained: f['--drop-retained'] ?? [],
   })
   const now = new Date()
+  // What a MergeTree table that does not declare index_granularity gets.
+  const indexGranularity = configuredIndexGranularity(config)
 
   const schemaDefinitions = await loadSchemaDefinitionsWithHooks(
     { command: 'generate', config, configPath, flags, jsonMode, tableSelector },
@@ -125,7 +128,17 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   const dictionaryMappings = mergeDictionaryMappings(schemaMappings.dictionaryMappings, cliDictionaryMappings)
 
   const { migrationsDir, metaDir } = dirs
-  const previousDefinitions = (await readSnapshot(metaDir))?.definitions ?? []
+  const snapshotDefinitions = (await readSnapshot(metaDir, { indexGranularity }))?.definitions ?? []
+  // The schema went through the plugins' rewrites; a snapshot written before
+  // a rewrite existed goes through it too, so it plans no change (#466).
+  const previousDefinitions = await pluginRuntime.runOnSnapshotLoaded({
+    command: 'generate',
+    config,
+    tableScope: resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshotDefinitions)),
+    flags,
+    jsonMode,
+    definitions: snapshotDefinitions,
+  })
   const definitions = carryRetainedDefinitions({
     previousDefinitions,
     definitions: schemaDefinitions,
@@ -174,7 +187,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
 
   let plan: ReturnType<typeof planDiff>
   try {
-    plan = planDiff(remappedPreviousDefinitions, definitions)
+    plan = planDiff(remappedPreviousDefinitions, definitions, { indexGranularity })
   } catch (error) {
     return reportValidationError(error, jsonMode)
   }
@@ -213,6 +226,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
         cutovers: cutoverFlags,
         cluster: config.clickhouse?.cluster,
         stamp: migrationStamp(now),
+        indexGranularity,
       }))
     } catch (error) {
       return reportValidationError(error, jsonMode)
@@ -262,6 +276,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     plan,
     cliVersion: CLI_VERSION,
     now,
+    indexGranularity,
   })
 
   const codegenPlugin = pluginRuntime.plugins.find((entry) => entry.plugin.manifest.name === 'codegen')

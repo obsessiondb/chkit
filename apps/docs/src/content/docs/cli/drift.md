@@ -25,9 +25,10 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 1. Reads `snapshot.json` from `metaDir`. If no snapshot exists, the command fails with an error: _"Snapshot not found. Run 'chkit generate' before drift checks."_
 2. Requires `clickhouse` config. If missing, fails with: _"clickhouse config is required for drift checks."_
-3. Connects to ClickHouse and introspects the live schema
-4. Compares expected (snapshot) vs actual (live) objects, table shapes, and view and materialized view queries
-5. Reports drift at both the object level and the table level
+3. Connects to ClickHouse. If the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default), fails with a message that names the value to set.
+4. Introspects the live schema
+5. Compares expected (snapshot) vs actual (live) objects, table shapes, and view and materialized view queries
+6. Reports drift at both the object level and the table level
 
 ### What drift compares
 
@@ -54,7 +55,7 @@ When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This pre
 
 ### Nullable columns
 
-Column types are compared as rendered SQL types. `type: 'Nullable(String)'` and `type: 'String', nullable: true` both render `Nullable(String)` and do not report drift. Changes to nullability or the underlying type still report `changed_column`.
+Column types are compared as rendered SQL types, in the spacing ClickHouse stores: `Decimal(10,2)` matches the stored `Decimal(10, 2)`, while text in quotes (an `Enum` label, a time zone) is compared as written. `type: 'Nullable(String)'` and `type: 'String', nullable: true` both render `Nullable(String)` and do not report drift. Changes to nullability or the underlying type still report `changed_column`.
 
 ### Expression normalization
 
@@ -72,7 +73,7 @@ ClickHouse does not store SQL comments. chkit removes them from TTL, partition, 
 
 ### Expression defaults
 
-Column defaults are compared token by token with `default_expression` in `system.columns`. chkit removes the comments from an expression default (`{ expression }` or `fn:`), then ignores whitespace, outer parentheses, and quotes around plain identifiers, so `now()+1` matches the stored `now() + 1`. A literal default is compared as a value: `default: 'web'` matches the stored `'web'`. ClickHouse stores some expressions in a canonical form, and an expression written another way reports `changed_column` although the default is the same: `NOW()` is stored as `now()`, `x::String` as `CAST(x, 'String')`, and `now() + INTERVAL 1 DAY` as `now() + toIntervalDay(1)`. Write expression defaults in the stored form; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
+Column defaults are compared token by token with `default_expression` in `system.columns`. chkit removes the comments from an expression default (`{ expression }` or `fn:`), then ignores whitespace, outer parentheses, and quotes around plain identifiers, so `now()+1` matches the stored `now() + 1`. A literal default is compared as a value, as `generate` compares it: `default: 'web'` matches the stored `'web'`, `default: 1e21` the stored `1e21`, and a large integer compares exactly. ClickHouse stores some expressions in a canonical form, and an expression written another way reports `changed_column` although the default is the same: `NOW()` is stored as `now()`, `x::String` as `CAST(x, 'String')`, and `now() + INTERVAL 1 DAY` as `now() + toIntervalDay(1)`. Write expression defaults in the stored form; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
 
 ### Column codecs
 

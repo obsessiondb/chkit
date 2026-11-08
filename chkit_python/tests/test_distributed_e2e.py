@@ -95,13 +95,11 @@ class _Project:
         engine = f"Distributed({CLUSTER}, {self.database}, {self.local}, {sharding_key})"
         (self.root / "schema.py").write_text(
             "from chkit import schema, table\n\n"
-            # index_granularity is spelled out because pull writes the server
-            # default (as a number in Python; TS pull writes a string).
             f"columns = {columns!r}\n\n"
             "definitions = schema(\n"
             f"    table(database={self.database!r}, name={self.local!r}, engine='MergeTree()', "
             "columns=columns, primary_key=['id'], order_by=['id'], "
-            "partition_by='toYYYYMM(ts)', settings={'index_granularity': 8192}),\n"
+            "partition_by='toYYYYMM(ts)'),\n"
             f"    table(database={self.database!r}, name={self.distributed!r}, "
             f"engine={engine!r}, columns=columns),\n"
             ")\n"

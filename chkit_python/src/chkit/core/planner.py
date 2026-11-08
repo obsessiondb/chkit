@@ -8,6 +8,11 @@ from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
 from chkit.core.codec import codec_fingerprint
+from chkit.core.column_default import (
+    literal_default_fingerprint,
+    parse_column_default,
+    render_default,
+)
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
@@ -39,6 +44,7 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
+    column_type_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
     render_alter_add_index,
@@ -61,6 +67,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
+from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.validate import assert_valid_definitions
 
@@ -226,6 +233,11 @@ def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool
             (_join_clause(old.order_by), _join_clause(new.order_by)),
             (old.partition_by or "", new.partition_by or ""),
             (_join_clause(old.unique_key), _join_clause(new.unique_key)),
+            # ClickHouse refuses to change or reset these on an existing table (#466).
+            (
+                readonly_settings_fingerprint(old.settings),
+                readonly_settings_fingerprint(new.settings),
+            ),
         ]
     )
 
@@ -235,14 +247,22 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
 
     Compare what the DSL renders: inline ``Nullable(T)`` and ``nullable=True``
     are equivalent, while an additional or differently placed wrapper is not.
+    A literal default compares by the SQL it renders, so the literal ``7`` and
+    the expression ``'7'`` that pull reads back are the same default (#466).
+    An expression keeps its comments, which the snapshot records as written.
     """
     data = column.model_dump(mode="json", by_alias=False)
     data.pop("name", None)
     data.pop("renamed_from", None)
     data.pop("nullable", None)
-    data["type"] = render_column_type(column)
+    # ClickHouse stores ``Decimal(10,2)`` as ``Decimal(10, 2)`` (#466).
+    data["type"] = column_type_fingerprint(column)
+    if column.default is not None:
+        parsed = parse_column_default(column.default)
+        sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
+        data["default"] = literal_default_fingerprint(sql) or sql
     # Codecs compare in the form ClickHouse stores them, like drift (#465).
-    data["codec"] = codec_fingerprint(column.codec, data["type"])
+    data["codec"] = codec_fingerprint(column.codec, render_column_type(column))
     return data
 
 
@@ -878,10 +898,34 @@ def _dictionary_comparison_shape(
     definition: DictionaryDefinition, omit_source: bool
 ) -> dict[str, object]:
     shape = definition.model_dump(by_alias=True)
+    shape["lifetime"] = _dictionary_lifetime_fingerprint(definition.lifetime)
     shape.pop("comment", None)
     if omit_source:
         shape.pop("source", None)
     return shape
+
+
+_LIFETIME_RANGE_RE = re.compile(
+    r"^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$", re.IGNORECASE
+)
+
+
+def _dictionary_lifetime_fingerprint(lifetime: str) -> str:
+    """The stored form of a ``LIFETIME`` (TS ``dictionaryLifetimeFingerprint``).
+
+    ClickHouse stores ``LIFETIME(300)`` as ``LIFETIME(MIN 0 MAX 300)`` and
+    ``LIFETIME(MAX 300 MIN 10)`` as ``LIFETIME(MIN 10 MAX 300)``, so a
+    dictionary pulled back compares by that stored form.
+    """
+    trimmed = lifetime.strip()
+    if re.fullmatch(r"\d+", trimmed, re.ASCII):
+        return f"MIN 0 MAX {trimmed}"
+    match = _LIFETIME_RANGE_RE.match(trimmed)
+    if match is None:
+        return trimmed
+    if match.group(1) is not None:
+        return f"MIN {match.group(1)} MAX {match.group(2)}"
+    return f"MIN {match.group(4)} MAX {match.group(3)}"
 
 
 def _diff_dictionary(
@@ -904,10 +948,13 @@ def _diff_dictionary(
 
 
 def plan_diff(
-    old_definitions: list[SchemaDefinition], new_definitions: list[SchemaDefinition]
+    old_definitions: list[SchemaDefinition],
+    new_definitions: list[SchemaDefinition],
+    *,
+    index_granularity: int | None = None,
 ) -> MigrationPlan:
-    old_canonical = canonicalize_definitions(old_definitions)
-    new_canonical = canonicalize_definitions(new_definitions)
+    old_canonical = canonicalize_definitions(old_definitions, index_granularity=index_granularity)
+    new_canonical = canonicalize_definitions(new_definitions, index_granularity=index_granularity)
     assert_valid_definitions(new_canonical)
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)

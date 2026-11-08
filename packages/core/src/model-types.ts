@@ -431,6 +431,14 @@ export interface ChxUserClickHouseConfig {
    * Accepts an identifier (e.g. `"my_cluster"`) or a macro (e.g. `"{cluster}"`).
    */
   cluster?: string
+  /**
+   * The server's MergeTree `index_granularity` default (its
+   * `<merge_tree><index_granularity>` setting): the value chkit assumes for a
+   * MergeTree table that does not declare `index_granularity`. Defaults to
+   * 8192, ClickHouse's default. `drift`, `check`, `migrate` and `pull` stop
+   * when the server reports another value.
+   */
+  indexGranularity?: number
 }
 
 export interface ChxResolvedClickHouseConfig {
@@ -440,6 +448,8 @@ export interface ChxResolvedClickHouseConfig {
   database: string
   secure: boolean
   cluster?: string
+  /** Unset in a config built by hand; read it through `configuredIndexGranularity`. */
+  indexGranularity?: number
 }
 
 export interface ChxInlinePluginRegistration<

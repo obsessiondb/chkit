@@ -80,6 +80,7 @@ def events(
     name: str = "events",
     engine: str = "MergeTree",
     columns: list[Any] | None = None,
+    settings: dict[str, Any] | None = None,
 ) -> TableDefinition:
     order = order_by or ["id"]
     return table(
@@ -89,7 +90,25 @@ def events(
         columns=columns or COLUMNS,
         primaryKey=order,
         orderBy=order,
+        settings=settings,
     )
+
+
+def _norm(sql: str) -> str:
+    """The normalization the cutover applies to a stored read-only setting."""
+    return (
+        f"multiIf(lower({sql}) = 'true', '1', lower({sql}) = 'false', '0', "
+        f"ifNull(toString(toFloat64OrNull({sql})), {sql}))"
+    )
+
+
+_LIT_8192 = "'8192'"
+_LIT_4096 = "'4096'"
+_LIT_EMPTY = "''"
+_GRANULARITY = (
+    "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', "
+    "extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))"
+)
 
 
 OLD = events(["id"])
@@ -106,6 +125,7 @@ def plan(
     cluster: str | None = None,
     key: list[str] | None = None,
     definitions: list[SchemaDefinition] | None = None,
+    index_granularity: int | None = None,
 ) -> PlannedCutover:
     new = new_def or NEW
     return plan_cutover(
@@ -117,6 +137,7 @@ def plan(
             old_table=old_table,  # type: ignore[arg-type]
             cluster=cluster,
             stamp=STAMP,
+            index_granularity=index_granularity,
         ),
         definitions=definitions if definitions is not None else [new],
     )
@@ -271,12 +292,39 @@ def test_exchange_is_guarded_on_every_attempt() -> None:
     assert exchange.before_retry is not None
     assert f"{exchange.before_retry};" == ops[9].sql
     assert "\n" not in exchange.before_retry
+    granularity = _norm(_GRANULARITY)
+
+    def layout(name: str) -> str:
+        return (
+            f"(SELECT any(tuple(engine, sorting_key, primary_key, partition_key, "
+            f"tuple({granularity}))) FROM system.tables WHERE database = 'app' AND name = '{name}')"
+        )
+
     assert (
-        "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables "
-        "WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, "
-        "primary_key, partition_key)) FROM system.tables WHERE database = 'app' AND "
-        "name = 'events__cutover_20261024120000_snapshot')"
-    ) in exchange.before_retry
+        f"{layout('events')} = {layout('events__cutover_20261024120000_snapshot')}"
+        in exchange.before_retry
+    )
+
+
+def test_compares_a_numeric_read_only_setting_by_value() -> None:
+    # ClickHouse may store 1e6 as 1000000. on one table and 1000000 on another (#511).
+    ops = plan(new_def=events(settings={"index_granularity_bytes": 1e6})).operations
+    guard = next(op for op in ops if op.type == "exchange_tables").before_retry or ""
+    stored = "extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')"
+    assert _norm(stored) in guard
+
+
+def test_cuts_over_a_change_of_read_only_settings_only() -> None:
+    # The layout tells the tables apart by those settings too (#511).
+    new_def = events(settings={"index_granularity": 4096})
+    ops = plan(new_def=new_def).operations
+    guard = next(op for op in ops if op.type == "exchange_tables").before_retry or ""
+    assert "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192'," in guard
+    created = next(op for op in ops if op.type == "create_table")
+    assert "SETTINGS index_granularity = 4096;" in created.sql
+    minmax = plan(new_def=events(settings={"add_minmax_index_for_numeric_columns": 1})).operations
+    minmax_guard = next(op for op in minmax if op.type == "exchange_tables").before_retry or ""
+    assert "add_minmax_index_for_numeric_columns = ([^,]*)" in minmax_guard
 
 
 # An INSERT that resolved the table before the swap and the mirror's target
@@ -1338,3 +1386,39 @@ def test_cutover_chunk_skips_keys_the_shadow_holds() -> None:
         "SETTINGS async_insert=0, asterisk_include_materialized_columns=0, "
         "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1",
     ]
+
+
+def test_checks_the_old_table_stores_the_readonly_settings_before_it_creates_anything() -> None:
+    start = plan().operations[0]
+    assert start.type == "cutover_validate"
+    assert (
+        "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
+        f"(SELECT any(tuple({_norm(_GRANULARITY)})) FROM system.tables WHERE database = "
+        f"'app' AND name = 'events') = tuple({_norm(_LIT_8192)})) AS settings"
+    ) in start.sql
+    assert (
+        "throwIf(min(settings) = 0, 'app.events does not store the read-only settings this "
+        "migration expects (index_granularity = 8192)"
+    ) in start.sql
+    assert "Nothing was created or copied." in start.sql
+
+    # A setting only the new table declares is expected absent from the old one.
+    minmax = plan(
+        new_def=events(settings={"add_minmax_index_for_numeric_columns": True})
+    ).operations[0].sql
+    assert f"= tuple({_norm(_LIT_EMPTY)}, {_norm(_LIT_8192)})) AS settings" in minmax
+    assert "(add_minmax_index_for_numeric_columns unset, index_granularity = 8192)" in minmax
+
+
+def test_takes_a_missing_index_granularity_as_the_configured_server_default() -> None:
+    ops = plan(index_granularity=4096).operations
+    assert f"= tuple({_norm(_LIT_4096)})) AS settings" in ops[0].sql
+    assert (
+        "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',"
+    ) in ops[0].sql
+    exchange = next(op for op in ops if op.type == "exchange_tables")
+    assert "= '', '4096'," in (exchange.before_retry or "")
+    snapshot = next(
+        op for op in ops if op.key == "table:app.events__cutover_20261024120000_snapshot"
+    )
+    assert "SETTINGS index_granularity = 4096" in snapshot.sql

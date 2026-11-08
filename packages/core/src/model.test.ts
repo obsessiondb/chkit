@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { resolveConfig } from './model.js'
+import { configuredIndexGranularity, resolveConfig } from './model.js'
 
 function resolveSecure(url: string, secure?: boolean): boolean | undefined {
   return resolveConfig({ schema: 's', clickhouse: { url, secure } }).clickhouse?.secure
@@ -47,5 +47,25 @@ describe('resolveConfig clickhouse.secure', () => {
     expect(() => resolveSecure('https://host', false)).toThrow(
       'clickhouse.secure is false but clickhouse.url uses https://',
     )
+  })
+})
+
+describe('resolveConfig clickhouse.indexGranularity', () => {
+  const resolve = (indexGranularity?: number) =>
+    resolveConfig({ schema: 's', clickhouse: { url: 'http://localhost:8123', indexGranularity } })
+
+  test('defaults to 8192, the ClickHouse default', () => {
+    expect(resolve().clickhouse?.indexGranularity).toBe(8192)
+    expect(configuredIndexGranularity(resolveConfig({ schema: 's' }))).toBe(8192)
+  })
+
+  test('takes the server default the config names', () => {
+    expect(configuredIndexGranularity(resolve(4096))).toBe(4096)
+  })
+
+  test('rejects a value that is not a positive integer', () => {
+    for (const value of [0, -1, 1.5, Number.NaN]) {
+      expect(() => resolve(value)).toThrow('Invalid clickhouse.indexGranularity')
+    }
   })
 })

@@ -1,5 +1,9 @@
 import {
   codecFingerprint,
+  columnTypeFingerprint,
+  renderColumnType,
+  DEFAULT_INDEX_GRANULARITY,
+  literalDefaultFingerprint,
   constraintExpression,
   constraintKind,
   identifierName,
@@ -12,7 +16,6 @@ import {
   normalizeProjectionIndex,
   normalizeSQLFragment,
   renderDefault,
-  renderColumnType,
   renderKeyClauseColumns,
   splitTopLevelComma,
   sqlExpressionFingerprint,
@@ -28,6 +31,7 @@ import {
   type TableDefinition,
   vectorIndexGranularity,
   type ViewDefinition,
+  withDefaultIndexGranularity,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
 
@@ -275,10 +279,11 @@ function normalizeColumnShape(column: ColumnDefinition): string {
     rendered === undefined ||
     (column.defaultKind === 'EPHEMERAL' && isSyntheticEphemeralDefault(rendered))
       ? ''
-      : sqlExpressionFingerprint(rendered)
+      : (literalDefaultFingerprint(rendered) ?? sqlExpressionFingerprint(rendered))
   const parts = [
-    // Introspection unwraps Nullable(T) into type=T plus nullable=true.
-    `type=${renderColumnType(column)}`,
+    // Introspection unwraps Nullable(T) into type=T plus nullable=true, and
+    // ClickHouse spaces the type its own way (`Decimal(10, 2)`).
+    `type=${columnTypeFingerprint(column)}`,
     `default=${normalizedDefault}`,
     `defaultKind=${column.defaultKind ?? 'DEFAULT'}`,
     `comment=${column.comment?.trim() ?? ''}`,
@@ -457,7 +462,9 @@ export function collectTableSqlFragments(
 export function compareTableShape(
   expected: TableDefinition,
   actual: ActualTableShape,
-  canonicalizer?: SqlCanonicalizer
+  canonicalizer?: SqlCanonicalizer,
+  /** `clickhouse.indexGranularity`, for a live table that does not show index_granularity. */
+  indexGranularity: number = DEFAULT_INDEX_GRANULARITY
 ): TableDriftDetail | null {
   const columnDiff = diffByName(
     expected.columns,
@@ -481,7 +488,7 @@ export function compareTableShape(
     : expected.settings ?? {}
   const actualSettings = kafka
     ? Object.fromEntries(Object.entries(parseKafkaSettings(actual.settings)).map(([key, value]) => [key, kafkaSettingFingerprint(value)]))
-    : actual.settings
+    : withDefaultIndexGranularity(actual.engine ?? expected.engine, actual.settings, indexGranularity) ?? {}
   const settingDiffs = diffSettings(expectedSettings, actualSettings)
 
   const expectedIndexes = new Map(

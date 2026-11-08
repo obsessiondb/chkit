@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import fg from 'fast-glob'
 
-import type { MigrationOperation, Snapshot } from '@chkit/core'
+import type { CanonicalizeOptions, MigrationOperation, Snapshot } from '@chkit/core'
 
 import { parseSnapshotDocument, type SnapshotUnreadableReason } from './snapshot-document.js'
 
@@ -26,10 +26,15 @@ interface ChecksumMismatch {
   actual: string
 }
 
-export async function readSnapshot(metaDir: string): Promise<Snapshot | null> {
+/**
+ * `options.indexGranularity` is `clickhouse.indexGranularity`: a snapshot an
+ * older chkit wrote has no index_granularity for a MergeTree table that does
+ * not declare it, and gets the server default.
+ */
+export async function readSnapshot(metaDir: string, options: CanonicalizeOptions = {}): Promise<Snapshot | null> {
   const file = join(metaDir, 'snapshot.json')
   if (!existsSync(file)) return null
-  const parsed = parseSnapshotDocument(await readFile(file, 'utf8'))
+  const parsed = parseSnapshotDocument(await readFile(file, 'utf8'), options)
   if (parsed.status === 'ok') return parsed.snapshot
   throw new Error(describeUnreadableSnapshot(file, parsed.reason))
 }

@@ -1,7 +1,7 @@
 import process from 'node:process'
 
 import { loadSchemaDefinitions as loadSchemaDefinitionsFromCore } from '@chkit/core/schema-loader'
-import type { ParsedFlags, ResolvedChxConfig, SchemaDefinition } from '@chkit/core'
+import { configuredIndexGranularity, type CanonicalizeOptions, type ParsedFlags, type ResolvedChxConfig, type SchemaDefinition } from '@chkit/core'
 import type { PluginRuntime } from '../plugins.js'
 import { debug } from './debug.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
@@ -34,7 +34,9 @@ export async function loadSchemaDefinitionsWithHooks(
     flags: input.flags,
   })
 
-  const definitions = await loadSchemaDefinitions(input.config.schema)
+  const definitions = await loadSchemaDefinitions(input.config.schema, {
+    indexGranularity: configuredIndexGranularity(input.config),
+  })
   return deps.pluginRuntime.runOnSchemaLoaded({
     command: input.command,
     config: input.config,
@@ -45,10 +47,13 @@ export async function loadSchemaDefinitionsWithHooks(
   })
 }
 
-export async function loadSchemaDefinitions(schemaGlobs: string | string[]): Promise<SchemaDefinition[]> {
+export async function loadSchemaDefinitions(
+  schemaGlobs: string | string[],
+  options: CanonicalizeOptions = {},
+): Promise<SchemaDefinition[]> {
   const globs = Array.isArray(schemaGlobs) ? schemaGlobs : [schemaGlobs]
   debug('schema', `loading definitions from globs: [${globs.join(', ')}] (cwd: ${process.cwd()})`)
-  const definitions = await loadSchemaDefinitionsFromCore(schemaGlobs, { cwd: process.cwd() })
+  const definitions = await loadSchemaDefinitionsFromCore(schemaGlobs, { ...options, cwd: process.cwd() })
   debug('schema', `loaded ${definitions.length} schema definitions`)
   return definitions
 }

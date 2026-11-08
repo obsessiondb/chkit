@@ -192,6 +192,31 @@ class PluginRuntime:
                 definitions = list(result)
         return definitions
 
+    def run_on_snapshot_loaded(
+        self, context: ChxOnSchemaLoadedContext
+    ) -> Sequence[Any]:
+        """Runs in ``generate`` on the previous snapshot's definitions (TS
+        ``runOnSnapshotLoaded``, #466). A plugin that rewrites the schema in
+        ``on_schema_loaded`` applies the same rewrite here, so a snapshot written
+        before the rewrite existed does not plan a change."""
+        definitions = list(context.definitions)
+        for entry in self._plugins:
+            hook = _get_hook(entry.plugin, "on_snapshot_loaded")
+            if hook is None:
+                continue
+            updated_ctx = ChxOnSchemaLoadedContext(
+                command=context.command,
+                config=context.config,
+                table_scope=context.table_scope,
+                flags=context.flags,
+                definitions=definitions,
+                json_mode=context.json_mode,
+            )
+            result = self._call_hook(entry, "onSnapshotLoaded", hook, updated_ctx)
+            if result is not None:
+                definitions = list(result)
+        return definitions
+
     def run_on_plan_created(self, context: ChxOnPlanCreatedContext) -> Any:
         plan = context.plan
         for entry in self._plugins:
