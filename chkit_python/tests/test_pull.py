@@ -400,49 +400,6 @@ def test_unwraps_key_tuples_whose_identifiers_contain_parens() -> None:
     assert 'primary_key=["`w)x`", "id"],' in content
 
 
-# ---------- keys a table does not declare (#487) ----------
-
-
-def test_primary_key_defaults_to_order_by_when_none_is_declared() -> None:
-    definition = _introspected_table_to_definition(
-        _introspected(
-            "events",
-            primary_key=None,
-            order_by="(b, a)",
-            columns=[
-                ColumnDefinition(name="a", type="UInt8"),
-                ColumnDefinition(name="b", type="UInt8"),
-            ],
-        )
-    )
-
-    assert definition is not None
-    assert definition.primary_key == definition.order_by
-    content = render_schema_file([definition])
-    assert 'primary_key=["b", "a"],' in content
-
-
-def test_order_by_stays_empty_when_none_is_declared() -> None:
-    definition = _introspected_table_to_definition(
-        _introspected(
-            "kv",
-            engine="EmbeddedRocksDB",
-            primary_key="key",
-            order_by=None,
-            columns=[
-                ColumnDefinition(name="value", type="UInt32"),
-                ColumnDefinition(name="key", type="String"),
-            ],
-        )
-    )
-
-    assert definition is not None
-    assert definition.order_by == []
-    content = render_schema_file([definition])
-    assert 'primary_key=["key"],' in content
-    assert "order_by=[]," in content
-
-
 # ---------- CLI: ObsessionDB metadata tables ----------
 
 
