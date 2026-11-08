@@ -3,24 +3,20 @@ import { isTrivia, readHeredoc, tokenizeSQL, type SQLToken } from './sql-lexer.j
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
   let current = ''
-  // Inside a `//`, `# ` or `#!` comment only the newline and `;` count: the
-  // splitter still cuts at a `;` there (see extractExecutableStatements).
   let inLineComment = false
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
 
-    if (inLineComment) {
-      if (ch === '\n') inLineComment = false
-    } else {
-      const end = quotedEnd(sql, i)
-      if (end !== undefined) {
-        current += sql.slice(i, end)
-        i = end - 1
-        continue
-      }
-      inLineComment = startsLineComment(sql, i)
+    const end = quotedEnd(sql, i, inLineComment)
+    if (end !== undefined) {
+      const quoted = sql.slice(i, end)
+      current += quoted
+      if (quoted.includes('\n')) inLineComment = false
+      i = end - 1
+      continue
     }
+    inLineComment = ch !== '\n' && (inLineComment || startsLineComment(sql, i))
 
     if (ch === ';') {
       const trimmed = current.trim()
@@ -56,20 +52,16 @@ export function extractExecutableStatements(sql: string): string[] {
       continue
     }
 
-    if (inLineComment) {
-      if (ch === '\n') inLineComment = false
-      stripped += ch
-      continue
-    }
-
-    const end = quotedEnd(sql, i)
+    const end = quotedEnd(sql, i, inLineComment)
     if (end !== undefined) {
-      stripped += sql.slice(i, end)
+      const quoted = sql.slice(i, end)
+      stripped += quoted
+      if (quoted.includes('\n')) inLineComment = false
       i = end - 1
       continue
     }
 
-    inLineComment = startsLineComment(sql, i)
+    inLineComment = ch !== '\n' && (inLineComment || startsLineComment(sql, i))
     stripped += ch
   }
 
@@ -89,7 +81,8 @@ export function extractExecutableStatements(sql: string): string[] {
 const NAME_CHAR = /[A-Za-z0-9_$]/
 
 // `//x`, `# x` and `#!x` start a line comment, as in ClickHouse (`#x` does not).
-// A quote or `$` inside one starts nothing.
+// The splitter does not skip these comments (#197), but a `$` inside one starts
+// no heredoc: a heredoc there would swallow the statements after the comment.
 function startsLineComment(sql: string, i: number): boolean {
   const ch = sql[i]
   const next = sql[i + 1]
@@ -100,12 +93,12 @@ function startsLineComment(sql: string, i: number): boolean {
 // starts at `i`, or undefined when none starts there: a `;` or `--` inside one
 // is text. An unclosed quote or block comment runs to the end of the input; an
 // unclosed `$tag$` is not a heredoc, as in ClickHouse.
-function quotedEnd(sql: string, i: number): number | undefined {
+function quotedEnd(sql: string, i: number, inLineComment: boolean): number | undefined {
   const ch = sql[i] ?? ''
   if (ch === '/' && sql[i + 1] === '*') return blockCommentEnd(sql, i)
   if (ch === "'" || ch === '"' || ch === '`') return quoteEnd(sql, i, ch)
   // `a$$b` is one name: a heredoc starts only where a name does not go on.
-  if (ch === '$' && !NAME_CHAR.test(sql[i - 1] ?? '')) return readHeredoc(sql, i)
+  if (ch === '$' && !inLineComment && !NAME_CHAR.test(sql[i - 1] ?? '')) return readHeredoc(sql, i)
   return undefined
 }
 

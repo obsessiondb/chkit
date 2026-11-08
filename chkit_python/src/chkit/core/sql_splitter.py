@@ -19,30 +19,26 @@ def split_sql_statements(text: str) -> list[str]:
     """Split a SQL blob into statements, each ending in ``;``.
 
     A ``;`` inside a string, a quoted identifier, a nested ``/* */`` comment
-    or a ``$tag$`` heredoc does not end a statement. Inside a ``//``, ``# ``
-    or ``#!`` comment a quote or ``$`` starts nothing, but a ``;`` still cuts.
-    ``--`` comments are not special here: `extract_executable_statements`
-    strips them first.
+    or a ``$tag$`` heredoc does not end a statement; a ``$`` inside a ``//``,
+    ``# `` or ``#!`` comment starts no heredoc. ``--`` comments are not
+    special here: `extract_executable_statements` strips them first.
     """
     statements: list[str] = []
     current: list[str] = []
-    # Inside a `//`, `# ` or `#!` comment only the newline and `;` count: the
-    # splitter still cuts at a `;` there (see extract_executable_statements).
     in_line_comment = False
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
-        if in_line_comment:
-            if ch == "\n":
+        end = _quoted_end(text, i, in_line_comment=in_line_comment)
+        if end is not None:
+            quoted = text[i:end]
+            current.append(quoted)
+            if "\n" in quoted:
                 in_line_comment = False
-        else:
-            end = _quoted_end(text, i)
-            if end is not None:
-                current.append(text[i:end])
-                i = end
-                continue
-            in_line_comment = _starts_line_comment(text, i)
+            i = end
+            continue
+        in_line_comment = ch != "\n" and (in_line_comment or _starts_line_comment(text, i))
         if ch == ";":
             trimmed = js_trim("".join(current))
             if trimmed:
@@ -84,18 +80,15 @@ def extract_executable_statements(text: str) -> list[str]:
                 break
             i = newline
             continue
-        if in_line_comment:
-            if ch == "\n":
-                in_line_comment = False
-            stripped.append(ch)
-            i += 1
-            continue
-        end = _quoted_end(text, i)
+        end = _quoted_end(text, i, in_line_comment=in_line_comment)
         if end is not None:
-            stripped.append(text[i:end])
+            quoted = text[i:end]
+            stripped.append(quoted)
+            if "\n" in quoted:
+                in_line_comment = False
             i = end
             continue
-        in_line_comment = _starts_line_comment(text, i)
+        in_line_comment = ch != "\n" and (in_line_comment or _starts_line_comment(text, i))
         stripped.append(ch)
         i += 1
 
@@ -111,11 +104,13 @@ def extract_executable_statements(text: str) -> list[str]:
 
 def _starts_line_comment(text: str, i: int) -> bool:
     """``//x``, ``# x`` and ``#!x`` start a line comment, as in ClickHouse (``#x``
-    does not). A quote or ``$`` inside one starts nothing."""
+    does not). The splitter does not skip these comments (#197), but a ``$``
+    inside one starts no heredoc: a heredoc there would swallow the statements
+    after the comment."""
     return text.startswith(("//", "# ", "#!"), i)
 
 
-def _quoted_end(text: str, i: int) -> int | None:
+def _quoted_end(text: str, i: int, *, in_line_comment: bool) -> int | None:
     """The end of the string, quoted identifier, block comment or heredoc that
     starts at ``i``, or None when none starts there.
 
@@ -128,7 +123,7 @@ def _quoted_end(text: str, i: int) -> int | None:
     if ch in ("'", '"', "`"):
         return _quote_end(text, i, ch)
     # `a$$b` is one name: a heredoc starts only where a name does not go on.
-    if ch == "$" and not (i > 0 and _NAME_CHAR.match(text[i - 1])):
+    if ch == "$" and not in_line_comment and not (i > 0 and _NAME_CHAR.match(text[i - 1])):
         return read_heredoc(text, i)
     return None
 

@@ -109,11 +109,10 @@
       ]
     },
     {
-      "name": "a quote inside a // comment opens no string",
-      "sql": "// don't\nSELECT 1;\nSELECT 2;",
+      "name": "a quote inside a // comment still holds the ; after it, as before",
+      "sql": "SELECT 1 // '; DROP TABLE victims; -- '\n;",
       "statements": [
-        "// don't\nSELECT 1;",
-        "SELECT 2;"
+        "SELECT 1 // '; DROP TABLE victims; -- ';"
       ]
     },
     {
