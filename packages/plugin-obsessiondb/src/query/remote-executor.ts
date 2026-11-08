@@ -278,7 +278,7 @@ WHERE is_temporary = 0
 
 			const [tables, columns, indexes] = await Promise.all([
 				executor.query<SystemTableRow>(
-					`SELECT database, name, engine, create_table_query, comment FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
+					`SELECT database, name, engine, create_table_query, primary_key, comment FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
 				),
 				executor.query<SystemColumnRow>(
 					`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position, compression_codec FROM system.columns WHERE database IN (${quoted})`,
