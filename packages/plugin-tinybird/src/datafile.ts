@@ -232,3 +232,18 @@ function dedent(text: string): string {
   }, undefined) ?? ''
   return lines.map((line) => (line.trim().length === 0 ? line.trim() : line.slice(common.length))).join('\n')
 }
+
+const ENV_SUBSTITUTION = /\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/
+
+/**
+ * Tinybird substitutes `$VAR` and `${VAR}` from the environment in every
+ * single-line command (`eval_var` in `assign_var`); the importer does not, so
+ * each command that uses it is reported.
+ */
+export function envSubstitutions(file: Datafile): string[] {
+  const vars = [...file.vars, ...file.nodes.flatMap((node) => [...node.vars])]
+  return vars.flatMap(([key, value]) => {
+    const match = ENV_SUBSTITUTION.exec(value.replace(/\$\$/g, ''))
+    return match ? [`${key} uses environment substitution (${match[0]}), which the importer does not evaluate`] : []
+  })
+}

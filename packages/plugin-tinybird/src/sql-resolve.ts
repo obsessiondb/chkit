@@ -36,6 +36,9 @@ export interface ResolvedSql {
   pipes: Set<string>
 }
 
+/** The SQL of a node whose template has params: resolving a reference to it fails. */
+export const TEMPLATED_NODE = '\u0000templated'
+
 export class SqlResolveError extends Error {
   constructor(message: string) {
     super(message)
@@ -74,6 +77,7 @@ function resolveIn(
   const sql = nodes.get(nodeName)
   if (sql === undefined) throw new SqlResolveError(`node ${key} does not exist`)
   if (stack.includes(key)) throw new SqlResolveError(`nodes reference each other in a cycle: ${[...stack, key].join(' → ')}`)
+  if (sql === TEMPLATED_NODE) throw new SqlResolveError(`node ${key} uses Tinybird template expressions, which a ClickHouse view cannot take`)
   const tokens = tokenizeSQL(sql.trim().replace(/;\s*$/, ''))
   const replacements = new Map<number, string>()
   const known = new Set([

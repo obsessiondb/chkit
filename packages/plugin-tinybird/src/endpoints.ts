@@ -1,6 +1,6 @@
 import type { Datafile, DatafileNode } from './datafile.js'
 import type { PipeScope } from './pipes.js'
-import { PYTHON_FLOAT_SOURCE } from './python-float.js'
+import { PYTHON_FLOAT_SOURCE, pythonFloat } from './python-float.js'
 import { oneLine, type Translation } from './report.js'
 import { resolveNode, SqlResolveError } from './sql-resolve.js'
 
@@ -191,7 +191,15 @@ function parseParam(expression: string): Translation<EndpointParam> {
     if (key === 'default') {
       const literal = pythonLiteral(arg.value)
       if (literal === undefined) return { ok: false, reasons: [`the default of ${nameArg.value} is not a plain literal (Python string escapes and adjacent literals are not translated)`] }
-      defaultValue = literal
+      // A number given to a String-like param renders as Python's str() of it: String(x, 1.50) → '1.5'.
+      const numberLiteral = !/^['"]/.test(arg.value)
+      if (numberLiteral && !PARAM_KINDS[type]?.cast) {
+        // Python 3 rejects an integer with a leading zero (a float may have one).
+        if (!literal.includes('.') && /^-?0\d/.test(literal)) {
+          return { ok: false, reasons: [`the default ${literal} of ${nameArg.value} is not a Python number literal`] }
+        }
+        defaultValue = literal.includes('.') ? pythonFloat(Number(literal)) : BigInt(literal).toString()
+      } else defaultValue = literal
     } else if (key === 'required') {
       // Metadata only: Tinybird accepts any value and does not read it at runtime.
       required = /^(['"]?)(True|true)\1$/.test(arg.value)
@@ -253,7 +261,7 @@ function splitArgs(text: string): Array<{ key?: string; value: string }> | undef
 }
 
 /** A Python string or number literal, as Tinybird's template sees it. */
-function pythonLiteral(text: string): string | number | undefined {
+function pythonLiteral(text: string): string | undefined {
   const quoted = /^(['"])([\s\S]*)\1$/.exec(text)
   // Escapes and adjacent literals ('it''s') follow Python rules the importer does not reproduce.
   if (quoted) return /[\\'"]/.test(quoted[2] ?? '') ? undefined : (quoted[2] ?? '')

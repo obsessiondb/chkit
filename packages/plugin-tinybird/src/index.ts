@@ -15,6 +15,7 @@ import {
 import { renderSchemaFile } from '@chkit/plugin-pull'
 import { z } from 'zod'
 
+import { envSubstitutions } from './datafile.js'
 import { translateDatasource } from './datasource.js'
 import { renderQueriesFile, translateEndpoint, type TranslatedEndpoint } from './endpoints.js'
 import { type CopyFallback, staticSql, translateCopy, translateMaterialized } from './pipes.js'
@@ -149,7 +150,7 @@ export function createTinybirdPlugin(options: TinybirdPluginOptions = {}): Tinyb
               const writes: Array<{ path: string; content: string }> = [{ path: outFile, content: imported.schemaSource }]
               if (queriesOutFile && imported.queriesSource) writes.push({ path: queriesOutFile, content: imported.queriesSource })
               if (reportFile) writes.push({ path: reportFile, content: `${JSON.stringify(reportJson(imported), null, 2)}\n` })
-              await assertWritable(writes.map((write) => write.path).filter((path) => path !== reportFile), effective.overwrite)
+              await assertWritable(writes.map((write) => write.path), effective.overwrite)
               for (const write of writes) await writeAtomically(write.path, write.content)
             }
             const counts = countEntries(imported.report)
@@ -210,6 +211,7 @@ export async function importTinybirdProject(input: { projectDir: string; databas
   const unreadablePipes = new Map<string, string>()
   for (const { file } of readable) {
     if (file.unsupported.length > 0) unreadablePipes.set(file.name, includeReason(file))
+    else if (envSubstitutions(file).length > 0) unreadablePipes.set(file.name, envSubstitutions(file).join('; '))
     else if (file.nodes.some((node) => staticSql(node.sql) === undefined)) unreadablePipes.set(file.name, 'its SQL uses Tinybird template expressions')
   }
   const referenceable = new Map(
@@ -223,9 +225,10 @@ export async function importTinybirdProject(input: { projectDir: string; databas
 
   for (const { file, type, output } of project.pipes) {
     // INCLUDE splices datafile text in place, so nodes and even the pipe's TYPE may come from it.
-    if (file.unsupported.length > 0) {
+    const blocked = [...(file.unsupported.length > 0 ? [includeReason(file)] : []), ...envSubstitutions(file)]
+    if (blocked.length > 0) {
       const kind = type === 'materialized' || type === 'copy' || type === 'endpoint' ? type : 'pipe'
-      entries.push({ kind, name: file.name, file: file.path, status: 'untranslatable', reasons: [includeReason(file)] })
+      entries.push({ kind, name: file.name, file: file.path, status: 'untranslatable', reasons: blocked })
       continue
     }
     if (type === 'materialized' || type === 'copy') {
@@ -257,6 +260,9 @@ export async function importTinybirdProject(input: { projectDir: string; databas
       continue
     }
     entries.push({ kind: 'other', name: file.name, file: file.path, status: 'skipped', reasons: [skipReason(type)] })
+  }
+  for (const { path, reason } of project.ignoredFiles) {
+    entries.push({ kind: 'other', name: path, file: path, status: 'skipped', reasons: [reason] })
   }
   for (const path of project.otherFiles) {
     entries.push({ kind: 'other', name: path, file: path, status: 'skipped', reasons: ['connection and include files are not translated (ingestion and connectors are out of scope)'] })

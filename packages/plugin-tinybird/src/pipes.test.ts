@@ -45,8 +45,16 @@ describe('translateMaterialized', () => {
     const templated = pipe(['NODE n', 'SQL >', '    %', '    SELECT {{ String(x) }} FROM events', 'TYPE materialized', 'DATASOURCE daily'])
     expect(translateMaterialized(templated.file, templated.output, scope)).toEqual({
       ok: false,
-      reasons: ['node n uses Tinybird template expressions, which have no p equivalent in a ClickHouse view'],
+      reasons: ['node n: node n uses Tinybird template expressions, which a ClickHouse view cannot take'],
     })
+    const read = pipe(['NODE t', 'SQL >', '    %', '    SELECT {{ String(x) }} AS x', 'NODE n', 'SQL >', '    SELECT * FROM t', 'TYPE materialized', 'DATASOURCE daily'])
+    expect(translateMaterialized(read.file, read.output, scope)).toEqual({
+      ok: false,
+      reasons: ['node n: node t uses Tinybird template expressions, which a ClickHouse view cannot take'],
+    })
+    // A templated node the output never reads does not matter, as in Tinybird.
+    const unread = pipe(['NODE t', 'SQL >', '    %', '    SELECT {{ String(x) }} AS x', 'NODE n', 'SQL >', '    SELECT 1 AS c FROM events', 'TYPE materialized', 'DATASOURCE daily'])
+    expect(translateMaterialized(unread.file, unread.output, scope).ok).toBe(true)
     const noTarget = pipe(['NODE n', 'SQL >', '    SELECT 1', 'TYPE materialized'])
     expect(translateMaterialized(noTarget.file, noTarget.output, scope)).toEqual({ ok: false, reasons: ['the materialized node has no DATASOURCE'] })
     const badTarget = pipe(['NODE n', 'SQL >', '    SELECT 1', 'TYPE materialized', 'DATASOURCE sampled'])

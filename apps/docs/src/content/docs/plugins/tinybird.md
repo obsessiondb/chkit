@@ -120,6 +120,8 @@ Translated param types: `String`, `Int8`–`Int64`, `UInt8`–`UInt64`, `Float32
 - `ENGINE_SAMPLING_KEY`: the chkit table DSL has no `SAMPLE BY`. Pipes that read such a datasource are not translated either.
 - Templated SQL in materialized and copy pipes, reads of Tinybird service datasources (`tinybird.*`) and of other workspaces.
 - Ingestion (Events API, connectors, JSONPaths at runtime), tokens, sinks and connection files.
+- Datafiles Tinybird does not build in the workspace: under `vendor/` (other workspaces' datasources) or deeper than two folder levels. They are listed as skipped.
+- Commands that use environment substitution (`$VAR`, `${VAR}`), which Tinybird evaluates at build time.
 
 ## Parity with Tinybird
 

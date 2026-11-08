@@ -8,7 +8,7 @@ import {
   type TableDefinition,
 } from '@chkit/core'
 
-import type { Datafile } from './datafile.js'
+import { type Datafile, envSubstitutions } from './datafile.js'
 import type { Translation } from './report.js'
 import { parseSchemaColumns, type TinybirdColumn } from './schema-columns.js'
 import { ttlPartitionVerdict } from './ttl-partition.js'
@@ -31,7 +31,6 @@ const ENGINES: Record<string, { name: string; params: string[]; keyless?: boolea
 const INGESTION_PREFIXES = ['KAFKA_', 'IMPORT_', 'PG_']
 // `_PATTERN_INDEX_ENTRY` of the Tinybird CLI, matched from the start of the entry as Python's re.match does.
 const INDEX_ENTRY = /^(\w+)\s+([\w\s*[\]*(),'"-><.]+)\s+TYPE\s+(\w+)(?:\(([\w\s*.,]+)\))?(?:\s+GRANULARITY\s+(\d+))?/
-const ENV_SUBSTITUTION = /\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/
 
 export function translateDatasource(file: Datafile, database: string): Translation<TableDefinition> {
   const reasons: string[] = []
@@ -50,11 +49,7 @@ export function translateDatasource(file: Datafile, database: string): Translati
   const engine = ENGINES[engineName.toLowerCase()]
   if (!engine) return { ok: false, reasons: [`engine ${engineName} is not one Tinybird supports`] }
 
-  for (const [key, value] of file.vars) {
-    if (key.startsWith('ENGINE') && ENV_SUBSTITUTION.test(value)) {
-      reasons.push(`${key} uses environment substitution (${ENV_SUBSTITUTION.exec(value)?.[0]}), which the importer does not evaluate`)
-    }
-  }
+  reasons.push(...envSubstitutions(file))
   if (file.vars.get('ENGINE_SAMPLING_KEY')) {
     reasons.push(`ENGINE_SAMPLING_KEY (SAMPLE BY ${file.vars.get('ENGINE_SAMPLING_KEY')}): the chkit table DSL has no SAMPLE BY`)
   }
@@ -144,7 +139,8 @@ function parseSettings(value: string | undefined): Record<string, string | numbe
     if (eq < 0) continue
     const key = item.slice(0, eq).trim()
     const raw = item.slice(eq + 1).trim()
-    if (key) settings[key] = /^-?\d+(?:\.\d+)?$/.test(raw) ? Number(raw) : raw
+    // A number beyond 2^53 keeps its digits as SQL text.
+    if (key) settings[key] = /^-?\d+(?:\.\d+)?$/.test(raw) && (raw.includes('.') || Number.isSafeInteger(Number(raw))) ? Number(raw) : raw
   }
   return settings
 }

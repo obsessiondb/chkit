@@ -127,6 +127,11 @@ describe('translateDatasource', () => {
     ])
   })
 
+  test('a setting beyond 2^53 keeps its digits', () => {
+    const translated = datasource([...SCHEMA, 'ENGINE "MergeTree"', 'ENGINE_SETTINGS "max_bytes_to_merge_at_max_space_in_pool = 18446744073709551615, merge_max_block_size = 8192"'])
+    expect(translated.ok && translated.value.settings).toEqual({ max_bytes_to_merge_at_max_space_in_pool: '18446744073709551615', merge_max_block_size: 8192 })
+  })
+
   test('Null takes no keys or settings', () => {
     const translated = datasource([...SCHEMA, 'ENGINE "Null"'])
     expect(translated.ok && translated.value).toMatchObject({ engine: 'Null()', orderBy: [], primaryKey: [] })

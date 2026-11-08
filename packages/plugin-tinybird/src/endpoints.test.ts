@@ -98,6 +98,13 @@ describe('translateEndpoint', () => {
     expect(translated.ok && translated.value.paramSets[0]).toEqual({ x: 'chkit' })
   })
 
+  test("a number given to a String param renders as Python's str() of it", () => {
+    const translated = endpoint(['%', "SELECT {{ String(a, 1.50) }}, {{ String(b, 10) }}, {{ DateTime(c, '2024-01-01 00:00:00') }} FROM events"])
+    expect(translated.ok && translated.value.params.map((param) => param.default)).toEqual(['1.5', '10', '2024-01-01 00:00:00'])
+    const leadingZero = endpoint(['%', 'SELECT {{ String(a, 007) }} FROM events'])
+    expect(!leadingZero.ok && leadingZero.reasons.join(' | ')).toContain('the default 007 of a is not a Python number literal')
+  })
+
   test('a float default beyond 2^53 stays a number, sent as Python formats it', () => {
     const translated = endpoint(['%', 'SELECT {{ Float64(a, 99999999999999999999) }}, {{ Float64(b, 12345678901234567890.5) }} FROM events'])
     expect(translated.ok && translated.value.params.map((param) => param.default)).toEqual([1e20, Number('12345678901234567890.5')])

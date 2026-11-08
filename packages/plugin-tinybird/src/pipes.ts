@@ -3,7 +3,7 @@ import type { MaterializedViewDefinition } from '@chkit/core'
 import { cronToRefresh } from './cron.js'
 import type { Datafile, DatafileNode } from './datafile.js'
 import type { Translation } from './report.js'
-import { type ResolveScope, resolveNode, SqlResolveError } from './sql-resolve.js'
+import { type ResolveScope, resolveNode, SqlResolveError, TEMPLATED_NODE } from './sql-resolve.js'
 
 export interface PipeScope extends Omit<ResolveScope, 'nodes'> {}
 
@@ -93,11 +93,8 @@ function resolveOutput(file: Datafile, output: DatafileNode, scope: PipeScope, t
     return { ok: false, reasons: [`its target datasource ${target} does not translate (${scope.untranslatableDatasources.get(target)})`] }
   }
   if (!scope.datasources.has(target)) return { ok: false, reasons: [`its target datasource ${target} is not in the project`] }
-  const templated = file.nodes.filter((node) => staticSql(node.sql) === undefined)
-  if (templated.length > 0) {
-    return { ok: false, reasons: [`node ${templated.map((node) => node.name).join(', ')} uses Tinybird template expressions, which have no ${file.name} equivalent in a ClickHouse view`] }
-  }
-  const nodes = new Map(file.nodes.map((node) => [node.name, staticSql(node.sql) ?? '']))
+  // Only the nodes the output reads matter; Tinybird builds a pipe with an unread templated node.
+  const nodes = new Map(file.nodes.map((node) => [node.name, staticSql(node.sql) ?? TEMPLATED_NODE]))
   try {
     const resolved = resolveNode(output.name, { ...scope, nodes })
     return { ok: true, value: resolved.sql, notes: resolved.pipes.size > 0 ? [`inlines pipe${resolved.pipes.size === 1 ? '' : 's'} ${[...resolved.pipes].join(', ')}`] : [] }

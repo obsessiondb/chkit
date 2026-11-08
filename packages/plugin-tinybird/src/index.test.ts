@@ -129,6 +129,46 @@ describe('tinybird import command', () => {
     expect(reader?.status === 'untranslatable' && reader.reasons[0]).toContain('reads pipe shared, which cannot be inlined (INCLUDE (line 1) is not evaluated')
   })
 
+  test('vendored and too-deep datafiles are skipped, as Tinybird does not build them in this workspace', async () => {
+    const dir = await tempDir()
+    const datasource = 'SCHEMA >\n    `id` UInt64\n\nENGINE "MergeTree"\nENGINE_SORTING_KEY "id"\n'
+    await mkdir(join(dir, 'datasources'), { recursive: true })
+    await mkdir(join(dir, 'vendor', 'other_ws', 'datasources'), { recursive: true })
+    await mkdir(join(dir, 'tests', 'deep', 'more'), { recursive: true })
+    await writeFile(join(dir, 'root.datasource'), datasource)
+    await writeFile(join(dir, 'datasources', 'ev.datasource'), datasource)
+    await writeFile(join(dir, 'vendor', 'other_ws', 'datasources', 'ev.datasource'), datasource)
+    await writeFile(join(dir, 'tests', 'deep', 'more', 'x.datasource'), datasource)
+    const { report, definitions } = await importTinybirdProject({ projectDir: dir, database: 'analytics' })
+    expect(definitions.map((definition) => definition.name).sort()).toEqual(['ev', 'root'])
+    expect(report.entries.filter((entry) => entry.status === 'skipped').map((entry) => [entry.name, entry.reasons[0]?.split(':')[0]])).toEqual([
+      [join('tests', 'deep', 'more', 'x.datasource'), 'deeper than the 2 folder levels Tinybird scans, so Tinybird does not build it'],
+      [join('vendor', 'other_ws', 'datasources', 'ev.datasource'), 'vendored'],
+    ])
+  })
+
+  test('a pipe whose commands use environment substitution is not translated', async () => {
+    const dir = await tempDir()
+    await mkdir(join(dir, 'datasources'), { recursive: true })
+    await writeFile(join(dir, 'datasources', 'ev.datasource'), 'SCHEMA >\n    `id` UInt64\n\nENGINE "MergeTree"\nENGINE_SORTING_KEY "id"\n')
+    await writeFile(join(dir, 'copy.pipe'), 'NODE n\nSQL >\n    SELECT id FROM ev\n\nTYPE copy\nTARGET_DATASOURCE ev\nCOPY_SCHEDULE $SCHEDULE\n')
+    const { report } = await importTinybirdProject({ projectDir: dir, database: 'analytics' })
+    expect(report.entries.find((entry) => entry.name === 'copy')).toMatchObject({
+      kind: 'copy',
+      status: 'untranslatable',
+      reasons: ['COPY_SCHEDULE uses environment substitution ($SCHEDULE), which the importer does not evaluate'],
+    })
+  })
+
+  test('--report is an output file too: it is not overwritten without --force', async () => {
+    const dir = await tempDir()
+    const flags = { '--out-file': join(dir, 'schema.ts'), '--queries-out-file': join(dir, 'queries.ts'), '--report': join(dir, 'report.json') }
+    expect((await runImport(flags)).code).toBe(0)
+    await rm(join(dir, 'schema.ts'))
+    await rm(join(dir, 'queries.ts'))
+    expect((await runImport(flags)).code).toBe(2)
+  })
+
   test('an unreadable project is an error, not a partial import', async () => {
     await expect(importTinybirdProject({ projectDir: join(FIXTURE, 'missing'), database: 'analytics' })).rejects.toThrow('ENOENT')
   })
