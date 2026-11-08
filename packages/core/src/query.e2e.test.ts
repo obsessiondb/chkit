@@ -87,7 +87,7 @@ async function pollUntil<T>(read: () => Promise<T>, done: (value: T) => boolean)
     } catch (error) {
       if (Date.now() >= deadline) throw error
     }
-    await sleep(500)
+    await sleep(100)
   }
 }
 
