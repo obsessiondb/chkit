@@ -24,6 +24,7 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import ObjectDriftDetail, TableDriftDetail
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import read_snapshot
 from chkit.cli.plugin_runtime import load_plugin_runtime
@@ -60,10 +61,11 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             help="No-op, kept for existing scripts: drift always reads the live server.",
         ),
     ] = False,
-    # Accepted so existing scripts keep working; only generate and snapshot
-    # rebuild run the on_schema_loaded hooks that read them (as in TS).
-    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
-    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    # Accepted so existing scripts keep working, and handed to on_init and
+    # get_context; only generate and snapshot rebuild run the on_schema_loaded
+    # hooks that act on them (as in TS).
+    force_shared_engines: ForceSharedEnginesOption = False,
+    no_shared_engines: NoSharedEnginesOption = False,
     service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="drift"))
@@ -106,6 +108,17 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
         service=service,
+        # As in TS, the hooks get the flags that were passed, keyed by long name.
+        flags=passed_flags(
+            {
+                "--config": str(config_path) if config_path is not None else None,
+                "--json": output_json,
+                "--table": table_selector,
+                "--force-shared-engines": force_shared_engines,
+                "--no-shared-engines": no_shared_engines,
+                "--service": service,
+            }
+        ),
     )
     if executor is None and config.clickhouse is None:
         msg = "clickhouse config is required for drift checks"
