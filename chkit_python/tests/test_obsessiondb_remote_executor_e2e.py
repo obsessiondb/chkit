@@ -61,42 +61,60 @@ def _poll_until(
     return last
 
 
-def _start_workbench(env: LiveEnv) -> ThreadingHTTPServer:
-    """Stand in for the workbench API: run each query on the live ClickHouse."""
-    auth = (env.clickhouse_user, env.clickhouse_password)
+def _run_on_live(env: LiveEnv, payload: dict[str, Any]) -> dict[str, Any]:
+    params: dict[str, str] = {"default_format": "JSONCompactStrings"}
+    # Like the real API: the query runs under the top-level queryId, and a
+    # query_id setting is ignored.
+    for key, value in (payload.get("settings") or {}).items():
+        if key != "query_id":
+            params[key] = str(value)
+    if payload.get("queryId"):
+        params["query_id"] = payload["queryId"]
+    response = httpx.post(
+        env.clickhouse_url,
+        params=params,
+        content=payload["query"].encode(),
+        auth=(env.clickhouse_user, env.clickhouse_password),
+        timeout=120.0,
+    )
+    body = response.text
+    if response.status_code >= httpx.codes.BAD_REQUEST:
+        return {"data": [], "meta": [], "rows": 0, "error": body.strip()}
+    if body.strip() == "":
+        return {"data": [], "meta": [], "rows": 0}
+    parsed = json.loads(body)
+    return {"data": parsed["data"], "meta": parsed["meta"], "rows": parsed["rows"]}
+
+
+def _start_workbench(
+    env: LiveEnv, *, query_log_after_submit: bool = False
+) -> ThreadingHTTPServer:
+    """Stand in for the workbench API: run each query on the live ClickHouse.
+
+    ``query_log_after_submit`` fails ``system.query_log`` reads until a
+    statement is submitted, as on a fresh server, which creates the table on
+    its first log flush.
+    """
+    submitted = threading.Event()
 
     class Handler(BaseHTTPRequestHandler):
         def do_POST(self) -> None:
             length = int(self.headers.get("Content-Length") or 0)
             payload = json.loads(self.rfile.read(length))["json"]
-            params: dict[str, str] = {"default_format": "JSONCompactStrings"}
-            # Like the real API: the query runs under the top-level queryId,
-            # and a query_id setting is ignored.
-            for key, value in (payload.get("settings") or {}).items():
-                if key != "query_id":
-                    params[key] = str(value)
             if payload.get("queryId"):
-                params["query_id"] = payload["queryId"]
-            response = httpx.post(
-                env.clickhouse_url,
-                params=params,
-                content=payload["query"].encode(),
-                auth=auth,
-                timeout=120.0,
-            )
-            body = response.text
-            if response.status_code >= httpx.codes.BAD_REQUEST:
-                result: dict[str, Any] = {
-                    "data": [],
-                    "meta": [],
-                    "rows": 0,
-                    "error": body.strip(),
-                }
-            elif body.strip() == "":
-                result = {"data": [], "meta": [], "rows": 0}
+                submitted.set()
+            if (
+                query_log_after_submit
+                and not submitted.is_set()
+                and "system.query_log" in payload["query"]
+            ):
+                error = (
+                    "Code: 60. DB::Exception: Unknown table expression identifier "
+                    "'system.query_log'. (UNKNOWN_TABLE)"
+                )
+                result: dict[str, Any] = {"data": [], "meta": [], "rows": 0, "error": error}
             else:
-                parsed = json.loads(body)
-                result = {"data": parsed["data"], "meta": parsed["meta"], "rows": parsed["rows"]}
+                result = _run_on_live(env, payload)
             encoded = json.dumps({"json": result}).encode()
             self.send_response(200)
             self.send_header("Content-Type", "application/json")
@@ -119,7 +137,18 @@ def live_env() -> LiveEnv:
 
 @pytest.fixture
 def remote(live_env: LiveEnv) -> Iterator[RemoteClickHouseClient]:
-    server = _start_workbench(live_env)
+    yield from _serve_remote(live_env)
+
+
+@pytest.fixture
+def fresh_remote(live_env: LiveEnv) -> Iterator[RemoteClickHouseClient]:
+    yield from _serve_remote(live_env, query_log_after_submit=True)
+
+
+def _serve_remote(
+    env: LiveEnv, *, query_log_after_submit: bool = False
+) -> Iterator[RemoteClickHouseClient]:
+    server = _start_workbench(env, query_log_after_submit=query_log_after_submit)
     host, port = server.server_address[0], server.server_address[1]
     try:
         yield RemoteClickHouseClient(
@@ -295,6 +324,34 @@ def test_async_submission_completes_and_rerun_skips(
         live.execute(f"DROP TABLE IF EXISTS {table}")
 
 
+def test_first_submission_completes_without_query_log(
+    live_env: LiveEnv, fresh_remote: RemoteClickHouseClient, live: ClickHouseClient
+) -> None:
+    """The in-flight check runs before the first submission, when a fresh
+    server can still lack system.query_log (OBS-176)."""
+    prefix = create_prefix("py_remote_fresh")
+    name = f"{prefix}dst"
+    table = _create_table(live, live_env.clickhouse_database, name)
+    journal = _MemoryJournal(None)
+    statement = _statement(
+        client=fresh_remote,
+        journal=journal,
+        migration_name=f"20990101000000_{prefix}fresh.sql",
+        operation_key=f"table:{live_env.clickhouse_database}.{name}",
+        sql=f"INSERT INTO {table} SELECT number FROM numbers(3)",
+    )
+    try:
+        assert apply_async_statement(statement).kind == "completed"
+        assert journal.statuses() == ["started", "completed"]
+        rows = _poll_until(
+            lambda: int(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"]),
+            lambda n: n >= 3,
+        )
+        assert rows == 3
+    finally:
+        live.execute(f"DROP TABLE IF EXISTS {table}")
+
+
 class _RecordingRemote:
     """Delegates to the remote client and records each ``after_time``."""
 
@@ -317,11 +374,19 @@ class _RecordingRemote:
         return self._inner.submit(statement, query_id=query_id, settings=settings)
 
     def query_status(
-        self, query_id: str, *, after_time: str | None = None, every_replica: bool = False
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         self.after_times.append(after_time)
         return self._inner.query_status(
-            query_id, after_time=after_time, every_replica=every_replica
+            query_id,
+            after_time=after_time,
+            every_replica=every_replica,
+            running_only=running_only,
         )
 
 

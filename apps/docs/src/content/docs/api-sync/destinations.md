@@ -110,6 +110,16 @@ export const demo = definePipeline({ id: 'demo', streams: [ticketsSource] })
 
 Add `ingestionColumns` to custom destinations. The default loader supplies batch/run IDs and ClickHouse supplies ingestion time. Migrations create the tables before ingestion runs. Query this current-state table with `FINAL`, or expose a view that does so.
 
+A yielded field with no insertable column fails the stream. To keep such fields instead, declare a `_chkit_rest` JSON column; they land there as `{ field: value }` and each run logs their names:
+
+```ts
+columns: [
+  { name: 'id', type: 'String' },
+  { name: '_chkit_rest', type: 'JSON' },
+  ...ingestionColumns,
+],
+```
+
 Leave [`MATERIALIZED` and `ALIAS`](/schema/dsl-reference/#defaultkind-optional) fields out of yielded rows. For a table with `EPHEMERAL` columns, the destination lists the insertable columns from its table definition in the `INSERT`, so `EPHEMERAL` values reach the expressions that read them; apply migrations before ingesting.
 
 Changing the mapping affects future writes. Updating older rows requires replaying retained raw data or refetching the source. Fields discarded before storage cannot be reconstructed by changing a view.
@@ -200,7 +210,7 @@ Custom destinations must declare all `ingestionColumns`; the runtime rejects a m
 | `Date` / `Date32` | Supply `YYYY-MM-DD`, not a Date object or full timestamp. Validate bounds: ClickHouse may clamp out-of-range dates rather than rejecting them. |
 | `Map` | Supply a plain object or a JavaScript Map with string, number or bigint keys. Keys must remain distinct after conversion to strings. Nested bigint and non-finite values use the same encoding rules. |
 | `Array`, `Tuple`, `Nested` | Arrays use JSON arrays. Named tuples use objects; unnamed tuples use positional arrays. For `Nested`, supply flattened arrays such as `items.sku` and `items.qty`; a parent `items` field fails instead of being silently ignored. |
-| Omitted, null or extra fields | ClickHouse applies omitted-field defaults, including implicit zero/empty values. Its default `input_format_null_as_default=1` can also replace null in non-Nullable columns with a default. Unknown fields, including supplied MATERIALIZED or ALIAS values, follow the server's `input_format_skip_unknown_fields` setting (default `1` on 26.3). Validate row shapes to catch typos and unintended coercion. |
+| Omitted, null or extra fields | ClickHouse applies omitted-field defaults, including implicit zero/empty values. Its default `input_format_null_as_default=1` can also replace null in non-Nullable columns with a default. A field with no insertable column, including a supplied MATERIALIZED or ALIAS value, fails the stream unless the table declares [`_chkit_rest`](#map-into-a-known-schema). Validate row values to catch unintended coercion. |
 | `EPHEMERAL`, `DEFAULT`, `MATERIALIZED`, `ALIAS` | The destination names insertable columns when EPHEMERAL inputs exist, so they reach default/materialized expressions. Omitted DEFAULT columns use their expressions; supply source columns rather than computed MATERIALIZED or ALIAS values. Object key order does not matter. |
 
 Wrong-type parsing errors fail the stream with ClickHouse's error and no checkpoint for the failed batch. Earlier acknowledged slices and already-written blocks within a failed INSERT can remain: neither a load batch nor an arbitrarily large INSERT is an all-or-nothing transaction. Replay still requires suitable destination keys. Validate provider values before yielding them; TypeScript's `Row` type is not runtime schema validation.

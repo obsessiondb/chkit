@@ -2,8 +2,9 @@ import { randomUUID } from 'node:crypto'
 
 import { waitForTable, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
 
-import { validateJournalHistory } from './journal-history.js'
+import { validateJournalHistory, type ValidatedJournalHistory } from './journal-history.js'
 import { canonicalJson, DEFAULT_JOURNAL_TABLE, digest, journalTableSql, type JournalRow } from './journal.js'
+import { sortedDigest } from './sorted-digest.js'
 import type { CommittedCheckpoint } from './types.js'
 
 const IDENTIFIER = /^[A-Za-z_][A-Za-z0-9_]*$/
@@ -45,6 +46,14 @@ export interface JournalRepairResult {
   plan: JournalRepairPlan
 }
 
+/** One source-table snapshot: every row is counted and digested, only the selected namespace is kept. */
+interface SourceSnapshot {
+  rows: number
+  digest: string
+  selected: JournalRow[]
+  missing: boolean
+}
+
 /** Inspect valid run histories; overlapping runs are normal journal evidence. */
 export function planJournalRepair(
   snapshot: readonly JournalRow[],
@@ -52,35 +61,16 @@ export function planJournalRepair(
   sourceTable: string,
   targetId?: string
 ): JournalRepairPlan {
-  const selected = selectedRows(snapshot, namespaceId, targetId)
-  const validated = validateJournalHistory(selected, namespaceId)
-  const fingerprint = repairFingerprint(snapshot, namespaceId, sourceTable, targetId)
-  const suffix = fingerprint.slice(0, 24)
-  const replacementTable = `${sourceTable}_repair_${suffix}`
-  return {
-    namespaceId,
-    sourceTable,
-    fingerprint,
-    healthy: validated.problems.length === 0,
-    repairable: true,
-    problems: validated.problems,
-    evidenceRows: snapshot.length,
-    selectedEvidenceRows: selected.length,
-    retainedFacts: snapshot.length - selected.length + validated.rows.length,
-    runs: new Set(selected.map((row) => row.run_id)).size,
-    checkpoint: validated.checkpoint,
-    archiveTable: `${sourceTable}_archive_${suffix}`,
-    replacementTable,
-    activation: `Stop all ingestion writers, materialize the reviewed repair, then configure ingest({ journalTable: '${replacementTable}' }) before restarting them.`,
-    replayWarning: 'The next run resumes from the selected valid checkpoint. Uncertain destination writes may be loaded again (at least once).',
-  }
+  const selected = snapshot.filter((row) => isSelected(row, namespaceId, targetId))
+  const source = { rows: snapshot.length, digest: snapshotFingerprint(snapshot), selected, missing: false }
+  return sourcePlan(source, validateJournalHistory(selected, namespaceId), namespaceId, sourceTable, targetId)
 }
 
 /** Diagnose one complete source-table snapshot without modifying it. */
 export async function doctorJournal(namespaceId: string, options: JournalRecoveryOptions): Promise<JournalRepairPlan> {
   const table = recoveryTable(options)
-  const snapshot = await inspectSource(table, options)
-  return sourcePlan(snapshot, namespaceId, table, options.targetId)
+  const source = await inspectSource(table, namespaceId, options)
+  return sourcePlan(source, validateJournalHistory(source.selected, namespaceId), namespaceId, table, options.targetId)
 }
 
 /** Materialize a reviewed repair; activation is an explicit configuration change. */
@@ -90,8 +80,9 @@ export async function repairJournal(
   options: JournalRecoveryOptions
 ): Promise<JournalRepairResult> {
   const table = recoveryTable(options)
-  const source = await inspectSource(table, options)
-  const plan = sourcePlan(source, namespaceId, table, options.targetId)
+  const source = await inspectSource(table, namespaceId, options)
+  const validated = validateJournalHistory(source.selected, namespaceId)
+  const plan = sourcePlan(source, validated, namespaceId, table, options.targetId)
   if (fingerprint === undefined) return { applied: false, activated: false, plan }
   if (fingerprint !== plan.fingerprint) throw new Error('Journal changed since review. Stop all writers, run ingest repair again, and review the new fingerprint.')
   if (!plan.repairable) throw new Error(plan.problems.join(' '))
@@ -100,29 +91,52 @@ export async function repairJournal(
   // Each attempt writes its own tables. Concurrent or interrupted repairs cannot
   // change another attempt's verified output; none of them routes active writers.
   const copyId = randomUUID().replaceAll('-', '').slice(0, 12)
+  const archiveTable = `${plan.archiveTable}_${copyId}`
   const replacementTable = `${plan.replacementTable}_${copyId}`
   const materializedPlan = {
     ...plan,
-    archiveTable: `${plan.archiveTable}_${copyId}`,
+    archiveTable,
     replacementTable,
     activation: `Keep all ingestion writers stopped. Configure ingest({ journalTable: '${replacementTable}' }), then restart them. The active journal has not been changed.`,
   }
-  await preserveSnapshot(materializedPlan.archiveTable, source.rows, options)
-  const selected = selectedRows(source.rows, namespaceId, options.targetId)
-  const validated = validateJournalHistory(selected, namespaceId)
-  const retained = [
-    ...source.rows.filter((row) => !isSelected(row, namespaceId, options.targetId)),
-    ...validated.rows,
-  ]
-  await preserveSnapshot(replacementTable, retained, options)
-  const copied = validateJournalHistory(selectedRows(await readSnapshot(replacementTable, options), namespaceId, options.targetId), namespaceId)
+  const assertSourceUnchanged = async () => {
+    if (await tableDigest(table, options) !== source.digest) {
+      throw new Error('Journal changed while copying. Keep the original journal active, stop all writers, and review a new repair plan.')
+    }
+  }
+  const selection = `target_id = ${sqlString(options.targetId)} AND namespace_id = ${sqlString(namespaceId)}`
+
+  await createTable(archiveTable, options)
+  await copyRows(archiveTable, `SELECT * FROM ${qualified(options.database, table)}`, options)
+  if (await tableDigest(archiveTable, options) !== source.digest) {
+    await assertSourceUnchanged()
+    throw new Error(`Evidence verification failed for ${archiveTable}; the active journal remains unchanged.`)
+  }
+
+  await createTable(replacementTable, options)
+  await copyRows(replacementTable, `SELECT * FROM ${qualified(options.database, archiveTable)} WHERE NOT (${selection})`, options)
+  if (validated.rows.length > 0) {
+    await options.executor.insert({
+      table: `${options.database}.${replacementTable}`,
+      values: validated.rows,
+      stream: true,
+      settings: { async_insert: 0, insert_deduplication_token: `${replacementTable}:validated` },
+    })
+  }
+  const retainedDigest = await sortedDigest(async (add) => {
+    for await (const batch of readRows(archiveTable, options)) {
+      for (const row of batch) if (!isSelected(row, namespaceId, options.targetId)) add(canonicalJson(row))
+    }
+    for (const row of validated.rows) add(canonicalJson(row))
+  })
+  if (await tableDigest(replacementTable, options) !== retainedDigest) {
+    throw new Error(`Evidence verification failed for ${replacementTable}; the active journal remains unchanged.`)
+  }
+  const copied = validateJournalHistory(validated.rows, namespaceId)
   if (copied.problems.length > 0 || canonicalJson(copied.checkpoint) !== canonicalJson(plan.checkpoint)) {
     throw new Error('Replacement journal verification failed; the active journal remains unchanged.')
   }
-  const finalSnapshot = await readSnapshot(table, options)
-  if (repairFingerprint(finalSnapshot, namespaceId, table, options.targetId) !== fingerprint) {
-    throw new Error('Journal changed while copying. Keep the original journal active, stop all writers, and review a new repair plan.')
-  }
+  await assertSourceUnchanged()
   return { applied: true, activated: false, plan: materializedPlan }
 }
 
@@ -133,57 +147,81 @@ function recoveryTable(options: JournalRecoveryOptions): string {
   return table
 }
 
-async function inspectSource(table: string, options: JournalRecoveryOptions): Promise<{ rows: JournalRow[]; missing: boolean }> {
+async function inspectSource(table: string, namespaceId: string, options: JournalRecoveryOptions): Promise<SourceSnapshot> {
   const exists = await options.executor.query<{ x: number }>(
     `SELECT 1 AS x FROM system.tables WHERE database = ${sqlString(options.database)} AND name = ${sqlString(table)}`,
     READ_SETTINGS
   )
-  if (exists.length === 0) return { rows: [], missing: true }
-  return { rows: await readSnapshot(table, options), missing: false }
+  if (exists.length === 0) return { rows: 0, digest: snapshotFingerprint([]), selected: [], missing: true }
+  const selected: JournalRow[] = []
+  let rows = 0
+  const rowsDigest = await sortedDigest(async (add) => {
+    for await (const batch of readRows(table, options)) {
+      for (const row of batch) {
+        rows += 1
+        add(canonicalJson(row))
+        if (isSelected(row, namespaceId, options.targetId)) selected.push(row)
+      }
+    }
+  })
+  return { rows, digest: rowsDigest, selected, missing: false }
 }
 
-function sourcePlan(snapshot: { rows: JournalRow[]; missing: boolean }, namespaceId: string, table: string, targetId: string): JournalRepairPlan {
-  const plan = planJournalRepair(snapshot.rows, namespaceId, table, targetId)
-  if (!snapshot.missing) return plan
+function sourcePlan(
+  source: SourceSnapshot, validated: ValidatedJournalHistory, namespaceId: string, sourceTable: string, targetId: string | undefined
+): JournalRepairPlan {
+  const fingerprint = digest([namespaceId, sourceTable, targetId ?? '', source.digest])
+  const suffix = fingerprint.slice(0, 24)
+  const replacementTable = `${sourceTable}_repair_${suffix}`
+  const problems = source.missing
+    ? [...validated.problems, `Journal source table ${sourceTable} is missing. Restore its evidence before repairing, or run ingest on a fresh target.`]
+    : validated.problems
   return {
-    ...plan, healthy: false, repairable: false,
-    problems: [...plan.problems, `Journal source table ${table} is missing. Restore its evidence before repairing, or run ingest on a fresh target.`],
+    namespaceId,
+    sourceTable,
+    fingerprint,
+    healthy: !source.missing && validated.problems.length === 0,
+    repairable: !source.missing,
+    problems,
+    evidenceRows: source.rows,
+    selectedEvidenceRows: source.selected.length,
+    retainedFacts: source.rows - source.selected.length + validated.rows.length,
+    runs: new Set(source.selected.map((row) => row.run_id)).size,
+    checkpoint: validated.checkpoint,
+    archiveTable: `${sourceTable}_archive_${suffix}`,
+    replacementTable,
+    activation: `Stop all ingestion writers, materialize the reviewed repair, then configure ingest({ journalTable: '${replacementTable}' }) before restarting them.`,
+    replayWarning: 'The next run resumes from the selected valid checkpoint. Uncertain destination writes may be loaded again (at least once).',
   }
 }
 
-async function readSnapshot(table: string, options: JournalRecoveryOptions): Promise<JournalRow[]> {
-  return options.executor.query<JournalRow>(
-    `SELECT * FROM ${qualified(options.database, table)} ORDER BY target_id, namespace_id, run_id, event_seq, event_id, payload_hash, event_at`,
-    READ_SETTINGS
-  )
+/** Streams a snapshot in batches; executors without batched reads return it whole. */
+async function* readRows(table: string, options: JournalRecoveryOptions): AsyncGenerator<JournalRow[]> {
+  const sql = `SELECT * FROM ${qualified(options.database, table)} ORDER BY target_id, namespace_id, run_id, event_seq, event_id, payload_hash, event_at`
+  if (options.executor.queryBatches) yield* options.executor.queryBatches<JournalRow>(sql, READ_SETTINGS)
+  else yield await options.executor.query<JournalRow>(sql, READ_SETTINGS)
 }
 
-async function preserveSnapshot(table: string, rows: readonly JournalRow[], options: JournalRecoveryOptions): Promise<void> {
+async function tableDigest(table: string, options: JournalRecoveryOptions): Promise<string> {
+  return sortedDigest(async (add) => {
+    for await (const batch of readRows(table, options)) for (const row of batch) add(canonicalJson(row))
+  })
+}
+
+async function createTable(table: string, options: JournalRecoveryOptions): Promise<void> {
   await options.executor.command(journalTableSql(qualified(options.database, table)))
   await waitForTable(options.executor, options.database, table)
-  if (rows.length > 0) {
-    await options.executor.insert({
-      table: `${options.database}.${table}`,
-      values: [...rows],
-      settings: { async_insert: 0, insert_deduplication_token: snapshotFingerprint(rows) },
-    })
-  }
-  const archived = await readSnapshot(table, options)
-  if (snapshotFingerprint(archived) !== snapshotFingerprint(rows)) {
-    throw new Error(`Evidence verification failed for ${table}; the active journal remains unchanged.`)
-  }
 }
 
-function selectedRows(rows: readonly JournalRow[], namespaceId: string, targetId: string | undefined): JournalRow[] {
-  return rows.filter((row) => isSelected(row, namespaceId, targetId))
+/** Copies rows inside ClickHouse; the token keeps identical source blocks from deduplicating. */
+async function copyRows(table: string, select: string, options: JournalRecoveryOptions): Promise<void> {
+  await options.executor.command(`INSERT INTO ${qualified(options.database, table)} ${select}`, {
+    select_sequential_consistency: '1', insert_deduplication_token: table,
+  })
 }
 
 function isSelected(row: JournalRow, namespaceId: string, targetId: string | undefined): boolean {
   return row.namespace_id === namespaceId && (targetId === undefined || row.target_id === targetId)
-}
-
-function repairFingerprint(rows: readonly JournalRow[], namespaceId: string, table: string, targetId: string | undefined): string {
-  return digest([namespaceId, table, targetId ?? '', snapshotFingerprint(rows)])
 }
 
 function snapshotFingerprint(rows: readonly JournalRow[]): string {

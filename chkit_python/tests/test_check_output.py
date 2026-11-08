@@ -122,6 +122,24 @@ events = table(database="app", name="events",
 definitions = schema(events_local, events)
 """
 
+QUOTED_DEFAULT_SCHEMA = """
+from chkit import SQLExpression, dictionary, schema, table
+
+plans = table(database="app", name="plans", engine="MergeTree()", columns=[
+    {"name": "id", "type": "UInt64"},
+    {"name": "tier", "type": "String", "default": "'standard'"},
+    {"name": "label", "type": "String", "default": "standard"},
+    {"name": "code", "type": "String", "default": SQLExpression(expression="'standard'")},
+    {"name": "note", "type": "String", "default": "'line1\\\\nline2'"},
+], primary_key=["id"], order_by=["id"])
+plans_dict = dictionary(database="app", name="plans_dict", attributes=[
+    {"name": "id", "type": "UInt64"},
+    {"name": "tier", "type": "String", "default": "'standard'"},
+    {"name": "label", "type": "String", "default": "standard"},
+], primary_key=["id"], source="CLICKHOUSE(TABLE 'plans')", layout="HASHED()", lifetime="300")
+definitions = schema(plans, plans_dict)
+"""
+
 EVENTS_ONLY_MIGRATION = """-- operation: add_column key=table:app.events:column:extra risk=safe
 ALTER TABLE app.events ADD COLUMN IF NOT EXISTS `extra` String;
 """
@@ -205,7 +223,7 @@ def test_json_has_the_ts_keys_in_ts_order(
     assert list(payload) == [
         "command", "schemaVersion", "strict", "policy", "ok", "failedChecks", "pendingCount",
         "checksumMismatchCount", "drifted", "driftEvaluated", "driftReasonCounts",
-        "driftReasonTotals", "plugins", "scope", "databaseMissing", "database",
+        "driftReasonTotals", "plugins", "scope", "warnings", "databaseMissing", "database",
     ]
     assert payload["failedChecks"] == ["pending_migrations", "schema_drift"]
     assert payload["pendingCount"] == 1
@@ -234,6 +252,32 @@ def test_text_matches_the_ts_lines(project: Path, monkeypatch: pytest.MonkeyPatc
         "Drift reasons: total=0, object=0, table=0\n"
         "Failed checks: pending_migrations\n"
     )
+
+
+def test_generate_and_check_warn_about_a_quoted_string_default(project: Path) -> None:
+    """As in TS, a plain string default written as a SQL literal warns without failing."""
+    (project / "schema.py").write_text(QUOTED_DEFAULT_SCHEMA, encoding="utf-8")
+    expected = [
+        "Table app.plans column \"tier\" has plain string default \"'standard'\", which renders "
+        "as DEFAULT '''standard''' and keeps the quotes in the value. Use default: \"standard\" "
+        "for the value, or use default: { expression: \"'standard'\" } for SQL. If the quotes "
+        "belong to the value, ignore this warning.",
+        # SQL escapes are not decoded, so no value is suggested for them.
+        "Table app.plans column \"note\" has plain string default \"'line1\\\\nline2'\", which "
+        "renders as DEFAULT '''line1\\\\nline2''' and keeps the quotes in the value. Write the "
+        "value itself, without SQL quotes or escapes, as a plain string, or use default: "
+        "{ expression: \"'line1\\\\nline2'\" } for SQL. If the quotes belong to the value, ignore "
+        "this warning.",
+        "Dictionary app.plans_dict attribute \"tier\" has plain string default \"'standard'\", "
+        "which renders as DEFAULT '''standard''' and keeps the quotes in the value. Use default: "
+        "\"standard\" for the value; dictionary defaults are literals only. If the quotes belong "
+        "to the value, ignore this warning.",
+    ]
+
+    generated = CliRunner().invoke(app, ["generate", "--name", "plans", "--json"])
+    assert generated.exit_code == 0, generated.output
+    assert json.loads(generated.stdout)["warnings"] == expected
+    assert json.loads(_check("--json").stdout)["warnings"] == expected
 
 
 def test_table_scope_keeps_pending_migrations_of_other_tables(project: Path) -> None:

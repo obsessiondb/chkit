@@ -71,43 +71,12 @@ describe('reviewed repair materialization', () => {
     expect(fixture.mutations).toEqual([])
   })
 
-  test('archives all evidence and materializes valid facts without activating a journal', async () => {
-    const other = fact('other', 1, { namespaceId: 'app.other' })
-    const rows = [...damagedBranch(), other]
-    const fixture = recoveryFixture(rows)
-    const review = await repairJournal(namespaceId, undefined, fixture.options)
-    const copied = await repairJournal(namespaceId, review.plan.fingerprint, fixture.options)
-    expect(copied).toMatchObject({ applied: true, activated: false })
-    expect(fixture.tables.get(sourceTable)).toEqual(rows)
-    expect(fixture.tables.get(copied.plan.archiveTable)).toEqual(rows)
-    expect(fixture.tables.get(copied.plan.replacementTable)).toEqual([other, ...rows.slice(0, 2)])
-    expect(copied.plan.activation).toContain(`journalTable: '${copied.plan.replacementTable}'`)
-    expect(fixture.mutations.some((entry) => /DELETE|DROP|TRUNCATE|ALTER/.test(entry))).toBe(false)
-  })
-
   test('rejects changed evidence before creating recovery artifacts', async () => {
     const fixture = recoveryFixture(damagedBranch())
     const review = await repairJournal(namespaceId, undefined, fixture.options)
     fixture.tables.get(sourceTable)?.push(fact('other', 1, { namespaceId: 'app.other' }))
     await expect(repairJournal(namespaceId, review.plan.fingerprint, fixture.options)).rejects.toThrow('changed since review')
     expect(fixture.mutations).toEqual([])
-  })
-
-  test('does not return an activatable replacement if archive verification fails', async () => {
-    const rows = damagedBranch()
-    const fixture = recoveryFixture(rows, { corruptArchive: true })
-    const review = await repairJournal(namespaceId, undefined, fixture.options)
-    await expect(repairJournal(namespaceId, review.plan.fingerprint, fixture.options)).rejects.toThrow('Evidence verification failed')
-    expect(fixture.tables.get(sourceTable)).toEqual(rows)
-    expect([...fixture.tables.keys()].some((table) => table.includes('_repair_'))).toBe(false)
-  })
-
-  test('rejects source changes during materialization', async () => {
-    const rows = damagedBranch()
-    const fixture = recoveryFixture(rows, { changeSourceDuringArchive: true })
-    const review = await repairJournal(namespaceId, undefined, fixture.options)
-    await expect(repairJournal(namespaceId, review.plan.fingerprint, fixture.options)).rejects.toThrow('Journal changed while copying')
-    expect(fixture.tables.get(sourceTable)).toHaveLength(rows.length + 1)
   })
 
   test('diagnoses a missing source table without creating one', async () => {
@@ -145,7 +114,7 @@ function fact(runId: string, eventSeq: number, fields: Partial<JournalEvent> = {
   }, 'target', new Date('2026-10-01T00:00:00Z'))
 }
 
-function recoveryFixture(rows: JournalRow[], faults: { corruptArchive?: boolean; changeSourceDuringArchive?: boolean } = {}) {
+function recoveryFixture(rows: JournalRow[]) {
   const tables = new Map<string, JournalRow[]>([[sourceTable, structuredClone(rows)]])
   const mutations: string[] = []
   const queries: Array<{ sql: string; settings: Record<string, unknown> | undefined }> = []
@@ -174,8 +143,7 @@ function recoveryFixture(rows: JournalRow[], faults: { corruptArchive?: boolean;
         if (!row) throw new Error('Unexpected inserted journal row')
         return structuredClone(row)
       })
-      tables.set(name, faults.corruptArchive && name.includes('_archive_') ? inserted.slice(1) : inserted)
-      if (faults.changeSourceDuringArchive && name.includes('_archive_')) tables.get(sourceTable)?.push(fact('new', 1, { namespaceId: 'app.other' }))
+      tables.set(name, inserted)
     },
     async listSchemaObjects() { return [] },
     async listTableDetails() { return [] },

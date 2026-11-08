@@ -20,11 +20,12 @@ import { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 import { stripWrappingParens } from './sql-scan.js'
 import { engineName, supportsSortOrder } from './engine.js'
 import { isKafkaEngine } from './kafka.js'
-import { type SQLToken, tokenizeSQL } from './sql-lexer.js'
+import { type SQLToken, stringLiteralValue, tokenizeSQL } from './sql-lexer.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
 import { textSQLTokens } from './text-index-sql.js'
 import type {
   ColumnDefaultKind,
+  ColumnDefaultValue,
   ColumnDefinition,
   DictionaryDefinition,
   MaterializedViewDefinition,
@@ -798,4 +799,55 @@ export function validateDefinitions(definitions: SchemaDefinition[]): Validation
 export function assertValidDefinitions(definitions: SchemaDefinition[]): void {
   const issues = validateDefinitions(definitions)
   if (issues.length > 0) throw new ValidationError(issues)
+}
+
+/**
+ * Schema issues that are reported but never fail: a plain string default that
+ * is one quoted SQL string literal, such as `"'standard'"`. It renders as
+ * `'''standard'''` and keeps the quotes in the value, which is usually SQL
+ * written without `{ expression }`. A value may contain quotes, so it only warns.
+ */
+export function collectDefinitionWarnings(definitions: SchemaDefinition[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  for (const def of definitions) {
+    if (def.kind === 'table') {
+      for (const column of def.columns) {
+        const kind = column.defaultKind ?? 'DEFAULT'
+        const quoted = quotedStringDefault(column.default)
+        if (quoted === undefined || (kind !== 'DEFAULT' && kind !== 'EPHEMERAL')) continue
+        pushValidationIssue(issues, def, 'quoted_string_default',
+          `${describeQuotedStringDefault(`Table ${def.database}.${def.name} column "${column.name}"`, kind, quoted)}, or use default: { expression: ${JSON.stringify(quoted.raw.trim())} } for SQL. If the quotes belong to the value, ignore this warning.`)
+      }
+    } else if (def.kind === 'dictionary') {
+      for (const attribute of def.attributes) {
+        const quoted = quotedStringDefault(attribute.default)
+        if (quoted === undefined) continue
+        pushValidationIssue(issues, def, 'quoted_string_default',
+          `${describeQuotedStringDefault(`Dictionary ${def.database}.${def.name} attribute "${attribute.name}"`, 'DEFAULT', quoted)}; dictionary defaults are literals only. If the quotes belong to the value, ignore this warning.`)
+      }
+    }
+  }
+  return issues
+}
+
+/**
+ * A plain string default that is exactly one terminated `'…'` literal, with
+ * its value, or no value when the literal has backslash escapes (`\n`,
+ * `\x41`), which chkit does not decode. `fn:` strings are expressions.
+ */
+function quotedStringDefault(value: ColumnDefaultValue | undefined): { raw: string; value: string | undefined } | undefined {
+  if (value === undefined) return undefined
+  const parsed = parseColumnDefault(value)
+  if (parsed.kind !== 'literal' || typeof parsed.value !== 'string') return undefined
+  const tokens = tokenizeSQL(parsed.value.trim())
+  const [token] = tokens
+  if (tokens.length !== 1 || token === undefined || !token.text.startsWith("'") || !token.terminated) return undefined
+  return { raw: parsed.value, value: token.text.includes('\\') ? undefined : stringLiteralValue(token) }
+}
+
+function describeQuotedStringDefault(subject: string, kind: string, quoted: { raw: string; value: string | undefined }): string {
+  const asValue = quoted.value === undefined
+    ? 'Write the value itself, without SQL quotes or escapes, as a plain string'
+    : `Use default: ${JSON.stringify(quoted.value)} for the value`
+  return `${subject} has plain string default ${JSON.stringify(quoted.raw)}, which renders as ${kind} ${renderDefault(quoted.raw)} and keeps the quotes in the value. ${asValue}`
 }
