@@ -77,13 +77,57 @@ def _normalize_short_options(
     return normalized
 
 
+def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
+    """Separate a plugin forwarder's own options from the plugin's arguments.
+
+    ``plugin``, ``codegen`` and ``obsessiondb`` pass unknown tokens to the
+    plugin command, but click would still read the letters of a token such as
+    ``-hmodels.py`` (a value of ``--out-file``) or ``-xh`` as its own short
+    options. As in TS, only the forwarder's options in their exact forms
+    (``-h``, ``--json``, ``-c x`` / ``-c=x`` / ``-cx``, ``--config x``) are
+    read here; every other token goes behind ``--``, in order, so click hands
+    it to the plugin untouched (#491).
+    """
+    takes_value: dict[str, bool] = {}
+    for param in params:
+        if param.param_type_name == "option":
+            for opt in [*param.opts, *param.secondary_opts]:
+                takes_value[opt] = not (param.is_flag or param.count)
+
+    own: list[str] = []
+    forwarded: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--":
+            forwarded.extend(args[i:])
+            break
+        long_name = token.split("=", 1)[0] if token.startswith("--") else None
+        short_name = token[:2] if long_name is None else None
+        if token in takes_value:
+            own.append(token)
+            if takes_value[token] and i < len(args):
+                own.append(args[i])
+                i += 1
+        elif long_name is not None and takes_value.get(long_name):
+            own.append(token)
+        elif short_name is not None and takes_value.get(short_name):
+            value = token[2:]
+            own.extend([short_name, value[1:] if value.startswith("=") else value])
+        else:
+            forwarded.append(token)
+    return [*own, "--", *forwarded]
+
+
 class _ChkitCommand(TyperCommand):
     """Every chkit command reads short options as TS does (#491)."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
-        return super().parse_args(
-            ctx, _normalize_short_options(ctx, args, self.get_params(ctx))
-        )
+        params = self.get_params(ctx)
+        if ctx.ignore_unknown_options:
+            return super().parse_args(ctx, _split_forwarded_args(args, params))
+        return super().parse_args(ctx, _normalize_short_options(ctx, args, params))
 
 
 class _ChkitGroup(TyperGroup):

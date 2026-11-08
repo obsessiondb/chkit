@@ -4,14 +4,20 @@ such as ``-fd`` is an unknown option, ``-h`` is help and ``-v`` the version."""
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
+from typing import Any
 
 import pytest
 from typer.main import get_command
 from typer.testing import CliRunner
 
 from chkit import __version__
+from chkit.cli.commands import codegen_shortcut
 from chkit.cli.main import _normalize_short_options, app
+
+# CI forces rich to colour usage errors.
+ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
 
 CONFIG = (
     'from chkit import define_config\n\nconfig = define_config({"schema": "./schema.py", '
@@ -60,7 +66,7 @@ def test_a_bundle_of_short_flags_is_an_unknown_option(project: Path) -> None:
     ):
         result = CliRunner().invoke(app, args)
         assert result.exit_code == 2, (args, result.output)
-        assert f"No such option: {token}" in result.output, args
+        assert f"No such option: {token}" in ANSI_STYLE.sub("", result.output), args
     assert not (project / "src").exists()
 
 
@@ -69,6 +75,34 @@ def test_a_value_that_looks_like_a_short_flag_is_kept() -> None:
     assert _normalize_short_options(
         None, ["--name", "-t=x", "-t=app.users", "--", "-c=y"], params
     ) == ["--name", "-t=x", "-t", "app.users", "--", "-c=y"]
+
+
+def test_a_forwarder_reads_only_its_own_options_and_passes_the_rest_on(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        codegen_shortcut, "dispatch_plugin_command", lambda **kw: calls.append(kw)
+    )
+    for args, tokens, config in (
+        # A plugin value that starts with -h is not the help option.
+        (["--out-file", "-hmodels.py", "--json"], ["--out-file", "-hmodels.py"], None),
+        # A bundle reaches the plugin, which rejects it as TS does, not click's help.
+        (["-xh"], ["-xh"], None),
+        (["--check", "-c=cfg.py", "--", "-c", "x"], ["--check", "-c", "x"], "cfg.py"),
+        (["-ccfg.py", "--check"], ["--check"], "cfg.py"),
+        (["--config", "cfg.py", "--check"], ["--check"], "cfg.py"),
+    ):
+        calls.clear()
+        result = CliRunner().invoke(app, ["codegen", *args])
+        assert result.exit_code == 0, (args, result.output)
+        assert len(calls) == 1, args
+        assert calls[0]["tokens"] == tokens, args
+        assert calls[0]["config_path"] == (Path(config) if config else None), args
+
+    help_result = CliRunner().invoke(app, ["codegen", "--check", "-h"])
+    assert help_result.exit_code == 0
+    assert "Usage:" in help_result.output
 
 
 def test_h_is_help_and_v_is_the_version() -> None:
