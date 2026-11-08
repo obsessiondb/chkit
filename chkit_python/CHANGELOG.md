@@ -130,15 +130,9 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
-- Plugin hooks run at more of the TS points, with the flags that were passed, keyed by long
-  name (#488). `status`, `check`, `drift` and `query` give `on_init` and `get_context` every
-  flag, not only `--service`. `generate` (also with `--empty`, which gets `--empty`) and
-  `snapshot rebuild` now always run `on_init` and `get_context`, so with a selected ObsessionDB
-  service they print `obsessiondb: using service "<name>"` in text mode, as TS does.
-  `snapshot rebuild` gives its hooks `--config`, `--dryrun` and `--json` too, not only the
-  shared-engine flags. `pull` now runs the `on_config_loaded` hooks, between `on_init` and
-  `get_context` as in TS. A hook error there prints its message on stderr (with `--json`,
-  `{"ok": false, "error": ...}` on stdout) and exits 2, as in TS.
+- Plugin hooks run as in TS (#488): `status`, `check`, `drift` and `query` give them every
+  flag that was passed, `generate` and `snapshot rebuild` run `on_init` and `get_context` (so
+  they show the ObsessionDB service banner), and `pull` runs `on_config_loaded`.
 - `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
   migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
   `index_granularity`, and leaves out chkit's migration journal and the hidden
