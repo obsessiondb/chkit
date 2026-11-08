@@ -268,6 +268,21 @@ describe('query execution', () => {
     expect(await pollUntil(() => matches({ ...row, seen: moment }), (rows) => rows[0]?.n === 1)).toEqual([{ n: 1 }])
   }, 90_000)
 
+  test('rows keep integers a JS number would round as their digits, and returns can make them bigints or strings', async () => {
+    const wide = run`
+      SELECT toUInt64(18446744073709551615) AS u64, toInt128('-170141183460469231731687303715884105728') AS i128,
+        toUInt32(4294967295) AS u32, toFloat64(0.1) AS f64
+    `
+    const asBigInt = run({ returns: z.object({ u64: z.coerce.bigint(), i128: z.coerce.bigint() }) })`SELECT * FROM ${wide}`
+    const asString = run({ returns: z.object({ u64: z.coerce.string() }) })`SELECT * FROM ${wide}`
+
+    expect(await wide()).toEqual([
+      { u64: '18446744073709551615', i128: '-170141183460469231731687303715884105728', u32: 4294967295, f64: 0.1 },
+    ])
+    expect(await asBigInt()).toEqual([{ u64: 2n ** 64n - 1n, i128: -(2n ** 127n) }])
+    expect(await asString()).toEqual([{ u64: '18446744073709551615' }])
+  })
+
   test('dates inside arrays keep their day, seconds and milliseconds', async () => {
     const lists = run`
       SELECT toString(${p('days', t.array(t.date()))}) AS days, toString(${p('times', t.array(t.dateTime()))}) AS times,
