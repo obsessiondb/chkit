@@ -17,6 +17,7 @@ from chkit.cli.commands.drift_compare import (
     TableDriftDetail,
     collect_table_sql_fragments,
     collect_view_sql_queries,
+    compare_object_comments,
     compare_schema_objects,
     compare_table_shape,
     compare_view_shape,
@@ -176,12 +177,12 @@ def build_drift_payload(
 
     expected_filtered = _expected_filtered()
     expected_objects = [
-        SchemaObjectShape(kind=d.kind, database=d.database, name=d.name)
+        SchemaObjectShape(kind=d.kind, database=d.database, name=d.name, comment=d.comment)
         for d in expected_filtered
     ]
     expected_databases = {d.database for d in expected_filtered}
     actual_in_scope = [
-        SchemaObjectShape(kind=o.kind, database=o.database, name=o.name)
+        SchemaObjectShape(kind=o.kind, database=o.database, name=o.name, comment=o.comment)
         for o in actual_objects
         if o.database in expected_databases
     ]
@@ -247,13 +248,16 @@ def build_drift_payload(
     ]
     table_drift = sorted(table_drift_unsorted, key=lambda d: d.table)
     view_drift = sorted(
-        (
-            detail
-            for expected_view, actual_view in view_pairs
-            for detail in compare_view_shape(
-                expected_view, actual_view, current_database, canonicalizer
-            )
-        ),
+        [
+            *(
+                detail
+                for expected_view, actual_view in view_pairs
+                for detail in compare_view_shape(
+                    expected_view, actual_view, current_database, canonicalizer
+                )
+            ),
+            *compare_object_comments(expected_objects, actual_in_scope),
+        ],
         key=lambda d: d.object,
     )
 

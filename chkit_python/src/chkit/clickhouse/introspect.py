@@ -87,6 +87,8 @@ class SchemaObjectRef:
     kind: SchemaObjectKind
     database: str
     name: str
+    # ``system.tables.comment``, as ClickHouse decoded it; ``''`` when there is none.
+    comment: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -95,6 +97,7 @@ class SystemTableRow:
     name: str
     engine: str
     create_table_query: str | None = None
+    comment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -135,6 +138,7 @@ class IntrospectedTable:
     unique_key: str | None = None
     partition_by: str | None = None
     ttl: str | None = None
+    comment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -378,6 +382,7 @@ def build_introspected_tables(
                     table_row.create_table_query
                 ),
                 ttl=parse_ttl_from_create_table_query(table_row.create_table_query),
+                comment=table_row.comment or None,
             )
         )
 
@@ -392,7 +397,7 @@ def _quote_str_list(items: list[str]) -> str:
 
 
 _LIST_SCHEMA_OBJECTS_SQL = """\
-SELECT database, name, engine
+SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
@@ -413,6 +418,7 @@ def list_schema_objects(client: Any) -> list[SchemaObjectRef]:
                 kind=kind,
                 database=str(raw["database"]),
                 name=str(raw["name"]),
+                comment=str(raw.get("comment") or ""),
             )
         )
     return out
@@ -425,7 +431,7 @@ def list_table_details(client: Any, databases: list[str]) -> list[IntrospectedTa
     quoted = _quote_str_list(databases)
 
     table_rows_raw = client.query(
-        f"SELECT database, name, engine, create_table_query "
+        f"SELECT database, name, engine, create_table_query, comment "
         f"FROM system.tables "
         f"WHERE is_temporary = 0 AND database IN ({quoted})"
     ).rows
@@ -449,6 +455,7 @@ def list_table_details(client: Any, databases: list[str]) -> list[IntrospectedTa
                 if r.get("create_table_query") is not None
                 else None
             ),
+            comment=str(r["comment"]) if r.get("comment") else None,
         )
         for r in table_rows_raw
     ]

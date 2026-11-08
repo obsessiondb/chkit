@@ -14,6 +14,7 @@ import {
 import {
   collectTableSqlFragments,
   collectViewSqlQueries,
+  compareObjectComments,
   compareSchemaObjects,
   compareTableShape,
   compareViewShape,
@@ -94,6 +95,28 @@ describe('@chkit/cli drift comparer', () => {
     expect(result.objectDrift.map((item) => item.code)).toEqual(
       expect.arrayContaining(['kind_mismatch', 'extra_object'])
     )
+  })
+
+  test('reports a changed comment on any object kind with both values (#464)', () => {
+    const drift = compareObjectComments(
+      [
+        { kind: 'table', database: 'app', name: 'events', comment: 'a\\b' },
+        { kind: 'view', database: 'app', name: 'v' },
+        { kind: 'materialized_view', database: 'app', name: 'mv', comment: 'same' },
+        { kind: 'dictionary', database: 'app', name: 'd', comment: 'dict' },
+        { kind: 'table', database: 'app', name: 'missing', comment: 'x' },
+      ],
+      [
+        { kind: 'table', database: 'app', name: 'events', comment: 'a\\b' },
+        { kind: 'view', database: 'app', name: 'v', comment: 'server' },
+        { kind: 'materialized_view', database: 'app', name: 'mv', comment: 'same' },
+        { kind: 'dictionary', database: 'app', name: 'd', comment: '' },
+      ]
+    )
+    expect(drift).toEqual([
+      { code: 'comment_mismatch', object: 'app.v', expected: '', actual: 'server' },
+      { code: 'comment_mismatch', object: 'app.d', expected: 'dict', actual: '' },
+    ])
   })
 
   test('summarizes drift reason counts', () => {

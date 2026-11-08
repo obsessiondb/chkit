@@ -472,7 +472,7 @@ backfill (see [Target safety checks](/plugins/backfill/#target-safety-checks)).
 
 ### `comment` (string, optional)
 
-Column-level comment rendered in SQL.
+Column-level comment rendered in SQL. See [Comments](#comments).
 
 ### `renamedFrom` (string, optional)
 
@@ -1294,10 +1294,26 @@ What `chkit pull` reads back plans nothing against the schema it came from:
 
 The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not part of the schema.
 
-Views and materialized views always use drop + recreate.
+Views and materialized views use drop + recreate for a change to the query (or a materialized view's `TO` target or refresh mode). A comment-only change is an `ALTER TABLE ... MODIFY COMMENT` in place; see [Comments](#comments).
 
-Dictionaries have no ALTER at all: any change to `attributes`, `primaryKey`, `layout`, `lifetime`, `source` (including a password change), or `comment` renders as a single `CREATE OR REPLACE DICTIONARY` (`risk=caution`) — except a `source` still carrying the `[HIDDEN]` introspection placeholder, which is excluded from the diff entirely (see [Credentials in `source`](#credentials-in-source)). Removing a dictionary from schema emits `DROP DICTIONARY` (`risk=danger`, requires `--allow-destructive`).
+Dictionaries have no ALTER for their definition: any change to `attributes`, `primaryKey`, `layout`, `lifetime`, or `source` (including a password change) renders as a single `CREATE OR REPLACE DICTIONARY` (`risk=caution`), which carries the new `comment`. A comment-only change is an `ALTER TABLE ... MODIFY COMMENT`. A `source` still carrying the `[HIDDEN]` introspection placeholder is excluded from the diff entirely (see [Credentials in `source`](#credentials-in-source)). Removing a dictionary from schema emits `DROP DICTIONARY` (`risk=danger`, requires `--allow-destructive`).
 
 :::danger
 Changing a structural property on an existing table generates a `DROP TABLE` followed by `CREATE TABLE` — **all rows are permanently deleted and the table is recreated empty**. The data is not copied over. The drop is classified `risk=danger` (blocked without `--allow-destructive`) and `chkit migrate` flags it with the distinct `table_recreate_data_loss` warning. To preserve data, migrate by hand instead: create a new table with the desired structure, `INSERT INTO new SELECT ... FROM old`, then swap names and drop the old table.
 :::
+
+### Comments
+
+`comment` on a table, column, view, materialized view or dictionary is stored as written: chkit escapes backslashes and quotes, so the text `C:\new` (`'C:\\new'` in TypeScript) reaches `system.tables.comment` (or `system.columns.comment`) as `C:\new`, not with a newline. Leading and trailing whitespace is trimmed, and an empty comment is the same as none, so switching between `comment: ''` and no `comment` plans nothing.
+
+| Change | Planned statement | Risk |
+|--------|-------------------|------|
+| Table, view, materialized view or dictionary comment added or changed | `ALTER TABLE <object> MODIFY COMMENT '<text>'` | `safe` |
+| Same, comment removed | `ALTER TABLE <object> MODIFY COMMENT ''` | `safe` |
+| Column comment added or changed, nothing else | `ALTER TABLE <table> COMMENT COLUMN <column> '<text>'` | `safe` |
+| Column comment removed, nothing else | `ALTER TABLE <table> MODIFY COLUMN <column> REMOVE COMMENT` | `safe` |
+| Column comment and type or default changed | `MODIFY COLUMN` with the new `COMMENT`; a removed comment runs `REMOVE COMMENT` first | `caution` |
+
+A comment change never recreates a view, materialized view or dictionary: recreating a materialized view would lose the rows its source receives in between. A change that recreates the object anyway, such as a new query, carries the new comment in its `CREATE`.
+
+On ObsessionDB, `MODIFY COMMENT` currently changes only the replica that runs it ([#407](https://github.com/obsessiondb/chkit/issues/407)), so `chkit drift` may report a `comment_mismatch` for a table, view, materialized view or dictionary until the server fix ships. Column comments are not affected.

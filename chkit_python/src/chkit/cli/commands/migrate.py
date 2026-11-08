@@ -719,10 +719,6 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     def log(line: str) -> None:
         typer.echo(line, err=ctx.json_mode)
 
-    def warn(line: str) -> None:
-        if not ctx.json_mode:
-            typer.secho(line, fg=typer.colors.YELLOW, err=True)
-
     retry = plan.retry
     applied_now: list[MigrationJournalEntry] = []
     for filename in plan.pending:
@@ -748,7 +744,6 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                     else None
                 ),
                 log=log,
-                warn=warn,
                 settings=ctx.settings,
                 flags=ctx.flags,
             )

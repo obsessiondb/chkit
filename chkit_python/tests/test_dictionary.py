@@ -32,7 +32,6 @@ from chkit.cli.safety_markers import (
 )
 from chkit.clickhouse.create_dictionary_parser import (
     ParsedDictionaryAttribute,
-    parse_comment_from_create_dictionary_query,
     parse_dictionary_attributes_from_create_dictionary_query,
     parse_dictionary_primary_key_from_create_dictionary_query,
     parse_dictionary_range_from_create_dictionary_query,
@@ -314,17 +313,13 @@ def test_parses_primary_key() -> None:
     ) == ["id"]
 
 
-def test_parses_source_layout_lifetime_comment() -> None:
+def test_parses_source_layout_lifetime() -> None:
     assert parse_source_from_create_dictionary_query(_PARSER_QUERY) == (
         "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' "
         "db 'app' table 'users')"
     )
     assert parse_layout_from_create_dictionary_query(_PARSER_QUERY) == "HASHED()"
     assert parse_lifetime_from_create_dictionary_query(_PARSER_QUERY) == "MIN 0 MAX 300"
-    assert (
-        parse_comment_from_create_dictionary_query(_PARSER_QUERY)
-        == "User lookup dictionary"
-    )
 
 
 def test_returns_empty_results_for_none_query() -> None:

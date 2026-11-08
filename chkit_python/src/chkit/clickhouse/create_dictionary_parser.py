@@ -16,7 +16,6 @@ from chkit.core.key_clause import split_top_level_comma
 
 __all__ = [
     "ParsedDictionaryAttribute",
-    "parse_comment_from_create_dictionary_query",
     "parse_dictionary_attributes_from_create_dictionary_query",
     "parse_dictionary_primary_key_from_create_dictionary_query",
     "parse_dictionary_range_from_create_dictionary_query",
@@ -61,7 +60,6 @@ _PRIMARY_KEY_RE = re.compile(
     re.IGNORECASE,
 )
 
-_COMMENT_RE = re.compile(r"\bCOMMENT\s+'((?:[^'\\]|\\.|'')*)'", re.IGNORECASE)
 
 _RANGE_RE = re.compile(r"^MIN\s+(\S+)\s+MAX\s+(\S+)$", re.IGNORECASE)
 
@@ -344,15 +342,6 @@ def parse_lifetime_from_create_dictionary_query(query: str | None) -> str | None
     if not query:
         return None
     return _extract_keyword_paren_body(query, "LIFETIME")
-
-
-def parse_comment_from_create_dictionary_query(query: str | None) -> str | None:
-    if not query:
-        return None
-    match = _COMMENT_RE.search(query)
-    if match is None or not match.group(1):
-        return None
-    return match.group(1).replace("\\'", "'").replace("''", "'")
 
 
 def _strip_backticks(value: str) -> str:

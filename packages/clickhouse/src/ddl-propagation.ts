@@ -37,6 +37,7 @@ const KEY_SUFFIXES: ReadonlyMap<string, string> = new Map<MigrationOperationType
   ['alter_table_modify_setting', ':setting:'],
   ['alter_table_reset_setting', ':setting:'],
   ['alter_table_modify_ttl', ':ttl'],
+  ['alter_table_modify_comment', ':comment'],
   ['alter_table_rename_table', ':rename_table'],
   ['rename_dictionary', ':rename_dictionary'],
 ])

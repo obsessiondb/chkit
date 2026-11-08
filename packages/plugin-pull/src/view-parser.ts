@@ -1,20 +1,22 @@
 import {
   inferSchemaKindFromEngine,
-  parseCommentFromCreateDictionaryQuery,
   parseDictionaryAttributesFromCreateDictionaryQuery,
   parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
   parseDictionaryRangeFromCreateDictionaryQuery,
   parseDictionarySettingsFromCreateDictionaryQuery,
   parseLayoutFromCreateDictionaryQuery,
   parseLifetimeFromCreateDictionaryQuery,
+  parseMaterializedViewTarget,
   parseSourceFromCreateDictionaryQuery,
   type IntrospectedTable,
 } from '@chkit/clickhouse'
-import type {
-  DictionaryDefinition,
-  MaterializedViewDefinition,
-  MaterializedViewRefresh,
-  ViewDefinition,
+import {
+  isTrivia,
+  tokenizeSQL,
+  type DictionaryDefinition,
+  type MaterializedViewDefinition,
+  type MaterializedViewRefresh,
+  type ViewDefinition,
 } from '@chkit/core'
 
 export interface SystemTableRow {
@@ -22,14 +24,16 @@ export interface SystemTableRow {
   name: string
   engine: string
   create_table_query?: string
+  /** `system.tables.comment`, as ClickHouse decoded it. */
+  comment?: string
 }
 
 export type IntrospectedObject =
   | ({ kind: 'table' } & IntrospectedTable)
-  | ({ kind: 'view' } & Pick<ViewDefinition, 'database' | 'name' | 'as'>)
+  | ({ kind: 'view' } & Pick<ViewDefinition, 'database' | 'name' | 'as' | 'comment'>)
   | ({ kind: 'materialized_view' } & Pick<
       MaterializedViewDefinition,
-      'database' | 'name' | 'to' | 'as' | 'refresh'
+      'database' | 'name' | 'to' | 'as' | 'refresh' | 'comment'
     >)
   | ({ kind: 'dictionary' } & Pick<
       DictionaryDefinition,
@@ -58,7 +62,6 @@ function mapDictionaryRowToDefinition(
   if (attributes.length === 0 || primaryKey.length === 0 || !source || !layout || !lifetime) {
     return null
   }
-  const comment = parseCommentFromCreateDictionaryQuery(query)
   const range = parseDictionaryRangeFromCreateDictionaryQuery(query)
   const settings = parseDictionarySettingsFromCreateDictionaryQuery(query)
   return {
@@ -72,7 +75,7 @@ function mapDictionaryRowToDefinition(
     lifetime,
     ...(range ? { range } : {}),
     ...(settings ? { settings } : {}),
-    ...(comment ? { comment } : {}),
+    ...(row.comment ? { comment: row.comment } : {}),
   }
 }
 
@@ -83,14 +86,21 @@ export function mapSystemTableRowToDefinition(
   if (kind === 'view') {
     const as = parseAsClause(row.create_table_query)
     if (!as) return null
-    return { kind: 'view', database: row.database, name: row.name, as }
+    return { kind: 'view', database: row.database, name: row.name, as, ...(row.comment ? { comment: row.comment } : {}) }
   }
   if (kind === 'materialized_view') {
     const as = parseAsClause(row.create_table_query)
     const to = parseToClause(row.create_table_query, row.database)
     if (!as || !to) return null
     const refresh = parseRefreshClause(row.create_table_query)
-    const base = { kind: 'materialized_view' as const, database: row.database, name: row.name, to, as }
+    const base = {
+      kind: 'materialized_view' as const,
+      database: row.database,
+      name: row.name,
+      to,
+      as,
+      ...(row.comment ? { comment: row.comment } : {}),
+    }
     return refresh ? { ...base, refresh } : base
   }
   if (kind === 'dictionary') {
@@ -110,13 +120,23 @@ function stripDefinerClauses(query: string): string {
     .replace(/\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER|NONE)/gi, '')
 }
 
+/**
+ * The query after the first top-level `AS`. The statement is read with the SQL
+ * lexer, so an `AS` inside a string literal (a `COMMENT`) or a column list is
+ * skipped.
+ */
 export function parseAsClause(query: string | undefined): string | null {
   if (!query) return null
-  const cleaned = stripDefinerClauses(query)
-  const match = /\bAS\b([\s\S]*)$/i.exec(cleaned)
-  if (!match?.[1]) return null
-  const asClause = match[1].trim().replace(/;$/, '').trim()
-  return asClause.length > 0 ? asClause : null
+  let depth = 0
+  for (const token of tokenizeSQL(query)) {
+    if (isTrivia(token)) continue
+    if (token.text === '(') depth++
+    else if (token.text === ')') depth--
+    if (depth !== 0 || token.kind !== 'identifier' || token.text.toUpperCase() !== 'AS') continue
+    const asClause = query.slice(token.end).trim().replace(/;$/, '').trim()
+    return asClause.length > 0 ? asClause : null
+  }
+  return null
 }
 
 const INTERVAL_TOKEN = '\\d+\\s+(?:SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)S?(?:\\s+\\d+\\s+(?:SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)S?)*'
@@ -230,26 +250,10 @@ export function parseRefreshClause(
   return refresh
 }
 
+/** The `TO [db.]name` target of a materialized view; null for one with an inner table. */
 export function parseToClause(
   query: string | undefined,
   fallbackDatabase: string
 ): { database: string; name: string } | null {
-  if (!query) return null
-  const identifier = /(?:^|\s)TO\s+((?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+)(?:\.(?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+))?)/i.exec(
-    query
-  )?.[1]
-  if (!identifier) return null
-  const parts = identifier.split('.').map((part) => part.replace(/^[`"]|[`"]$/g, '').trim())
-  if (parts.length === 1) {
-    const name = parts[0] ?? ''
-    if (name.length === 0) return null
-    return { database: fallbackDatabase, name }
-  }
-  if (parts.length === 2) {
-    const database = parts[0] ?? fallbackDatabase
-    const name = parts[1] ?? ''
-    if (database.length === 0 || name.length === 0) return null
-    return { database, name }
-  }
-  return null
+  return parseMaterializedViewTarget(query, fallbackDatabase) ?? null
 }

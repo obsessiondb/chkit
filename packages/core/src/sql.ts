@@ -24,11 +24,20 @@ import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { renderVectorIndexType, vectorIndexGranularity } from './vector-index.js'
 
+/**
+ * A comment as a ClickHouse string literal. ClickHouse reads backslash escapes
+ * in string literals, so a backslash is doubled as well as a quote; the server
+ * then stores exactly the schema's text.
+ */
+function commentLiteral(comment: string): string {
+  return `'${comment.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
+}
+
 function renderColumn(col: ColumnDefinition): string {
   let out = `${quoteIdentifier(col.name)} ${renderColumnType(col)}`
   if (col.default !== undefined) out += ` ${col.defaultKind ?? 'DEFAULT'} ${renderDefault(col.default)}`
   else if (col.defaultKind === 'EPHEMERAL') out += ' EPHEMERAL'
-  if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
+  if (col.comment) out += ` COMMENT ${commentLiteral(col.comment)}`
   if (col.codec) out += ` ${renderCodec(col.codec)}`
   return out
 }
@@ -130,7 +139,7 @@ function renderTableSQL(def: TableDefinition): string {
         .join(', ')}`
     )
   }
-  if (def.comment) clauses.push(`COMMENT '${def.comment.replace(/'/g, "''")}'`)
+  if (def.comment) clauses.push(`COMMENT ${commentLiteral(def.comment)}`)
 
   return `CREATE TABLE IF NOT EXISTS ${renderQualifiedName(def.database, def.name)}\n(\n  ${body}\n) ENGINE = ${def.engine}\n${clauses.join('\n')};`
 }
@@ -138,7 +147,7 @@ function renderTableSQL(def: TableDefinition): string {
 // Before `AS`, where ClickHouse itself stores it: after the query, the parser
 // would read `COMMENT` as an alias of a trailing `FROM <table>`.
 function renderViewComment(comment: string | undefined): string {
-  return comment ? ` COMMENT '${comment.replace(/'/g, "''")}'` : ''
+  return comment ? ` COMMENT ${commentLiteral(comment)}` : ''
 }
 
 function renderViewSQL(def: ViewDefinition): string {
@@ -239,7 +248,7 @@ export function renderDictionarySQL(def: DictionaryDefinition, replace = false):
   if (def.settings && Object.keys(def.settings).length > 0) {
     clauses.push(`SETTINGS(${renderDictionarySettings(def.settings)})`)
   }
-  if (def.comment) clauses.push(`COMMENT '${def.comment.replace(/'/g, "''")}'`)
+  if (def.comment) clauses.push(`COMMENT ${commentLiteral(def.comment)}`)
   return `${verb} ${renderQualifiedName(def.database, def.name)}\n(\n  ${attrs}\n)\n${clauses.join('\n')};`
 }
 
@@ -257,6 +266,24 @@ export function renderAlterAddColumn(def: TableDefinition, column: ColumnDefinit
 
 export function renderAlterModifyColumn(def: TableDefinition, column: ColumnDefinition): string {
   return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${renderColumn(column)};`
+}
+
+/** Sets a column comment without restating the column's type. */
+export function renderAlterCommentColumn(def: TableDefinition, column: ColumnDefinition): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} COMMENT COLUMN ${quoteIdentifier(column.name)} ${commentLiteral(column.comment ?? '')};`
+}
+
+/** MODIFY COLUMN without COMMENT keeps the old comment, so removing it needs its own statement. */
+export function renderAlterRemoveColumnComment(def: TableDefinition, columnName: string): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${quoteIdentifier(columnName)} REMOVE COMMENT;`
+}
+
+/**
+ * Sets the comment of a table, view, materialized view or dictionary in place
+ * (`''` removes it), so a comment change never recreates the object.
+ */
+export function renderAlterModifyComment(def: SchemaDefinition): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COMMENT ${commentLiteral(def.comment ?? '')};`
 }
 
 /**

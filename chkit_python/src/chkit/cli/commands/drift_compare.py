@@ -53,7 +53,12 @@ from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 from chkit.core.vector_index import render_vector_index_type
 
 ObjectDriftReasonCode: TypeAlias = Literal[
-    "missing_object", "extra_object", "kind_mismatch", "query_mismatch", "target_mismatch"
+    "missing_object",
+    "extra_object",
+    "kind_mismatch",
+    "query_mismatch",
+    "target_mismatch",
+    "comment_mismatch",
 ]
 
 TableDriftReasonCode: TypeAlias = Literal[
@@ -123,6 +128,7 @@ class SchemaObjectShape:
     kind: SchemaObjectKind
     database: str
     name: str
+    comment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -138,7 +144,8 @@ class ObjectDriftDetail:
     object: str
     expected_kind: SchemaObjectKind | None = None
     actual_kind: SchemaObjectKind | None = None
-    # query_mismatch / target_mismatch: the compared query or ``TO`` target.
+    # query_mismatch / target_mismatch / comment_mismatch: the compared query,
+    # ``TO`` target or comment.
     expected: str | None = None
     actual: str | None = None
 
@@ -257,6 +264,36 @@ def compare_schema_objects(
         kind_mismatches=kind_mismatches,
         object_drift=object_drift,
     )
+
+
+def compare_object_comments(
+    expected_objects: list[SchemaObjectShape],
+    actual_objects: list[SchemaObjectShape],
+) -> list[ObjectDriftDetail]:
+    """Compare the comment of every object that exists on both sides with the same kind.
+
+    Covers tables, views, materialized views and dictionaries. The live comment
+    is ``system.tables.comment``, which ClickHouse has already decoded.
+    """
+    actual_comments = {_schema_object_key(item): item.comment for item in actual_objects}
+    drift: list[ObjectDriftDetail] = []
+    for item in expected_objects:
+        actual = actual_comments.get(_schema_object_key(item))
+        if actual is None:
+            continue
+        expected_comment = js_trim(item.comment or "")
+        actual_comment = js_trim(actual)
+        if expected_comment == actual_comment:
+            continue
+        drift.append(
+            ObjectDriftDetail(
+                code="comment_mismatch",
+                object=f"{item.database}.{item.name}",
+                expected=expected_comment,
+                actual=actual_comment,
+            )
+        )
+    return drift
 
 
 def summarize_drift_reasons(

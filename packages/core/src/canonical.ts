@@ -40,6 +40,11 @@ function sortKind(kind: SchemaDefinition['kind']): number {
   return 3
 }
 
+// An empty comment is no comment: ClickHouse stores both as ''.
+function canonicalizeComment(comment: string | undefined): string | undefined {
+  return comment?.trim() || undefined
+}
+
 function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
   const { defaultKind, ...rest } = column
   return {
@@ -48,7 +53,7 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
     name: column.name.trim(),
     renamedFrom: column.renamedFrom?.trim(),
     type: typeof column.type === 'string' ? column.type.trim() : column.type,
-    comment: column.comment?.trim(),
+    comment: canonicalizeComment(column.comment),
     codec: column.codec ? canonicalizeCodec(column.codec) : undefined,
     // `{ expression }` becomes the legacy `fn:` string, so snapshots, plans,
     // drift and chkit-py share one representation (#234). A column without a
@@ -122,7 +127,7 @@ function canonicalizeTable(def: TableDefinition, options: CanonicalizeOptions): 
     indexes,
     projections,
     constraints,
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
 }
 
@@ -132,7 +137,7 @@ function canonicalizeView(def: ViewDefinition): ViewDefinition {
     database: def.database.trim(),
     name: def.name.trim(),
     as: normalizeSQLFragment(def.as),
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
 }
 
@@ -193,7 +198,7 @@ function canonicalizeMaterializedView(def: MaterializedViewDefinition): Material
       name: def.to.name.trim(),
     },
     as: normalizeSQLFragment(def.as),
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
   const refresh = canonicalizeRefresh(def.refresh)
   if (refresh) {
@@ -239,7 +244,7 @@ function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition
       ? { min: def.range.min.trim(), max: def.range.max.trim() }
       : undefined,
     settings: settings && Object.keys(settings).length > 0 ? settings : undefined,
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
 }
 

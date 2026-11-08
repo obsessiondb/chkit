@@ -69,6 +69,16 @@ def _normalize_projection(projection: ProjectionInput) -> ProjectionDefinition:
     return projection
 
 
+def _comment_literal(comment: str) -> str:
+    """A comment as a ClickHouse string literal.
+
+    ClickHouse reads backslash escapes in string literals, so a backslash is
+    doubled as well as a quote; the server then stores exactly the schema's text.
+    """
+    escaped = comment.replace("\\", "\\\\").replace("'", "''")
+    return f"'{escaped}'"
+
+
 def _render_column(col: ColumnDefinition) -> str:
     out = f"{quote_identifier(col.name)} {render_column_type(col)}"
     if col.default is not None:
@@ -76,8 +86,7 @@ def _render_column(col: ColumnDefinition) -> str:
     elif col.default_kind == "EPHEMERAL":
         out += " EPHEMERAL"
     if col.comment is not None and len(col.comment) > 0:
-        escaped = col.comment.replace("'", "''")
-        out += f" COMMENT '{escaped}'"
+        out += f" COMMENT {_comment_literal(col.comment)}"
     if col.codec is not None:
         out += f" {render_codec(col.codec)}"
     return out
@@ -190,8 +199,7 @@ def _render_table_sql(definition: TableDefinition) -> str:
         )
         clauses.append(f"SETTINGS {rendered_settings}")
     if definition.comment is not None and len(definition.comment) > 0:
-        escaped = definition.comment.replace("'", "''")
-        clauses.append(f"COMMENT '{escaped}'")
+        clauses.append(f"COMMENT {_comment_literal(definition.comment)}")
 
     return (
         f"CREATE TABLE IF NOT EXISTS "
@@ -206,8 +214,7 @@ def _render_table_sql(definition: TableDefinition) -> str:
 def _render_view_comment(comment: str | None) -> str:
     if comment is None or len(comment) == 0:
         return ""
-    escaped = comment.replace("'", "''")
-    return f" COMMENT '{escaped}'"
+    return f" COMMENT {_comment_literal(comment)}"
 
 
 def _render_view_sql(definition: ViewDefinition) -> str:
@@ -337,8 +344,7 @@ def render_dictionary_sql(definition: DictionaryDefinition, replace: bool = Fals
     if definition.settings is not None and len(definition.settings) > 0:
         clauses.append(f"SETTINGS({_render_dictionary_settings(definition.settings)})")
     if definition.comment:
-        escaped = definition.comment.replace("'", "''")
-        clauses.append(f"COMMENT '{escaped}'")
+        clauses.append(f"COMMENT {_comment_literal(definition.comment)}")
     return (
         f"{verb} {render_qualified_name(definition.database, definition.name)}\n"
         f"(\n  {attrs}\n)\n{chr(10).join(clauses)};"
@@ -369,6 +375,33 @@ def render_alter_modify_column(definition: TableDefinition, column: ColumnInput)
     return (
         f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
         f"MODIFY COLUMN {_render_column(normalized)};"
+    )
+
+
+def render_alter_comment_column(definition: TableDefinition, column: ColumnDefinition) -> str:
+    """Set a column comment without restating the column's type."""
+    return (
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"COMMENT COLUMN {quote_identifier(column.name)} {_comment_literal(column.comment or '')};"
+    )
+
+
+def render_alter_remove_column_comment(definition: TableDefinition, column_name: str) -> str:
+    """MODIFY COLUMN without COMMENT keeps the old comment, so removing it is a statement."""
+    return (
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"MODIFY COLUMN {quote_identifier(column_name)} REMOVE COMMENT;"
+    )
+
+
+def render_alter_modify_comment(definition: SchemaDefinition) -> str:
+    """Set the comment of a table, view, materialized view or dictionary in place.
+
+    ``''`` removes it, so a comment change never recreates the object.
+    """
+    return (
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"MODIFY COMMENT {_comment_literal(definition.comment or '')};"
     )
 
 

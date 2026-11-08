@@ -247,8 +247,9 @@ ${readSettings}`,
 				database: string
 				name: string
 				engine: string
+				comment?: string
 			}>(
-				`SELECT database, name, engine
+				`SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
@@ -259,7 +260,12 @@ WHERE is_temporary = 0
 			for (const row of rows) {
 				const kind = inferSchemaKindFromEngine(row.engine)
 				if (!kind) continue
-				out.push({ kind, database: row.database, name: row.name })
+				out.push({
+					kind,
+					database: row.database,
+					name: row.name,
+					comment: row.comment ?? '',
+				})
 			}
 			return out
 		},
@@ -272,7 +278,7 @@ WHERE is_temporary = 0
 
 			const [tables, columns, indexes] = await Promise.all([
 				executor.query<SystemTableRow>(
-					`SELECT database, name, engine, create_table_query FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
+					`SELECT database, name, engine, create_table_query, comment FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
 				),
 				executor.query<SystemColumnRow>(
 					`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position FROM system.columns WHERE database IN (${quoted})`,

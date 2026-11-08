@@ -2001,13 +2001,12 @@ describe('@chkit/core view comments', () => {
     )
   })
 
-  test('a comment change recreates the view with the new comment', () => {
+  test('a comment change alters the view in place (#464)', () => {
     const plan = planDiff(
       [view({ database: 'app', name: 'v', as: 'SELECT 1 AS a', comment: 'old' })],
       [view({ database: 'app', name: 'v', as: 'SELECT 1 AS a', comment: 'new' })]
     )
-    expect(plan.operations.map((op) => op.type)).toEqual(['drop_view', 'create_view'])
-    expect(plan.operations[1]?.sql).toContain("COMMENT 'new'")
+    expect(plan.operations.map((op) => op.sql)).toEqual(["ALTER TABLE app.v MODIFY COMMENT 'new';"])
   })
 })
 
