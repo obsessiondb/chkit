@@ -1,7 +1,8 @@
-import { typedFlags, type ChxPluginCommand, type ParsedFlags, type PluginRuntime } from '../plugins.js'
+import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
+import { forwardedCommandFlags } from '../runtime/command-dispatch.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
-import { type FlagDef, parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
+import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
 import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
@@ -124,10 +125,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     }
     return 1
   }
-  const commandFlags = [
-    ...(targetCommand?.flags ?? []),
-    ...collectExtensionFlags(pluginRuntime.plugins, pluginName),
-  ]
+  const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, pluginName, targetCommand)
   let mergedFlags: ParsedFlags = { ...flags }
   if (commandFlags.length > 0) {
     try {
@@ -159,16 +157,4 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   })
 
   return exitCode
-}
-
-function collectExtensionFlags(
-  plugins: PluginRuntime['plugins'],
-  pluginName: string,
-): FlagDef[] {
-  return plugins.flatMap((entry) =>
-    (entry.plugin.extendCommands ?? []).flatMap((extension) => {
-      const targets = Array.isArray(extension.command) ? extension.command : [extension.command]
-      return targets.includes(pluginName) ? [...extension.flags] : []
-    }),
-  )
 }

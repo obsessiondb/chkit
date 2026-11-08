@@ -1,5 +1,12 @@
 # @chkit/plugin-obsessiondb
 
+## 0.2.0-beta.15
+
+### Patch Changes
+
+- faf52fa: `chkit pull`, `chkit drift` and `chkit check` through the ObsessionDB console API now read column codecs.
+- Updated dependencies: `@chkit/core@0.2.0-beta.15`, `@chkit/clickhouse@0.2.0-beta.15`, `@chkit/plugin-backfill@0.2.0-beta.15`
+
 ## 0.2.0-beta.14
 
 ### Patch Changes
