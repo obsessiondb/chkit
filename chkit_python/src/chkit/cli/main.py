@@ -77,7 +77,7 @@ def _normalize_short_options(
     return normalized
 
 
-def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
+def _split_forwarded_args(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
     """Separate a plugin forwarder's own options from the plugin's arguments.
 
     ``plugin``, ``codegen`` and ``obsessiondb`` pass unknown tokens to the
@@ -107,7 +107,10 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         short_name = token[:2] if long_name is None else None
         if token in takes_value:
             own.append(token)
-            if takes_value[token] and i < len(args):
+            if takes_value[token]:
+                # Without its value, click would take the `--` below as the value.
+                if i >= len(args):
+                    ctx.fail(f"Option '{token}' requires an argument.")
                 own.append(args[i])
                 i += 1
         elif long_name is not None and takes_value.get(long_name):
@@ -126,7 +129,7 @@ class _ChkitCommand(TyperCommand):
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
         if ctx.ignore_unknown_options:
-            return super().parse_args(ctx, _split_forwarded_args(args, params))
+            return super().parse_args(ctx, _split_forwarded_args(ctx, args, params))
         return super().parse_args(ctx, _normalize_short_options(ctx, args, params))
 
 

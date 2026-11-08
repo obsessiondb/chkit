@@ -105,6 +105,18 @@ def test_a_forwarder_reads_only_its_own_options_and_passes_the_rest_on(
     assert "Usage:" in help_result.output
 
 
+def test_a_forwarder_option_without_its_value_is_a_usage_error() -> None:
+    for command in (["codegen"], ["plugin", "codegen", "codegen"], ["obsessiondb", "login"]):
+        for option in ("--config", "-c"):
+            args = [*command, "--out-file", "-hmodels.py", option]
+            result = CliRunner().invoke(app, args)
+            output = ANSI_STYLE.sub("", result.output)
+            assert result.exit_code == 2, (args, output)
+            assert f"Option '{option}' requires an argument." in output, args
+            # A usage error, not the help that a forwarded -h would print.
+            assert "Options" not in output, args
+
+
 def test_h_is_help_and_v_is_the_version() -> None:
     for args in (["-h"], ["status", "-h"], ["plugin", "-h"], ["obsessiondb", "-h"]):
         result = CliRunner().invoke(app, args)
