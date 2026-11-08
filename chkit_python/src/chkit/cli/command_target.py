@@ -9,6 +9,7 @@ As in TS (``runtime.resolveContext``), a plugin's ``get_context`` executor
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from typing import Annotated, Any, NoReturn
 
 import typer
@@ -51,11 +52,14 @@ def resolve_plugin_executor(
     json_mode: bool,
     service: str | None,
     flags: dict[str, Any] | None = None,
+    after_init: Callable[[], None] | None = None,
 ) -> ClickHouseClient | None:
     """Run the on_init hooks, then return the first plugin executor, or None.
 
     ``flags`` is the command's parsed-flag dict (``hook_flags.passed_flags``)
-    for both hooks; without it they get only ``--service``.
+    for both hooks; without it they get only ``--service``. ``after_init``
+    runs between the two hooks, where TS runs a plugin command's
+    on_config_loaded hooks.
     """
     # The hooks read --service under the key the TS flag parser produces.
     if flags is None:
@@ -72,6 +76,8 @@ def resolve_plugin_executor(
             options={},
         )
     )
+    if after_init is not None:
+        after_init()
     try:
         plugin_context = plugin_runtime.resolve_context(
             ChxGetContextInput(

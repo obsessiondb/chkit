@@ -158,6 +158,9 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
+- Plugin hooks run as in TS (#488): `status`, `check`, `drift` and `query` give them every
+  flag that was passed, `generate` and `snapshot rebuild` run `on_init` and `get_context` (so
+  they show the ObsessionDB service banner), and `pull` runs `on_config_loaded`.
 - `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
   migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
   `index_granularity`, and leaves out chkit's migration journal and the hidden
