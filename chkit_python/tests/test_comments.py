@@ -234,6 +234,30 @@ def test_a_type_change_that_removes_the_comment_runs_remove_comment_first() -> N
     ]
 
 
+def test_comment_alters_quote_table_and_column_names_that_need_it() -> None:
+    def quoted(comment: str | None = None, column_comment: str | None = None) -> TableDefinition:
+        return table(
+            database="app",
+            name="events-v2",
+            engine="MergeTree()",
+            columns=[
+                ColumnDefinition(name="id", type="UInt64"),
+                ColumnDefinition(name="my col", type="String", comment=column_comment),
+            ],
+            primary_key=["id"],
+            order_by=["id"],
+            comment=comment,
+        )
+
+    assert _sql_of([quoted(column_comment="old")], [quoted(comment="t", column_comment="new")]) == [
+        "ALTER TABLE app.`events-v2` COMMENT COLUMN `my col` 'new';",
+        "ALTER TABLE app.`events-v2` MODIFY COMMENT 't';",
+    ]
+    assert _sql_of([quoted(column_comment="old")], [quoted()]) == [
+        "ALTER TABLE app.`events-v2` MODIFY COLUMN `my col` REMOVE COMMENT;",
+    ]
+
+
 # ---------- DDL wait, drift, pull (TS alter-column-statement, drift, plugin-pull tests) ----------
 
 

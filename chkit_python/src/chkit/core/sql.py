@@ -378,16 +378,16 @@ def render_alter_modify_column(definition: TableDefinition, column: ColumnInput)
 def render_alter_comment_column(definition: TableDefinition, column: ColumnDefinition) -> str:
     """Set a column comment without restating the column's type."""
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"COMMENT COLUMN `{column.name}` {_comment_literal(column.comment or '')};"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"COMMENT COLUMN {quote_identifier(column.name)} {_comment_literal(column.comment or '')};"
     )
 
 
 def render_alter_remove_column_comment(definition: TableDefinition, column_name: str) -> str:
     """MODIFY COLUMN without COMMENT keeps the old comment, so removing it is a statement."""
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
-        f"MODIFY COLUMN `{column_name}` REMOVE COMMENT;"
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"MODIFY COLUMN {quote_identifier(column_name)} REMOVE COMMENT;"
     )
 
 
@@ -397,7 +397,7 @@ def render_alter_modify_comment(definition: SchemaDefinition) -> str:
     ``''`` removes it, so a comment change never recreates the object.
     """
     return (
-        f"ALTER TABLE {definition.database}.{definition.name} "
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
         f"MODIFY COMMENT {_comment_literal(definition.comment or '')};"
     )
 

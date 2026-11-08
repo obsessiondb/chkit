@@ -184,4 +184,27 @@ describe('@chkit/core comments (#464)', () => {
       ])
     })
   })
+
+  test('comment ALTERs quote table and column names that need it', () => {
+    const quoted = (input: { comment?: string; columnComment?: string }) =>
+      table({
+        database: 'app',
+        name: 'events-v2',
+        engine: 'MergeTree()',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'my col', type: 'String', ...(input.columnComment === undefined ? {} : { comment: input.columnComment }) },
+        ],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        ...(input.comment === undefined ? {} : { comment: input.comment }),
+      })
+    expect(sqlOf([quoted({ columnComment: 'old' })], [quoted({ comment: 't', columnComment: 'new' })])).toEqual([
+      "ALTER TABLE app.`events-v2` COMMENT COLUMN `my col` 'new';",
+      "ALTER TABLE app.`events-v2` MODIFY COMMENT 't';",
+    ])
+    expect(sqlOf([quoted({ columnComment: 'old' })], [quoted({})])).toEqual([
+      'ALTER TABLE app.`events-v2` MODIFY COLUMN `my col` REMOVE COMMENT;',
+    ])
+  })
 })
