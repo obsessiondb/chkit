@@ -35,28 +35,57 @@ export const READONLY_MERGE_TREE_SETTINGS: readonly string[] = [
 /** Prefix of the skip indexes the `add_minmax_index_for_*` settings create. */
 export const AUTO_MINMAX_INDEX_PREFIX = 'auto_minmax_index_'
 
-const NUMBER_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i
+/** Past this exponent `canonicalDecimal` keeps the exponent. */
+const MAX_PLAIN_EXPONENT = 400
+
+const DECIMAL_RE = /^([+-]?)(\d*)(?:\.(\d*))?(?:e([+-]?\d+))?$/i
 
 /**
  * A setting value in one form for comparison: ClickHouse stores `2.0` as `2.`
  * and `1e6` as `1000000.`, and pull reads every value back as the SQL text, so
- * `8192`, `"8192"` and `8192.` are the same value. Integral
- * numbers print as exact integers so TS and chkit-py agree. Booleans keep
- * their word: ClickHouse stores `true` as written.
+ * `8192`, `"8192"` and `8192.` are the same value. A number compares exactly,
+ * as decimal text: a float would make two UInt64 values above 2^53 equal.
+ * `true`/`false` compare as the `1`/`0` ClickHouse reads them as, in any case.
  */
 export function settingValueFingerprint(value: SettingValue): string {
-  if (typeof value === 'boolean') return value ? 'true' : 'false'
+  if (typeof value === 'boolean') return value ? '1' : '0'
   const text = String(value).trim()
-  if (!NUMBER_RE.test(text)) return text
-  const number = Number(text)
-  if (!Number.isFinite(number)) return text
-  return Number.isInteger(number) ? BigInt(number).toString() : String(number)
+  const lower = text.toLowerCase()
+  if (lower === 'true') return '1'
+  if (lower === 'false') return '0'
+  return canonicalDecimal(text) ?? text
+}
+
+/**
+ * Number text as a canonical decimal: no exponent, no leading zeros, no
+ * trailing fraction zeros or `.`, and `0` for any zero. `1e6`, `1000000.` and
+ * `1000000` give `1000000`; `1e-7` gives `0.0000001`. A value too far from 1
+ * keeps an exponent (`<digits>e<exponent>`) instead of thousands of zeros.
+ * Undefined when the text is not a number. chkit-py's twin gives the same text.
+ */
+function canonicalDecimal(text: string): string | undefined {
+  const match = DECIMAL_RE.exec(text)
+  if (!match) return undefined
+  const [, sign = '', integer = '', fraction = '', exponent = '0'] = match
+  if (integer === '' && fraction === '') return undefined
+  let digits = `${integer}${fraction}`.replace(/^0+/, '')
+  if (digits === '') return '0'
+  let exp = Number.parseInt(exponent, 10) - fraction.length
+  const trailing = /0+$/.exec(digits)?.[0].length ?? 0
+  digits = digits.slice(0, digits.length - trailing)
+  exp += trailing
+  const prefix = sign === '-' ? '-' : ''
+  if (exp > MAX_PLAIN_EXPONENT || exp < -MAX_PLAIN_EXPONENT) return `${prefix}${digits}e${exp}`
+  if (exp >= 0) return `${prefix}${digits}${'0'.repeat(exp)}`
+  const point = digits.length + exp
+  return point > 0
+    ? `${prefix}${digits.slice(0, point)}.${digits.slice(point)}`
+    : `${prefix}0.${'0'.repeat(-point)}${digits}`
 }
 
 function isEnabled(value: SettingValue | undefined): boolean {
   if (value === undefined) return false
-  const fingerprint = settingValueFingerprint(value).toLowerCase()
-  return fingerprint !== '0' && fingerprint !== 'false'
+  return settingValueFingerprint(value) !== '0'
 }
 
 /**
@@ -64,7 +93,7 @@ function isEnabled(value: SettingValue | undefined): boolean {
  * `auto_minmax_index_<column>` skip indexes and rejects a user index whose name
  * has that prefix, so such an index is always the server's own.
  */
-export function hasAutoMinmaxIndexes(settings: Record<string, SettingValue> | undefined): boolean {
+function hasAutoMinmaxIndexes(settings: Record<string, SettingValue> | undefined): boolean {
   return Object.entries(settings ?? {}).some(([key, value]) => key.startsWith('add_minmax_index_for_') && isEnabled(value))
 }
 
@@ -76,13 +105,18 @@ export function withoutAutoMinmaxIndexes(
   return indexes.filter((index) => !index.name.startsWith(AUTO_MINMAX_INDEX_PREFIX))
 }
 
-/** A MergeTree table's settings with `index_granularity` filled in as ClickHouse does. */
+/**
+ * A MergeTree table's settings with `index_granularity` filled in as ClickHouse
+ * does: `indexGranularity` is the server's MergeTree default
+ * (`clickhouse.indexGranularity`).
+ */
 export function withDefaultIndexGranularity(
   engine: string,
-  settings: Record<string, SettingValue> | undefined
+  settings: Record<string, SettingValue> | undefined,
+  indexGranularity: number = DEFAULT_INDEX_GRANULARITY
 ): Record<string, SettingValue> | undefined {
   if (!isMergeTreeEngine(engine) || (settings && 'index_granularity' in settings)) return settings
-  return { ...settings, index_granularity: DEFAULT_INDEX_GRANULARITY }
+  return { ...settings, index_granularity: indexGranularity }
 }
 
 /** The read-only settings of a table, each in comparison form. */
@@ -103,18 +137,43 @@ export function declaredReadonlySettings(...settings: Array<Record<string, Setti
 /**
  * SQL over `system.tables` giving the `keys` read-only settings of a table as
  * stored in `engine_full`, one element per setting ('' when absent; a missing
- * `index_granularity` reads as 8192, as above). The cutover adds it to the
- * layout that tells the old table from the new one, so a change of only these
- * settings can be cut over and an interrupted swap is never replayed (#511).
+ * `index_granularity` reads as `indexGranularity`, the server default). The
+ * cutover adds it to the layout that tells the old table from the new one, so
+ * a change of only these settings can be cut over and an interrupted swap is
+ * never replayed (#511).
+ */
+export function readonlySettingsLayoutSQL(keys: readonly string[], indexGranularity: number): string {
+  const elements = keys.map((key) => {
+    const stored = `extract(engine_full, '(?:SETTINGS |, )${key} = ([^,]*)')`
+    return normalizedSettingSQL(key === 'index_granularity' ? `if(${stored} = '', '${indexGranularity}', ${stored})` : stored)
+  })
+  return `tuple(${elements.join(', ')})`
+}
+
+/**
+ * The tuple `readonlySettingsLayoutSQL` gives for a table created with
+ * `settings` (which must have `index_granularity` filled in): each value as
+ * the CREATE renders it, through the same normalization in SQL.
+ */
+export function readonlySettingsExpectedSQL(keys: readonly string[], settings: Record<string, SettingValue> | undefined): string {
+  const elements = keys.map((key) => {
+    const value = settings?.[key]
+    return normalizedSettingSQL(stringLiteral(value === undefined ? '' : String(value)))
+  })
+  return `tuple(${elements.join(', ')})`
+}
+
+/**
  * A number compares by value, as `settingValueFingerprint` does: a table
  * created with `1e6` stores `1000000.`, the snapshot table chkit creates from
  * the same definition may store `1000000`, and they are the same layout.
+ * Float64 is exact enough here: read-only settings hold small numbers and
+ * flags, unlike the column defaults `settingValueFingerprint` also compares.
  */
-export function readonlySettingsLayoutSQL(keys: readonly string[]): string {
-  const elements = keys.map((key) => {
-    const stored = `extract(engine_full, '(?:SETTINGS |, )${key} = ([^,]*)')`
-    const value = key === 'index_granularity' ? `if(${stored} = '', '${DEFAULT_INDEX_GRANULARITY}', ${stored})` : stored
-    return `ifNull(toString(toFloat64OrNull(${value})), ${value})`
-  })
-  return `tuple(${elements.join(', ')})`
+function normalizedSettingSQL(value: string): string {
+  return `ifNull(toString(toFloat64OrNull(${value})), ${value})`
+}
+
+function stringLiteral(value: string): string {
+  return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }

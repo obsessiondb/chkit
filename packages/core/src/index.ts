@@ -16,6 +16,7 @@ export {
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
   definitionKey,
+  type CanonicalizeOptions,
 } from './canonical.js'
 export { planDiff } from './planner.js'
 export {
@@ -56,7 +57,7 @@ export {
   renderQualifiedName,
   unquoteIdentifiers,
 } from './identifier.js'
-export { parseColumnDefault, renderDefault, type ParsedColumnDefault } from './column-default.js'
+export { literalDefaultFingerprint, parseColumnDefault, renderDefault, type ParsedColumnDefault } from './column-default.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export {
   isSyntheticEphemeralDefault,
@@ -64,7 +65,7 @@ export {
   normalizeSQLFragment,
   sqlExpressionFingerprint,
 } from './sql-normalizer.js'
-export { renderColumnType, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
+export { columnTypeFingerprint, renderColumnType, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   CUTOVER_COPY_MODES,

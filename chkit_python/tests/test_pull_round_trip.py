@@ -242,3 +242,113 @@ def test_pull_leaves_out_the_journal_table(monkeypatch: pytest.MonkeyPatch) -> N
     monkeypatch.setenv("CHKIT_JOURNAL_TABLE", "app_journal")
     assert not _is_pulled_object(table_named("app_journal"))
     assert _is_pulled_object(table_named("_chkit_migrations"))
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("18446744073709551615", "18446744073709551614"),
+        ("9007199254740992", "9007199254740993"),
+    ],
+)
+def test_a_changed_default_plans_a_change_where_a_float_would_round_both_alike(
+    before: str, after: str
+) -> None:
+    plan = plan_diff([_events(default=f"fn:{before}")], [_events(default=f"fn:{after}")])
+    assert [op.type for op in plan.operations] == ["alter_table_modify_column"]
+
+
+def test_defaults_clickhouse_stores_in_another_number_form_plan_nothing() -> None:
+    assert plan_diff([_events(default=1e21)], [_events(default="fn:1e21")]).operations == []
+    stored = _events(default="fn:18446744073709551615.")
+    assert plan_diff([stored], [_events(default="fn:18446744073709551615")]).operations == []
+
+
+@pytest.mark.parametrize(
+    ("stored", "declared"),
+    [("'\\e'", "e"), ("'\\N'", "N"), ("'\\q'", "q")],
+)
+def test_a_string_default_with_an_escape_clickhouse_decodes_otherwise_is_a_change(
+    stored: str, declared: str
+) -> None:
+    plan = plan_diff([_events(default=f"fn:{stored}")], [_events(default=declared)])
+    assert [op.type for op in plan.operations] == ["alter_table_modify_column"]
+
+
+@pytest.mark.parametrize(
+    ("stored", "declared"),
+    [("'\\e'", "\x1b"), ("'\\x41'", "A"), ("'\\\"'", '"'), ("'a\\=b'", "a=b"), ("'it''s'", "it's")],
+)
+def test_a_string_default_with_a_verified_escape_plans_nothing(stored: str, declared: str) -> None:
+    assert plan_diff([_events(default=f"fn:{stored}")], [_events(default=declared)]).operations == []
+
+
+def test_a_readonly_setting_written_true_or_1_plans_nothing() -> None:
+    on = plan_diff(
+        [_events(settings={"add_minmax_index_for_numeric_columns": True})],
+        [_events(settings={"add_minmax_index_for_numeric_columns": 1})],
+    )
+    assert on.operations == []
+    off = plan_diff(
+        [_events(settings={"add_minmax_index_for_numeric_columns": "false"})],
+        [_events(settings={"add_minmax_index_for_numeric_columns": 0})],
+    )
+    assert off.operations == []
+
+
+def test_indexes_compare_whatever_order_their_keys_are_written_in() -> None:
+    declared = _events(
+        indexes=[{"name": "idx_n", "type": "minmax", "expression": "n", "granularity": 1}]
+    )
+    pulled = _events(
+        indexes=[{"name": "idx_n", "expression": "n", "granularity": 1, "type": "minmax"}]
+    )
+    assert plan_diff([declared], [pulled]).operations == []
+
+
+def _typed(types: list[str]) -> TableDefinition:
+    return table(
+        database="app",
+        name="typed",
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+        columns=[
+            {"name": "id", "type": "UInt64"},
+            *({"name": f"c{i}", "type": type_} for i, type_ in enumerate(types)),
+        ],
+    )
+
+
+def test_a_column_type_compares_in_the_spacing_clickhouse_stores_quotes_as_written() -> None:
+    declared = _typed([
+        "Decimal(10,2)", "DateTime64(3,'UTC')", "Map(String,UInt64)", "Nullable(Decimal(10,2))",
+        "Tuple(a UInt8,b String)", "Enum8('a'=1,'b'=2)",
+    ])
+    stored = _typed([
+        "Decimal(10, 2)", "DateTime64(3, 'UTC')", "Map(String, UInt64)",
+        "Nullable(Decimal(10, 2))", "Tuple(a UInt8, b String)", "Enum8('a' = 1, 'b' = 2)",
+    ])
+    assert plan_diff([declared], [stored]).operations == []
+    assert plan_diff([stored], [declared]).operations == []
+    label = plan_diff([_typed(["Enum8('a b'=1)"])], [_typed(["Enum8('a  b' = 1)"])])
+    assert [op.type for op in label.operations] == ["alter_table_modify_column"]
+    created = next(op for op in plan_diff([], [declared]).operations if op.type == "create_table")
+    assert "`c0` Decimal(10,2)" in created.sql
+
+
+def test_a_table_without_index_granularity_gets_the_configured_server_default() -> None:
+    pulled = _events(settings={"index_granularity": "4096"})
+    assert plan_diff([_events()], [pulled], index_granularity=4096).operations == []
+    declared = _events(settings={"index_granularity": 4096})
+    assert plan_diff([declared], [_events()], index_granularity=4096).operations == []
+    assert [op.type for op in plan_diff([_events()], [pulled]).operations] == [
+        "drop_table",
+        "create_table",
+    ]
+    created = next(
+        op
+        for op in plan_diff([], [_events()], index_granularity=4096).operations
+        if op.type == "create_table"
+    )
+    assert created.sql.endswith("SETTINGS index_granularity = 4096;")

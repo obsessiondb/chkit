@@ -46,16 +46,19 @@ from chkit.core.model import (
     ColumnDefinition,
     MigrationOperation,
     SchemaDefinition,
+    SettingValue,
     TableDefinition,
     TableRetainedBy,
     ValidationIssue,
 )
-from chkit.core.sql import render_column_type, to_create_sql
+from chkit.core.sql import column_type_fingerprint, render_column_type, to_create_sql
 from chkit.core.table_settings import (
+    DEFAULT_INDEX_GRANULARITY,
     declared_readonly_settings,
+    readonly_settings_expected_sql,
     readonly_settings_fingerprint,
     readonly_settings_layout_sql,
-    with_default_index_granularity,
+    render_setting_value,
 )
 
 CutoverCopyMode: TypeAlias = Literal["migration", "backfill"]
@@ -101,6 +104,9 @@ class CutoverOptions:
     stamp: str
     # clickhouse.cluster: DDL runs ON CLUSTER and data steps run on every shard.
     cluster: str | None = None
+    # clickhouse.indexGranularity: what a table without index_granularity
+    # stores. 8192 when None.
+    index_granularity: int | None = None
 
 
 @dataclass(frozen=True)
@@ -229,8 +235,10 @@ def plan_cutover(
     cutover cannot cover. Raises ``ChxValidationError`` (``cutover_unsupported``)
     when the change cannot be cut over safely.
     """
-    old_canonical = _canonical_table(old_def)
-    new_canonical = _canonical_table(new_def)
+    index_granularity = options.index_granularity or DEFAULT_INDEX_GRANULARITY
+    # Canonical: a MergeTree table has its index_granularity filled in.
+    old_canonical = _canonical_table(old_def, index_granularity)
+    new_canonical = _canonical_table(new_def, index_granularity)
     names = cutover_names(request.table, options.stamp)
     columns = _assert_cutover_supported(
         old_def=old_canonical,
@@ -248,9 +256,10 @@ def plan_cutover(
         key=request.key,
         cluster=options.cluster,
         readonly_settings=declared_readonly_settings(
-            with_default_index_granularity(old_def.engine, old_def.settings),
-            with_default_index_granularity(new_def.engine, new_def.settings),
+            old_canonical.settings, new_canonical.settings
         ),
+        old_settings=old_canonical.settings,
+        index_granularity=index_granularity,
     )
     metadata = CutoverMetadata(
         database=request.database,
@@ -555,6 +564,8 @@ def _create_cutover_sql(
     key: list[str],
     cluster: str | None,
     readonly_settings: list[str],
+    old_settings: dict[str, SettingValue] | None,
+    index_granularity: int,
 ) -> _CutoverSql:
     def q(name: str) -> str:
         return render_qualified_name(database, name)
@@ -575,7 +586,29 @@ def _create_cutover_sql(
         )
 
     settings_layout = (
-        f", {readonly_settings_layout_sql(readonly_settings)}" if readonly_settings else ""
+        f", {readonly_settings_layout_sql(readonly_settings, index_granularity)}"
+        if readonly_settings
+        else ""
+    )
+    # The snapshot table is created from the old definition and must get the
+    # old table's layout, or the EXCHANGE guard stops the cutover after the
+    # copy. Check before anything is created: the old table stores what it was
+    # created with, and a missing index_granularity is the server's default,
+    # which chkit only assumes (clickhouse.indexGranularity).
+    settings_match = (
+        f"({table_count(table)} = 0 OR (SELECT any("
+        f"{readonly_settings_layout_sql(readonly_settings, index_granularity)}) "
+        f"FROM system.tables WHERE database = {_string_literal(database)} "
+        f"AND name = {_string_literal(table)}) = "
+        f"{readonly_settings_expected_sql(readonly_settings, old_settings)}) AS settings"
+        if readonly_settings
+        else None
+    )
+    expected_settings = ", ".join(
+        f"{setting} unset"
+        if old_settings is None or old_settings.get(setting) is None
+        else f"{setting} = {render_setting_value(old_settings[setting])}"
+        for setting in readonly_settings
     )
 
     def layout(name: str) -> str:
@@ -725,7 +758,8 @@ def _create_cutover_sql(
             f"{table_count(table)} AS present,",
             f"{table_count(names.shadow)} + {table_count(names.mirror)} + "
             f"{table_count(names.snapshot)} + {table_count(names.reconcile)} AS leftovers,",
-            f"{pending_mutations} AS mutations",
+            f"{pending_mutations} AS mutations{',' if settings_match else ''}",
+            *([settings_match] if settings_match else []),
         ]
     )
     validate_start = "\n".join(
@@ -754,7 +788,25 @@ def _create_cutover_sql(
                 f"{target} has unfinished mutations. Wait for them to finish: rows they "
                 "change would not reach the new table."
             )
-            + ")",
+            + ("),", ")")[settings_match is None],
+            *(
+                [
+                    "  throwIf(min(settings) = 0, "
+                    + _string_literal(
+                        f"{target} does not store the read-only settings this migration expects "
+                        f"({expected_settings}), so the cutover would stop at the EXCHANGE. "
+                        "Nothing was created or copied. A table that does not declare "
+                        "index_granularity stores the server's MergeTree default, which chkit "
+                        f"takes as {index_granularity}: check it with SELECT value FROM "
+                        "system.merge_tree_settings WHERE name = 'index_granularity', set "
+                        "clickhouse.indexGranularity to it, run chkit drift, and generate the "
+                        "cutover again."
+                    )
+                    + ")"
+                ]
+                if settings_match
+                else []
+            ),
             f"FROM {every_replica(validate_start_query)};",
         ]
     )
@@ -890,9 +942,7 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
     )
 
     def readonly_settings(definition: TableDefinition) -> str:
-        return readonly_settings_fingerprint(
-            with_default_index_granularity(definition.engine, definition.settings)
-        )
+        return readonly_settings_fingerprint(definition.settings)
 
     layout_changed = (
         engine_name(old_def.engine) != engine_name(new_def.engine)
@@ -1000,7 +1050,7 @@ def _copied_columns(
             continue
         if not _is_stored(old_column) or not _is_insertable(new_column):
             continue
-        if render_column_type(old_column) != render_column_type(new_column):
+        if column_type_fingerprint(old_column) != column_type_fingerprint(new_column):
             problems.append(
                 f"column {old_column.name} changes type ({render_column_type(old_column)} to "
                 f"{render_column_type(new_column)}). Change column types in a separate migration."
@@ -1090,8 +1140,8 @@ def _unquote_argument(value: str) -> str:
     return re.sub(r"^['\"`]|['\"`]$", "", value.strip())
 
 
-def _canonical_table(definition: TableDefinition) -> TableDefinition:
-    canonical = canonicalize_definition(definition)
+def _canonical_table(definition: TableDefinition, index_granularity: int) -> TableDefinition:
+    canonical = canonicalize_definition(definition, index_granularity=index_granularity)
     if not isinstance(canonical, TableDefinition):
         msg = f"Expected a table definition for {definition.database}.{definition.name}."
         raise TypeError(msg)

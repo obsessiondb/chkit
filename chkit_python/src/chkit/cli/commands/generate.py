@@ -93,6 +93,7 @@ from chkit.core.model import (
     ChxValidationError,
     MigrationOperation,
     SchemaDefinition,
+    configured_index_granularity,
 )
 from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
@@ -456,13 +457,15 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         plugin_runtime=plugin_runtime,
         table_selector=table_selector,
     )
-    schema_canonical = canonicalize_definitions(threaded_defs)
+    # What a MergeTree table that does not declare index_granularity gets.
+    index_granularity = configured_index_granularity(config)
+    schema_canonical = canonicalize_definitions(threaded_defs, index_granularity=index_granularity)
 
     issues = validate_definitions(schema_canonical)
     if issues:
         _exit_validation_failed(ChxValidationError(issues), output_json=output_json)
 
-    previous = read_snapshot(meta_dir)
+    previous = read_snapshot(meta_dir, index_granularity=index_granularity)
     snapshot_defs = list(previous.definitions) if previous is not None else []
     # The schema went through the plugins' rewrites; a snapshot written before
     # a rewrite existed goes through it too, so it plans no change (#466).
@@ -478,7 +481,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 definitions=snapshot_defs,
                 json_mode=output_json,
             )
-        )
+        ),
+        index_granularity=index_granularity,
     )
     try:
         canonical = carry_retained_definitions(
@@ -532,7 +536,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     # letting them escape as a stack trace. ``plan_diff`` itself may raise a
     # ChxValidationError for invariant violations or unsupported changes.
     try:
-        plan = plan_diff(remapped_old_defs, canonical)
+        plan = plan_diff(remapped_old_defs, canonical, index_granularity=index_granularity)
         plan = apply_explicit_table_renames(plan, active_table_mappings)
         plan = apply_explicit_dictionary_renames(plan, active_dictionary_mappings)
         assert_cli_column_mappings_resolvable(cli_column_mappings, plan, canonical)
@@ -580,6 +584,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 cutovers=cutover_flags,
                 cluster=cluster,
                 stamp=_migration_stamp(now),
+                index_granularity=index_granularity,
             )
         except ChxValidationError as error:
             _exit_validation_failed(error, output_json=output_json)
@@ -674,7 +679,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         cli_version=__version__,
         now=now,
     )
-    snapshot = create_snapshot(artifact_definitions)
+    snapshot = create_snapshot(artifact_definitions, index_granularity=index_granularity)
     snapshot_path = write_snapshot(meta_dir, snapshot)
 
     _run_codegen_integration(

@@ -1,4 +1,4 @@
-import { canonicalizeDefinitions, definitionKey } from './canonical.js'
+import { type CanonicalizeOptions, canonicalizeDefinitions, definitionKey } from './canonical.js'
 import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefaultValue,
@@ -32,12 +32,12 @@ import {
   renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
   renderDictionarySQL,
-  renderColumnType,
+  columnTypeFingerprint,
   toCreateSQL,
 } from './sql.js'
-import { parseColumnDefault, renderDefault } from './column-default.js'
+import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
-import { readonlySettingsFingerprint, settingValueFingerprint } from './table-settings.js'
+import { readonlySettingsFingerprint } from './table-settings.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
@@ -229,7 +229,8 @@ function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name
   // Compare what the DSL renders: inline Nullable(T) and nullable: true are
   // equivalent, while an additional or differently placed wrapper is not.
   return {
-    type: renderColumnType(column),
+    // ClickHouse stores `Decimal(10,2)` as `Decimal(10, 2)` (#466).
+    type: columnTypeFingerprint(column),
     ...rest,
     ...(column.default === undefined ? {} : { default: defaultFingerprint(column.default) }),
   }
@@ -244,24 +245,6 @@ function defaultFingerprint(value: ColumnDefaultValue): string {
   return literalDefaultFingerprint(sql) ?? sql
 }
 
-const STRING_LITERAL_RE = /^'((?:[^'\\]|\\[\s\S]|'')*)'$/
-const NUMBER_LITERAL_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i
-const STRING_ESCAPES: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', '0': '\0', a: '\x07', v: '\v' }
-
-// ClickHouse stores a string default with backslash escapes ('it\'s', '\n')
-// and a float as `2.`, so a default that is one literal compares by its value.
-function literalDefaultFingerprint(sql: string): string | undefined {
-  const text = sql.trim()
-  if (NUMBER_LITERAL_RE.test(text)) return `number:${settingValueFingerprint(text)}`
-  const body = STRING_LITERAL_RE.exec(text)?.[1]
-  if (body === undefined) return undefined
-  const value = body.replace(/\\(x[0-9a-fA-F]{2}|[\s\S])|''/g, (_match: string, code: string | undefined) => {
-    if (code === undefined) return "'"
-    if (code.length === 3) return String.fromCharCode(Number.parseInt(code.slice(1), 16))
-    return STRING_ESCAPES[code] ?? code
-  })
-  return `string:${JSON.stringify(value)}`
-}
 
 function normalizeColumnWithoutCodec(
   column: ColumnDefinition
@@ -273,8 +256,7 @@ function normalizeColumnWithoutCodec(
 function isCodecRemoval(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
   if (!oldCol.codec || newCol.codec) return false
   return (
-    JSON.stringify(normalizeColumnWithoutCodec(oldCol)) ===
-    JSON.stringify(normalizeColumnWithoutCodec(newCol))
+    shapeKey(normalizeColumnWithoutCodec(oldCol)) === shapeKey(normalizeColumnWithoutCodec(newCol))
   )
 }
 
@@ -294,7 +276,7 @@ function inferColumnRenameSuggestions(
 
   const addedBySignature = new Map<string, ColumnDefinition[]>()
   for (const column of addedColumns) {
-    const signature = JSON.stringify(normalizeColumn(column))
+    const signature = shapeKey(normalizeColumn(column))
     const existing = addedBySignature.get(signature) ?? []
     existing.push(column)
     addedBySignature.set(signature, existing)
@@ -302,7 +284,7 @@ function inferColumnRenameSuggestions(
 
   const suggestions: ColumnRenameSuggestion[] = []
   for (const oldColumn of droppedColumns) {
-    const signature = JSON.stringify(normalizeColumn(oldColumn))
+    const signature = shapeKey(normalizeColumn(oldColumn))
     const candidates = addedBySignature.get(signature)
     if (!candidates || candidates.length !== 1) continue
     const [candidate] = candidates
@@ -337,7 +319,7 @@ function refreshEqual(
   oldRefresh: MaterializedViewRefresh | undefined,
   newRefresh: MaterializedViewRefresh | undefined
 ): boolean {
-  return JSON.stringify(oldRefresh ?? null) === JSON.stringify(newRefresh ?? null)
+  return shapeKey(oldRefresh ?? null) === shapeKey(newRefresh ?? null)
 }
 
 function diffMaterializedView(
@@ -419,6 +401,14 @@ function dictionaryLifetimeFingerprint(lifetime: string): string {
   return range[1] !== undefined ? `MIN ${range[1]} MAX ${range[2]}` : `MIN ${range[4]} MAX ${range[3]}`
 }
 
+/**
+ * JSON with object keys sorted, for comparing definitions: key order follows
+ * how the schema spelled an object, and pull writes its own order (#466).
+ */
+function shapeKey(value: unknown): string {
+  return JSON.stringify(value, sortObjectKeys)
+}
+
 function sortObjectKeys(_key: string, value: unknown): unknown {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
   return Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
@@ -429,11 +419,8 @@ function diffDictionary(
   newDef: DictionaryDefinition
 ): MigrationOperation[] {
   const omitSource = dictionarySourceIsHidden(newDef.source)
-  // Keys sorted: their order follows how the schema spelled the dictionary,
-  // which pull writes in its own order.
   const unchanged =
-    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource), sortObjectKeys) ===
-    JSON.stringify(dictionaryComparisonShape(newDef, omitSource), sortObjectKeys)
+    shapeKey(dictionaryComparisonShape(oldDef, omitSource)) === shapeKey(dictionaryComparisonShape(newDef, omitSource))
   if (unchanged) return []
 
   return [
@@ -452,7 +439,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       Object.entries(def.settings ?? {}).map(([key, value]) => [key, kafkaSettingFingerprint(value)])
     )
     if (requiresTableRecreate(oldDef, newDef)
-      || JSON.stringify(oldDef.columns.map(column => [column.name, normalizeColumn(column)])) !== JSON.stringify(newDef.columns.map(column => [column.name, normalizeColumn(column)]))
+      || shapeKey(oldDef.columns.map(column => [column.name, normalizeColumn(column)])) !== shapeKey(newDef.columns.map(column => [column.name, normalizeColumn(column)]))
       || diffSettings(settings(oldDef), settings(newDef)).changes.length > 0
       || (oldDef.comment ?? '') !== (newDef.comment ?? '')) {
       throw new ChxValidationError([{
@@ -487,7 +474,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.columns,
     newDef.columns,
     (column) => column.name,
-    (left, right) => JSON.stringify(normalizeColumn(left)) === JSON.stringify(normalizeColumn(right))
+    (left, right) => shapeKey(normalizeColumn(left)) === shapeKey(normalizeColumn(right))
   )
   const addedColumns = columnDiff.added
   const droppedColumns = columnDiff.removed
@@ -545,7 +532,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     (index) => index.name,
     (left, right) => left.type === 'text' && right.type === 'text'
       ? textIndexFingerprint(left) === textIndexFingerprint(right)
-      : JSON.stringify(left) === JSON.stringify(right)
+      : shapeKey(left) === shapeKey(right)
   )
   for (const index of indexDiff.added) {
     ops.push( {
@@ -582,7 +569,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.constraints ?? [],
     newDef.constraints ?? [],
     (constraint) => constraint.name,
-    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    (left, right) => shapeKey(left) === shapeKey(right)
   )
   const addConstraint = (constraint: TableConstraintDefinition): MigrationOperation => ({
     type: 'alter_table_add_constraint',
@@ -605,7 +592,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.projections ?? [],
     newDef.projections ?? [],
     (projection) => projection.name,
-    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    (left, right) => shapeKey(left) === shapeKey(right)
   )
   for (const projection of projectionDiff.added) {
     ops.push( {
@@ -679,9 +666,13 @@ function constraintWarning(def: TableDefinition, constraint: TableConstraintDefi
     : `${subject} is an ASSUME constraint: ClickHouse never validates it, and queries optimized with optimize_using_constraints trust it, so an assumption that does not hold returns wrong results.`
 }
 
-export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
-  const oldCanonical = canonicalizeDefinitions(oldDefinitions)
-  const newCanonical = canonicalizeDefinitions(newDefinitions)
+export function planDiff(
+  oldDefinitions: SchemaDefinition[],
+  newDefinitions: SchemaDefinition[],
+  options: CanonicalizeOptions = {}
+): MigrationPlan {
+  const oldCanonical = canonicalizeDefinitions(oldDefinitions, options)
+  const newCanonical = canonicalizeDefinitions(newDefinitions, options)
   assertValidDefinitions(newCanonical)
   const oldMap = createMap(oldCanonical)
   const newMap = createMap(newCanonical)

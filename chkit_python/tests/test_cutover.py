@@ -108,6 +108,7 @@ def plan(
     cluster: str | None = None,
     key: list[str] | None = None,
     definitions: list[SchemaDefinition] | None = None,
+    index_granularity: int | None = None,
 ) -> PlannedCutover:
     new = new_def or NEW
     return plan_cutover(
@@ -119,6 +120,7 @@ def plan(
             old_table=old_table,  # type: ignore[arg-type]
             cluster=cluster,
             stamp=STAMP,
+            index_granularity=index_granularity,
         ),
         definitions=definitions if definitions is not None else [new],
     )
@@ -1366,3 +1368,47 @@ def test_cutover_chunk_skips_keys_the_shadow_holds() -> None:
         "SETTINGS async_insert=0, asterisk_include_materialized_columns=0, "
         "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1",
     ]
+
+
+def test_checks_the_old_table_stores_the_readonly_settings_before_it_creates_anything() -> None:
+    start = plan().operations[0]
+    assert start.type == "cutover_validate"
+    assert (
+        "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
+        "(SELECT any(tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, "
+        "'(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, "
+        "'(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, "
+        "'(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, "
+        "'(?:SETTINGS |, )index_granularity = ([^,]*)'))))) FROM system.tables WHERE database = "
+        "'app' AND name = 'events') = tuple(ifNull(toString(toFloat64OrNull('8192')), '8192'))) "
+        "AS settings"
+    ) in start.sql
+    assert (
+        "throwIf(min(settings) = 0, 'app.events does not store the read-only settings this "
+        "migration expects (index_granularity = 8192)"
+    ) in start.sql
+    assert "Nothing was created or copied." in start.sql
+
+    # A setting only the new table declares is expected absent from the old one.
+    minmax = plan(
+        new_def=events(settings={"add_minmax_index_for_numeric_columns": True})
+    ).operations[0].sql
+    assert (
+        "= tuple(ifNull(toString(toFloat64OrNull('')), ''), "
+        "ifNull(toString(toFloat64OrNull('8192')), '8192'))) AS settings"
+    ) in minmax
+    assert "(add_minmax_index_for_numeric_columns unset, index_granularity = 8192)" in minmax
+
+
+def test_takes_a_missing_index_granularity_as_the_configured_server_default() -> None:
+    ops = plan(index_granularity=4096).operations
+    assert "= tuple(ifNull(toString(toFloat64OrNull('4096')), '4096'))) AS settings" in ops[0].sql
+    assert (
+        "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',"
+    ) in ops[0].sql
+    exchange = next(op for op in ops if op.type == "exchange_tables")
+    assert "= '', '4096'," in (exchange.before_retry or "")
+    snapshot = next(
+        op for op in ops if op.key == "table:app.events__cutover_20261024120000_snapshot"
+    )
+    assert "SETTINGS index_granularity = 4096" in snapshot.sql

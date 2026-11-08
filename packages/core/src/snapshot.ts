@@ -1,10 +1,10 @@
-import { canonicalizeDefinitions } from './canonical.js'
+import { type CanonicalizeOptions, canonicalizeDefinitions } from './canonical.js'
 import type { SchemaDefinition, Snapshot } from './model.js'
 
-export function createSnapshot(definitions: SchemaDefinition[]): Snapshot {
+export function createSnapshot(definitions: SchemaDefinition[], options: CanonicalizeOptions = {}): Snapshot {
   return {
     version: 1,
     generatedAt: new Date().toISOString(),
-    definitions: canonicalizeDefinitions(definitions),
+    definitions: canonicalizeDefinitions(definitions, options),
   }
 }

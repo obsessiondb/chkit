@@ -239,3 +239,4 @@ If you do this, be aware of the consequence: `chkit pull` has no way to detect t
 - Dictionaries whose `create_table_query` can't be parsed (attributes, primary key, or `SOURCE`/`LAYOUT`/`LIFETIME` missing) are skipped.
 - XML-config dictionaries (not created via DDL) are not introspected.
 - Requires a live ClickHouse connection.
+- Fails when the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default): the pulled schema would plan changes against the snapshot.

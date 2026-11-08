@@ -108,6 +108,8 @@ export function applyCutovers(input: {
   cutovers: ResolvedCutovers
   cluster: string | undefined
   stamp: string
+  /** `clickhouse.indexGranularity`; 8192 when unset. */
+  indexGranularity?: number
 }): { plan: MigrationPlan; cutovers: PlannedCutover[] } {
   const { cutovers } = input
   let operations = input.plan.operations
@@ -130,7 +132,13 @@ export function applyCutovers(input: {
       oldDef,
       newDef,
       request,
-      options: { copy: cutovers.copy, oldTable: cutovers.oldTable, cluster: input.cluster, stamp: input.stamp },
+      options: {
+        copy: cutovers.copy,
+        oldTable: cutovers.oldTable,
+        cluster: input.cluster,
+        stamp: input.stamp,
+        indexGranularity: input.indexGranularity,
+      },
       definitions: input.definitions,
     })
     planned.push(cutover)

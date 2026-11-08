@@ -36,6 +36,7 @@ from chkit.core.model import (
     TableDefinition,
     ViewDefinition,
 )
+from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +129,7 @@ def build_drift_payload(
     database: str | None,
     fail_on_extra_objects: bool = False,
     scope: TableScope | None = None,
+    index_granularity: int = DEFAULT_INDEX_GRANULARITY,
 ) -> DriftPayload:
     """Run live introspection and produce the full DriftPayload."""
     selected_tables: set[str] | None = (
@@ -238,7 +240,10 @@ def build_drift_payload(
     table_drift_unsorted = [
         detail
         for expected, actual in pairs
-        if (detail := compare_table_shape(expected, actual, canonicalizer)) is not None
+        if (
+            detail := compare_table_shape(expected, actual, canonicalizer, index_granularity)
+        )
+        is not None
     ]
     table_drift = sorted(table_drift_unsorted, key=lambda d: d.table)
     view_drift = sorted(

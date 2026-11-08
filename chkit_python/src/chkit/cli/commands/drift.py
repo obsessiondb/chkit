@@ -16,6 +16,7 @@ import typer
 
 from chkit.cli.command_target import (
     ServiceOption,
+    assert_index_granularity_matches_server,
     exit_no_target,
     open_client,
     resolve_plugin_executor,
@@ -32,7 +33,7 @@ from chkit.cli.table_scope import (
     scope_to_payload,
     table_keys_from_definitions,
 )
-from chkit.core.model import ChxConfigEnv
+from chkit.core.model import ChxConfigEnv, configured_index_granularity
 from chkit.plugins import ChxPlugin
 
 
@@ -68,7 +69,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     config = load_config(config_path, ChxConfigEnv(command="drift"))
     # Absolute, as TS resolves it, so ``snapshotFile`` reads the same in both CLIs.
     meta_dir = Path(os.path.abspath(config.meta_dir))
-    snapshot = read_snapshot(meta_dir)
+    snapshot = read_snapshot(meta_dir, index_granularity=configured_index_granularity(config))
     if snapshot is None:
         msg = "Snapshot not found. Run `chkit generate` before drift checks."
         if output_json:
@@ -110,6 +111,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         msg = "clickhouse config is required for drift checks"
         exit_no_target("drift", msg, json_mode=output_json)
     with open_client(executor, config.clickhouse) as client:
+        assert_index_granularity_matches_server("drift", client, config, json_mode=output_json)
         payload_obj = build_drift_payload(
             client=client,
             meta_dir=meta_dir,
@@ -117,6 +119,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             database=config.clickhouse.database if config.clickhouse else None,
             fail_on_extra_objects=config.check.fail_on_extra_objects,
             scope=table_scope if table_scope.enabled else None,
+            index_granularity=configured_index_granularity(config),
         )
 
     payload_dict: dict[str, object] = {

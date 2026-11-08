@@ -20,7 +20,15 @@ from chkit.cli.plugin_runtime import (
     null_plugin_context,
 )
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.core.model import ChxResolvedClickHouseConfig, ChxResolvedConfig
+from chkit.clickhouse.index_granularity import (
+    IndexGranularityMismatchError,
+    assert_server_index_granularity,
+)
+from chkit.core.model import (
+    ChxResolvedClickHouseConfig,
+    ChxResolvedConfig,
+    configured_index_granularity,
+)
 from chkit.plugins import ChxGetContextInput, ChxOnInitContext
 
 # The TS ObsessionDB plugin adds --service to these commands through
@@ -105,3 +113,20 @@ def exit_no_target(command: str, message: str, *, json_mode: bool) -> NoReturn:
         emit_json_error(command, {"code": "error", "message": message})
     typer.echo(message, err=True)
     raise typer.Exit(code=1)
+
+
+def assert_index_granularity_matches_server(
+    command: str, client: Any, config: ChxResolvedConfig, *, json_mode: bool
+) -> None:
+    """Stop a connected command when the server's MergeTree index_granularity
+    default is not ``clickhouse.indexGranularity``: drift, plans and cutovers
+    would all assume the wrong value for tables that do not declare it (#466).
+    The error is reported as TS reports a thrown error: on stderr, plus the JSON
+    error envelope under ``--json``, and exit 1."""
+    try:
+        assert_server_index_granularity(client, configured_index_granularity(config))
+    except IndexGranularityMismatchError as error:
+        if json_mode:
+            emit_json_error(command, {"code": error.code, "message": str(error)})
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error

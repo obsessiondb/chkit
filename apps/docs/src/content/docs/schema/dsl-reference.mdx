@@ -1284,7 +1284,15 @@ When a property changes, chkit determines whether the table can be altered in pl
 
 **Alterable** (ALTER in place): columns, indexes, projections, constraints, other settings, TTL, comment
 
-A MergeTree table that does not declare `index_granularity` is treated as `index_granularity: 8192`, the value ClickHouse stores for it, so `CREATE TABLE` writes `SETTINGS index_granularity = 8192` and a schema with or without it plans nothing. Setting values compare by value: `8192` and `"8192"`, `2.0` and `2.` are the same. The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not part of the schema.
+A MergeTree table that does not declare `index_granularity` is treated as having the server's default, the value ClickHouse stores for it: 8192, or [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) when the server uses another. `CREATE TABLE` writes `SETTINGS index_granularity = 8192`, and a schema with or without it plans nothing. Setting values compare by value: `8192` and `"8192"`, `2.0` and `2.`, `1e6` and `1000000` are the same, and `true` and `false` equal `1` and `0`. Numbers compare exactly, so two large integers that differ only past the 15th digit are different values.
+
+What `chkit pull` reads back plans nothing against the schema it came from:
+
+- A column type compares in the spacing ClickHouse stores: `Decimal(10,2)` and `Decimal(10, 2)` are the same type. Text in quotes, such as an `Enum` label or a time zone, compares as written. chkit writes the type as you declared it.
+- A default that is one number or string literal compares by value: `2.0` and `2.`, `1e21` and `1e+21`, `'it\'s'` and `"it's"` are the same default. A string escape whose meaning chkit does not know for certain (such as `\N` or `\u0041`) compares as text, so it can show a change that is not one, but never hides one.
+- Indexes, projections, constraints and columns compare whatever order their keys are written in.
+
+The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not part of the schema.
 
 Views and materialized views always use drop + recreate.
 

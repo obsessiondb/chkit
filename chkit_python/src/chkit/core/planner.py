@@ -7,7 +7,11 @@ import re
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.column_default import parse_column_default, render_default
+from chkit.core.column_default import (
+    literal_default_fingerprint,
+    parse_column_default,
+    render_default,
+)
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
@@ -39,6 +43,7 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
+    column_type_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
     render_alter_add_index,
@@ -54,11 +59,10 @@ from chkit.core.sql import (
     render_alter_remove_codec,
     render_alter_remove_column_expression,
     render_alter_reset_setting,
-    render_column_type,
     render_dictionary_sql,
     to_create_sql,
 )
-from chkit.core.table_settings import readonly_settings_fingerprint, setting_value_fingerprint
+from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.validate import assert_valid_definitions
 
@@ -246,42 +250,13 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
     data.pop("name", None)
     data.pop("renamed_from", None)
     data.pop("nullable", None)
-    data["type"] = render_column_type(column)
+    # ClickHouse stores ``Decimal(10,2)`` as ``Decimal(10, 2)`` (#466).
+    data["type"] = column_type_fingerprint(column)
     if column.default is not None:
         parsed = parse_column_default(column.default)
         sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
-        data["default"] = _literal_default_fingerprint(sql) or sql
+        data["default"] = literal_default_fingerprint(sql) or sql
     return data
-
-
-def _literal_default_fingerprint(sql: str) -> str | None:
-    """ClickHouse stores a string default with backslash escapes (``'it\\'s'``,
-    ``'\\n'``) and a float as ``2.``, so a default that is one literal compares by
-    its value (TS ``literalDefaultFingerprint``, #466)."""
-    text = sql.strip()
-    if _NUMBER_LITERAL_RE.fullmatch(text):
-        return f"number:{setting_value_fingerprint(text)}"
-    match = _STRING_LITERAL_RE.fullmatch(text)
-    if match is None:
-        return None
-
-    def unescape(escape: re.Match[str]) -> str:
-        code = escape.group(1)
-        if code is None:
-            return "'"
-        if code.startswith("x") and len(code) > 1:
-            return chr(int(code[1:], 16))
-        return _STRING_ESCAPES.get(code, code)
-
-    value = re.sub(r"\\(x[0-9a-fA-F]{2}|.)|''", unescape, match.group(1), flags=re.DOTALL)
-    return f"string:{json.dumps(value, ensure_ascii=False)}"
-
-
-_STRING_LITERAL_RE = re.compile(r"'((?:[^'\\]|\\.|'')*)'", re.DOTALL)
-_NUMBER_LITERAL_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?", re.IGNORECASE)
-_STRING_ESCAPES = {
-    "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "0": "\0", "a": "\x07", "v": "\v"
-}
 
 
 def _column_identity(column: ColumnDefinition) -> str:
@@ -896,10 +871,13 @@ def _diff_dictionary(
 
 
 def plan_diff(
-    old_definitions: list[SchemaDefinition], new_definitions: list[SchemaDefinition]
+    old_definitions: list[SchemaDefinition],
+    new_definitions: list[SchemaDefinition],
+    *,
+    index_granularity: int | None = None,
 ) -> MigrationPlan:
-    old_canonical = canonicalize_definitions(old_definitions)
-    new_canonical = canonicalize_definitions(new_definitions)
+    old_canonical = canonicalize_definitions(old_definitions, index_granularity=index_granularity)
+    new_canonical = canonicalize_definitions(new_definitions, index_granularity=index_granularity)
     assert_valid_definitions(new_canonical)
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)

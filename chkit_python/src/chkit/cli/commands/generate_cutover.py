@@ -119,6 +119,7 @@ def apply_cutovers(
     cutovers: ResolvedCutovers,
     cluster: str | None,
     stamp: str,
+    index_granularity: int | None = None,
 ) -> tuple[MigrationPlan, list[PlannedCutover]]:
     """Replace the DROP + CREATE that ``plan_diff`` emits for each cutover table
     with the cutover's operations, at the CREATE's position."""
@@ -161,6 +162,7 @@ def apply_cutovers(
                 old_table=cutovers.old_table,
                 cluster=cluster,
                 stamp=stamp,
+                index_granularity=index_granularity,
             ),
             definitions=definitions,
         )

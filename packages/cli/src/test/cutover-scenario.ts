@@ -260,7 +260,7 @@ export interface CutoverChange {
   layout: string
 }
 
-export const ORDER_BY_CHANGE: CutoverChange = { orderBy: ['user_id', 'id'], layout: 'user_id, id|8192' }
+const ORDER_BY_CHANGE: CutoverChange = { orderBy: ['user_id', 'id'], layout: 'user_id, id|8192' }
 /** Only a read-only setting changes (#511): the guards must tell the tables apart by it. */
 export const GRANULARITY_CHANGE: CutoverChange = { orderBy: ['id'], settings: { index_granularity: 4096 }, layout: 'id|4096' }
 

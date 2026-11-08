@@ -137,4 +137,102 @@ describe('@chkit/core planner: pulled schema round trip', () => {
     expect(plan.operations.map((op) => op.type)).toEqual(['create_dictionary'])
     expect(plan.operations[0]?.sql).toContain('LIFETIME(MIN 10 MAX 300)')
   })
+
+  test('a changed default plans a MODIFY COLUMN even where a float would round both alike', () => {
+    const pairs: Array<[string, string]> = [
+      ['18446744073709551615', '18446744073709551614'],
+      ['9007199254740992', '9007199254740993'],
+    ]
+    for (const [before, after] of pairs) {
+      const plan = planDiff([events({ default: { expression: before } })], [events({ default: { expression: after } })])
+      expect(plan.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
+    }
+    expect(planDiff([events({ default: 1e21 })], [events({ default: { expression: '1e21' } })]).operations).toEqual([])
+    expect(planDiff([events({ default: { expression: '18446744073709551615.' } })], [events({ default: { expression: '18446744073709551615' } })]).operations).toEqual([])
+  })
+
+  test('a string default with an escape ClickHouse decodes otherwise is a change', () => {
+    // ClickHouse reads '\e' as the ESC byte and drops '\N'; '\q' keeps its backslash.
+    const changed: Array<[string, string]> = [
+      ["'\\e'", 'e'],
+      ["'\\N'", 'N'],
+      ["'\\q'", 'q'],
+    ]
+    for (const [stored, declared] of changed) {
+      const plan = planDiff([events({ default: { expression: stored } })], [events({ default: declared })])
+      expect(plan.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
+    }
+    const same: Array<[string, string]> = [
+      ["'\\e'", '\x1b'],
+      ["'\\x41'", 'A'],
+      ["'\\\"'", '"'],
+      ["'a\\=b'", 'a=b'],
+      ["'it''s'", "it's"],
+    ]
+    for (const [stored, declared] of same) {
+      expect(planDiff([events({ default: { expression: stored } })], [events({ default: declared })]).operations).toEqual([])
+    }
+  })
+
+  test('a read-only setting written true or 1 plans nothing', () => {
+    const plan = planDiff(
+      [events({ settings: { add_minmax_index_for_numeric_columns: true } })],
+      [events({ settings: { add_minmax_index_for_numeric_columns: 1 } })]
+    )
+    expect(plan.operations).toEqual([])
+    const off = planDiff([events({ settings: { add_minmax_index_for_numeric_columns: 'false' } })], [events({ settings: { add_minmax_index_for_numeric_columns: 0 } })])
+    expect(off.operations).toEqual([])
+  })
+
+  test('columns, indexes, projections and constraints compare whatever order their keys are written in', () => {
+    const declared = table({
+      database: 'app', name: 'keyed', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, { name: 'n', type: 'UInt8', default: 1, comment: 'count' }],
+      indexes: [{ name: 'idx_n', type: 'minmax', expression: 'n', granularity: 1 }],
+      projections: [{ name: 'p', query: 'SELECT n ORDER BY n' }],
+      constraints: [{ name: 'c', check: 'n < 10' }],
+    })
+    const pulled = table({
+      database: 'app', name: 'keyed', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, { comment: 'count', default: 1, type: 'UInt8', name: 'n' }],
+      indexes: [{ name: 'idx_n', expression: 'n', granularity: 1, type: 'minmax' }],
+      projections: [{ query: 'SELECT n ORDER BY n', name: 'p' }],
+      constraints: [{ check: 'n < 10', name: 'c' }],
+    })
+    expect(planDiff([declared], [pulled]).operations).toEqual([])
+    expect(planDiff([pulled], [declared]).operations).toEqual([])
+  })
+
+  test('a column type compares in the spacing ClickHouse stores, quotes as written', () => {
+    const typed = (types: string[]) => table({
+      database: 'app', name: 'typed', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, ...types.map((type, i) => ({ name: `c${i}`, type }))],
+    })
+    const declared = typed([
+      'Decimal(10,2)', "DateTime64(3,'UTC')", 'Map(String,UInt64)', 'Nullable(Decimal(10,2))',
+      'Tuple(a UInt8,b String)', "Enum8('a'=1,'b'=2)",
+    ])
+    const stored = typed([
+      'Decimal(10, 2)', "DateTime64(3, 'UTC')", 'Map(String, UInt64)', 'Nullable(Decimal(10, 2))',
+      'Tuple(a UInt8, b String)', "Enum8('a' = 1, 'b' = 2)",
+    ])
+    expect(planDiff([declared], [stored]).operations).toEqual([])
+    expect(planDiff([stored], [declared]).operations).toEqual([])
+    const label = planDiff([typed(["Enum8('a b'=1)"])], [typed(["Enum8('a  b' = 1)"])])
+    expect(label.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
+    // What chkit writes keeps the declared spelling.
+    expect(planDiff([], [declared]).operations.find((op) => op.type === 'create_table')?.sql).toContain('`c0` Decimal(10,2)')
+  })
+
+  test('a table without index_granularity gets the configured server default', () => {
+    const options = { indexGranularity: 4096 }
+    expect(planDiff([events({})], [events({ settings: { index_granularity: '4096' } })], options).operations).toEqual([])
+    expect(planDiff([events({ settings: { index_granularity: 4096 } })], [events({})], options).operations).toEqual([])
+    expect(planDiff([events({})], [events({ settings: { index_granularity: '4096' } })]).operations.map((op) => op.type)).toEqual([
+      'drop_table',
+      'create_table',
+    ])
+    const created = planDiff([], [events({})], options).operations.find((op) => op.type === 'create_table')?.sql
+    expect(created).toEndWith('SETTINGS index_granularity = 4096;')
+  })
 })

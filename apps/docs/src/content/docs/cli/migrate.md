@@ -79,6 +79,10 @@ The settings go with every statement a migration runs: synchronous statements, s
 
 `--setting` takes query settings only. It rejects the ClickHouse HTTP parameters `query`, `database`, `query_id`, `session_id`, `session_check`, `session_timeout`, `user` and `password` with a usage error before anything runs: they would change the database, credentials, query text or query ID that chkit tracks. Set the database and credentials in [`clickhouse`](/configuration/overview/) config instead.
 
+### Server index granularity
+
+Before it checks checksums or applies anything, `migrate` (except `--abandon`) fails when the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default). The message names the value to set. When the server cannot be asked, the check is skipped.
+
 ### Checksum verification
 
 Before applying, the CLI verifies SHA-256 checksums of all previously-applied migrations against the files on disk. If any file has been modified since it was applied, the command aborts with exit code 1.

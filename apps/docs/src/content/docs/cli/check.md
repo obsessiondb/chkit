@@ -40,6 +40,8 @@ Policies can be disabled in config. The `--strict` flag forces `failOnPending`, 
 
 Drift is only evaluated when both a `snapshot.json` and a `clickhouse` config block are present. If either is missing, drift is skipped (not treated as a failure).
 
+`check` fails before any policy runs when the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default). The message names the value to set.
+
 ### Plugin check integration
 
 Plugins can register `onCheck` hooks that return findings with severity levels. If a plugin check has `evaluated: true`, `ok: false`, and at least one finding with `severity: 'error'`, it adds `plugin:<name>` to the list of failed checks.

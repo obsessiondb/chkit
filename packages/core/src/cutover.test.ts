@@ -187,6 +187,29 @@ describe('planCutover', () => {
     expect(guard).toContain("ifNull(toString(toFloat64OrNull(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))), extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))")
   })
 
+  test('checks the old table stores the read-only settings it expects before it creates anything (#466)', () => {
+    const start = plan().operations[0]
+    expect(start?.type).toBe('cutover_validate')
+    expect(start?.sql).toContain(
+      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))))) FROM system.tables WHERE database = 'app' AND name = 'events') = tuple(ifNull(toString(toFloat64OrNull('8192')), '8192'))) AS settings"
+    )
+    expect(start?.sql).toContain("throwIf(min(settings) = 0, 'app.events does not store the read-only settings this migration expects (index_granularity = 8192)")
+    expect(start?.sql).toContain('Nothing was created or copied.')
+
+    // A setting only the new table declares is expected absent from the old one.
+    const minmax = plan({ newDef: events({ settings: { add_minmax_index_for_numeric_columns: true } }) }).operations[0]?.sql ?? ''
+    expect(minmax).toContain("= tuple(ifNull(toString(toFloat64OrNull('')), ''), ifNull(toString(toFloat64OrNull('8192')), '8192'))) AS settings")
+    expect(minmax).toContain('(add_minmax_index_for_numeric_columns unset, index_granularity = 8192)')
+  })
+
+  test('takes a missing index_granularity as the configured server default', () => {
+    const ops = plan({ options: { indexGranularity: 4096 } }).operations
+    expect(ops[0]?.sql).toContain("= tuple(ifNull(toString(toFloat64OrNull('4096')), '4096'))) AS settings")
+    expect(ops[0]?.sql).toContain("if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',")
+    expect(ops.find((op) => op.type === 'exchange_tables')?.beforeRetry).toContain("= '', '4096',")
+    expect(ops.find((op) => op.key === 'table:app.events__cutover_20261024120000_snapshot')?.sql).toContain('SETTINGS index_granularity = 4096')
+  })
+
   test('guards the exchange on every attempt, so a replay never swaps the tables back', () => {
     const ops = plan().operations
     const exchange = ops[10]

@@ -83,6 +83,16 @@ definitions = schema(
             {{"name": "ratio", "type": "Float64", "default": 2.0}},
             {{"name": "received_at", "type": "DateTime64(3)",
              "default": {{"expression": "now64(3)"}}}},
+            # ClickHouse stores these types with its own spacing (Decimal(10, 2)).
+            {{"name": "amount", "type": "Decimal(10,2)"}},
+            {{"name": "at_utc", "type": "DateTime64(3,'UTC')"}},
+            {{"name": "attrs", "type": "Map(String,UInt64)"}},
+            {{"name": "kind", "type": "Enum8('a  b'=1,'c'=2)"}},
+            {{"name": "maybe", "type": "Decimal(10,2)", "nullable": True}},
+            # Defaults ClickHouse stores in another form (1e21) or a float cannot hold.
+            {{"name": "huge", "type": "Float64", "default": 1e21}},
+            {{"name": "tiny", "type": "Float64", "default": 1e-7}},
+            {{"name": "max_u64", "type": "UInt64", "default": 18446744073709551615}},
         ],
     ),
     table(
@@ -140,6 +150,7 @@ definitions = schema(
         assert journal_table not in pulled_content
         assert "index_granularity" in pulled_content
         assert "auto_minmax_index" not in pulled_content
+        assert "Decimal(10, 2)" in pulled_content
 
         (tmp_path / "schema.py").write_text(pulled_content)
         plan = chkit("generate", "--dryrun", "--json")

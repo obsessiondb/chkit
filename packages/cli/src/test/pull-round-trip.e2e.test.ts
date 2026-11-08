@@ -24,8 +24,8 @@ const OBSESSIONDB_PLUGIN_ENTRY = resolve(import.meta.dir, '../../../plugin-obses
 // On a database chkit migrated, pull then generate plans nothing and drift is
 // clean (#466): the journal table is not pulled, literal defaults read back as
 // expressions, every stored setting is pulled (index_granularity, floats in the
-// form ClickHouse stores), hidden minmax indexes are left out, and the LIFETIME
-// forms ClickHouse stores.
+// form ClickHouse stores), hidden minmax indexes are left out, column types and
+// LIFETIME compare in the form ClickHouse stores them.
 test('pull then generate plans nothing on a database chkit migrated', async () => {
   const env = getLiveEnv()
   const executor = createLiveExecutor(env)
@@ -70,6 +70,16 @@ export default schema(
       { name: 'multiline', type: 'String', default: 'x\\ny\\tz' },
       { name: 'ratio', type: 'Float64', default: 2.0 },
       { name: 'received_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
+      // ClickHouse stores these types with its own spacing (Decimal(10, 2)).
+      { name: 'amount', type: 'Decimal(10,2)' },
+      { name: 'at_utc', type: "DateTime64(3,'UTC')" },
+      { name: 'attrs', type: 'Map(String,UInt64)' },
+      { name: 'kind', type: "Enum8('a  b'=1,'c'=2)" },
+      { name: 'maybe', type: 'Decimal(10,2)', nullable: true },
+      // Defaults ClickHouse stores in another form (1e21) or a float cannot hold.
+      { name: 'huge', type: 'Float64', default: 1e21 },
+      { name: 'tiny', type: 'Float64', default: 1e-7 },
+      { name: 'max_u64', type: 'UInt64', default: { expression: '18446744073709551615' } },
     ],
   }),
   table({
@@ -117,6 +127,7 @@ export default schema(
     expect(pulledContent).not.toContain(journalTable)
     expect(pulledContent).toContain('index_granularity')
     expect(pulledContent).not.toContain('auto_minmax_index')
+    expect(pulledContent).toContain('Decimal(10, 2)')
 
     await writeFile(schemaPath, pulledContent.replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)), 'utf8')
     const plan = runCli(dir, ['generate', '--config', configPath, '--dryrun', '--json'], cliEnv)

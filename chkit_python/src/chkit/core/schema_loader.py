@@ -52,6 +52,7 @@ def load_schema_definitions(
     schema_globs: str | list[str],
     *,
     cwd: Path | str | None = None,
+    index_granularity: int | None = None,
 ) -> list[SchemaDefinition]:
     """Resolve schema globs, import each match, return canonicalized definitions.
 
@@ -60,6 +61,9 @@ def load_schema_definitions(
             anchored to ``cwd``. Supports ``**`` recursion.
         cwd: Working directory for relative globs. Defaults to the process
             current working directory.
+        index_granularity: ``clickhouse.indexGranularity``, the
+            ``index_granularity`` a MergeTree table that does not declare it
+            gets (8192 when None).
 
     Returns:
         Canonicalized list of SchemaDefinition objects (tables, views,
@@ -78,9 +82,11 @@ def load_schema_definitions(
     collected: list[SchemaDefinition] = []
     for file in files:
         module = _import_schema_file(file)
-        collected.extend(collect_definitions_from_module(vars(module)))
+        collected.extend(
+            collect_definitions_from_module(vars(module), index_granularity=index_granularity)
+        )
 
-    return canonicalize_definitions(collected)
+    return canonicalize_definitions(collected, index_granularity=index_granularity)
 
 
 def _import_schema_file(file: Path) -> ModuleType:

@@ -1,4 +1,4 @@
-import { canonicalizeDefinitions, type MigrationPlan } from '@chkit/core'
+import { canonicalizeDefinitions, configuredIndexGranularity, type MigrationPlan } from '@chkit/core'
 
 import type {
   ChxOnAfterApplyContext,
@@ -88,7 +88,7 @@ export async function runOnSchemaLoaded(
         'hook',
         `onSchemaLoaded ← ${item.plugin.manifest.name} returned ${next.length} definitions`,
       )
-      definitions = canonicalizeDefinitions(next)
+      definitions = canonicalizeDefinitions(next, { indexGranularity: configuredIndexGranularity(context.config) })
     }
   }
   return definitions
@@ -106,7 +106,9 @@ export async function runOnSnapshotLoaded(
     const next = await guardHook(item.plugin.manifest.name, 'onSnapshotLoaded', () =>
       hook({ ...context, definitions }),
     )
-    if (Array.isArray(next)) definitions = canonicalizeDefinitions(next)
+    if (Array.isArray(next)) {
+      definitions = canonicalizeDefinitions(next, { indexGranularity: configuredIndexGranularity(context.config) })
+    }
   }
   return definitions
 }

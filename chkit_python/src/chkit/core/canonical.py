@@ -30,7 +30,11 @@ from chkit.core.model import (
 from chkit.core.projection import canonicalize_projection
 from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
-from chkit.core.table_settings import with_default_index_granularity, without_auto_minmax_indexes
+from chkit.core.table_settings import (
+    DEFAULT_INDEX_GRANULARITY,
+    with_default_index_granularity,
+    without_auto_minmax_indexes,
+)
 from chkit.core.text_index import canonicalize_text_index
 
 _T = TypeVar("_T")
@@ -103,9 +107,15 @@ def _normalize_optional_clause(value: str | None) -> str | None:
     return normalize_sql_fragment(value) or None
 
 
-def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
+def _canonicalize_table(
+    definition: TableDefinition, index_granularity: int | None
+) -> TableDefinition:
     settings = _sorted_settings(
-        with_default_index_granularity(definition.engine, definition.settings)
+        with_default_index_granularity(
+            definition.engine,
+            definition.settings,
+            DEFAULT_INDEX_GRANULARITY if index_granularity is None else index_granularity,
+        )
     )
     declared_indexes = without_auto_minmax_indexes(definition.indexes, settings)
     indexes = (
@@ -312,9 +322,14 @@ def _canonicalize_dictionary(definition: DictionaryDefinition) -> DictionaryDefi
     )
 
 
-def canonicalize_definition(definition: SchemaDefinition) -> SchemaDefinition:
+def canonicalize_definition(
+    definition: SchemaDefinition, *, index_granularity: int | None = None
+) -> SchemaDefinition:
+    """``index_granularity`` is what a MergeTree table that does not declare it
+    gets: the server's MergeTree default, ``clickhouse.indexGranularity`` (8192
+    when None)."""
     if isinstance(definition, TableDefinition):
-        return _canonicalize_table(definition)
+        return _canonicalize_table(definition, index_granularity)
     if isinstance(definition, ViewDefinition):
         return _canonicalize_view(definition)
     if isinstance(definition, DictionaryDefinition):
@@ -326,10 +341,12 @@ def definition_key(definition: SchemaDefinition) -> str:
     return f"{definition.kind}:{definition.database}.{definition.name}"
 
 
-def canonicalize_definitions(definitions: Iterable[SchemaDefinition]) -> list[SchemaDefinition]:
+def canonicalize_definitions(
+    definitions: Iterable[SchemaDefinition], *, index_granularity: int | None = None
+) -> list[SchemaDefinition]:
     dedup: dict[str, SchemaDefinition] = {}
     for definition in definitions:
-        normalized = canonicalize_definition(definition)
+        normalized = canonicalize_definition(definition, index_granularity=index_granularity)
         dedup[definition_key(normalized)] = normalized
 
     return sorted(

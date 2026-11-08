@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 
 import { z } from 'zod'
 import {
+  assertServerIndexGranularity,
   type ClickHouseExecutor,
   createClickHouseExecutor,
   type IntrospectedTable,
@@ -11,6 +12,7 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  configuredIndexGranularity,
   type ColumnDefaultValue,
   createPluginRunner,
   defineFlags,
@@ -333,6 +335,11 @@ async function pullSchema(input: {
     )
   }
 
+  // The pulled tables are compared later against definitions canonicalized
+  // with clickhouse.indexGranularity, which must be this server's default. A
+  // custom introspector reads elsewhere, so ClickHouse is not asked.
+  if (db && !customIntrospector) await assertServerIndexGranularity(db, configuredIndexGranularity(input.config))
+
   const outFile = resolve(process.cwd(), input.options.outFile)
   let objects: Array<{
     kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
@@ -357,7 +364,9 @@ async function pullSchema(input: {
       : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
   ).filter(isPulledObject)
 
-  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
+  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition), {
+    indexGranularity: configuredIndexGranularity(input.config),
+  })
   // ObsessionDB reports the engine as Shared*, which canonicalization strips.
   const sharedTables = new Set(
     introspected

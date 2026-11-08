@@ -16,6 +16,7 @@ import type {
   ValidationIssue,
   ViewDefinition,
 } from './model-types.js'
+import { DEFAULT_INDEX_GRANULARITY } from './table-settings.js'
 
 export * from './model-types.js'
 
@@ -90,9 +91,23 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
           cluster: config.clickhouse.cluster
             ? assertValidClusterName(config.clickhouse.cluster)
             : undefined,
+          indexGranularity: assertValidIndexGranularity(config.clickhouse.indexGranularity),
         }
       : undefined,
   }
+}
+
+/** The `index_granularity` chkit gives a MergeTree table that does not declare it. */
+export function configuredIndexGranularity(config: { clickhouse?: { indexGranularity?: number } }): number {
+  return config.clickhouse?.indexGranularity ?? DEFAULT_INDEX_GRANULARITY
+}
+
+function assertValidIndexGranularity(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_INDEX_GRANULARITY
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`Invalid clickhouse.indexGranularity ${JSON.stringify(value)}. Expected a positive integer, the server's MergeTree index_granularity default (8192 unless the server configures another).`)
+  }
+  return value
 }
 
 // The client takes the protocol, and without a port the scheme's default port,

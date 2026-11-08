@@ -36,7 +36,8 @@ from chkit.core.model import (
 )
 from chkit.core.projection import render_projection_body
 from chkit.core.sql_lexer import js_trim
-from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.sql_normalizer import normalize_sql_fragment, sql_expression_fingerprint
+from chkit.core.table_settings import render_setting_value
 from chkit.core.text_index import TEXT_INDEX_GRANULARITY, render_text_index_type
 from chkit.core.validate import assert_valid_definitions
 from chkit.core.vector_index import render_vector_index_type
@@ -88,6 +89,14 @@ def render_column_type(column: ColumnDefinition) -> str:
     return f"Nullable({type_})" if column.nullable else type_
 
 
+def column_type_fingerprint(column: ColumnDefinition) -> str:
+    """A column type in comparison form (TS ``columnTypeFingerprint``): its
+    tokens, so ``Decimal(10,2)`` equals the ``Decimal(10, 2)`` ClickHouse stores,
+    while text inside quotes (an Enum label, a time zone) is compared as
+    written. Only for comparing: chkit renders and stores the type as declared."""
+    return sql_expression_fingerprint(render_column_type(column))
+
+
 def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str:
     """Key clause columns as chkit renders them in DDL (TS ``renderKeyClauseColumns``)."""
     # Quote a token when it names a declared column (including names that need
@@ -122,14 +131,8 @@ def _render_index_type(idx: SkipIndexDefinition) -> str:  # noqa: PLR0911
     )
 
 
-def _render_setting_value(value: str | int | float | bool) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
 def _render_settings_clause(settings: dict[str, str | int | float | bool]) -> str:
-    parts = [f"{k} = {_render_setting_value(v)}" for k, v in settings.items()]
+    parts = [f"{k} = {render_setting_value(v)}" for k, v in settings.items()]
     return ", ".join(parts)
 
 
@@ -457,7 +460,7 @@ def render_alter_modify_setting(
 ) -> str:
     return (
         f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
-        f"MODIFY SETTING {key} = {_render_setting_value(value)};"
+        f"MODIFY SETTING {key} = {render_setting_value(value)};"
     )
 
 
