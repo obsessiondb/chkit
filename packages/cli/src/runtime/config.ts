@@ -5,7 +5,6 @@ import process from 'node:process'
 
 import { urlWithoutCredentials } from '@chkit/clickhouse'
 import {
-  importModuleFile,
   resolveConfig,
   SYNTHESIZED_CONFIG_PATH,
   type ChxConfig,
@@ -16,6 +15,7 @@ import {
   type ChxUserConfig,
   type ResolvedChxConfig,
 } from '@chkit/core'
+import { importModuleFile } from '@chkit/core/loader'
 
 import { mergeUserConfig } from './config-merge.js'
 import { debug } from './debug.js'
