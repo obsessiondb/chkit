@@ -112,5 +112,6 @@ export {
   type QueryInterpolation,
   type QueryObjectRef,
   type QueryOptions,
+  type QueryResult,
   type QueryTag,
 } from './query.js'

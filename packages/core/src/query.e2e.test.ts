@@ -283,6 +283,18 @@ describe('query execution', () => {
     expect(await asString()).toEqual([{ u64: '18446744073709551615' }])
   })
 
+  test('raw returns the client result unparsed, streams, and still validates params', async () => {
+    const wide = run`SELECT toUInt64(18446744073709551615) AS u64, toUInt32(number) AS n FROM numbers(${p.uint32('count')})`
+
+    expect(await (await wide.raw({ count: 1 })).text()).toContain('18446744073709551615')
+    const streamed: unknown[] = []
+    for await (const rows of (await wide.raw({ count: 3 })).stream()) {
+      for (const row of rows) streamed.push((row.json() as { n: number }).n)
+    }
+    expect(streamed).toEqual([0, 1, 2])
+    await expect(wide.raw({ count: -1 })).rejects.toThrow('Too small')
+  })
+
   test('dates inside arrays keep their day, seconds and milliseconds', async () => {
     const lists = run`
       SELECT toString(${p('days', t.array(t.date()))}) AS days, toString(${p('times', t.array(t.dateTime()))}) AS times,
