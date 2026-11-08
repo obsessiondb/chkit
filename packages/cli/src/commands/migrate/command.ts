@@ -25,7 +25,6 @@ import {
   type MigrationJournal,
   type MigrationJournalEntry,
 } from '../../runtime/migration-store.js'
-import type { DestructiveOperationMarker } from '../../runtime/safety-markers.js'
 import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
 
 import { abandonMigrationState, abandonReport, readAbandonableState } from './abandon.js'
@@ -149,24 +148,6 @@ interface AbandonPrompt {
 const TERMINAL_PROMPT: AbandonPrompt = {
   isInteractive: () => !isBackgroundOrCI(),
   confirm: confirmAbandon,
-}
-
-/** The parts of the migrate context that the destructive gate reads. */
-type DestructiveGateContext = Pick<
-  MigrateContext,
-  'migrationsDir' | 'allowDestructive' | 'config' | 'jsonMode' | 'tableScope'
->
-
-/** How the destructive gate asks before it applies destructive migrations. */
-interface DestructivePrompt {
-  /** Whether someone can answer a prompt: a TTY outside CI. */
-  isInteractive: () => boolean
-  confirm: (operations: DestructiveOperationMarker[]) => Promise<boolean>
-}
-
-const TERMINAL_DESTRUCTIVE_PROMPT: DestructivePrompt = {
-  isInteractive: () => !isBackgroundOrCI(),
-  confirm: confirmDestructiveExecution,
 }
 
 async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | number> {
@@ -417,11 +398,7 @@ async function runConfirmGate(ctx: MigrateContext): Promise<number | undefined> 
 }
 
 /** Gate 3: block destructive migrations unless allowed, confirmed, or forced. */
-export async function runDestructiveGate(
-  ctx: DestructiveGateContext,
-  pending: string[],
-  prompt: DestructivePrompt = TERMINAL_DESTRUCTIVE_PROMPT,
-): Promise<number | undefined> {
+async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promise<number | undefined> {
   const { migrationsDir, allowDestructive, config, jsonMode, tableScope } = ctx
   const destructive = await scanDestructive(migrationsDir, pending)
   const destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
@@ -434,7 +411,7 @@ export async function runDestructiveGate(
       return 3
     }
 
-    if (!prompt.isInteractive()) {
+    if (isBackgroundOrCI()) {
       printDestructiveOperationDetails(destructive.operations)
       console.error(
         `${error}\nDestructive migrations: ${destructive.migrations.join(', ')}\n` +
@@ -443,7 +420,7 @@ export async function runDestructiveGate(
       return 3
     }
 
-    const confirmed = await prompt.confirm(destructive.operations)
+    const confirmed = await confirmDestructiveExecution(destructive.operations)
     if (!confirmed) {
       console.error(
         `Destructive migration cancelled by user.\nDestructive migrations: ${destructive.migrations.join(', ')}`,
