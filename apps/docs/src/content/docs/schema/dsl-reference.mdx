@@ -292,6 +292,8 @@ Column name.
 
 Any ClickHouse type string. Parameterized types like `DateTime64(3)`, `Decimal(18, 4)`, `Enum8('a' = 1, 'b' = 2)`, and `FixedString(32)` are supported.
 
+In TypeScript, `type` also takes a [`t` type](/schema/queries/#types) such as `t.lowCardinality(t.string())`. It renders to the same type string, so a query param can share the column's type.
+
 Primitive types recognized by the DSL type system: `String`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`, `UInt256`, `Int8`, `Int16`, `Int32`, `Int64`, `Int128`, `Int256`, `Float32`, `Float64`, `Bool`, `Boolean`, `Date`, `DateTime`, `DateTime64`.
 
 #### SQL-standard aliases
