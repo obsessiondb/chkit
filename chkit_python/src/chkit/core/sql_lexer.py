@@ -137,7 +137,7 @@ def _read_token(sql: str, i: int, previous: SQLToken | None) -> _TokenEnd:  # no
         end, terminated = _read_quoted(sql, i, char)
         return ("quoted_identifier", end, terminated)
     if char == "$":
-        heredoc_end = _read_heredoc(sql, i)
+        heredoc_end = read_heredoc(sql, i)
         if heredoc_end is not None:
             return ("string", heredoc_end, True)
         if nxt in _WORD_CHAR:
@@ -239,7 +239,7 @@ def _read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
     return (len(sql), False)
 
 
-def _read_heredoc(sql: str, i: int) -> int | None:
+def read_heredoc(sql: str, i: int) -> int | None:
     # `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
     # is only a literal when the same tag closes it later; otherwise ClickHouse
     # reads the `$` as part of an identifier or as punctuation.

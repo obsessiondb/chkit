@@ -209,7 +209,7 @@ function readQuoted(sql: string, i: number, quote: string): { end: number; termi
 // `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
 // is only a literal when the same tag closes it later; otherwise ClickHouse
 // reads the `$` as part of an identifier or as punctuation.
-function readHeredoc(sql: string, i: number): number | undefined {
+export function readHeredoc(sql: string, i: number): number | undefined {
   const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
   if (sql[tagEnd] !== '$') return undefined
   const tag = sql.slice(i, tagEnd + 1)

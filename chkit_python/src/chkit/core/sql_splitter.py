@@ -1,144 +1,145 @@
-"""Split SQL text on statement boundaries, respecting strings/comments."""
+"""Split SQL text on statement boundaries, respecting strings/comments.
+
+1:1 port of ``packages/core/src/sql-splitter.ts``: both ports return the same
+statements, ``--`` comments stripped and each statement ending in ``;``
+(#486). ``test/fixtures/sql-splitter.json`` holds the cases both test suites
+check.
+"""
 
 from __future__ import annotations
 
-from dataclasses import dataclass, field
+import re
 
-from chkit.core.sql_lexer import is_trivia, tokenize_sql
+from chkit.core.sql_lexer import SQLToken, is_trivia, js_trim, read_heredoc, tokenize_sql
 
-
-@dataclass
-class _SplitterState:
-    statements: list[str] = field(default_factory=list)
-    current: list[str] = field(default_factory=list)
-    quote: str | None = None
-    in_line_comment: bool = False
-    in_block_comment: bool = False
-
-
-def _handle_in_line_comment(state: _SplitterState, ch: str) -> None:
-    state.current.append(ch)
-    if ch == "\n":
-        state.in_line_comment = False
-
-
-def _handle_in_block_comment(state: _SplitterState, ch: str, nxt: str) -> int:
-    state.current.append(ch)
-    if ch == "*" and nxt == "/":
-        state.current.append(nxt)
-        state.in_block_comment = False
-        return 2
-    return 1
-
-
-def _handle_in_quote(state: _SplitterState, ch: str, nxt: str) -> int:
-    state.current.append(ch)
-    if nxt and (ch == "\\" or ch == state.quote == nxt):
-        state.current.append(nxt)
-        return 2
-    if ch == state.quote:
-        state.quote = None
-    return 1
-
-
-def _flush_statement(state: _SplitterState) -> None:
-    statement = "".join(state.current).strip()
-    if statement and statement != ";":
-        state.statements.append(statement)
-    state.current = []
+_NAME_CHAR = re.compile(r"[A-Za-z0-9_$]")
 
 
 def split_sql_statements(text: str) -> list[str]:
-    """Split a SQL blob into individual statements.
+    """Split a SQL blob into statements, each ending in ``;``.
 
-    Handles single/double quotes, backtick identifiers, and ``-- line``
-    comments. Multi-line ``/* */`` comments are also preserved as-is.
+    A ``;`` inside a string, a quoted identifier, a ``/* */`` comment or a
+    ``$tag$`` heredoc does not end a statement. ``--`` comments are not
+    special here: `extract_executable_statements` strips them first.
     """
-    state = _SplitterState()
+    statements: list[str] = []
+    current: list[str] = []
     i = 0
     n = len(text)
-
     while i < n:
         ch = text[i]
-        nxt = text[i + 1] if i + 1 < n else ""
-
-        if state.in_line_comment:
-            _handle_in_line_comment(state, ch)
-            i += 1
-            continue
-        if state.in_block_comment:
-            i += _handle_in_block_comment(state, ch, nxt)
-            continue
-        if state.quote is not None:
-            i += _handle_in_quote(state, ch, nxt)
-            continue
-        if ch == "-" and nxt == "-":
-            state.current.append(ch)
-            state.in_line_comment = True
-            i += 1
-            continue
-        if ch == "/" and nxt == "*":
-            state.current.append(ch)
-            state.current.append(nxt)
-            state.in_block_comment = True
-            i += 2
-            continue
-        if ch in {"'", '"', "`"}:
-            state.quote = ch
-            state.current.append(ch)
-            i += 1
+        end = _quoted_end(text, i)
+        if end is not None:
+            current.append(text[i:end])
+            i = end
             continue
         if ch == ";":
-            state.current.append(ch)
-            _flush_statement(state)
+            trimmed = js_trim("".join(current))
+            if trimmed:
+                statements.append(f"{trimmed};")
+            current = []
             i += 1
             continue
-        state.current.append(ch)
+        current.append(ch)
         i += 1
 
-    tail = "".join(state.current).strip()
+    tail = js_trim("".join(current))
     if tail:
-        state.statements.append(tail if tail.endswith(";") else f"{tail};")
-    return state.statements
+        statements.append(f"{tail};")
+    return statements
 
 
 def extract_executable_statements(text: str) -> list[str]:
-    """Return statements stripped of trailing semicolons (preferred by clickhouse-connect).
+    """The statements chkit runs: ``--`` comments stripped, ``;`` kept, as in TS.
 
-    A statement made only of comments is not executable: ClickHouse rejects it
-    as "Empty query" (for example a block comment after the last statement),
-    so it is dropped. The splitter does not know ``#`` and ``//`` line
-    comments; when one of them holds a ``;`` the splitter cut that comment
-    line in two, and keeping the comment-only piece makes ClickHouse reject
-    the file instead of running the commented-out text after the ``;``.
+    ``--`` inside a string, a quoted identifier, a block comment or a heredoc
+    is text and stays. A statement made only of comments is not executable:
+    ClickHouse rejects it as "Empty query" (for example a block comment after
+    the last statement), so it is dropped. The splitter does not know ``#``
+    and ``//`` line comments; when one of them holds a ``;`` the splitter cut
+    that comment line in two, and keeping the comment-only piece makes
+    ClickHouse reject the file instead of running the commented-out text after
+    the ``;``.
     """
-    stripped = [s.rstrip(";").strip() for s in split_sql_statements(text)]
-    statements = [s for s in stripped if s]
+    stripped: list[str] = []
+    i = 0
+    n = len(text)
+    while i < n:
+        ch = text[i]
+        if text.startswith("--", i):
+            # The comment runs to the end of the line; the newline stays.
+            newline = text.find("\n", i)
+            if newline == -1:
+                break
+            i = newline
+            continue
+        end = _quoted_end(text, i)
+        if end is not None:
+            stripped.append(text[i:end])
+            i = end
+            continue
+        stripped.append(ch)
+        i += 1
+
+    stripped_text = "".join(stripped)
+    statements = split_sql_statements(stripped_text)
     executable = [s for s in statements if _has_executable_content(s)]
     if len(executable) == len(statements):
         return statements
-    if _has_line_comment_with_semicolon(text):
+    if any(_is_line_comment_with_semicolon(token) for token in tokenize_sql(stripped_text)):
         return statements
     return executable
+
+
+def _quoted_end(text: str, i: int) -> int | None:
+    """The end of the string, quoted identifier, block comment or heredoc that
+    starts at ``i``, or None when none starts there.
+
+    An unclosed quote or block comment runs to the end of the input; an
+    unclosed ``$tag$`` is not a heredoc, as in ClickHouse.
+    """
+    ch = text[i]
+    if text.startswith("/*", i):
+        close = text.find("*/", i + 2)
+        return len(text) if close == -1 else close + 2
+    if ch in ("'", '"', "`"):
+        return _quote_end(text, i, ch)
+    # `a$$b` is one name: a heredoc starts only where a name does not go on.
+    if ch == "$" and not (i > 0 and _NAME_CHAR.match(text[i - 1])):
+        return read_heredoc(text, i)
+    return None
+
+
+def _quote_end(text: str, i: int, quote: str) -> int:
+    """A backslash escapes the next character. A doubled quote ends one quoted
+    part and starts the next, which ends where the escaped quote would."""
+    j = i + 1
+    n = len(text)
+    while j < n:
+        ch = text[j]
+        if ch == "\\" and j + 1 < n:
+            j += 2
+            continue
+        if ch == quote:
+            return j + 1
+        j += 1
+    return n
 
 
 def _has_executable_content(statement: str) -> bool:
     """False when every token is whitespace or a terminated comment.
 
-    Covers every ClickHouse comment form: ``--``, ``//``, ``# ``, ``#!`` and
-    nested ``/* */``. An unterminated comment counts as content, so
-    ClickHouse reports it.
+    Covers the comment forms left after ``--`` comments are stripped: ``//``,
+    ``# ``, ``#!`` and nested ``/* */``. An unterminated comment counts as
+    content, so ClickHouse reports it.
     """
     # Only a statement that starts like a comment can be made only of comments.
     if not statement.startswith(("-", "/", "#")):
         return True
-    return any(not is_trivia(token) or not token.terminated for token in tokenize_sql(statement))
+    # The splitter appended the `;`; a trailing line comment would swallow it.
+    body = statement[:-1] if statement.endswith(";") else statement
+    return any(not is_trivia(token) or not token.terminated for token in tokenize_sql(body))
 
 
-def _has_line_comment_with_semicolon(text: str) -> bool:
-    # `--` comments never reach the splitter's cut in TS (they are stripped
-    # first), so only `//`, `# ` and `#!` comments count here.
-    return any(
-        token.kind == "line_comment" and not token.text.startswith("--") and ";" in token.text
-        for token in tokenize_sql(text)
-    )
+def _is_line_comment_with_semicolon(token: SQLToken) -> bool:
+    return token.kind == "line_comment" and ";" in token.text

@@ -1,0 +1,101 @@
+{
+  "migration": {
+    "sql": "-- chkit-migration-format: v1\n-- generated-at: 2026-11-08T00:00:00.000Z\n-- operation-count: 2\n-- risk-summary: safe=2, caution=0, danger=0\n\n-- operation: create_table key=table:{database}.{table} risk=safe\nCREATE TABLE IF NOT EXISTS {database}.{table} (\n  id UInt64,\n  note String DEFAULT 'a -- b; it''s \\'c\\'',\n  `odd\\`--;name` String DEFAULT $tag$ -- not a comment; still the string $tag$\n) ENGINE = MergeTree ORDER BY id; -- trailing note\n\n-- operation: alter_table_add_column key=table:{database}.{table}:column:extra risk=safe\nALTER TABLE {database}.{table} /* block; -- kept */ ADD COLUMN extra String DEFAULT 'semi;colon' -- last comment, no newline after it",
+    "statements": [
+      "CREATE TABLE IF NOT EXISTS {database}.{table} (\n  id UInt64,\n  note String DEFAULT 'a -- b; it''s \\'c\\'',\n  `odd\\`--;name` String DEFAULT $tag$ -- not a comment; still the string $tag$\n) ENGINE = MergeTree ORDER BY id;",
+      "ALTER TABLE {database}.{table} /* block; -- kept */ ADD COLUMN extra String DEFAULT 'semi;colon';"
+    ]
+  },
+  "cases": [
+    {
+      "name": "a heredoc keeps its -- and ;",
+      "sql": "SELECT $$a -- b; c$$;",
+      "statements": [
+        "SELECT $$a -- b; c$$;"
+      ]
+    },
+    {
+      "name": "a tagged heredoc is one literal",
+      "sql": "SELECT $tag$x;$$;$tag$, $$y$$; SELECT 2",
+      "statements": [
+        "SELECT $tag$x;$$;$tag$, $$y$$;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a $ inside a name does not start a heredoc",
+      "sql": "SELECT a$$b FROM t; SELECT $$c$$",
+      "statements": [
+        "SELECT a$$b FROM t;",
+        "SELECT $$c$$;"
+      ]
+    },
+    {
+      "name": "an unclosed heredoc is not a literal",
+      "sql": "SELECT $$a; SELECT 1",
+      "statements": [
+        "SELECT $$a;",
+        "SELECT 1;"
+      ]
+    },
+    {
+      "name": "a backslash escapes a backtick in a quoted identifier",
+      "sql": "SELECT `a\\`;--b` FROM t; SELECT 2",
+      "statements": [
+        "SELECT `a\\`;--b` FROM t;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "-- and ; inside a double-quoted identifier",
+      "sql": "SELECT \"a--;b\" FROM t",
+      "statements": [
+        "SELECT \"a--;b\" FROM t;"
+      ]
+    },
+    {
+      "name": "escaped quotes keep the string open",
+      "sql": "SELECT 'it\\'s -- x; y', 'it''s -- z; w';\nSELECT 2;",
+      "statements": [
+        "SELECT 'it\\'s -- x; y', 'it''s -- z; w';",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a quote inside a -- comment opens no string",
+      "sql": "-- don't; split here\nSELECT 1;\nSELECT 2;",
+      "statements": [
+        "SELECT 1;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a -- comment without a trailing newline",
+      "sql": "SELECT 1 -- done",
+      "statements": [
+        "SELECT 1;"
+      ]
+    },
+    {
+      "name": "a -- comment between the lines of one statement",
+      "sql": "SELECT 1, -- one\n  2 -- two\nFROM t;",
+      "statements": [
+        "SELECT 1, \n  2 \nFROM t;"
+      ]
+    },
+    {
+      "name": "-- inside a block comment is kept",
+      "sql": "/* a -- b; c */ SELECT 1;",
+      "statements": [
+        "/* a -- b; c */ SELECT 1;"
+      ]
+    },
+    {
+      "name": "a statement made only of comments is dropped",
+      "sql": "SELECT 1;\n-- only a comment\n;\n/* and a block */\n",
+      "statements": [
+        "SELECT 1;"
+      ]
+    }
+  ]
+}

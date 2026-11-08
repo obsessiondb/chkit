@@ -521,10 +521,8 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
 
 
 _QUOTED_OR_BARE = r"(?:`(?:[^`\\]|\\.)*`|[^\s.`;]+)"
-# Python keeps the ``-- operation:`` / ``-- before-retry:`` marker lines in the
-# statements it executes (TS strips them), so leading line comments are skipped.
 _EXCHANGE_PATTERN = re.compile(
-    rf"^(?:\s*--[^\n]*(?:\n|$))*\s*EXCHANGE\s+TABLES\s+"
+    rf"^\s*EXCHANGE\s+TABLES\s+"
     rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})\s+AND\s+"
     rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})",
     re.IGNORECASE,

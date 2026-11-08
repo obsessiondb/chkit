@@ -1,89 +1,16 @@
-import { isTrivia, tokenizeSQL, type SQLToken } from './sql-lexer.js'
+import { isTrivia, readHeredoc, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
   let current = ''
-  let inSingleQuote = false
-  let inDoubleQuote = false
-  let inBacktick = false
-  let inBlockComment = false
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
-    const next = sql[i + 1] ?? ''
 
-    if (inBlockComment) {
-      current += ch
-      if (ch === '*' && next === '/') {
-        current += next
-        i += 1
-        inBlockComment = false
-      }
-      continue
-    }
-
-    if (inSingleQuote) {
-      current += ch
-      if (ch === '\\' && next) {
-        current += next
-        i += 1
-        continue
-      }
-      if (ch === "'" && next === "'") {
-        current += next
-        i += 1
-        continue
-      }
-      if (ch === "'") {
-        inSingleQuote = false
-      }
-      continue
-    }
-
-    if (inDoubleQuote) {
-      current += ch
-      if (ch === '\\' && next) {
-        current += next
-        i += 1
-        continue
-      }
-      if (ch === '"') {
-        inDoubleQuote = false
-      }
-      continue
-    }
-
-    if (inBacktick) {
-      current += ch
-      if (ch === '`') {
-        inBacktick = false
-      }
-      continue
-    }
-
-    if (ch === '/' && next === '*') {
-      current += ch
-      current += next
-      i += 1
-      inBlockComment = true
-      continue
-    }
-
-    if (ch === "'") {
-      current += ch
-      inSingleQuote = true
-      continue
-    }
-
-    if (ch === '"') {
-      current += ch
-      inDoubleQuote = true
-      continue
-    }
-
-    if (ch === '`') {
-      current += ch
-      inBacktick = true
+    const end = quotedEnd(sql, i)
+    if (end !== undefined) {
+      current += sql.slice(i, end)
+      i = end - 1
       continue
     }
 
@@ -107,102 +34,23 @@ export function extractExecutableStatements(sql: string): string[] {
   // We can't use a naive line-based filter because `--` inside string
   // literals must be preserved.
   let stripped = ''
-  let inSingleQuote = false
-  let inDoubleQuote = false
-  let inBacktick = false
-  let inBlockComment = false
-  let inLineComment = false
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
     const next = sql[i + 1] ?? ''
 
-    if (inLineComment) {
-      if (ch === '\n') {
-        inLineComment = false
-        stripped += ch
-      }
-      continue
-    }
-
-    if (inBlockComment) {
-      stripped += ch
-      if (ch === '*' && next === '/') {
-        stripped += next
-        i += 1
-        inBlockComment = false
-      }
-      continue
-    }
-
-    if (inSingleQuote) {
-      stripped += ch
-      if (ch === '\\' && next) {
-        stripped += next
-        i += 1
-        continue
-      }
-      if (ch === "'" && next === "'") {
-        stripped += next
-        i += 1
-        continue
-      }
-      if (ch === "'") {
-        inSingleQuote = false
-      }
-      continue
-    }
-
-    if (inDoubleQuote) {
-      stripped += ch
-      if (ch === '\\' && next) {
-        stripped += next
-        i += 1
-        continue
-      }
-      if (ch === '"') {
-        inDoubleQuote = false
-      }
-      continue
-    }
-
-    if (inBacktick) {
-      stripped += ch
-      if (ch === '`') {
-        inBacktick = false
-      }
-      continue
-    }
-
     if (ch === '-' && next === '-') {
-      inLineComment = true
-      i += 1
+      // The comment runs to the end of the line; the newline stays.
+      const newline = sql.indexOf('\n', i)
+      if (newline === -1) break
+      i = newline - 1
       continue
     }
 
-    if (ch === '/' && next === '*') {
-      stripped += ch
-      stripped += next
-      i += 1
-      inBlockComment = true
-      continue
-    }
-
-    if (ch === "'") {
-      stripped += ch
-      inSingleQuote = true
-      continue
-    }
-
-    if (ch === '"') {
-      stripped += ch
-      inDoubleQuote = true
-      continue
-    }
-
-    if (ch === '`') {
-      stripped += ch
-      inBacktick = true
+    const end = quotedEnd(sql, i)
+    if (end !== undefined) {
+      stripped += sql.slice(i, end)
+      i = end - 1
       continue
     }
 
@@ -220,6 +68,38 @@ export function extractExecutableStatements(sql: string): string[] {
   // commented-out text after the `;`.
   if (tokenizeSQL(stripped).some(isLineCommentWithSemicolon)) return statements
   return executable
+}
+
+const NAME_CHAR = /[A-Za-z0-9_$]/
+
+// The end of the string, quoted identifier, block comment or heredoc that
+// starts at `i`, or undefined when none starts there: a `;` or `--` inside one
+// is text. An unclosed quote or block comment runs to the end of the input; an
+// unclosed `$tag$` is not a heredoc, as in ClickHouse.
+function quotedEnd(sql: string, i: number): number | undefined {
+  const ch = sql[i] ?? ''
+  if (ch === '/' && sql[i + 1] === '*') {
+    const close = sql.indexOf('*/', i + 2)
+    return close === -1 ? sql.length : close + 2
+  }
+  if (ch === "'" || ch === '"' || ch === '`') return quoteEnd(sql, i, ch)
+  // `a$$b` is one name: a heredoc starts only where a name does not go on.
+  if (ch === '$' && !NAME_CHAR.test(sql[i - 1] ?? '')) return readHeredoc(sql, i)
+  return undefined
+}
+
+// A backslash escapes the next character. A doubled quote ends one quoted part
+// and starts the next, which ends where the escaped quote would.
+function quoteEnd(sql: string, i: number, quote: string): number {
+  for (let j = i + 1; j < sql.length; j += 1) {
+    const ch = sql[j]
+    if (ch === '\\' && j + 1 < sql.length) {
+      j += 1
+      continue
+    }
+    if (ch === quote) return j + 1
+  }
+  return sql.length
 }
 
 // True unless every token is whitespace or a terminated comment (`/* */`,
