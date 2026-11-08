@@ -2,7 +2,22 @@
 
 ## Unreleased
 
+### Added
+- `-h` is `--help` on every command and `-v` is `--version`, as in TS (#491). TS now accepts
+  chkit-py's short flags too, so both CLIs take the same ones.
+
+### Changed
+- Short flags read as in TS (#491): `-t=x` is `--table x` (it was the table `=x`), and a
+  bundle such as `pull -fo out.py` is rejected as `No such option: -fo` instead of being
+  split. `-tx` keeps working.
+- `chkit obsessiondb service alias set` rejects an alias that starts with `-`, which the
+  command line would read as a flag (#491). An alias saved earlier still loads and is
+  listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
+
 ### Fixed
+- `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
+  such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
+  plugin command as a positional argument (#491, fixed in TS too).
 - Validation rejects empty names and names with a control character (`invalid_identifier`),
   as in TS (#490). This covers database, object, column, index, constraint, projection,
   attribute and materialized view target names.
@@ -168,9 +183,6 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
-- `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
-  such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
-  plugin command as a positional argument (#491, fixed in TS too).
 - `pull` no longer writes the first column as the primary key or `ORDER BY` of a table that
   does not declare one, so `drift` is clean right after `pull` (#487).
 - Plugin hooks run as in TS (#488): `status`, `check`, `drift` and `query` give them every
