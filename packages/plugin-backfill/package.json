@@ -42,7 +42,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun run src/chunking/e2e/seed-datasets.script.ts && bun test src --parallel",
+    "test": "bun run ../../scripts/infra-up.ts && bun run src/chunking/e2e/seed-datasets.script.ts && bun test src --parallel",
     "clean": "rm -rf dist"
   },
   "dependencies": {

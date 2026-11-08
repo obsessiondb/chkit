@@ -34,8 +34,9 @@ jobs:
         with:
           sarif_file: fallow-results.sarif
 
-      # Same command as locally: Turbo starts the test stack (test/infra) and
-      # runs typecheck, lint, test and build.
+      # Same command as locally: Turbo runs typecheck, lint, test and build,
+      # restoring unchanged tasks from the remote cache. A test task that runs
+      # starts the test stack (test/infra) first.
       - name: Verify
         env:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}

@@ -7,6 +7,6 @@
     "build": "bash scripts/build.sh",
     "lint": "uv run --locked --extra dev ruff check src tests tests_cluster tests_workbench_api",
     "typecheck": "uv run --locked --extra dev mypy src",
-    "test": "uv run --locked --extra dev pytest -n 8 --dist loadgroup"
+    "test": "bun run ../scripts/infra-up.ts && uv run --locked --extra dev pytest -n 8 --dist loadgroup"
   }
 }
