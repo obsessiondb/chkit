@@ -1,0 +1,11 @@
+NODE flagged
+SQL >
+    %
+    SELECT e.event_time AS event_time, e.user_id AS user_id, f.flag AS flag, e.amount AS amount
+    FROM events e, users u
+    INNER JOIN flagged_users f ON f.user_id = u.user_id
+    WHERE e.user_id = u.user_id
+      AND e.event_type NOT IN (SELECT event_type FROM type_totals WHERE total < 0)
+
+TYPE materialized
+DATASOURCE flagged_events
