@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from functools import partial
 from pathlib import Path
 from typing import Any
 
@@ -391,8 +392,13 @@ def test_select_service_interactive_rejects_invalid_index(
 
 
 def test_run_claim_when_eligible_polls_until_running(
-    isolated_home: Path, httpx_mock: HTTPXMock, tmp_path: Path
+    isolated_home: Path, httpx_mock: HTTPXMock, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    monkeypatch.setattr(
+        _service_claim_module,
+        "_poll_until_running",
+        partial(_service_claim_module._poll_until_running, sleep=lambda _: None),
+    )
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/instanceClaimStatus",
         json={"eligible": True},
@@ -442,10 +448,7 @@ def test_run_claim_when_no_capacity_returns_1(
 
 
 def test_run_claim_when_provisioning_errors_returns_1(
-    isolated_home: Path,
-    httpx_mock: HTTPXMock,
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+    isolated_home: Path, httpx_mock: HTTPXMock, tmp_path: Path
 ) -> None:
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/instanceClaimStatus",
@@ -460,7 +463,6 @@ def test_run_claim_when_provisioning_errors_returns_1(
         json=_service(name="broken", slug="broken", status="error"),
     )
 
-    monkeypatch.setattr(_service_claim_module.time, "sleep", lambda _: None)
     msgs: list[object] = []
     code = run_claim(_creds(), tmp_path / "config.py", msgs.append)
     assert code == 1

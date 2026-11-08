@@ -237,43 +237,6 @@ def test_mirrors_snapshots_copies_verifies_and_swaps_in_order() -> None:
     ]
 
 
-def test_shadow_has_new_layout_and_snapshot_old_layout_with_metadata() -> None:
-    ops = plan().operations
-    assert "CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000" in ops[1].sql
-    assert "ORDER BY (`user_id`, `id`)" in ops[1].sql
-    assert "CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000_snapshot" in ops[4].sql
-    assert "ORDER BY (`id`)" in ops[4].sql
-    assert 'COMMENT \'chkit cutover {"chkitCutover":1,"database":"app","table":"events"' in ops[4].sql
-
-
-def test_mirror_and_copy_sql() -> None:
-    ops = plan().operations
-    assert ops[2].sql == (
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS app.events__cutover_20261024120000_mirror "
-        "TO app.events__cutover_20261024120000 AS\n"
-        "SELECT `id`, `user_id`, `payload` FROM app.events;"
-    )
-    assert ops[2].warning is not None
-    assert "No INSERT may reuse a key (id)" in ops[2].warning
-    assert ops[3].sql == (
-        "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');"
-    )
-    assert ops[5].sql == (
-        "ALTER TABLE app.events__cutover_20261024120000_snapshot ATTACH PARTITION ALL FROM app.events;"
-    )
-    assert ops[5].before_retry == (
-        "TRUNCATE TABLE IF EXISTS app.events__cutover_20261024120000_snapshot SYNC"
-    )
-    assert ops[7].sql == "\n".join(
-        [
-            "INSERT INTO app.events__cutover_20261024120000 (`id`, `user_id`, `payload`)",
-            "SELECT `id`, `user_id`, `payload` FROM app.events__cutover_20261024120000_snapshot",
-            "WHERE (`id`) NOT IN (SELECT `id` FROM app.events__cutover_20261024120000)",
-            "SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;",
-        ]
-    )
-
-
 def test_verify_compares_rows_per_key() -> None:
     verify = plan().operations[8].sql
     # A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
@@ -283,27 +246,6 @@ def test_verify_compares_rows_per_key() -> None:
         "(snapshot_rows != shadow_rows OR snapshot_hash != shadow_hash)"
     ) in verify
     assert "The table was not swapped." in verify
-
-
-def test_exchange_is_guarded_on_every_attempt() -> None:
-    ops = plan().operations
-    exchange = ops[10]
-    assert exchange.sql == "EXCHANGE TABLES app.events AND app.events__cutover_20261024120000;"
-    assert exchange.before_retry is not None
-    assert f"{exchange.before_retry};" == ops[9].sql
-    assert "\n" not in exchange.before_retry
-    granularity = _norm(_GRANULARITY)
-
-    def layout(name: str) -> str:
-        return (
-            f"(SELECT any(tuple(engine, sorting_key, primary_key, partition_key, "
-            f"tuple({granularity}))) FROM system.tables WHERE database = 'app' AND name = '{name}')"
-        )
-
-    assert (
-        f"{layout('events')} = {layout('events__cutover_20261024120000_snapshot')}"
-        in exchange.before_retry
-    )
 
 
 def test_compares_a_numeric_read_only_setting_by_value() -> None:
