@@ -130,9 +130,6 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
-- `migrate --apply` prints the same lines as TS (#486). It no longer prints
-  `Applying <file>` before each migration, and a destructive migration cancelled at the
-  prompt prints the list of destructive migrations on its own line.
 - Comments work end to end, as in TS (#464). Comments escape backslashes, so ClickHouse
   stores the exact text (a trailing `\` no longer breaks the statement), and an empty
   comment is the same as none. A table, view, materialized view or dictionary comment change

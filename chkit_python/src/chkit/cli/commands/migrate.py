@@ -697,9 +697,11 @@ def _run_destructive_gate(ctx: _MigrateContext, pending: list[str]) -> None:
 
     if not confirm_destructive_execution(destructive_markers):
         typer.secho(
-            "Destructive migration cancelled by user.", fg=typer.colors.RED, err=True
+            f"Destructive migration cancelled by user. "
+            f"Destructive migrations: {', '.join(destructive_files)}",
+            fg=typer.colors.RED,
+            err=True,
         )
-        typer.echo(f"Destructive migrations: {', '.join(destructive_files)}", err=True)
         raise typer.Exit(code=3)
 
 
@@ -718,6 +720,7 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
             )
             if meta.log:
                 typer.echo(f"  {meta.log}")
+            typer.echo(f"  Applying {filename}")
         entry = apply_migration(
             ApplyMigrationInput(
                 client=ctx.client,

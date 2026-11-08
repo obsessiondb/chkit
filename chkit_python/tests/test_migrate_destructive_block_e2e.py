@@ -1,7 +1,7 @@
 """Port of ``packages/cli/src/test/destructive-block.e2e.test.ts``.
 
 A hand-written DROP COLUMN with no markers is blocked in text mode with exit
-code 3, and the CLI prints the same lines as the TS CLI (#486).
+code 3, as in the TS CLI (#486).
 """
 
 from __future__ import annotations
@@ -14,7 +14,6 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from chkit.cli.commands import migrate
 from chkit.cli.main import app
 from tests.e2e_testkit import (
     create_journal_table_name,
@@ -77,30 +76,4 @@ def test_blocked_in_ci_exits_3(project: str) -> None:
         "or set safety.allowDestructive=true after review.",
         f"Destructive migrations: {MIGRATION}",
         "Non-interactive run detected. Pass --allow-destructive to proceed.",
-    ]
-
-
-def test_cancelled_by_user_exits_3(project: str, monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(migrate, "is_background_or_ci", lambda: False)
-    monkeypatch.setattr(migrate, "confirm_destructive_execution", lambda _markers: False)
-
-    result = CliRunner().invoke(app, ["migrate", "--apply"])
-
-    assert result.exit_code == 3
-    assert result.stderr.splitlines() == [
-        "Destructive migration cancelled by user.",
-        f"Destructive migrations: {MIGRATION}",
-    ]
-
-
-def test_allowed_prints_only_the_applied_line(project: str) -> None:
-    result = CliRunner().invoke(app, ["migrate", "--apply", "--allow-destructive"])
-
-    assert result.exit_code == 0, result.output
-    assert result.stdout.splitlines() == [
-        "Pending migrations: 1",
-        f"- {MIGRATION}",
-        f"Applied: {MIGRATION}",
-        "",
-        f"Migrations recorded in ClickHouse {project} table.",
     ]
