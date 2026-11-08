@@ -14,10 +14,10 @@ const EXCEPTIONS = [
   { category: 'non-codec', field: 'error', pattern: 'Incompatible data types between aggregate function', reason: 'SimpleAggregateFunction return type differs from its storage type.' },
   { category: 'non-codec', field: 'error', pattern: 'similar types', reason: 'Variant alternatives require a server setting.' },
   { category: 'non-codec', field: 'error', pattern: 'Syntax error:|Duplicate values in enum:|Elements of Enum data type', reason: 'Invalid Enum syntax or duplicate values are type errors.' },
-  { category: 'non-codec', field: 'error', pattern: 'Map cannot have a key|Names are specified not for all elements', reason: 'Invalid Map key or partially named Tuple is a type error.' },
+  { category: 'non-codec', field: 'error', pattern: 'Map cannot have a key|Names are specified not for all elements|Nullable Tuple type is not allowed|DataTypeLowCardinality is supported only', reason: 'Invalid Map key, partially named Tuple, Nullable(Tuple) or LowCardinality of a compound type is a type error.' },
   { category: 'unmodelled', field: 'type', pattern: '\\b(Variant|AggregateFunction|Nested)\\s*\\(', reason: 'chkit does not model these value streams (Nested has no parent column).' },
   { category: 'integer-bound', field: 'codec', pattern: '^LZ4HC\\(-?9007199254740992\\)$|^ZSTD\\(-9223372036854775808\\)$', reason: 'Codec arguments beyond the shared JS safe-integer bound stay unparsed.' },
-  { category: 'aliases', field: 'type', pattern: '\\b(Double|BIGINT|Point|Ring)\\b', reason: 'Type aliases are outside the codec type model.' },
+  { category: 'aliases', field: 'type', pattern: '\\b(Double|BIGINT)\\b', reason: 'SQL type aliases: ClickHouse stores them under the canonical name, so the type itself already differs.' },
 ] as const
 
 function matrixTable(type: string, spec: ColumnCodecSpec) {
@@ -89,5 +89,5 @@ test('codec storage, pull, planner and validation match the server matrix in bot
   console.log('codec-server-matrix', JSON.stringify(counts), digest)
   expect(hits.every((hit) => hit > 0)).toBe(true)
   expect(failures).toEqual([])
-  expect(digest).toBe('2cd0ba0f0ba53db485f3a1eddb5a78b63234198d97a662a99da3afc530c6d2aa')
+  expect(digest).toBe('3bb6c4c90e28c625e4f0955cda2fca58e13b1611446b77b81aea9c8f15e14085')
 })

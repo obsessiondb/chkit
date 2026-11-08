@@ -57,10 +57,7 @@ _AGGREGATE_RE: Final = re.compile(
 def codec_value_types(column_type: str) -> list[CodecValueType] | None:
     """The value types of a column type, or None when one of them is a type
     chkit does not model (Variant, Nested, AggregateFunction, ...)."""
-    type_ = js_trim("".join(
-        " " if token.kind in {"line_comment", "block_comment"} else token.text
-        for token in tokenize_sql(column_type)
-    ))
+    type_ = _normalize_codec_type(column_type)
     wrapper = _WRAPPER_RE.match(type_)
     if wrapper is not None:
         inner = js_trim(wrapper.group(2))
@@ -88,10 +85,7 @@ def codec_has_reachable_float(column_type: str) -> bool | None:
 
     Unknown types stay unknown.
     """
-    type_ = js_trim("".join(
-        " " if token.kind in {"line_comment", "block_comment"} else token.text
-        for token in tokenize_sql(column_type)
-    ))
+    type_ = _normalize_codec_type(column_type)
     if re.match(rf"^(LowCardinality|Map)[{JS_WHITESPACE}]*\(", type_):
         return False
     wrapper = re.match(rf"^(Nullable|Array)[{JS_WHITESPACE}]*\(([\s\S]*)\)$", type_)
@@ -125,6 +119,27 @@ def codec_value_width(column_type: str) -> int | None:
     if len(widths) != 1:
         return None
     return next(iter(widths))
+
+
+# ClickHouse's geo types are aliases it keeps by name in system.columns, so a
+# codec on Point behaves as on Tuple(Float64, Float64).
+_GEO_TYPES: Final[dict[str, str]] = {
+    "Point": "Tuple(Float64, Float64)",
+    "Ring": "Array(Point)",
+    "LineString": "Array(Point)",
+    "MultiLineString": "Array(LineString)",
+    "Polygon": "Array(Ring)",
+    "MultiPolygon": "Array(Polygon)",
+}
+
+
+def _normalize_codec_type(column_type: str) -> str:
+    """A column type without comments, with a geo alias replaced by what it stands for."""
+    type_ = js_trim("".join(
+        " " if token.kind in {"line_comment", "block_comment"} else token.text
+        for token in tokenize_sql(column_type)
+    ))
+    return _GEO_TYPES.get(type_, type_)
 
 
 def _collect(types: list[str]) -> list[CodecValueType] | None:

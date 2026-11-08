@@ -29,10 +29,10 @@ EXCEPTIONS = [
     ("non-codec", "error", r"Incompatible data types between aggregate function", "SimpleAggregateFunction return type differs from its storage type."),
     ("non-codec", "error", r"similar types", "Variant alternatives require a server setting."),
     ("non-codec", "error", r"Syntax error:|Duplicate values in enum:|Elements of Enum data type", "Invalid Enum syntax or duplicate values are type errors."),
-    ("non-codec", "error", r"Map cannot have a key|Names are specified not for all elements", "Invalid Map key or partially named Tuple is a type error."),
+    ("non-codec", "error", r"Map cannot have a key|Names are specified not for all elements|Nullable Tuple type is not allowed|DataTypeLowCardinality is supported only", "Invalid Map key, partially named Tuple, Nullable(Tuple) or LowCardinality of a compound type is a type error."),
     ("unmodelled", "type", r"\b(Variant|AggregateFunction|Nested)\s*\(", "chkit does not model these value streams (Nested has no parent column)."),
     ("integer-bound", "codec", r"^LZ4HC\(-?9007199254740992\)$|^ZSTD\(-9223372036854775808\)$", "Codec arguments beyond the shared JS safe-integer bound stay unparsed."),
-    ("aliases", "type", r"\b(Double|BIGINT|Point|Ring)\b", "Type aliases are outside the codec type model."),
+    ("aliases", "type", r"\b(Double|BIGINT)\b", "SQL type aliases: ClickHouse stores them under the canonical name, so the type itself already differs."),
 ]
 
 
@@ -111,4 +111,4 @@ def test_codec_server_matrix():
     print("codec-server-matrix", json.dumps(counts), digest)
     assert all(hits)
     assert not failures, "\n".join(failures)
-    assert digest == "2cd0ba0f0ba53db485f3a1eddb5a78b63234198d97a662a99da3afc530c6d2aa"
+    assert digest == "3bb6c4c90e28c625e4f0955cda2fca58e13b1611446b77b81aea9c8f15e14085"

@@ -37,9 +37,7 @@ export interface CodecValueType {
  * chkit does not model (Variant, Nested, AggregateFunction, ...).
  */
 export function codecValueTypes(columnType: string): CodecValueType[] | undefined {
-  const type = tokenizeSQL(columnType).map((token) =>
-    token.kind === 'line_comment' || token.kind === 'block_comment' ? ' ' : token.text
-  ).join('').trim()
+  const type = normalizeCodecType(columnType)
   const wrapper = type.match(/^(Nullable|Array|LowCardinality)\s*\(([\s\S]*)\)$/)
   if (wrapper?.[2] !== undefined) {
     if (wrapper[1] === 'LowCardinality' && /^Nullable\s*\(/.test(wrapper[2].trim())) {
@@ -62,9 +60,7 @@ export function codecValueTypes(columnType: string): CodecValueType[] | undefine
 
 /** Whether a float is reachable without entering Map or LowCardinality; unknown types stay unknown. */
 export function codecHasReachableFloat(columnType: string): boolean | undefined {
-  const type = tokenizeSQL(columnType).map((token) =>
-    token.kind === 'line_comment' || token.kind === 'block_comment' ? ' ' : token.text
-  ).join('').trim()
+  const type = normalizeCodecType(columnType)
   if (/^(LowCardinality|Map)\s*\(/.test(type)) return false
   const wrapper = type.match(/^(Nullable|Array)\s*\(([\s\S]*)\)$/)
   if (wrapper?.[2] !== undefined) return codecHasReachableFloat(wrapper[2])
@@ -93,6 +89,27 @@ export function codecValueWidth(columnType: string): number | undefined {
   if (widths.size !== 1) return undefined
   const [width] = widths
   return width
+}
+
+/**
+ * ClickHouse's geo types are aliases it keeps by name in `system.columns`, so a
+ * codec on `Point` behaves as on `Tuple(Float64, Float64)`.
+ */
+const GEO_TYPES: Record<string, string> = {
+  Point: 'Tuple(Float64, Float64)',
+  Ring: 'Array(Point)',
+  LineString: 'Array(Point)',
+  MultiLineString: 'Array(LineString)',
+  Polygon: 'Array(Ring)',
+  MultiPolygon: 'Array(Polygon)',
+}
+
+/** A column type without comments, with a geo alias replaced by what it stands for. */
+function normalizeCodecType(columnType: string): string {
+  const type = tokenizeSQL(columnType).map((token) =>
+    token.kind === 'line_comment' || token.kind === 'block_comment' ? ' ' : token.text
+  ).join('').trim()
+  return GEO_TYPES[type] ?? type
 }
 
 function collect(types: string[]): CodecValueType[] | undefined {
