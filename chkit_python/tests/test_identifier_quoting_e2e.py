@@ -34,7 +34,7 @@ def client() -> Iterator[Any]:
     live.close()
 
 
-@pytest.fixture(scope="module")
+@pytest.fixture
 def table_definition(client: Any) -> Iterator[TableDefinition]:
     name = f"{create_prefix('ident')}we`ird\\name"
     database = resolve_live_env().clickhouse_database
@@ -50,6 +50,7 @@ def table_definition(client: Any) -> Iterator[TableDefinition]:
         primary_key=["id"],
         order_by=["id"],
     )
+    _exec(client, to_create_sql(definition))
     yield definition
     drop = plan_diff([definition], []).operations[0].sql
     client.command(drop.removesuffix(";"), settings={"wait_end_of_query": 1})
@@ -72,7 +73,6 @@ def test_create_table_preserves_names_verbatim(
     client: Any, table_definition: TableDefinition
 ) -> None:
     definition = table_definition
-    _exec(client, to_create_sql(definition))
     expected = ["id", EVIL_COLUMN, "a.b"]
     assert poll_until(lambda: _column_names(client, definition), lambda n: n == expected) == expected
 

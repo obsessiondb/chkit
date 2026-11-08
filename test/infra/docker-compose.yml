@@ -1,5 +1,5 @@
 # Test infrastructure for `bun run test` and `bun run verify`, locally and in CI.
-# Turbo starts it through the root `infra:up` task; `bun run infra:down` removes it.
+# Each test script that needs it starts it through scripts/infra-up.ts; `bun run infra:down` removes it.
 # CHKIT_TEST_PORT (default 8123) moves ClickHouse to another port and its own
 # project (chkit-test-<port>), so several checkouts can each run a stack.
 name: chkit-test${CHKIT_TEST_PORT:+-$CHKIT_TEST_PORT}

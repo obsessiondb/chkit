@@ -90,4 +90,4 @@ test('codec storage, pull, planner and validation match the server matrix in bot
   expect(hits.every((hit) => hit > 0)).toBe(true)
   expect(failures).toEqual([])
   expect(digest).toBe('3bb6c4c90e28c625e4f0955cda2fca58e13b1611446b77b81aea9c8f15e14085')
-})
+}, 30_000)

@@ -271,7 +271,7 @@ def test_mv_replay_refuses_to_run_a_plan_whose_target_lost_a_replayed_column(
         result = ctx.runner.invoke(
             app,
             ["plugin", "backfill", "run", "--plan-id", planned["planId"],
-             "--poll-interval", "500", "--json"],
+             "--poll-interval", "250", "--json"],
         )
         assert result.exit_code == 2, result.output
         assert (
@@ -300,7 +300,7 @@ def _run_mv_replay(
         ran = _invoke_json(
             ctx,
             ["plugin", "backfill", "run", "--plan-id", planned["planId"],
-             "--poll-interval", "500", "--json"],
+             "--poll-interval", "250", "--json"],
         )
         assert ran["status"] == "completed"
 
@@ -411,7 +411,7 @@ def _run_copy_backfill(
         ran = _invoke_json(
             ctx,
             ["plugin", "backfill", "run", "--plan-id", planned["planId"],
-             "--poll-interval", "500", "--json"],
+             "--poll-interval", "250", "--json"],
         )
         assert ran["status"] == "completed"
 

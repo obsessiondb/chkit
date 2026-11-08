@@ -51,6 +51,7 @@ function fakeTarget(polls: object[][], options: { replicas?: number; formatted?:
 }
 
 const KEY = 'table:app.events:column:raw'
+const FAST = { pollIntervalMs: 1 }
 
 describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets', () => {
   test('keeps waiting while a replica still reports the old default expression', async () => {
@@ -60,7 +61,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
       [row('r1', { default_kind: 'DEFAULT', default_expression: "'new'" }), row('r2', { default_kind: 'DEFAULT', default_expression: "'new'" })],
     ])
 
-    await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, { statement })
+    await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, { ...FAST, statement })
 
     const polls = polled('system.columns')
     expect(polls).toHaveLength(2)
@@ -77,7 +78,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
     const applied = row('r1', { default_kind: 'MATERIALIZED', default_expression: 'concat(a + 1, b)' })
     const { db, polled } = fakeTarget([[applied, { ...applied, replica: 'r2' }]], { formatted })
 
-    await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, { statement })
+    await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, { ...FAST, statement })
 
     expect(polled('system.columns')).toHaveLength(1)
   })
@@ -89,7 +90,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
       [row('r1', { type: 'Decimal(10, 2)' }), row('r2', { type: 'Decimal(10, 2)' })],
     ])
 
-    await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, { statement })
+    await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, { ...FAST, statement })
 
     expect(polled('system.columns')).toHaveLength(2)
   })
@@ -98,6 +99,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
     const { db, polled } = fakeTarget([[row('r1')], [row('r1'), row('r2')]])
 
     await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+      ...FAST,
       statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` String;',
     })
 
@@ -110,6 +112,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
       [row('r1'), row('r2')],
     ])
     await waitForDDLPropagation(removed.db, 'alter_table_modify_column', KEY, {
+      ...FAST,
       statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` REMOVE DEFAULT;',
     })
     expect(removed.polled('system.columns')).toHaveLength(2)
@@ -119,6 +122,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
       [row('r1'), row('r2')],
     ])
     await waitForDDLPropagation(codec.db, 'alter_table_modify_column', KEY, {
+      ...FAST,
       statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` REMOVE CODEC;',
     })
     expect(codec.polled('system.columns')).toHaveLength(2)
@@ -128,6 +132,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
       [row('r1', { comment: "it's" }), row('r2', { comment: "it's" })],
     ])
     await waitForDDLPropagation(comment.db, 'alter_table_modify_column', KEY, {
+      ...FAST,
       statement: "ALTER TABLE app.events MODIFY COLUMN `raw` String COMMENT 'it''s';",
     })
     expect(comment.polled('system.columns')).toHaveLength(2)
@@ -143,6 +148,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
     ])
 
     await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+      ...FAST,
       statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` String EPHEMERAL;',
     })
 
@@ -156,6 +162,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
     )
 
     await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+      ...FAST,
       statement: "ALTER TABLE app.events MODIFY COLUMN `raw` String DEFAULT 'new';",
     })
 
@@ -170,22 +177,24 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
 
     await expect(
       waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        ...FAST,
         statement: "ALTER TABLE app.events MODIFY COLUMN `raw` String EPHEMERAL 'seed';",
       }),
     ).rejects.toThrow(
       `waitForDDLPropagation: app.events.raw definition not applied on every replica after 21 checks: replica r1 reports default_expression "defaultValueOfTypeName('String')", the statement sets "'seed'"; every replica reports the same, so this is not replication lag: the server accepted the statement without applying it`,
     )
-  }, 30_000)
+  })
 
   test('names the replica and field that still differ when replicas disagree', async () => {
     const { db } = fakeTarget([[row('r1', { type: 'UInt64' }), row('r2', { type: 'UInt32' })]])
 
     await expect(
       waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        ...FAST,
         statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
       }),
     ).rejects.toThrow('after 21 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64"')
-  }, 30_000)
+  })
 })
 
 describe('waitForDDLPropagation: deadline', () => {
@@ -200,11 +209,13 @@ describe('waitForDDLPropagation: deadline', () => {
 
     await expect(
       waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        ...FAST,
+        deadlineMs: 500,
         statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
       }),
-    ).rejects.toThrow('app.events.raw definition not applied on every replica after 1 checks: a check did not return within the 30s deadline')
-    expect(Date.now() - started).toBeLessThan(35_000)
-  }, 40_000)
+    ).rejects.toThrow('app.events.raw definition not applied on every replica after 1 checks: a check did not return within the 0.5s deadline')
+    expect(Date.now() - started).toBeLessThan(3_000)
+  })
 })
 
 describe('waitForDDLPropagation: other column and index operations', () => {
@@ -215,6 +226,7 @@ describe('waitForDDLPropagation: other column and index operations', () => {
     ])
 
     await waitForDDLPropagation(db, 'alter_table_add_column', KEY, {
+      ...FAST,
       statement: "ALTER TABLE app.events ADD COLUMN IF NOT EXISTS `raw` String DEFAULT 'x' COMMENT 'c';",
     })
 
@@ -230,7 +242,7 @@ describe('waitForDDLPropagation: other column and index operations', () => {
       [{ replica: 'r1', name: 'c' }, { replica: 'r2', name: 'c' }],
     ])
 
-    await waitForDDLPropagation(db, 'alter_table_rename_column', 'table:app.events:column_rename:a:b:c', { statement })
+    await waitForDDLPropagation(db, 'alter_table_rename_column', 'table:app.events:column_rename:a:b:c', { ...FAST, statement })
 
     const polls = polled('system.columns')
     expect(polls).toHaveLength(3)
@@ -240,21 +252,21 @@ describe('waitForDDLPropagation: other column and index operations', () => {
   test('RENAME COLUMN without the statement splits a key with one colon', async () => {
     const { db, polled } = fakeTarget([[{ replica: 'r1', name: 'y' }, { replica: 'r2', name: 'y' }]])
 
-    await waitForDDLPropagation(db, 'alter_table_rename_column', 'table:app.events:column_rename:x:y')
+    await waitForDDLPropagation(db, 'alter_table_rename_column', 'table:app.events:column_rename:x:y', FAST)
 
     expect(polled('system.columns')[0]).toContain("name IN ('x', 'y')")
   })
 
   test('ADD and DROP INDEX wait for the index on every replica', async () => {
     const added = fakeTarget([[{ replicas: 1 }], [{ replicas: 2 }]])
-    await waitForDDLPropagation(added.db, 'alter_table_add_index', 'table:app.events:index:idx')
+    await waitForDDLPropagation(added.db, 'alter_table_add_index', 'table:app.events:index:idx', FAST)
     const addPolls = added.polled('system.data_skipping_indices')
     expect(addPolls).toHaveLength(2)
     expect(addPolls[0]).toContain("clusterAllReplicas('default', system.data_skipping_indices)")
     expect(addPolls[0]).toContain("name = 'idx'")
 
     const dropped = fakeTarget([[{ replicas: 1 }], [{ replicas: 0 }]])
-    await waitForDDLPropagation(dropped.db, 'alter_table_drop_index', 'table:app.events:index:idx')
+    await waitForDDLPropagation(dropped.db, 'alter_table_drop_index', 'table:app.events:index:idx', FAST)
     expect(dropped.polled('system.data_skipping_indices')).toHaveLength(2)
   })
 })
