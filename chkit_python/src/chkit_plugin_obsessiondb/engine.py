@@ -173,9 +173,12 @@ def with_obsessiondb_storage_policy(
 
 
 def storage_policy_change_errors(plan: Any) -> list[str]:
-    """ObsessionDB rejects any other storage_policy on a Shared table, so on an
-    ObsessionDB target a plan that changes it fails in generate, with the
-    reason, instead of at migrate (TS ``storagePolicyChangeErrors``)."""
+    """A Shared table needs a policy on remote object storage, and ALTER accepts
+    only one that keeps the current policy's volumes; ObsessionDB services offer
+    only 's3' for Shared tables today. chkit cannot list a service's policies
+    offline, so on an ObsessionDB target a plan that changes it fails in
+    generate, with the reason, instead of at migrate (TS
+    ``storagePolicyChangeErrors``)."""
     errors: list[str] = []
     for op in plan.operations:
         if op.type not in ("alter_table_modify_setting", "alter_table_reset_setting"):
@@ -184,8 +187,9 @@ def storage_policy_change_errors(plan: Any) -> list[str]:
             continue
         table = op.key.removeprefix("table:").removesuffix(":setting:storage_policy")
         errors.append(
-            f"obsessiondb: {table} cannot change storage_policy: ObsessionDB stores every "
-            "Shared table with storage_policy = 's3' and rejects any other. Keep "
+            f"obsessiondb: {table} cannot change storage_policy: a Shared table needs a "
+            "policy on remote object storage that keeps the volumes of its current one, and "
+            "ObsessionDB services offer only 's3' for Shared tables today. Keep "
             f'storage_policy: "{_OBSESSIONDB_STORAGE_POLICY}" in the schema, or leave it out.'
         )
     return errors

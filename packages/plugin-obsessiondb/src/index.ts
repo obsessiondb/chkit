@@ -274,9 +274,11 @@ export function withObsessionDBStoragePolicy(definitions: SchemaDefinition[]): S
 }
 
 /**
- * ObsessionDB rejects any other storage_policy on a Shared table, so on an
- * ObsessionDB target a plan that changes it fails in generate, with the reason,
- * instead of at migrate.
+ * A Shared table needs a policy on remote object storage, and ALTER accepts only
+ * one that keeps the current policy's volumes; ObsessionDB services offer only
+ * 's3' for Shared tables today. chkit cannot list a service's policies offline,
+ * so on an ObsessionDB target a plan that changes it fails in generate, with
+ * the reason, instead of at migrate.
  */
 export function storagePolicyChangeErrors(plan: MigrationPlan): string[] {
 	return plan.operations
@@ -287,7 +289,7 @@ export function storagePolicyChangeErrors(plan: MigrationPlan): string[] {
 		)
 		.map((op) => {
 			const table = op.key.replace(/^table:/, '').replace(/:setting:storage_policy$/, '')
-			return `obsessiondb: ${table} cannot change storage_policy: ObsessionDB stores every Shared table with storage_policy = 's3' and rejects any other. Keep storage_policy: "${OBSESSIONDB_STORAGE_POLICY}" in the schema, or leave it out.`
+			return `obsessiondb: ${table} cannot change storage_policy: a Shared table needs a policy on remote object storage that keeps the volumes of its current one, and ObsessionDB services offer only 's3' for Shared tables today. Keep storage_policy: "${OBSESSIONDB_STORAGE_POLICY}" in the schema, or leave it out.`
 		})
 }
 
