@@ -61,12 +61,7 @@ async function main(): Promise<void> {
 
   const proxy = await startProxy(target, Number(values.port))
   const workDir = join(REPO, '.tmp/tinybird-parity', runId)
-  try {
-    await applyWithChkit({ workDir, schemaSource: imported.schemaSource, url: proxy.url })
-    const chkit = await readChkitSide(target, database, imported.endpoints)
-    const entries = await compareParity(oracle, chkit, imported.report, { formatQuery: (sql) => formatQuery(target, sql) })
-    await writeReport({ reportDir, projectDir, database, oracle, entries, imported: imported.report })
-  } finally {
+  const cleanup = async () => {
     await proxy.stop()
     if (values.keep) log(`kept database ${database} and ${workDir}`)
     else {
@@ -74,9 +69,23 @@ async function main(): Promise<void> {
       await rm(workDir, { recursive: true, force: true })
     }
   }
+  // An interrupted run cleans up as well: the proxy container and the scratch database.
+  for (const signal of ['SIGINT', 'SIGTERM'] as const) {
+    process.once(signal, () => void cleanup().finally(() => process.exit(130)))
+  }
+  try {
+    // The scratch database is chkit's connection database too, so its migration journal goes with it.
+    await localCommand(target, `CREATE DATABASE \`${database}\``)
+    await applyWithChkit({ workDir, schemaSource: imported.schemaSource, url: proxy.url, database })
+    const chkit = await readChkitSide(target, database, imported.endpoints)
+    const entries = await compareParity(oracle, chkit, imported.report, { formatQuery: (sql) => formatQuery(target, sql) })
+    await writeReport({ reportDir, projectDir, database, oracle, entries, imported: imported.report })
+  } finally {
+    await cleanup()
+  }
 }
 
-async function applyWithChkit(input: { workDir: string; schemaSource: string; url: string }): Promise<void> {
+async function applyWithChkit(input: { workDir: string; schemaSource: string; url: string; database: string }): Promise<void> {
   await mkdir(input.workDir, { recursive: true })
   await writeFile(join(input.workDir, 'schema.ts'), input.schemaSource)
   const config = join(input.workDir, 'clickhouse.config.ts')
@@ -87,7 +96,7 @@ async function applyWithChkit(input: { workDir: string; schemaSource: string; ur
 export default defineConfig({
   schema: './schema.ts',
   outDir: './chkit',
-  clickhouse: { url: ${JSON.stringify(input.url)}, username: 'default', password: '', database: 'default' },
+  clickhouse: { url: ${JSON.stringify(input.url)}, username: 'default', password: '', database: ${JSON.stringify(input.database)} },
 })
 `
   )
