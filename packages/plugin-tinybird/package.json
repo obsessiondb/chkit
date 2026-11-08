@@ -1,0 +1,53 @@
+{
+  "name": "@chkit/plugin-tinybird",
+  "version": "0.2.0-beta.15",
+  "description": "Import a Tinybird project as a chkit schema: datasources, materialized views, copy pipes and endpoints",
+  "license": "MIT",
+  "author": "ObsessionDB",
+  "keywords": [
+    "clickhouse",
+    "tinybird",
+    "migration",
+    "schema",
+    "chkit-plugin"
+  ],
+  "homepage": "https://chkit.obsessiondb.com",
+  "bugs": {
+    "url": "https://github.com/obsessiondb/chkit/issues"
+  },
+  "repository": {
+    "type": "git",
+    "url": "https://github.com/obsessiondb/chkit.git",
+    "directory": "packages/plugin-tinybird"
+  },
+  "type": "module",
+  "main": "./dist/index.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "source": "./src/index.ts",
+      "types": "./dist/index.d.ts",
+      "default": "./dist/index.js"
+    }
+  },
+  "files": [
+    "dist"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "dev": "tsc -p tsconfig.json --watch",
+    "typecheck": "tsc -p tsconfig.typecheck.json",
+    "lint": "biome lint src parity",
+    "test": "env -u CLICKHOUSE_URL -u CLICKHOUSE_HOST bun run ../../scripts/infra-up.ts && bun test src",
+    "clean": "rm -rf dist"
+  },
+  "dependencies": {
+    "@chkit/clickhouse": "workspace:*",
+    "@chkit/core": "workspace:*",
+    "@chkit/plugin-pull": "workspace:*",
+    "zod": "^4.3.6"
+  },
+  "devDependencies": {
+    "@clickhouse/client": "^1.11.0"
+  }
+}
