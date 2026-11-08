@@ -208,6 +208,7 @@ describe('query execution', () => {
       [p('v', t.lowCardinality(t.nullable(t.string()))), null, 'LowCardinality(Nullable(String))', null],
       [p('v', t.array(t.int128())), [1n, -2], 'Array(Int128)', '[1,-2]'],
       [p('v', t.map(t.uint32(), t.nullable(t.string()))), { 7: 'a', 8: null }, 'Map(UInt32, Nullable(String))', "{7:'a',8:NULL}"],
+      [p('v', t.map(t.decimal(8, 2), t.string())), { '1.25': 'a', '-3.50': 'b' }, 'Map(Decimal(8, 2), String)', "{1.25:'a',-3.5:'b'}"],
       [p('v', t.simpleAggregateFunction('max', t.dateTime())), moment, 'SimpleAggregateFunction(max, DateTime)', '2026-11-07 12:34:56'],
     ]
 
@@ -292,6 +293,10 @@ describe('query execution', () => {
       query`SELECT sleep(3)`(undefined, { client, abort_signal: AbortSignal.timeout(100) }),
     ).rejects.toThrow('aborted')
     await expect(echo({ n: 256 }, { client })).rejects.toThrow('Too big')
+    await expect(run`SELECT ${p.dateTime64('at')}`({ at: new Date(-500) })).rejects.toThrow('less than a second before 1970-01-01')
+    await expect(run`SELECT ${p('keys', t.map(t.decimal(30, 20), t.string()))}`({ keys: { '0.00000000000000000001': 'a' } })).rejects.toThrow(
+      "Decimal Map key 0.00000000000000000001 can't be sent without losing digits",
+    )
     await expect(run({ returns: z.object({ n: z.string() }) })`SELECT toUInt8(1) AS n`()).rejects.toThrow('expected string')
   })
 })

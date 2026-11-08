@@ -236,8 +236,9 @@ function defineQuery(
  * trailing `Z` in a DateTime64 param and a fractional epoch in a DateTime one,
  * and @clickhouse/client's own Date formatting fails inside arrays and maps.
  * Dates and ISO strings become epoch seconds; an ISO string keeps all its
- * fraction digits. Array elements and Map values follow their own type, and
- * numeric Map keys stay unquoted. JSON values are sent as JSON text.
+ * fraction digits, but a DateTime64 less than a second before the epoch throws,
+ * because ClickHouse drops its sign. Array elements and Map values follow their
+ * own type, and numeric Map keys stay unquoted. JSON values are sent as JSON text.
  */
 function serializeParam(value: unknown, type: string): unknown {
   const wrapped =
@@ -247,8 +248,9 @@ function serializeParam(value: unknown, type: string): unknown {
   if (Array.isArray(value)) return value.map((item) => serializeParam(item, /^Array\((.*)\)$/.exec(type)?.[1] ?? type))
   if (typeof value === 'object' && value !== null && !(value instanceof Date)) {
     const [keyType = '', valueType = type] = splitTopLevelComma(/^Map\((.*)\)$/.exec(type)?.[1] ?? '').map((part) => part.trim())
-    const numeric = /^(?:LowCardinality\()?(U?Int|Float)/.exec(keyType)?.[1]
-    const key = (name: string) => (numeric === 'Float' ? Number(name) : numeric ? BigInt(name) : name)
+    const numeric = /^(?:LowCardinality\()?(U?Int|Float|Decimal)/.exec(keyType)?.[1]
+    const key = (name: string) =>
+      numeric === 'Float' ? Number(name) : numeric === 'Decimal' ? decimalKey(name) : numeric ? BigInt(name) : name
     return new Map(Object.entries(value).map(([name, item]) => [key(name), serializeParam(item, valueType)]))
   }
   if (!type.startsWith('DateTime')) return value instanceof Date ? value.toISOString().slice(0, 10) : value
@@ -257,8 +259,23 @@ function serializeParam(value: unknown, type: string): unknown {
   if (!type.startsWith('DateTime64') || !time.fraction) return String(time.seconds)
   const scale = time.fraction.length
   const units = BigInt(time.seconds) * 10n ** BigInt(scale) + BigInt(time.fraction)
+  if (units < 0n && units > -(10n ** BigInt(scale))) {
+    throw new Error('ClickHouse reads a DateTime64 param less than a second before 1970-01-01 as after it')
+  }
   const digits = (units < 0n ? -units : units).toString().padStart(scale + 1, '0')
   return `${units < 0n ? '-' : ''}${digits.slice(0, -scale)}.${digits.slice(-scale)}`
+}
+
+/**
+ * A Decimal Map key as a number, which @clickhouse/client sends unquoted, as
+ * long as the number keeps every digit; a quoted key fails to parse.
+ */
+function decimalKey(text: string): number {
+  const value = Number(text)
+  const plain = (digits: string) =>
+    digits.replace(/^(-?)0+(?=\d)/, '$1').replace(/(\.\d*?)0+$/, '$1').replace(/\.$/, '').replace(/^-0$/, '0')
+  if (plain(String(value)) !== plain(text)) throw new Error(`Decimal Map key ${text} can't be sent without losing digits`)
+  return value
 }
 
 /** Whole epoch seconds and the fraction digits of a Date or an ISO datetime string. */
