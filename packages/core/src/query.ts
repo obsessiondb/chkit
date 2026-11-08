@@ -65,6 +65,10 @@ export interface Query<S extends z.ZodRawShape = z.ZodRawShape, Row = Record<str
   /** Types the rows as `R` without parsing them. */
   returns<R>(): Query<S, R, Raw>
   /** Runs the query like a call, but returns the client's result unparsed, e.g. to `stream()` a bulk read. */
+  raw<C extends QueryClient>(
+    params: QueryArgs<S>[0],
+    options: QueryCallOptions & { client: C },
+  ): Promise<ClientResult<C>>
   raw(...args: QueryArgs<S>): Promise<Raw>
 }
 
@@ -82,7 +86,7 @@ type QueryTemplate<Row, Raw> = <const V extends readonly QueryInterpolation[]>(
   ...values: V
 ) => Query<ParamsShape<V>, Row, Raw>
 
-/** `Raw` is what `.raw()` returns: the bound client's own query result. */
+/** `Raw` is what `.raw()` returns without a `client` option: the bound client's own query result. */
 export interface QueryTag<Raw = QueryResult> extends QueryTemplate<Record<string, unknown>, Raw> {
   <R extends z.ZodType | undefined = undefined>(options: QueryOptions<R>): QueryTemplate<RowOf<R>, Raw>
 }
@@ -91,6 +95,7 @@ type QueryArgs<S extends z.ZodRawShape> = Record<never, never> extends z.input<z
   ? [params?: z.input<z.ZodObject<S>>, options?: QueryCallOptions]
   : [params: z.input<z.ZodObject<S>>, options?: QueryCallOptions]
 type RowOf<R> = R extends z.ZodType ? z.output<R> : Record<string, unknown>
+type ClientResult<C extends QueryClient> = Awaited<ReturnType<C['query']>>
 
 interface Wrapping<T> {
   readonly _zod: { readonly def: { readonly innerType: T } }
@@ -139,7 +144,7 @@ const paramSpecs = new WeakMap<object, ReadonlyMap<string, ParamSpec>>()
 export function createQuery<C extends QueryClient>(
   source: C | (() => C | Promise<C>),
   options: CreateQueryOptions = {},
-): QueryTag<Awaited<ReturnType<C['query']>>> {
+): QueryTag<ClientResult<C>> {
   let pending: Promise<QueryClient> | undefined
   const resolveClient = () => {
     pending ??= Promise.resolve(typeof source === 'function' ? source() : source).catch((error: unknown) => {
@@ -148,7 +153,7 @@ export function createQuery<C extends QueryClient>(
     })
     return pending
   }
-  return queryTag({ resolveClient, logComment: options.logComment ?? true }) as QueryTag<Awaited<ReturnType<C['query']>>>
+  return queryTag({ resolveClient, logComment: options.logComment ?? true }) as QueryTag<ClientResult<C>>
 }
 
 /**

@@ -1,7 +1,7 @@
 import { createClient } from '@clickhouse/client'
 import { z } from 'zod'
 
-import { createQuery, p, type QueryResult, query as unboundQuery, t, table } from '../src/index.js'
+import { createQuery, p, query as unboundQuery, t, table } from '../src/index.js'
 
 // Compile-time checks of the query API's inference; `bun run typecheck` runs them.
 // Queries are exported so declaration emit is checked too.
@@ -136,7 +136,11 @@ export async function calls() {
   const result = await topCities.raw({ city: 'Berlin' })
   assertType<Equal<typeof result, Awaited<ReturnType<typeof client.query>>>>()
   const unboundResult = await unboundQuery`SELECT 1`.raw(undefined, { client })
-  assertType<Equal<typeof unboundResult, QueryResult>>()
+  assertType<Equal<typeof unboundResult, Awaited<ReturnType<typeof client.query>>>>()
+  const textOnly = await topCities.raw({ city: 'Berlin' }, { client: { query: async () => ({ text: async () => '' }) } })
+  await textOnly.text()
+  // @ts-expect-error the override client's result has no stream()
+  textOnly.stream()
   // @ts-expect-error raw takes the same params as a call
   await topCities.raw({ limit: 3 })
 
