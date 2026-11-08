@@ -13,6 +13,7 @@ import {
   toCreateSQL,
 } from './sql.js'
 import { unquoteIdentifiers } from './identifier.js'
+import { normalizeKeyColumns } from './key-clause.js'
 import { validateDefinitions } from './validate.js'
 
 // Names a source catalog (e.g. Postgres, via CDC) can legally contain but that
@@ -258,6 +259,11 @@ describe('key clauses keep declared column names whole', () => {
       orderBy: ['id, toDate(ts)'],
     })
     expect(toCreateSQL(def)).toContain('ORDER BY (`id`, toDate(ts))')
+  })
+
+  test('key entries trim JavaScript whitespace', () => {
+    // chkit-py's test_key_clause_expressions.py asserts the same (#523).
+    expect(normalizeKeyColumns(['﻿id\x1c', ' \x85ts﻿ '])).toEqual(['id\x1c', '\x85ts'])
   })
 })
 

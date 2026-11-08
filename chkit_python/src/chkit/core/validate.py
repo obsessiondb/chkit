@@ -461,7 +461,7 @@ def _js_string(value: str) -> str:
 
 
 def _validate_unstored_column_references(
-    definition: TableDefinition, issues: list[ValidationIssue]
+    definition: TableDefinition, column_set: set[str], issues: list[ValidationIssue]
 ) -> None:
     """Flag ALIAS/EPHEMERAL columns named directly where ClickHouse needs a stored column.
 
@@ -478,8 +478,11 @@ def _validate_unstored_column_references(
     # (plan_diff) check the same fragment text.
     partition = strip_wrapping_parens(normalize_sql_fragment(definition.partition_by or ""))
     references = [
-        *(("orderBy", part) for part in normalize_key_columns(definition.order_by)),
-        *(("primaryKey", part) for part in normalize_key_columns(definition.primary_key)),
+        *(("orderBy", part) for part in normalize_key_columns(definition.order_by, column_set)),
+        *(
+            ("primaryKey", part)
+            for part in normalize_key_columns(definition.primary_key, column_set)
+        ),
         *(("partitionBy", part) for part in split_top_level_comma(partition)),
         *(("engine", part) for part in _engine_arguments(definition.engine)),
         *(
@@ -604,7 +607,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
                 f'"{projection.name}" has an empty index expression',
             )
 
-    for col in normalize_key_columns(definition.primary_key):
+    for col in normalize_key_columns(definition.primary_key, column_set):
         if is_plain_column_reference(col) and col not in column_set:
             _push(
                 issues,
@@ -614,7 +617,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
                 f'references missing column "{col}"',
             )
 
-    for col in normalize_key_columns(definition.order_by):
+    for col in normalize_key_columns(definition.order_by, column_set):
         if is_plain_column_reference(col) and col not in column_set:
             _push(
                 issues,
@@ -624,7 +627,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
                 f'references missing column "{col}"',
             )
 
-    _validate_unstored_column_references(definition, issues)
+    _validate_unstored_column_references(definition, column_set, issues)
 
 
 _INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(

@@ -35,6 +35,7 @@ from chkit.core.sql import (
     render_alter_remove_codec,
     to_create_sql,
 )
+from chkit.core.validate import validate_definitions
 
 
 def _events_table(**overrides: Any) -> TableDefinition:
@@ -215,3 +216,30 @@ def test_on_cluster_lands_after_quoted_object_references() -> None:
         "DROP TABLE IF EXISTS `my db`.`a b` ON CLUSTER 'c';",
         "ALTER TABLE app.`a\\` b` ON CLUSTER 'c' ADD COLUMN IF NOT EXISTS `x` String;",
     ]
+
+
+# TS ``identifier-quoting.test.ts`` "key clauses keep declared column names whole" (#523).
+def _comma_column_table() -> TableDefinition:
+    return _events_table(
+        columns=[{"name": "id", "type": "UInt64"}, {"name": "e,f)", "type": "UInt8"}],
+        order_by=["id", "e,f)"],
+    )
+
+
+def test_a_declared_column_name_containing_a_comma_is_not_split() -> None:
+    definition = _comma_column_table()
+    assert validate_definitions([definition]) == []
+    assert "ORDER BY (`id`, `e,f)`)" in to_create_sql(definition)
+
+
+def test_an_identical_definition_with_a_comma_column_plans_no_changes() -> None:
+    definition = _comma_column_table()
+    assert plan_diff([definition], [definition]).operations == []
+
+
+def test_a_comma_separated_expression_entry_is_still_split() -> None:
+    definition = _events_table(
+        columns=[{"name": "id", "type": "UInt64"}, {"name": "ts", "type": "DateTime"}],
+        order_by=["id, toDate(ts)"],
+    )
+    assert "ORDER BY (`id`, toDate(ts))" in to_create_sql(definition)

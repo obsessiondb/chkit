@@ -158,6 +158,9 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
+- A `primary_key`, `order_by` or `unique_key` entry that names a column containing a comma
+  (`"e,f)"`) is kept whole, as in TS, instead of failing validation; key entries are trimmed
+  like TS (#523).
 - `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
   migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
   `index_granularity`, and leaves out chkit's migration journal and the hidden
