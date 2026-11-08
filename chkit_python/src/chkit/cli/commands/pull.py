@@ -135,8 +135,8 @@ def _introspected_table_to_definition(
             if isinstance(column.default, str) else column
             for column in item.columns
         ],
-        primary_key=[] if kafka else _split_clause(item.primary_key) or [item.columns[0].name],
-        order_by=[] if kafka else _split_clause(item.order_by) or [item.columns[0].name],
+        primary_key=_split_clause(item.primary_key) or None,
+        order_by=_split_clause(item.order_by),
         unique_key=_split_clause(item.unique_key) or None,
         partition_by=item.partition_by or None,
         ttl=item.ttl or None,

@@ -173,3 +173,68 @@ definitions = schema(
             )
         ) as client:
             client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+
+
+def test_pull_uses_order_by_as_the_primary_key_a_table_does_not_declare(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """On a table created without chkit, pull then drift is clean (#487)."""
+    env = resolve_live_env()
+    database = f"{create_prefix('pull_keys_py')}db"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", create_journal_table_name("pull_keys_py"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("CI", "1")
+    clickhouse = json.dumps({
+        "url": env.clickhouse_url,
+        "username": env.clickhouse_user,
+        "password": env.clickhouse_password,
+        "database": database,
+    })
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n"
+        "from chkit_plugin_obsessiondb import obsessiondb\n\n"
+        "config = define_config({\n"
+        '    "schema": "./schema.py",\n'
+        '    "outDir": "./chkit",\n'
+        '    "migrationsDir": "./chkit/migrations",\n'
+        '    "metaDir": "./chkit/meta",\n'
+        f'    "clickhouse": {clickhouse},\n'
+        '    "plugins": [obsessiondb()],\n'
+        "})\n"
+    )
+    runner = CliRunner()
+
+    def chkit(*args: str) -> Any:
+        return runner.invoke(app, list(args))
+
+    with ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url=env.clickhouse_url,
+            username=env.clickhouse_user,
+            password=env.clickhouse_password,
+            database=env.clickhouse_database,
+            secure=env.clickhouse_url.startswith("https:"),
+        )
+    ) as client:
+        try:
+            client.execute(f"CREATE DATABASE {quote_ident(database)}")
+            client.execute(
+                f"CREATE TABLE {quote_ident(database)}.events (a UInt8, b UInt8) "
+                "ENGINE = MergeTree ORDER BY (b, a)"
+            )
+            pulled = poll_until(
+                lambda: chkit("pull", "--database", database, "--out-file", "schema.py", "--json"),
+                lambda result: result.exit_code == 0
+                and json.loads(result.stdout)["definitionCount"] == 1,
+            )
+            assert pulled.exit_code == 0, format_test_diagnostic("chkit pull", pulled)
+
+            generated = chkit("generate", "--name", "baseline", "--json")
+            assert generated.exit_code == 0, format_test_diagnostic("chkit generate", generated)
+            drift = chkit("drift", "--json")
+            assert json.loads(drift.stdout)["tableDrift"] == [], format_test_diagnostic(
+                "chkit drift", drift
+            )
+        finally:
+            client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
