@@ -23,28 +23,43 @@ export type PrimitiveColumnType =
   | 'DateTime64'
 
 /**
- * General-purpose compression codecs. Exactly one ends a codec chain.
- * Level ranges: LZ4HC 1–12 (default 9), ZSTD 1–22 (default 1).
+ * General-purpose compression codecs (`LZ4`, `LZ4HC`, `ZSTD`, and `Default`,
+ * the server's default compression). A chain holds at most one, and only
+ * encryption codecs (raw) may follow it. `NONE` stores data uncompressed and
+ * must be the only codec of its column.
+ * Levels: LZ4HC any integer (default 9; below 1 means 9), ZSTD at most 22
+ * (default 1; negative levels are faster). `windowLog` (10–31) sets the ZSTD
+ * long-range window.
  */
 export type GeneralColumnCodec =
-  | { kind: 'NONE' | 'LZ4' | 'ALP' }
+  | { kind: 'NONE' | 'LZ4' | 'Default' }
   | { kind: 'LZ4HC'; level?: number }
-  | { kind: 'ZSTD'; level?: number }
+  | { kind: 'ZSTD'; level?: number; windowLog?: number }
 
 /**
- * Preprocessing codecs (zero or more) placed before the general codec.
- * `size` (bytes) defaults to 1 in ClickHouse for Delta / DoubleDelta / Gorilla.
+ * Codecs placed before the general codec, or used without one. `Delta` and
+ * `GCD` only transform the data and need a compression codec in the chain.
+ * `DoubleDelta`, `Gorilla`, `T64`, `FPC` and `ALP` compress by themselves.
+ * Without `size`, `Delta` and `Gorilla` are rendered bare and ClickHouse uses
+ * the byte width of the column's values (`Delta(8)` on UInt64). `ALP` is
+ * experimental: ClickHouse needs `allow_experimental_codecs = 1` for it.
  */
 export type PreprocessingColumnCodec =
-  | { kind: 'Delta' | 'DoubleDelta' | 'Gorilla'; size?: 1 | 2 | 4 | 8 }
-  | { kind: 'GCD' }
-  | { kind: 'T64' }
-  | { kind: 'FPC'; level: number; floatSize: 4 | 8 }
+  | { kind: 'Delta' | 'Gorilla'; size?: 1 | 2 | 4 | 8 }
+  | {
+      kind: 'DoubleDelta'
+      /** Rendered when set; ClickHouse retains it only in verbatim chains. */
+      size?: 1 | 2 | 4 | 8
+    }
+  | { kind: 'GCD' | 'ALP' }
+  | { kind: 'T64'; mode?: 'byte' | 'bit' }
+  /** `level` 1–28 (default 12). ClickHouse retains `floatSize` only in verbatim chains. */
+  | { kind: 'FPC'; level?: number; floatSize?: 4 | 8 }
 
 /**
  * Escape hatch — passes the raw expression through unchanged. Useful for
- * codecs we haven't typed (new CH versions, experimental codecs) or unusual
- * arg shapes. Canonicalization is whitespace-only; round-trip may be noisy.
+ * codecs we haven't typed (encryption codecs, new CH versions). Atoms that
+ * parse as typed codecs are validated and compared like them.
  */
 export interface RawColumnCodec {
   kind: 'raw'
@@ -53,7 +68,7 @@ export interface RawColumnCodec {
 
 export type ColumnCodec = GeneralColumnCodec | PreprocessingColumnCodec | RawColumnCodec
 
-/** Single codec or a chain (preprocessors then exactly one general codec). */
+/** Single codec or a chain (preprocessors and compression codecs, then at most one general codec). */
 export type ColumnCodecSpec = ColumnCodec | ColumnCodec[]
 
 export type ColumnDefaultKind = 'DEFAULT' | 'MATERIALIZED' | 'ALIAS' | 'EPHEMERAL'
@@ -416,6 +431,14 @@ export interface ChxUserClickHouseConfig {
    * Accepts an identifier (e.g. `"my_cluster"`) or a macro (e.g. `"{cluster}"`).
    */
   cluster?: string
+  /**
+   * The server's MergeTree `index_granularity` default (its
+   * `<merge_tree><index_granularity>` setting): the value chkit assumes for a
+   * MergeTree table that does not declare `index_granularity`. Defaults to
+   * 8192, ClickHouse's default. `drift`, `check`, `migrate` and `pull` stop
+   * when the server reports another value.
+   */
+  indexGranularity?: number
 }
 
 export interface ChxResolvedClickHouseConfig {
@@ -425,6 +448,8 @@ export interface ChxResolvedClickHouseConfig {
   database: string
   secure: boolean
   cluster?: string
+  /** Unset in a config built by hand; read it through `configuredIndexGranularity`. */
+  indexGranularity?: number
 }
 
 export interface ChxInlinePluginRegistration<
@@ -603,6 +628,13 @@ export type ValidationIssueCode =
   | 'codec_chain_must_end_with_general'
   | 'codec_chain_multiple_general'
   | 'codec_chain_empty'
+  | 'codec_unknown'
+  | 'codec_parameter_invalid'
+  | 'codec_none_combined'
+  | 'codec_chain_encryption_not_last'
+  | 'codec_chain_no_compression'
+  | 'codec_chain_float_order'
+  | 'codec_type_unsupported'
   | 'column_default_kind_invalid'
   | 'column_expression_required'
   | 'column_expression_requires_fn'

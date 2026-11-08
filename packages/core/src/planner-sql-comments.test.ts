@@ -64,7 +64,7 @@ describe('planDiff with SQL comments in fragments (#232)', () => {
     )
     expect(extractExecutableStatements(renderMigrationBody(plan))).toHaveLength(plan.operations.length)
     expect(sqlOf(plan, 'create_table')).toEndWith(
-      'PARTITION BY toYYYYMM(ts)\nPRIMARY KEY (`id`)\nORDER BY (`id`)\nTTL ts + toIntervalDay(30);'
+      'PARTITION BY toYYYYMM(ts)\nPRIMARY KEY (`id`)\nORDER BY (`id`)\nTTL ts + toIntervalDay(30)\nSETTINGS index_granularity = 8192;'
     )
   })
 

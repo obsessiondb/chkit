@@ -65,6 +65,25 @@ COLUMNS = [
     "{'name': 'raw_fpc', 'type': 'Float64', 'codec': {'kind': 'raw', 'expression': 'FPC, LZ4'}}",
     "{'name': 'mixed', 'type': 'Int32', "
     "'codec': [{'kind': 'Delta', 'size': 4}, {'kind': 'raw', 'expression': 'ZSTD(3)'}]}",
+    # #465: a bare Delta/Gorilla renders bare and ClickHouse fills in the value width.
+    "{'name': 'delta_u32', 'type': 'UInt32', 'codec': [{'kind': 'Delta'}, {'kind': 'ZSTD'}]}",
+    "{'name': 'delta_date', 'type': 'Date', 'codec': [{'kind': 'Delta'}, {'kind': 'ZSTD'}]}",
+    "{'name': 'delta_dt64', 'type': 'DateTime64(3)', 'codec': [{'kind': 'Delta'}, {'kind': 'ZSTD'}]}",
+    "{'name': 'delta_tuple', 'type': 'Tuple(a UInt8, b UInt64)', "
+    "'codec': [{'kind': 'Delta'}, {'kind': 'LZ4'}]}",
+    "{'name': 'delta_mat', 'type': 'UInt64', 'defaultKind': 'MATERIALIZED', "
+    "'default': {'expression': 'id * 2'}, 'codec': [{'kind': 'Delta'}, {'kind': 'ZSTD'}]}",
+    "{'name': 'gorilla32', 'type': 'Float32', 'codec': {'kind': 'Gorilla'}}",
+    "{'name': 'gorilla_arr', 'type': 'Array(Float64)', 'codec': [{'kind': 'Gorilla'}, {'kind': 'ZSTD'}]}",
+    "{'name': 'zstd_window', 'type': 'String', 'codec': {'kind': 'ZSTD', 'level': 3, 'windowLog': 24}}",
+    "{'name': 't64_bit', 'type': 'UInt64', 'codec': {'kind': 'T64', 'mode': 'bit'}}",
+    "{'name': 'fpc_bare', 'type': 'Float64', 'codec': {'kind': 'FPC'}}",
+    "{'name': 'fpc12', 'type': 'Float64', 'codec': {'kind': 'FPC', 'level': 12}}",
+    "{'name': 'default_codec', 'type': 'UInt64', 'codec': {'kind': 'Default'}}",
+    "{'name': 'delta_default', 'type': 'UInt64', 'codec': [{'kind': 'Delta'}, {'kind': 'Default'}]}",
+    "{'name': 'raw_delta_default', 'type': 'UInt64', "
+    "'codec': {'kind': 'raw', 'expression': 'Delta, Default'}}",
+    "{'name': 'raw_aes', 'type': 'String', 'codec': {'kind': 'raw', 'expression': 'ZSTD, AES_128_GCM_SIV'}}",
     "{'name': 'plain', 'type': 'String'}",
 ]
 
@@ -153,30 +172,69 @@ def test_every_codec_form_migrates_without_drift_and_server_codec_changes_drift(
             time.sleep(2)
             migrated = runner.invoke(app, ["migrate", "--execute", "--json"])
         assert migrated.exit_code == 0, format_test_diagnostic("migrate --execute failed", migrated)
-        _wait_for_codecs(client, codecs_sql, lambda codecs: len(codecs) == len(COLUMNS))
+        stored = _wait_for_codecs(client, codecs_sql, lambda codecs: len(codecs) == len(COLUMNS))
+        assert {
+            name: stored.get(name)
+            for name in [
+                "delta", "delta_u32", "delta_date", "delta_dt64", "delta_tuple", "delta_mat", "gorilla",
+                "gorilla32", "gorilla_arr", "zstd_window", "t64_bit", "fpc_bare", "delta_default",
+                "raw_delta_default", "raw_aes",
+            ]
+        } == {
+            "delta": "CODEC(Delta(8), ZSTD(1))",
+            "delta_u32": "CODEC(Delta(4), ZSTD(1))",
+            "delta_date": "CODEC(Delta(2), ZSTD(1))",
+            "delta_dt64": "CODEC(Delta(8), ZSTD(1))",
+            "delta_tuple": "CODEC(Delta, LZ4)",
+            "delta_mat": "CODEC(Delta(8), ZSTD(1))",
+            "gorilla": "CODEC(Gorilla(8), LZ4)",
+            "gorilla32": "CODEC(Gorilla(4))",
+            "gorilla_arr": "CODEC(Gorilla(8), ZSTD(1))",
+            "zstd_window": "CODEC(ZSTD(3, 24))",
+            "t64_bit": "CODEC(T64('bit'))",
+            "fpc_bare": "CODEC(FPC(12))",
+            "delta_default": "CODEC(Delta(8), Default)",
+            "raw_delta_default": "CODEC(Delta(8), Default)",
+            "raw_aes": "CODEC(ZSTD(1), AES_128_GCM_SIV)",
+        }
         expect_no_drift()
 
         # The same codecs, spelled the way ClickHouse fills in itself.
         client.command(f"ALTER TABLE {obj} MODIFY COLUMN lz4hc CODEC(LZ4HC)")
         client.command(f"ALTER TABLE {obj} MODIFY COLUMN double_delta4 CODEC(DoubleDelta(8), ZSTD(2))")
+        client.command(f"ALTER TABLE {obj} MODIFY COLUMN gorilla8 CODEC(Gorilla, ZSTD(2))")
         _wait_for_codecs(client, codecs_sql, lambda codecs: codecs.get("lz4hc") == "CODEC(LZ4HC(0))")
         expect_no_drift()
 
         client.command(f"ALTER TABLE {obj} MODIFY COLUMN zstd3 String CODEC(LZ4)")
         client.command(f"ALTER TABLE {obj} MODIFY COLUMN plain String CODEC(ZSTD(3))")
         client.command(f"ALTER TABLE {obj} MODIFY COLUMN lz4 REMOVE CODEC")
+        client.command(f"ALTER TABLE {obj} MODIFY COLUMN zstd_window CODEC(ZSTD(3))")
+        client.command(f"ALTER TABLE {obj} MODIFY COLUMN delta8 CODEC(Delta(4), LZ4)")
+        client.command(f"ALTER TABLE {obj} MODIFY COLUMN fpc12 CODEC(FPC(5))")
+        client.command(f"ALTER TABLE {obj} MODIFY COLUMN t64 CODEC(T64('bit'))")
+        changed = {
+            "zstd3": "CODEC(LZ4)",
+            "plain": "CODEC(ZSTD(3))",
+            "lz4": "",
+            "zstd_window": "CODEC(ZSTD(3))",
+            "delta8": "CODEC(Delta(4), LZ4)",
+            "fpc12": "CODEC(FPC(5))",
+            "t64": "CODEC(T64('bit'))",
+        }
         codecs = _wait_for_codecs(
             client,
             codecs_sql,
-            lambda seen: (seen.get("zstd3"), seen.get("plain"), seen.get("lz4"))
-            == ("CODEC(LZ4)", "CODEC(ZSTD(3))", ""),
+            lambda seen: {name: seen.get(name) for name in changed} == changed,
         )
-        assert (codecs["zstd3"], codecs["plain"], codecs["lz4"]) == ("CODEC(LZ4)", "CODEC(ZSTD(3))", "")
+        assert {name: codecs.get(name) for name in changed} == changed
         payload = drift()
         assert payload["drifted"] is True
         [detail] = payload["tableDrift"]
         assert detail["reasonCodes"] == ["changed_column"]
-        assert sorted(detail["changedColumns"]) == ["lz4", "plain", "zstd3"]
+        assert sorted(detail["changedColumns"]) == [
+            "delta8", "fpc12", "lz4", "plain", "t64", "zstd3", "zstd_window",
+        ]
         assert check(1)["failedChecks"] == ["schema_drift"]
     finally:
         client.command(f"DROP TABLE IF EXISTS {obj}")

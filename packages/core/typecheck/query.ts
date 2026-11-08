@@ -17,6 +17,7 @@ const client = createClient({ url: 'http://localhost:8123' })
 export const query = createQuery(client)
 export const lazyQuery = createQuery(async () => createClient({ url: 'http://localhost:8123' }))
 export const syncQuery = createQuery(() => client)
+export const quietQuery = createQuery(client, { logComment: false })
 
 export const events = table({
   database: 'app',
@@ -132,6 +133,16 @@ export async function calls() {
   assertType<Equal<typeof untyped, Record<string, unknown>[]>>()
   const typed = await noParams.returns<{ one: number }>()()
   assertType<Equal<typeof typed, { one: number }[]>>()
+  const result = await topCities.raw({ city: 'Berlin' })
+  assertType<Equal<typeof result, Awaited<ReturnType<typeof client.query>>>>()
+  const unboundResult = await unboundQuery`SELECT 1`.raw(undefined, { client })
+  assertType<Equal<typeof unboundResult, Awaited<ReturnType<typeof client.query>>>>()
+  const textOnly = await topCities.raw({ city: 'Berlin' }, { client: { query: async () => ({ text: async () => '' }) } })
+  await textOnly.text()
+  // @ts-expect-error the override client's result has no stream()
+  textOnly.stream()
+  // @ts-expect-error raw takes the same params as a call
+  await topCities.raw({ limit: 3 })
 
   await topCities(
     { city: 'Berlin', limit: 3 },
@@ -139,6 +150,9 @@ export async function calls() {
   )
   await unboundQuery`SELECT ${p.string('city')}`({ city: 'Berlin' }, { client })
   await noParams()
+  await noParams({}, { logComment: false })
+  // @ts-expect-error logComment is a boolean
+  createQuery(client, { logComment: 'no' })
   // @ts-expect-error city is required
   await topCities({ limit: 3 })
   // @ts-expect-error limit is a number

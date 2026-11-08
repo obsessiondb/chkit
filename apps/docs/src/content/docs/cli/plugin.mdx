@@ -69,6 +69,7 @@ Plugins can register hooks that run at various points in the CLI lifecycle:
 
 - `onConfigLoaded` — after config is parsed
 - `onSchemaLoaded` — after schema definitions are loaded (can modify definitions); runs for `generate` and `snapshot rebuild`, so both write the same snapshot
+- `onSnapshotLoaded` — in `generate`, on the previous snapshot's definitions before they are compared with the schema (can modify definitions). A plugin that rewrites the schema in `onSchemaLoaded` applies the same rewrite here, so a snapshot written before the rewrite existed plans no change
 - `onPlanCreated` — after migration plan is computed (can modify the plan)
 - `onBeforeApply` — before migration SQL is executed (can transform statements)
 - `onAfterApply` — after migration SQL is executed

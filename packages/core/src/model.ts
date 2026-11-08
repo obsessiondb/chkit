@@ -1,5 +1,3 @@
-import { join } from 'node:path'
-
 import { clickhouseType } from './clickhouse-type.js'
 import type {
   ChxConfigFn,
@@ -19,6 +17,7 @@ import type {
   ValidationIssue,
   ViewDefinition,
 } from './model-types.js'
+import { DEFAULT_INDEX_GRANULARITY } from './table-settings.js'
 
 export * from './model-types.js'
 
@@ -57,8 +56,8 @@ function assertValidClusterName(name: string): string {
 
 export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
   const outDir = config.outDir ?? './chkit'
-  const migrationsDir = config.migrationsDir ?? join(outDir, 'migrations')
-  const metaDir = config.metaDir ?? join(outDir, 'meta')
+  const migrationsDir = config.migrationsDir ?? joinPath(outDir, 'migrations')
+  const metaDir = config.metaDir ?? joinPath(outDir, 'meta')
 
   const schemaGlobs = config.schema === undefined ? [] : Array.isArray(config.schema) ? config.schema : [config.schema]
   if (config.entry !== undefined && schemaGlobs.length > 0) {
@@ -93,9 +92,23 @@ export function resolveConfig(config: ChxUserConfig): ChxResolvedConfig {
           cluster: config.clickhouse.cluster
             ? assertValidClusterName(config.clickhouse.cluster)
             : undefined,
+          indexGranularity: assertValidIndexGranularity(config.clickhouse.indexGranularity),
         }
       : undefined,
   }
+}
+
+/** The `index_granularity` chkit gives a MergeTree table that does not declare it. */
+export function configuredIndexGranularity(config: { clickhouse?: { indexGranularity?: number } }): number {
+  return config.clickhouse?.indexGranularity ?? DEFAULT_INDEX_GRANULARITY
+}
+
+function assertValidIndexGranularity(value: number | undefined): number {
+  if (value === undefined) return DEFAULT_INDEX_GRANULARITY
+  if (typeof value !== 'number' || !Number.isSafeInteger(value) || value <= 0) {
+    throw new Error(`Invalid clickhouse.indexGranularity ${JSON.stringify(value)}. Expected a positive integer, the server's MergeTree index_granularity default (8192 unless the server configures another).`)
+  }
+  return value
 }
 
 // The client takes the protocol, and without a port the scheme's default port,
@@ -111,6 +124,21 @@ function resolveSecure(clickhouse: ChxUserClickHouseConfig): boolean {
     )
   }
   return fromUrl
+}
+
+// POSIX `path.join` that keeps a leading `//` (a Windows UNC root), written out
+// because importing `node:path` here breaks browser bundles of `@chkit/core`.
+function joinPath(dir: string, name: string): string {
+  const root = /^\/\/[^/]/.test(dir) ? '//' : dir.startsWith('/') ? '/' : ''
+  const absolute = root !== ''
+  const segments: string[] = []
+  for (const segment of `${dir}/${name}`.split('/')) {
+    if (segment === '' || segment === '.') continue
+    if (segment !== '..') segments.push(segment)
+    else if (segments.length > 0 && segments.at(-1) !== '..') segments.pop()
+    else if (!absolute) segments.push(segment)
+  }
+  return `${root}${segments.join('/')}`
 }
 
 /** Defines a table. A column's `t` type renders as its ClickHouse type string. */

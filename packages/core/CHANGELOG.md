@@ -1,5 +1,35 @@
 # @chkit/core
 
+## 0.2.0-beta.14
+
+### Patch Changes
+
+- f63233d: Queries have a `.raw()` method that runs the query like a call but returns the client's result unparsed, for bulk reads and `stream()`.
+
+## 0.2.0-beta.13
+
+### Patch Changes
+
+- c523ef2: Comments work end to end (#464). Comments escape backslashes, so ClickHouse stores the exact text (a trailing `\` no longer breaks the statement), and an empty comment is the same as none. A table comment change plans `ALTER TABLE ... MODIFY COMMENT`; a view, materialized view or dictionary comment change is the same `MODIFY COMMENT` instead of a drop and recreate (or `CREATE OR REPLACE DICTIONARY`). A column comment change alone is `COMMENT COLUMN`, and a removed column comment runs `MODIFY COLUMN ... REMOVE COMMENT`, so it no longer stays on the server. `drift` reports a changed table, view, materialized view or dictionary comment as `comment_mismatch`, with both values. `pull` writes the comments of tables, views and materialized views, reads every comment from `system.tables.comment` (decoded by ClickHouse), finds the `AS` and `TO` of a view outside its `COMMENT`, and skips a materialized view with an inner table, and that table, with a warning. The same comments reach `drift` and `pull` when they run through the ObsessionDB console API.
+- fffb87b: `importModuleFile` moved to the `@chkit/core/loader` subpath, so importing `@chkit/core` no longer pulls in the Node-only jiti loader.
+
+  - Breaking: import `importModuleFile` from `@chkit/core/loader` instead of `@chkit/core`.
+
+- 96fade0: Add `query`, `createQuery`, `p` and `t` to `@chkit/core`: typed ClickHouse queries written as tagged templates, composed as subqueries and called with their params, with `t` types shared by table columns and params. `zod@^4.3` is now a peer dependency of `@chkit/core`.
+- c9f5483: Bundlers can now drop the parts of `@chkit/core` an app doesn't import, such as the migration planner.
+- 81dffea: `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit migrated (#466).
+
+  - `pull` keeps every setting the server stores, including `index_granularity`, with a comment on the ones that cannot be altered on an existing table, and leaves out chkit's migration journal (`_chkit_migrations` or `CHKIT_JOURNAL_TABLE`) and the hidden `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings.
+  - A MergeTree table without `index_granularity` is treated as having the server's default, the value ClickHouse stores, so new `CREATE TABLE` statements write `SETTINGS index_granularity = 8192`. Existing projects plan nothing for it. A server with another `<merge_tree><index_granularity>` sets it in the new `clickhouse.indexGranularity` config value (default 8192). `drift`, `check`, `migrate` and `pull` stop when the server's default differs from it, with a message that names the value to set.
+  - Setting values compare by value (`4096` and `"4096"`, `2.0` and `2.`, `true` and `1`), exactly, so a change between two large integers is not lost. A literal column default compares by value with the expression pull reads back (`7` and `{ expression: '7' }`, `"it's"` and `'it\'s'`, `1e21` and `1e+21`, newlines and tabs as ClickHouse escapes them), in `generate` and in `drift`. A string escape chkit does not know for certain (`\N`, `\u0041`) compares as text.
+  - A column type compares in the spacing ClickHouse stores (`Decimal(10,2)` and `Decimal(10, 2)`) in `generate` and `drift`; text in quotes compares as written. Skip indexes, projections, constraints and columns compare whatever order their keys are written in.
+  - A change to a setting ClickHouse cannot alter on an existing table (`index_granularity`, `index_granularity_bytes`, the `add_minmax_index_for_*` settings and others) plans `DROP TABLE` and `CREATE TABLE`, like an `ORDER BY` change, instead of an `ALTER` the server rejects. `--cutover` supports such a change: its swap guards now also tell the old table from the new one by these settings, and its first statement checks that the table stores the read-only settings the migration expects before anything is created or copied.
+  - On an ObsessionDB host, the ObsessionDB plugin treats a table without `storage_policy` as `storage_policy: "'s3'"`, the policy ObsessionDB writes into every `Shared` table, in the schema and the snapshot, and `generate` rejects a schema that changes it. A new `onSnapshotLoaded` plugin hook applies a plugin's schema rewrite to the previous snapshot, so a snapshot written before the rewrite plans no change, and dropping `--force-shared-engines` no longer plans a `RESET SETTING storage_policy`.
+  - A dictionary `lifetime` compares in the form ClickHouse stores (`300` and `MIN 0 MAX 300`), and dictionaries compare whatever order their keys are written in.
+
+- 30a421f: Query rows now return 64-bit and wider integers that a JS number would round as strings of their exact digits, with no ClickHouse setting needed.
+- bcc27f7: Add a `logComment: false` option to `createQuery` and to query calls so `readonly = 1` users can run named queries; without it they now get an error that names the fix.
+
 ## 0.2.0-beta.12
 
 ### Patch Changes

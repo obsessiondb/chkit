@@ -7,10 +7,12 @@ every other value is a literal.
 
 from __future__ import annotations
 
+import json
 import re
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
+from chkit.core.jsnum import js_number_to_string
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import ColumnDefaultValue, SQLExpression
 from chkit.core.sql_lexer import (
@@ -22,6 +24,23 @@ from chkit.core.sql_lexer import (
     tokenize_sql,
 )
 from chkit.core.sql_normalizer import strip_sql_comments
+from chkit.core.sql_scan import strip_wrapping_parens
+from chkit.core.table_settings import setting_value_fingerprint
+
+_STRING_LITERAL_RE: Final[re.Pattern[str]] = re.compile(r"'((?:[^'\\]|\\.|'')*)'", re.DOTALL)
+_HEREDOC_RE: Final[re.Pattern[str]] = re.compile(r"\$([A-Za-z0-9_]*)\$(.*)\$\1\$", re.DOTALL)
+_NUMBER_LITERAL_RE: Final[re.Pattern[str]] = re.compile(
+    r"[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?", re.IGNORECASE | re.ASCII
+)
+_ASCII_HEX_ESCAPE_RE: Final[re.Pattern[str]] = re.compile(r"x([0-7][0-9a-fA-F])")
+# The backslash escapes of a string literal, as ClickHouse 26.3 decodes them
+# (checked with ``SELECT hex('\e')`` and so on). ``\xHH`` decodes to a byte, so
+# only ASCII bytes (below 0x80) are decoded. Others, such as ``\N`` (removed),
+# ``\u0041`` (``A``) or ``\q`` (kept as written), are left to text comparison.
+_STRING_ESCAPES: Final[dict[str, str]] = {
+    "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "0": "\0", "a": "\x07", "v": "\v",
+    "e": "\x1b", "\\": "\\", "'": "'", '"': '"', "`": "`", "/": "/", "=": "=",
+}
 
 # Legacy spelling of an expression default: `'fn:now()'` == `SQLExpression(expression='now()')`.
 LEGACY_EXPRESSION_PREFIX: Final[str] = "fn:"
@@ -143,7 +162,61 @@ def render_default(value: ColumnDefaultValue) -> str:
         return f"'{escaped}'"
     if isinstance(literal, bool):
         return "true" if literal else "false"
+    if isinstance(literal, float):
+        # As TS ``String(value)``: ``2.0`` is ``2``, ``1e-05`` is ``0.00001`` (#466).
+        return js_number_to_string(literal)
     return str(literal)
+
+
+def literal_default_fingerprint(sql: str) -> str | None:
+    """A default that is one number or string literal, by its value.
+
+    ClickHouse stores a float as ``2.`` and a string with backslash escapes
+    (``'it\\'s'``, ``'\\n'``), so ``generate`` and ``drift`` compare what the
+    literal means (TS ``literalDefaultFingerprint``, #466). None for any other
+    SQL, and for a string with an escape whose meaning was not verified on
+    ClickHouse, which then compares as text: a phantom change is possible, a
+    missed one is not.
+    """
+    text = js_trim(sql)
+    inner = strip_wrapping_parens(text)
+    while inner != text:
+        text = inner
+        inner = strip_wrapping_parens(text)
+    if _NUMBER_LITERAL_RE.fullmatch(text):
+        return f"number:{setting_value_fingerprint(text)}"
+    # A heredoc is its text as written; ClickHouse stores it as a quoted literal.
+    heredoc = _HEREDOC_RE.fullmatch(text)
+    if heredoc is not None and f"${heredoc.group(1)}$" not in heredoc.group(2):
+        return f"string:{json.dumps(heredoc.group(2), ensure_ascii=False)}"
+    match = _STRING_LITERAL_RE.fullmatch(text)
+    if match is None:
+        return None
+    body = match.group(1)
+    value: list[str] = []
+    i = 0
+    while i < len(body):
+        char = body[i]
+        if char == "'":
+            # The literal pattern only lets a quote in as ``''``.
+            value.append("'")
+            i += 2
+            continue
+        if char != "\\":
+            value.append(char)
+            i += 1
+            continue
+        hex_match = _ASCII_HEX_ESCAPE_RE.match(body, i + 1)
+        if hex_match is not None:
+            value.append(chr(int(hex_match.group(1), 16)))
+            i += 4
+            continue
+        decoded = _STRING_ESCAPES.get(body[i + 1] if i + 1 < len(body) else "")
+        if decoded is None:
+            return None
+        value.append(decoded)
+        i += 2
+    return f"string:{json.dumps(''.join(value), ensure_ascii=False)}"
 
 
 def column_type_accepts_string_literal(type_: str) -> bool:

@@ -292,6 +292,8 @@ Column name.
 
 Any ClickHouse type string. Parameterized types like `DateTime64(3)`, `Decimal(18, 4)`, `Enum8('a' = 1, 'b' = 2)`, and `FixedString(32)` are supported.
 
+In TypeScript, `type` also takes a [`t` type](/schema/queries/#types) such as `t.lowCardinality(t.string())`. It renders to the same type string, so a query param can share the column's type.
+
 Primitive types recognized by the DSL type system: `String`, `UInt8`, `UInt16`, `UInt32`, `UInt64`, `UInt128`, `UInt256`, `Int8`, `Int16`, `Int32`, `Int64`, `Int128`, `Int256`, `Float32`, `Float64`, `Bool`, `Boolean`, `Date`, `DateTime`, `DateTime64`.
 
 #### SQL-standard aliases
@@ -480,7 +482,7 @@ Previous column name for rename tracking. See [Rename support](#rename-support).
 
 ### `codec` (ColumnCodecSpec, optional)
 
-Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is an object with a `kind`, or an **array** forming a chain (zero or more preprocessors followed by exactly one general codec).
+Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is an object with a `kind`, or an **array** forming a chain. Kinds are case-sensitive.
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
@@ -488,8 +490,8 @@ Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is
     columns: [
       { name: 'ts', type: 'DateTime64(3)', codec: { kind: 'DoubleDelta' } },
       { name: 'amount', type: 'Float64', codec: { kind: 'ZSTD', level: 3 } },
-      // chain: preprocessor then general codec
-      { name: 'seq', type: 'UInt64', codec: [{ kind: 'DoubleDelta' }, { kind: 'LZ4HC', level: 9 }] },
+      // chain: transform, then general codec → CODEC(Delta, LZ4HC(9)), stored as Delta(8)
+      { name: 'seq', type: 'UInt64', codec: [{ kind: 'Delta' }, { kind: 'LZ4HC', level: 9 }] },
     ]
     ```
   </TabItem>
@@ -498,52 +500,87 @@ Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is
     columns=[
         {"name": "ts", "type": "DateTime64(3)", "codec": {"kind": "DoubleDelta"}},
         {"name": "amount", "type": "Float64", "codec": {"kind": "ZSTD", "level": 3}},
-        # chain: preprocessor then general codec
-        {"name": "seq", "type": "UInt64", "codec": [{"kind": "DoubleDelta"}, {"kind": "LZ4HC", "level": 9}]},
+        # chain: transform, then general codec → CODEC(Delta, LZ4HC(9)), stored as Delta(8)
+        {"name": "seq", "type": "UInt64", "codec": [{"kind": "Delta"}, {"kind": "LZ4HC", "level": 9}]},
     ]
     ```
   </TabItem>
 </Tabs>
 
-**General codecs** (the compressor; at most one, and it must come last in a chain):
+**General codecs** (at most one per chain; only encryption codecs may follow it):
 
-| `kind` | Args | Renders |
-|--------|------|---------|
-| `NONE`, `LZ4`, `ALP` | — | `CODEC(LZ4)` |
-| `LZ4HC` | `level?: number` | `CODEC(LZ4HC(9))` |
-| `ZSTD` | `level?: number` | `CODEC(ZSTD(3))` |
+| `kind` | Args | Renders | ClickHouse stores |
+|--------|------|---------|-------------------|
+| `LZ4` | — | `CODEC(LZ4)` | `LZ4` |
+| `LZ4HC` | `level?: number` (any integer, default 9; ClickHouse keeps its low 32 bits, and chkit compares those) | `CODEC(LZ4HC(9))` | as written; a bare `LZ4HC` as `LZ4HC(0)`, the default |
+| `ZSTD` | `level?: number` (its signed low 32 bits must be at most 22, default 1; negative levels are faster), `windowLog?: number` (0 or 10–31) | `CODEC(ZSTD(3))`, `CODEC(ZSTD(3, 24))` | as written; a bare `ZSTD` as `ZSTD(1)` |
+| `Default` | — | `CODEC(Default)` | `Default`, the server's default compression |
+| `NONE` | — | `CODEC(NONE)` | `NONE`. It stores data uncompressed and must be the only codec of its column |
 
-**Preprocessing codecs** (placed before the general codec):
+**Transforms and compression codecs** (placed before the general codec, or used without one):
 
-| `kind` | Args | Renders |
-|--------|------|---------|
-| `Delta`, `DoubleDelta`, `Gorilla` | `size?: 1 \| 2 \| 4 \| 8` (bytes, defaults to 1) | `CODEC(Delta(4))` |
-| `GCD` | — | `CODEC(GCD, LZ4)` |
-| `T64` | — | `CODEC(T64)`, `CODEC(T64, ZSTD(3))` |
-| `FPC` | `level: number`, `floatSize: 4 \| 8` | `CODEC(FPC(...))` |
+| `kind` | Args | Column types | Renders and stores |
+|--------|------|--------------|--------------------|
+| `Delta` | `size?: 1 \| 2 \| 4 \| 8` | With explicit `size`: any type. Bare `Delta`: fixed-size values of 1, 2, 4 or 8 bytes: integers up to 64 bits, floats, `BFloat16`, `Decimal32`/`Decimal64`, dates and times, `Enum`, `Bool`, `IPv4`, `FixedString(N)` | `CODEC(Delta)` without `size`; ClickHouse stores the byte width of the values (`Delta(8)` on `UInt64`, `Delta(4)` on `DateTime`, `Delta(2)` on `Date`), and a bare `Delta` on a `Tuple` or `Map` of mixed widths. An explicit `size` is kept as written. Only transforms: the chain needs a codec that compresses |
+| `GCD` | — | integers, `Decimal`, `Date`, `Date32`, `DateTime`, `DateTime64`, `Bool` | `GCD`. Only transforms, like `Delta` |
+| `DoubleDelta` | `size?: 1 \| 2 \| 4 \| 8` | numeric values of 1, 2, 4 or 8 bytes | `DoubleDelta` or `DoubleDelta(size)`; ClickHouse keeps the size only in verbatim chains |
+| `Gorilla` | `size?: 1 \| 2 \| 4 \| 8` | With explicit `size`: any leaf types, with a reachable `Float32`, `Float64` or `BFloat16` leaf. Bare `Gorilla`: leaf widths of 1, 2, 4 or 8 bytes, with a reachable float leaf | `CODEC(Gorilla)` without `size`, stored with the value width (`Gorilla(8)` on `Float64`) |
+| `T64` | `mode?: 'byte' \| 'bit'` | integers up to 64 bits, `Decimal32`/`Decimal64`, dates and times, `Enum`, `Bool`, `IPv4` | `T64` (`'byte'`, the default) or `T64('bit')` |
+| `FPC` | `level?: number` (1–28, default 12), `floatSize?: 4 \| 8` | `Float32`, `Float64` | `FPC(level)`; ClickHouse drops the float size except in the mixed-width chains described below |
+| `ALP` | — | `Float32`, `Float64` | `ALP`. Experimental: see below |
 
-**Raw escape hatch** — for codecs not yet typed (new ClickHouse versions, unusual arg shapes), pass the inner expression through verbatim:
+Per-leaf type checks and value widths apply inside `Nullable`, `Array`, `LowCardinality` and `SimpleAggregateFunction(f, T)`, and to each element of a `Tuple` or `Map`. `LowCardinality(Nullable(T))` is one leaf with no fixed width or numeric family. `T64`, `FPC`, `ALP`, `GCD` and `DoubleDelta` require each modelled leaf to qualify. A bare `Delta` or `Gorilla` requires leaf widths of 1, 2, 4 or 8 bytes. An explicit size bypasses the per-leaf check, including the fixed-size requirement: `Tuple(String, Float64)` and `Tuple(UUID, Float64)` reject bare `Gorilla` and accept `Gorilla(8)`.
+
+`Gorilla`, `FPC` and `ALP` also require a float leaf reachable through `Nullable`, `Array` and `Tuple`. `LowCardinality` and `Map` are opaque for this reachability check, so a float inside them does not count. `Tuple(LowCardinality(Float64), Float64)` accepts FPC and ALP because the second leaf is reachable and both leaves satisfy their type rules. `Tuple(LowCardinality(UInt64), Float64)` accepts Gorilla but rejects FPC on the `UInt64` leaf. `Map(Float64, Float64)` and `Tuple(LowCardinality(Float64))` reject all three float-series codecs. An explicit Gorilla size still requires a reachable float. Numeric `LowCardinality` types require the server setting `allow_suspicious_low_cardinality_types = 1`.
+
+An unsized `Enum(...)` has width 1 when its assigned values fit in −128–127, otherwise width 2. Explicit values accept signed decimal, `0x` hex and `0b` binary integer literals, with `_` between digits, like codec arguments. An omitted value is the previous decoded value plus one, starting at 1: `Enum('a', 'b')` uses one byte, while `Enum('a' = 0x7f, 'b')` uses two. Codec comparisons recognize whitespace before type arguments, such as `Tuple (Float32, Float64)`, and quoted Tuple field names, including escaped backticks.
+
+On leaves of different fixed widths, a `Delta`, `Gorilla` or `DoubleDelta` without an explicit size makes ClickHouse store the whole chain as written. `T64`, with or without a mode, also triggers verbatim storage when leaf type IDs differ, even at the same width: `Tuple(UInt32, Int32)` retains `DoubleDelta(4), T64, ZSTD`. For this rule, `Bool` has the same type ID as `UInt8`. On `Tuple(Float32, Float64)`, both `Gorilla, FPC(12, 4)` and `FPC(12, 4), DoubleDelta, ZSTD` keep FPC's float size; changing it to 8 plans a column modification. On `Tuple(Float64, Float64)`, the latter chain stores as `FPC(12), DoubleDelta, ZSTD(1)`. When none of these codecs triggers verbatim storage, ClickHouse drops FPC's float size, even on mixed-width leaves.
+
+chkit preserves and renders an explicit `DoubleDelta` size in both typed and raw codecs. ClickHouse retains that size only in verbatim chains: on `Tuple(UInt32, UInt64)`, `Delta, DoubleDelta(4)` differs from `Delta, DoubleDelta(8)`. Outside those chains, the server drops the size and chkit ignores it during comparison. `JSON` and `Dynamic` contribute a value width of 1; their per-leaf codec validation stays unchecked. The geo types count as what they stand for: `Point` as `Tuple(Float64, Float64)`, `Ring` and `LineString` as `Array(Point)`, `Polygon` and `MultiLineString` as arrays of those, and `MultiPolygon` as `Array(Polygon)`. Types chkit does not model keep their existing comparison behavior.
+
+`ZSTD` keeps an explicit zero window: `ZSTD(3, 0)` and `ZSTD(3)` are different stored forms.
+
+**Raw escape hatch** — for codecs without a typed form, such as the encryption codecs, pass the inner expression through verbatim:
 
 <Tabs syncKey="lang">
   <TabItem label="TypeScript">
     ```ts
-    { name: 'blob', type: 'String', codec: { kind: 'raw', expression: 'ZSTD_QAT(1)' } }
-    // → CODEC(ZSTD_QAT(1))
+    { name: 'secret', type: 'String', codec: { kind: 'raw', expression: 'ZSTD, AES_128_GCM_SIV' } }
+    // → CODEC(ZSTD, AES_128_GCM_SIV)
     ```
   </TabItem>
   <TabItem label="Python">
     ```python
-    {"name": "blob", "type": "String", "codec": {"kind": "raw", "expression": "ZSTD_QAT(1)"}}
-    # → CODEC(ZSTD_QAT(1))
+    {"name": "secret", "type": "String", "codec": {"kind": "raw", "expression": "ZSTD, AES_128_GCM_SIV"}}
+    # → CODEC(ZSTD, AES_128_GCM_SIV)
     ```
   </TabItem>
 </Tabs>
 
-:::caution
-Use the typed `{ kind: 'ZSTD', level: 3 }` shape — an unrecognized shape such as `codec: { general: 'ZSTD' }` is **not** a valid `ColumnCodecSpec` and renders an empty `CODEC()`, silently shipping a column with no codec. (The Python port rejects unknown codec keys at validation time.)
+The atoms of a raw codec that name a typed codec are validated and compared like the typed form, so `codec.raw('ZSTD')` equals `{ kind: 'ZSTD' }`. The encryption codecs need `encryption_codecs` keys in the server configuration before an insert succeeds.
+
+**Rules.** `generate` rejects a codec ClickHouse would reject at migrate time (see [Validation rules](#validation-rules)):
+
+- `NONE` is the only codec of its column.
+- A chain has at most one general codec, and only encryption codecs follow it. A chain needs no general codec: `T64`, `DoubleDelta`, `Gorilla`, `FPC` and `ALP` compress by themselves, and transforms and compression codecs may repeat in any order before the general codec.
+- A chain of only `Delta` and `GCD` (with or without encryption) compresses nothing.
+- `Gorilla`, `FPC` and `ALP` cannot follow `Delta` or `DoubleDelta`. `ALP` cannot follow `Gorilla`, `FPC` or `ALP`: ClickHouse creates the column, but every insert fails.
+- Each codec accepts only the column types in the table above, and the parameter ranges shown. An explicit `Delta(n)` bypasses the type check; bare `Delta` on `String` is rejected. `ZSTD` windowLog is 0 or an integer from 10 through 31.
+
+**Changing codecs.** `generate` compares codecs in the form ClickHouse stores them, so respelling a codec (`ZSTD` and `ZSTD(1)`, `FPC(12, 8)` and `FPC` outside a mixed-width chain with bare `Delta`/`Gorilla`, `[x]` and `x`) plans nothing. A changed codec is a `MODIFY COLUMN ... CODEC(...)`; a removed one is `MODIFY COLUMN ... REMOVE CODEC`, its own operation before any other change to the column (a `MODIFY COLUMN` without a codec keeps the stored one). A new codec applies to the parts written after it: chkit runs no mutation, and existing parts keep their codec until ClickHouse merges them.
+
+:::note
+Earlier versions of chkit and chkit-py rendered a `Delta` or `Gorilla` without `size` as `Delta(1)` / `Gorilla(1)`, which compresses wider columns poorly, and stored `size: 1` in the snapshot. The next `generate` plans one `MODIFY COLUMN ... CODEC(Delta, ...)` for each such column; from then until the migration runs, `drift` reports the column (`Delta(1)` on the server, the value width in the snapshot). A column whose schema sets `size: 1` is unchanged.
 :::
 
-Codec chains are validated (see [Validation rules](#validation-rules)): a chain must be non-empty, contain at most one general codec, and end with the general codec.
+**ALP is experimental.** ClickHouse rejects it unless `allow_experimental_codecs` is 1, and `generate` warns about every operation that sets it. Pass the setting to `migrate`:
+
+```sh
+chkit migrate --apply --setting allow_experimental_codecs=1
+```
+
+On ObsessionDB (ClickHouse 26.8), the other replicas of a table with an `ALP` column do not apply later `ALTER` statements on that table, so `migrate` stops waiting for them. Avoid `ALP` on replicated tables.
 
 ## Skip indexes
 
@@ -996,7 +1033,7 @@ Creates a [ClickHouse dictionary](https://clickhouse.com/docs/sql-reference/dict
 | `primaryKey` | `string[]` | Key attribute name(s) — every entry must name a declared attribute |
 | `source` | `string` | Raw `SOURCE(...)` body, e.g. `` `MYSQL(host '...' password '...' ...)` `` |
 | `layout` | `string` | Raw `LAYOUT(...)` body, e.g. `` `HASHED()` `` or `` `COMPLEX_KEY_HASHED()` `` |
-| `lifetime` | `string` | Raw `LIFETIME(...)` body, e.g. `` `300` `` or `` `MIN 300 MAX 360` `` |
+| `lifetime` | `string` | Raw `LIFETIME(...)` body, e.g. `` `300` `` or `` `MIN 300 MAX 360` ``. `generate` compares it in the form ClickHouse stores, so `300` and `MIN 0 MAX 300` are the same lifetime |
 
 ### Optional fields
 
@@ -1253,8 +1290,15 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Primary key references missing column** -- `primaryKey` includes a bare column name not in `columns` (function expressions like `toDate(ts)` are passed through to ClickHouse unchecked)
 - **Order by references missing column** -- `orderBy` includes a bare column name not in `columns` (function expressions like `toStartOfHour(ts)` are passed through to ClickHouse unchecked)
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
-- **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one general codec in a chain; only one is allowed
-- **Codec chain must end with a general codec** (`codec_chain_must_end_with_general`) -- preprocessors must precede the single general codec (`NONE`, `LZ4`, `LZ4HC`, `ZSTD`, `ALP`), and a chain of only `Delta` and `GCD` steps needs a codec that compresses after them, as ClickHouse requires
+- **Unknown codec** (`codec_unknown`) -- a codec atom without a `kind`, a `kind` chkit does not know (kinds are case-sensitive: `Zstd` is not `ZSTD`), or a raw atom such as `zstd` that names a codec in the wrong case
+- **Invalid codec parameter** (`codec_parameter_invalid`) -- a field the codec does not take, or a value out of range: a non-integer level, an `LZ4HC` or `ZSTD` level outside -9007199254740991 to 9007199254740991, `ZSTD` level above 22 or `windowLog` other than 0 or an integer in 10–31, `FPC` level outside 1–28, a `size` other than 1, 2, 4 or 8, a `floatSize` other than 4 or 8, a `T64` mode other than `'byte'` or `'bit'`, an empty raw expression, or a raw atom such as `Delta(3)` or `ZSTD(1.0)` whose arguments ClickHouse rejects (raw arguments are integers written as ClickHouse reads them: decimal, `0x` hex or `0b` binary, with `_` between digits, and at most 2^53 - 1 in size)
+- **NONE combined** (`codec_none_combined`) -- `NONE` with any other codec
+- **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one of `LZ4`, `LZ4HC`, `ZSTD` and `Default` in a chain
+- **Codec after the general codec** (`codec_chain_must_end_with_general`) -- a transform or compression codec after the general codec; only encryption codecs may follow it
+- **Codec after encryption** (`codec_chain_encryption_not_last`) -- any codec but another encryption codec after `AES_128_GCM_SIV` or `AES_256_GCM_SIV`
+- **Chain without compression** (`codec_chain_no_compression`) -- a chain of only `Delta` and `GCD`, with or without encryption
+- **Float codec order** (`codec_chain_float_order`) -- `Gorilla`, `FPC` or `ALP` after `Delta` or `DoubleDelta`, or `ALP` after `Gorilla`, `FPC` or `ALP`
+- **Codec type unsupported** (`codec_type_unsupported`) -- a codec on a column type it does not accept, such as `T64` on `Float64` or `Delta` on `String` (see the codec tables in [`codec`](#codec-columncodecspec-optional))
 - **Column expression required** (`column_expression_required`) -- a `MATERIALIZED` or `ALIAS` column has no `default`, or a `default` expression is empty: `{ expression: '' }`, an expression made only of comments, or a bare `'fn:'`
 - **Invalid column kind** (`column_default_kind_invalid`) -- `defaultKind` is not `DEFAULT`, `MATERIALIZED`, `ALIAS`, or `EPHEMERAL` (Python rejects it when the column is constructed)
 - **Default looks like an expression** (`column_default_looks_like_expression`) -- the plain string default of a `DEFAULT` or `EPHEMERAL` column starts with a function call, such as `'now64(3)'`, and the column type cannot hold a string; use `{ expression: 'now64(3)' }` (see [`default`](#default-string--number--boolean--sqlexpression-optional))
@@ -1280,9 +1324,19 @@ drop is `risk=caution` because it holds no rows.
 
 When a property changes, chkit determines whether the table can be altered in place or must be dropped and recreated.
 
-**Structural** (drop + recreate): `engine`, `primaryKey`, `orderBy`, `partitionBy`, `uniqueKey`
+**Structural** (drop + recreate): `engine`, `primaryKey`, `orderBy`, `partitionBy`, `uniqueKey`, and the settings ClickHouse refuses to change on an existing table: `index_granularity`, `index_granularity_bytes`, `enable_mixed_granularity_parts`, `table_disk`, the `add_minmax_index_for_*` settings, and on ObsessionDB also `allow_tuple_element_aggregation` and `share_nested_offsets`
 
-**Alterable** (ALTER in place): columns, indexes, projections, constraints, settings, TTL, comment
+**Alterable** (ALTER in place): columns, indexes, projections, constraints, other settings, TTL, comment
+
+A MergeTree table that does not declare `index_granularity` is treated as having the server's default, the value ClickHouse stores for it: 8192, or [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) when the server uses another. `CREATE TABLE` writes `SETTINGS index_granularity = 8192`, and a schema with or without it plans nothing. Setting values compare by value: `8192` and `"8192"`, `2.0` and `2.`, `1e6` and `1000000` are the same, and `true` and `false` equal `1` and `0`. Numbers compare exactly, so two large integers that differ only past the 15th digit are different values.
+
+What `chkit pull` reads back plans nothing against the schema it came from:
+
+- A column type compares in the spacing ClickHouse stores: `Decimal(10,2)` and `Decimal(10, 2)` are the same type. Text in quotes, such as an `Enum` label or a time zone, compares as written. chkit writes the type as you declared it.
+- A default that is one number or string literal compares by value: `2.0` and `2.`, `1e21` and `1e+21`, `'it\'s'` and `"it's"` are the same default. A string escape whose meaning chkit does not know for certain (such as `\N` or `\u0041`) compares as text, so it can show a change that is not one, but never hides one.
+- Indexes, projections, constraints and columns compare whatever order their keys are written in.
+
+The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not part of the schema.
 
 Views and materialized views use drop + recreate for a change to the query (or a materialized view's `TO` target or refresh mode). A comment-only change is an `ALTER TABLE ... MODIFY COMMENT` in place; see [Comments](#comments).
 

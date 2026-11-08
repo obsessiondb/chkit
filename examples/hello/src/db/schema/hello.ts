@@ -13,7 +13,7 @@ const users = table({
   orderBy: ['id'],
 })
 
-const events = table({
+export const events = table({
   database: 'default',
   name: 'events',
   engine: 'MergeTree',

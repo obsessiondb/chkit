@@ -158,7 +158,7 @@ def test_parse_raw_fallback_round_trips_through_render() -> None:
 
 def test_parse_falls_back_to_raw_when_known_codec_has_unexpected_args() -> None:
     cases = {
-        "CODEC(ZSTD(3, 1))": "ZSTD(3, 1)",
+        "CODEC(ZSTD(3, 24, 1))": "ZSTD(3, 24, 1)",
         "CODEC(LZ4HC(9, 1))": "LZ4HC(9, 1)",
         "CODEC(Delta(4, 2))": "Delta(4, 2)",
         "CODEC(LZ4(1))": "LZ4(1)",
@@ -176,8 +176,8 @@ def test_parse_reads_a_negative_level_back_from_the_unsigned_form_clickhouse_pri
     lz4hc = parse_codec("CODEC(LZ4HC(18446744073709551614))")
     assert zstd is not None
     assert lz4hc is not None
-    assert [c.model_dump() for c in zstd] == [{"kind": "ZSTD", "level": -1}]
-    assert [c.model_dump() for c in lz4hc] == [{"kind": "LZ4HC", "level": -2}]
+    assert [c.model_dump(exclude_none=True) for c in zstd] == [{"kind": "ZSTD", "level": -1}]
+    assert [c.model_dump(exclude_none=True) for c in lz4hc] == [{"kind": "LZ4HC", "level": -2}]
 
 
 # ───────────── canonicalizeCodec ─────────────
@@ -197,12 +197,20 @@ def test_canonicalize_fills_in_lz4hc_default_level() -> None:
     ]
 
 
-def test_canonicalize_fills_in_delta_double_delta_gorilla_default_size() -> None:
-    for kind in ["Delta", "DoubleDelta", "Gorilla"]:
-        canon = canonicalize_codec({"kind": kind})
-        assert [c.model_dump(exclude_none=True) for c in canon] == [
-            {"kind": kind, "size": 1}
-        ]
+def test_canonicalize_keeps_bare_delta_gorilla_and_explicit_double_delta_size() -> None:
+    # #465: ClickHouse fills in the column's value width for a bare Delta/Gorilla.
+    def canon(spec: CodecSpecInput) -> list[dict[str, Any]]:
+        return [c.model_dump(exclude_none=True) for c in canonicalize_codec(spec)]
+
+    assert canon({"kind": "Delta"}) == [{"kind": "Delta"}]
+    assert canon({"kind": "Delta", "size": 1}) == [{"kind": "Delta", "size": 1}]
+    assert canon({"kind": "DoubleDelta", "size": 4}) == [{"kind": "DoubleDelta", "size": 4}]
+    assert canon({"kind": "Gorilla"}) == [{"kind": "Gorilla"}]
+
+
+def test_canonicalize_keeps_a_malformed_atom_as_written() -> None:
+    [step] = canonicalize_codec({"kind": "ZSTD", "level": 1.5})
+    assert step.model_dump() == {"kind": "invalid", "value": {"kind": "ZSTD", "level": 1.5}}
 
 
 def test_canonicalize_trims_raw_expression_whitespace() -> None:
@@ -275,11 +283,9 @@ _STORED: list[tuple[CodecSpecInput, str]] = [
     ({"kind": "LZ4HC", "level": 0}, "CODEC(LZ4HC(0))"),
     ({"kind": "LZ4HC", "level": -1}, "CODEC(LZ4HC(18446744073709551615))"),
     ({"kind": "LZ4HC", "level": 12}, "CODEC(LZ4HC(12))"),
-    ([{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(1), ZSTD(1))"),
     ([{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"),
     ([{"kind": "DoubleDelta"}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
-    ([{"kind": "DoubleDelta", "size": 4}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
-    ([{"kind": "Gorilla"}, {"kind": "LZ4"}], "CODEC(Gorilla(1), LZ4)"),
+    ([{"kind": "DoubleDelta", "size": 4}, {"kind": "LZ4"}], "CODEC(DoubleDelta(4), LZ4)"),
     ([{"kind": "Gorilla", "size": 8}, {"kind": "ZSTD", "level": 2}], "CODEC(Gorilla(8), ZSTD(2))"),
     ([{"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "LZ4"}], "CODEC(FPC(12), LZ4)"),
     (
@@ -343,3 +349,338 @@ def test_codec_fingerprint_matches_the_typescript_strings() -> None:
         codec_fingerprint(parse_codec("CODEC(Delta(8), DoubleDelta, FPC(12), ZSTD(1))"))
         == "Delta(8),DoubleDelta,FPC(12),ZSTD(1)"
     )
+
+
+# ───────────── codec forms ClickHouse stores (#465) ─────────────
+
+
+def test_render_bare_delta_gorilla_and_explicit_double_delta_size() -> None:
+    assert render_codec([{"kind": "Delta"}, {"kind": "ZSTD"}]) == "CODEC(Delta, ZSTD)"
+    assert render_codec({"kind": "Gorilla"}) == "CODEC(Gorilla)"
+    assert render_codec({"kind": "DoubleDelta", "size": 8}) == "CODEC(DoubleDelta(8))"
+
+
+def test_render_and_parse_zstd_window_t64_mode_fpc_level_and_default() -> None:
+    forms: list[tuple[CodecSpecInput, str]] = [
+        ({"kind": "ZSTD", "level": 3, "windowLog": 24}, "CODEC(ZSTD(3, 24))"),
+        ({"kind": "T64", "mode": "bit"}, "CODEC(T64('bit'))"),
+        ({"kind": "FPC"}, "CODEC(FPC)"),
+        ({"kind": "FPC", "level": 12}, "CODEC(FPC(12))"),
+        ([{"kind": "Delta"}, {"kind": "Default"}], "CODEC(Delta, Default)"),
+    ]
+    for spec, sql in forms:
+        assert render_codec(spec) == sql
+        parsed = parse_codec(sql)
+        assert parsed is not None
+        expected = spec if isinstance(spec, list) else [spec]
+        assert [c.model_dump(by_alias=True, exclude_none=True) for c in parsed] == expected
+    t64 = parse_codec("CODEC(T64('byte'))")
+    assert t64 is not None
+    assert [c.model_dump(exclude_none=True) for c in t64] == [{"kind": "T64", "mode": "byte"}]
+
+
+def test_codec_fingerprint_fills_in_the_value_width_for_bare_delta_or_gorilla() -> None:
+    widths: list[tuple[str, CodecSpecInput, str]] = [
+        ("UInt64", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(8), ZSTD(1))"),
+        ("UInt32", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(4), ZSTD(1))"),
+        ("Date", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(2), ZSTD(1))"),
+        ("DateTime64(3, 'UTC')", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(8), ZSTD(1))"),
+        ("Nullable(UInt64)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"),
+        ("Array(Float64)", {"kind": "Gorilla"}, "CODEC(Gorilla(8))"),
+        ("Float32", {"kind": "Gorilla"}, "CODEC(Gorilla(4))"),
+        ("Tuple(a UInt8, b UInt64)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta, LZ4)"),
+        ("Map(UInt32, UInt32)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"),
+        ("UInt64", codec_raw("Delta, Default"), "CODEC(Delta(8), Default)"),
+        ("UInt64", [{"kind": "Delta", "size": 4}, {"kind": "ZSTD"}], "CODEC(Delta(4), ZSTD(1))"),
+    ]
+    for type_, spec, stored in widths:
+        assert codec_fingerprint(spec, type_) == codec_fingerprint(parse_codec(stored), type_)
+    # An explicit size is compared as written: no equivalence with the bare form.
+    assert not codecs_equal({"kind": "Delta", "size": 1}, {"kind": "Delta"}, "UInt64")
+    assert codecs_equal({"kind": "Delta", "size": 8}, {"kind": "Delta"}, "UInt64")
+
+
+def test_codec_fingerprint_compares_respelled_codecs_equal() -> None:
+    same: list[tuple[str, CodecSpecInput, CodecSpecInput]] = [
+        ("String", {"kind": "ZSTD"}, {"kind": "ZSTD", "level": 1}),
+        ("String", {"kind": "LZ4HC"}, {"kind": "LZ4HC", "level": 9}),
+        ("UInt64", {"kind": "DoubleDelta", "size": 8}, {"kind": "DoubleDelta"}),
+        ("Float64", {"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "FPC", "level": 12, "floatSize": 4}),
+        ("Float64", {"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "FPC"}),
+        ("String", [{"kind": "LZ4"}], {"kind": "LZ4"}),
+        ("String", codec_raw("NONE"), {"kind": "NONE"}),
+        ("String", codec_raw("ZSTD"), {"kind": "ZSTD", "level": 1}),
+        ("String", codec_raw("ZSTD, AES_128_GCM_SIV"), codec_raw("ZSTD(1), AES_128_GCM_SIV")),
+        ("UInt64", {"kind": "T64", "mode": "byte"}, {"kind": "T64"}),
+        # Integer literals ClickHouse reads: hex, binary, underscores.
+        ("String", codec_raw("ZSTD(0x1)"), {"kind": "ZSTD", "level": 1}),
+        ("String", codec_raw("ZSTD(1_0)"), {"kind": "ZSTD", "level": 10}),
+        ("String", codec_raw("ZSTD(3, 0x18)"), {"kind": "ZSTD", "level": 3, "windowLog": 24}),
+        ("String", codec_raw("LZ4HC(0b1_0)"), {"kind": "LZ4HC", "level": 2}),
+        ("UInt64", codec_raw("T64( 'bit' )"), {"kind": "T64", "mode": "bit"}),
+        # ClickHouse keeps the low 32 bits of an LZ4HC level (observed on 26.3).
+        ("String", {"kind": "LZ4HC", "level": 4294967297}, parse_codec("CODEC(LZ4HC(1))") or []),
+        (
+            "String",
+            codec_raw("LZ4HC(2147483648)"),
+            parse_codec("CODEC(LZ4HC(18446744071562067968))") or [],
+        ),
+    ]
+    for type_, a, b in same:
+        assert codec_fingerprint(a, type_) == codec_fingerprint(b, type_)
+
+
+def test_codec_fingerprint_tells_apart_a_zstd_window_and_a_t64_bit_mode() -> None:
+    assert codec_fingerprint({"kind": "ZSTD", "level": 3, "windowLog": 24}) != codec_fingerprint(
+        {"kind": "ZSTD", "level": 3}
+    )
+    assert codec_fingerprint({"kind": "T64", "mode": "bit"}) != codec_fingerprint({"kind": "T64"})
+
+
+def test_codec_fingerprint_leaves_a_decimal_argument_too_long_for_a_number_unparsed() -> None:
+    expression = "ZSTD(-" + "9" * 4301 + ")"
+    assert codec_fingerprint(codec_raw(expression)) == expression
+
+
+def test_codec_fingerprint_keeps_whitespace_inside_a_quoted_argument() -> None:
+    # ClickHouse rejects T64('b it').
+    assert codec_fingerprint(codec_raw("T64('b it')")) == "T64('b it')"
+
+
+# Schema and compression_codec pairs observed on ClickHouse 26.3.
+_MATRIX_STORED: list[tuple[str, CodecSpecInput, str]] = [
+    ('SimpleAggregateFunction(sum, UInt64)', [{'kind': 'Delta'}, {'kind': 'LZ4'}], 'CODEC(Delta(8), LZ4)'),
+    ('SimpleAggregateFunction(max, DateTime)', [{'kind': 'Delta'}, {'kind': 'LZ4'}], 'CODEC(Delta(4), LZ4)'),
+    ('SimpleAggregateFunction(max, Float64)', {'kind': 'Gorilla'}, 'CODEC(Gorilla(8))'),
+    ('SimpleAggregateFunction(max, Float32)', {'kind': 'FPC'}, 'CODEC(FPC(12))'),
+    ('SimpleAggregateFunction(sum, UInt64)', {'kind': 'T64'}, 'CODEC(T64)'),
+    ('SimpleAggregateFunction(sum, UInt64)', {'kind': 'DoubleDelta'}, 'CODEC(DoubleDelta)'),
+    ('SimpleAggregateFunction(max, Nullable(UInt16))', [{'kind': 'Delta'}, {'kind': 'LZ4'}], 'CODEC(Delta(2), LZ4)'),
+    ('SimpleAggregateFunction(groupUniqArrayArray, Array(UInt32))', [{'kind': 'Delta'}, {'kind': 'LZ4'}], 'CODEC(Delta(4), LZ4)'),
+    ("Enum('a' = 1, 'b' = 2)", [{'kind': 'Delta'}, {'kind': 'LZ4'}], 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = 1, 'b' = 1000)", [{'kind': 'Delta'}, {'kind': 'LZ4'}], 'CODEC(Delta(2), LZ4)'),
+    ("Enum16('a' = 1)", [{'kind': 'Delta'}, {'kind': 'LZ4'}], 'CODEC(Delta(2), LZ4)'),
+    ('Tuple(Float32, Float64)', [{'kind': 'Gorilla'}, {'kind': 'FPC', 'level': 12, 'floatSize': 4}], 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple(Float32, Float64)', {'kind': 'FPC', 'level': 12, 'floatSize': 4}, 'CODEC(FPC(12))'),
+    ('Tuple(Float32, Float64)', {'kind': 'FPC', 'level': 12}, 'CODEC(FPC(12))'),
+    ('Tuple(Float32, Float64)', {'kind': 'FPC'}, 'CODEC(FPC(12))'),
+    ('Tuple(Float32, Float64)', [{'kind': 'FPC', 'level': 12, 'floatSize': 4}, {'kind': 'ZSTD'}], 'CODEC(FPC(12), ZSTD(1))'),
+    ('Tuple(Float32, Float64)', {'kind': 'Gorilla'}, 'CODEC(Gorilla)'),
+    ('Tuple(Float32, Float64)', {'kind': 'Gorilla', 'size': 4}, 'CODEC(Gorilla(4))'),
+    ('Tuple(Float32, Float64)', [{'kind': 'Gorilla'}, {'kind': 'ZSTD'}], 'CODEC(Gorilla, ZSTD)'),
+    ('Tuple(Float64, Float64)', [{'kind': 'Gorilla'}, {'kind': 'FPC', 'level': 12, 'floatSize': 4}], 'CODEC(Gorilla(8), FPC(12))'),
+    ('Tuple(Float64, Float64)', {'kind': 'FPC', 'level': 12, 'floatSize': 4}, 'CODEC(FPC(12))'),
+    ('Tuple(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'ZSTD'}], 'CODEC(Delta, ZSTD)'),
+    ('Tuple(UInt32, UInt64)', [{'kind': 'Delta', 'size': 2}, {'kind': 'ZSTD'}], 'CODEC(Delta(2), ZSTD(1))'),
+    ('Array(Tuple(Float32, Float64))', [{'kind': 'Gorilla'}, {'kind': 'FPC', 'level': 12, 'floatSize': 4}], 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple(Float32, Float64)', [{'kind': 'DoubleDelta'}, {'kind': 'ZSTD'}], 'CODEC(DoubleDelta, ZSTD)'),
+    ('Tuple(Float32, Float64)', {'kind': 'ALP'}, 'CODEC(ALP)'),
+    ('String', [{'kind': 'Delta', 'size': 4}, {'kind': 'LZ4'}], 'CODEC(Delta(4), LZ4)'),
+    ('String', [{'kind': 'Delta', 'size': 1}, {'kind': 'LZ4'}], 'CODEC(Delta(1), LZ4)'),
+    ('FixedString(4)', [{'kind': 'Delta', 'size': 4}, {'kind': 'LZ4'}], 'CODEC(Delta(4), LZ4)'),
+    ('Array(String)', [{'kind': 'Delta', 'size': 4}, {'kind': 'LZ4'}], 'CODEC(Delta(4), LZ4)'),
+    ('Nullable(String)', [{'kind': 'Delta', 'size': 4}, {'kind': 'LZ4'}], 'CODEC(Delta(4), LZ4)'),
+    ('LowCardinality(String)', [{'kind': 'Delta', 'size': 4}, {'kind': 'LZ4'}], 'CODEC(Delta(4), LZ4)'),
+    ('UUID', [{'kind': 'Delta', 'size': 8}, {'kind': 'LZ4'}], 'CODEC(Delta(8), LZ4)'),
+    ('Decimal(18, 4)', [{'kind': 'Delta', 'size': 8}, {'kind': 'LZ4'}], 'CODEC(Delta(8), LZ4)'),
+    ('Float64', [{'kind': 'Delta', 'size': 8}, {'kind': 'LZ4'}], 'CODEC(Delta(8), LZ4)'),
+    ('Tuple(UInt64, Float64)', {'kind': 'Gorilla'}, 'CODEC(Gorilla(8))'),
+    ('Tuple(UInt64, Float64)', {'kind': 'Gorilla', 'size': 8}, 'CODEC(Gorilla(8))'),
+    ('Array(Tuple(UInt64, Float64))', {'kind': 'Gorilla'}, 'CODEC(Gorilla(8))'),
+    ('UInt64', {'kind': 'ZSTD', 'level': 3, 'windowLog': 0}, 'CODEC(ZSTD(3, 0))'),
+    ('UInt64', {'kind': 'ZSTD', 'level': 3, 'windowLog': 10}, 'CODEC(ZSTD(3, 10))'),
+    ('UInt64', {'kind': 'ZSTD', 'level': 3, 'windowLog': 31}, 'CODEC(ZSTD(3, 31))'),
+    ('UInt64', {'kind': 'ZSTD', 'level': 1, 'windowLog': 0}, 'CODEC(ZSTD(1, 0))'),
+    ('UInt64', {'kind': 'ZSTD', 'level': -1, 'windowLog': 0}, 'CODEC(ZSTD(18446744073709551615, 0))'),
+    ('UInt64', {'kind': 'ZSTD', 'level': 0, 'windowLog': 0}, 'CODEC(ZSTD(0, 0))'),
+    ('Tuple(Float32, Float64)', [{'kind': 'Gorilla', 'size': 4}, {'kind': 'FPC', 'level': 12, 'floatSize': 4}], 'CODEC(Gorilla(4), FPC(12))'),
+    ('Tuple(Float32, Float64)', [{'kind': 'Gorilla'}, {'kind': 'FPC'}], 'CODEC(Gorilla, FPC)'),
+    ('Tuple(Float32, Float64)', [{'kind': 'Gorilla'}, {'kind': 'FPC', 'level': 12, 'floatSize': 4}, {'kind': 'ZSTD'}], 'CODEC(Gorilla, FPC(12, 4), ZSTD)'),
+    ('Tuple(Float32, Float64)', [{'kind': 'Gorilla'}, {'kind': 'LZ4HC'}], 'CODEC(Gorilla, LZ4HC)'),
+    ('Tuple(Float32, Float64)', [{'kind': 'Gorilla'}, {'kind': 'ZSTD', 'level': 3, 'windowLog': 24}], 'CODEC(Gorilla, ZSTD(3, 24))'),
+    ('Tuple(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'LZ4HC'}], 'CODEC(Delta, LZ4HC)'),
+    ('Tuple(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'T64'}], 'CODEC(Delta, T64)'),
+    ('Tuple(UInt32, UInt64)', [{'kind': 'DoubleDelta'}, {'kind': 'Delta'}, {'kind': 'ZSTD'}], 'CODEC(DoubleDelta, Delta, ZSTD)'),
+    ('Tuple(UInt32, UInt64)', {'kind': 'raw', 'expression': 'Delta, DoubleDelta(4)'}, 'CODEC(Delta, DoubleDelta(4))'),
+    ('Tuple(Float32, Float64)', [{'kind': 'FPC', 'level': 12, 'floatSize': 4}, {'kind': 'Gorilla'}], 'CODEC(FPC(12, 4), Gorilla)'),
+    ('Map(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'ZSTD'}], 'CODEC(Delta, ZSTD)'),
+    ('Tuple(UInt32, Float32)', [{'kind': 'Delta'}, {'kind': 'ZSTD'}], 'CODEC(Delta(4), ZSTD(1))'),
+    ('Tuple(UInt64, Float64)', [{'kind': 'Gorilla'}, {'kind': 'ZSTD'}], 'CODEC(Gorilla(8), ZSTD(1))'),
+    ('Nullable(Float64)', [{'kind': 'Gorilla'}, {'kind': 'FPC', 'level': 12, 'floatSize': 4}], 'CODEC(Gorilla(8), FPC(12))'),
+    ('Array(Float32)', [{'kind': 'Gorilla'}, {'kind': 'FPC', 'level': 12, 'floatSize': 8}], 'CODEC(Gorilla(4), FPC(12))'),
+]
+
+
+@pytest.mark.parametrize(("type_", "spec", "stored"), _MATRIX_STORED)
+def test_server_matrix_stored_forms(type_: str, spec: CodecSpecInput, stored: str) -> None:
+    expected = codec_fingerprint(parse_codec(stored), type_)
+    assert codec_fingerprint(spec, type_) == expected
+    assert codec_fingerprint(codec_raw(render_codec(spec)[6:-1]), type_) == expected
+
+
+def test_mixed_widths_retain_fpc_arguments_and_unknown_types_keep_the_old_comparison() -> None:
+    before: CodecSpecInput = [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}]
+    after: CodecSpecInput = [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 8}]
+    assert codec_fingerprint(before, "Tuple(Float32, Float64)") == "Gorilla,FPC(12,4)"
+    assert not codecs_equal(before, after, "Tuple(Float32, Float64)")
+    assert codecs_equal(before, after, "JSON")
+    assert codecs_equal(before, after, "Dynamic")
+
+
+def test_zero_zstd_window_remains_distinct_from_an_omitted_window() -> None:
+    assert codec_fingerprint({"kind": "ZSTD", "level": 3, "windowLog": 0}) == "ZSTD(3,0)"
+    assert not codecs_equal(
+        {"kind": "ZSTD", "level": 3, "windowLog": 0}, {"kind": "ZSTD", "level": 3}
+    )
+
+
+# Parser coverage beyond the server matrix; these are not server verdicts.
+@pytest.mark.parametrize(("type_", "expected"), [
+    ("Enum('can\\'t' = 1000, 'b' = 1)", "Delta(2),LZ4"),
+    ("Enum('a\\', b' = 1, 'c' = 2)", "Delta(1),LZ4"),
+    ("Enum()", "Delta,LZ4"),
+    ("Enum('a' = 1 2)", "Delta,LZ4"),
+    ("Enum('a' = \u0661)", "Delta,LZ4"),
+    ("Enum('a' = 1\u0085)", "Delta,LZ4"),
+    ("Enum('a' = 0x1)", "Delta(1),LZ4"),
+    ("Enum('a' = " + "9" * 4301 + ")", "Delta,LZ4"),
+])
+def test_enum_value_parsing_parity(type_: str, expected: str) -> None:
+    assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == expected
+
+
+# STORED rows from both additional ClickHouse 26.3 server matrices.
+@pytest.mark.parametrize(("type_", "expression", "stored_type", "stored_codec"), [
+    ('Tuple(LowCardinality(UInt64), Float64)', 'Gorilla', 'Tuple(LowCardinality(UInt64), Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(LowCardinality(Float64), Float64)', 'FPC', 'Tuple(LowCardinality(Float64), Float64)', 'CODEC(FPC(12))'),
+    ('Tuple(LowCardinality(Float64), Float64)', 'ALP', 'Tuple(LowCardinality(Float64), Float64)', 'CODEC(ALP)'),
+    ('Tuple(a LowCardinality(Float32), b Float32)', 'Gorilla', 'Tuple(a LowCardinality(Float32), b Float32)', 'CODEC(Gorilla(4))'),
+    ('Array(Tuple(LowCardinality(Float64), Float64))', 'Gorilla', 'Array(Tuple(LowCardinality(Float64), Float64))', 'CODEC(Gorilla(8))'),
+    ('Tuple(Array(LowCardinality(Float64)), Float64)', 'Gorilla', 'Tuple(Array(LowCardinality(Float64)), Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(Map(UInt64, Float64), Float64)', 'Gorilla', 'Tuple(Map(UInt64, Float64), Float64)', 'CODEC(Gorilla(8))'),
+    ('Nullable(Float64)', 'Gorilla', 'Nullable(Float64)', 'CODEC(Gorilla(8))'),
+    ('Array(Nullable(Float64))', 'Gorilla', 'Array(Nullable(Float64))', 'CODEC(Gorilla(8))'),
+    ('Tuple(Nullable(Float64), Float64)', 'Gorilla', 'Tuple(Nullable(Float64), Float64)', 'CODEC(Gorilla(8))'),
+    ('Array(Float64)', 'Gorilla', 'Array(Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(Float64, Float64)', 'ALP', 'Tuple(Float64, Float64)', 'CODEC(ALP)'),
+    ('Map(UInt64, UInt64)', 'T64', 'Map(UInt64, UInt64)', 'CODEC(T64)'),
+    ('Map(UInt64, UInt64)', 'Delta, LZ4', 'Map(UInt64, UInt64)', 'CODEC(Delta(8), LZ4)'),
+    ('Map(UInt64, UInt64)', 'DoubleDelta', 'Map(UInt64, UInt64)', 'CODEC(DoubleDelta)'),
+    ('Map(UInt64, Float64)', 'DoubleDelta', 'Map(UInt64, Float64)', 'CODEC(DoubleDelta)'),
+    ('Tuple (Float32, Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(Float32, Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple (Float64, Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(Float64, Float64)', 'CODEC(Gorilla(8), FPC(12))'),
+    ('Nullable (Float64)', 'Gorilla', 'Nullable(Float64)', 'CODEC(Gorilla(8))'),
+    ('Array (UInt32)', 'Delta, LZ4', 'Array(UInt32)', 'CODEC(Delta(4), LZ4)'),
+    ("Enum ('a' = 1, 'b' = 1000)", 'Delta, LZ4', "Enum16('a' = 1, 'b' = 1000)", 'CODEC(Delta(2), LZ4)'),
+    ('SimpleAggregateFunction (sum, UInt64)', 'Delta, LZ4', 'SimpleAggregateFunction(sum, UInt64)', 'CODEC(Delta(8), LZ4)'),
+    ('Tuple(`a\\`x` Float32, b Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(`a\\`x` Float32, b Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple(`a b` Float32, b Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(`a b` Float32, b Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple("a" Float32, b Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(a Float32, b Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ("Enum('a', 'b')", 'Delta, LZ4', "Enum8('a' = 1, 'b' = 2)", 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = 127, 'b')", 'Delta, LZ4', "Enum16('a' = 127, 'b' = 128)", 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a', 'b' = 1000)", 'Delta, LZ4', "Enum16('a' = 1, 'b' = 1000)", 'CODEC(Delta(2), LZ4)'),
+    ("Enum8('a', 'b')", 'Delta, LZ4', "Enum8('a' = 1, 'b' = 2)", 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = -129)", 'Delta, LZ4', "Enum16('a' = -129)", 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = -128, 'b' = 127)", 'Delta, LZ4', "Enum8('a' = -128, 'b' = 127)", 'CODEC(Delta(1), LZ4)'),
+    ('Tuple(FixedString(8), Float64)', 'Gorilla', 'Tuple(FixedString(8), Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(UInt128, Float64)', 'Gorilla(8)', 'Tuple(UInt128, Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(Date32, Float64)', 'Gorilla', 'Tuple(Date32, Float64)', 'CODEC(Gorilla)'),
+])
+def test_additional_server_matrix_fingerprints(
+    type_: str, expression: str, stored_type: str, stored_codec: str
+) -> None:
+    spec = parse_codec(expression)
+    parsed_stored = parse_codec(stored_codec)
+    assert spec is not None
+    assert parsed_stored is not None
+    assert codec_fingerprint(spec, type_) == codec_fingerprint(parsed_stored, type_)
+    assert codec_fingerprint(spec, type_) == codec_fingerprint(parsed_stored, stored_type)
+
+
+# Parser parity includes JS whitespace that Python's built-in \s treats differently.
+_JS_TYPE_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+@pytest.mark.parametrize("space", list(_JS_TYPE_WHITESPACE))
+def test_type_parser_recognizes_js_whitespace(space: str) -> None:
+    mixed = f"Tuple{space}(a{space}Float32, b{space}Float64)"
+    before: CodecSpecInput = [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}]
+    after: CodecSpecInput = [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 8}]
+    assert codec_fingerprint(before, mixed) == "Gorilla,FPC(12,4)"
+    assert not codecs_equal(before, after, mixed)
+    for type_ in [
+        f"Array{space}(UInt64)", f"Nullable{space}(UInt64)", f"LowCardinality{space}(UInt64)",
+        f"SimpleAggregateFunction{space}(max, UInt64)", f"Map{space}(UInt64, UInt64)",
+        f"FixedString{space}({space}8{space})", f"Decimal{space}({space}18, 4)",
+        f"Decimal64{space}(4)", f"DateTime64{space}(3)", f"Time64{space}(3)",
+    ]:
+        assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == "Delta(8),LZ4"
+    assert codec_fingerprint(
+        [{"kind": "Delta"}, {"kind": "LZ4"}], f"Enum{space}('a'{space}={space}1{space})"
+    ) == "Delta(1),LZ4"
+
+
+@pytest.mark.parametrize("space", ["\u001c", "\u001d", "\u001e", "\u001f", "\u0085"])
+def test_type_parser_leaves_non_js_whitespace_unknown(space: str) -> None:
+    for type_ in [f"Tuple(a{space}Float32, b Float64)", f"Tuple{space}(Float32, Float64)"]:
+        assert codec_fingerprint(
+            [{"kind": "Gorilla"}, {"kind": "FPC", "floatSize": 4}], type_
+        ) == "Gorilla,FPC(12)"
+    assert codec_fingerprint(
+        [{"kind": "Delta"}, {"kind": "LZ4"}], f"Enum('a' = 1{space})"
+    ) == "Delta,LZ4"
+
+
+@pytest.mark.parametrize(("type_", "expected"), [
+    ("Enum('has=1000', 'b')", "Delta(1),LZ4"),
+    ("Enum('can\\'t', 'b' = 128)", "Delta(2),LZ4"),
+    ("Enum('a,b' = -129, 'c')", "Delta(2),LZ4"),
+    ("Enum('a''b', 'c')", "Delta(1),LZ4"),
+])
+def test_implicit_enum_values_with_quoted_names(type_: str, expected: str) -> None:
+    assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == expected
+
+
+@pytest.mark.parametrize(("type_", "expression", "stored"), [
+    ('Tuple(Float32, Float64)', 'FPC(12, 4), DoubleDelta', 'CODEC(FPC(12, 4), DoubleDelta)'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 4), DoubleDelta, ZSTD', 'CODEC(FPC(12, 4), DoubleDelta, ZSTD)'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 8), DoubleDelta', 'CODEC(FPC(12, 8), DoubleDelta)'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 8), DoubleDelta, ZSTD', 'CODEC(FPC(12, 8), DoubleDelta, ZSTD)'),
+    ('Tuple(Float32, Float64)', 'DoubleDelta, ZSTD', 'CODEC(DoubleDelta, ZSTD)'),
+    ('Tuple(Float32, Float64)', 'DoubleDelta(4), ZSTD', 'CODEC(DoubleDelta, ZSTD(1))'),
+    ('Tuple(UInt32, UInt64)', 'DoubleDelta, ZSTD', 'CODEC(DoubleDelta, ZSTD)'),
+    ('Tuple(UInt32, UInt64)', 'DoubleDelta(4), ZSTD', 'CODEC(DoubleDelta, ZSTD(1))'),
+    ('Tuple(UInt32, UInt64)', 'T64, ZSTD', 'CODEC(T64, ZSTD)'),
+    ('Tuple(UInt32, UInt64)', "T64('byte'), ZSTD", "CODEC(T64('byte'), ZSTD)"),
+    ('Tuple(UInt32, UInt64)', 'GCD, ZSTD', 'CODEC(GCD, ZSTD(1))'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 4), ZSTD', 'CODEC(FPC(12), ZSTD(1))'),
+    ('Float64', 'FPC(12, 4), DoubleDelta, ZSTD', 'CODEC(FPC(12), DoubleDelta, ZSTD(1))'),
+    ('Tuple(UInt32, UInt64)', 'Delta, DoubleDelta(4)', 'CODEC(Delta, DoubleDelta(4))'),
+    ('Tuple(UInt32, UInt64)', 'Delta, DoubleDelta(8)', 'CODEC(Delta, DoubleDelta(8))'),
+    ("Enum('a' = 0x10)", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = 0x7f, 'b')", 'Delta, LZ4', 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = -0x80, 'b')", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = 1_0, 'b')", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = +0b1111111, 'b')", 'Delta, LZ4', 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = 0x0_7f, 'b')", 'Delta, LZ4', 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = -1_2_8, 'b')", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Tuple(Enum('a' = 0x10), Float64)", 'Gorilla', 'CODEC(Gorilla)'),
+    ('Tuple(String, Float64)', 'Gorilla(8)', 'CODEC(Gorilla(8))'),
+    ('Tuple(UUID, Float64)', 'Gorilla(8)', 'CODEC(Gorilla(8))'),
+])
+def test_opus_server_fingerprints(type_: str, expression: str, stored: str) -> None:
+    assert codec_fingerprint(codec_raw(expression), type_) == codec_fingerprint(parse_codec(stored), type_)
+
+
+def test_double_delta_retains_a_size_only_in_verbatim_chains() -> None:
+    type_ = "Tuple(UInt32, UInt64)"
+    assert codec_fingerprint(codec_raw("Delta, DoubleDelta(4)"), type_) == "Delta,DoubleDelta(4)"
+    assert not codecs_equal(codec_raw("Delta, DoubleDelta(4)"), codec_raw("Delta, DoubleDelta(8)"), type_)
+    assert codecs_equal(codec_raw("DoubleDelta(4), ZSTD"), codec_raw("DoubleDelta(8), ZSTD"), type_)
+    assert codecs_equal(codec_raw("Delta, DoubleDelta(4)"), codec_raw("Delta, DoubleDelta(8)"), "UInt64")
+    typed: CodecSpecInput = [{"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "DoubleDelta", "size": 8}]
+    assert render_codec(typed) == "CODEC(FPC(12, 4), DoubleDelta(8))"
+    assert codec_fingerprint(canonicalize_codec(typed), "Tuple(Float32, Float64)") == "FPC(12),DoubleDelta"

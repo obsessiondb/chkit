@@ -7,6 +7,11 @@ import re
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
+from chkit.core.column_default import (
+    literal_default_fingerprint,
+    parse_column_default,
+    render_default,
+)
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
@@ -38,6 +43,8 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
+    column_codec_fingerprint,
+    column_type_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
     render_alter_add_index,
@@ -56,10 +63,10 @@ from chkit.core.sql import (
     render_alter_remove_column_comment,
     render_alter_remove_column_expression,
     render_alter_reset_setting,
-    render_column_type,
     render_dictionary_sql,
     to_create_sql,
 )
+from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.validate import assert_valid_definitions
 
@@ -225,6 +232,11 @@ def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool
             (_join_clause(old.order_by), _join_clause(new.order_by)),
             (old.partition_by or "", new.partition_by or ""),
             (_join_clause(old.unique_key), _join_clause(new.unique_key)),
+            # ClickHouse refuses to change or reset these on an existing table (#466).
+            (
+                readonly_settings_fingerprint(old.settings),
+                readonly_settings_fingerprint(new.settings),
+            ),
         ]
     )
 
@@ -234,12 +246,22 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
 
     Compare what the DSL renders: inline ``Nullable(T)`` and ``nullable=True``
     are equivalent, while an additional or differently placed wrapper is not.
+    A literal default compares by the SQL it renders, so the literal ``7`` and
+    the expression ``'7'`` that pull reads back are the same default (#466).
+    An expression keeps its comments, which the snapshot records as written.
     """
     data = column.model_dump(mode="json", by_alias=False)
     data.pop("name", None)
     data.pop("renamed_from", None)
     data.pop("nullable", None)
-    data["type"] = render_column_type(column)
+    # ClickHouse stores ``Decimal(10,2)`` as ``Decimal(10, 2)`` (#466).
+    data["type"] = column_type_fingerprint(column)
+    if column.default is not None:
+        parsed = parse_column_default(column.default)
+        sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
+        data["default"] = literal_default_fingerprint(sql) or sql
+    # Codecs compare in the form ClickHouse stores them, like drift (#465).
+    data["codec"] = column_codec_fingerprint(column)
     return data
 
 
@@ -248,9 +270,15 @@ def _column_identity(column: ColumnDefinition) -> str:
     return json.dumps(_normalized_column(column), sort_keys=True, default=str)
 
 
-def _column_identity_without_codec(column: ColumnDefinition) -> str:
+def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bool) -> str:
+    """A column without its codec, and without its comment.
+
+    The comment is left out when the plan removes it in its own operation.
+    """
     data = _normalized_column(column)
     data.pop("codec", None)
+    if remove_comment:
+        data.pop("comment", None)
     return json.dumps(data, sort_keys=True, default=str)
 
 
@@ -266,12 +294,6 @@ def _indexes_equal(left: SkipIndexDefinition, right: SkipIndexDefinition) -> boo
     if left.type == "text" and right.type == "text":
         return text_index_fingerprint(left) == text_index_fingerprint(right)
     return _index_identity(left) == _index_identity(right)
-
-
-def _is_codec_removal(old: ColumnDefinition, new: ColumnDefinition) -> bool:
-    if old.codec is None or new.codec is not None:
-        return False
-    return _column_identity_without_codec(old) == _column_identity_without_codec(new)
 
 
 def _is_comment_only_change(old: ColumnDefinition, new: ColumnDefinition) -> bool:
@@ -439,7 +461,7 @@ def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
     return "danger" if disabled else "caution"
 
 
-def _diff_tables(  # noqa: PLR0915
+def _diff_tables(  # noqa: PLR0915 — mirrors TS diffTables
     old: TableDefinition, new: TableDefinition
 ) -> tuple[list[MigrationOperation], list[ColumnRenameSuggestion]]:
     if is_kafka_engine(old.engine) or is_kafka_engine(new.engine):
@@ -571,17 +593,31 @@ def _diff_tables(  # noqa: PLR0915
                     sql=render_alter_remove_column_comment(new, column_change.name),
                 )
             )
-        sql = (
-            render_alter_remove_codec(new, column_change.name)
-            if _is_codec_removal(column_change.old_item, column_change.new_item)
-            else render_alter_modify_column(new, column_change.new_item)
+        # MODIFY COLUMN without a codec keeps the stored one: a removal is always
+        # REMOVE CODEC, its own operation before any other change (#465).
+        codec_removed = (
+            column_change.old_item.codec is not None and column_change.new_item.codec is None
         )
+        if codec_removed:
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="caution",
+                    sql=render_alter_remove_codec(new, column_change.name),
+                )
+            )
+        # The removals above already reach the schema when nothing else changed.
+        if codec_removed and _column_identity_after_removals(
+            column_change.old_item, remove_comment
+        ) == _column_identity_after_removals(column_change.new_item, remove_comment):
+            continue
         ops.append(
             MigrationOperation(
                 type="alter_table_modify_column",
                 key=key,
                 risk="caution",
-                sql=sql,
+                sql=render_alter_modify_column(new, column_change.new_item),
                 warning=(
                     f"Changing the expression for {new.database}.{new.name}.{column_change.name} "
                     "does not rewrite stored historical values. "
@@ -861,10 +897,34 @@ def _dictionary_comparison_shape(
     definition: DictionaryDefinition, omit_source: bool
 ) -> dict[str, object]:
     shape = definition.model_dump(by_alias=True)
+    shape["lifetime"] = _dictionary_lifetime_fingerprint(definition.lifetime)
     shape.pop("comment", None)
     if omit_source:
         shape.pop("source", None)
     return shape
+
+
+_LIFETIME_RANGE_RE = re.compile(
+    r"^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$", re.IGNORECASE
+)
+
+
+def _dictionary_lifetime_fingerprint(lifetime: str) -> str:
+    """The stored form of a ``LIFETIME`` (TS ``dictionaryLifetimeFingerprint``).
+
+    ClickHouse stores ``LIFETIME(300)`` as ``LIFETIME(MIN 0 MAX 300)`` and
+    ``LIFETIME(MAX 300 MIN 10)`` as ``LIFETIME(MIN 10 MAX 300)``, so a
+    dictionary pulled back compares by that stored form.
+    """
+    trimmed = lifetime.strip()
+    if re.fullmatch(r"\d+", trimmed, re.ASCII):
+        return f"MIN 0 MAX {trimmed}"
+    match = _LIFETIME_RANGE_RE.match(trimmed)
+    if match is None:
+        return trimmed
+    if match.group(1) is not None:
+        return f"MIN {match.group(1)} MAX {match.group(2)}"
+    return f"MIN {match.group(4)} MAX {match.group(3)}"
 
 
 def _diff_dictionary(
@@ -887,10 +947,13 @@ def _diff_dictionary(
 
 
 def plan_diff(
-    old_definitions: list[SchemaDefinition], new_definitions: list[SchemaDefinition]
+    old_definitions: list[SchemaDefinition],
+    new_definitions: list[SchemaDefinition],
+    *,
+    index_granularity: int | None = None,
 ) -> MigrationPlan:
-    old_canonical = canonicalize_definitions(old_definitions)
-    new_canonical = canonicalize_definitions(new_definitions)
+    old_canonical = canonicalize_definitions(old_definitions, index_granularity=index_granularity)
+    new_canonical = canonicalize_definitions(new_definitions, index_granularity=index_granularity)
     assert_valid_definitions(new_canonical)
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)

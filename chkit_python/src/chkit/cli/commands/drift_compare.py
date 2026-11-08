@@ -22,8 +22,7 @@ from chkit.cli.commands.drift_diff import (
     diff_settings,
 )
 from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView, SchemaObjectKind
-from chkit.core.codec import codec_fingerprint
-from chkit.core.column_default import render_default
+from chkit.core.column_default import literal_default_fingerprint, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
 from chkit.core.identifier import unquote_identifiers
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
@@ -40,7 +39,11 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql import render_column_type, render_key_clause_columns
+from chkit.core.sql import (
+    column_codec_fingerprint,
+    column_type_fingerprint,
+    render_key_clause_columns,
+)
 from chkit.core.sql_lexer import JS_WHITESPACE_RUN, identifier_name, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import (
     is_synthetic_ephemeral_default,
@@ -48,6 +51,7 @@ from chkit.core.sql_normalizer import (
     normalize_sql_fragment,
     sql_expression_fingerprint,
 )
+from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY, with_default_index_granularity
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 from chkit.core.vector_index import render_vector_index_type
 
@@ -329,16 +333,17 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         ""
         if rendered is None
         or (column.default_kind == "EPHEMERAL" and is_synthetic_ephemeral_default(rendered))
-        else sql_expression_fingerprint(rendered)
+        else (literal_default_fingerprint(rendered) or sql_expression_fingerprint(rendered))
     )
 
-    # Introspection unwraps Nullable(T) into type=T plus nullable=True.
+    # Introspection unwraps Nullable(T) into type=T plus nullable=True, and
+    # ClickHouse spaces the type its own way (``Decimal(10, 2)``).
     parts = [
-        f"type={render_column_type(column)}",
+        f"type={column_type_fingerprint(column)}",
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
-        f"codec={codec_fingerprint(column.codec)}",
+        f"codec={column_codec_fingerprint(column)}",
     ]
     return "|".join(parts)
 
@@ -550,8 +555,12 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     expected: TableDefinition,
     actual: IntrospectedTable,
     canonicalizer: SqlCanonicalizer | None = None,
+    index_granularity: int = DEFAULT_INDEX_GRANULARITY,
 ) -> TableDriftDetail | None:
-    """Compare every shape-bearing field on the table. Returns None if identical."""
+    """Compare every shape-bearing field on the table. Returns None if identical.
+
+    ``index_granularity`` is ``clickhouse.indexGranularity``, for a live table
+    that does not show index_granularity."""
     column_diff = diff_by_name(
         expected.columns,
         [
@@ -578,7 +587,12 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
         }
         setting_diffs = diff_settings(expected_settings, actual_settings)
     else:
-        setting_diffs = diff_settings(expected.settings or {}, actual.settings)
+        actual_engine = actual.engine or expected.engine
+        setting_diffs = diff_settings(
+            expected.settings or {},
+            with_default_index_granularity(actual_engine, dict(actual.settings), index_granularity)
+            or {},
+        )
 
     expected_indexes = {
         idx.name: _normalize_index_shape(idx, canonicalizer) for idx in (expected.indexes or [])

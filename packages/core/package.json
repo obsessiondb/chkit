@@ -1,6 +1,6 @@
 {
   "name": "@chkit/core",
-  "version": "0.2.0-beta.12",
+  "version": "0.2.0-beta.14",
   "description": "Schema DSL, config, diff engine, and migration planner for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -34,6 +34,11 @@
       "source": "./src/schema-loader.ts",
       "types": "./dist/schema-loader.d.ts",
       "default": "./dist/schema-loader.js"
+    },
+    "./loader": {
+      "source": "./src/ts-import.ts",
+      "types": "./dist/ts-import.d.ts",
+      "default": "./dist/ts-import.js"
     }
   },
   "files": [

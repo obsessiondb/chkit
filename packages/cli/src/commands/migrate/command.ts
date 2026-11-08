@@ -2,8 +2,8 @@ import { mkdir } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import process from 'node:process'
 
-import type { ClickHouseExecutor, ClickHouseSettings } from '@chkit/clickhouse'
-import type { ResolvedChxConfig } from '@chkit/core'
+import { assertServerIndexGranularity, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
+import { configuredIndexGranularity, type ResolvedChxConfig } from '@chkit/core'
 
 import {
   defineFlags,
@@ -153,6 +153,9 @@ const TERMINAL_PROMPT: AbandonPrompt = {
 async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | number> {
   const ctx = await prepareMigration(runCtx)
   if (ctx.abandonTarget !== undefined) return runAbandon(ctx, ctx.abandonTarget)
+  // A migration generated for another index_granularity default would create
+  // tables unlike the ones chkit planned for (#466).
+  await assertServerIndexGranularity(ctx.db, configuredIndexGranularity(ctx.config))
 
   const checksumExit = await runChecksumGate(ctx)
   if (checksumExit !== undefined) return checksumExit
@@ -200,7 +203,9 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const journalStore = createJournalStore(db, config.clickhouse?.cluster)
   // --abandon only changes the journal and rejects --table, so it does not
   // read snapshot.json: a conflicted snapshot cannot block it.
-  const snapshot = abandonTarget === undefined ? await readSnapshot(metaDir) : null
+  const snapshot = abandonTarget === undefined
+    ? await readSnapshot(metaDir, { indexGranularity: configuredIndexGranularity(config) })
+    : null
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
   const mode: MigrateMode = executeRequested ? 'execute' : 'plan'
 

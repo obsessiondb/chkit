@@ -2,6 +2,7 @@ import { describe, test } from 'bun:test'
 
 import { createLiveExecutor, createStatelessLiveExecutor, getLiveEnv } from './e2e-testkit.js'
 import {
+  GRANULARITY_CHANGE,
   runBackfillScenario,
   runKeepScenario,
   runRetryScenario,
@@ -43,5 +44,9 @@ describe('generate --cutover e2e (#202)', () => {
 
   test('resumes after a failure at every step and never replays the swap', async () => {
     await runRetryScenario(liveTarget(), 'cutover_retry')
+  }, 1_800_000)
+
+  test('cuts over an index_granularity change, resuming after a failure at every step (#511)', async () => {
+    await runRetryScenario(liveTarget(), 'cutover_granularity', GRANULARITY_CHANGE)
   }, 1_800_000)
 })

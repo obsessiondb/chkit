@@ -20,6 +20,7 @@ obsessiondb plugin port.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
@@ -44,6 +45,7 @@ from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.create_dictionary_parser import (
     parse_dictionary_attributes_from_create_dictionary_query,
     parse_dictionary_primary_key_from_create_dictionary_query,
@@ -53,16 +55,22 @@ from chkit.clickhouse.create_dictionary_parser import (
     parse_lifetime_from_create_dictionary_query,
     parse_source_from_create_dictionary_query,
 )
+from chkit.clickhouse.index_granularity import (
+    IndexGranularityMismatchError,
+    assert_server_index_granularity,
+)
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
     infer_schema_kind_from_engine,
     list_schema_objects,
     list_table_details,
 )
+from chkit.core.canonical import canonicalize_definitions
 from chkit.core.kafka import is_kafka_engine, parse_kafka_settings
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ChxConfigEnv,
+    ChxResolvedConfig,
     DictionaryDefinition,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
@@ -79,6 +87,7 @@ from chkit.core.model import (
     TableDefinition,
     TableRef,
     ViewDefinition,
+    configured_index_granularity,
     dictionary,
     materialized_view,
     table,
@@ -181,6 +190,14 @@ def _is_obsessiondb_metadata_table(item: object) -> bool:
     ) in _OBSESSIONDB_METADATA_TABLES
 
 
+def _is_journal_table(item: object) -> bool:
+    # chkit's migration journal (CHKIT_JOURNAL_TABLE, ``_chkit_migrations`` by
+    # default) is chkit's own bookkeeping, not part of the user's schema (#466).
+    kind = getattr(item, "kind", None)
+    journal = (os.environ.get("CHKIT_JOURNAL_TABLE") or "").strip() or "_chkit_migrations"
+    return (kind is None or kind == "table") and getattr(item, "name", None) == journal
+
+
 def _is_materialized_view_inner_table(item: object) -> bool:
     """The table that stores the rows of a materialized view without ``TO``.
 
@@ -197,8 +214,10 @@ def _is_materialized_view_inner_table(item: object) -> bool:
 
 
 def _is_pulled_object(item: object) -> bool:
-    return not _is_obsessiondb_metadata_table(item) and not _is_materialized_view_inner_table(
-        item
+    return (
+        not _is_obsessiondb_metadata_table(item)
+        and not _is_journal_table(item)
+        and not _is_materialized_view_inner_table(item)
     )
 
 
@@ -223,6 +242,22 @@ def _refresh_shape_to_model(
         append=shape.append or None,
         empty=shape.empty or None,
     )
+
+
+def _assert_index_granularity(
+    client: ClickHouseClient, config: ChxResolvedConfig, *, output_json: bool
+) -> None:
+    """Stop when the server's MergeTree index_granularity default is not
+    ``clickhouse.indexGranularity``, reported as TS pull reports an error
+    (``wrapPluginRun``): on stdout, exit 1."""
+    try:
+        assert_server_index_granularity(client, configured_index_granularity(config))
+    except IndexGranularityMismatchError as error:
+        if output_json:
+            print_output({"ok": False, "command": "schema", "error": str(error)}, json_mode=True)
+        else:
+            typer.echo(f"Pull schema failed: {error}")
+        raise typer.Exit(code=1) from error
 
 
 def _pull_definitions(
@@ -564,6 +599,10 @@ def run(  # noqa: PLR0912, PLR0917
         definitions = list(custom)
     else:
         with open_client(executor, config.clickhouse) as client:
+            # The pulled tables are compared later against definitions
+            # canonicalized with clickhouse.indexGranularity, which must be this
+            # server's default. A custom introspector reads elsewhere.
+            _assert_index_granularity(client, config, output_json=output_json)
             # Capture objects so we can summarize what got skipped, even when
             # --database was passed explicitly.
             raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
@@ -572,7 +611,18 @@ def run(  # noqa: PLR0912, PLR0917
             definitions, inner_storage_warnings = _pull_definitions(client, selected)
     definitions = [d for d in definitions if _is_pulled_object(d)]
 
-    content = render_schema_file(definitions)
+    # ObsessionDB reports the engine as Shared*, which rendering canonicalizes away.
+    shared_tables = frozenset(
+        f"{d.database}.{d.name}"
+        for d in definitions
+        if isinstance(d, TableDefinition) and d.engine.startswith("Shared")
+    )
+    # A table that does not declare index_granularity gets the configured
+    # default, as in TS, not the 8192 rendering would assume (#466).
+    definitions = canonicalize_definitions(
+        definitions, index_granularity=configured_index_granularity(config)
+    )
+    content = render_schema_file(definitions, shared_tables=shared_tables)
     out_file_abs = (Path.cwd() / out_file).resolve()
 
     if not dryrun:

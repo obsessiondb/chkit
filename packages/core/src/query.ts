@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { parseJsonEachRow } from './exact-json.js'
 import { quoteIdentifier } from './identifier.js'
 import { splitTopLevelComma } from './key-clause.js'
 import type { DictionaryDefinition, MaterializedViewDefinition, TableDefinition, ViewDefinition } from './model-types.js'
@@ -15,7 +16,12 @@ export interface QueryClient {
     clickhouse_settings?: object
     query_id?: string
     abort_signal?: AbortSignal
-  }): Promise<{ json(): Promise<unknown> }>
+  }): Promise<QueryResult>
+}
+
+/** The part of a client's query result that queries read. */
+export interface QueryResult {
+  text(): Promise<string>
 }
 
 export interface QueryOptions<R extends z.ZodType | undefined = undefined> {
@@ -27,12 +33,19 @@ export interface QueryOptions<R extends z.ZodType | undefined = undefined> {
   returns?: R
 }
 
+export interface CreateQueryOptions {
+  /** Sends `log_comment` for named queries. Defaults to true; a `readonly = 1` user needs false. */
+  logComment?: boolean
+}
+
 export interface QueryCallOptions {
   clickhouse_settings?: Record<string, unknown>
   query_id?: string
   abort_signal?: AbortSignal
   /** Runs the query on this client instead of the one bound with `createQuery`. */
   client?: QueryClient
+  /** Overrides `logComment` from `createQuery` for this call. */
+  logComment?: boolean
 }
 
 /** A query definition. Interpolate it into another query to use it as a subquery. */
@@ -46,10 +59,17 @@ export interface QueryDefinition<S extends z.ZodRawShape = z.ZodRawShape> {
 }
 
 /** A query you call with its params; it validates them through `params` and returns the rows. */
-export interface Query<S extends z.ZodRawShape = z.ZodRawShape, Row = Record<string, unknown>> extends QueryDefinition<S> {
+export interface Query<S extends z.ZodRawShape = z.ZodRawShape, Row = Record<string, unknown>, Raw = QueryResult>
+  extends QueryDefinition<S> {
   (...args: QueryArgs<S>): Promise<Row[]>
   /** Types the rows as `R` without parsing them. */
-  returns<R>(): Query<S, R>
+  returns<R>(): Query<S, R, Raw>
+  /** Runs the query like a call, but returns the client's result unparsed, e.g. to `stream()` a bulk read. */
+  raw<C extends QueryClient>(
+    params: QueryArgs<S>[0],
+    options: QueryCallOptions & { client: C },
+  ): Promise<ClientResult<C>>
+  raw(...args: QueryArgs<S>): Promise<Raw>
 }
 
 /** A chkit table, view, materialized view or dictionary. */
@@ -61,19 +81,21 @@ export type QueryObjectRef = Pick<
 /** What a query template accepts: named params, queries and chkit objects. */
 export type QueryInterpolation = NamedSchema | QueryDefinition | QueryObjectRef
 
-type QueryTemplate<Row> = <const V extends readonly QueryInterpolation[]>(
+type QueryTemplate<Row, Raw> = <const V extends readonly QueryInterpolation[]>(
   strings: TemplateStringsArray,
   ...values: V
-) => Query<ParamsShape<V>, Row>
+) => Query<ParamsShape<V>, Row, Raw>
 
-export interface QueryTag extends QueryTemplate<Record<string, unknown>> {
-  <R extends z.ZodType | undefined = undefined>(options: QueryOptions<R>): QueryTemplate<RowOf<R>>
+/** `Raw` is what `.raw()` returns without a `client` option: the bound client's own query result. */
+export interface QueryTag<Raw = QueryResult> extends QueryTemplate<Record<string, unknown>, Raw> {
+  <R extends z.ZodType | undefined = undefined>(options: QueryOptions<R>): QueryTemplate<RowOf<R>, Raw>
 }
 
 type QueryArgs<S extends z.ZodRawShape> = Record<never, never> extends z.input<z.ZodObject<S>>
   ? [params?: z.input<z.ZodObject<S>>, options?: QueryCallOptions]
   : [params: z.input<z.ZodObject<S>>, options?: QueryCallOptions]
 type RowOf<R> = R extends z.ZodType ? z.output<R> : Record<string, unknown>
+type ClientResult<C extends QueryClient> = Awaited<ReturnType<C['query']>>
 
 interface Wrapping<T> {
   readonly _zod: { readonly def: { readonly innerType: T } }
@@ -98,7 +120,10 @@ type Simplify<T> = { [K in keyof T]: T[K] } & {}
 type AsShape<T> = T extends z.ZodRawShape ? T : never
 type ParamsShape<V extends readonly unknown[]> = AsShape<Simplify<UnionToIntersection<ShapeOf<V[number]> | EmptyShape>>>
 
-type ClientResolver = () => Promise<QueryClient>
+interface Binding {
+  readonly resolveClient: () => Promise<QueryClient>
+  readonly logComment: boolean
+}
 
 interface ParamSpec {
   readonly schemas: readonly z.ZodType[]
@@ -107,6 +132,7 @@ interface ParamSpec {
 }
 
 const PARAM_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+const READONLY_LOG_COMMENT = /Cannot modify 'log_comment' setting in readonly mode/
 const OBJECT_KINDS = new Set<unknown>(['table', 'view', 'materialized_view', 'dictionary'])
 const paramSpecs = new WeakMap<object, ReadonlyMap<string, ParamSpec>>()
 
@@ -115,15 +141,19 @@ const paramSpecs = new WeakMap<object, ReadonlyMap<string, ParamSpec>>()
  * one, sync or async, which runs on the first call and is cached. A function
  * that throws runs again on the next call.
  */
-export function createQuery(source: QueryClient | (() => QueryClient | Promise<QueryClient>)): QueryTag {
+export function createQuery<C extends QueryClient>(
+  source: C | (() => C | Promise<C>),
+  options: CreateQueryOptions = {},
+): QueryTag<ClientResult<C>> {
   let pending: Promise<QueryClient> | undefined
-  return queryTag(() => {
+  const resolveClient = () => {
     pending ??= Promise.resolve(typeof source === 'function' ? source() : source).catch((error: unknown) => {
       pending = undefined
       throw error
     })
     return pending
-  })
+  }
+  return queryTag({ resolveClient, logComment: options.logComment ?? true }) as QueryTag<ClientResult<C>>
 }
 
 /**
@@ -134,11 +164,10 @@ export function createQuery(source: QueryClient | (() => QueryClient | Promise<Q
  */
 export const query = queryTag(undefined)
 
-function queryTag(resolveClient: ClientResolver | undefined): QueryTag {
+function queryTag(binding: Binding | undefined): QueryTag {
   return ((first: TemplateStringsArray | QueryOptions<z.ZodType | undefined>, ...values: unknown[]) => {
-    if (isTemplate(first)) return defineQuery(first, values, {}, resolveClient)
-    return (strings: TemplateStringsArray, ...templateValues: unknown[]) =>
-      defineQuery(strings, templateValues, first, resolveClient)
+    if (isTemplate(first)) return defineQuery(first, values, {}, binding)
+    return (strings: TemplateStringsArray, ...templateValues: unknown[]) => defineQuery(strings, templateValues, first, binding)
   }) as QueryTag
 }
 
@@ -146,7 +175,7 @@ function defineQuery(
   strings: TemplateStringsArray,
   values: readonly unknown[],
   options: QueryOptions<z.ZodType | undefined>,
-  resolveClient: ClientResolver | undefined,
+  binding: Binding | undefined,
 ): Query {
   const label = options.name ? `query "${options.name}"` : 'query'
   const specs = new Map<string, ParamSpec>()
@@ -201,23 +230,34 @@ function defineQuery(
     Object.fromEntries([...specs].map(([name, spec]) => [name, spec.schemas.reduce((all, schema) => z.intersection(all, schema))])),
   )
   const version = options.version ?? 1
-  const logComment = options.name ? { log_comment: JSON.stringify({ query: options.name, version }) } : {}
+  const logComment = JSON.stringify({ query: options.name, version })
 
-  const run = async (input: unknown = {}, callOptions: QueryCallOptions = {}) => {
+  const raw = async (input: unknown = {}, callOptions: QueryCallOptions = {}) => {
     const parsed = params.parse(input)
-    const client = callOptions.client ?? (await resolveClient?.())
+    const client = callOptions.client ?? (await binding?.resolveClient())
     if (!client) throw new Error(`${label}: no client; bind one with createQuery(client) or pass { client }`)
-    const result = await client.query({
-      query: sql,
-      format: 'JSONEachRow',
-      query_params: Object.fromEntries(
-        [...specs].map(([name, spec]) => [name, serializeParam(parsed[name] ?? null, spec.clickhouseType)]),
-      ),
-      clickhouse_settings: { ...logComment, ...callOptions.clickhouse_settings },
-      query_id: callOptions.query_id,
-      abort_signal: callOptions.abort_signal,
-    })
-    const rows = await result.json()
+    const comment = Boolean(options.name) && (callOptions.logComment ?? binding?.logComment ?? true)
+    return client
+      .query({
+        query: sql,
+        format: 'JSONEachRow',
+        query_params: Object.fromEntries(
+          [...specs].map(([name, spec]) => [name, serializeParam(parsed[name] ?? null, spec.clickhouseType)]),
+        ),
+        clickhouse_settings: { ...(comment ? { log_comment: logComment } : {}), ...callOptions.clickhouse_settings },
+        query_id: callOptions.query_id,
+        abort_signal: callOptions.abort_signal,
+      })
+      .catch((error: unknown) => {
+        if (!comment || !READONLY_LOG_COMMENT.test(error instanceof Error ? error.message : String(error))) throw error
+        throw new Error(
+          `${label}: ClickHouse refused log_comment because the user has readonly = 1. Give the user readonly = 2 or plain GRANT SELECT, or set logComment: false`,
+          { cause: error },
+        )
+      })
+  }
+  const run = async (input?: unknown, callOptions?: QueryCallOptions) => {
+    const rows = parseJsonEachRow(await (await raw(input, callOptions)).text())
     return options.returns ? z.array(options.returns).parse(rows) : rows
   }
   Object.defineProperties(run, {
@@ -226,6 +266,7 @@ function defineQuery(
     sql: { value: sql, enumerable: true },
     params: { value: params, enumerable: true },
     returns: { value: () => run },
+    raw: { value: raw },
   })
   paramSpecs.set(run, specs)
   return Object.freeze(run) as unknown as Query

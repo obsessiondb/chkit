@@ -134,11 +134,16 @@ class SnapshotReadError(RuntimeError):
     """Raised when ``snapshot.json`` exists but cannot be read as JSON."""
 
 
-def read_snapshot(meta_dir: Path) -> Snapshot | None:
+def read_snapshot(meta_dir: Path, *, index_granularity: int | None = None) -> Snapshot | None:
+    """``index_granularity`` is ``clickhouse.indexGranularity``: a snapshot an
+    older chkit wrote has no index_granularity for a MergeTree table that does
+    not declare it, and gets the server default."""
     snapshot_path = meta_dir / "snapshot.json"
     if not snapshot_path.exists():
         return None
-    parsed = parse_snapshot_document(snapshot_path.read_text(encoding="utf-8"))
+    parsed = parse_snapshot_document(
+        snapshot_path.read_text(encoding="utf-8"), index_granularity=index_granularity
+    )
     if isinstance(parsed, ReadableSnapshotDocument):
         return parsed.snapshot
     raise SnapshotReadError(_describe_unreadable_snapshot(snapshot_path, parsed.reason))

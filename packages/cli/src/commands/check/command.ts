@@ -1,6 +1,7 @@
 import { mkdir } from 'node:fs/promises'
 
-import { collectDefinitionWarnings } from '@chkit/core'
+import { assertServerIndexGranularity } from '@chkit/clickhouse'
+import { collectDefinitionWarnings, configuredIndexGranularity } from '@chkit/core'
 
 import { typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
@@ -40,6 +41,7 @@ export const checkCommand: ChxPluginCommand = {
     }
     const db = pluginContext.executor
     const database = config.clickhouse?.database
+    await assertServerIndexGranularity(db, configuredIndexGranularity(config))
 
     const journalStore = createJournalStore(db, config.clickhouse?.cluster)
     const files = await listMigrations(migrationsDir)
@@ -48,7 +50,7 @@ export const checkCommand: ChxPluginCommand = {
     const appliedNames = new Set(journal.applied.map((entry) => entry.name))
     const pending = files.filter((file) => !appliedNames.has(file))
     const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
-    const snapshot = await readSnapshot(metaDir)
+    const snapshot = await readSnapshot(metaDir, { indexGranularity: configuredIndexGranularity(config) })
     const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
 
     if (tableScope.enabled && tableScope.matchCount === 0) {

@@ -11,7 +11,7 @@ import type {
   TableDefinition,
   ViewDefinition,
 } from './model.js'
-import { renderCodec } from './codec.js'
+import { codecFingerprint, renderCodec } from './codec.js'
 import { renderDefault } from './column-default.js'
 import { constraintExpression, constraintKind, renderConstraint } from './constraint.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
@@ -19,7 +19,7 @@ import { isMergeTreeEngine, supportsSortOrder } from './engine.js'
 import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
 import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
-import { normalizeSQLFragment } from './sql-normalizer.js'
+import { normalizeSQLFragment, sqlExpressionFingerprint } from './sql-normalizer.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { renderVectorIndexType, vectorIndexGranularity } from './vector-index.js'
@@ -45,6 +45,21 @@ function renderColumn(col: ColumnDefinition): string {
 export function renderColumnType(column: Pick<ColumnDefinition, 'type' | 'nullable'>): string {
   const type = String(column.type).trim()
   return column.nullable ? `Nullable(${type})` : type
+}
+
+/** A column codec compared using its rendered type, including Nullable. */
+export function columnCodecFingerprint(column: Pick<ColumnDefinition, 'type' | 'nullable' | 'codec'>): string {
+  return codecFingerprint(column.codec, renderColumnType(column))
+}
+
+/**
+ * A column type in comparison form: its tokens, so `Decimal(10,2)` equals the
+ * `Decimal(10, 2)` ClickHouse stores, while text inside quotes (an Enum label,
+ * a time zone) is compared as written. Only for comparing: chkit renders and
+ * stores the type as declared.
+ */
+export function columnTypeFingerprint(column: Pick<ColumnDefinition, 'type' | 'nullable'>): string {
+  return sqlExpressionFingerprint(renderColumnType(column))
 }
 
 export function renderKeyClauseColumns(

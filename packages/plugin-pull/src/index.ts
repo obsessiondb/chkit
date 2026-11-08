@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 
 import { z } from 'zod'
 import {
+  assertServerIndexGranularity,
   type ClickHouseExecutor,
   createClickHouseExecutor,
   type IntrospectedTable,
@@ -11,6 +12,7 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  configuredIndexGranularity,
   type ColumnDefaultValue,
   createPluginRunner,
   defineFlags,
@@ -298,6 +300,13 @@ function isObsessionDbMetadataTable(object: { kind?: string; name: string }): bo
   return isTable && OBSESSIONDB_METADATA_TABLES.has(object.name)
 }
 
+// chkit's migration journal (CHKIT_JOURNAL_TABLE, `_chkit_migrations` by
+// default) is chkit's own bookkeeping, not part of the user's schema (#466).
+function isJournalTable(object: { kind?: string; name: string }): boolean {
+  const isTable = object.kind == null || object.kind === 'table'
+  return isTable && object.name === (process.env.CHKIT_JOURNAL_TABLE?.trim() || '_chkit_migrations')
+}
+
 // The table that stores the rows of a materialized view without `TO`
 // (`.inner_id.<uuid>`, or `.inner.<view>` in an Ordinary database). It belongs
 // to the view, which pull skips, so it is not a user table either.
@@ -307,7 +316,7 @@ function isMaterializedViewInnerTable(object: { kind?: string; name: string }): 
 }
 
 function isPulledObject(object: { kind?: string; name: string }): boolean {
-  return !isObsessionDbMetadataTable(object) && !isMaterializedViewInnerTable(object)
+  return !isObsessionDbMetadataTable(object) && !isJournalTable(object) && !isMaterializedViewInnerTable(object)
 }
 
 async function pullSchema(input: {
@@ -333,6 +342,11 @@ async function pullSchema(input: {
       'pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service (chkit obsessiondb service select)'
     )
   }
+
+  // The pulled tables are compared later against definitions canonicalized
+  // with clickhouse.indexGranularity, which must be this server's default. A
+  // custom introspector reads elsewhere, so ClickHouse is not asked.
+  if (db && !customIntrospector) await assertServerIndexGranularity(db, configuredIndexGranularity(input.config))
 
   const outFile = resolve(process.cwd(), input.options.outFile)
   let objects: Array<{
@@ -360,8 +374,17 @@ async function pullSchema(input: {
     : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
   const introspected = introspection.objects.filter(isPulledObject)
 
-  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
-  const content = renderSchemaFile(definitions)
+  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition), {
+    indexGranularity: configuredIndexGranularity(input.config),
+  })
+  // ObsessionDB reports the engine as Shared*, which canonicalization strips.
+  const sharedTables = new Set(
+    introspected
+      .filter((object) => !('kind' in object) || object.kind === 'table')
+      .filter((object) => ((object as { engine?: string }).engine ?? '').startsWith('Shared'))
+      .map((object) => `${object.database}.${object.name}`)
+  )
+  const content = renderSchemaFile(definitions, { sharedTables })
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
   const warnings = [
