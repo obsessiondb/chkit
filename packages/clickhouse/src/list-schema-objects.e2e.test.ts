@@ -18,6 +18,7 @@ describe('@chkit/clickhouse listSchemaObjects e2e', () => {
         )
       }
       await waitForTable(executor, database, kept)
+      await waitForTable(executor, database, hidden)
       const names = (await executor.listSchemaObjects()).map((object) => object.name)
       expect(names).toContain(kept)
       expect(names).not.toContain(hidden)
