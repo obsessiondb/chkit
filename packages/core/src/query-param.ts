@@ -30,6 +30,7 @@ const NUMBER_TYPES: Record<string, string> = {
   float64: 'Float64',
 }
 const BIGINT_TYPES: Record<string, string> = { int64: 'Int64', uint64: 'UInt64' }
+const NOT_NULLABLE = /^(Array|Map|Tuple|LowCardinality)\(/
 
 /**
  * Names a query param. `p(name, schema)` names any Zod schema; the helpers
@@ -153,5 +154,9 @@ function metaString(schema: z.core.$ZodType, key: 'clickhouse' | 'param'): strin
 }
 
 function nullable(type: string): string {
-  return type.startsWith('Nullable(') ? type : `Nullable(${type})`
+  if (type.startsWith('Nullable(')) return type
+  if (NOT_NULLABLE.test(type)) {
+    throw new Error(`ClickHouse has no Nullable(${type}); use .default() instead of .optional() or .nullable()`)
+  }
+  return `Nullable(${type})`
 }

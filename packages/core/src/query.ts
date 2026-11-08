@@ -3,6 +3,7 @@ import { z } from 'zod'
 import { quoteIdentifier } from './identifier.js'
 import type { DictionaryDefinition, MaterializedViewDefinition, TableDefinition, ViewDefinition } from './model-types.js'
 import { clickhouseType, type NamedParam, paramDefault, paramName } from './query-param.js'
+import { tokenizeSQL } from './sql-lexer.js'
 
 export interface QueryOptions {
   /** Names the query in `system.query_log` through `log_comment`. */
@@ -102,18 +103,27 @@ function defineQuery(strings: TemplateStringsArray, values: readonly unknown[], 
     specs.set(name, { ...seen, schemas: [...new Set([...seen.schemas, ...spec.schemas])] })
   }
 
+  const paramType = (name: string, schema: z.ZodType): string => {
+    try {
+      return clickhouseType(schema)
+    } catch (error) {
+      throw new Error(`${label}: param "${name}": ${error instanceof Error ? error.message : String(error)}`, { cause: error })
+    }
+  }
+
   const render = (value: unknown): string => {
     const parts = typeof value === 'object' && value !== null ? paramSpecs.get(value) : undefined
     if (parts) {
       for (const [name, spec] of parts) addParam(name, spec)
-      return `(${(value as QueryDefinition).sql})`
+      const inner = (value as QueryDefinition).sql
+      return tokenizeSQL(inner).at(-1)?.kind === 'line_comment' ? `(${inner}\n)` : `(${inner})`
     }
     if (isObjectRef(value)) return `${quoteIdentifier(value.database)}.${quoteIdentifier(value.name)}`
     if (value instanceof z.ZodType) {
       const name = paramName(value)
       if (!name) throw new Error(`${label}: a param needs a name, e.g. p.string('city') or p('tags', schema)`)
       if (!PARAM_NAME.test(name)) throw new Error(`${label}: param name "${name}" must match ${PARAM_NAME.source}`)
-      const type = clickhouseType(value)
+      const type = paramType(name, value)
       addParam(name, { schemas: [value], clickhouseType: type, defaultValue: paramDefault(value) })
       return `{${name}:${type}}`
     }

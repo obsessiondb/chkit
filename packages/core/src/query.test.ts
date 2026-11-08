@@ -30,6 +30,12 @@ describe('query definitions', () => {
     expect(topCities.params.parse({ city: 'Berlin' })).toEqual({ city: 'Berlin', limit: 10 })
   })
 
+  test('a subquery ending in a line comment is closed on the next line', () => {
+    const commented = query`SELECT city FROM ${events} -- every city`
+
+    expect(query`SELECT * FROM ${commented} LIMIT 1`.sql).toBe('SELECT * FROM (SELECT city FROM `app`.`events` -- every city\n) LIMIT 1')
+  })
+
   test('a param used twice renders the same placeholder', () => {
     const since = p.dateTime64('since')
     const busy = query`
@@ -114,5 +120,8 @@ describe('query definitions', () => {
     expect(() => query`SELECT ${p.string() as unknown as QueryInterpolation}`).toThrow('a param needs a name')
     expect(() => query`SELECT ${'Berlin' as unknown as QueryInterpolation}`).toThrow('only p params, queries and chkit')
     expect(() => query`SELECT ${p.string('city name')}`).toThrow('param name "city name" must match')
+    expect(() => query`SELECT ${p('tags', z.array(z.string()).optional())}`).toThrow(
+      'query: param "tags": ClickHouse has no Nullable(Array(String)); use .default() instead of .optional() or .nullable()',
+    )
   })
 })
