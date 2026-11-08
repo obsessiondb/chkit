@@ -6,6 +6,25 @@ function resolveSecure(url: string, secure?: boolean): boolean | undefined {
   return resolveConfig({ schema: 's', clickhouse: { url, secure } }).clickhouse?.secure
 }
 
+describe('resolveConfig directories', () => {
+  test('defaults migrationsDir and metaDir to normalized paths under outDir', () => {
+    const dirs = (outDir?: string) => {
+      const resolved = resolveConfig({ schema: 's', outDir })
+      return [resolved.migrationsDir, resolved.metaDir]
+    }
+    expect(dirs()).toEqual(['chkit/migrations', 'chkit/meta'])
+    expect(dirs('./db//chkit/')).toEqual(['db/chkit/migrations', 'db/chkit/meta'])
+    expect(dirs('../shared/./chkit')).toEqual(['../shared/chkit/migrations', '../shared/chkit/meta'])
+    expect(dirs('/srv/chkit')).toEqual(['/srv/chkit/migrations', '/srv/chkit/meta'])
+    expect(dirs('//server/share/chkit')).toEqual(['//server/share/chkit/migrations', '//server/share/chkit/meta'])
+  })
+
+  test('keeps explicit migrationsDir and metaDir as given', () => {
+    const resolved = resolveConfig({ schema: 's', migrationsDir: './sql/', metaDir: './state' })
+    expect([resolved.migrationsDir, resolved.metaDir]).toEqual(['./sql/', './state'])
+  })
+})
+
 describe('resolveConfig clickhouse.secure', () => {
   test('follows the URL scheme when secure is unset', () => {
     expect(resolveSecure('https://host')).toBe(true)

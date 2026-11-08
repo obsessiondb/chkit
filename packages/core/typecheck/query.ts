@@ -1,6 +1,7 @@
+import { createClient } from '@clickhouse/client'
 import { z } from 'zod'
 
-import { p, query, t, table } from '../src/index.js'
+import { createQuery, p, query as unboundQuery, t, table } from '../src/index.js'
 
 // Compile-time checks of the query API's inference; `bun run typecheck` runs them.
 // Queries are exported so declaration emit is checked too.
@@ -11,6 +12,12 @@ type Output<Q extends { params: z.ZodType }> = z.output<Q['params']>
 function assertType<T extends true>(): T | undefined {
   return undefined
 }
+
+const client = createClient({ url: 'http://localhost:8123' })
+export const query = createQuery(client)
+export const lazyQuery = createQuery(async () => createClient({ url: 'http://localhost:8123' }))
+export const syncQuery = createQuery(() => client)
+export const quietQuery = createQuery(client, { logComment: false })
 
 export const events = table({
   database: 'app',
@@ -26,7 +33,7 @@ export const events = table({
 })
 
 export const cityEvents = query`SELECT * FROM ${events} WHERE city = ${p.string('city')}`
-export const topCities = query({ name: 'top_cities', version: 2 })`
+export const topCities = query({ name: 'top_cities', version: 2, returns: z.object({ city: z.string(), n: z.number() }) })`
   SELECT city, count() AS n FROM ${cityEvents} GROUP BY city LIMIT ${p.uint32('limit').default(10)}
 `
 assertType<Equal<Input<typeof topCities>, { city: string; limit?: number | undefined }>>()
@@ -70,16 +77,6 @@ assertType<
     }
   >
 >()
-
-export const inputs: Input<typeof topCities>[] = [
-  { city: 'Berlin' },
-  // @ts-expect-error city is required
-  { limit: 3 },
-  // @ts-expect-error limit is a number
-  { city: 'Berlin', limit: '3' },
-  // @ts-expect-error unknown param
-  { city: 'Berlin', nope: 1 },
-]
 
 // t types and table columns infer their values.
 export const typed = query`
@@ -128,4 +125,34 @@ const rejected = [
   // @ts-expect-error a plain value
   query`SELECT ${'Berlin'}`,
 ]
+
+export async function calls() {
+  const rows = await topCities({ city: 'Berlin' })
+  assertType<Equal<typeof rows, { city: string; n: number }[]>>()
+  const untyped = await cityEvents({ city: 'Berlin' })
+  assertType<Equal<typeof untyped, Record<string, unknown>[]>>()
+  const typed = await noParams.returns<{ one: number }>()()
+  assertType<Equal<typeof typed, { one: number }[]>>()
+
+  await topCities(
+    { city: 'Berlin', limit: 3 },
+    { query_id: 'q1', clickhouse_settings: { max_threads: 2 }, abort_signal: new AbortController().signal, client },
+  )
+  await unboundQuery`SELECT ${p.string('city')}`({ city: 'Berlin' }, { client })
+  await noParams()
+  await noParams({}, { logComment: false })
+  // @ts-expect-error logComment is a boolean
+  createQuery(client, { logComment: 'no' })
+  // @ts-expect-error city is required
+  await topCities({ limit: 3 })
+  // @ts-expect-error limit is a number
+  await topCities({ city: 'Berlin', limit: '3' })
+  // @ts-expect-error unknown param
+  await topCities({ city: 'Berlin', nope: 1 })
+  // @ts-expect-error params are required
+  await busy()
+  // @ts-expect-error unknown call option
+  await noParams({}, { nope: true })
+}
+
 void rejected

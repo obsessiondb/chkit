@@ -21,6 +21,7 @@
     "directory": "packages/core"
   },
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -33,6 +34,11 @@
       "source": "./src/schema-loader.ts",
       "types": "./dist/schema-loader.d.ts",
       "default": "./dist/schema-loader.js"
+    },
+    "./loader": {
+      "source": "./src/ts-import.ts",
+      "types": "./dist/ts-import.d.ts",
+      "default": "./dist/ts-import.js"
     }
   },
   "files": [

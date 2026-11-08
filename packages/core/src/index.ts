@@ -90,11 +90,15 @@ export {
 export { assertValidDefinitions, collectDefinitionWarnings, validateDefinitions } from './validate.js'
 export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plugin-error.js'
 export { splitSqlStatements, extractExecutableStatements } from './sql-splitter.js'
-export { importModuleFile } from './ts-import.js'
 export { t } from './clickhouse-type.js'
 export { p, type NamedParam } from './query-param.js'
 export {
+  createQuery,
   query,
+  type CreateQueryOptions,
+  type Query,
+  type QueryCallOptions,
+  type QueryClient,
   type QueryDefinition,
   type QueryInterpolation,
   type QueryObjectRef,
