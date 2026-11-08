@@ -8,6 +8,7 @@ abandon-output,retry-output,empty,apply-resume}.test.ts`` and
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1085,6 +1086,123 @@ def test_apply_marks_completed_before_ddl_propagation(tmp_path: Path) -> None:
 
     _apply(_write(tmp_path, sql), client, _OrderStore())
     assert client.events == ["command", "completed-write", "propagation-query"]
+
+
+# ---------- resume after a propagation wait timeout (#513) ----------
+
+_CREATE_T = "CREATE TABLE IF NOT EXISTS default.t (id UInt64) ENGINE = MergeTree ORDER BY id"
+_INSERT_T = "INSERT INTO default.t VALUES (1)"
+_CREATE_MARKER = "-- operation: create_table key=table:default.t risk=safe\n"
+_WAIT_SQL = f"{_CREATE_MARKER}{_CREATE_T};\n{_INSERT_T};\n"
+# The statement as sent: the splitter keeps the marker comment in front of it.
+_CREATE_SENT = f"{_CREATE_MARKER}{_CREATE_T}"
+
+
+class _PropagationClient:
+    """A single-replica target on which default.t is listed in system.tables
+    only while ``visible`` is set."""
+
+    def __init__(self, events: list[str], *, visible: bool) -> None:
+        self.events = events
+        self.visible = visible
+
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        self.events.append(f"command {statement}")
+
+    def query(self, _sql: str) -> QueryResult:
+        self.events.append("propagation-query")
+        return QueryResult(column_names=["x"], rows=[{"x": 1}] if self.visible else [])
+
+
+class _EventStore(FakeStore):
+    def __init__(self, events: list[str], state: MigrationRowState | None = None) -> None:
+        super().__init__(state)
+        self.events = events
+
+    def append_entry(self, entry: MigrationJournalEntry, *, chkit_version: str) -> None:
+        self.events.append("append")
+        super().append_entry(entry, chkit_version=chkit_version)
+
+
+@pytest.fixture
+def _fast_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a propagation wait time out without sleeping between its checks."""
+    from chkit.clickhouse import ddl_propagation  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        ddl_propagation, "time", SimpleNamespace(sleep=lambda _s: None, monotonic=time.monotonic)
+    )
+
+
+@pytest.mark.usefixtures("_fast_waits")
+def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: Path) -> None:
+    events: list[str] = []
+    client = _PropagationClient(events, visible=False)
+    store = _EventStore(events)
+    _write(tmp_path, _WAIT_SQL)
+
+    with pytest.raises(RuntimeError, match=r"waitForTable: default\.t not yet visible"):
+        _apply(tmp_path, cast(Any, client), store)
+    assert events[0] == f"command {_CREATE_SENT}"
+    assert [e for e in events if e.startswith("command")] == [f"command {_CREATE_SENT}"]
+    assert store.state is not None
+    assert [(o.operation_index, o.status) for o in store.state.operations] == [(0, "completed")]
+    assert store.appended == []
+
+    client.visible = True
+    events.clear()
+    _apply(tmp_path, cast(Any, client), store)
+    assert events == ["propagation-query", f"command {_INSERT_T}", "append"]
+    assert [(e.name, e.checksum) for e in store.appended] == [("m.sql", checksum_sql(_WAIT_SQL))]
+
+
+@pytest.mark.usefixtures("_fast_waits")
+def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None:
+    events: list[str] = []
+    client = _PropagationClient(events, visible=False)
+    store = _EventStore(events)
+    _write(tmp_path, _WAIT_SQL)
+
+    with pytest.raises(RuntimeError, match=r"waitForTable: default\.t not yet visible"):
+        _apply(tmp_path, cast(Any, client), store)
+    writes_after_first_run = len(store.writes)
+    events.clear()
+    with pytest.raises(RuntimeError, match=r"waitForTable: default\.t not yet visible"):
+        _apply(tmp_path, cast(Any, client), store)
+
+    assert len(events) > 1
+    assert all(e == "propagation-query" for e in events)
+    assert len(store.writes) == writes_after_first_run
+    assert store.state is not None
+    assert store.state.migration_completed is False
+    assert [(o.operation_index, o.status) for o in store.state.operations] == [(0, "completed")]
+    assert store.appended == []
+
+
+@pytest.mark.usefixtures("_fast_waits")
+def test_apply_does_not_wait_again_when_a_later_statement_is_recorded(tmp_path: Path) -> None:
+    # A run records a statement only after the wait of the statement before it
+    # passed. Waiting again for an earlier statement could never pass when a
+    # later one undid what it waits for, as this DROP of the table the CREATE
+    # made: the migration could then never be applied.
+    drop = (
+        "-- operation: drop_table key=table:default.t risk=danger\nDROP TABLE IF EXISTS default.t"
+    )
+    sql = f"{_CREATE_MARKER}{_CREATE_T};\n{drop};\n"
+    events: list[str] = []
+    store = _EventStore(
+        events,
+        in_progress(
+            [
+                op(0, "completed", Marker(type="create_table", key="table:default.t")),
+                op(1, "failed", Marker(type="drop_table", key="table:default.t")),
+            ],
+            checksum=checksum_sql(sql),
+        ),
+    )
+
+    _apply(_write(tmp_path, sql), cast(Any, _PropagationClient(events, visible=False)), store)
+    assert events == [f"command {drop}", "propagation-query", "append"]
 
 
 def test_apply_refuses_edited_file_with_completed_statement(tmp_path: Path) -> None:

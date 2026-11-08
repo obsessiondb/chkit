@@ -187,7 +187,7 @@ On a service whose endpoint spreads requests over several replicas, such as a mu
 
 When the cluster does not exist, has a single replica, or the user cannot query it, chkit reads the local replica as before.
 
-When a wait times out, `migrate` stops with an error that names the object, such as `waitForTable: analytics.events not yet visible`, and does not record the migration as applied. The statement stays marked completed, so a re-run does not replay it.
+When a wait times out, `migrate` stops with an error that names the object, such as `waitForTable: analytics.events not yet visible`, and does not record the migration as applied. The statement stays marked completed, so a re-run does not replay it: the re-run waits for it again before it runs the next statement, and stops with the same error if the change has still not reached every replica.
 
 On any target, a `MODIFY COLUMN` (or `COMMENT COLUMN`) also waits until `system.columns` shows what the statement sets: the default kind, the default expression (as the server formats it), the comment, and a removed default or codec. If the server accepts the statement without applying it, the wait times out after about 10 seconds and `migrate` stops with an error naming the replica and the field that differs. The statement stays marked completed, so fix the column by hand before you re-run. ObsessionDB currently ignores `MODIFY COLUMN ... EPHEMERAL <default>` ([#285](https://github.com/obsessiondb/chkit/issues/285)), so a migration that changes an `EPHEMERAL` column's default fails there with this error.
 

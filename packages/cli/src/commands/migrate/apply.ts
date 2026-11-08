@@ -25,6 +25,7 @@ import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
 import {
   applyAsyncStatement,
@@ -49,6 +50,30 @@ function operationIsCompleted(state: MigrationRowState | null, index: number): b
   return (
     state?.operations.some((op) => op.operationIndex === index && op.status === 'completed') ?? false
   )
+}
+
+/**
+ * Whether the propagation wait of completed statement `index` may not have
+ * passed: no later statement is recorded. A statement is marked completed
+ * before its wait, and the next statement is recorded only after that wait
+ * passed, so a later record means it passed in some run (#513). An earlier
+ * statement's wait is not repeated: a later statement may have undone what it
+ * waits for, as a cutover drops a table it created.
+ */
+function propagationWaitPending(state: MigrationRowState | null, index: number): boolean {
+  return state?.operations.every((op) => op.operationIndex <= index) ?? false
+}
+
+/** Waits until a sync statement's DDL reaches every replica; on resume too, with the same inputs. */
+async function waitForPropagation(
+  db: ClickHouseExecutor,
+  operation: MigrationOperationSummary | undefined,
+  statement: string,
+  cluster: string | undefined,
+): Promise<void> {
+  if (operation && operation.mode !== 'barrier') {
+    await waitForDDLPropagation(db, operation.type, operation.key, { cluster, statement })
+  }
 }
 
 function errorMessage(error: unknown): string {
@@ -189,7 +214,14 @@ export async function applyMigration(input: {
     // iteration so async ops written above (or in a prior run) are preserved.
     const stateBefore = await journalStore.readMigrationState(file)
     if (operationIsCompleted(stateBefore, i)) {
-      debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
+      if (propagationWaitPending(stateBefore, i)) {
+        // The run that completed it may have stopped in, or before the end
+        // of, its propagation wait (#513): wait again before the next one.
+        debug('migrate', `${file}#${i}: already completed in a prior run — waiting for DDL propagation again`)
+        await waitForPropagation(db, operation, statement, config.clickhouse?.cluster)
+      } else {
+        debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
+      }
       continue
     }
     const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
@@ -239,13 +271,12 @@ export async function applyMigration(input: {
     // DDL propagation. The statement already ran, so if the propagation wait
     // later times out and throws, a re-run must skip this statement rather than
     // replay it into an "already exists" error (the brick this fix prevents).
+    // The re-run waits for it again before the next statement (#513).
     const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
     await journalStore.writeMigrationState(
       upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
     )
-    if (operation && operation.mode !== 'barrier') {
-      await waitForDDLPropagation(db, operation.type, operation.key, { cluster: config.clickhouse?.cluster, statement })
-    }
+    await waitForPropagation(db, operation, statement, config.clickhouse?.cluster)
   }
 
   const entry: MigrationJournalEntry = {

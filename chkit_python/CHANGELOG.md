@@ -158,6 +158,10 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
+- `migrate` no longer records a migration as applied when re-run after a DDL propagation
+  wait timed out (#513, fixed in TS too): the re-run waits again for that statement before it
+  runs the next one, and stops with the same error if the change has still not reached every
+  replica.
 - `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
   migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
   `index_granularity`, and leaves out chkit's migration journal and the hidden
