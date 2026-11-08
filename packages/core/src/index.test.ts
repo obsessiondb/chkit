@@ -1466,6 +1466,24 @@ describe('@chkit/core column codec', () => {
     ])
   })
 
+  test('plan: mixed-width FPC size changes survive codec and comment comparisons (#465)', () => {
+    for (const raw of [false, true]) {
+      for (const comment of ['old', 'new']) {
+        const events = (floatSize: 4 | 8, comment: string) => table({
+          database: 'app', name: 'events', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+          columns: [{ name: 'id', type: 'UInt64' }, {
+            name: 'c', type: 'Tuple(Float32, Float64)', comment,
+            codec: raw ? codec.raw(`Gorilla, FPC(12, ${floatSize})`) : [{ kind: 'Gorilla' }, { kind: 'FPC', level: 12, floatSize }],
+          }],
+        })
+        expect(planDiff([events(4, 'old')], [events(8, comment)]).operations.map((op) => op.sql)).toEqual([
+          `ALTER TABLE app.events MODIFY COLUMN \`c\` Tuple(Float32, Float64) COMMENT '${comment}' CODEC(Gorilla, FPC(12, 8));`,
+        ])
+        expect(planDiff([events(4, 'old')], [events(4, 'old')]).operations).toEqual([])
+      }
+    }
+  })
+
   test('plan: codecs ClickHouse stores the same yield no operation (#465)', () => {
     const pairs: Array<[string, ColumnDefinition['codec'], ColumnDefinition['codec']]> = [
       ['String', { kind: 'ZSTD' }, { kind: 'ZSTD', level: 1 }],

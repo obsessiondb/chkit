@@ -19,7 +19,7 @@ export type CodecTypeFamily =
   | 'string'
   | 'fixedstring'
 
-/** A value type of a column. `width` is its size in bytes, unknown for `Enum(...)`. */
+/** A value type of a column. `width` is its size in bytes when known. */
 export interface CodecValueType {
   type: string
   family: CodecTypeFamily
@@ -34,6 +34,11 @@ export function codecValueTypes(columnType: string): CodecValueType[] | undefine
   const type = columnType.trim()
   const wrapper = type.match(/^(Nullable|Array|LowCardinality)\(([\s\S]*)\)$/)
   if (wrapper?.[2] !== undefined) return codecValueTypes(wrapper[2])
+  const aggregate = type.match(/^SimpleAggregateFunction\(([\s\S]*)\)$/)
+  if (aggregate?.[1] !== undefined) {
+    const args = splitTypeArguments(aggregate[1])
+    return args.length === 2 && args[1] !== undefined ? codecValueTypes(args[1]) : undefined
+  }
   const tuple = type.match(/^Tuple\(([\s\S]*)\)$/)
   if (tuple?.[1] !== undefined) return collect(splitTypeArguments(tuple[1]).map(stripElementName))
   const map = type.match(/^Map\(([\s\S]*)\)$/)
@@ -82,7 +87,15 @@ function leafType(type: string): CodecValueType | undefined {
   if (/^Time64\(/.test(type)) return { type, family: 'time', width: 8 }
   if (/^Enum8\(/.test(type)) return { type, family: 'enum', width: 1 }
   if (/^Enum16\(/.test(type)) return { type, family: 'enum', width: 2 }
-  if (/^Enum\(/.test(type)) return { type, family: 'enum' }
+  const enumeration = type.match(/^Enum\(([\s\S]*)\)$/)
+  if (enumeration?.[1] !== undefined) {
+    const values = splitTypeArguments(enumeration[1]).map((entry) => {
+      const value = entry.match(/=\s*([+-]?[0-9]+)\s*$/)?.[1]
+      return value === undefined ? undefined : Number(value)
+    })
+    if (values.some((value) => value === undefined)) return { type, family: 'enum' }
+    return { type, family: 'enum', width: values.every((value) => value !== undefined && value >= -128 && value <= 127) ? 1 : 2 }
+  }
   const simple = SIMPLE_TYPES[type]
   return simple ? { type, ...simple } : undefined
 }
@@ -121,9 +134,12 @@ function splitTypeArguments(input: string): string[] {
   let depth = 0
   let quote: string | undefined
   let current = ''
+  let escaped = false
   for (const ch of input) {
     if (quote) {
-      if (ch === quote) quote = undefined
+      if (escaped) escaped = false
+      else if (ch === '\\') escaped = true
+      else if (ch === quote) quote = undefined
     } else if (ch === "'" || ch === '`' || ch === '"') {
       quote = ch
     } else if (ch === '(') {

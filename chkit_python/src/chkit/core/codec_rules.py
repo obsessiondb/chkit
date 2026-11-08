@@ -14,7 +14,13 @@ from typing import Final, Literal, TypeAlias
 
 from chkit.core.codec import codec_atom_problem, parse_raw_codec_atoms
 from chkit.core.codec_type import CodecValueType, codec_value_types
-from chkit.core.model import ColumnCodec, ColumnCodecSpec, RawColumnCodec, ValidationIssueCode
+from chkit.core.model import (
+    ColumnCodec,
+    ColumnCodecSpec,
+    RawColumnCodec,
+    ValidationIssueCode,
+    _CodecDeltaLike,
+)
 
 
 @dataclass(frozen=True)
@@ -183,12 +189,24 @@ def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | N
     if values is None:
         return None
     for step in steps:
+        # An explicit Delta size bypasses ClickHouse's type check.
+        if (
+            isinstance(step.codec, _CodecDeltaLike)
+            and step.codec.kind == "Delta"
+            and step.codec.size is not None
+        ):
+            continue
         accepts = _TYPE_RULES.get(step.codec.kind) if step.codec is not None else None
         rejected = (
             next((value for value in values if not accepts(value)), None)
             if accepts is not None
             else None
         )
+        if step.kind == "Gorilla":
+            # Gorilla checks fixed-size streams individually, then requires a float in the column.
+            rejected = next((value for value in values if value.width is None), None)
+            if rejected is None and not any(_is_float(value) for value in values):
+                rejected = next((value for value in values if not _is_float(value)), None)
         if rejected is None:
             continue
         where = "" if rejected.type == column_type.strip() else f" in {column_type.strip()}"
@@ -197,6 +215,10 @@ def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | N
             f"codec {step.kind} does not support type {rejected.type}{where}",
         )
     return None
+
+
+def _is_float(value: CodecValueType) -> bool:
+    return value.family in {"float", "bfloat16"}
 
 
 _NUMERIC_FAMILIES: Final = frozenset(
@@ -211,7 +233,6 @@ def _has_width(value: CodecValueType, widths: tuple[int, ...]) -> bool:
 _TYPE_RULES: Final[dict[str, Callable[[CodecValueType], bool]]] = {
     "Delta": lambda v: v.family != "string" and _has_width(v, (1, 2, 4, 8)),
     "DoubleDelta": lambda v: v.family in _NUMERIC_FAMILIES and _has_width(v, (1, 2, 4, 8)),
-    "Gorilla": lambda v: v.family in {"float", "bfloat16"},
     "GCD": lambda v: v.family in {"int", "decimal", "date", "bool"},
     "T64": lambda v: (
         v.family in {"int", "decimal", "date", "time", "enum", "bool", "ipv4"}

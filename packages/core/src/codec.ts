@@ -1,4 +1,4 @@
-import { codecValueWidth } from './codec-type.js'
+import { codecValueTypes, codecValueWidth } from './codec-type.js'
 import type {
   ColumnCodec,
   ColumnCodecSpec,
@@ -287,23 +287,31 @@ export function canonicalizeCodec(spec: ColumnCodecSpec): ColumnCodec[] {
  * `LZ4HC(0)`, which like any level below 1 means the default 9. It fills in
  * the column's value width for a bare `Delta` or `Gorilla` (`Delta(8)` on
  * UInt64, still bare on a mixed-width Tuple), keeps no `DoubleDelta` width, no
- * `FPC` float size and no `T64('byte')` mode. Atoms of a raw codec that parse
+ * `FPC` float size (except in a mixed-width chain with bare Delta/Gorilla)
+ * and no `T64('byte')` mode. Atoms of a raw codec that parse
  * get the same treatment; the others compare without whitespace. No codec is
  * the empty string.
  */
 export function codecFingerprint(spec: ColumnCodecSpec | undefined, columnType?: string): string {
   if (spec === undefined) return ''
   const width = columnType === undefined ? undefined : codecValueWidth(columnType)
-  return toArray(spec)
-    .flatMap((step) =>
-      isRawCodec(step) && typeof step.expression === 'string'
-        ? parseRawCodecAtoms(step.expression).map((atom) => atom.codec ? stepFingerprint(atom.codec, width) : atom.text)
-        : [stepFingerprint(step, width)]
-    )
-    .join(',')
+  const atoms = toArray(spec).flatMap((step) =>
+    isRawCodec(step) && typeof step.expression === 'string'
+      ? parseRawCodecAtoms(step.expression)
+      : [{ codec: step, text: '' }]
+  )
+  const values = columnType === undefined ? undefined : codecValueTypes(columnType)
+  // A bare width-dependent codec prevents substitution for the whole mixed-width chain.
+  // Unknown types keep the existing comparison until their storage is modelled.
+  const mixedWidths = values !== undefined && values.every((value) => value.width !== undefined) &&
+    new Set(values.map((value) => value.width)).size > 1
+  const verbatim = mixedWidths && atoms.some(({ codec }) =>
+    (codec?.kind === 'Delta' || codec?.kind === 'Gorilla') && codec.size === undefined
+  )
+  return atoms.map((atom) => atom.codec ? stepFingerprint(atom.codec, width, verbatim) : atom.text).join(',')
 }
 
-function stepFingerprint(step: ColumnCodec, width: number | undefined): string {
+function stepFingerprint(step: ColumnCodec, width: number | undefined, verbatim: boolean): string {
   switch (step.kind) {
     case 'ZSTD':
       return `ZSTD(${step.level ?? 1}${step.windowLog !== undefined ? `,${step.windowLog}` : ''})`
@@ -322,7 +330,7 @@ function stepFingerprint(step: ColumnCodec, width: number | undefined): string {
     case 'T64':
       return step.mode === 'bit' ? "T64('bit')" : 'T64'
     case 'FPC':
-      return `FPC(${step.level ?? 12})`
+      return verbatim ? renderStep(step).replaceAll(' ', '') : `FPC(${step.level ?? 12})`
     case 'raw':
       return String(step.expression)
     default:
@@ -378,8 +386,8 @@ function codecParameterProblem(kind: string, step: Record<string, unknown>): str
     case 'ZSTD':
       if (step.level !== undefined && !isInteger(step.level)) return 'level must be an integer'
       if (isInteger(step.level) && step.level > 22) return 'level must be at most 22'
-      if (step.windowLog !== undefined && !(isInteger(step.windowLog) && step.windowLog >= 10 && step.windowLog <= 31)) {
-        return 'windowLog must be an integer between 10 and 31'
+      if (step.windowLog !== undefined && !(isInteger(step.windowLog) && (step.windowLog === 0 || (step.windowLog >= 10 && step.windowLog <= 31)))) {
+        return 'windowLog must be 0 or an integer between 10 and 31'
       }
       return undefined
     case 'Delta':

@@ -8,7 +8,7 @@ from typing import Any, Final, Literal, NamedTuple, TypeAlias
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from chkit.core.codec_type import codec_value_width
+from chkit.core.codec_type import codec_value_types, codec_value_width
 from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
@@ -354,7 +354,8 @@ def codec_fingerprint(spec: CodecSpecInput | None, column_type: str | None = Non
     stores a bare `ZSTD` as `ZSTD(1)` and a bare `LZ4HC` as `LZ4HC(0)`, which
     like any level below 1 means the default 9. It fills in the column's value
     width for a bare `Delta` or `Gorilla` (`Delta(8)` on UInt64, still bare on a
-    mixed-width Tuple), keeps no `DoubleDelta` width, no `FPC` float size and
+    mixed-width Tuple), keeps no `DoubleDelta` width, no `FPC` float size
+    (except in a mixed-width chain with bare Delta/Gorilla) and
     no `T64('byte')` mode. Atoms of a raw codec that parse get the same
     treatment; the others compare without whitespace. No codec is the empty
     string.
@@ -362,19 +363,36 @@ def codec_fingerprint(spec: CodecSpecInput | None, column_type: str | None = Non
     if spec is None:
         return ""
     width = None if column_type is None else codec_value_width(column_type)
-    parts: list[str] = []
-    for step in _to_list(spec):
-        if isinstance(step, RawColumnCodec):
-            parts.extend(
-                _step_fingerprint(atom.codec, width) if atom.codec is not None else atom.text
-                for atom in parse_raw_codec_atoms(step.expression)
-            )
-        else:
-            parts.append(_step_fingerprint(step, width))
-    return ",".join(parts)
+    atoms = [
+        atom
+        for step in _to_list(spec)
+        for atom in (
+            parse_raw_codec_atoms(step.expression)
+            if isinstance(step, RawColumnCodec)
+            else [RawCodecAtom(step, "")]
+        )
+    ]
+    values = None if column_type is None else codec_value_types(column_type)
+    # A bare width-dependent codec prevents substitution for the whole mixed-width chain.
+    # Unknown types keep the existing comparison until their storage is modelled.
+    mixed_widths = (
+        values is not None
+        and all(value.width is not None for value in values)
+        and len({value.width for value in values}) > 1
+    )
+    verbatim = mixed_widths and any(
+        isinstance(atom.codec, _CodecDeltaLike)
+        and atom.codec.kind in {"Delta", "Gorilla"}
+        and atom.codec.size is None
+        for atom in atoms
+    )
+    return ",".join(
+        _step_fingerprint(atom.codec, width, verbatim) if atom.codec is not None else atom.text
+        for atom in atoms
+    )
 
 
-def _step_fingerprint(step: ColumnCodec, width: int | None) -> str:
+def _step_fingerprint(step: ColumnCodec, width: int | None, verbatim: bool) -> str:
     if isinstance(step, _CodecZSTD):
         level = 1 if step.level is None else step.level
         window = "" if step.window_log is None else f",{step.window_log}"
@@ -391,6 +409,8 @@ def _step_fingerprint(step: ColumnCodec, width: int | None) -> str:
     if isinstance(step, _CodecT64):
         return "T64('bit')" if step.mode == "bit" else "T64"
     if isinstance(step, _CodecFPC):
+        if verbatim:
+            return _render_step(step).replace(" ", "")
         return f"FPC({12 if step.level is None else step.level})"
     if isinstance(step, RawColumnCodec):
         return step.expression
@@ -474,9 +494,11 @@ def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
             return "level must be at most 22"
         window_log = data.get("windowLog")
         if window_log is not None and not (
-            isinstance(window_log, int) and _is_int(window_log) and 10 <= window_log <= 31
+            isinstance(window_log, int)
+            and _is_int(window_log)
+            and (window_log == 0 or 10 <= window_log <= 31)
         ):
-            return "windowLog must be an integer between 10 and 31"
+            return "windowLog must be 0 or an integer between 10 and 31"
         return None
     if kind in {"Delta", "DoubleDelta", "Gorilla"}:
         size = data.get("size")

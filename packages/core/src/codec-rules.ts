@@ -143,13 +143,24 @@ function typeProblem(steps: ChainStep[], columnType: string): CodecProblem | und
   const values = codecValueTypes(columnType)
   if (!values) return undefined
   for (const step of steps) {
+    // An explicit Delta size bypasses ClickHouse's type check.
+    if (step.codec?.kind === 'Delta' && step.codec.size !== undefined) continue
     const accepts = step.codec ? TYPE_RULES[step.codec.kind] : undefined
-    const rejected = accepts ? values.find((value) => !accepts(value)) : undefined
+    let rejected = accepts ? values.find((value) => !accepts(value)) : undefined
+    if (step.kind === 'Gorilla') {
+      // Gorilla checks fixed-size streams individually, then requires a float in the column.
+      rejected = values.find((value) => value.width === undefined) ??
+        (values.some(isFloat) ? undefined : values.find((value) => !isFloat(value)))
+    }
     if (!rejected) continue
     const where = rejected.type === columnType.trim() ? '' : ` in ${columnType.trim()}`
     return { code: 'codec_type_unsupported', message: `codec ${step.kind} does not support type ${rejected.type}${where}` }
   }
   return undefined
+}
+
+function isFloat(value: CodecValueType): boolean {
+  return value.family === 'float' || value.family === 'bfloat16'
 }
 
 const NUMERIC_FAMILIES = new Set(['int', 'bool', 'float', 'bfloat16', 'decimal', 'date', 'time', 'enum', 'ipv4'])
@@ -162,7 +173,6 @@ function hasWidth(value: CodecValueType, widths: readonly number[]): boolean {
 const TYPE_RULES: Record<string, (value: CodecValueType) => boolean> = {
   Delta: (value) => value.family !== 'string' && hasWidth(value, [1, 2, 4, 8]),
   DoubleDelta: (value) => NUMERIC_FAMILIES.has(value.family) && hasWidth(value, [1, 2, 4, 8]),
-  Gorilla: (value) => value.family === 'float' || value.family === 'bfloat16',
   GCD: (value) => ['int', 'decimal', 'date', 'bool'].includes(value.family),
   T64: (value) =>
     ['int', 'decimal', 'date', 'time', 'enum', 'bool', 'ipv4'].includes(value.family) && hasWidth(value, [1, 2, 4, 8]),

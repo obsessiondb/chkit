@@ -372,3 +372,105 @@ describe('codec forms ClickHouse stores (#465)', () => {
     expect(codecFingerprint(codec.raw("T64('b it')"))).toBe("T64('b it')")
   })
 })
+
+// Schema and compression_codec pairs observed on ClickHouse 26.3.
+const MATRIX_STORED: Array<[string, ColumnCodecSpec, string]> = [
+  ["SimpleAggregateFunction(sum, UInt64)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"],
+  ["SimpleAggregateFunction(max, DateTime)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"],
+  ["SimpleAggregateFunction(max, Float64)", {"kind": "Gorilla"}, "CODEC(Gorilla(8))"],
+  ["SimpleAggregateFunction(max, Float32)", {"kind": "FPC"}, "CODEC(FPC(12))"],
+  ["SimpleAggregateFunction(sum, UInt64)", {"kind": "T64"}, "CODEC(T64)"],
+  ["SimpleAggregateFunction(sum, UInt64)", {"kind": "DoubleDelta"}, "CODEC(DoubleDelta)"],
+  ["SimpleAggregateFunction(max, Nullable(UInt16))", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(2), LZ4)"],
+  ["SimpleAggregateFunction(groupUniqArrayArray, Array(UInt32))", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"],
+  ["Enum('a' = 1, 'b' = 2)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(1), LZ4)"],
+  ["Enum('a' = 1, 'b' = 1000)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(2), LZ4)"],
+  ["Enum16('a' = 1)", [{"kind": "Delta"}, {"kind": "LZ4"}], "CODEC(Delta(2), LZ4)"],
+  ["Tuple(Float32, Float64)", [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}], "CODEC(Gorilla, FPC(12, 4))"],
+  ["Tuple(Float32, Float64)", {"kind": "FPC", "level": 12, "floatSize": 4}, "CODEC(FPC(12))"],
+  ["Tuple(Float32, Float64)", {"kind": "FPC", "level": 12}, "CODEC(FPC(12))"],
+  ["Tuple(Float32, Float64)", {"kind": "FPC"}, "CODEC(FPC(12))"],
+  ["Tuple(Float32, Float64)", [{"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "ZSTD"}], "CODEC(FPC(12), ZSTD(1))"],
+  ["Tuple(Float32, Float64)", {"kind": "Gorilla"}, "CODEC(Gorilla)"],
+  ["Tuple(Float32, Float64)", {"kind": "Gorilla", "size": 4}, "CODEC(Gorilla(4))"],
+  ["Tuple(Float32, Float64)", [{"kind": "Gorilla"}, {"kind": "ZSTD"}], "CODEC(Gorilla, ZSTD)"],
+  ["Tuple(Float64, Float64)", [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}], "CODEC(Gorilla(8), FPC(12))"],
+  ["Tuple(Float64, Float64)", {"kind": "FPC", "level": 12, "floatSize": 4}, "CODEC(FPC(12))"],
+  ["Tuple(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta, ZSTD)"],
+  ["Tuple(UInt32, UInt64)", [{"kind": "Delta", "size": 2}, {"kind": "ZSTD"}], "CODEC(Delta(2), ZSTD(1))"],
+  ["Array(Tuple(Float32, Float64))", [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}], "CODEC(Gorilla, FPC(12, 4))"],
+  ["Tuple(Float32, Float64)", [{"kind": "DoubleDelta"}, {"kind": "ZSTD"}], "CODEC(DoubleDelta, ZSTD)"],
+  ["Tuple(Float32, Float64)", {"kind": "ALP"}, "CODEC(ALP)"],
+  ["String", [{"kind": "Delta", "size": 4}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"],
+  ["String", [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}], "CODEC(Delta(1), LZ4)"],
+  ["FixedString(4)", [{"kind": "Delta", "size": 4}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"],
+  ["Array(String)", [{"kind": "Delta", "size": 4}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"],
+  ["Nullable(String)", [{"kind": "Delta", "size": 4}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"],
+  ["LowCardinality(String)", [{"kind": "Delta", "size": 4}, {"kind": "LZ4"}], "CODEC(Delta(4), LZ4)"],
+  ["UUID", [{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"],
+  ["Decimal(18, 4)", [{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"],
+  ["Float64", [{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"],
+  ["Tuple(UInt64, Float64)", {"kind": "Gorilla"}, "CODEC(Gorilla(8))"],
+  ["Tuple(UInt64, Float64)", {"kind": "Gorilla", "size": 8}, "CODEC(Gorilla(8))"],
+  ["Array(Tuple(UInt64, Float64))", {"kind": "Gorilla"}, "CODEC(Gorilla(8))"],
+  ["UInt64", {"kind": "ZSTD", "level": 3, "windowLog": 0}, "CODEC(ZSTD(3, 0))"],
+  ["UInt64", {"kind": "ZSTD", "level": 3, "windowLog": 10}, "CODEC(ZSTD(3, 10))"],
+  ["UInt64", {"kind": "ZSTD", "level": 3, "windowLog": 31}, "CODEC(ZSTD(3, 31))"],
+  ["UInt64", {"kind": "ZSTD", "level": 1, "windowLog": 0}, "CODEC(ZSTD(1, 0))"],
+  ["UInt64", {"kind": "ZSTD", "level": -1, "windowLog": 0}, "CODEC(ZSTD(18446744073709551615, 0))"],
+  ["UInt64", {"kind": "ZSTD", "level": 0, "windowLog": 0}, "CODEC(ZSTD(0, 0))"],
+  ["Tuple(Float32, Float64)", [{"kind": "Gorilla", "size": 4}, {"kind": "FPC", "level": 12, "floatSize": 4}], "CODEC(Gorilla(4), FPC(12))"],
+  ["Tuple(Float32, Float64)", [{"kind": "Gorilla"}, {"kind": "FPC"}], "CODEC(Gorilla, FPC)"],
+  ["Tuple(Float32, Float64)", [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "ZSTD"}], "CODEC(Gorilla, FPC(12, 4), ZSTD)"],
+  ["Tuple(Float32, Float64)", [{"kind": "Gorilla"}, {"kind": "LZ4HC"}], "CODEC(Gorilla, LZ4HC)"],
+  ["Tuple(Float32, Float64)", [{"kind": "Gorilla"}, {"kind": "ZSTD", "level": 3, "windowLog": 24}], "CODEC(Gorilla, ZSTD(3, 24))"],
+  ["Tuple(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "LZ4HC"}], "CODEC(Delta, LZ4HC)"],
+  ["Tuple(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "T64"}], "CODEC(Delta, T64)"],
+  ["Tuple(UInt32, UInt64)", [{"kind": "DoubleDelta"}, {"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(DoubleDelta, Delta, ZSTD)"],
+  ["Tuple(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "DoubleDelta", "size": 4}], "CODEC(Delta, DoubleDelta(4))"],
+  ["Tuple(Float32, Float64)", [{"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "Gorilla"}], "CODEC(FPC(12, 4), Gorilla)"],
+  ["Map(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta, ZSTD)"],
+  ["Tuple(UInt32, Float32)", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(4), ZSTD(1))"],
+  ["Tuple(UInt64, Float64)", [{"kind": "Gorilla"}, {"kind": "ZSTD"}], "CODEC(Gorilla(8), ZSTD(1))"],
+  ["Nullable(Float64)", [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}], "CODEC(Gorilla(8), FPC(12))"],
+  ["Array(Float32)", [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 8}], "CODEC(Gorilla(4), FPC(12))"],
+]
+
+describe('server matrix stored forms (#465)', () => {
+  for (const [type, spec, stored] of MATRIX_STORED) {
+    test(`${type} ${JSON.stringify(spec)} stores ${stored}`, () => {
+      const expected = codecFingerprint(parseCodec(stored), type)
+      expect(codecFingerprint(spec, type)).toBe(expected)
+      expect(codecFingerprint(codec.raw(renderCodec(spec).slice(6, -1)), type)).toBe(expected)
+    })
+  }
+  test('mixed widths retain FPC arguments while unknown types keep their old comparison', () => {
+    const before = [{ kind: 'Gorilla' }, { kind: 'FPC', level: 12, floatSize: 4 }] satisfies ColumnCodecSpec
+    const after = [{ kind: 'Gorilla' }, { kind: 'FPC', level: 12, floatSize: 8 }] satisfies ColumnCodecSpec
+    expect(codecFingerprint(before, 'Tuple(Float32, Float64)')).toBe('Gorilla,FPC(12,4)')
+    expect(codecsEqual(before, after, 'Tuple(Float32, Float64)')).toBe(false)
+    expect(codecsEqual(before, after, 'JSON')).toBe(true)
+    expect(codecsEqual(before, after, 'Dynamic')).toBe(true)
+  })
+  test('a zero ZSTD window remains distinct from an omitted window', () => {
+    expect(codecFingerprint({ kind: 'ZSTD', level: 3, windowLog: 0 })).toBe('ZSTD(3,0)')
+    expect(codecsEqual({ kind: 'ZSTD', level: 3, windowLog: 0 }, { kind: 'ZSTD', level: 3 })).toBe(false)
+  })
+})
+
+// Parser coverage beyond the server matrix; these are not server verdicts.
+describe('Enum value parsing parity', () => {
+  const cases: Array<[string, string]> = [
+    ["Enum('can\\'t' = 1000, 'b' = 1)", 'Delta(2),LZ4'],
+    ["Enum('a\\', b' = 1, 'c' = 2)", 'Delta(1),LZ4'],
+    ["Enum('a' = ١)", 'Delta,LZ4'],
+    ["Enum('a' = 1\u0085)", 'Delta,LZ4'],
+    ["Enum('a' = 0x1)", 'Delta,LZ4'],
+    [`Enum('a' = ${'9'.repeat(4301)})`, 'Delta(2),LZ4'],
+  ]
+  for (const [type, expected] of cases) {
+    test(`parses Enum values: ${type.slice(0, 80)}`, () => {
+      expect(codecFingerprint([{ kind: 'Delta' }, { kind: 'LZ4' }], type)).toBe(expected)
+    })
+  }
+})
