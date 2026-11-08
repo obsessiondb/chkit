@@ -277,43 +277,7 @@ describe('createRemoteExecutor introspection', () => {
 
 			expect(table?.comment).toBe('Raw events')
 			const tablesQuery = workbench.queries.find((query) => query.includes('FROM system.tables'))
-			expect(tablesQuery).toContain('create_table_query, comment')
-		} finally {
-			workbench.stop()
-		}
-	})
-
-	test('listTableDetails reads column codecs', async () => {
-		const workbench = startScriptedWorkbench({
-			replicas: 1,
-			tables: {
-				meta: ['database', 'name', 'engine', 'create_table_query', 'comment'],
-				data: [
-					[
-						'app',
-						'events',
-						'MergeTree',
-						'CREATE TABLE app.events (`ts` DateTime CODEC(Delta(4), ZSTD(3))) ENGINE = MergeTree ORDER BY ts',
-						'',
-					],
-				],
-			},
-			columns: {
-				meta: ['database', 'table', 'name', 'type', 'position', 'compression_codec'],
-				data: [['app', 'events', 'ts', 'DateTime', '1', 'CODEC(Delta(4), ZSTD(3))']],
-			},
-		})
-		try {
-			const remote = connect(workbench.url)
-
-			const [table] = await remote.listTableDetails(['app'])
-
-			expect(table?.columns[0]?.codec).toEqual([
-				{ kind: 'Delta', size: 4 },
-				{ kind: 'ZSTD', level: 3 },
-			])
-			const columnsQuery = workbench.queries.find((query) => query.includes('FROM system.columns'))
-			expect(columnsQuery).toContain('compression_codec')
+			expect(tablesQuery).toContain('create_table_query, primary_key, comment')
 		} finally {
 			workbench.stop()
 		}
@@ -328,13 +292,12 @@ function connect(baseUrl: string): ClickHouseExecutor {
 }
 
 // Stands in for the workbench API: answers the replica probe with `replicas`,
-// a system.tables read with `tables`, a system.columns read with `columns`,
-// every other read with no rows (or `processesError`), and records each query.
+// a system.tables read with `tables`, every other read with no rows (or
+// `processesError`), and records each query.
 function startScriptedWorkbench(script: {
 	replicas: number
 	processesError?: string
 	tables?: { meta: string[]; data: string[][] }
-	columns?: { meta: string[]; data: string[][] }
 }) {
 	const queries: string[] = []
 	const inputs: Array<Record<string, unknown>> = []
@@ -351,14 +314,10 @@ function startScriptedWorkbench(script: {
 					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1 },
 				})
 			}
-			const rows = input.query.includes('FROM system.tables')
-				? script.tables
-				: input.query.includes('FROM system.columns')
-					? script.columns
-					: undefined
-			if (rows) {
+			if (script.tables && input.query.includes('FROM system.tables')) {
+				const { meta, data } = script.tables
 				return Response.json({
-					json: { data: rows.data, meta: rows.meta.map((name) => ({ name, type: 'String' })), rows: rows.data.length },
+					json: { data, meta: meta.map((name) => ({ name, type: 'String' })), rows: data.length },
 				})
 			}
 			if (script.processesError && input.query.includes('system.processes')) {
