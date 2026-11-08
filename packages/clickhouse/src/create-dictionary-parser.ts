@@ -269,13 +269,6 @@ export function parseLifetimeFromCreateDictionaryQuery(query: string | undefined
   return extractKeywordParenBody(query, 'LIFETIME')
 }
 
-export function parseCommentFromCreateDictionaryQuery(query: string | undefined): string | undefined {
-  if (!query) return undefined
-  const match = /\bCOMMENT\s+'((?:[^'\\]|\\.|'')*)'/i.exec(query)
-  if (!match?.[1]) return undefined
-  return match[1].replace(/\\'/g, "'").replace(/''/g, "'")
-}
-
 function stripBackticks(value: string): string {
   const trimmed = value.trim()
   return trimmed.startsWith('`') && trimmed.endsWith('`') ? trimmed.slice(1, -1) : trimmed

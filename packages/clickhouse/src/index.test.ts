@@ -12,7 +12,6 @@ import {
   urlWithoutCredentials,
   inferSchemaKindFromEngine,
   observableSystemTable,
-  parseCommentFromCreateDictionaryQuery,
   parseDictionaryAttributesFromCreateDictionaryQuery,
   parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
   parseDictionaryRangeFromCreateDictionaryQuery,
@@ -793,13 +792,12 @@ COMMENT 'User lookup dictionary'`
     expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query)).toEqual(['id'])
   })
 
-  test('parses source, layout, lifetime, comment', () => {
+  test('parses source, layout, lifetime', () => {
     expect(parseSourceFromCreateDictionaryQuery(query)).toBe(
       "MYSQL(host 'db' port 3306 user 'reader' password '[HIDDEN]' db 'app' table 'users')"
     )
     expect(parseLayoutFromCreateDictionaryQuery(query)).toBe('HASHED()')
     expect(parseLifetimeFromCreateDictionaryQuery(query)).toBe('MIN 0 MAX 300')
-    expect(parseCommentFromCreateDictionaryQuery(query)).toBe('User lookup dictionary')
   })
 
   test('returns empty results for undefined query', () => {

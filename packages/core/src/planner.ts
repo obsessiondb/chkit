@@ -19,15 +19,18 @@ import {
   renderAlterAddConstraint,
   renderAlterAddIndex,
   renderAlterAddProjection,
+  renderAlterCommentColumn,
   renderAlterDropColumn,
   renderAlterDropConstraint,
   renderAlterDropIndex,
   renderAlterDropProjection,
   renderAlterModifyColumn,
+  renderAlterModifyComment,
   renderAlterModifyRefresh,
   renderAlterModifySetting,
   renderAlterModifyTTL,
   renderAlterRemoveCodec,
+  renderAlterRemoveColumnComment,
   renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
   renderDictionarySQL,
@@ -235,6 +238,29 @@ function normalizeColumnWithoutCodec(
   return rest
 }
 
+function isCommentOnlyChange(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
+  const { comment: _oldComment, ...oldRest } = normalizeColumn(oldCol)
+  const { comment: _newComment, ...newRest } = normalizeColumn(newCol)
+  return JSON.stringify(oldRest) === JSON.stringify(newRest)
+}
+
+/**
+ * A comment change on a table, view, materialized view or dictionary is an
+ * ALTER of the object in place: recreating a materialized view would lose the
+ * rows its source receives in between.
+ */
+function diffComment(oldDef: SchemaDefinition, newDef: SchemaDefinition): MigrationOperation[] {
+  if (oldDef.comment === newDef.comment) return []
+  return [
+    {
+      type: 'alter_table_modify_comment',
+      key: `${definitionKey(newDef)}:comment`,
+      risk: 'safe',
+      sql: renderAlterModifyComment(newDef),
+    },
+  ]
+}
+
 function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, to: string): string {
   // IF EXISTS makes the rename idempotent: once it has run (the `from` column is
   // gone), a replay after a partial migration failure is a safe no-op rather
@@ -308,7 +334,6 @@ function diffMaterializedView(
 
   const structuralChange =
     newDef.as !== oldDef.as ||
-    newDef.comment !== oldDef.comment ||
     newDef.to.database !== oldDef.to.database ||
     newDef.to.name !== oldDef.to.name ||
     hasOldRefresh !== hasNewRefresh ||
@@ -331,18 +356,18 @@ function diffMaterializedView(
     ]
   }
 
-  if (hasNewRefresh && !refreshEqual(oldDef.refresh, newDef.refresh)) {
-    return [
-      {
-        type: 'alter_materialized_view_modify_refresh',
-        key: `materialized_view:${newDef.database}.${newDef.name}:refresh`,
-        risk: 'caution',
-        sql: renderAlterModifyRefresh(newDef),
-      },
-    ]
-  }
-
-  return []
+  const refreshOps: MigrationOperation[] =
+    hasNewRefresh && !refreshEqual(oldDef.refresh, newDef.refresh)
+      ? [
+          {
+            type: 'alter_materialized_view_modify_refresh',
+            key: `materialized_view:${newDef.database}.${newDef.name}:refresh`,
+            risk: 'caution',
+            sql: renderAlterModifyRefresh(newDef),
+          },
+        ]
+      : []
+  return [...refreshOps, ...diffComment(oldDef, newDef)]
 }
 
 // `chkit pull` writes ClickHouse's own introspection placeholder
@@ -356,8 +381,9 @@ function dictionarySourceIsHidden(source: string): boolean {
 }
 
 function dictionaryComparisonShape(def: DictionaryDefinition, omitSource: boolean) {
-  if (!omitSource) return def
-  const { source, ...rest } = def
+  const { comment: _comment, ...shape } = def
+  if (!omitSource) return shape
+  const { source: _source, ...rest } = shape
   return rest
 }
 
@@ -369,7 +395,7 @@ function diffDictionary(
   const unchanged =
     JSON.stringify(dictionaryComparisonShape(oldDef, omitSource)) ===
     JSON.stringify(dictionaryComparisonShape(newDef, omitSource))
-  if (unchanged) return []
+  if (unchanged) return diffComment(oldDef, newDef)
 
   return [
     {
@@ -449,9 +475,21 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     const oldKind = oldItem.defaultKind ?? 'DEFAULT'
     const newKind = newItem.defaultKind ?? 'DEFAULT'
     const key = `table:${newDef.database}.${newDef.name}:column:${name}`
+    const removeComment = oldItem.comment !== undefined && newItem.comment === undefined
+    if (isCommentOnlyChange(oldItem, newItem)) {
+      ops.push({
+        type: 'alter_table_modify_column',
+        key,
+        risk: 'safe',
+        sql: removeComment ? renderAlterRemoveColumnComment(newDef, name) : renderAlterCommentColumn(newDef, newItem),
+      })
+      continue
+    }
     const removeExpression = renderAlterRemoveColumnExpression(newDef, newItem, oldItem)
     // Its own operation: migrate pairs each `-- operation:` marker with exactly one statement.
     if (removeExpression) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: removeExpression })
+    // MODIFY COLUMN without COMMENT keeps the old comment.
+    if (removeComment) ops.push({ type: 'alter_table_modify_column', key, risk: 'safe', sql: renderAlterRemoveColumnComment(newDef, name) })
     // MODIFY COLUMN without a codec keeps the stored one: a removal is always
     // REMOVE CODEC, its own operation before any other change (#465).
     const codecRemoved = Boolean(oldItem.codec) && !newItem.codec
@@ -602,6 +640,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       sql: renderAlterModifyTTL(newDef, newDef.ttl),
     })
   }
+  ops.push(...diffComment(oldDef, newDef))
 
   return {
     operations: ops,
@@ -644,9 +683,11 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     }
 
     if (newDef.kind === oldDef.kind && newDef.kind === 'view' && oldDef.kind === 'view') {
-      if (newDef.as !== oldDef.as || newDef.comment !== oldDef.comment) {
+      if (newDef.as !== oldDef.as) {
         pushDropOperation(operations, oldDef, 'caution')
         pushCreateOperation(operations, newDef, 'caution')
+      } else {
+        operations.push(...diffComment(oldDef, newDef))
       }
       continue
     }

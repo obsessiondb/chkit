@@ -158,6 +158,20 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
+- Comments work end to end, as in TS (#464). Comments escape backslashes, so ClickHouse
+  stores the exact text (a trailing `\` no longer breaks the statement), and an empty
+  comment is the same as none. A table, view, materialized view or dictionary comment change
+  plans `ALTER TABLE ... MODIFY COMMENT` (no drop and recreate, no `CREATE OR REPLACE
+  DICTIONARY`); a column comment change alone is `COMMENT COLUMN`, and a removed column
+  comment runs `MODIFY COLUMN ... REMOVE COMMENT`. `drift` reports a changed object comment
+  as `comment_mismatch`, with both values. `pull` writes the comments of tables, views and
+  materialized views from `system.tables.comment`, finds a view's `AS` and `TO` outside its
+  `COMMENT`, writes non-ASCII text as is (an emoji was written as two lone surrogates), and
+  skips a materialized view with an inner table, and that table, with a warning.
+- **Behaviour change:** a DDL propagation wait that times out stops `migrate` with an error,
+  as in TS (#464), instead of printing `⚠ DDL propagation wait failed` and recording the
+  migration as applied. The wait errors use the TS names (`waitForTable: ... not yet
+  visible`).
 - Async `migrate` statements no longer fail on a fresh ClickHouse server that has not
   created `system.query_log` yet, as in TS.
 - Concurrent `migrate --apply` runs of one migration file against other databases, or by

@@ -13,6 +13,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from chkit.clickhouse.introspect import parse_materialized_view_target
+from chkit.core.sql_lexer import is_trivia, js_trim, tokenize_sql
+
 __all__ = [
     "MaterializedViewRefreshShape",
     "ToClauseShape",
@@ -52,12 +55,6 @@ _DEFINER_RE = re.compile(
 )
 _SQL_SECURITY_RE = re.compile(
     r"\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER|NONE)", re.IGNORECASE
-)
-_AS_CLAUSE_RE = re.compile(r"\bAS\b(.*)$", re.IGNORECASE | re.DOTALL)
-_TO_CLAUSE_RE = re.compile(
-    r"(?:^|\s)TO\s+((?:`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+)"
-    r"(?:\.(?:`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+))?)",
-    re.IGNORECASE,
 )
 
 _INTERVAL_TOKEN = (
@@ -104,38 +101,32 @@ def _normalize_interval(value: str) -> str:
 
 
 def parse_as_clause(query: str | None) -> str | None:
-    """Return the SELECT body from a CREATE VIEW / MV statement, or None."""
+    """Return the query after the first top-level ``AS``, or None.
+
+    The statement is read with the SQL lexer, so an ``AS`` inside a string
+    literal (a ``COMMENT``) or a column list is skipped.
+    """
     if not query:
         return None
-    cleaned = _strip_definer_clauses(query)
-    match = _AS_CLAUSE_RE.search(cleaned)
-    if match is None or not match.group(1):
-        return None
-    as_clause = match.group(1).strip().rstrip(";").strip()
-    return as_clause or None
-
-
-def parse_to_clause(query: str | None, fallback_database: str) -> ToClauseShape | None:  # noqa: PLR0911
-    """Extract the ``TO db.t`` target of a CREATE MATERIALIZED VIEW."""
-    if not query:
-        return None
-    match = _TO_CLAUSE_RE.search(query)
-    if match is None:
-        return None
-    identifier = match.group(1)
-    parts = [p.strip().lstrip("`\"").rstrip("`\"") for p in identifier.split(".")]
-    if len(parts) == 1:
-        name = parts[0]
-        if not name:
-            return None
-        return ToClauseShape(database=fallback_database, name=name)
-    if len(parts) == _QUALIFIED_TWO_PARTS:
-        database = parts[0] or fallback_database
-        name = parts[1]
-        if not database or not name:
-            return None
-        return ToClauseShape(database=database, name=name)
+    depth = 0
+    for token in tokenize_sql(query):
+        if is_trivia(token):
+            continue
+        if token.text == "(":
+            depth += 1
+        elif token.text == ")":
+            depth -= 1
+        if depth != 0 or token.kind != "identifier" or token.text.upper() != "AS":
+            continue
+        as_clause = js_trim(js_trim(query[token.end :]).removesuffix(";"))
+        return as_clause or None
     return None
+
+
+def parse_to_clause(query: str | None, fallback_database: str) -> ToClauseShape | None:
+    """The ``TO [db.]name`` target of a materialized view; None for one with an inner table."""
+    target = parse_materialized_view_target(query, fallback_database)
+    return None if target is None else ToClauseShape(database=target[0], name=target[1])
 
 
 def _parse_depends_on(segment: str) -> list[DependsOnEntry]:

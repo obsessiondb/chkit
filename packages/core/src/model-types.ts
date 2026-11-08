@@ -531,6 +531,7 @@ export type MigrationOperationType =
   | 'alter_table_drop_projection'
   | 'alter_table_reset_setting'
   | 'alter_table_modify_ttl'
+  | 'alter_table_modify_comment'
   | 'alter_table_add_constraint'
   | 'alter_table_drop_constraint'
   | 'create_dictionary'

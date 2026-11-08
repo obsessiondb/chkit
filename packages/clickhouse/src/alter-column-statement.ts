@@ -22,15 +22,15 @@ const DEFAULT_KINDS = new Set(['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'])
 const TRAILING_CLAUSES = new Set(['TTL', 'SETTINGS', 'FIRST', 'AFTER', 'STATISTICS', 'PRIMARY'])
 
 /**
- * Reads what `ALTER TABLE ... MODIFY COLUMN <column> ...` sets. Returns an
- * empty intent when the statement is not a single MODIFY COLUMN of `column`
- * (hand-written or plugin-rewritten SQL), so the wait falls back to checking
- * that every replica agrees.
+ * Reads what `ALTER TABLE ... MODIFY COLUMN <column> ...` (or `COMMENT COLUMN
+ * <column> '<text>'`) sets. Returns an empty intent when the statement is not a
+ * single MODIFY COLUMN of `column` (hand-written or plugin-rewritten SQL), so
+ * the wait falls back to checking that every replica agrees.
  */
 export function parseModifyColumnIntent(statement: string, column: string): ColumnIntent {
   const tokens = significantTokens(statement)
   let i = findTopLevel(tokens, ['MODIFY', 'COLUMN'])
-  if (i < 0) return {}
+  if (i < 0) return parseCommentColumnIntent(tokens, column)
   if (word(tokens[i]) === 'IF' && word(tokens[i + 1]) === 'EXISTS') i += 2
   const name = tokens[i]
   if (!name || identifierName(name) !== column) return {}
@@ -74,6 +74,16 @@ export function parseModifyColumnIntent(statement: string, column: string): Colu
       return intent
     }
   }
+}
+
+function parseCommentColumnIntent(tokens: SQLToken[], column: string): ColumnIntent {
+  let i = findTopLevel(tokens, ['COMMENT', 'COLUMN'])
+  if (i < 0) return {}
+  if (word(tokens[i]) === 'IF' && word(tokens[i + 1]) === 'EXISTS') i += 2
+  const name = tokens[i]
+  const value = tokens[i + 1] ? stringLiteralValue(tokens[i + 1] as SQLToken) : undefined
+  if (!name || identifierName(name) !== column || value === undefined) return {}
+  return { comment: value }
 }
 
 /**

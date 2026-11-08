@@ -405,6 +405,29 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
     expect(content).toContain('export default schema(app_events_view, app_events_mv)')
   })
 
+  test('renders the comment of a table, a view and a materialized view exactly (#464)', () => {
+    const comment = 'it\'s "q" a\\b C:\\new\\t trail\\ l1\nl2 héllo 世界 🚀 x AS y'
+    const content = renderSchemaFile([
+      {
+        kind: 'table',
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [{ name: 'id', type: 'UInt64', comment }],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        comment,
+      },
+      { kind: 'view', database: 'app', name: 'v', as: 'SELECT id FROM app.events', comment },
+      { kind: 'materialized_view', database: 'app', name: 'mv', to: { database: 'app', name: 'events' }, as: 'SELECT 1 AS id', comment },
+    ])
+    const literal = JSON.stringify(comment)
+    expect(content).toContain(`  orderBy: ["id"],\n  comment: ${literal},\n})`)
+    expect(content).toContain(`  as: "SELECT id FROM app.events",\n  comment: ${literal},\n})`)
+    expect(content).toContain(`  as: "SELECT 1 AS id",\n  comment: ${literal},\n})`)
+    expect(content).toContain(`{ name: "id", type: "UInt64", comment: ${literal} }`)
+  })
+
   test('renders a dictionary definition with a hidden-secret note', () => {
     const content = renderSchemaFile([
       {
@@ -982,6 +1005,65 @@ describe('@chkit/plugin-pull parser helpers', () => {
 SELECT id
 FROM app.users;`)
     expect(asClause).toBe('SELECT id\nFROM app.users')
+  })
+
+  test('parseAsClause skips an AS inside the comment literal (#464)', () => {
+    expect(
+      __testUtils.parseAsClause("CREATE VIEW db.v (`id` UInt64) COMMENT 'it\\'s a view AS x' AS SELECT id FROM db.events")
+    ).toBe('SELECT id FROM db.events')
+    expect(
+      __testUtils.parseAsClause(
+        "CREATE MATERIALIZED VIEW db.mv TO db.totals (`id` UInt64) COMMENT 'sums AS totals' AS SELECT id, note FROM db.src"
+      )
+    ).toBe('SELECT id, note FROM db.src')
+  })
+
+  test('mapSystemTableRowToDefinition takes the comment of a view, materialized view and dictionary from system.tables (#464)', () => {
+    const comment = 'line1\nline2 back\\slash it\'s AS x'
+    expect(
+      __testUtils.mapSystemTableRowToDefinition({
+        database: 'db',
+        name: 'v',
+        engine: 'View',
+        create_table_query: "CREATE VIEW db.v (`id` UInt64) COMMENT 'line1\\nline2 back\\\\slash it\\'s AS x' AS SELECT id FROM db.t",
+        comment,
+      })
+    ).toEqual({ kind: 'view', database: 'db', name: 'v', as: 'SELECT id FROM db.t', comment })
+    expect(
+      __testUtils.mapSystemTableRowToDefinition({
+        database: 'db',
+        name: 'mv',
+        engine: 'MaterializedView',
+        create_table_query: "CREATE MATERIALIZED VIEW db.mv TO db.t (`id` UInt64) COMMENT 'maps x TO y' AS SELECT id FROM db.src",
+        comment: 'maps x TO y',
+      })
+    ).toEqual({
+      kind: 'materialized_view',
+      database: 'db',
+      name: 'mv',
+      to: { database: 'db', name: 't' },
+      as: 'SELECT id FROM db.src',
+      comment: 'maps x TO y',
+    })
+    expect(
+      __testUtils.mapSystemTableRowToDefinition({
+        database: 'db',
+        name: 'd',
+        engine: 'Dictionary',
+        create_table_query:
+          "CREATE DICTIONARY db.d (`id` UInt64) PRIMARY KEY id SOURCE(NULL()) LIFETIME(MIN 0 MAX 300) LAYOUT(HASHED()) COMMENT 'line1\\nline2 back\\\\slash it\\'s AS x'",
+        comment,
+      })
+    ).toMatchObject({ kind: 'dictionary', comment })
+  })
+
+  test('parseToClause ignores a TO inside the comment of a materialized view with an inner table', () => {
+    expect(
+      __testUtils.parseToClause(
+        "CREATE MATERIALIZED VIEW db.mv (`id` UInt64) ENGINE = MergeTree ORDER BY id COMMENT 'maps x TO y' AS SELECT id FROM db.src",
+        'db'
+      )
+    ).toBeNull()
   })
 
   test('parseAsClause returns null when AS clause is missing', () => {
