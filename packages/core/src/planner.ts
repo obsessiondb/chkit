@@ -183,9 +183,8 @@ function stripInsignificantFormatting(token: string): string {
   return out
 }
 
-// Keeps the key parts apart: a column named `a, b` is one part, not `a` and `b` (#523).
 function normalizeClauseList(value: string[] | undefined): string {
-  return JSON.stringify((value ?? []).map(stripInsignificantFormatting))
+  return (value ?? []).map(stripInsignificantFormatting).join(',')
 }
 
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {
