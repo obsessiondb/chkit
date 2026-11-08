@@ -18,7 +18,7 @@ import {
   renderKeyClauseColumns,
   splitTopLevelComma,
   sqlExpressionFingerprint,
-  stripWrappingParens,
+  isTrivia,
   unquoteIdentifiers,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -317,14 +317,25 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
 
 // chkit renders `INDEX name (expr)`. Stock ClickHouse drops the parentheses
 // that enclose the whole expression, ObsessionDB keeps one pair (#512), and a
-// schema may write more (`((s))`). Peel every such pair, quote-aware, so
-// `(a) + (b)` and `(s = ')(')`'s literal stay intact.
+// schema may write more (`((s))`). Peel every such pair, reading the SQL with
+// the shared lexer so `(a) + (b)` and the parentheses inside a string, quoted
+// name or heredoc (`$$)$$`) stay intact.
 function indexExpressionBase(index: SkipIndexDefinition): string {
   let expression = normalizeSQLFragment(index.expression)
-  for (let peeled = stripWrappingParens(expression); peeled !== expression; peeled = stripWrappingParens(expression)) {
-    expression = peeled
+  for (;;) {
+    const tokens = tokenizeSQL(expression).filter((token) => !isTrivia(token))
+    const first = tokens[0]
+    const last = tokens.at(-1)
+    if (first?.text !== '(' || last?.text !== ')') return expression
+    let depth = 0
+    const encloses = tokens.every((token, i) => {
+      if (token.text === '(') depth++
+      else if (token.text === ')') depth--
+      return depth > 0 || i === tokens.length - 1
+    })
+    if (!encloses) return expression
+    expression = expression.slice(first.end, last.start).trim()
   }
-  return expression
 }
 
 function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCanonicalizer): string {

@@ -11,6 +11,7 @@ from chkit.cli.commands.drift_compare import (
     MapSqlCanonicalizer,
     ObjectDriftDetail,
     SchemaObjectShape,
+    collect_table_sql_fragments,
     collect_view_sql_queries,
     compare_schema_objects,
     compare_table_shape,
@@ -286,6 +287,17 @@ def test_table_shape_peels_every_enclosing_index_paren(declared: str, stored: st
     detail = compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[changed_idx]))
     assert detail is not None
     assert "index_mismatch" in detail.reason_codes
+
+
+def test_index_paren_peel_reads_heredocs_as_strings() -> None:
+    expected_idx = SkipIndexMinmax(
+        name="idx_x", expression="((equals(x, $$($$)) OR (equals(x, $$)$$)))", granularity=1
+    )
+    stored_idx = SkipIndexMinmax(
+        name="idx_x", expression="equals(x, '(') OR equals(x, ')')", granularity=1
+    )
+    fragments = collect_table_sql_fragments(_t(indexes=[expected_idx]), _it(indexes=[stored_idx]))
+    assert "(equals(x, $$($$)) OR (equals(x, $$)$$))" in fragments.expressions
 
 
 def test_table_shape_keeps_parens_that_do_not_enclose_the_expression() -> None:

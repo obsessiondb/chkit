@@ -430,6 +430,20 @@ describe('@chkit/cli drift comparer', () => {
     ).toContain('index_mismatch')
   })
 
+  test('peels only the skip index parentheses that enclose the expression, reading heredocs as strings', () => {
+    const columns = [{ name: 'id', type: 'UInt64' }, { name: 'a', type: 'String' }]
+    const index = { name: 'idx', type: 'set' as const, maxRows: 0, granularity: 1 }
+    const expected = table({
+      database: 'app', name: 'events', engine: 'MergeTree()', columns, primaryKey: ['id'], orderBy: ['id'],
+      indexes: [{ ...index, expression: '((equals(a, $$($$)) OR (equals(a, $$)$$)))' }],
+    })
+    const actual = {
+      engine: 'MergeTree()', primaryKey: '(id)', orderBy: '(id)', columns, settings: {},
+      indexes: [{ ...index, expression: "equals(a, '(') OR equals(a, ')')" }], projections: [],
+    }
+    expect(collectTableSqlFragments(expected, actual).expressions).toContain('(equals(a, $$($$)) OR (equals(a, $$)$$))')
+  })
+
   test('reports projection_mismatch when an index projection changes type', () => {
     const expected = table({
       database: 'app',

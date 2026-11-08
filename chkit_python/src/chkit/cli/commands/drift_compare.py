@@ -44,14 +44,19 @@ from chkit.core.sql import (
     column_type_fingerprint,
     render_key_clause_columns,
 )
-from chkit.core.sql_lexer import JS_WHITESPACE_RUN, identifier_name, js_trim, tokenize_sql
+from chkit.core.sql_lexer import (
+    JS_WHITESPACE_RUN,
+    identifier_name,
+    is_trivia,
+    js_trim,
+    tokenize_sql,
+)
 from chkit.core.sql_normalizer import (
     is_synthetic_ephemeral_default,
     normalize_engine,
     normalize_sql_fragment,
     sql_expression_fingerprint,
 )
-from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY, with_default_index_granularity
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 from chkit.core.vector_index import render_vector_index_type
@@ -382,15 +387,24 @@ def _index_expression_base(index: SkipIndexDefinition) -> str:
 
     chkit renders ``INDEX name (expr)``. Stock ClickHouse drops those
     parentheses, ObsessionDB keeps one pair (#512), and a schema may write more
-    (``((s))``). Every such pair is peeled, quote-aware, so ``(a) + (b)`` and
-    the literal in ``(s = ')(')`` stay intact.
+    (``((s))``). Every such pair is peeled, reading the SQL with the shared
+    lexer so ``(a) + (b)`` and the parentheses inside a string, quoted name or
+    heredoc (``$$)$$``) stay intact.
     """
     expression = normalize_sql_fragment(index.expression)
-    peeled = strip_wrapping_parens(expression)
-    while peeled != expression:
-        expression = peeled
-        peeled = strip_wrapping_parens(expression)
-    return expression
+    while True:
+        tokens = [token for token in tokenize_sql(expression) if not is_trivia(token)]
+        if not tokens or tokens[0].text != "(" or tokens[-1].text != ")":
+            return expression
+        depth = 0
+        for i, token in enumerate(tokens):
+            if token.text == "(":
+                depth += 1
+            elif token.text == ")":
+                depth -= 1
+            if depth == 0 and i < len(tokens) - 1:
+                return expression
+        expression = js_trim(expression[tokens[0].end : tokens[-1].start])
 
 
 def _normalize_index_shape(
