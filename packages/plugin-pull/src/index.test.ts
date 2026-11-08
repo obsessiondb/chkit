@@ -31,6 +31,13 @@ describe('@chkit/plugin-pull options', () => {
 })
 
 describe('@chkit/plugin-pull renderSchemaFile', () => {
+  test('keeps every header line a comment, whatever line terminator it contains', () => {
+    const definition = table({ database: 'db', name: 't', engine: 'MergeTree()', primaryKey: [], orderBy: [], columns: [{ name: 'a', type: 'UInt8' }] })
+    const output = renderSchemaFile([definition], { header: ['first\nprocess.exit(1)', 'second\r\nthird\u2028fourth\u2029fifth', ''] })
+    expect(output).toContain('// first\n// process.exit(1)\n// second\n// third\n// fourth\n// fifth\n//\n')
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(output)).not.toThrow()
+  })
+
   test('preserves DoubleDelta sizes retained by the server in verbatim chains', () => {
     const definition = table({
       database: 'db', name: 't', engine: 'MergeTree()', primaryKey: [], orderBy: [],

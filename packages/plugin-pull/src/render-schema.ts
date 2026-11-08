@@ -47,7 +47,8 @@ export function renderSchemaFile(definitions: SchemaDefinition[], options: Rende
   const lines: string[] = [
     renderImportStatement(canonical),
     '',
-    ...(options.header ?? PULL_HEADER).map((line) => (line ? `// ${line}` : '//')),
+    // Every line terminator JavaScript knows starts a new comment line, so header text can never become code.
+    ...(options.header ?? PULL_HEADER).flatMap((line) => line.split(/\r\n|[\r\n\u2028\u2029]/)).map((line) => (line ? `// ${line}` : '//')),
     '',
   ]
 
