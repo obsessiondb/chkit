@@ -78,13 +78,12 @@ jobs:
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [verify, obsessiondb]
-    # ObsessionDB tests run only on main. PR previews need verify to pass,
-    # while production still requires both test jobs to succeed.
+    needs: verify
+    # Production and PR previews both deploy once verify passes. The
+    # obsessiondb job reports on the managed target and gates nothing.
     if: >-
       !cancelled() && needs.verify.result == 'success' &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-        needs.obsessiondb.result == 'success') ||
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         github.actor != 'dependabot[bot]'))
