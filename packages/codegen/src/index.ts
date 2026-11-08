@@ -17,6 +17,8 @@ export interface GenerateArtifactsInput {
   plan: MigrationPlan
   cliVersion?: string
   now?: Date
+  /** `clickhouse.indexGranularity`, for a MergeTree table without index_granularity. */
+  indexGranularity?: number
 }
 
 export interface GenerateArtifactsOutput {
@@ -29,6 +31,8 @@ export interface GenerateArtifactsOutput {
 export interface WriteSnapshotInput {
   metaDir: string
   definitions: SchemaDefinition[]
+  /** `clickhouse.indexGranularity`, for a MergeTree table without index_granularity. */
+  indexGranularity?: number
 }
 
 export interface WriteSnapshotOutput {
@@ -192,6 +196,7 @@ export async function generateArtifacts(input: GenerateArtifactsInput): Promise<
   const { snapshotFile, snapshot } = await writeSnapshot({
     metaDir: input.metaDir,
     definitions: input.definitions,
+    indexGranularity: input.indexGranularity,
   })
 
   return {
@@ -215,7 +220,7 @@ export function serializeSnapshot(snapshot: Snapshot): string {
 export async function writeSnapshot(input: WriteSnapshotInput): Promise<WriteSnapshotOutput> {
   await mkdir(input.metaDir, { recursive: true })
   const snapshotFile = join(input.metaDir, 'snapshot.json')
-  const snapshot = createSnapshot(input.definitions)
+  const snapshot = createSnapshot(input.definitions, { indexGranularity: input.indexGranularity })
   await writeFile(snapshotFile, serializeSnapshot(snapshot), 'utf8')
   return { snapshotFile, snapshot }
 }

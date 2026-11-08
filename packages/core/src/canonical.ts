@@ -15,9 +15,19 @@ import { canonicalizeCodec } from './codec.js'
 import { canonicalizeConstraint } from './constraint.js'
 import { canonicalizeColumnDefault } from './column-default.js'
 import { canonicalizeProjection } from './projection.js'
+import { withDefaultIndexGranularity, withoutAutoMinmaxIndexes } from './table-settings.js'
 import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 import { canonicalizeVectorIndex } from './vector-index.js'
+
+export interface CanonicalizeOptions {
+  /**
+   * The `index_granularity` a MergeTree table that does not declare it gets:
+   * the server's MergeTree default, `clickhouse.indexGranularity` (8192 when
+   * unset).
+   */
+  indexGranularity?: number
+}
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => a.name.localeCompare(b.name))
@@ -72,14 +82,16 @@ function normalizeOptionalClause(value: string | undefined): string | undefined 
   return normalizeSQLFragment(value) || undefined
 }
 
-function canonicalizeTable(def: TableDefinition): TableDefinition {
-  const settings = def.settings
+function canonicalizeTable(def: TableDefinition, options: CanonicalizeOptions): TableDefinition {
+  const declaredSettings = withDefaultIndexGranularity(def.engine, def.settings, options.indexGranularity)
+  const settings = declaredSettings
     ? Object.fromEntries(
-        Object.entries(def.settings).sort(([a], [b]) => a.localeCompare(b))
+        Object.entries(declaredSettings).sort(([a], [b]) => a.localeCompare(b))
       )
     : undefined
 
-  const indexes = def.indexes ? sortByName(def.indexes).map(canonicalizeIndex) : undefined
+  const declaredIndexes = withoutAutoMinmaxIndexes(def.indexes, settings)
+  const indexes = declaredIndexes ? sortByName(declaredIndexes).map(canonicalizeIndex) : undefined
   const projections = def.projections
     ? sortByName(def.projections).map(canonicalizeProjection)
     : undefined
@@ -236,8 +248,8 @@ function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition
   }
 }
 
-export function canonicalizeDefinition(def: SchemaDefinition): SchemaDefinition {
-  if (def.kind === 'table') return canonicalizeTable(def)
+export function canonicalizeDefinition(def: SchemaDefinition, options: CanonicalizeOptions = {}): SchemaDefinition {
+  if (def.kind === 'table') return canonicalizeTable(def, options)
   if (def.kind === 'view') return canonicalizeView(def)
   if (def.kind === 'dictionary') return canonicalizeDictionary(def)
   return canonicalizeMaterializedView(def)
@@ -247,10 +259,13 @@ export function definitionKey(def: SchemaDefinition): string {
   return `${def.kind}:${def.database}.${def.name}`
 }
 
-export function canonicalizeDefinitions(definitions: SchemaDefinition[]): SchemaDefinition[] {
+export function canonicalizeDefinitions(
+  definitions: SchemaDefinition[],
+  options: CanonicalizeOptions = {}
+): SchemaDefinition[] {
   const dedup = new Map<string, SchemaDefinition>()
   for (const def of definitions) {
-    const normalized = canonicalizeDefinition(def)
+    const normalized = canonicalizeDefinition(def, options)
     dedup.set(definitionKey(normalized), normalized)
   }
 
@@ -263,7 +278,10 @@ export function canonicalizeDefinitions(definitions: SchemaDefinition[]): Schema
   })
 }
 
-export function collectDefinitionsFromModule(mod: Record<string, unknown>): SchemaDefinition[] {
+export function collectDefinitionsFromModule(
+  mod: Record<string, unknown>,
+  options: CanonicalizeOptions = {}
+): SchemaDefinition[] {
   const out: SchemaDefinition[] = []
 
   const walk = (value: unknown) => {
@@ -279,5 +297,5 @@ export function collectDefinitionsFromModule(mod: Record<string, unknown>): Sche
   }
 
   for (const value of Object.values(mod)) walk(value)
-  return canonicalizeDefinitions(out)
+  return canonicalizeDefinitions(out, options)
 }

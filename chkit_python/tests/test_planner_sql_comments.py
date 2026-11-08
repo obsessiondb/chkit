@@ -111,7 +111,7 @@ def test_commented_partition_by_and_ttl_keep_create_table_complete() -> None:
     assert len(extract_executable_statements(render_migration_body(plan))) == len(plan.operations)
     create_table = sql_of(plan, "create_table") or ""
     assert "PARTITION BY toYYYYMM(ts)\n" in create_table
-    assert create_table.endswith("\nTTL ts + toIntervalDay(30);")
+    assert create_table.endswith("\nTTL ts + toIntervalDay(30)\nSETTINGS index_granularity = 8192;")
 
 
 def test_commented_ttl_change_renders_complete_modify_ttl() -> None:

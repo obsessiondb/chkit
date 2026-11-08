@@ -181,7 +181,7 @@ def test_plans_additive_table_changes_in_stable_order() -> None:
             engine="MergeTree()",
             primaryKey=["id"],
             orderBy=["id"],
-            settings={"index_granularity": 8192},
+            settings={"merge_with_ttl_timeout": 3600},
         )
     ]
     new = [
@@ -196,7 +196,7 @@ def test_plans_additive_table_changes_in_stable_order() -> None:
             engine="MergeTree()",
             primaryKey=["id"],
             orderBy=["id"],
-            settings={"index_granularity": 4096},
+            settings={"merge_with_ttl_timeout": 7200},
             indexes=[
                 {
                     "name": "idx_source",
@@ -235,7 +235,7 @@ def test_plans_non_additive_table_changes_with_risk_classification() -> None:
             primaryKey=["id"],
             orderBy=["id"],
             ttl="toDateTime(id)",
-            settings={"index_granularity": 8192, "old_setting": 1},
+            settings={"merge_with_ttl_timeout": 3600, "old_setting": 1},
             indexes=[
                 {"name": "idx_source", "expression": "source", "type": "set", "maxRows": 0, "granularity": 1},
                 {"name": "idx_old", "expression": "old_col", "type": "set", "maxRows": 0, "granularity": 1},
@@ -253,7 +253,7 @@ def test_plans_non_additive_table_changes_with_risk_classification() -> None:
             engine="MergeTree()",
             primaryKey=["id"],
             orderBy=["id"],
-            settings={"index_granularity": 4096},
+            settings={"merge_with_ttl_timeout": 7200},
             indexes=[
                 {"name": "idx_source", "expression": "lower(source)", "type": "set", "maxRows": 0, "granularity": 2},
             ],

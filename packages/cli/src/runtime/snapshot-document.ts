@@ -1,4 +1,5 @@
 import {
+  type CanonicalizeOptions,
   canonicalizeDefinitions,
   definitionKey,
   hasConflictMarkers,
@@ -34,7 +35,7 @@ interface SnapshotJson {
  * other damage. JSON is read as leniently as before: missing fields default,
  * definitions are canonicalized, and entries chkit never writes may still throw.
  */
-export function parseSnapshotDocument(raw: string): ParsedSnapshotDocument {
+export function parseSnapshotDocument(raw: string, options: CanonicalizeOptions = {}): ParsedSnapshotDocument {
   if (raw.trim() === '') return { status: 'unreadable', reason: 'empty' }
 
   let parsed: SnapshotJson
@@ -51,7 +52,7 @@ export function parseSnapshotDocument(raw: string): ParsedSnapshotDocument {
     snapshot: {
       version: 1,
       generatedAt: parsed.generatedAt ?? '',
-      definitions: canonicalizeDefinitions(parsed.definitions ?? []),
+      definitions: canonicalizeDefinitions(parsed.definitions ?? [], options),
     },
   }
 }

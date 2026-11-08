@@ -7,6 +7,7 @@ guarantee that round-tripping a definition produces an equal object.
 
 from __future__ import annotations
 
+import json
 import os
 import re
 from collections.abc import Callable
@@ -597,6 +598,20 @@ class ChxUserClickHouseConfig(_StrictModel):
     # unnecessary). Accepts an identifier (e.g. ``"my_cluster"``) or a macro
     # (e.g. ``"{cluster}"``).
     cluster: str | None = None
+    # The server's MergeTree ``index_granularity`` default (its
+    # ``<merge_tree><index_granularity>`` setting): the value chkit assumes for
+    # a MergeTree table that does not declare ``index_granularity``. Defaults
+    # to 8192, ClickHouse's default. ``drift``, ``check``, ``migrate`` and
+    # ``pull`` stop when the server reports another value.
+    index_granularity: int | None = Field(default=None, alias="indexGranularity")
+
+    model_config = ConfigDict(
+        frozen=True,
+        extra="forbid",
+        strict=True,
+        validate_assignment=True,
+        populate_by_name=True,
+    )
 
 
 class ChxResolvedClickHouseConfig(_StrictModel):
@@ -606,6 +621,8 @@ class ChxResolvedClickHouseConfig(_StrictModel):
     database: str
     secure: bool
     cluster: str | None = None
+    # None in a config built by hand; read it through ``configured_index_granularity``.
+    index_granularity: int | None = None
 
 
 # A cluster name is interpolated into ``ON CLUSTER '<name>'``, so constrain it
@@ -1070,7 +1087,7 @@ def is_schema_definition(value: object) -> bool:
 
 
 def collect_definitions_from_module(
-    mod: dict[str, object],
+    mod: dict[str, object], *, index_granularity: int | None = None
 ) -> list[SchemaDefinition]:
     """Walk module values, collect SchemaDefinition instances, deduplicate via canonicalization."""
     from chkit.core.canonical import canonicalize_definitions
@@ -1090,7 +1107,7 @@ def collect_definitions_from_module(
     for value in mod.values():
         walk(value)
 
-    return canonicalize_definitions(out)
+    return canonicalize_definitions(out, index_granularity=index_granularity)
 
 
 ChxConfigFn: TypeAlias = Callable[
@@ -1163,6 +1180,7 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
             # and ``""`` skip validation and stay ``None``, so cluster mode is
             # opt-in and never engages silently.
             cluster=_assert_valid_cluster_name(ch.cluster) if ch.cluster else None,
+            index_granularity=_assert_valid_index_granularity(ch.index_granularity),
         )
 
     return ChxResolvedConfig(
@@ -1176,6 +1194,30 @@ def resolve_config(config: ChxUserConfig) -> ChxResolvedConfig:
         plugins=list(config.plugins) if config.plugins is not None else [],
     )
 
+
+
+def configured_index_granularity(config: ChxResolvedConfig) -> int:
+    """The ``index_granularity`` chkit gives a MergeTree table that does not declare it."""
+    from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY
+
+    if config.clickhouse is None or config.clickhouse.index_granularity is None:
+        return DEFAULT_INDEX_GRANULARITY
+    return config.clickhouse.index_granularity
+
+
+def _assert_valid_index_granularity(value: int | None) -> int:
+    from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY
+
+    if value is None:
+        return DEFAULT_INDEX_GRANULARITY
+    if value <= 0:
+        msg = (
+            f"Invalid clickhouse.indexGranularity {json.dumps(value)}. Expected a positive "
+            "integer, the server's MergeTree index_granularity default (8192 unless the "
+            "server configures another)."
+        )
+        raise ValueError(msg)
+    return value
 
 
 def _resolve_secure(ch: ChxUserClickHouseConfig) -> bool:

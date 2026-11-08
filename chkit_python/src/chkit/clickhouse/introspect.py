@@ -56,6 +56,7 @@ from chkit.core.model import (
 )
 from chkit.core.sql_lexer import identifier_name, is_trivia, tokenize_sql
 from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
+from chkit.core.table_settings import AUTO_MINMAX_INDEX_PREFIX
 from chkit.core.text_index import parse_text_index_params
 from chkit.core.text_index_sql import normalize_text_index_sql
 from chkit.core.vector_index import parse_vector_index_args
@@ -217,6 +218,19 @@ def _numeric_args(args: str | None) -> list[float] | None:
     return [float(part) for part in parts]
 
 
+def _is_server_generated_index(name: str, create_table_query: str | None) -> bool:
+    """The ``add_minmax_index_for_*`` settings make ClickHouse create hidden
+    ``auto_minmax_index_<column>`` skip indexes. They show in
+    system.data_skipping_indices but not in the table's CREATE, and recreating
+    the table with them fails (reserved name), so pull and drift leave them out
+    (#466). A user index of that name, allowed while those settings are off,
+    appears in the CREATE and is kept."""
+    if not name.startswith(AUTO_MINMAX_INDEX_PREFIX):
+        return False
+    pattern = rf"\bINDEX\s+`?{re.escape(name)}`?\s"
+    return re.search(pattern, create_table_query or "", re.IGNORECASE) is None
+
+
 def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
     row: SystemSkippingIndexRow,
 ) -> SkipIndexDefinition:
@@ -327,7 +341,11 @@ def build_introspected_tables(
         col_rows = sorted(
             columns_by_table.get(key, []), key=lambda c: c.position
         )
-        idx_rows = indexes_by_table.get(key, [])
+        idx_rows = [
+            idx
+            for idx in indexes_by_table.get(key, [])
+            if not _is_server_generated_index(idx.name, table_row.create_table_query)
+        ]
         out.append(
             IntrospectedTable(
                 database=table_row.database,

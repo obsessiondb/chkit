@@ -35,6 +35,7 @@ from chkit.plugins import (
     ChxOnCheckReportContext,
     ChxOnCheckResult,
     ChxOnInitContext,
+    ChxOnPlanCreatedContext,
     ChxOnSchemaLoadedContext,
     ChxPlugin,
     ChxPluginCommand,
@@ -61,8 +62,11 @@ from chkit_plugin_obsessiondb.credentials import (
 )
 from chkit_plugin_obsessiondb.engine import (
     find_distributed_tables,
+    is_obsessiondb_target,
     resolve_strip_behavior,
     rewrite_shared_engines,
+    storage_policy_change_errors,
+    with_obsessiondb_storage_policy,
 )
 from chkit_plugin_obsessiondb.remote_executor import create_remote_executor
 from chkit_plugin_obsessiondb.service_api import list_services
@@ -122,6 +126,8 @@ class _ObsessionDBHooks:
             distributed = find_distributed_tables(list(ctx.definitions))
             if distributed:
                 raise ValueError("\n".join(distributed))
+            if is_obsessiondb_target(ctx.config, flags):
+                return with_obsessiondb_storage_policy(list(ctx.definitions))
             return None
 
         result = rewrite_shared_engines(list(ctx.definitions))
@@ -138,6 +144,25 @@ class _ObsessionDBHooks:
                     f"{', '.join(unique)}"
                 )
         return result.definitions
+
+    def on_snapshot_loaded(self, ctx: ChxOnSchemaLoadedContext) -> list[Any]:
+        # The same settings rewrite as on_schema_loaded, without its notices
+        # and checks: they are about the schema, not about the last snapshot.
+        flags = dict(ctx.flags) if ctx.flags else {}
+        if resolve_strip_behavior(ctx.config, flags):
+            return rewrite_shared_engines(list(ctx.definitions)).definitions
+        if is_obsessiondb_target(ctx.config, flags):
+            return with_obsessiondb_storage_policy(list(ctx.definitions))
+        return list(ctx.definitions)
+
+    def on_plan_created(self, ctx: ChxOnPlanCreatedContext) -> Any:
+        flags = dict(ctx.flags) if ctx.flags else {}
+        if not is_obsessiondb_target(ctx.config, flags):
+            return None
+        errors = storage_policy_change_errors(ctx.plan)
+        if errors:
+            raise ValueError("\n".join(errors))
+        return None
 
     def on_check(self, ctx: ChxOnCheckContext) -> ChxOnCheckResult | None:
         # Same target decision as on_schema_loaded: ObsessionDB host or

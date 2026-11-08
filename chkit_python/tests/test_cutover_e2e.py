@@ -17,6 +17,7 @@ import pytest
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.cutover_scenario import (
+    GRANULARITY_CHANGE,
     CutoverTarget,
     run_backfill_scenario,
     run_keep_scenario,
@@ -76,3 +77,9 @@ def test_resumes_after_a_failure_at_every_step_and_never_replays_the_swap(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
     run_retry_scenario(target, "cutover_retry", tmp_path)
+
+
+def test_cuts_over_an_index_granularity_change_resuming_after_a_failure_at_every_step(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE)

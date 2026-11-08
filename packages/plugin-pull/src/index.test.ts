@@ -109,7 +109,7 @@ const app_events = table({
   partitionBy: "toYYYYMM(received_at)",
   ttl: "received_at + INTERVAL 30 DAY",
   settings: {
-    index_granularity: 8192,
+    index_granularity: 8192, // read-only: a change recreates the table (DROP + CREATE, or --cutover)
     ttl_only_drop_parts: 1,
   },
   indexes: [
@@ -422,7 +422,10 @@ export default schema(app_events, app_events_view, analytics_daily_mv)
       { kind: 'materialized_view', database: 'app', name: 'mv', to: { database: 'app', name: 'events' }, as: 'SELECT 1 AS id', comment },
     ])
     const literal = JSON.stringify(comment)
-    expect(content).toContain(`  orderBy: ["id"],\n  comment: ${literal},\n})`)
+    // A MergeTree table carries index_granularity, so its settings come before the comment (#466).
+    expect(content).toContain(
+      `  orderBy: ["id"],\n  settings: {\n    index_granularity: 8192, // read-only: a change recreates the table (DROP + CREATE, or --cutover)\n  },\n  comment: ${literal},\n})`
+    )
     expect(content).toContain(`  as: "SELECT id FROM app.events",\n  comment: ${literal},\n})`)
     expect(content).toContain(`  as: "SELECT 1 AS id",\n  comment: ${literal},\n})`)
     expect(content).toContain(`{ name: "id", type: "UInt64", comment: ${literal} }`)

@@ -108,6 +108,8 @@ export function applyCutovers(input: {
   cutovers: ResolvedCutovers
   cluster: string | undefined
   stamp: string
+  /** `clickhouse.indexGranularity`; 8192 when unset. */
+  indexGranularity?: number
 }): { plan: MigrationPlan; cutovers: PlannedCutover[] } {
   const { cutovers } = input
   let operations = input.plan.operations
@@ -119,7 +121,7 @@ export function applyCutovers(input: {
     const createIndex = operations.findIndex((op) => op.type === 'create_table' && op.key === key)
     if (dropIndex === -1 || createIndex === -1) {
       throw new Error(
-        `--cutover ${target}: the plan does not recreate ${target}. A cutover replaces the DROP TABLE and CREATE TABLE of a change to the engine, ORDER BY, PRIMARY KEY or PARTITION BY of an existing table${input.plan.operations.length === 0 ? '; the plan is empty' : ''}. Check the table name and the --table scope.`
+        `--cutover ${target}: the plan does not recreate ${target}. A cutover replaces the DROP TABLE and CREATE TABLE of a change to the engine, ORDER BY, PRIMARY KEY, PARTITION BY or a read-only setting (such as index_granularity) of an existing table${input.plan.operations.length === 0 ? '; the plan is empty' : ''}. Check the table name and the --table scope.`
       )
     }
     assertNoDependentRecreated(operations, [...input.previousDefinitions, ...input.definitions], request)
@@ -130,7 +132,13 @@ export function applyCutovers(input: {
       oldDef,
       newDef,
       request,
-      options: { copy: cutovers.copy, oldTable: cutovers.oldTable, cluster: input.cluster, stamp: input.stamp },
+      options: {
+        copy: cutovers.copy,
+        oldTable: cutovers.oldTable,
+        cluster: input.cluster,
+        stamp: input.stamp,
+        indexGranularity: input.indexGranularity,
+      },
       definitions: input.definitions,
     })
     planned.push(cutover)

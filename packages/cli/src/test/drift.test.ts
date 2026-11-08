@@ -1387,3 +1387,51 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
     expect(compareViewShape(expected, elsewhere, 'app', canonicalizer)).toMatchObject([{ code: 'query_mismatch' }])
   })
 })
+
+describe('@chkit/cli drift comparer on what ClickHouse stores (#466)', () => {
+  test('compares a column type in the spacing ClickHouse stores, quotes as written', () => {
+    const pairs: Array<[string, string]> = [
+      ['Decimal(10,2)', 'Decimal(10, 2)'],
+      ["DateTime64(3,'UTC')", "DateTime64(3, 'UTC')"],
+      ['Map(String,UInt64)', 'Map(String, UInt64)'],
+      ['Tuple(a UInt8,b String)', 'Tuple(a UInt8, b String)'],
+      ["Enum8('a'=1,'b'=2)", "Enum8('a' = 1, 'b' = 2)"],
+    ]
+    for (const [declared, stored] of pairs) {
+      expect(compareColumn({ name: 'value', type: declared }, { name: 'value', type: stored })).toBeNull()
+    }
+    expect(compareColumn({ name: 'value', type: 'Decimal(10,2)', nullable: true }, { name: 'value', type: 'Decimal(10, 2)', nullable: true })).toBeNull()
+    expect(compareColumn({ name: 'value', type: "Enum8('a b'=1)" }, { name: 'value', type: "Enum8('a  b' = 1)" })?.changedColumns).toEqual(['value'])
+  })
+
+  test('compares a literal default by value, as generate does', () => {
+    const same: Array<[ColumnDefinition['default'], string]> = [
+      [1e21, '1e21'],
+      // ClickHouse stores `9007199254740993.` as the Float64 it reads.
+      [{ expression: '9007199254740993.' }, '9007199254740992.'],
+      [2.0, '2.'],
+      ["it's", "'it\\'s'"],
+    ]
+    for (const [declared, stored] of same) {
+      expect(compareColumn({ name: 'value', type: 'Float64', default: declared }, { name: 'value', type: 'Float64', default: stored })).toBeNull()
+    }
+    const changed: Array<[ColumnDefinition['default'], string]> = [
+      [{ expression: '18446744073709551615' }, '18446744073709551614'],
+      ['e', "'\\e'"],
+    ]
+    for (const [declared, stored] of changed) {
+      expect(compareColumn({ name: 'value', type: 'String', default: declared }, { name: 'value', type: 'String', default: stored })?.changedColumns).toEqual(['value'])
+    }
+  })
+
+  test('takes a live table without index_granularity as the configured server default', () => {
+    const expected = table({
+      database: 'app', name: 'events', engine: 'MergeTree()', orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }],
+      settings: { index_granularity: 4096 },
+    })
+    const actual = { engine: 'MergeTree()', orderBy: '(id)', primaryKey: '(id)', columns: [{ name: 'id', type: 'UInt64' }], settings: {}, indexes: [], projections: [] }
+    expect(compareTableShape(expected, actual, undefined, 4096)).toBeNull()
+    expect(compareTableShape(expected, actual)?.settingDiffs).toEqual(['index_granularity'])
+  })
+})

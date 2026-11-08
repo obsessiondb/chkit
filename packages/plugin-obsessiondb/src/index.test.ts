@@ -3,6 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 import {
+	type MigrationPlan,
 	parseFlags,
 	type ResolvedChxConfig,
 	type SchemaDefinition,
@@ -381,7 +382,7 @@ describe('obsessiondb plugin', () => {
 		const registration = obsessiondb()
 		const flagDefs = registration.plugin.extendCommands[0]?.flags ?? []
 		const definitions: SchemaDefinition[] = [
-			makeTable('events', 'MergeTree', { storage_policy: "'s3'" }),
+			makeTable('events', 'MergeTree', { storage_policy: "'hot_cold'" }),
 		]
 
 		const kept = registration.plugin.hooks.onSchemaLoaded({
@@ -389,6 +390,7 @@ describe('obsessiondb plugin', () => {
 			flags: parseFlags(['--force-shared-engines'], flagDefs),
 			definitions,
 		})
+		// Kept as written: not a recognized ObsessionDB host, so no storage_policy rules apply.
 		expect(kept).toBeUndefined()
 
 		const stripped = registration.plugin.hooks.onSchemaLoaded({
@@ -401,7 +403,7 @@ describe('obsessiondb plugin', () => {
 		).toBeUndefined()
 	})
 
-	test('onSchemaLoaded is a no-op for ObsessionDB hosts', () => {
+	test('onSchemaLoaded keeps Shared engines for ObsessionDB hosts', () => {
 		const registration = obsessiondb()
 		const definitions: SchemaDefinition[] = [
 			makeTable('events', 'SharedReplacingMergeTree(ts)'),
@@ -413,7 +415,52 @@ describe('obsessiondb plugin', () => {
 			definitions,
 		})
 
-		expect(result).toBeUndefined()
+		expect((result?.[0] as { engine: string }).engine).toBe('SharedReplacingMergeTree(ts)')
+	})
+
+	// ObsessionDB writes storage_policy = 's3' into every Shared table, so pull
+	// reads it back; on ObsessionDB the schema and the snapshot both carry it (#466).
+	test("an ObsessionDB target gives every MergeTree table storage_policy = 's3', in the schema and the snapshot", () => {
+		const registration = obsessiondb()
+		const definitions: SchemaDefinition[] = [
+			makeTable('events', 'MergeTree', { index_granularity: '8192' }),
+			makeTable('pulled', 'MergeTree', { storage_policy: "'s3'" }),
+			makeTable('hot', 'MergeTree', { storage_policy: "'hot_cold'" }),
+		]
+		const settingsOf = (result: SchemaDefinition[] | undefined) =>
+			result?.map((def) => (def as { settings?: Record<string, unknown> }).settings)
+		const obsession = makeConfig('https://my-cluster.obsessiondb.com:8443')
+
+		const expected = [
+			{ index_granularity: '8192', storage_policy: "'s3'" },
+			{ storage_policy: "'s3'" },
+			{ storage_policy: "'hot_cold'" },
+		]
+		expect(settingsOf(registration.plugin.hooks.onSchemaLoaded({ config: obsession, flags: {}, definitions }))).toEqual(expected)
+		expect(settingsOf(registration.plugin.hooks.onSnapshotLoaded({ config: obsession, flags: {}, definitions }))).toEqual(expected)
+		// Regular ClickHouse strips every storage_policy, on both sides.
+		const local = makeConfig('http://localhost:8123')
+		expect(settingsOf(registration.plugin.hooks.onSnapshotLoaded({ config: local, flags: {}, definitions }))).toEqual([
+			{ index_granularity: '8192' },
+			undefined,
+			undefined,
+		])
+		// --force-shared-engines on another host may be a self-hosted server with its own policies: kept as is.
+		const forced = { config: local, flags: { '--force-shared-engines': true }, definitions }
+		expect(settingsOf(registration.plugin.hooks.onSnapshotLoaded(forced))).toEqual(settingsOf(definitions))
+	})
+
+	test('an ObsessionDB target rejects a plan that changes storage_policy', () => {
+		const registration = obsessiondb()
+		const plan = {
+			operations: [
+				{ type: 'alter_table_modify_setting', key: 'table:app.events:setting:storage_policy', risk: 'caution', sql: "ALTER TABLE app.events MODIFY SETTING storage_policy = 'default';" },
+			],
+			riskSummary: { safe: 0, caution: 1, danger: 0 },
+		} as unknown as MigrationPlan
+		const run = (url: string) => () => registration.plugin.hooks.onPlanCreated({ config: makeConfig(url), flags: {}, plan })
+		expect(run('https://my-cluster.obsessiondb.com:8443')).toThrow('app.events cannot change storage_policy')
+		expect(run('http://localhost:8123')()).toBeUndefined()
 	})
 
 	test('onSchemaLoaded returns undefined when no Shared engines exist', () => {

@@ -106,6 +106,7 @@ function makeRuntime(): {
 			configLoadedCalls += 1
 		},
 		runOnSchemaLoaded: async (context) => context.definitions,
+		runOnSnapshotLoaded: async (context) => context.definitions,
 		runOnPlanCreated: async (_context, plan) => plan,
 		runOnBeforeApply: async (context) => context.statements,
 		runOnAfterApply: async () => {},

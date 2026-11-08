@@ -55,6 +55,7 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import is_index_projection
+from chkit.core.table_settings import READONLY_MERGE_TREE_SETTINGS
 
 _MIN_QUOTED_LEN = 2
 
@@ -64,10 +65,29 @@ _MULTI_UNDERSCORE_RE = re.compile(r"_+")
 _LEADING_TRAILING_UNDERSCORE_RE = re.compile(r"^_+|_+$")
 
 
+_READONLY_SETTING_COMMENT = "read-only: a change recreates the table (DROP + CREATE, or --cutover)"
+_OBSESSIONDB_STORAGE_POLICY_COMMENT = "set by ObsessionDB on every Shared table; it cannot change"
+
+
+def _table_setting_comment(key: str, *, shared: bool) -> str | None:
+    """Why a pulled setting cannot be altered in place, written next to it (#466)."""
+    if key in READONLY_MERGE_TREE_SETTINGS:
+        return _READONLY_SETTING_COMMENT
+    if key == "storage_policy" and shared:
+        return _OBSESSIONDB_STORAGE_POLICY_COMMENT
+    return None
+
+
 def render_schema_file(  # noqa: PLR0912, PLR0915
     definitions: Sequence[SchemaDefinition],
+    *,
+    shared_tables: frozenset[str] = frozenset(),
 ) -> str:
-    """Render canonical Python schema source from a list of definitions."""
+    """Render canonical Python schema source from a list of definitions.
+
+    ``shared_tables`` holds ``database.name`` of the tables ObsessionDB stores
+    as ``Shared*``, whose storage_policy gets a comment.
+    """
     canonical = canonicalize_definitions(list(definitions))
     declaration_counts: dict[str, int] = {}
 
@@ -175,7 +195,8 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
         references.append(variable_name)
 
         if isinstance(definition, TableDefinition):
-            lines.extend(_render_table(variable_name, definition))
+            shared = f"{definition.database}.{definition.name}" in shared_tables
+            lines.extend(_render_table(variable_name, definition, shared=shared))
         elif isinstance(definition, ViewDefinition):
             lines.extend(_render_view(variable_name, definition))
         elif isinstance(definition, DictionaryDefinition):
@@ -195,7 +216,9 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
 # ---------- table ----------
 
 
-def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
+def _render_table(
+    variable_name: str, definition: TableDefinition, *, shared: bool = False
+) -> list[str]:
     lines: list[str] = [
         f"{variable_name} = table(",
         f"    database={_render_string(definition.database)},",
@@ -219,7 +242,9 @@ def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
         lines.append("    settings={")
         for key in sorted(definition.settings):
             value = definition.settings[key]
-            lines.append(f"        {_render_string(key)}: {_render_literal(value)},")
+            note = _table_setting_comment(key, shared=shared)
+            suffix = f"  # {note}" if note else ""
+            lines.append(f"        {_render_string(key)}: {_render_literal(value)},{suffix}")
         lines.append("    },")
     if definition.indexes:
         lines.append("    indexes=[")

@@ -8,12 +8,13 @@ import {
   type IntrospectedTable,
   type SchemaObjectRef,
 } from '@chkit/clickhouse'
-import type {
-  ChxConfig,
-  MaterializedViewDefinition,
-  Snapshot,
-  TableDefinition,
-  ViewDefinition,
+import {
+  configuredIndexGranularity,
+  type ChxConfig,
+  type MaterializedViewDefinition,
+  type Snapshot,
+  type TableDefinition,
+  type ViewDefinition,
 } from '@chkit/core'
 
 import { debug } from '../../runtime/debug.js'
@@ -203,7 +204,7 @@ export async function buildDriftPayload(
     viewPairs.flatMap(({ expected, actual }) => collectViewSqlQueries(expected, actual))
   )
   const tableDrift = pairs
-    .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer))
+    .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer, configuredIndexGranularity(config)))
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => a.table.localeCompare(b.table))
   const objectShapeDrift = [

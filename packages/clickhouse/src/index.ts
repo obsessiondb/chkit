@@ -1,6 +1,7 @@
 import { createRequire } from 'node:module'
 import { Readable } from 'node:stream'
 import {
+	AUTO_MINMAX_INDEX_PREFIX,
 	type ChxConfig,
 	type ColumnDefinition,
 	isSyntheticEphemeralDefault,
@@ -345,6 +346,20 @@ function splitArgs(args: string): number[] {
 	return parts.map(Number)
 }
 
+/**
+ * The `add_minmax_index_for_*` settings make ClickHouse create hidden
+ * `auto_minmax_index_<column>` skip indexes. They show in
+ * system.data_skipping_indices but not in the table's CREATE, and recreating
+ * the table with them fails (reserved name), so pull and drift leave them out
+ * (#466). A user index of that name, allowed while those settings are off,
+ * appears in the CREATE and is kept.
+ */
+function isServerGeneratedIndex(name: string, createTableQuery: string | undefined): boolean {
+	if (!name.startsWith(AUTO_MINMAX_INDEX_PREFIX)) return false
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+	return !new RegExp(`\\bINDEX\\s+\`?${escaped}\`?\\s`, 'i').test(createTableQuery ?? '')
+}
+
 export function normalizeIndexFromSystemRow(
 	row: SystemSkippingIndexRow,
 ): SkipIndexDefinition {
@@ -390,7 +405,9 @@ export function buildIntrospectedTables(
 			const columnRows = (columnsByTable.get(key) ?? []).sort(
 				(a, b) => a.position - b.position,
 			)
-			const indexRows = indexesByTable.get(key) ?? []
+			const indexRows = (indexesByTable.get(key) ?? []).filter(
+				(index) => !isServerGeneratedIndex(index.name, row.create_table_query),
+			)
 			return {
 				database: row.database,
 				name: row.name,
@@ -600,6 +617,7 @@ export {
 export { allReplicas, resolveReplicaFanout, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
 export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
+export { assertServerIndexGranularity } from './index-granularity.js'
 
 function parseSummaryFromHeaders(
 	headers: Record<string, string | string[] | undefined>,

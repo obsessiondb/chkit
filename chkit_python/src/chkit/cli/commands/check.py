@@ -24,6 +24,7 @@ import typer
 
 from chkit.cli.command_target import (
     ServiceOption,
+    assert_index_granularity_matches_server,
     exit_no_target,
     open_client,
     resolve_plugin_executor,
@@ -47,7 +48,7 @@ from chkit.cli.table_scope import (
     scope_to_payload,
     table_keys_from_definitions,
 )
-from chkit.core.model import ChxConfigEnv
+from chkit.core.model import ChxConfigEnv, configured_index_granularity
 from chkit.core.validate import collect_definition_warnings
 from chkit.plugins import (
     ChxOnCheckContext,
@@ -115,7 +116,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     migrations_dir.mkdir(parents=True, exist_ok=True)
 
     files = list_migration_filenames(migrations_dir)
-    snapshot = read_snapshot(meta_dir)
+    snapshot = read_snapshot(meta_dir, index_granularity=configured_index_granularity(config))
     table_scope = resolve_table_scope(
         table_selector,
         table_keys_from_definitions(snapshot.definitions if snapshot is not None else []),
@@ -124,6 +125,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     drifted = False
     drift_reasons = summarize_drift_reasons([], [])
     with open_client(executor, config.clickhouse) as client:
+        assert_index_granularity_matches_server("check", client, config, json_mode=output_json)
         store = JournalStore(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
         )
@@ -144,6 +146,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 database=config.clickhouse.database if config.clickhouse else None,
                 fail_on_extra_objects=config.check.fail_on_extra_objects,
                 scope=table_scope if table_scope.enabled else None,
+                index_granularity=configured_index_granularity(config),
             )
             drifted = payload.drifted
             drift_reasons = summarize_drift_reasons(payload.object_drift, payload.table_drift)

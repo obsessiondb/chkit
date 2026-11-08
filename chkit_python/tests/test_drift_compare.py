@@ -569,3 +569,66 @@ def test_table_shape_compares_column_codecs_in_the_form_clickhouse_stores_them()
     ]
     for expected, actual in differences:
         assert _changed_columns(expected, actual) == ["value"]
+
+
+# #466: what ClickHouse stores compares equal to what the schema declares.
+def test_table_shape_compares_a_column_type_in_the_spacing_clickhouse_stores() -> None:
+    pairs = [
+        ("Decimal(10,2)", "Decimal(10, 2)"),
+        ("DateTime64(3,'UTC')", "DateTime64(3, 'UTC')"),
+        ("Map(String,UInt64)", "Map(String, UInt64)"),
+        ("Tuple(a UInt8,b String)", "Tuple(a UInt8, b String)"),
+        ("Enum8('a'=1,'b'=2)", "Enum8('a' = 1, 'b' = 2)"),
+    ]
+    for declared, stored in pairs:
+        assert (
+            _changed_columns(
+                ColumnDefinition(name="value", type=declared),
+                ColumnDefinition(name="value", type=stored),
+            )
+            is None
+        )
+    assert (
+        _changed_columns(
+            ColumnDefinition(name="value", type="Decimal(10,2)", nullable=True),
+            ColumnDefinition(name="value", type="Decimal(10, 2)", nullable=True),
+        )
+        is None
+    )
+    label = _changed_columns(
+        ColumnDefinition(name="value", type="Enum8('a b'=1)"),
+        ColumnDefinition(name="value", type="Enum8('a  b' = 1)"),
+    )
+    assert label == ["value"]
+
+
+def test_table_shape_compares_a_literal_default_by_value_as_generate_does() -> None:
+    same: list[tuple[object, str]] = [
+        (1e21, "1e21"),
+        # ClickHouse stores ``9007199254740993.`` as the Float64 it reads.
+        ("fn:9007199254740993.", "9007199254740992."),
+        (2.0, "2."),
+        ("it's", "'it\\'s'"),
+    ]
+    for declared, stored in same:
+        expected = ColumnDefinition(name="value", type="Float64", default=declared)  # type: ignore[arg-type]
+        actual = ColumnDefinition(name="value", type="Float64", default=stored)
+        assert _changed_columns(expected, actual) is None
+    changed: list[tuple[object, str]] = [
+        ("fn:18446744073709551615", "18446744073709551614"),
+        ("e", "'\\e'"),
+    ]
+    for declared, stored in changed:
+        expected = ColumnDefinition(name="value", type="String", default=declared)  # type: ignore[arg-type]
+        actual = ColumnDefinition(name="value", type="String", default=stored)
+        assert _changed_columns(expected, actual) == ["value"]
+
+
+def test_table_shape_takes_a_live_table_without_index_granularity_as_the_configured_default() -> (
+    None
+):
+    expected = _t(settings={"index_granularity": 4096})
+    assert compare_table_shape(expected, _it(), None, 4096) is None
+    detail = compare_table_shape(expected, _it())
+    assert detail is not None
+    assert detail.setting_diffs == ["index_granularity"]

@@ -1,3 +1,5 @@
+import { settingValueFingerprint } from './table-settings.js'
+
 interface NamedDiffChange<T> {
   name: string
   oldItem: T
@@ -69,7 +71,8 @@ export function diffSettings(
       if (hadValue) changes.push({ kind: 'reset', key })
       continue
     }
-    if (!hadValue || oldSettings[key] !== nextValue) {
+    // `index_granularity: 4096` and the "4096" pull reads back are the same, and so are 2.0 and 2.
+    if (!hadValue || settingValueFingerprint(oldSettings[key] ?? '') !== settingValueFingerprint(nextValue)) {
       changes.push({ kind: 'modify', key, value: nextValue })
     }
   }

@@ -100,8 +100,13 @@ export async function createCutoverProject(target: CutoverTarget, label: string)
   return project
 }
 
-/** Rewrites the schema so the table sorts by `orderBy`. */
-export async function writeSchema(target: CutoverTarget, project: CutoverProject, orderBy: string[]): Promise<void> {
+/** Rewrites the schema so the table sorts by `orderBy`, with `settings`. */
+export async function writeSchema(
+  target: CutoverTarget,
+  project: CutoverProject,
+  orderBy: string[],
+  settings?: Record<string, number>,
+): Promise<void> {
   const db = target.database
   const local = (name: string) => `${db}.${name}`
   const engine = JSON.stringify(target.engine)
@@ -116,7 +121,7 @@ const columns = [
 ]
 
 export default schema(
-  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)} }),
+  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)}${settings ? `, settings: ${JSON.stringify(settings)}` : ''} }),
   table({ database: '${db}', name: '${project.byUser}', engine: ${engine}, columns: [{ name: 'user_id', type: 'UInt64' }, { name: 'id', type: 'UInt64' }], primaryKey: ['user_id'], orderBy: ['user_id', 'id'] }),
   materializedView({ database: '${db}', name: '${project.byUser}_mv', to: { database: '${db}', name: '${project.byUser}' }, as: 'SELECT user_id, id FROM ${local(project.table)}' }),
   table({ database: '${db}', name: '${project.ingest}', engine: ${engine}, columns, primaryKey: ['id'], orderBy: ['id'] }),
@@ -246,6 +251,27 @@ async function assertCutoverRows(
     throw new Error(`cutover rows: expected ${JSON.stringify(want)}, got ${JSON.stringify(actual)} (writer errors: ${writers.errors.length})`)
   }
   return { total: expected }
+}
+
+/** A cutover's change: the new sort key and settings, and the layout `layouts` reports after it. */
+export interface CutoverChange {
+  orderBy: string[]
+  settings?: Record<string, number>
+  layout: string
+}
+
+const ORDER_BY_CHANGE: CutoverChange = { orderBy: ['user_id', 'id'], layout: 'user_id, id|8192' }
+/** Only a read-only setting changes (#511): the guards must tell the tables apart by it. */
+export const GRANULARITY_CHANGE: CutoverChange = { orderBy: ['id'], settings: { index_granularity: 4096 }, layout: 'id|4096' }
+
+/** Sorting key and index_granularity of the table and every cutover table next to it. */
+async function layouts(target: CutoverTarget, project: CutoverProject): Promise<Record<string, string>> {
+  const result = await target.admin.query<{ name: string; sorting_key: string; granularity: string }>(
+    `SELECT name, sorting_key, extract(engine_full, 'index_granularity = ([0-9]+)') AS granularity FROM system.tables WHERE database = '${target.database}' AND (name IN ('${project.table}', '${project.previous}') OR startsWith(name, '${project.table}__cutover_')) ORDER BY name`,
+  )
+  return Object.fromEntries(
+    result.map((row) => [row.name, `${row.sorting_key.replace(/^\(|\)$/g, '')}|${row.granularity || '8192'}`]),
+  )
 }
 
 async function sortingKeys(target: CutoverTarget, project: CutoverProject): Promise<Record<string, string>> {
@@ -407,12 +433,16 @@ export async function runBackfillScenario(target: CutoverTarget, label: string):
  * (refuses: it must never swap back) and the drop of the old table. Writers
  * insert the whole time; no row may be lost or duplicated.
  */
-export async function runRetryScenario(target: CutoverTarget, label: string): Promise<void> {
+export async function runRetryScenario(
+  target: CutoverTarget,
+  label: string,
+  change: CutoverChange = ORDER_BY_CHANGE,
+): Promise<void> {
   const project = await createCutoverProject(target, label)
   const writers = startWriters(target, project, 1)
   let stopped: WriterReport | undefined
   try {
-    await writeSchema(target, project, ['user_id', 'id'])
+    await writeSchema(target, project, change.orderBy, change.settings)
     expectOk(
       cli(project, ['generate', '--name', 'cutover', '--cutover', `${target.database}.${project.table}=id`, '--cutover-old', 'drop', '--json']),
       'generate --cutover drop',
@@ -462,8 +492,8 @@ export async function runRetryScenario(target: CutoverTarget, label: string): Pr
         if (replay.exitCode === 0 || !output.includes('the EXCHANGE may already have run')) {
           throw new Error(formatTestDiagnostic('a replayed EXCHANGE must be refused', replay))
         }
-        const keys = await sortingKeys(target, project)
-        if (keys[project.table] !== 'user_id, id') throw new Error(`the refused replay swapped the tables back: ${JSON.stringify(keys)}`)
+        const keys = await layouts(target, project)
+        if (keys[project.table] !== change.layout) throw new Error(`the refused replay swapped the tables back: ${JSON.stringify(keys)}`)
       } else if (!output.includes('the ATTACH may already have run')) {
         // Nothing was staged, so the replayed ATTACH ran and the next statement failed.
         if (!output.includes(`injected failure at statement ${step + 2}`)) {
@@ -483,8 +513,8 @@ export async function runRetryScenario(target: CutoverTarget, label: string): Pr
     stopped = await writers.stop()
     if (stopped.errors.length > 0) throw new Error(`writers failed during the cutover: ${stopped.errors[0]}`)
     await assertCutoverRows(target, project, stopped)
-    const keys = await sortingKeys(target, project)
-    if (JSON.stringify(keys) !== JSON.stringify({ [project.table]: 'user_id, id' })) {
+    const keys = await layouts(target, project)
+    if (JSON.stringify(keys) !== JSON.stringify({ [project.table]: change.layout })) {
       throw new Error(`only the cut-over table may remain, found ${JSON.stringify(keys)}`)
     }
     assertChkitClean(project)
