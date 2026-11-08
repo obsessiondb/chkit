@@ -1,5 +1,11 @@
 # @chkit/core
 
+## 0.2.0-beta.14
+
+### Patch Changes
+
+- f63233d: Queries have a `.raw()` method that runs the query like a call but returns the client's result unparsed, for bulk reads and `stream()`.
+
 ## 0.2.0-beta.13
 
 ### Patch Changes
