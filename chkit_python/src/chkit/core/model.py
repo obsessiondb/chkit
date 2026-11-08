@@ -946,6 +946,7 @@ ValidationIssueCode: TypeAlias = Literal[
     "dictionary_attribute_default_expression_exclusive",
     "dictionary_range_missing_attribute",
     "dictionary_bidirectional_requires_hierarchical",
+    "invalid_identifier",
     "cutover_unsupported",
 ]
 
