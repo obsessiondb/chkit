@@ -128,7 +128,6 @@ export const topCities = query({ name: 'top_cities', version: 2, returns: z.obje
 - A `readonly = 1` user can't send `log_comment`. Give app users `readonly = 2` or plain grants, or skip it with `createQuery(client, { logComment: false })`.
 - `returns` parses every row. `.returns<Row>()` sets the row type without parsing.
 - An integer a JS number would round, such as a large UInt64, comes back as a string of its digits; other values stay numbers. `returns: z.object({ id: z.coerce.bigint() })` makes it a bigint.
-- `topCities.raw(params, options)` skips row parsing for bulk reads: it returns the client's result, such as `@clickhouse/client`'s `ResultSet` with `text()`, `json()` and `stream()`.
 
 ## Call options
 
@@ -140,6 +139,22 @@ await topCities({ city: 'Berlin' }, {
   client: testClient, // instead of the bound client
 })
 ```
+
+## Raw results
+
+`.raw()` takes the same params and options as a call and runs the same query, but returns the client's result without parsing the rows. Use it for bulk reads and to pass rows through as they arrive:
+
+```ts
+const result = await topCities.raw({ city: 'Berlin' })
+for await (const rows of result.stream()) {
+  for (const row of rows) res.write(`${row.text}\n`)
+}
+
+const body = await (await topCities.raw({ city: 'Berlin' })).text() // JSONEachRow text
+```
+
+- With `@clickhouse/client` the result is its `ResultSet`, with `text()`, `json()` and `stream()`. With `{ client }` it is that client's result.
+- `returns` doesn't run, and `json()` parses with `JSON.parse` by default, so an integer above 2^53, such as a large UInt64, rounds. `text()` and a normal call keep its digits.
 
 ## Inspect a query
 
