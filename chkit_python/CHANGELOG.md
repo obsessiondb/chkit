@@ -158,10 +158,8 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
-- `pull` no longer puts the first column in a key the table does not declare, as in TS
-  (#487). A missing primary key now defaults to `ORDER BY`: for `ORDER BY (b, a)`, `pull`
-  wrote `primary_key=["a"]`. A missing `ORDER BY` now stays empty: for an
-  `EmbeddedRocksDB` table with only `PRIMARY KEY key`, `pull` wrote `order_by=["value"]`.
+- `pull` no longer writes the first column as the primary key or `ORDER BY` of a table that
+  does not declare one, so `drift` is clean right after `pull` (#487).
 - Plugin hooks run as in TS (#488): `status`, `check`, `drift` and `query` give them every
   flag that was passed, `generate` and `snapshot rebuild` run `on_init` and `get_context` (so
   they show the ObsessionDB service banner), and `pull` runs `on_config_loaded`.
