@@ -327,4 +327,61 @@ describe('@chkit/plugin-pull live env e2e', () => {
     },
     240_000
   )
+
+  test(
+    'pulls the codecs ClickHouse stores as typed atoms, without filled-in sizes (#465)',
+    async () => {
+      const codecDatabase = `chkit_e2e_pull_codec_${runTag}`
+      const codecTable = `${createPrefix('pull_codec')}metrics`
+      const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-codec-e2e-'))
+      const pulledSchemaPath = join(dir, 'pulled.ts')
+      const command = createPullPlugin({ outFile: pulledSchemaPath, overwrite: true }).commands[0]
+      if (!command) throw new Error('Pull plugin command not registered')
+
+      try {
+        await executor.command(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(codecDatabase)}`)
+        await executor.command(
+          `CREATE TABLE ${quoteIdent(codecDatabase)}.${quoteIdent(codecTable)} (id UInt64, d UInt64 CODEC(Delta, ZSTD), g Float64 CODEC(Gorilla), h String CODEC(LZ4HC), f Float64 CODEC(FPC), dd UInt64 CODEC(DoubleDelta), tb UInt64 CODEC(T64('bit')), zw String CODEC(ZSTD(3, 24)), tu Tuple(a UInt8, b UInt64) CODEC(Delta, LZ4), df UInt64 CODEC(Delta, Default)) ENGINE = MergeTree() ORDER BY (id)`
+        )
+        await waitForTable(executor, codecDatabase, codecTable)
+
+        const exitCode = await command.run({
+          args: [],
+          flags: { '--database': [codecDatabase] },
+          jsonMode: true,
+          options: {},
+          configPath: join(dir, 'clickhouse.config.ts'),
+          config: createResolvedConfig({
+            url: liveEnv.clickhouseUrl,
+            username: liveEnv.clickhouseUser,
+            password: liveEnv.clickhousePassword,
+            database: 'default',
+            secure: liveEnv.clickhouseUrl.startsWith('https://'),
+          }),
+          print() {},
+        })
+        expect(exitCode).toBe(0)
+
+        const pulledSchema = await readFile(pulledSchemaPath, 'utf8')
+        const codecs = Object.fromEntries(
+          [...pulledSchema.matchAll(/\{ name: "(\w+)", type: "[^"]*", codec: (.*) \},?$/gm)].map((match) => [match[1], match[2]])
+        )
+        expect(codecs).toEqual({
+          d: '[{ kind: "Delta", size: 8 }, { kind: "ZSTD", level: 1 }]',
+          g: '{ kind: "Gorilla", size: 8 }',
+          h: '{ kind: "LZ4HC", level: 0 }',
+          f: '{ kind: "FPC", level: 12 }',
+          dd: '{ kind: "DoubleDelta" }',
+          tb: '{ kind: "T64", mode: "bit" }',
+          zw: '{ kind: "ZSTD", level: 3, windowLog: 24 }',
+          tu: '[{ kind: "Delta" }, { kind: "LZ4" }]',
+          df: '[{ kind: "Delta", size: 8 }, { kind: "Default" }]',
+        })
+      } finally {
+        await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(codecDatabase)} SYNC`)
+        await rm(dir, { recursive: true, force: true })
+      }
+    },
+    240_000
+  )
 })

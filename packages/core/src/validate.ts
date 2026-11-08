@@ -2,7 +2,7 @@ import { constraintProblem } from './constraint.js'
 import { renderTextIndexType } from './text-index.js'
 import { renderVectorIndexType } from './vector-index.js'
 import { definitionKey } from './canonical.js'
-import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
+import { columnCodecProblem } from './codec-rules.js'
 import {
   LEGACY_EXPRESSION_PREFIX,
   columnTypeAcceptsStringLiteral,
@@ -58,46 +58,16 @@ function validateColumnCodec(
   issues: ValidationIssue[]
 ): void {
   if (!column.codec) return
-  const steps = canonicalizeCodec(column.codec)
-  if (steps.length === 0) {
-    pushValidationIssue(
-      issues,
-      def,
-      'codec_chain_empty',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain is empty; provide at least one codec or omit the field`
-    )
-    return
-  }
-  let generalCount = 0
-  let generalIndex = -1
-  for (const [i, step] of steps.entries()) {
-    if (isRawCodec(step)) continue
-    if (isGeneralCodec(step)) {
-      generalCount += 1
-      generalIndex = i
-    }
-  }
-
-  if (generalCount > 1) {
-    pushValidationIssue(
-      issues,
-      def,
-      'codec_chain_multiple_general',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain has more than one general codec; only one general codec is allowed at the end of a chain`
-    )
-    return
-  }
-
-  // Delta and GCD only transform the data: ClickHouse rejects a chain of nothing else.
-  const onlyTransforms = steps.every((step) => step.kind === 'Delta' || step.kind === 'GCD')
-  if (onlyTransforms || (steps.length > 1 && generalCount === 1 && generalIndex !== steps.length - 1)) {
-    pushValidationIssue(
-      issues,
-      def,
-      'codec_chain_must_end_with_general',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain must end with a general codec (NONE, LZ4, LZ4HC, ZSTD, ALP)`
-    )
-  }
+  // The type as rendered (`nullable: true` is `Nullable(T)`), like renderColumnType.
+  const type = String(column.type).trim()
+  const problem = columnCodecProblem(column.codec, column.nullable ? `Nullable(${type})` : type)
+  if (!problem) return
+  pushValidationIssue(
+    issues,
+    def,
+    problem.code,
+    `Table ${def.database}.${def.name} column "${column.name}" ${problem.message}`
+  )
 }
 
 const COLUMN_DEFAULT_KINDS: ReadonlySet<string> = new Set(['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'])

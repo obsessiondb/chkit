@@ -36,6 +36,7 @@ import {
   renderAlterResetSetting,
   renderDictionarySQL,
   columnTypeFingerprint,
+  columnCodecFingerprint,
   toCreateSQL,
 } from './sql.js'
 import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
@@ -227,8 +228,10 @@ interface TableDiffResult {
   renameSuggestions: ColumnRenameSuggestion[]
 }
 
-function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable'> {
-  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, ...rest } = column
+function normalizeColumn(
+  column: ColumnDefinition
+): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> & { codec: string } {
+  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, codec: _codec, ...rest } = column
   // Compare what the DSL renders: inline Nullable(T) and nullable: true are
   // equivalent, while an additional or differently placed wrapper is not.
   return {
@@ -236,6 +239,8 @@ function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name
     type: columnTypeFingerprint(column),
     ...rest,
     ...(column.default === undefined ? {} : { default: defaultFingerprint(column.default) }),
+    // Codecs compare in the form ClickHouse stores them, like drift (#465).
+    codec: columnCodecFingerprint(column),
   }
 }
 
@@ -248,7 +253,6 @@ function defaultFingerprint(value: ColumnDefaultValue): string {
   return literalDefaultFingerprint(sql) ?? sql
 }
 
-
 function normalizeColumnWithoutCodec(
   column: ColumnDefinition
 ): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
@@ -256,11 +260,11 @@ function normalizeColumnWithoutCodec(
   return rest
 }
 
-function isCodecRemoval(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
-  if (!oldCol.codec || newCol.codec) return false
-  return (
-    shapeKey(normalizeColumnWithoutCodec(oldCol)) === shapeKey(normalizeColumnWithoutCodec(newCol))
-  )
+/** A column without its codec, and without its comment when the plan removes that in its own operation. */
+function columnAfterRemovals(column: ColumnDefinition, removeComment: boolean): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
+  const normalized = normalizeColumnWithoutCodec(column)
+  const { comment: _comment, ...rest } = normalized
+  return removeComment ? rest : normalized
 }
 
 function isCommentOnlyChange(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
@@ -543,14 +547,17 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     if (removeExpression) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: removeExpression })
     // MODIFY COLUMN without COMMENT keeps the old comment.
     if (removeComment) ops.push({ type: 'alter_table_modify_column', key, risk: 'safe', sql: renderAlterRemoveColumnComment(newDef, name) })
-    const sql = isCodecRemoval(oldItem, newItem)
-      ? renderAlterRemoveCodec(newDef, name)
-      : renderAlterModifyColumn(newDef, newItem)
+    // MODIFY COLUMN without a codec keeps the stored one: a removal is always
+    // REMOVE CODEC, its own operation before any other change (#465).
+    const codecRemoved = Boolean(oldItem.codec) && !newItem.codec
+    if (codecRemoved) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: renderAlterRemoveCodec(newDef, name) })
+    // The removals above already reach the schema when nothing else changed.
+    if (codecRemoved && shapeKey(columnAfterRemovals(oldItem, removeComment)) === shapeKey(columnAfterRemovals(newItem, removeComment))) continue
     ops.push( {
       type: 'alter_table_modify_column',
       key,
       risk: 'caution',
-      sql,
+      sql: renderAlterModifyColumn(newDef, newItem),
       ...((oldKind === 'DEFAULT' || oldKind === 'MATERIALIZED' || newKind === 'DEFAULT' || newKind === 'MATERIALIZED') && (oldItem.default !== newItem.default || oldKind !== newKind)
         ? { warning: `Changing the expression for ${newDef.database}.${newDef.name}.${name} does not rewrite stored historical values. Review a separate MATERIALIZE COLUMN migration if a rewrite is required; never reconstruct values from discarded EPHEMERAL inputs.` }
         : {}),

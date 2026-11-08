@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 from typing import Final
 
+from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_scan import find_quote_end, is_quote_char
 
 _PLAIN_COLUMN_REFERENCE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
@@ -40,7 +41,7 @@ def split_top_level_comma(text: str) -> list[str]:
         elif ch == ")":
             depth = max(0, depth - 1)
         elif ch == "," and depth == 0:
-            token = "".join(current).strip()
+            token = js_trim("".join(current))
             if token:
                 out.append(token)
             current = []
@@ -50,7 +51,7 @@ def split_top_level_comma(text: str) -> list[str]:
         current.append(ch)
         i += 1
 
-    tail = "".join(current).strip()
+    tail = js_trim("".join(current))
     if tail:
         out.append(tail)
     return out

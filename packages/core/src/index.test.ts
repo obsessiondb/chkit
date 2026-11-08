@@ -16,6 +16,7 @@ import {
   validateDefinitions,
   view,
 } from './index'
+import type { ColumnDefinition } from './index'
 
 describe('@chkit/core smoke', () => {
   test('builds table and view definitions', () => {
@@ -1393,7 +1394,7 @@ describe('@chkit/core column codec', () => {
     )
   })
 
-  test('plan: drop codec + other change emits single MODIFY COLUMN (no separate REMOVE)', () => {
+  test('plan: drop codec + other change emits REMOVE CODEC, then MODIFY COLUMN (#465)', () => {
     const oldDefs = [
       table({
         database: 'app',
@@ -1421,11 +1422,129 @@ describe('@chkit/core column codec', () => {
       }),
     ]
 
+    // MODIFY COLUMN without a codec keeps the stored one.
     const plan = planDiff(oldDefs, newDefs)
-    expect(plan.operations).toHaveLength(1)
-    expect(plan.operations[0]?.type).toBe('alter_table_modify_column')
-    expect(plan.operations[0]?.sql).toContain('LowCardinality(String)')
-    expect(plan.operations[0]?.sql).not.toContain('REMOVE CODEC')
+    expect(plan.operations.map((op) => [op.type, op.sql])).toEqual([
+      ['alter_table_modify_column', 'ALTER TABLE app.events MODIFY COLUMN `payload` REMOVE CODEC;'],
+      ['alter_table_modify_column', 'ALTER TABLE app.events MODIFY COLUMN `payload` LowCardinality(String);'],
+    ])
+  })
+
+  test('plan: dropping a codec and a comment plans the two removals and nothing else', () => {
+    const events = (columns: ColumnDefinition[]) =>
+      table({ database: 'app', name: 'events', columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
+    const plan = planDiff(
+      [events([{ name: 'id', type: 'UInt64' }, { name: 'n', type: 'UInt64', comment: 'old', codec: { kind: 'ZSTD' } }])],
+      [events([{ name: 'id', type: 'UInt64' }, { name: 'n', type: 'UInt64' }])]
+    )
+    expect(plan.operations.map((op) => op.sql)).toEqual([
+      'ALTER TABLE app.events MODIFY COLUMN `n` REMOVE COMMENT;',
+      'ALTER TABLE app.events MODIFY COLUMN `n` REMOVE CODEC;',
+    ])
+  })
+
+  test('plan: a bare Delta/Gorilla replaces the size 1 a snapshot from before #465 stored', () => {
+    const events = (columns: ColumnDefinition[]) =>
+      table({ database: 'app', name: 'events', columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
+    const oldDefs = [events([
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'UInt64', codec: [{ kind: 'Delta', size: 1 }, { kind: 'ZSTD', level: 1 }] },
+      { name: 'value', type: 'Float64', codec: { kind: 'Gorilla', size: 1 } },
+      { name: 'small', type: 'UInt8', codec: [{ kind: 'Delta', size: 1 }, { kind: 'LZ4' }] },
+      { name: 'pinned', type: 'UInt64', codec: [{ kind: 'Delta', size: 1 }, { kind: 'LZ4' }] },
+    ])]
+    const newDefs = [events([
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'UInt64', codec: [{ kind: 'Delta' }, { kind: 'ZSTD' }] },
+      { name: 'value', type: 'Float64', codec: { kind: 'Gorilla' } },
+      { name: 'small', type: 'UInt8', codec: [{ kind: 'Delta' }, { kind: 'LZ4' }] },
+      { name: 'pinned', type: 'UInt64', codec: [{ kind: 'Delta', size: 1 }, { kind: 'LZ4' }] },
+    ])]
+    expect(planDiff(oldDefs, newDefs).operations.map((op) => op.sql)).toEqual([
+      'ALTER TABLE app.events MODIFY COLUMN `ts` UInt64 CODEC(Delta, ZSTD(1));',
+      'ALTER TABLE app.events MODIFY COLUMN `value` Float64 CODEC(Gorilla);',
+    ])
+  })
+
+  test.each(["Tuple(Float32, Float64)", "Tuple (Float32, Float64)", "Tuple(`a\\`x` Float32, b Float64)", "Tuple(`a b` Float32, b Float64)", "Tuple(\"a\" Float32, b Float64)"])('plan: mixed-width FPC changes on %s (#465)', (type) => {
+    for (const raw of [false, true]) {
+      for (const comment of ['old', 'new']) {
+        const events = (floatSize: 4 | 8, comment: string) => table({
+          database: 'app', name: 'events', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+          columns: [{ name: 'id', type: 'UInt64' }, {
+            name: 'c', type, comment,
+            codec: raw ? codec.raw(`Gorilla, FPC(12, ${floatSize})`) : [{ kind: 'Gorilla' }, { kind: 'FPC', level: 12, floatSize }],
+          }],
+        })
+        expect(planDiff([events(4, 'old')], [events(8, comment)]).operations.map((op) => op.sql)).toEqual([
+          `ALTER TABLE app.events MODIFY COLUMN \`c\` ${type} COMMENT '${comment}' CODEC(Gorilla, FPC(12, 8));`,
+        ])
+        expect(planDiff([events(4, 'old')], [events(4, 'old')]).operations).toEqual([])
+      }
+    }
+  })
+
+  test.each([false, true])('plan: DoubleDelta preserves FPC size changes, with general codec %s', (general) => {
+    for (const raw of [false, true]) {
+      for (const comment of ['old', 'new']) {
+        const events = (floatSize: 4 | 8, comment: string) => table({
+          database: 'app', name: 'events', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+          columns: [{ name: 'id', type: 'UInt64' }, {
+            name: 'c', type: 'Tuple(Float32, Float64)', comment,
+            codec: raw ? codec.raw(`FPC(12, ${floatSize}), DoubleDelta${general ? ', ZSTD' : ''}`) : [
+              { kind: 'FPC', level: 12, floatSize }, { kind: 'DoubleDelta' }, ...(general ? [{ kind: 'ZSTD' } as const] : []),
+            ],
+          }],
+        })
+        expect(planDiff([events(4, 'old')], [events(8, comment)]).operations.map((op) => op.sql)).toEqual([
+          `ALTER TABLE app.events MODIFY COLUMN \`c\` Tuple(Float32, Float64) COMMENT '${comment}' CODEC(FPC(12, 8), DoubleDelta${general ? raw ? ', ZSTD' : ', ZSTD(1)' : ''});`,
+        ])
+        expect(planDiff([events(4, 'old')], [events(4, 'old')]).operations).toEqual([])
+      }
+    }
+  })
+
+  test.each(['old', 'new'])('plan: raw verbatim DoubleDelta size change with %s comment', (comment) => {
+    const events = (size: 4 | 8, comment: string) => table({
+      database: 'app', name: 'events', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, {
+        name: 'c', type: 'Tuple(UInt32, UInt64)', comment, codec: codec.raw(`Delta, DoubleDelta(${size})`),
+      }],
+    })
+    expect(planDiff([events(4, 'old')], [events(8, comment)]).operations.map((op) => op.sql)).toEqual([
+      `ALTER TABLE app.events MODIFY COLUMN \`c\` Tuple(UInt32, UInt64) COMMENT '${comment}' CODEC(Delta, DoubleDelta(8));`,
+    ])
+  })
+
+  test('plan: codecs ClickHouse stores the same yield no operation (#465)', () => {
+    const pairs: Array<[string, ColumnDefinition['codec'], ColumnDefinition['codec']]> = [
+      ['String', { kind: 'ZSTD' }, { kind: 'ZSTD', level: 1 }],
+      ['String', { kind: 'LZ4HC' }, { kind: 'LZ4HC', level: 0 }],
+      ['UInt64', { kind: 'DoubleDelta', size: 8 }, { kind: 'DoubleDelta' }],
+      ['Float64', { kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'FPC' }],
+      ['String', [{ kind: 'LZ4' }], { kind: 'LZ4' }],
+      ['String', codec.raw('NONE'), { kind: 'NONE' }],
+      ['UInt64', [{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }], [{ kind: 'Delta' }, { kind: 'LZ4' }]],
+      ['UInt64', codec.raw('Delta(8), Default'), codec.raw('Delta, Default')],
+    ]
+    for (const [type, before, after] of pairs) {
+      const events = (spec: ColumnDefinition['codec']) =>
+        table({ database: 'app', name: 'events', columns: [{ name: 'id', type: 'UInt64' }, { name: 'c', type, codec: spec }], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
+      expect(planDiff([events(before)], [events(after)]).operations).toEqual([])
+    }
+  })
+
+  test('plan: removing a codec while changing the type removes it first (#465)', () => {
+    const events = (column: ColumnDefinition) =>
+      table({ database: 'app', name: 'events', columns: [{ name: 'id', type: 'UInt64' }, column], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
+    const plan = planDiff(
+      [events({ name: 'n', type: 'UInt32', comment: 'c', codec: [{ kind: 'Delta' }, { kind: 'LZ4' }] })],
+      [events({ name: 'n', type: 'UInt64', comment: 'c' })]
+    )
+    expect(plan.operations.map((op) => op.sql)).toEqual([
+      'ALTER TABLE app.events MODIFY COLUMN `n` REMOVE CODEC;',
+      "ALTER TABLE app.events MODIFY COLUMN `n` UInt64 COMMENT 'c';",
+    ])
   })
 
   test('plan: equal codec across canonicalization yields no diff', () => {
@@ -1548,7 +1667,7 @@ describe('@chkit/core column codec', () => {
       }),
     ]
     const flagged = validateDefinitions(defs)
-      .filter((i) => i.code === 'codec_chain_must_end_with_general')
+      .filter((i) => i.code === 'codec_chain_no_compression')
       .map((i) => i.message.match(/column "(\w+)"/)?.[1])
     expect(flagged).toEqual(['gcd', 'delta', 'delta_gcd'])
   })

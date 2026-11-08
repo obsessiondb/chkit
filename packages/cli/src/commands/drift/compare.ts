@@ -1,5 +1,5 @@
 import {
-  codecFingerprint,
+  columnCodecFingerprint,
   columnTypeFingerprint,
   DEFAULT_INDEX_GRANULARITY,
   literalDefaultFingerprint,
@@ -286,7 +286,7 @@ function normalizeColumnShape(column: ColumnDefinition): string {
     `default=${normalizedDefault}`,
     `defaultKind=${column.defaultKind ?? 'DEFAULT'}`,
     `comment=${column.comment?.trim() ?? ''}`,
-    `codec=${codecFingerprint(column.codec)}`,
+    `codec=${columnCodecFingerprint(column)}`,
   ]
   return parts.join('|')
 }

@@ -43,6 +43,7 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
+    column_codec_fingerprint,
     column_type_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
@@ -259,6 +260,8 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
         parsed = parse_column_default(column.default)
         sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
         data["default"] = literal_default_fingerprint(sql) or sql
+    # Codecs compare in the form ClickHouse stores them, like drift (#465).
+    data["codec"] = column_codec_fingerprint(column)
     return data
 
 
@@ -267,9 +270,15 @@ def _column_identity(column: ColumnDefinition) -> str:
     return json.dumps(_normalized_column(column), sort_keys=True, default=str)
 
 
-def _column_identity_without_codec(column: ColumnDefinition) -> str:
+def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bool) -> str:
+    """A column without its codec, and without its comment.
+
+    The comment is left out when the plan removes it in its own operation.
+    """
     data = _normalized_column(column)
     data.pop("codec", None)
+    if remove_comment:
+        data.pop("comment", None)
     return json.dumps(data, sort_keys=True, default=str)
 
 
@@ -285,12 +294,6 @@ def _indexes_equal(left: SkipIndexDefinition, right: SkipIndexDefinition) -> boo
     if left.type == "text" and right.type == "text":
         return text_index_fingerprint(left) == text_index_fingerprint(right)
     return _index_identity(left) == _index_identity(right)
-
-
-def _is_codec_removal(old: ColumnDefinition, new: ColumnDefinition) -> bool:
-    if old.codec is None or new.codec is not None:
-        return False
-    return _column_identity_without_codec(old) == _column_identity_without_codec(new)
 
 
 def _is_comment_only_change(old: ColumnDefinition, new: ColumnDefinition) -> bool:
@@ -458,7 +461,7 @@ def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
     return "danger" if disabled else "caution"
 
 
-def _diff_tables(  # noqa: PLR0915
+def _diff_tables(  # noqa: PLR0915 — mirrors TS diffTables
     old: TableDefinition, new: TableDefinition
 ) -> tuple[list[MigrationOperation], list[ColumnRenameSuggestion]]:
     if is_kafka_engine(old.engine) or is_kafka_engine(new.engine):
@@ -590,17 +593,31 @@ def _diff_tables(  # noqa: PLR0915
                     sql=render_alter_remove_column_comment(new, column_change.name),
                 )
             )
-        sql = (
-            render_alter_remove_codec(new, column_change.name)
-            if _is_codec_removal(column_change.old_item, column_change.new_item)
-            else render_alter_modify_column(new, column_change.new_item)
+        # MODIFY COLUMN without a codec keeps the stored one: a removal is always
+        # REMOVE CODEC, its own operation before any other change (#465).
+        codec_removed = (
+            column_change.old_item.codec is not None and column_change.new_item.codec is None
         )
+        if codec_removed:
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="caution",
+                    sql=render_alter_remove_codec(new, column_change.name),
+                )
+            )
+        # The removals above already reach the schema when nothing else changed.
+        if codec_removed and _column_identity_after_removals(
+            column_change.old_item, remove_comment
+        ) == _column_identity_after_removals(column_change.new_item, remove_comment):
+            continue
         ops.append(
             MigrationOperation(
                 type="alter_table_modify_column",
                 key=key,
                 risk="caution",
-                sql=sql,
+                sql=render_alter_modify_column(new, column_change.new_item),
                 warning=(
                     f"Changing the expression for {new.database}.{new.name}.{column_change.name} "
                     "does not rewrite stored historical values. "

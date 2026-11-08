@@ -22,7 +22,6 @@ from chkit.cli.commands.drift_diff import (
     diff_settings,
 )
 from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView, SchemaObjectKind
-from chkit.core.codec import codec_fingerprint
 from chkit.core.column_default import literal_default_fingerprint, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
 from chkit.core.identifier import unquote_identifiers
@@ -40,7 +39,11 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql import column_type_fingerprint, render_key_clause_columns
+from chkit.core.sql import (
+    column_codec_fingerprint,
+    column_type_fingerprint,
+    render_key_clause_columns,
+)
 from chkit.core.sql_lexer import JS_WHITESPACE_RUN, identifier_name, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import (
     is_synthetic_ephemeral_default,
@@ -340,7 +343,7 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
         f"comment={(column.comment or '').strip()}",
-        f"codec={codec_fingerprint(column.codec)}",
+        f"codec={column_codec_fingerprint(column)}",
     ]
     return "|".join(parts)
 

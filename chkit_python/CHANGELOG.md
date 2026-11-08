@@ -129,6 +129,34 @@
   `obsessiondb_backfill_job_failed` finding now points to `submit --plan-id`. The
   backfill SDK exports `read_plan_submission`.
 
+### Changed
+- Column codecs follow ClickHouse's rules and stored forms, as in TS (#465). **After
+  upgrading, `generate` plans a codec change for every `Delta` or `Gorilla` column written
+  without `size`.** chkit-py rendered a bare `Delta` as `Delta(1)` and a bare `Gorilla` as
+  `Gorilla(1)` and stored `size: 1` in the snapshot; one byte is the wrong width for anything
+  but 8-bit columns (on 5M rows, `Delta(1), ZSTD(1)` compressed a `UInt64` column 2.42×
+  against 4.77× for `Delta(8)`, and `Gorilla(1)` made a `Float64` column larger: 0.88×
+  against 8.52×). They now render bare and ClickHouse fills in the value width, so the next
+  `generate` plans one `MODIFY COLUMN ... CODEC(...)` per such column, and `drift` reports the
+  column until that migration runs. It runs no mutation: only parts written after it use the
+  new codec. A column whose schema sets `size=1` is unchanged.
+- Removing a codec while changing the type, default or comment emits `REMOVE CODEC` as its
+  own operation before the `MODIFY COLUMN`, which kept the old codec.
+- A malformed codec atom (unknown or lowercase `kind`, a float level, `Delta` size 3, an
+  unknown field) no longer fails the schema load with a pydantic `ValidationError`:
+  `generate` reports it with the issue code and message chkit (TS) gives. New codes:
+  `codec_unknown`, `codec_parameter_invalid`, `codec_none_combined`,
+  `codec_chain_encryption_not_last`, `codec_chain_no_compression` (a chain of only
+  `Delta`/`GCD`, before `codec_chain_must_end_with_general`), `codec_chain_float_order` and
+  `codec_type_unsupported`. `ALP` is no longer a general codec, so `[ALP, ZSTD]` is
+  accepted.
+- New typed forms: `{"kind": "Default"}`, `ZSTD` `windowLog`, `T64` `mode`, and `FPC` with
+  optional `level` and `floatSize`. `DoubleDelta` renders an explicit size; ClickHouse retains it only in verbatim chains.
+- `generate`, `drift` and `pull` compare codecs in the form ClickHouse stores, so respellings
+  plan nothing and a live change of the `ZSTD` window drifts. `pull` writes stored codecs as
+  typed atoms (`FPC(12)` as `{"kind": "FPC", "level": 12}`, `DoubleDelta` with its size when the server retains it).
+- `generate` warns about each operation that sets the experimental `ALP` codec.
+
 ### Fixed
 - `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
   migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
