@@ -67,6 +67,23 @@ describe('@chkit/cli destructive block e2e (#2)', () => {
       expect(payload.destructiveMigrations).toContain('20990101000000_drop_email.sql')
       expect(payload.destructiveOperations.some((op) => op.type === 'alter_table_drop_column')).toBe(true)
 
+      // Text mode blocks with the same exit code.
+      const text = runCli(dir, ['migrate', '--config', configPath, '--execute'], cliEnv)
+      expect(text.exitCode).toBe(3)
+      expect(text.stderr.trim().split('\n')).toEqual([
+        'Blocked destructive migration execution. Re-run with --allow-destructive or set safety.allowDestructive=true after review.',
+        'Destructive migrations: 20990101000000_drop_email.sql',
+        'Non-interactive run detected. Pass --allow-destructive to proceed.',
+      ])
+
+      // In a real terminal, answering "no" at the prompt cancels with the same exit code.
+      const cancelled = await runCliInTerminal(dir, ['migrate', '--config', configPath, '--execute'], {
+        CHKIT_JOURNAL_TABLE: journalTable,
+      })
+      expect(cancelled.exitCode).toBe(3)
+      expect(cancelled.output).toContain('Destructive migration cancelled by user.')
+      expect(cancelled.output).toContain('Destructive migrations: 20990101000000_drop_email.sql')
+
       // The column must still exist — the destructive migration was NOT applied.
       const cols = await executor.query<{ x: number }>(
         `SELECT 1 AS x FROM system.columns WHERE database = '${database}' AND table = '${table}' AND name = 'email'`,
@@ -80,3 +97,39 @@ describe('@chkit/cli destructive block e2e (#2)', () => {
     }
   }, 120_000)
 })
+
+const CLI_ENTRY = join(import.meta.dir, '../bin/chkit.ts')
+
+/** Runs the CLI in a pseudo-terminal and types "no" at the first [no/yes] prompt. */
+async function runCliInTerminal(
+  cwd: string,
+  args: string[],
+  extraEnv: Record<string, string>,
+): Promise<{ exitCode: number; output: string }> {
+  // HOME is cwd, with a recent dismissal of the skill-install prompt, so that prompt does not show.
+  await mkdir(join(cwd, '.chkit'), { recursive: true })
+  await writeFile(join(cwd, '.chkit/skill-hint.json'), JSON.stringify({ lastDismissed: new Date().toISOString() }))
+  const env: Record<string, string | undefined> = { ...process.env, ...extraEnv, HOME: cwd }
+  delete env.CI
+  const decoder = new TextDecoder()
+  let output = ''
+  let answered = false
+  const proc = Bun.spawn(['bun', CLI_ENTRY, ...args], {
+    cwd,
+    env,
+    timeout: 60_000,
+    killSignal: 'SIGKILL',
+    terminal: {
+      data(terminal, data) {
+        output += decoder.decode(data, { stream: true })
+        if (!answered && output.includes('[no/yes]')) {
+          answered = true
+          terminal.write('no\r')
+        }
+      },
+    },
+  })
+  const exitCode = await proc.exited
+  proc.terminal?.close()
+  return { exitCode, output }
+}

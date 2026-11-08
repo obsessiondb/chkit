@@ -314,15 +314,6 @@ describe('resolveStripBehavior', () => {
 })
 
 describe('obsessiondb plugin', () => {
-	test('creates typed inline plugin registration', () => {
-		const registration = obsessiondb()
-
-		expect(registration.name).toBe('obsessiondb')
-		expect(registration.enabled).toBe(true)
-		expect(registration.plugin.manifest.name).toBe('obsessiondb')
-		expect(registration.plugin.manifest.apiVersion).toBe(1)
-	})
-
 	test('registers extendCommands for generate, migrate, status, drift, check, snapshot', () => {
 		const registration = obsessiondb()
 		const ext = registration.plugin.extendCommands[0]

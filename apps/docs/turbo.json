@@ -1,0 +1,15 @@
+{
+  "$schema": "https://turbo.build/schema.json",
+  "extends": ["//"],
+  "tasks": {
+    "test": {
+      "inputs": [
+        "$TURBO_EXTENDS$",
+        "$TURBO_ROOT$/scripts/check-registry-docs.ts",
+        "$TURBO_ROOT$/scripts/check-registry-docs.test.ts",
+        "$TURBO_ROOT$/scripts/registry-catalog.ts",
+        "$TURBO_ROOT$/packages/cli/src/registry/**"
+      ]
+    }
+  }
+}
