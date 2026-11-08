@@ -25,7 +25,11 @@ import {
 export interface RenderSchemaOptions {
   /** `database.name` of the tables ObsessionDB stores as `Shared*`. */
   sharedTables?: ReadonlySet<string>
+  /** Comment lines written under the import, without the `// ` prefix. Defaults to pull's own header. */
+  header?: readonly string[]
 }
+
+const PULL_HEADER = ['Pulled from live ClickHouse metadata via chkit plugin pull schema']
 
 const READONLY_SETTING_COMMENT = 'read-only: a change recreates the table (DROP + CREATE, or --cutover)'
 const OBSESSIONDB_STORAGE_POLICY_COMMENT = 'set by ObsessionDB on every Shared table; it cannot change'
@@ -43,7 +47,7 @@ export function renderSchemaFile(definitions: SchemaDefinition[], options: Rende
   const lines: string[] = [
     renderImportStatement(canonical),
     '',
-    '// Pulled from live ClickHouse metadata via chkit plugin pull schema',
+    ...(options.header ?? PULL_HEADER).map((line) => (line ? `// ${line}` : '//')),
     '',
   ]
 
