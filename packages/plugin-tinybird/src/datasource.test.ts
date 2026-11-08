@@ -110,6 +110,23 @@ describe('translateDatasource', () => {
     ])
   })
 
+  test('index names lose leading I, N, D, E and X, as Tinybird strips them', () => {
+    const translated = datasource([
+      ...SCHEMA,
+      'INDEXES >',
+      '    EXP_idx id TYPE bloom_filter(0.01) GRANULARITY 2',
+      '    Idx_ts lower(toString(ts)) TYPE set(10)',
+      '    INDEX Idx_kept ver TYPE minmax',
+      '',
+      'ENGINE "MergeTree"',
+    ])
+    expect(translated.ok && translated.value.indexes?.map((index) => index.name)).toEqual(['P_idx', 'dx_ts', 'Idx_kept'])
+    expect(translated.ok && translated.notes).toEqual([
+      'index EXP_idx is created as P_idx, as Tinybird strips leading I, N, D, E and X from index entries',
+      'index Idx_ts is created as dx_ts, as Tinybird strips leading I, N, D, E and X from index entries',
+    ])
+  })
+
   test('Null takes no keys or settings', () => {
     const translated = datasource([...SCHEMA, 'ENGINE "Null"'])
     expect(translated.ok && translated.value).toMatchObject({ engine: 'Null()', orderBy: [], primaryKey: [] })

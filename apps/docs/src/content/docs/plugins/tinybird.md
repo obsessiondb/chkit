@@ -111,9 +111,9 @@ ClickHouse aligns `REFRESH` to the server timezone; Tinybird runs schedules in `
 
 ### Endpoints
 
-Each translated endpoint becomes `export const <pipe> = query({ name: '<pipe>' })`…``. Tinybird inlines a typed param as a literal (`{{ Int32(limit, 100) }}` → `toInt32('100')`, `{{ DateTime(start, '…') }}` → `'…'`); the query binds the param as a ClickHouse `String` inside the same function, `toInt32({limit:String})`, so ClickHouse runs the SQL Tinybird runs while `p` still validates the value as the type. A default becomes `.default(…)`, also with `required=True`, because Tinybird uses the default whenever the param is missing; a param without a default is required. A pipe name that is a JavaScript reserved word, or one of the module's own names, gets an `_endpoint` suffix.
+Each translated endpoint becomes `export const <pipe> = query({ name: '<pipe>' })`…``. Tinybird inlines a typed param as a literal (`{{ Int32(limit, 100) }}` → `toInt32('100')`, `{{ DateTime(start, '…') }}` → `'…'`); the query binds the param as a ClickHouse `String` inside the same function, `toInt32({limit:String})`, so ClickHouse runs the SQL Tinybird runs while `p` still validates the value as the type. A default becomes `.default(…)`, also with `required=True`, because Tinybird uses the default whenever the param is missing; a param without a default is required, as Tinybird answers "Required parameter is not defined" when it is missing. Date and time values are validated with Tinybird's own patterns. A pipe name that is a JavaScript reserved word, or one of the module's own names, gets an `_endpoint` suffix.
 
-Translated param types: `String`, `Int8`–`Int64`, `UInt8`–`UInt64`, `Float32`, `Float64`, `Date`, `DateTime`, `DateTime64`. Endpoints with control flow (`{% if %}`), `defined()`, `column()`, `Array()`, `Boolean()` or a param with neither a default nor `required=True` are reported as not translated.
+Translated param types: `String`, `Int8`–`Int64`, `UInt8`–`UInt64`, `Float32`, `Float64`, `Date`, `DateTime`, `DateTime64`. Endpoints with control flow (`{% if %}`), `defined()`, `column()`, `Array()`, `Boolean()`, or a param declared twice with different defaults are reported as not translated.
 
 ### Not translated
 

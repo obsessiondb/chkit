@@ -29,7 +29,8 @@ const ENGINES: Record<string, { name: string; params: string[]; keyless?: boolea
 }
 
 const INGESTION_PREFIXES = ['KAFKA_', 'IMPORT_', 'PG_']
-const INDEX_LINE = /^\s*(?:INDEX\s+)?(\S+)\s+(.+?)\s+TYPE\s+(.+?)(?:\s+GRANULARITY\s+(\d+))?\s*,?\s*$/
+// `_PATTERN_INDEX_ENTRY` of the Tinybird CLI, matched from the start of the entry as Python's re.match does.
+const INDEX_ENTRY = /^(\w+)\s+([\w\s*[\]*(),'"-><.]+)\s+TYPE\s+(\w+)(?:\(([\w\s*.,]+)\))?(?:\s+GRANULARITY\s+(\d+))?/
 const ENV_SUBSTITUTION = /\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*)/
 
 export function translateDatasource(file: Datafile, database: string): Translation<TableDefinition> {
@@ -88,7 +89,11 @@ export function translateDatasource(file: Datafile, database: string): Translati
   }
   let indexes: SkipIndexDefinition[]
   try {
-    indexes = parseIndexes(file.blocks.get('INDEXES'), database, file.name)
+    const parsed = parseIndexes(file.blocks.get('INDEXES'), database, file.name)
+    for (const { written, name } of parsed) {
+      if (written !== name) notes.push(`index ${written} is created as ${name}, as Tinybird strips leading I, N, D, E and X from index entries`)
+    }
+    indexes = parsed.map(({ written: _written, ...index }) => index)
   } catch (error) {
     return { ok: false, reasons: [error instanceof Error ? error.message : String(error)] }
   }
@@ -144,21 +149,30 @@ function parseSettings(value: string | undefined): Record<string, string | numbe
   return settings
 }
 
-function parseIndexes(block: string | undefined, database: string, table: string): SkipIndexDefinition[] {
+/**
+ * INDEXES as the Tinybird CLI reads them (`parse_indexes_structure`): each
+ * entry is stripped, its trailing comma dropped, then `lstrip("INDEX")`, which
+ * removes every leading I, N, D, E or X, so an index named `EXP_idx` is created
+ * as `P_idx`. The names returned are the ones ClickHouse gets.
+ */
+function parseIndexes(block: string | undefined, database: string, table: string): Array<SkipIndexDefinition & { written: string }> {
   if (!block) return []
   return block
     .split('\n')
     .filter((line) => line.trim().length > 0)
     .map((line) => {
-      const match = INDEX_LINE.exec(line)
+      const entry = line.trim().replace(/,+$/, '').replace(/^[INDEX]+/, '').trim()
+      const match = entry.split('TYPE').length === 2 ? INDEX_ENTRY.exec(entry) : null
       if (!match) throw new Error(`INDEXES: cannot read "${line.trim()}" (expected name expr TYPE type [GRANULARITY n])`)
-      return normalizeIndexFromSystemRow({
+      const written = (/^\s*(?:INDEX\s+)?(\w+)/.exec(line)?.[1] ?? '')
+      const index = normalizeIndexFromSystemRow({
         database,
         table,
         name: match[1] ?? '',
-        expr: match[2] ?? '',
-        type: match[3] ?? '',
-        granularity: Number(match[4] ?? 1),
+        expr: (match[2] ?? '').trim(),
+        type: match[4] !== undefined ? `${match[3]}(${match[4]})` : (match[3] ?? ''),
+        granularity: Number(match[5] ?? 1),
       })
+      return { ...index, written }
     })
 }

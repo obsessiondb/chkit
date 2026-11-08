@@ -65,7 +65,8 @@ const PIPE_NODE_COMMANDS = new Set([
   'type', 'datasource', 'target_datasource', 'copy_schedule', 'copy_mode', 'mode', 'on_demand_compute', 'filter',
 ])
 
-const UNSUPPORTED_COMMANDS = new Set(['include', 'version'])
+// VERSION is a deprecated no-op in the Forward CLI; INCLUDE splices other datafiles in.
+const UNSUPPORTED_COMMANDS = new Set(['include'])
 
 export function parseDatafile(path: string, text: string): Datafile {
   const kind: DatafileKind = path.endsWith('.datasource') ? 'datasource' : 'pipe'

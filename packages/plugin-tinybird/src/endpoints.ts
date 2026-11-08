@@ -15,9 +15,10 @@ import { resolveNode, SqlResolveError } from './sql-resolve.js'
  * function, `toInt32({x:String})`, so the query ClickHouse runs is the one
  * Tinybird runs, while `p` still validates the TypeScript value as the type.
  *
+ * A param without a default is required: Tinybird answers "Required parameter
+ * is not defined" when it is missing (`required=` is not read at runtime).
  * Anything else (control flow, `defined()`, `column()`, `Array()`, `Boolean()`,
- * params with neither a default nor `required=True`, ...) is reported, per
- * endpoint, as not translated.
+ * ...) is reported, per endpoint, as not translated.
  */
 export interface TranslatedEndpoint {
   pipe: string
@@ -49,11 +50,17 @@ interface ParamKind {
   sample: string
 }
 
+/**
+ * Tinybird's own validators (`tinybird/datatypes.py`: `date_pattern`,
+ * `datetime_patterns`, `datetime64_patterns`), matched from the start as
+ * Python's re.match does: a DateTime accepts anything after the seconds. Every
+ * accepted value renders as the same String literal, which the String binding
+ * reproduces.
+ */
 const PATTERNS = {
-  DATE: String.raw`^\d{4}-\d{2}-\d{2}$`,
-  DATE_TIME: String.raw`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$`,
-  // Tinybird rejects a DateTime64 value without a fraction.
-  DATE_TIME64: String.raw`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+$`,
+  DATE: String.raw`^\d\d\d\d-\d\d-\d\d$`,
+  DATE_TIME: String.raw`^(?:\d\d\d\d.\d\d.\d\d(?:T|\s)\d\d:\d\d:\d\d|\d\d.\d\d.\d\d\d\d.\d{1,2}:\d{1,2}:\d{1,2})`,
+  DATE_TIME64: String.raw`^(?:\d\d\d\d.\d\d.\d\d(?:T|\s)\d\d:\d\d:\d\d.\d\d\d|\d\d.\d\d.\d\d\d\d.\d{1,2}:\d{1,2}:\d{1,2}.\d{1,3})`,
 } as const
 
 /** The template param types whose rendering was verified against Tinybird Local. */
@@ -183,17 +190,14 @@ function parseParam(expression: string): Translation<EndpointParam> {
     const key = arg.key ?? (index === 0 ? 'default' : undefined)
     if (key === 'default') {
       const literal = pythonLiteral(arg.value)
-      if (literal === undefined) return { ok: false, reasons: [`the default of ${nameArg.value} is not a literal`] }
+      if (literal === undefined) return { ok: false, reasons: [`the default of ${nameArg.value} is not a plain literal (Python string escapes and adjacent literals are not translated)`] }
       defaultValue = literal
     } else if (key === 'required') {
-      if (!/^(True|true|False|false)$/.test(arg.value)) return { ok: false, reasons: [`required=${arg.value} of ${nameArg.value} is not a boolean`] }
-      required = /^(True|true)$/.test(arg.value)
+      // Metadata only: Tinybird accepts any value and does not read it at runtime.
+      required = /^(['"]?)(True|true)\1$/.test(arg.value)
     } else if (key !== 'description' && key !== 'example') {
       return { ok: false, reasons: [`argument ${key ?? arg.value} of ${type}(${nameArg.value}) is not translated`] }
     }
-  }
-  if (defaultValue === undefined && !required) {
-    return { ok: false, reasons: [`param ${nameArg.value} has neither a default nor required=True; Tinybird's rendering of a missing value is not reproduced`] }
   }
   const kind = PARAM_KINDS[type]
   if (typeof defaultValue === 'string' && kind?.cast && !/^-?\d+(?:\.\d+)?$/.test(defaultValue)) {
@@ -212,7 +216,8 @@ function parseParam(expression: string): Translation<EndpointParam> {
 function normalizeDefault(value: string | number, kind: ParamKind | undefined): string | number {
   if (!kind?.cast) return String(value)
   const number = Number(value)
-  return Number.isInteger(number) && !Number.isSafeInteger(number) ? String(value) : number
+  if (kind.schema.startsWith('t.float')) return number
+  return Number.isSafeInteger(number) ? number : String(value)
 }
 
 /** Top-level comma-separated call arguments, `key=value` or positional. */
@@ -250,7 +255,8 @@ function splitArgs(text: string): Array<{ key?: string; value: string }> | undef
 /** A Python string or number literal, as Tinybird's template sees it. */
 function pythonLiteral(text: string): string | number | undefined {
   const quoted = /^(['"])([\s\S]*)\1$/.exec(text)
-  if (quoted) return (quoted[2] ?? '').replace(/\\(['"\\])/g, '$1')
+  // Escapes and adjacent literals ('it''s') follow Python rules the importer does not reproduce.
+  if (quoted) return /[\\'"]/.test(quoted[2] ?? '') ? undefined : (quoted[2] ?? '')
   // Kept as text, so a 64-bit integer keeps every digit.
   if (/^-?\d+(?:\.\d+)?$/.test(text)) return text
   return undefined

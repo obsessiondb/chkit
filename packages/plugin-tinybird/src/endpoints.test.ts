@@ -87,6 +87,34 @@ describe('translateEndpoint', () => {
     expect(!differing.ok && differing.reasons.join(' | ')).toContain('param a is declared twice with different types or defaults')
   })
 
+  test('a param without a default is required, whatever required= says', () => {
+    const translated = endpoint(['%', "SELECT {{ String(x) }}, {{ String(k, 'a', required='True') }} FROM events"])
+    expect(translated.ok && translated.value.params).toEqual([
+      { name: 'x', type: 'String', required: false },
+      { name: 'k', type: 'String', required: true, default: 'a' },
+    ])
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the expected TypeScript source contains template interpolations
+    expect(translated.ok && translated.value.source).toContain('${p("x", t.string())}')
+    expect(translated.ok && translated.value.paramSets[0]).toEqual({ x: 'chkit' })
+  })
+
+  test('a float default beyond 2^53 stays a number, sent as Python formats it', () => {
+    const translated = endpoint(['%', 'SELECT {{ Float64(a, 99999999999999999999) }}, {{ Float64(b, 12345678901234567890.5) }} FROM events'])
+    expect(translated.ok && translated.value.params.map((param) => param.default)).toEqual([1e20, Number('12345678901234567890.5')])
+    expect(translated.ok && translated.value.source).toContain('.prefault(100000000000000000000)')
+  })
+
+  test("date and time values follow Tinybird's validators", () => {
+    const translated = endpoint(['%', "SELECT {{ Date(d, '2024-01-01') }}, {{ DateTime(t, '2024-01-01 00:00:00') }}, {{ DateTime64(u, '2024-01-01 00:00:00.000') }} FROM events"])
+    const source = translated.ok ? renderQueriesFile([translated.value], 'analytics') : ''
+    const pattern = (name: string) => new RegExp(new RegExp(`const ${name} = /(.*)/`).exec(source)?.[1] ?? '^$')
+    const accepts = (name: string, values: string[]) => values.map((value) => pattern(name).test(value))
+    // Values and verdicts observed on Tinybird Local.
+    expect(accepts('DATE_TIME', ['2023-04-19 18:42:22', '2023-04-19T18:42:22Z', '2023-04-19 18:42:22.123', '2023/04/19 18:42:22', '19-04-2023 18:42:22', '2023-04-19'])).toEqual([true, true, true, true, true, false])
+    expect(accepts('DATE_TIME64', ['2023-04-19 18:42:22.123', '2023-04-19T18:42:22.123Z', '2023-04-19 18:42:22.123456', '2023-04-19 18:42:22.1', '2023-04-19 18:42:22'])).toEqual([true, true, true, false, false])
+    expect(accepts('DATE', ['2023-04-19', '2023-04-19T00'])).toEqual([true, false])
+  })
+
   test('a 64-bit integer default keeps every digit', () => {
     const translated = endpoint(['%', 'SELECT 1 FROM events WHERE id <= {{ UInt64(max, 18446744073709551615) }} AND id > {{ Int64(min, -9007199254740993) }}'])
     expect(translated.ok && translated.value.params.map((param) => param.default)).toEqual(['18446744073709551615', '-9007199254740993'])
@@ -110,7 +138,8 @@ describe('translateEndpoint', () => {
       [['%', 'SELECT 1 FROM events {% if defined(x) %} WHERE 1 {% end %}'], 'control flow {% if defined(x) %} has no static chkit query equivalent'],
       [['%', "SELECT 1 FROM events WHERE a IN {{ Array(ids, 'Int32', default='1,2') }}"], 'template function Array() is not translated'],
       [['%', "SELECT {{ column(c, 'a') }} FROM events"], 'template function column() is not translated'],
-      [['%', 'SELECT {{ String(x) }} FROM events'], 'param x has neither a default nor required=True'],
+      [['%', "SELECT {{ String(x, 'it''s') }} FROM events"], 'the default of x is not a plain literal'],
+      [['%', "SELECT {{ String(x, 'a\\nb') }} FROM events"], 'the default of x is not a plain literal'],
       [['%', "SELECT {{ String(x, 'a') }}, {{ String(x, 'b') }} FROM events"], 'param x is declared twice with different types or defaults'],
       [['%', "SELECT {{ Int32(x, 'abc') }} FROM events"], "the default 'abc' of x is not a number"],
       [['%', 'SELECT {{ Int32(x, 1, format=2) }} FROM events'], 'argument format of Int32(x) is not translated'],
@@ -133,7 +162,7 @@ describe('renderQueriesFile', () => {
     if (!translated.ok) return
     const source = renderQueriesFile([translated.value], 'analytics')
     expect(source.startsWith("import { p, query, t } from '@chkit/core'\n")).toBe(true)
-    expect(source).toContain('const DATE = /^\\d{4}-\\d{2}-\\d{2}$/\n')
+    expect(source).toContain('const DATE = /^\\d\\d\\d\\d-\\d\\d-\\d\\d$/\n')
     expect(source).not.toContain('const DATE_TIME =')
   })
 })

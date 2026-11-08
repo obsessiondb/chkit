@@ -205,8 +205,8 @@ export async function importTinybirdProject(input: { projectDir: string; databas
     }
   }
 
-  // Pipes other pipes may read from: Tinybird allows default, endpoint and materialized pipes.
-  const readable = project.pipes.filter(({ type, output }) => output && (type === 'default' || type === 'endpoint' || type === 'materialized'))
+  // Pipes other pipes may read from: Tinybird inlines default and endpoint pipes, and refuses a materialized one.
+  const readable = project.pipes.filter(({ type, output }) => output && (type === 'default' || type === 'endpoint'))
   const unreadablePipes = new Map<string, string>()
   for (const { file } of readable) {
     if (file.unsupported.length > 0) unreadablePipes.set(file.name, includeReason(file))

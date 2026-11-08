@@ -84,12 +84,9 @@ describe('parseDatafile', () => {
     expect(() => parseDatafile('x.pipe', 'TYPE copy')).toThrow('must come after a NODE')
   })
 
-  test('records commands it does not evaluate', () => {
+  test('records INCLUDE, which it does not evaluate; VERSION is a no-op as in the Forward CLI', () => {
     const file = parseDatafile('x.datasource', 'INCLUDE "shared.incl"\nVERSION 2')
-    expect(file.unsupported).toEqual([
-      { command: 'INCLUDE', line: 1 },
-      { command: 'VERSION', line: 2 },
-    ])
+    expect(file.unsupported).toEqual([{ command: 'INCLUDE', line: 1 }])
   })
 })
 

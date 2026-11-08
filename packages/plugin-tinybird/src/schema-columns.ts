@@ -42,7 +42,8 @@ const TYPE_STOPS: Lookahead[] = ['NULL', 'NOTNULL', 'DEFAULT', 'MATERIALIZED', '
 const VALUE_STOPS: Lookahead[] = ['NOTNULL', 'DEFAULT', 'MATERIALIZED', 'ALIAS', 'CODEC', 'TTL', 'JSONPATH', 'COMMA']
 const SIMPLE_AGGREGATE = /SimpleAggregateFunction\((\w+),\s*(?!(?:Nullable))([\w,.()]+)\)/
 
-export function parseSchemaColumns(schema: string): TinybirdColumn[] {
+export function parseSchemaColumns(rawSchema: string): TinybirdColumn[] {
+  const schema = stripSchemaComments(rawSchema)
   const columns: TinybirdColumn[] = []
   let i = 0
   let column: { name: string; type: string; default?: string; codec?: string; jsonPath?: string } | undefined
@@ -164,4 +165,25 @@ function wrapNullable(type: string): string {
   const match = SIMPLE_AGGREGATE.exec(type)
   if (match && !(match[2] ?? '').includes('Nullable(')) return `SimpleAggregateFunction(${match[1]}, Nullable(${match[2]}))`
   return type.includes('Nullable(') ? type : `Nullable(${type})`
+}
+
+/**
+ * Tinybird's `clean_comments_rstrip_keep_empty_lines`: on every line, `--`
+ * starts a comment unless it is inside a `json:...` path, also inside a
+ * backticked name (`c--c` keeps only the c before it, as Tinybird does).
+ */
+export function stripSchemaComments(schema: string): string {
+  return schema
+    .split(/\r\n|\r|\n/)
+    .map((line) => {
+      let inJsonPath = false
+      for (let i = 0; i < line.length; i++) {
+        if (!inJsonPath && line[i] === '-' && line[i + 1] === '-') return line.slice(0, i).trimEnd()
+        if (!inJsonPath && line.startsWith('`json:', i)) inJsonPath = true
+        else if (inJsonPath && line[i] === '`') inJsonPath = false
+      }
+      return line
+    })
+    .join('\n')
+    .trimEnd()
 }
