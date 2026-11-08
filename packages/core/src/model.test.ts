@@ -16,6 +16,7 @@ describe('resolveConfig directories', () => {
     expect(dirs('./db//chkit/')).toEqual(['db/chkit/migrations', 'db/chkit/meta'])
     expect(dirs('../shared/./chkit')).toEqual(['../shared/chkit/migrations', '../shared/chkit/meta'])
     expect(dirs('/srv/chkit')).toEqual(['/srv/chkit/migrations', '/srv/chkit/meta'])
+    expect(dirs('//server/share/chkit')).toEqual(['//server/share/chkit/migrations', '//server/share/chkit/meta'])
   })
 
   test('keeps explicit migrationsDir and metaDir as given', () => {

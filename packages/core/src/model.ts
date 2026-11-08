@@ -111,9 +111,11 @@ function resolveSecure(clickhouse: ChxUserClickHouseConfig): boolean {
   return fromUrl
 }
 
-// POSIX `path.join`, written out because importing `node:path` here breaks browser bundles of `@chkit/core`.
+// POSIX `path.join` that keeps a leading `//` (a Windows UNC root), written out
+// because importing `node:path` here breaks browser bundles of `@chkit/core`.
 function joinPath(dir: string, name: string): string {
-  const absolute = dir.startsWith('/')
+  const root = /^\/\/[^/]/.test(dir) ? '//' : dir.startsWith('/') ? '/' : ''
+  const absolute = root !== ''
   const segments: string[] = []
   for (const segment of `${dir}/${name}`.split('/')) {
     if (segment === '' || segment === '.') continue
@@ -121,7 +123,7 @@ function joinPath(dir: string, name: string): string {
     else if (segments.length > 0 && segments.at(-1) !== '..') segments.pop()
     else if (!absolute) segments.push(segment)
   }
-  return `${absolute ? '/' : ''}${segments.join('/')}`
+  return `${root}${segments.join('/')}`
 }
 
 /** Defines a table. A column's `t` type renders as its ClickHouse type string. */
