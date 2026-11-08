@@ -2,7 +2,6 @@
 
 from __future__ import annotations
 
-import math
 import re
 from collections.abc import Mapping
 from typing import Any, Final, Literal, NamedTuple, TypeAlias
@@ -23,7 +22,7 @@ from chkit.core.model import (
     _CodecT64,
     _CodecZSTD,
 )
-from chkit.core.sql_lexer import JS_WHITESPACE_RUN
+from chkit.core.sql_lexer import is_js_space
 
 CodecSpecInput: TypeAlias = ColumnCodecSpec | Mapping[str, Any] | list[ColumnCodec | Mapping[str, Any]]
 """Loose input accepted by public entry points: dicts or models, single or list."""
@@ -150,13 +149,6 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
         parts = [value.strip() for value in args_raw.split(",")]
         args = None if len(parts) == 1 and parts[0] == "" else parts
 
-    def _as_finite(value: str) -> float | None:
-        try:
-            parsed = float(value)
-        except ValueError:
-            return None
-        return parsed if math.isfinite(parsed) else None
-
     if name in {"NONE", "LZ4", "Default", "GCD", "ALP"}:
         if args is not None:
             return None
@@ -173,75 +165,92 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             return _GENERAL_ADAPTER.validate_python({"kind": "LZ4HC"})
         if len(args) != 1:
             return None
-        level = _parse_level(args[0])
+        level = _parse_integer_arg(args[0])
         if level is None:
             return None
-        return _normalize_atom({"kind": "LZ4HC", "level": _number(level)})
+        return _normalize_atom({"kind": "LZ4HC", "level": level})
     if name == "ZSTD":
         if args is None:
             return _GENERAL_ADAPTER.validate_python({"kind": "ZSTD"})
         if len(args) > 2:
             return None
-        level = _parse_level(args[0])
+        level = _parse_integer_arg(args[0])
         if level is None:
             return None
         if len(args) == 1:
-            return _normalize_atom({"kind": "ZSTD", "level": _number(level)})
-        window_log = _as_finite(args[1])
+            return _normalize_atom({"kind": "ZSTD", "level": level})
+        window_log = _parse_integer_arg(args[1])
         if window_log is None:
             return None
-        return _normalize_atom(
-            {"kind": "ZSTD", "level": _number(level), "windowLog": _number(window_log)}
-        )
+        return _normalize_atom({"kind": "ZSTD", "level": level, "windowLog": window_log})
     if name in {"Delta", "DoubleDelta", "Gorilla"}:
         if args is None:
             return _PREPROCESSOR_ADAPTER.validate_python({"kind": name})
         if len(args) != 1:
             return None
-        size_float = _as_finite(args[0])
-        if size_float is None:
+        size = _parse_integer_arg(args[0])
+        if size not in {1, 2, 4, 8}:
             return None
-        if size_float not in {1, 2, 4, 8}:
-            return None
-        return _PREPROCESSOR_ADAPTER.validate_python({"kind": name, "size": int(size_float)})
+        return _PREPROCESSOR_ADAPTER.validate_python({"kind": name, "size": size})
     if name == "FPC":
         # ClickHouse stores FPC(level) and drops the float size.
         if args is None:
             return _PREPROCESSOR_ADAPTER.validate_python({"kind": "FPC"})
         if len(args) > 2:
             return None
-        level = _as_finite(args[0])
+        level = _parse_integer_arg(args[0])
         if level is None:
             return None
         if len(args) == 1:
-            return _normalize_atom({"kind": "FPC", "level": _number(level)})
-        float_size_value = _as_finite(args[1])
-        if float_size_value not in {4, 8}:
+            return _normalize_atom({"kind": "FPC", "level": level})
+        float_size = _parse_integer_arg(args[1])
+        if float_size not in {4, 8}:
             return None
-        return _normalize_atom(
-            {"kind": "FPC", "level": _number(level), "floatSize": int(float_size_value)}
-        )
+        return _normalize_atom({"kind": "FPC", "level": level, "floatSize": float_size})
     return None
-
-
-def _number(value: float) -> float | int:
-    """A parsed argument as chkit (TS) reads it: an integer when it is one."""
-    return int(value) if float(value).is_integer() else value
 
 
 _UINT64_SIGN: Final[int] = 2**63
 _UINT64_RANGE: Final[int] = 2**64
 
 
-def _parse_level(raw: str) -> float | None:
-    """ClickHouse prints a negative level unsigned: `ZSTD(-1)` reads back as `ZSTD(18446744073709551615)`."""
-    if re.fullmatch(r"[0-9]+", raw) and int(raw) >= _UINT64_SIGN:
-        return int(raw) - _UINT64_RANGE
-    try:
-        parsed = float(raw)
-    except ValueError:
+# The integer literals ClickHouse takes as a codec argument; a float such as `1.0` is not one.
+_INTEGER_ARG: Final[re.Pattern[str]] = re.compile(
+    r"[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01]+)*|[0-9]+(?:_[0-9]+)*)"
+)
+
+
+def _parse_integer_arg(raw: str) -> int | None:
+    """An integer codec argument as ClickHouse reads it.
+
+    Decimal (``1_0`` is 10), ``0x`` hex or ``0b`` binary, optionally signed.
+    ClickHouse prints a negative level unsigned: ``ZSTD(-1)`` reads back as
+    ``ZSTD(18446744073709551615)``.
+    """
+    if _INTEGER_ARG.fullmatch(raw) is None:
         return None
-    return parsed if math.isfinite(parsed) else None
+    digits = raw.lstrip("+-").replace("_", "")
+    if digits[:2] in ("0x", "0X"):
+        magnitude = int(digits[2:], 16)
+    elif digits[:2] == "0b":
+        magnitude = int(digits[2:], 2)
+    else:
+        magnitude = int(digits, 10)
+    value = -magnitude if raw.startswith("-") else magnitude
+    return value - _UINT64_RANGE if value >= _UINT64_SIGN else value
+
+
+def _strip_whitespace_outside_quotes(text: str) -> str:
+    """Remove whitespace except inside quoted strings: ``T64('b it')`` is not ``T64('bit')``."""
+    out: list[str] = []
+    quoted = False
+    for ch in text:
+        if ch == "'":
+            quoted = not quoted
+        if not quoted and is_js_space(ch):
+            continue
+        out.append(ch)
+    return "".join(out)
 
 
 def _split_top_level_commas(text: str) -> list[str]:
@@ -300,9 +309,9 @@ class RawCodecAtom(NamedTuple):
 def parse_raw_codec_atoms(expression: str) -> list[RawCodecAtom]:
     """Split a raw codec expression into its atoms (``Delta, Default`` is two).
 
-    Each atom's text has no whitespace.
+    Each atom's text has no whitespace outside quotes.
     """
-    texts = [JS_WHITESPACE_RUN.sub("", atom) for atom in _split_top_level_commas(expression)]
+    texts = [_strip_whitespace_outside_quotes(atom) for atom in _split_top_level_commas(expression)]
     return [RawCodecAtom(_parse_atom(text), text) for text in texts if text]
 
 
@@ -448,7 +457,12 @@ def _atom_data(step: object) -> object:
 def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
     level = data.get("level")
     if kind == "LZ4HC":
-        return "level must be an integer" if level is not None and not _is_int(level) else None
+        if level is not None and not _is_int(level):
+            return "level must be an integer"
+        # ClickHouse keeps only the low 32 bits: LZ4HC(4294967297) is stored as LZ4HC(1).
+        if isinstance(level, int) and _is_int(level) and not _INT32_MIN <= level <= _INT32_MAX:
+            return f"level must be between {_INT32_MIN} and {_INT32_MAX}"
+        return None
     if kind == "ZSTD":
         if level is not None and not _is_int(level):
             return "level must be an integer"
@@ -483,6 +497,10 @@ def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
             return None
         return "expression must be a non-empty string"
     return None
+
+
+_INT32_MIN: Final[int] = -2147483648
+_INT32_MAX: Final[int] = 2147483647
 
 
 def _is_int(value: object) -> bool:

@@ -15,6 +15,7 @@ from urllib.parse import urlparse
 
 from pydantic import (
     BaseModel,
+    BeforeValidator,
     ConfigDict,
     Field,
     TypeAdapter,
@@ -103,7 +104,14 @@ GeneralColumnCodec: TypeAlias = _GeneralCodecSimple | _CodecLZ4HC | _CodecZSTD
 """
 
 
-_PreprocessorSize: TypeAlias = Literal[1, 2, 4, 8]
+def _reject_bool(value: object) -> object:
+    # Literal[1, ...] would take True as 1; TS rejects a boolean size.
+    if isinstance(value, bool):
+        raise ValueError("size must be 1, 2, 4 or 8")
+    return value
+
+
+_PreprocessorSize: TypeAlias = Annotated[Literal[1, 2, 4, 8], BeforeValidator(_reject_bool)]
 
 
 class _CodecDeltaLike(_StrictModel):

@@ -148,6 +148,15 @@ CASES: list[tuple[str, Any, tuple[str, str] | None]] = [
     ("FixedString(4)", [{"kind": "GCD"}, {"kind": "LZ4"}], ("codec_type_unsupported", "codec GCD does not support type FixedString(4)")),
     ("FixedString(4)", {"kind": "Gorilla"}, ("codec_type_unsupported", "codec Gorilla does not support type FixedString(4)")),
     ("FixedString(4)", {"kind": "T64"}, ("codec_type_unsupported", "codec T64 does not support type FixedString(4)")),
+    ("UInt64", {"kind": "raw", "expression": "ZSTD(0x1)"}, None),
+    ("UInt64", {"kind": "raw", "expression": "ZSTD(1_0)"}, None),
+    ("UInt64", {"kind": "raw", "expression": "ZSTD(1.0)"}, ("codec_parameter_invalid", "codec raw \"ZSTD(1.0)\" has invalid arguments for ZSTD")),
+    ("UInt64", {"kind": "raw", "expression": "T64( 'bit' )"}, None),
+    ("UInt64", {"kind": "raw", "expression": "T64('b it')"}, ("codec_parameter_invalid", "codec raw \"T64('b it')\" has invalid arguments for T64")),
+    ("UInt64", {"kind": "raw", "expression": "LZ4HC(-1)"}, None),
+    ("UInt64", {"kind": "raw", "expression": "LZ4HC(2147483648)"}, ("codec_parameter_invalid", "codec LZ4HC level must be between -2147483648 and 2147483647")),
+    ("UInt64", {"kind": "LZ4HC", "level": 4294967297}, ("codec_parameter_invalid", "codec LZ4HC level must be between -2147483648 and 2147483647")),
+    ("Float64", {"kind": "Gorilla", "size": True}, ("codec_parameter_invalid", "codec Gorilla size must be 1, 2, 4 or 8")),
 ]
 
 

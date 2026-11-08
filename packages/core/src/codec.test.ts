@@ -346,6 +346,12 @@ describe('codec forms ClickHouse stores (#465)', () => {
       ['String', codec.raw('ZSTD'), { kind: 'ZSTD', level: 1 }],
       ['String', codec.raw('ZSTD, AES_128_GCM_SIV'), codec.raw('ZSTD(1), AES_128_GCM_SIV')],
       ['UInt64', { kind: 'T64', mode: 'byte' }, { kind: 'T64' }],
+      // Integer literals ClickHouse reads: hex, binary, underscores.
+      ['String', codec.raw('ZSTD(0x1)'), { kind: 'ZSTD', level: 1 }],
+      ['String', codec.raw('ZSTD(1_0)'), { kind: 'ZSTD', level: 10 }],
+      ['String', codec.raw('ZSTD(3, 0x18)'), { kind: 'ZSTD', level: 3, windowLog: 24 }],
+      ['String', codec.raw('LZ4HC(0b1_0)'), { kind: 'LZ4HC', level: 2 }],
+      ['UInt64', codec.raw("T64( 'bit' )"), { kind: 'T64', mode: 'bit' }],
     ]
     for (const [type, a, b] of same) expect(codecFingerprint(a, type)).toBe(codecFingerprint(b, type))
   })
@@ -353,5 +359,9 @@ describe('codec forms ClickHouse stores (#465)', () => {
   test('tells apart a ZSTD window and a T64 bit mode', () => {
     expect(codecFingerprint({ kind: 'ZSTD', level: 3, windowLog: 24 })).not.toBe(codecFingerprint({ kind: 'ZSTD', level: 3 }))
     expect(codecFingerprint({ kind: 'T64', mode: 'bit' })).not.toBe(codecFingerprint({ kind: 'T64' }))
+  })
+
+  test('keeps whitespace inside a quoted argument: ClickHouse rejects T64(\'b it\')', () => {
+    expect(codecFingerprint(codec.raw("T64('b it')"))).toBe("T64('b it')")
   })
 })

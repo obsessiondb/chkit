@@ -251,9 +251,15 @@ def _column_identity(column: ColumnDefinition) -> str:
     return json.dumps(_normalized_column(column), sort_keys=True, default=str)
 
 
-def _column_identity_without_codec(column: ColumnDefinition) -> str:
+def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bool) -> str:
+    """A column without its codec, and without its comment.
+
+    The comment is left out when the plan removes it in its own operation.
+    """
     data = _normalized_column(column)
     data.pop("codec", None)
+    if remove_comment:
+        data.pop("comment", None)
     return json.dumps(data, sort_keys=True, default=str)
 
 
@@ -582,9 +588,10 @@ def _diff_tables(  # noqa: PLR0915 — mirrors TS diffTables
                     sql=render_alter_remove_codec(new, column_change.name),
                 )
             )
-        if codec_removed and _column_identity_without_codec(
-            column_change.old_item
-        ) == _column_identity_without_codec(column_change.new_item):
+        # The removals above already reach the schema when nothing else changed.
+        if codec_removed and _column_identity_after_removals(
+            column_change.old_item, remove_comment
+        ) == _column_identity_after_removals(column_change.new_item, remove_comment):
             continue
         ops.append(
             MigrationOperation(

@@ -1430,6 +1430,19 @@ describe('@chkit/core column codec', () => {
     ])
   })
 
+  test('plan: dropping a codec and a comment plans the two removals and nothing else', () => {
+    const events = (columns: ColumnDefinition[]) =>
+      table({ database: 'app', name: 'events', columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
+    const plan = planDiff(
+      [events([{ name: 'id', type: 'UInt64' }, { name: 'n', type: 'UInt64', comment: 'old', codec: { kind: 'ZSTD' } }])],
+      [events([{ name: 'id', type: 'UInt64' }, { name: 'n', type: 'UInt64' }])]
+    )
+    expect(plan.operations.map((op) => op.sql)).toEqual([
+      'ALTER TABLE app.events MODIFY COLUMN `n` REMOVE COMMENT;',
+      'ALTER TABLE app.events MODIFY COLUMN `n` REMOVE CODEC;',
+    ])
+  })
+
   test('plan: a bare Delta/Gorilla replaces the size 1 a snapshot from before #465 stored', () => {
     const events = (columns: ColumnDefinition[]) =>
       table({ database: 'app', name: 'events', columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })

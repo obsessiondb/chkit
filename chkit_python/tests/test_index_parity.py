@@ -964,6 +964,17 @@ def _codec_events(columns: list[dict[str, Any]]) -> Any:
     )
 
 
+def test_plan_dropping_a_codec_and_a_comment_plans_the_two_removals_and_nothing_else() -> None:
+    plan = plan_diff(
+        [_codec_events([{"name": "n", "type": "UInt64", "comment": "old", "codec": {"kind": "ZSTD"}}])],
+        [_codec_events([{"name": "n", "type": "UInt64"}])],
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `n` REMOVE COMMENT;",
+        "ALTER TABLE app.events MODIFY COLUMN `n` REMOVE CODEC;",
+    ]
+
+
 def test_plan_bare_delta_gorilla_replaces_the_size_1_of_an_old_snapshot() -> None:
     old = [_codec_events([
         {"name": "ts", "type": "UInt64", "codec": [{"kind": "Delta", "size": 1}, {"kind": "ZSTD", "level": 1}]},

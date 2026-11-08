@@ -238,6 +238,12 @@ function normalizeColumnWithoutCodec(
   return rest
 }
 
+/** A column without its codec, and without its comment when the plan removes that in its own operation. */
+function columnAfterRemovals(column: ColumnDefinition, removeComment: boolean): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
+  const { comment: _comment, ...rest } = normalizeColumnWithoutCodec(column)
+  return removeComment ? rest : normalizeColumnWithoutCodec(column)
+}
+
 function isCommentOnlyChange(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
   const { comment: _oldComment, ...oldRest } = normalizeColumn(oldCol)
   const { comment: _newComment, ...newRest } = normalizeColumn(newCol)
@@ -494,7 +500,8 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     // REMOVE CODEC, its own operation before any other change (#465).
     const codecRemoved = Boolean(oldItem.codec) && !newItem.codec
     if (codecRemoved) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: renderAlterRemoveCodec(newDef, name) })
-    if (codecRemoved && JSON.stringify(normalizeColumnWithoutCodec(oldItem)) === JSON.stringify(normalizeColumnWithoutCodec(newItem))) continue
+    // The removals above already reach the schema when nothing else changed.
+    if (codecRemoved && JSON.stringify(columnAfterRemovals(oldItem, removeComment)) === JSON.stringify(columnAfterRemovals(newItem, removeComment))) continue
     ops.push( {
       type: 'alter_table_modify_column',
       key,

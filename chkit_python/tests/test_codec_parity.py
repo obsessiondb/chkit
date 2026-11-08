@@ -412,6 +412,12 @@ def test_codec_fingerprint_compares_respelled_codecs_equal() -> None:
         ("String", codec_raw("ZSTD"), {"kind": "ZSTD", "level": 1}),
         ("String", codec_raw("ZSTD, AES_128_GCM_SIV"), codec_raw("ZSTD(1), AES_128_GCM_SIV")),
         ("UInt64", {"kind": "T64", "mode": "byte"}, {"kind": "T64"}),
+        # Integer literals ClickHouse reads: hex, binary, underscores.
+        ("String", codec_raw("ZSTD(0x1)"), {"kind": "ZSTD", "level": 1}),
+        ("String", codec_raw("ZSTD(1_0)"), {"kind": "ZSTD", "level": 10}),
+        ("String", codec_raw("ZSTD(3, 0x18)"), {"kind": "ZSTD", "level": 3, "windowLog": 24}),
+        ("String", codec_raw("LZ4HC(0b1_0)"), {"kind": "LZ4HC", "level": 2}),
+        ("UInt64", codec_raw("T64( 'bit' )"), {"kind": "T64", "mode": "bit"}),
     ]
     for type_, a, b in same:
         assert codec_fingerprint(a, type_) == codec_fingerprint(b, type_)
@@ -422,3 +428,8 @@ def test_codec_fingerprint_tells_apart_a_zstd_window_and_a_t64_bit_mode() -> Non
         {"kind": "ZSTD", "level": 3}
     )
     assert codec_fingerprint({"kind": "T64", "mode": "bit"}) != codec_fingerprint({"kind": "T64"})
+
+
+def test_codec_fingerprint_keeps_whitespace_inside_a_quoted_argument() -> None:
+    # ClickHouse rejects T64('b it').
+    assert codec_fingerprint(codec_raw("T64('b it')")) == "T64('b it')"

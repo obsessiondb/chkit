@@ -110,19 +110,19 @@ function parseAtom(raw: string): ColumnCodec | undefined {
     case 'LZ4HC': {
       if (args === undefined) return { kind: 'LZ4HC' }
       if (args.length !== 1 || args[0] === undefined) return undefined
-      const level = parseLevel(args[0])
-      if (!Number.isFinite(level)) return undefined
+      const level = parseIntegerArg(args[0])
+      if (level === undefined) return undefined
       return { kind: 'LZ4HC', level }
     }
     case 'ZSTD': {
       if (args === undefined) return { kind: 'ZSTD' }
       const [levelArg, windowLogArg] = args
       if (args.length > 2 || levelArg === undefined) return undefined
-      const level = parseLevel(levelArg)
-      if (!Number.isFinite(level)) return undefined
+      const level = parseIntegerArg(levelArg)
+      if (level === undefined) return undefined
       if (windowLogArg === undefined) return { kind: 'ZSTD', level }
-      const windowLog = Number(windowLogArg)
-      if (!Number.isFinite(windowLog)) return undefined
+      const windowLog = parseIntegerArg(windowLogArg)
+      if (windowLog === undefined) return undefined
       return { kind: 'ZSTD', level, windowLog }
     }
     case 'Delta':
@@ -130,7 +130,7 @@ function parseAtom(raw: string): ColumnCodec | undefined {
     case 'Gorilla': {
       if (args === undefined) return { kind: name }
       if (args.length !== 1) return undefined
-      const size = Number(args[0])
+      const size = parseIntegerArg(args[0] ?? '')
       if (size !== 1 && size !== 2 && size !== 4 && size !== 8) return undefined
       return { kind: name, size }
     }
@@ -139,10 +139,10 @@ function parseAtom(raw: string): ColumnCodec | undefined {
       if (args === undefined) return { kind: 'FPC' }
       const [levelArg, floatSizeArg] = args
       if (args.length > 2 || levelArg === undefined) return undefined
-      const level = Number(levelArg)
-      if (!Number.isFinite(level)) return undefined
+      const level = parseIntegerArg(levelArg)
+      if (level === undefined) return undefined
       if (floatSizeArg === undefined) return { kind: 'FPC', level }
-      const floatSize = Number(floatSizeArg)
+      const floatSize = parseIntegerArg(floatSizeArg)
       if (floatSize !== 4 && floatSize !== 8) return undefined
       return { kind: 'FPC', level, floatSize }
     }
@@ -154,10 +154,31 @@ function parseAtom(raw: string): ColumnCodec | undefined {
 const UINT64_SIGN = 9223372036854775808n
 const UINT64_RANGE = 18446744073709551616n
 
-/** ClickHouse prints a negative level unsigned: `ZSTD(-1)` reads back as `ZSTD(18446744073709551615)`. */
-function parseLevel(raw: string): number {
-  if (/^\d+$/.test(raw) && BigInt(raw) >= UINT64_SIGN) return Number(BigInt(raw) - UINT64_RANGE)
-  return Number(raw)
+/** The integer literals ClickHouse takes as a codec argument; a float such as `1.0` is not one. */
+const INTEGER_ARG = /^[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01]+)*|\d+(?:_\d+)*)$/
+
+/**
+ * An integer codec argument as ClickHouse reads it: decimal (`1_0` is 10),
+ * `0x` hex or `0b` binary, optionally signed. ClickHouse prints a negative
+ * level unsigned: `ZSTD(-1)` reads back as `ZSTD(18446744073709551615)`.
+ */
+function parseIntegerArg(raw: string): number | undefined {
+  if (!INTEGER_ARG.test(raw)) return undefined
+  const magnitude = BigInt(raw.replace(/^[+-]/, '').replaceAll('_', ''))
+  const value = raw.startsWith('-') ? -magnitude : magnitude
+  return Number(value >= UINT64_SIGN ? value - UINT64_RANGE : value)
+}
+
+/** Removes whitespace except inside quoted strings: `T64('b it')` is not `T64('bit')`. */
+function stripWhitespaceOutsideQuotes(text: string): string {
+  let out = ''
+  let quoted = false
+  for (const ch of text) {
+    if (ch === "'") quoted = !quoted
+    if (!quoted && /\s/.test(ch)) continue
+    out += ch
+  }
+  return out
 }
 
 function splitTopLevelCommas(input: string): string[] {
@@ -204,13 +225,13 @@ export function parseCodec(raw: string | undefined | null): ColumnCodec[] | unde
   return parsed
 }
 
-/** One atom of a raw codec: the typed codec it parses as, or its text without whitespace. */
+/** One atom of a raw codec: the typed codec it parses as, or its text without whitespace outside quotes. */
 export type RawCodecAtom = { codec: ColumnCodec; text: string } | { codec: undefined; text: string }
 
 /** Splits a raw codec expression into its atoms (`Delta, Default` is two). */
 export function parseRawCodecAtoms(expression: string): RawCodecAtom[] {
   return splitTopLevelCommas(expression)
-    .map((atom) => atom.replace(/\s+/g, ''))
+    .map(stripWhitespaceOutsideQuotes)
     .filter((atom) => atom.length > 0)
     .map((text) => ({ codec: parseAtom(text), text }))
 }
@@ -344,7 +365,12 @@ export function codecAtomProblem(step: unknown): CodecAtomProblem | undefined {
 function codecParameterProblem(kind: string, step: Record<string, unknown>): string | undefined {
   switch (kind) {
     case 'LZ4HC':
-      return step.level !== undefined && !isInteger(step.level) ? 'level must be an integer' : undefined
+      if (step.level !== undefined && !isInteger(step.level)) return 'level must be an integer'
+      // ClickHouse keeps only the low 32 bits: LZ4HC(4294967297) is stored as LZ4HC(1).
+      if (isInteger(step.level) && (step.level < INT32_MIN || step.level > INT32_MAX)) {
+        return `level must be between ${INT32_MIN} and ${INT32_MAX}`
+      }
+      return undefined
     case 'ZSTD':
       if (step.level !== undefined && !isInteger(step.level)) return 'level must be an integer'
       if (isInteger(step.level) && step.level > 22) return 'level must be at most 22'
@@ -371,6 +397,9 @@ function codecParameterProblem(kind: string, step: Record<string, unknown>): str
       return undefined
   }
 }
+
+const INT32_MIN = -2147483648
+const INT32_MAX = 2147483647
 
 function parameterProblem(message: string): CodecAtomProblem {
   return { code: 'codec_parameter_invalid', message }
