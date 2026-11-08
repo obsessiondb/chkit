@@ -81,6 +81,10 @@ describe('query definitions', () => {
       [p('v', z.date()), 'DateTime64(3)'],
       [p('v', z.array(z.string())), 'Array(String)'],
       [p('v', z.array(p.date())), 'Array(Date)'],
+      [p('v', z.record(z.string(), z.int())), 'Map(String, Int64)'],
+      [p('v', z.uuid()), 'UUID'],
+      [p('v', z.ipv4()), 'IPv4'],
+      [p('v', z.ipv6()), 'IPv6'],
       [p('v', z.string().optional()), 'Nullable(String)'],
       [p('v', z.string().meta({ clickhouse: 'LowCardinality(String)' })), 'LowCardinality(String)'],
     ]

@@ -21,7 +21,13 @@ export interface DateTime64Helper {
 
 type DateTimeValue = z.ZodUnion<[z.ZodDate, z.ZodISODateTime]>
 
-const STRING_TYPES: Record<string, string> = { uuid: 'UUID', date: 'Date', datetime: 'DateTime64(3)' }
+const STRING_TYPES: Record<string, string> = {
+  uuid: 'UUID',
+  ipv4: 'IPv4',
+  ipv6: 'IPv6',
+  date: 'Date',
+  datetime: 'DateTime64(3)',
+}
 const NUMBER_TYPES: Record<string, string> = {
   safeint: 'Int64',
   int32: 'Int32',
@@ -99,6 +105,8 @@ export function clickhouseType(schema: z.core.$ZodType): string {
       return 'String'
     case 'array':
       return `Array(${clickhouseType(def.element)})`
+    case 'record':
+      return `Map(${clickhouseType(def.keyType)}, ${clickhouseType(def.valueType)})`
   }
   throw new Error(`No ClickHouse type for Zod "${def.type}"; set one with p(name, schema.meta({ clickhouse: '...' }))`)
 }
