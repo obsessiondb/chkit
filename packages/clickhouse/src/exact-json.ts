@@ -1,3 +1,5 @@
+import { roundTripNumber } from '@chkit/core'
+
 import type { ClickHouseJsonQueryResult } from './index.js'
 
 /**
@@ -11,8 +13,6 @@ const EXACT_TYPE_RE = /\b(?:U?Int(?:64|128|256)|Decimal(?:32|64|128|256)?)\b/
  * (#438). Their numbers follow the rule of `parseJsonEachRowLine`.
  */
 const DYNAMIC_TYPE_RE = /\b(?:JSON|Object|Dynamic)\b/
-
-const SIXTEEN_DIGITS_RE = /[\d.]{16}/
 
 /**
  * How a column's numbers are read: as doubles, as the digits ClickHouse
@@ -80,43 +80,9 @@ export function parseJsonResult<T extends Record<string, unknown>>(
 	} as ClickHouseJsonQueryResult<T>
 }
 
-/** Parses a `JSONEachRow` body, every nonempty line as `parseJsonEachRowLine`. */
-export function parseJsonEachRow<T>(body: string): T[] {
-	return body
-		.split('\n')
-		.filter((line) => line.trim().length > 0)
-		.map((line) => parseJsonEachRowLine<T>(line))
-}
-
-/**
- * Parses one `JSONEachRow` line without rounding (#415). A number whose
- * double does not print back to the digits ClickHouse wrote (a 64-bit or
- * wider integer beyond 2^53, a Decimal with more than 15 significant digits)
- * becomes a string of those digits. Every other number, Float64 included, stays a
- * number. Unlike `parseJsonResult`, this needs no column types: values that
- * read correctly today keep their type.
- */
-export function parseJsonEachRowLine<T>(line: string): T {
-	// The reviver makes JSON.parse several times slower. A number with more
-	// than 15 digits needs a run of 16 digits and points, so a line without
-	// one has nothing to restore.
-	if (!SIXTEEN_DIGITS_RE.test(line)) return JSON.parse(line)
-	return JSON.parse(line, (_key, value: unknown, context?: { source?: string }) =>
-		typeof value === 'number' ? roundTripNumber(context?.source, value) : value,
-	)
-}
-
 function numberMode(type: string): NumberMode {
 	if (DYNAMIC_TYPE_RE.test(type)) return 'roundTrip'
 	return EXACT_TYPE_RE.test(type) ? 'digits' : 'double'
-}
-
-/** The number, or the digits ClickHouse wrote when its double prints other digits. */
-function roundTripNumber(source: string | undefined, value: number): number | string {
-	// Up to 15 significant digits always survive a double (DBL_DIG), and
-	// Node 20 gives the reviver no source text: both keep the number.
-	if (source === undefined || source.length <= 15) return value
-	return canonicalDecimal(source) === canonicalDecimal(String(value)) ? value : source
 }
 
 function jsonNumber(source: string | undefined, value: number): JsonNumber {
@@ -129,20 +95,6 @@ function isJsonNumber(value: unknown): value is JsonNumber {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
 	return value !== null && typeof value === 'object' && !Array.isArray(value) && !isJsonNumber(value)
-}
-
-/**
- * A JSON number's value as `<sign><significant digits>e<exponent>`, so that
- * `100000000000000000000` and `1e+20`, or `0.10` and `0.1`, compare equal.
- */
-function canonicalDecimal(text: string): string {
-	const match = /^(-?)(\d*)(?:\.(\d*))?(?:[eE]([+-]?\d+))?$/.exec(text)
-	if (!match) return text
-	const [, sign = '', integer = '', fraction = '', exponent = '0'] = match
-	const digits = integer + fraction
-	const first = digits.search(/[1-9]/)
-	if (first === -1) return '0'
-	return `${sign}${digits.slice(first).replace(/0+$/, '')}e${integer.length - first + Number(exponent)}`
 }
 
 function restore(value: unknown, mode: NumberMode): unknown {

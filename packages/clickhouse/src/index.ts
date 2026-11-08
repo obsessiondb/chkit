@@ -13,10 +13,11 @@ import {
 	parseTextIndexParams,
 	parseVectorIndexArgs,
 	normalizeTextIndexSQL,
+	parseJsonEachRow,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { parseJsonEachRow, parseJsonResult } from './exact-json.js'
+import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
