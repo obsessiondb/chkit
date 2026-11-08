@@ -158,9 +158,14 @@ export default schema(app_events, app_events_view, app_events_mv)
   </TabItem>
 </Tabs>
 
-Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, `projections`, and `constraints` when present in the source metadata. A MergeTree setting at the server's value in `system.merge_tree_settings` is left out, because a table that does not declare it has the same value: ClickHouse writes `index_granularity = 8192` into every MergeTree table it creates. `storage_policy = 's3'` on an ObsessionDB `Shared` table is left out too, since it is the only policy such a table can have. A setting declared at the server's value therefore does not come back in the pulled schema. An index type with no structured DSL form (or arguments the structured form cannot express exactly) is written as a [raw index](/schema/dsl-reference/#raw-indexes) that carries ClickHouse's type verbatim, so the pulled schema recreates the same index. Constraint expressions are written as ClickHouse stores them, e.g. `(s IN ('a', 'b')) AND (id > 0)`.
+Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, `projections`, and `constraints` when present in the source metadata. Every setting the server stores is pulled, including the ones it fills in itself, such as `index_granularity = 8192` on every MergeTree table. The hidden `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not pulled. An index type with no structured DSL form (or arguments the structured form cannot express exactly) is written as a [raw index](/schema/dsl-reference/#raw-indexes) that carries ClickHouse's type verbatim, so the pulled schema recreates the same index. Constraint expressions are written as ClickHouse stores them, e.g. `(s IN ('a', 'b')) AND (id > 0)`.
 
-chkit's migration journal (`_chkit_migrations`, or the table `CHKIT_JOURNAL_TABLE` names) is never pulled. On a database chkit migrated, `chkit generate` on the pulled schema plans no operations: a literal default and the expression pull reads back compare by the SQL they render (`7` and `{ expression: "7" }`), settings compare by their rendered value (`4096` and `"4096"`), and a dictionary `lifetime` compares in the form ClickHouse stores (`300` and `MIN 0 MAX 300`).
+chkit's migration journal (`_chkit_migrations`, or the table `CHKIT_JOURNAL_TABLE` names) is never pulled. On a database chkit migrated, `chkit generate` on the pulled schema plans no operations and `chkit drift` reports none:
+
+- A literal default and the expression pull reads back compare by value: `7` and `{ expression: "7" }`, `2.0` and `2.`, `"it's"` and `'it\'s'`.
+- Settings compare by value (`4096` and `"4096"`), and a MergeTree table without `index_granularity` has the `8192` ClickHouse stores.
+- With the [ObsessionDB plugin](/obsessiondb/engine-rewriting/), the `storage_policy = 's3'` every ObsessionDB `Shared` table has is left out of the schema and the snapshot.
+- A dictionary `lifetime` compares in the form ClickHouse stores (`300` and `MIN 0 MAX 300`).
 
 ## Credential handling (`[HIDDEN]` passwords)
 

@@ -4,8 +4,8 @@ import type { ClickHouseExecutor, IntrospectedTable } from '@chkit/clickhouse'
 
 import { createPullPlugin, PullSchema } from './index.js'
 
-// pull leaves out what chkit and the server add, so pull then generate plans
-// nothing (#466).
+// pull leaves out chkit's own journal and keeps every setting the server
+// stores; generate canonicalizes them, so pull then generate plans nothing (#466).
 
 function introspected(name: string, engine: string, settings: Record<string, string>): IntrospectedTable {
   return {
@@ -25,14 +25,7 @@ function fakeExecutor(tables: IntrospectedTable[]): ClickHouseExecutor {
   const executor: Pick<ClickHouseExecutor, 'listSchemaObjects' | 'listTableDetails' | 'query'> = {
     listSchemaObjects: async () => tables.map((t) => ({ kind: 'table' as const, database: t.database, name: t.name })),
     listTableDetails: async () => tables,
-    query: async <T>(sql: string): Promise<T[]> => {
-      if (!sql.includes('system.merge_tree_settings')) return []
-      const rows = [
-        { name: 'index_granularity', value: '8192' },
-        { name: 'storage_policy', value: 'default' },
-      ]
-      return rows as T[]
-    },
+    query: async <T>(): Promise<T[]> => [],
   }
   return executor as ClickHouseExecutor
 }
@@ -67,19 +60,16 @@ async function pullContent(tables: IntrospectedTable[]): Promise<{ content: stri
 }
 
 describe('@chkit/plugin-pull round trip', () => {
-  test('leaves out the settings the server fills in', async () => {
+  test('keeps every setting the server stores', async () => {
     const { content } = await pullContent([
       introspected('local_t', 'MergeTree', { index_granularity: '8192', merge_with_ttl_timeout: '3600' }),
       introspected('shared_t', 'SharedMergeTree', { storage_policy: "'s3'", index_granularity: '4096' }),
-      introspected('plain_s3', 'MergeTree', { storage_policy: "'s3'" }),
     ])
     const block = (name: string) => content.slice(content.indexOf(`name: "${name}"`), content.indexOf('})', content.indexOf(`name: "${name}"`)))
+    expect(block('local_t')).toContain('index_granularity: "8192"')
     expect(block('local_t')).toContain('merge_with_ttl_timeout: "3600"')
-    expect(block('local_t')).not.toContain('index_granularity')
     expect(block('shared_t')).toContain('index_granularity: "4096"')
-    expect(block('shared_t')).not.toContain('storage_policy')
-    // storage_policy 's3' is only implied on a Shared table.
-    expect(block('plain_s3')).toContain(`storage_policy: "'s3'"`)
+    expect(block('shared_t')).toContain(`storage_policy: "'s3'"`)
   })
 
   test('leaves out the journal table, by default and when CHKIT_JOURNAL_TABLE names it', async () => {

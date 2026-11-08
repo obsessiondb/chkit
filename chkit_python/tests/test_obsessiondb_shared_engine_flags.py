@@ -36,7 +36,7 @@ events = table(
     engine="SharedMergeTree",
     primary_key=["id"],
     order_by=["id"],
-    settings={"index_granularity": 8192, "storage_policy": "'s3'"},
+    settings={"index_granularity": 8192, "storage_policy": "STORAGE_POLICY"},
 )
 
 definitions = schema(events)
@@ -115,7 +115,7 @@ def test_on_schema_loaded_honors_parsed_override_flags_for_storage_policy() -> N
             engine="MergeTree",
             primary_key=["id"],
             order_by=["id"],
-            settings={"storage_policy": "'s3'"},
+            settings={"storage_policy": "'hot_cold'"},
         )
     ]
 
@@ -140,9 +140,45 @@ def test_on_schema_loaded_honors_parsed_override_flags_for_storage_policy() -> N
         )
     )
 
-    assert kept is None
+    assert kept is not None
+    assert kept[0].settings == {"storage_policy": "'hot_cold'"}
     assert stripped is not None
     assert stripped[0].settings is None
+
+
+def test_the_implicit_storage_policy_s3_is_left_out_of_the_schema_and_the_snapshot() -> None:
+    # ObsessionDB writes storage_policy = 's3' into every Shared table, so pull
+    # reads it back; the schema and the snapshot both leave it out (#466).
+    hooks = _ObsessionDBHooks()
+
+    def events(name: str, settings: dict[str, Any]) -> Any:
+        return table(
+            database="app", name=name, columns=[{"name": "id", "type": "UInt64"}],
+            engine="MergeTree", primary_key=["id"], order_by=["id"], settings=settings,
+        )
+
+    definitions = [
+        events("events", {"storage_policy": "'s3'", "index_granularity": "8192"}),
+        events("hot", {"storage_policy": "'hot_cold'"}),
+    ]
+
+    def context(url: str) -> ChxOnSchemaLoadedContext:
+        return ChxOnSchemaLoadedContext(
+            command="generate", table_scope=TableScope(enabled=False), config=_config(url),
+            flags={}, definitions=definitions, json_mode=True,
+        )
+
+    expected = [{"index_granularity": "8192"}, {"storage_policy": "'hot_cold'"}]
+    obsession = "https://my-cluster.obsessiondb.com:8443"
+    schema_side = hooks.on_schema_loaded(context(obsession))
+    assert schema_side is not None
+    assert [d.settings for d in schema_side] == expected
+    assert [d.settings for d in hooks.on_snapshot_loaded(context(obsession))] == expected
+    # Regular ClickHouse strips every storage_policy, on both sides.
+    assert [d.settings for d in hooks.on_snapshot_loaded(context(LOCAL_URL))] == [
+        {"index_granularity": "8192"},
+        None,
+    ]
 
 
 # ---------- CLI ----------
@@ -152,8 +188,10 @@ def test_on_schema_loaded_honors_parsed_override_flags_for_storage_policy() -> N
 def make_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.chdir(tmp_path)
 
-    def make(url: str) -> Path:
-        (tmp_path / "schema.py").write_text(SCHEMA, encoding="utf-8")
+    def make(url: str, storage_policy: str = "'hot_cold'") -> Path:
+        (tmp_path / "schema.py").write_text(
+            SCHEMA.replace("STORAGE_POLICY", storage_policy), encoding="utf-8"
+        )
         (tmp_path / "clickhouse.config.py").write_text(
             "from chkit import define_config\n"
             "from chkit_plugin_obsessiondb import obsessiondb\n\n"
@@ -201,7 +239,7 @@ def test_force_shared_engines_keeps_storage_policy_for_regular_clickhouse(
 
     assert "ENGINE = MergeTree()" in sql
     assert "Shared" not in sql
-    assert "storage_policy = 's3'" in sql
+    assert "storage_policy = 'hot_cold'" in sql
 
 
 def test_auto_detection_keeps_storage_policy_for_an_obsessiondb_host(make_project: Any) -> None:
@@ -211,7 +249,7 @@ def test_auto_detection_keeps_storage_policy_for_an_obsessiondb_host(make_projec
 
     assert "ENGINE = MergeTree()" in sql
     assert "Shared" not in sql
-    assert "storage_policy = 's3'" in sql
+    assert "storage_policy = 'hot_cold'" in sql
 
 
 def test_no_shared_engines_strips_storage_policy_for_an_obsessiondb_host(
@@ -225,7 +263,7 @@ def test_no_shared_engines_strips_storage_policy_for_an_obsessiondb_host(
     assert "storage_policy" not in sql
 
 
-def test_a_later_generate_without_the_override_plans_a_storage_policy_change(
+def test_a_later_generate_without_the_override_plans_nothing_for_storage_policy(
     make_project: Any,
 ) -> None:
     make_project(LOCAL_URL)
@@ -237,15 +275,21 @@ def test_a_later_generate_without_the_override_plans_a_storage_policy_change(
     later = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
 
     assert later.exit_code == 0, later.output
-    operations = [
-        {"type": op["type"], "sql": op["sql"]} for op in json.loads(later.stdout)["operations"]
-    ]
-    assert operations == [
-        {
-            "type": "alter_table_reset_setting",
-            "sql": "ALTER TABLE app.events RESET SETTING storage_policy;",
-        }
-    ]
+    # The plugin applies the same decision to the previous snapshot as to the
+    # schema, so dropping the flag no longer plans a RESET the server rejects (#466).
+    assert json.loads(later.stdout)["operations"] == []
+
+
+def test_obsessiondb_implicit_storage_policy_s3_never_reaches_a_migration(
+    make_project: Any,
+) -> None:
+    # Every Shared table has it, so pull reads it back; writing it is a no-op (#466).
+    make_project(OBSESSIONDB_URL, "'s3'")
+
+    sql = _plan_create_table([])
+
+    assert "storage_policy" not in sql
+    assert sql.endswith("SETTINGS index_granularity = 8192;")
 
 
 def test_snapshot_rebuild_accepts_the_overrides_and_matches_generate(make_project: Any) -> None:
@@ -260,7 +304,7 @@ def test_snapshot_rebuild_accepts_the_overrides_and_matches_generate(make_projec
     assert rebuilt_settings([]) == {"index_granularity": 8192}
     assert rebuilt_settings(["--force-shared-engines"]) == {
         "index_granularity": 8192,
-        "storage_policy": "'s3'",
+        "storage_policy": "'hot_cold'",
     }
 
 

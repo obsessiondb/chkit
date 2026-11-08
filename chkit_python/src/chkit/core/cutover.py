@@ -882,9 +882,10 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
     )
     if not layout_changed:
         problems.append(
-            "only the engine arguments change. The cutover tells the old table from the new "
-            "one by engine name, sorting key, primary key and partition key, so at least one "
-            "of them must change."
+            "only the engine arguments or read-only settings (such as index_granularity) change. "
+            "The cutover tells the old table from the new one by engine name, sorting key, "
+            "primary key and partition key, so at least one of them must change. Without "
+            "--cutover, generate plans DROP TABLE and CREATE TABLE, which loses the rows."
         )
 
     columns = _copied_columns(old_def, new_def, problems)

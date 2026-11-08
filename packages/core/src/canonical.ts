@@ -15,6 +15,7 @@ import { canonicalizeCodec } from './codec.js'
 import { canonicalizeConstraint } from './constraint.js'
 import { canonicalizeColumnDefault } from './column-default.js'
 import { canonicalizeProjection } from './projection.js'
+import { withDefaultIndexGranularity, withoutAutoMinmaxIndexes } from './table-settings.js'
 import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 import { canonicalizeVectorIndex } from './vector-index.js'
@@ -68,13 +69,15 @@ function normalizeOptionalClause(value: string | undefined): string | undefined 
 }
 
 function canonicalizeTable(def: TableDefinition): TableDefinition {
-  const settings = def.settings
+  const declaredSettings = withDefaultIndexGranularity(def.engine, def.settings)
+  const settings = declaredSettings
     ? Object.fromEntries(
-        Object.entries(def.settings).sort(([a], [b]) => a.localeCompare(b))
+        Object.entries(declaredSettings).sort(([a], [b]) => a.localeCompare(b))
       )
     : undefined
 
-  const indexes = def.indexes ? sortByName(def.indexes).map(canonicalizeIndex) : undefined
+  const declaredIndexes = withoutAutoMinmaxIndexes(def.indexes, settings)
+  const indexes = declaredIndexes ? sortByName(declaredIndexes).map(canonicalizeIndex) : undefined
   const projections = def.projections
     ? sortByName(def.projections).map(canonicalizeProjection)
     : undefined

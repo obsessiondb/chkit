@@ -42,18 +42,81 @@ describe('@chkit/core planner: pulled schema round trip', () => {
     expect(planDiff([events({ default: { expression: '7' } })], [events({ default: 7 })]).operations).toEqual([])
   })
 
+  test('a literal default compares by value with the escapes and float form ClickHouse stores', () => {
+    const pairs: Array<[ColumnDefaultValue, string]> = [
+      ["it's", "'it\\'s'"],
+      ['x\ny', "'x\\ny'"],
+      ['x\ty', "'x\\ty'"],
+      ['back\\slash', "'back\\\\slash'"],
+      [2.0, '2.'],
+      [2.5, '2.5'],
+    ]
+    for (const [declared, stored] of pairs) {
+      expect(planDiff([events({ default: declared })], [events({ default: { expression: stored } })]).operations).toEqual([])
+      expect(planDiff([events({ default: { expression: stored } })], [events({ default: declared })]).operations).toEqual([])
+    }
+    expect(planDiff([events({ default: "it's" })], [events({ default: { expression: "'its'" } })]).operations).toHaveLength(1)
+    expect(planDiff([events({ default: 2 })], [events({ default: { expression: "'2'" } })]).operations).toHaveLength(1)
+  })
+
   test('a default that renders another clause still plans a MODIFY COLUMN', () => {
     const plan = planDiff([events({ default: 7 })], [events({ default: { expression: '8' } })])
     expect(plan.operations.map((op) => op.sql)).toEqual(['ALTER TABLE app.events MODIFY COLUMN `n` UInt8 DEFAULT 8;'])
   })
 
-  test('a setting compares by the value it renders', () => {
-    const declared = events({ settings: { index_granularity: 4096, ttl_only_drop_parts: true } })
-    const pulled = events({ settings: { index_granularity: '4096', ttl_only_drop_parts: 'true' } })
+  test('a setting compares by its value, in the forms ClickHouse stores', () => {
+    const declared = events({
+      settings: { merge_selecting_sleep_slowdown_factor: 2.0, min_bytes_for_wide_part: 1e6, ttl_only_drop_parts: true },
+    })
+    const pulled = events({
+      settings: {
+        index_granularity: '8192',
+        merge_selecting_sleep_slowdown_factor: '2.',
+        min_bytes_for_wide_part: '1000000.',
+        ttl_only_drop_parts: 'true',
+      },
+    })
     expect(planDiff([declared], [pulled]).operations).toEqual([])
-    expect(planDiff([declared], [events({ settings: { index_granularity: '8192', ttl_only_drop_parts: true } })]).operations.map((op) => op.sql)).toEqual([
-      'ALTER TABLE app.events MODIFY SETTING index_granularity = 8192;',
+    expect(planDiff([pulled], [declared]).operations).toEqual([])
+  })
+
+  test('a MergeTree table without index_granularity has the 8192 ClickHouse stores', () => {
+    expect(planDiff([events({})], [events({ settings: { index_granularity: '8192' } })]).operations).toEqual([])
+    expect(planDiff([events({ settings: { index_granularity: 8192 } })], [events({})]).operations).toEqual([])
+    const created = planDiff([], [events({})]).operations.find((op) => op.type === 'create_table')?.sql
+    expect(created).toEndWith('SETTINGS index_granularity = 8192;')
+  })
+
+  test('an editable setting still plans MODIFY SETTING', () => {
+    const plan = planDiff([events({ settings: { ttl_only_drop_parts: 0 } })], [events({ settings: { ttl_only_drop_parts: 1 } })])
+    expect(plan.operations.map((op) => op.sql)).toEqual(['ALTER TABLE app.events MODIFY SETTING ttl_only_drop_parts = 1;'])
+  })
+
+  test('a read-only setting change recreates the table, as ClickHouse cannot alter it', () => {
+    const plan = planDiff([events({ settings: { index_granularity: '4096' } })], [events({})])
+    expect(plan.operations.map((op) => [op.type, op.risk])).toEqual([
+      ['drop_table', 'danger'],
+      ['create_table', 'safe'],
     ])
+    expect(plan.operations[1]?.sql).toContain('SETTINGS index_granularity = 8192;')
+    const minmax = planDiff([events({})], [events({ settings: { add_minmax_index_for_numeric_columns: 1 } })])
+    expect(minmax.operations.map((op) => op.type)).toEqual(['drop_table', 'create_table'])
+  })
+
+  test('hidden minmax indexes the server creates plan nothing', () => {
+    const autoIndex = { name: 'auto_minmax_index_id', expression: 'id', type: 'minmax' as const, granularity: 1 }
+    const withAuto = { ...events({ settings: { add_minmax_index_for_numeric_columns: '1' } }), indexes: [autoIndex] }
+    const withoutAuto = events({ settings: { add_minmax_index_for_numeric_columns: 1 } })
+    expect(planDiff([withAuto], [withoutAuto]).operations).toEqual([])
+    expect(planDiff([withoutAuto], [withAuto]).operations).toEqual([])
+    // With the settings off, the server allows a user index of that name, so it is compared.
+    const userIndex = planDiff([events({})], [{ ...events({}), indexes: [autoIndex] }])
+    expect(userIndex.operations.map((op) => op.type)).toEqual(['alter_table_add_index'])
+  })
+
+  test('engines outside the MergeTree family get no index_granularity', () => {
+    const memory = table({ database: 'app', name: 'buffer', engine: 'Memory()', columns: [{ name: 'id', type: 'UInt64' }] })
+    expect(planDiff([], [memory]).operations.find((op) => op.type === 'create_table')?.sql).not.toContain('index_granularity')
   })
 
   test('LIFETIME forms ClickHouse stores the same plan nothing', () => {

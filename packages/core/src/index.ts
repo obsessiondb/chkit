@@ -18,6 +18,13 @@ export {
   definitionKey,
 } from './canonical.js'
 export { planDiff } from './planner.js'
+export {
+  AUTO_MINMAX_INDEX_PREFIX,
+  DEFAULT_INDEX_GRANULARITY,
+  READONLY_MERGE_TREE_SETTINGS,
+  settingValueFingerprint,
+  withDefaultIndexGranularity,
+} from './table-settings.js'
 export { createSnapshot } from './snapshot.js'
 export {
   TEXT_INDEX_GRANULARITY,

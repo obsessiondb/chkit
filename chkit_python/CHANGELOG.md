@@ -130,14 +130,17 @@
   backfill SDK exports `read_plan_submission`.
 
 ### Fixed
-- `pull` then `generate` plans nothing on a database chkit migrated (#466, fixed in TS too). `pull`
-  leaves out chkit's migration journal (`_chkit_migrations` or `CHKIT_JOURNAL_TABLE`) and the
-  settings the server fills in: a MergeTree setting at its `system.merge_tree_settings` value
-  (such as `index_granularity = 8192`) and ObsessionDB's `storage_policy = 's3'` on `Shared`
-  tables. `generate` compares a literal default with the expression pull reads back by the
-  SQL it renders (`7` and `{"expression": "7"}`), settings by their rendered value (`4096`
-  and `"4096"`), and a dictionary `lifetime` in the form ClickHouse stores (`300` and
-  `MIN 0 MAX 300`).
+- `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
+  migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
+  `index_granularity`, and leaves out chkit's migration journal and the hidden
+  `auto_minmax_index_*` skip indexes. A MergeTree table without `index_granularity` is treated
+  as `index_granularity=8192`, so new `CREATE TABLE` statements write it. Setting values and
+  literal column defaults compare by value (`2.0` and `2.`, `"it's"` and `'it\'s'`). A change
+  to a setting ClickHouse cannot alter on an existing table plans `DROP TABLE` and
+  `CREATE TABLE` instead of an `ALTER` the server rejects. The ObsessionDB plugin leaves
+  `storage_policy = 's3'` out of the schema and the snapshot, through a new
+  `on_snapshot_loaded` plugin hook for the snapshot. A dictionary `lifetime` compares in the
+  form ClickHouse stores.
 - Async `migrate` statements no longer fail on a fresh ClickHouse server that has not
   created `system.query_log` yet, as in TS.
 - Concurrent `migrate --apply` runs of one migration file against other databases, or by

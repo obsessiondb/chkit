@@ -22,7 +22,7 @@ from __future__ import annotations
 
 import os
 import re
-from collections.abc import Mapping, Sequence
+from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated
 
@@ -92,18 +92,16 @@ from chkit.plugins import ChxOnPullIntrospectContext, ChxPlugin
 
 def _introspected_table_to_definition(
     item: IntrospectedTable,
-    server_settings: Mapping[str, str] | None = None,
 ) -> TableDefinition | None:
     """Turn an IntrospectedTable into a TableDefinition (lossy where types differ)."""
     if not item.columns:
         return None
 
     kafka = is_kafka_engine(item.engine or "")
-    declared = _declared_settings(item, server_settings or {})
     settings = (
-        parse_kafka_settings(declared)
+        parse_kafka_settings(item.settings or {})
         if kafka
-        else {k: _coerce_setting_value(v) for k, v in declared.items()}
+        else {k: _coerce_setting_value(v) for k, v in (item.settings or {}).items()}
     )
 
     indexes: list[
@@ -140,38 +138,6 @@ def _introspected_table_to_definition(
         projections=list(item.projections) or None,
         constraints=list(item.constraints or []) or None,
     )
-
-
-def _declared_settings(
-    item: IntrospectedTable, server_settings: Mapping[str, str]
-) -> dict[str, str]:
-    """Leave out the settings the server fills in (TS ``declaredSettings``, #466).
-
-    A table that does not declare them has them anyway: ClickHouse writes
-    ``index_granularity = 8192`` into every MergeTree table, and ObsessionDB
-    writes ``storage_policy = 's3'`` into every Shared table, the only policy
-    such a table can have. A setting at the server's value is left out the
-    same way, declared or not.
-    """
-    engine = item.engine or ""
-    settings = dict(item.settings or {})
-    if "MergeTree" not in engine:
-        return settings
-    declared: dict[str, str] = {}
-    for key, value in settings.items():
-        quoted = re.fullmatch(r"'(.*)'", value, re.DOTALL)
-        plain = quoted.group(1) if quoted else value
-        if key == "storage_policy" and engine.startswith("Shared") and plain == "s3":
-            continue
-        if server_settings.get(key) != plain:
-            declared[key] = value
-    return declared
-
-
-def _read_merge_tree_settings(client: object) -> dict[str, str]:
-    """The value every MergeTree setting takes on this server when a table does not declare it."""
-    rows = client.query("SELECT name, value FROM system.merge_tree_settings").rows  # type: ignore[attr-defined]
-    return {str(row["name"]): str(row["value"]) for row in rows}
 
 
 def _coerce_setting_value(value: str) -> str | int | float | bool:
@@ -255,11 +221,10 @@ def _pull_definitions(
     client: object, databases: Sequence[str]
 ) -> list[SchemaDefinition]:
     """Combine introspect.list_table_details + view parsing into SchemaDefinitions."""
-    server_settings = _read_merge_tree_settings(client)
     introspected_tables = list_table_details(client, list(databases))
     table_defs: list[SchemaDefinition] = []
     for it in introspected_tables:
-        td = _introspected_table_to_definition(it, server_settings)
+        td = _introspected_table_to_definition(it)
         if td is not None:
             table_defs.append(td)
 

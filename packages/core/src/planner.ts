@@ -37,6 +37,7 @@ import {
 } from './sql.js'
 import { parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
+import { readonlySettingsFingerprint, settingValueFingerprint } from './table-settings.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
@@ -198,6 +199,11 @@ function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition)
       oldValue: normalizeClauseList(oldDef.uniqueKey),
       newValue: normalizeClauseList(newDef.uniqueKey),
     },
+    // ClickHouse refuses to change or reset these on an existing table (#466).
+    {
+      oldValue: readonlySettingsFingerprint(oldDef.settings),
+      newValue: readonlySettingsFingerprint(newDef.settings),
+    },
   ])
 }
 
@@ -234,7 +240,27 @@ function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name
 // expression keeps its comments, which the snapshot records as written.
 function defaultFingerprint(value: ColumnDefaultValue): string {
   const parsed = parseColumnDefault(value)
-  return parsed.kind === 'expression' ? parsed.sql : renderDefault(value)
+  const sql = parsed.kind === 'expression' ? parsed.sql : renderDefault(value)
+  return literalDefaultFingerprint(sql) ?? sql
+}
+
+const STRING_LITERAL_RE = /^'((?:[^'\\]|\\[\s\S]|'')*)'$/
+const NUMBER_LITERAL_RE = /^[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?$/i
+const STRING_ESCAPES: Record<string, string> = { n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', '0': '\0', a: '\x07', v: '\v' }
+
+// ClickHouse stores a string default with backslash escapes ('it\'s', '\n')
+// and a float as `2.`, so a default that is one literal compares by its value.
+function literalDefaultFingerprint(sql: string): string | undefined {
+  const text = sql.trim()
+  if (NUMBER_LITERAL_RE.test(text)) return `number:${settingValueFingerprint(text)}`
+  const body = STRING_LITERAL_RE.exec(text)?.[1]
+  if (body === undefined) return undefined
+  const value = body.replace(/\\(x[0-9a-fA-F]{2}|[\s\S])|''/g, (_match: string, code: string | undefined) => {
+    if (code === undefined) return "'"
+    if (code.length === 3) return String.fromCharCode(Number.parseInt(code.slice(1), 16))
+    return STRING_ESCAPES[code] ?? code
+  })
+  return `string:${JSON.stringify(value)}`
 }
 
 function normalizeColumnWithoutCodec(

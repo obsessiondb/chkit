@@ -176,12 +176,12 @@ test('init preserves explicit target configuration during offline generation and
     await writeFile(configPath, `import { obsessiondb } from '@chkit/plugin-obsessiondb'\n${config.replace('plugins: [', 'plugins: [obsessiondb(),')}`)
     const schemaPath = join(dir, 'src/db/schema/example.ts')
     const schema = await readFile(schemaPath, 'utf8')
-    await writeFile(schemaPath, schema.replace("  engine: 'MergeTree',", "  engine: 'MergeTree',\n  settings: { storage_policy: \"'s3'\" },"))
+    await writeFile(schemaPath, schema.replace("  engine: 'MergeTree',", "  engine: 'MergeTree',\n  settings: { storage_policy: \"'hot_cold'\" },"))
     const generate = spawnWithTimeout(['bun', entry, 'generate', '--dryrun', '--json'], { cwd: dir, env })
     expect(generate.exitCode).toBe(0)
     expect(generate.stdout).toContain('chosen_database.events')
     expect(generate.stdout).toContain("ON CLUSTER 'chosen_cluster'")
-    expect(generate.stdout).toContain("storage_policy = 's3'")
+    expect(generate.stdout).toContain("storage_policy = 'hot_cold'")
     const regularTarget = spawnWithTimeout(['bun', entry, 'generate', '--dryrun', '--json'], {
       cwd: dir, env: { ...env, CLICKHOUSE_URL: 'https://fixture.invalid' },
     })
@@ -191,7 +191,7 @@ test('init preserves explicit target configuration during offline generation and
     expect(rebuild.exitCode).toBe(0)
     const snapshot = JSON.parse(await readFile(join(dir, 'chkit/meta/snapshot.json'), 'utf8'))
     expect(snapshot.definitions[0].database).toBe('chosen_database')
-    expect(snapshot.definitions[0].settings.storage_policy).toBe("'s3'")
+    expect(snapshot.definitions[0].settings.storage_policy).toBe("'hot_cold'")
   } finally {
     await rm(dir, { recursive: true, force: true })
   }

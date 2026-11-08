@@ -94,6 +94,23 @@ export async function runOnSchemaLoaded(
   return definitions
 }
 
+export async function runOnSnapshotLoaded(
+  loaded: LoadedPlugin[],
+  context: ChxOnSchemaLoadedContext,
+) {
+  let definitions = context.definitions
+  for (const item of loaded) {
+    const hook = item.plugin.hooks?.onSnapshotLoaded
+    if (!hook) continue
+    debug('hook', `onSnapshotLoaded → ${item.plugin.manifest.name} (${definitions.length} definitions)`)
+    const next = await guardHook(item.plugin.manifest.name, 'onSnapshotLoaded', () =>
+      hook({ ...context, definitions }),
+    )
+    if (Array.isArray(next)) definitions = canonicalizeDefinitions(next)
+  }
+  return definitions
+}
+
 export async function runOnPlanCreated(
   loaded: LoadedPlugin[],
   context: Omit<ChxOnPlanCreatedContext, 'plan' | 'tableScope'> & { tableScope?: TableScope },

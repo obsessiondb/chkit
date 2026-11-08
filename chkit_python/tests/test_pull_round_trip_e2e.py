@@ -1,8 +1,9 @@
-"""On a database chkit migrated, pull then generate plans nothing (#466).
+"""On a database chkit migrated, pull then generate plans nothing and drift is clean (#466).
 
 The journal table is not pulled, literal defaults read back as expressions,
-settings the server fills in are left out, and the LIFETIME forms ClickHouse
-stores compare equal to the ones the schema declares.
+every stored setting is pulled (index_granularity, floats in the form
+ClickHouse stores), hidden minmax indexes are left out, and the LIFETIME forms
+ClickHouse stores compare equal to the ones the schema declares.
 """
 
 from __future__ import annotations
@@ -44,13 +45,17 @@ def test_pull_then_generate_plans_nothing(
         "database": database,
     })
     (tmp_path / "clickhouse.config.py").write_text(
-        "from chkit import define_config\n\n"
+        "from chkit import define_config\n"
+        # ObsessionDB writes storage_policy = 's3' into every Shared table; its
+        # plugin leaves it out of the schema and the snapshot.
+        "from chkit_plugin_obsessiondb import obsessiondb\n\n"
         "config = define_config({\n"
         '    "schema": "./schema.py",\n'
         '    "outDir": "./chkit",\n'
         '    "migrationsDir": "./chkit/migrations",\n'
         '    "metaDir": "./chkit/meta",\n'
         f'    "clickhouse": {clickhouse},\n'
+        '    "plugins": [obsessiondb()],\n'
         "})\n"
     )
     (tmp_path / "schema.py").write_text(f"""from chkit import dictionary, materialized_view, schema, table, view
@@ -73,6 +78,9 @@ definitions = schema(
             {{"name": "id", "type": "UInt64"}},
             {{"name": "n", "type": "UInt8", "default": 7}},
             {{"name": "source", "type": "String", "default": "web"}},
+            {{"name": "quote", "type": "String", "default": "it's"}},
+            {{"name": "multiline", "type": "String", "default": "x\\ny\\tz"}},
+            {{"name": "ratio", "type": "Float64", "default": 2.0}},
             {{"name": "received_at", "type": "DateTime64(3)",
              "default": {{"expression": "now64(3)"}}}},
         ],
@@ -81,6 +89,14 @@ definitions = schema(
         database=db, name="tuned", engine="MergeTree()", primary_key=["id"], order_by=["id"],
         columns=[{{"name": "id", "type": "UInt64"}}],
         settings={{"index_granularity": 4096, "merge_with_ttl_timeout": 3600}},
+    ),
+    table(
+        database=db, name="minmax", engine="MergeTree()", primary_key=["id"], order_by=["id"],
+        columns=[{{"name": "id", "type": "UInt64"}}, {{"name": "s", "type": "String"}}],
+        settings={{
+            "add_minmax_index_for_numeric_columns": 1,
+            "merge_selecting_sleep_slowdown_factor": 2.0,
+        }},
     ),
     table(
         database=db, name="daily", engine="MergeTree()", primary_key=["day"], order_by=["day"],
@@ -116,17 +132,25 @@ definitions = schema(
         pulled = poll_until(
             pull,
             lambda result: result.exit_code == 0
-            and json.loads(result.stdout)["definitionCount"] == 8,
+            and json.loads(result.stdout)["definitionCount"] == 9,
         )
         assert pulled.exit_code == 0, format_test_diagnostic("chkit pull", pulled)
-        assert json.loads(pulled.stdout)["definitionCount"] == 8
+        assert json.loads(pulled.stdout)["definitionCount"] == 9
         pulled_content = (tmp_path / "pulled.py").read_text()
         assert journal_table not in pulled_content
+        assert "index_granularity" in pulled_content
+        assert "auto_minmax_index" not in pulled_content
 
         (tmp_path / "schema.py").write_text(pulled_content)
         plan = chkit("generate", "--dryrun", "--json")
         assert plan.exit_code == 0, format_test_diagnostic("chkit generate --dryrun", plan)
         assert json.loads(plan.stdout)["operations"] == []
+
+        drift = chkit("drift", "--live", "--json")
+        assert drift.exit_code == 0, format_test_diagnostic("chkit drift --live", drift)
+        payload = json.loads(drift.stdout)
+        assert payload["tableDrift"] == []
+        assert payload["drifted"] is False
     finally:
         with ClickHouseClient.connect(
             ChxResolvedClickHouseConfig(

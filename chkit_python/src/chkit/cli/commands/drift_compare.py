@@ -48,6 +48,7 @@ from chkit.core.sql_normalizer import (
     normalize_sql_fragment,
     sql_expression_fingerprint,
 )
+from chkit.core.table_settings import with_default_index_granularity
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 from chkit.core.vector_index import render_vector_index_type
 
@@ -541,7 +542,11 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
         }
         setting_diffs = diff_settings(expected_settings, actual_settings)
     else:
-        setting_diffs = diff_settings(expected.settings or {}, actual.settings)
+        actual_engine = actual.engine or expected.engine
+        setting_diffs = diff_settings(
+            expected.settings or {},
+            with_default_index_granularity(actual_engine, dict(actual.settings)) or {},
+        )
 
     expected_indexes = {
         idx.name: _normalize_index_shape(idx, canonicalizer) for idx in (expected.indexes or [])

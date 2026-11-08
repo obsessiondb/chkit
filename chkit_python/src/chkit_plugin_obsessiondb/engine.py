@@ -20,12 +20,13 @@ with ``--force-shared-engines`` (keep them) or ``--no-shared-engines``
 
 from __future__ import annotations
 
+import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
 from urllib.parse import urlparse
 
-from chkit.core.engine import is_distributed_engine
+from chkit.core.engine import is_distributed_engine, is_merge_tree_engine
 from chkit.core.model import (
     ChxResolvedConfig,
     SchemaDefinition,
@@ -134,6 +135,39 @@ def strip_cloud_settings(
         settings=result if result else None,
         stripped=stripped,
     )
+
+
+def _unquoted(value: str) -> str:
+    return re.sub(r"^'(.*)'$", r"\1", value.strip(), flags=re.DOTALL)
+
+
+def without_implicit_storage_policy(
+    definitions: Sequence[SchemaDefinition],
+) -> list[SchemaDefinition]:
+    """Leave out the ``storage_policy = 's3'`` ObsessionDB writes into every
+    Shared table (TS ``withoutImplicitStoragePolicy``, #466).
+
+    It is the only policy such a table can have, so pull reads it back on
+    tables that never declared it. chkit leaves that value out of the schema
+    and the snapshot alike, for every target, so neither plans a change against
+    the other. Any other policy is kept and compared.
+    """
+    out: list[SchemaDefinition] = []
+    for definition in definitions:
+        if (
+            not isinstance(definition, TableDefinition)
+            or not is_merge_tree_engine(definition.engine)
+            or not definition.settings
+        ):
+            out.append(definition)
+            continue
+        value = definition.settings.get("storage_policy")
+        if not isinstance(value, str) or _unquoted(value) != "s3":
+            out.append(definition)
+            continue
+        settings = {k: v for k, v in definition.settings.items() if k != "storage_policy"}
+        out.append(definition.model_copy(update={"settings": settings or None}))
+    return out
 
 
 def rewrite_shared_engines(

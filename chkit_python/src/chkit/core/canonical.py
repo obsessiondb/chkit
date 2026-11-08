@@ -30,6 +30,7 @@ from chkit.core.model import (
 from chkit.core.projection import canonicalize_projection
 from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.table_settings import with_default_index_granularity, without_auto_minmax_indexes
 from chkit.core.text_index import canonicalize_text_index
 
 _T = TypeVar("_T")
@@ -103,10 +104,13 @@ def _normalize_optional_clause(value: str | None) -> str | None:
 
 
 def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
-    settings = _sorted_settings(definition.settings)
+    settings = _sorted_settings(
+        with_default_index_granularity(definition.engine, definition.settings)
+    )
+    declared_indexes = without_auto_minmax_indexes(definition.indexes, settings)
     indexes = (
-        [_canonicalize_index(idx) for idx in _sort_by_name(definition.indexes)]
-        if definition.indexes is not None
+        [_canonicalize_index(idx) for idx in _sort_by_name(declared_indexes)]
+        if declared_indexes is not None
         else None
     )
     projections = (

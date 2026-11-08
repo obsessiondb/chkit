@@ -17,10 +17,15 @@ import {
 } from './e2e-testkit.js'
 
 const PULL_PLUGIN_ENTRY = resolve(import.meta.dir, '../../../plugin-pull/src/index.ts')
+// ObsessionDB writes storage_policy = 's3' into every Shared table; its plugin
+// leaves it out of the schema and the snapshot. On other targets it does nothing here.
+const OBSESSIONDB_PLUGIN_ENTRY = resolve(import.meta.dir, '../../../plugin-obsessiondb/src/index.ts')
 
-// On a database chkit migrated, pull then generate plans nothing (#466): the
-// journal table is not pulled, literal defaults read back as expressions,
-// settings the server fills in, and the LIFETIME forms ClickHouse stores.
+// On a database chkit migrated, pull then generate plans nothing and drift is
+// clean (#466): the journal table is not pulled, literal defaults read back as
+// expressions, every stored setting is pulled (index_granularity, floats in the
+// form ClickHouse stores), hidden minmax indexes are left out, and the LIFETIME
+// forms ClickHouse stores.
 test('pull then generate plans nothing on a database chkit migrated', async () => {
   const env = getLiveEnv()
   const executor = createLiveExecutor(env)
@@ -41,7 +46,7 @@ test('pull then generate plans nothing on a database chkit migrated', async () =
   }
   await writeFile(
     configPath,
-    `import { pull } from '${PULL_PLUGIN_ENTRY}'\n\nexport default ${JSON.stringify(config, null, 2).replace(/\n}$/, ',\n  plugins: [pull()],\n}')}\n`,
+    `import { pull } from '${PULL_PLUGIN_ENTRY}'\nimport { obsessiondb } from '${OBSESSIONDB_PLUGIN_ENTRY}'\n\nexport default ${JSON.stringify(config, null, 2).replace(/\n}$/, ',\n  plugins: [pull(), obsessiondb()],\n}')}\n`,
     'utf8'
   )
   await writeFile(
@@ -61,6 +66,9 @@ export default schema(
       { name: 'id', type: 'UInt64' },
       { name: 'n', type: 'UInt8', default: 7 },
       { name: 'source', type: 'String', default: 'web' },
+      { name: 'quote', type: 'String', default: "it's" },
+      { name: 'multiline', type: 'String', default: 'x\\ny\\tz' },
+      { name: 'ratio', type: 'Float64', default: 2.0 },
       { name: 'received_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },
     ],
   }),
@@ -68,6 +76,11 @@ export default schema(
     database: db, name: 'tuned', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
     columns: [{ name: 'id', type: 'UInt64' }],
     settings: { index_granularity: 4096, merge_with_ttl_timeout: 3600 },
+  }),
+  table({
+    database: db, name: 'minmax', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+    columns: [{ name: 'id', type: 'UInt64' }, { name: 's', type: 'String' }],
+    settings: { add_minmax_index_for_numeric_columns: 1, merge_selecting_sleep_slowdown_factor: 2.0 },
   }),
   table({
     database: db, name: 'daily', engine: 'MergeTree()', primaryKey: ['day'], orderBy: ['day'],
@@ -96,17 +109,23 @@ export default schema(
     const pull = () => runCli(dir, ['pull', '--config', configPath, '--database', database, '--out-file', pulledPath, '--force', '--json'], cliEnv)
     const pulled = await pollUntil(
       async () => pull(),
-      (result) => result.exitCode === 0 && (JSON.parse(result.stdout) as { definitionCount: number }).definitionCount === 8
+      (result) => result.exitCode === 0 && (JSON.parse(result.stdout) as { definitionCount: number }).definitionCount === 9
     )
     expect(pulled.exitCode, formatTestDiagnostic('pull', pulled)).toBe(0)
-    expect((JSON.parse(pulled.stdout) as { definitionCount: number }).definitionCount).toBe(8)
+    expect((JSON.parse(pulled.stdout) as { definitionCount: number }).definitionCount).toBe(9)
     const pulledContent = await readFile(pulledPath, 'utf8')
     expect(pulledContent).not.toContain(journalTable)
+    expect(pulledContent).toContain('index_granularity')
+    expect(pulledContent).not.toContain('auto_minmax_index')
 
     await writeFile(schemaPath, pulledContent.replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)), 'utf8')
     const plan = runCli(dir, ['generate', '--config', configPath, '--dryrun', '--json'], cliEnv)
     expect(plan.exitCode, formatTestDiagnostic('generate from the pulled schema', plan)).toBe(0)
     expect((JSON.parse(plan.stdout) as { operations: unknown[] }).operations).toEqual([])
+
+    const drift = runCli(dir, ['drift', '--config', configPath, '--json'], cliEnv)
+    expect(drift.exitCode, formatTestDiagnostic('drift', drift)).toBe(0)
+    expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
   } finally {
     await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
     await executor.close()

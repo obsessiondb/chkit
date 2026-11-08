@@ -348,9 +348,6 @@ async function pullSchema(input: {
     }
   }
 
-  const serverSettings = customIntrospector
-    ? new Map<string, string>()
-    : await readMergeTreeSettings(db as ClickHouseExecutor)
   const introspected = (
     customIntrospector
       ? await customIntrospector({
@@ -360,9 +357,7 @@ async function pullSchema(input: {
       : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
   ).filter(isPulledObject)
 
-  const definitions = canonicalizeDefinitions(
-    introspected.map((object) => mapIntrospectedObjectToDefinition(object, serverSettings))
-  )
+  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
   const content = renderSchemaFile(definitions)
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
@@ -399,39 +394,7 @@ async function introspectWithExecutor(
   return [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects]
 }
 
-// The value every MergeTree setting takes on this server when a table does not
-// declare it.
-async function readMergeTreeSettings(db: ClickHouseExecutor): Promise<Map<string, string>> {
-  const rows = await db.query<{ name: string; value: string }>(
-    'SELECT name, value FROM system.merge_tree_settings'
-  )
-  return new Map(rows.map((row) => [row.name, row.value]))
-}
-
-/**
- * Leaves out the settings the server fills in, which a table that does not
- * declare them has anyway: ClickHouse writes `index_granularity = 8192` into
- * every MergeTree table, and ObsessionDB writes `storage_policy = 's3'` into
- * every Shared table, the only policy such a table can have. A setting at the
- * server's value is left out the same way, declared or not (#466).
- */
-function declaredSettings(table: IntrospectedTable, serverSettings: Map<string, string>): Record<string, string> {
-  const engine = table.engine ?? ''
-  if (!engine.includes('MergeTree')) return table.settings
-  return Object.fromEntries(
-    Object.entries(table.settings).filter(([key, value]) => {
-      const plain = value.replace(/^'(.*)'$/s, '$1')
-      if (key === 'storage_policy' && engine.startsWith('Shared') && plain === 's3') return false
-      return serverSettings.get(key) !== plain
-    })
-  )
-}
-
-function mapIntrospectedTableToDefinition(
-  table: IntrospectedTable,
-  serverSettings: Map<string, string>
-): TableDefinition {
-  const settings = declaredSettings(table, serverSettings)
+function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefinition {
   return {
     kind: 'table',
     database: table.database,
@@ -446,19 +409,16 @@ function mapIntrospectedTableToDefinition(
     ...(table.uniqueKey ? { uniqueKey: splitTopLevelCommaSeparated(table.uniqueKey) } : {}),
     ...(table.partitionBy ? { partitionBy: table.partitionBy } : {}),
     ...(table.ttl ? { ttl: table.ttl } : {}),
-    ...(Object.keys(settings).length > 0 ? { settings: isKafkaEngine(table.engine ?? '') ? parseKafkaSettings(settings) : settings } : {}),
+    ...(Object.keys(table.settings).length > 0 ? { settings: isKafkaEngine(table.engine ?? '') ? parseKafkaSettings(table.settings) : table.settings } : {}),
     ...(table.indexes.length > 0 ? { indexes: table.indexes } : {}),
     ...(table.projections.length > 0 ? { projections: table.projections } : {}),
     ...(table.constraints && table.constraints.length > 0 ? { constraints: table.constraints } : {}),
   }
 }
 
-function mapIntrospectedObjectToDefinition(
-  introspected: IntrospectedObject,
-  serverSettings: Map<string, string>
-): SchemaDefinition {
+function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): SchemaDefinition {
   if ('kind' in introspected) {
-    if (introspected.kind === 'table') return mapIntrospectedTableToDefinition(introspected, serverSettings)
+    if (introspected.kind === 'table') return mapIntrospectedTableToDefinition(introspected)
     if (introspected.kind === 'view') {
       return {
         kind: 'view',
@@ -491,7 +451,7 @@ function mapIntrospectedObjectToDefinition(
       ...(introspected.refresh ? { refresh: introspected.refresh } : {}),
     }
   }
-  return mapIntrospectedTableToDefinition(introspected, serverSettings)
+  return mapIntrospectedTableToDefinition(introspected)
 }
 
 // Introspection returns the SQL that ClickHouse stores for a default

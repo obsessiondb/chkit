@@ -18,7 +18,11 @@ from chkit.core.model import (
 from chkit.core.planner import plan_diff
 
 
-def _events(default: Any = None, settings: dict[str, Any] | None = None) -> TableDefinition:
+def _events(
+    default: Any = None,
+    settings: dict[str, Any] | None = None,
+    indexes: list[dict[str, Any]] | None = None,
+) -> TableDefinition:
     column: dict[str, Any] = {"name": "n", "type": "UInt8"}
     if default is not None:
         column["default"] = default
@@ -30,6 +34,7 @@ def _events(default: Any = None, settings: dict[str, Any] | None = None) -> Tabl
         order_by=["id"],
         columns=[{"name": "id", "type": "UInt64"}, column],
         settings=settings,
+        indexes=indexes,
     )
 
 
@@ -64,6 +69,30 @@ def test_a_default_that_renders_the_same_clause_plans_nothing() -> None:
     assert plan_diff([_events({"expression": "7"})], [_events(7)]).operations == []
 
 
+@pytest.mark.parametrize(
+    ("declared", "stored"),
+    [
+        ("it's", "'it\\'s'"),
+        ("x\ny", "'x\\ny'"),
+        ("x\ty", "'x\\ty'"),
+        ("back\\slash", "'back\\\\slash'"),
+        (2.0, "2."),
+        (2.5, "2.5"),
+    ],
+)
+def test_a_literal_default_compares_by_value_with_the_stored_escapes(
+    declared: Any, stored: str
+) -> None:
+    pulled = _events({"expression": stored})
+    assert plan_diff([_events(declared)], [pulled]).operations == []
+    assert plan_diff([pulled], [_events(declared)]).operations == []
+
+
+def test_a_literal_default_with_another_value_still_plans_a_change() -> None:
+    assert len(plan_diff([_events("it's")], [_events({"expression": "'its'"})]).operations) == 1
+    assert len(plan_diff([_events(2)], [_events({"expression": "'2'"})]).operations) == 1
+
+
 def test_a_default_that_renders_another_clause_still_plans_a_modify_column() -> None:
     plan = plan_diff([_events(7)], [_events({"expression": "8"})])
     assert [op.sql for op in plan.operations] == [
@@ -71,14 +100,74 @@ def test_a_default_that_renders_another_clause_still_plans_a_modify_column() -> 
     ]
 
 
-def test_a_setting_compares_by_the_value_it_renders() -> None:
-    declared = _events(settings={"index_granularity": 4096, "ttl_only_drop_parts": True})
-    pulled = _events(settings={"index_granularity": "4096", "ttl_only_drop_parts": "true"})
+def test_a_setting_compares_by_its_value_in_the_forms_clickhouse_stores() -> None:
+    declared = _events(
+        settings={
+            "merge_selecting_sleep_slowdown_factor": 2.0,
+            "min_bytes_for_wide_part": 1e6,
+            "ttl_only_drop_parts": True,
+        }
+    )
+    pulled = _events(
+        settings={
+            "index_granularity": "8192",
+            "merge_selecting_sleep_slowdown_factor": "2.",
+            "min_bytes_for_wide_part": "1000000.",
+            "ttl_only_drop_parts": "true",
+        }
+    )
     assert plan_diff([declared], [pulled]).operations == []
-    changed = _events(settings={"index_granularity": "8192", "ttl_only_drop_parts": True})
-    assert [op.sql for op in plan_diff([declared], [changed]).operations] == [
-        "ALTER TABLE app.events MODIFY SETTING index_granularity = 8192;"
+    assert plan_diff([pulled], [declared]).operations == []
+
+
+def test_a_merge_tree_table_without_index_granularity_has_the_8192_clickhouse_stores() -> None:
+    assert plan_diff([_events()], [_events(settings={"index_granularity": "8192"})]).operations == []
+    assert plan_diff([_events(settings={"index_granularity": 8192})], [_events()]).operations == []
+    created = next(op for op in plan_diff([], [_events()]).operations if op.type == "create_table")
+    assert created.sql.endswith("SETTINGS index_granularity = 8192;")
+
+
+def test_an_editable_setting_still_plans_modify_setting() -> None:
+    plan = plan_diff(
+        [_events(settings={"ttl_only_drop_parts": 0})], [_events(settings={"ttl_only_drop_parts": 1})]
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.events MODIFY SETTING ttl_only_drop_parts = 1;"
     ]
+
+
+def test_a_readonly_setting_change_recreates_the_table() -> None:
+    plan = plan_diff([_events(settings={"index_granularity": "4096"})], [_events()])
+    assert [(op.type, op.risk) for op in plan.operations] == [
+        ("drop_table", "danger"),
+        ("create_table", "safe"),
+    ]
+    assert "SETTINGS index_granularity = 8192;" in plan.operations[1].sql
+    minmax = plan_diff(
+        [_events()], [_events(settings={"add_minmax_index_for_numeric_columns": 1})]
+    )
+    assert [op.type for op in minmax.operations] == ["drop_table", "create_table"]
+
+
+def test_hidden_minmax_indexes_the_server_creates_plan_nothing() -> None:
+    auto_index = {"name": "auto_minmax_index_id", "expression": "id", "type": "minmax", "granularity": 1}
+    with_auto = _events(settings={"add_minmax_index_for_numeric_columns": "1"}, indexes=[auto_index])
+    without_auto = _events(settings={"add_minmax_index_for_numeric_columns": 1})
+    assert plan_diff([with_auto], [without_auto]).operations == []
+    assert plan_diff([without_auto], [with_auto]).operations == []
+    # With the settings off, the server allows a user index of that name, so it is compared.
+    user_index = _events(indexes=[auto_index])
+    assert [op.type for op in plan_diff([_events()], [user_index]).operations] == [
+        "alter_table_add_index"
+    ]
+
+
+def test_engines_outside_the_merge_tree_family_get_no_index_granularity() -> None:
+    memory = table(
+        database="app", name="buffer", engine="Memory()", columns=[{"name": "id", "type": "UInt64"}]
+    )
+    created = next(op for op in plan_diff([], [memory]).operations if op.type == "create_table")
+    assert "index_granularity" not in created.sql
 
 
 @pytest.mark.parametrize(
@@ -100,27 +189,20 @@ def test_a_lifetime_clickhouse_stores_differently_still_replaces_the_dictionary(
     assert "LIFETIME(MIN 10 MAX 300)" in plan.operations[0].sql
 
 
-def test_pull_leaves_out_settings_the_server_fills_in() -> None:
-    server = {"index_granularity": "8192", "storage_policy": "default"}
+def test_pull_keeps_every_setting_the_server_stores() -> None:
     local = _introspected(
         "t", "MergeTree", {"index_granularity": "8192", "merge_with_ttl_timeout": "3600"}
     )
-    pulled = _introspected_table_to_definition(local, server)
+    pulled = _introspected_table_to_definition(local)
     assert pulled is not None
-    assert pulled.settings == {"merge_with_ttl_timeout": 3600}
+    assert pulled.settings == {"index_granularity": 8192, "merge_with_ttl_timeout": 3600}
 
     shared = _introspected(
         "t", "SharedMergeTree", {"storage_policy": "'s3'", "index_granularity": "4096"}
     )
-    pulled = _introspected_table_to_definition(shared, server)
+    pulled = _introspected_table_to_definition(shared)
     assert pulled is not None
-    assert pulled.settings == {"index_granularity": 4096}
-
-    # storage_policy 's3' is only implied on a Shared table.
-    plain = _introspected("t", "MergeTree", {"storage_policy": "'s3'"})
-    pulled = _introspected_table_to_definition(plain, server)
-    assert pulled is not None
-    assert pulled.settings == {"storage_policy": "'s3'"}
+    assert pulled.settings == {"storage_policy": "'s3'", "index_granularity": 4096}
 
 
 def test_pull_leaves_out_the_journal_table(monkeypatch: pytest.MonkeyPatch) -> None:

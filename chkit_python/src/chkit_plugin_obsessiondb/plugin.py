@@ -63,6 +63,7 @@ from chkit_plugin_obsessiondb.engine import (
     find_distributed_tables,
     resolve_strip_behavior,
     rewrite_shared_engines,
+    without_implicit_storage_policy,
 )
 from chkit_plugin_obsessiondb.remote_executor import create_remote_executor
 from chkit_plugin_obsessiondb.service_api import list_services
@@ -122,7 +123,7 @@ class _ObsessionDBHooks:
             distributed = find_distributed_tables(list(ctx.definitions))
             if distributed:
                 raise ValueError("\n".join(distributed))
-            return None
+            return without_implicit_storage_policy(list(ctx.definitions))
 
         result = rewrite_shared_engines(list(ctx.definitions))
         if not ctx.json_mode:
@@ -138,6 +139,14 @@ class _ObsessionDBHooks:
                     f"{', '.join(unique)}"
                 )
         return result.definitions
+
+    def on_snapshot_loaded(self, ctx: ChxOnSchemaLoadedContext) -> list[Any]:
+        # The same settings rewrite as on_schema_loaded, without its notices
+        # and checks: they are about the schema, not about the last snapshot.
+        flags = dict(ctx.flags) if ctx.flags else {}
+        if resolve_strip_behavior(ctx.config, flags):
+            return rewrite_shared_engines(list(ctx.definitions)).definitions
+        return without_implicit_storage_policy(list(ctx.definitions))
 
     def on_check(self, ctx: ChxOnCheckContext) -> ChxOnCheckResult | None:
         # Same target decision as on_schema_loaded: ObsessionDB host or

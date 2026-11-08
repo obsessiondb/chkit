@@ -479,7 +479,7 @@ def test_refuses_an_engine_argument_only_change() -> None:
         cluster="c2",
     )
     assert len(found) == 1
-    assert "only the engine arguments change" in found[0]
+    assert "only the engine arguments or read-only settings" in found[0]
 
 
 def test_refuses_a_replication_path_without_a_macro() -> None:

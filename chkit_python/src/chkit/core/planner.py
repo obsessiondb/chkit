@@ -58,6 +58,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
+from chkit.core.table_settings import readonly_settings_fingerprint, setting_value_fingerprint
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.validate import assert_valid_definitions
 
@@ -223,6 +224,11 @@ def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool
             (_join_clause(old.order_by), _join_clause(new.order_by)),
             (old.partition_by or "", new.partition_by or ""),
             (_join_clause(old.unique_key), _join_clause(new.unique_key)),
+            # ClickHouse refuses to change or reset these on an existing table (#466).
+            (
+                readonly_settings_fingerprint(old.settings),
+                readonly_settings_fingerprint(new.settings),
+            ),
         ]
     )
 
@@ -243,10 +249,39 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
     data["type"] = render_column_type(column)
     if column.default is not None:
         parsed = parse_column_default(column.default)
-        data["default"] = parsed.sql if parsed.kind == "expression" else render_default(
-            column.default
-        )
+        sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
+        data["default"] = _literal_default_fingerprint(sql) or sql
     return data
+
+
+def _literal_default_fingerprint(sql: str) -> str | None:
+    """ClickHouse stores a string default with backslash escapes (``'it\\'s'``,
+    ``'\\n'``) and a float as ``2.``, so a default that is one literal compares by
+    its value (TS ``literalDefaultFingerprint``, #466)."""
+    text = sql.strip()
+    if _NUMBER_LITERAL_RE.fullmatch(text):
+        return f"number:{setting_value_fingerprint(text)}"
+    match = _STRING_LITERAL_RE.fullmatch(text)
+    if match is None:
+        return None
+
+    def unescape(escape: re.Match[str]) -> str:
+        code = escape.group(1)
+        if code is None:
+            return "'"
+        if code.startswith("x") and len(code) > 1:
+            return chr(int(code[1:], 16))
+        return _STRING_ESCAPES.get(code, code)
+
+    value = re.sub(r"\\(x[0-9a-fA-F]{2}|.)|''", unescape, match.group(1), flags=re.DOTALL)
+    return f"string:{json.dumps(value, ensure_ascii=False)}"
+
+
+_STRING_LITERAL_RE = re.compile(r"'((?:[^'\\]|\\.|'')*)'", re.DOTALL)
+_NUMBER_LITERAL_RE = re.compile(r"[+-]?(?:\d+\.?\d*|\.\d+)(?:e[+-]?\d+)?", re.IGNORECASE)
+_STRING_ESCAPES = {
+    "n": "\n", "t": "\t", "r": "\r", "b": "\b", "f": "\f", "0": "\0", "a": "\x07", "v": "\v"
+}
 
 
 def _column_identity(column: ColumnDefinition) -> str:

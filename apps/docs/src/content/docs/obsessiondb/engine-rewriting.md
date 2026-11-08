@@ -37,7 +37,9 @@ chkit generate --force-shared-engines
 chkit snapshot rebuild --force-shared-engines
 ```
 
-The migration files and `snapshot.json` keep what the flag decided, so pass the same flag every time `generate` or `snapshot rebuild` runs for that target. A later `generate` that decides differently plans a change for each affected table, for example `ALTER TABLE analytics.events RESET SETTING storage_policy` once the flag is dropped.
+The migration files and `snapshot.json` keep what the flag decided, so pass the same flag every time `generate` or `snapshot rebuild` runs for that target. `generate` applies the flag's decision to the previous snapshot too, so dropping the flag plans no `RESET SETTING storage_policy` for existing tables (the server would reject it); those tables keep the policy they were created with. Adding the flag later plans `MODIFY SETTING storage_policy` for existing tables that declare one.
+
+ObsessionDB writes `storage_policy = 's3'` into every `Shared` table, so `chkit pull` reads it back on tables that never declared it. It is the only policy such a table can have, so the plugin leaves `storage_policy = 's3'` out of the schema and the snapshot on every target, and it never appears in a migration.
 
 `migrate`, `status`, `drift` and `check` also accept both flags, so scripts can pass them to all six commands, but those four ignore them: they work from the migration files and snapshot that `generate` already wrote.
 
@@ -52,7 +54,8 @@ The migration files and `snapshot.json` keep what the flag decided, so pass the 
 
 | Table setting | Regular ClickHouse | ObsessionDB |
 |---|---|---|
-| `storage_policy` (any value) | stripped | kept |
+| `storage_policy = 's3'` | stripped | left out (ObsessionDB sets it on every `Shared` table) |
+| `storage_policy` (any other value) | stripped | kept |
 | Any other setting | kept | kept |
 
 Only tables are affected. Views and materialized views pass through unchanged.

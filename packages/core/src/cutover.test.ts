@@ -329,7 +329,7 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
   test('a change of the engine arguments only', () => {
     const oldDef = events({ engine: "ReplicatedMergeTree('/t/{uuid}', '{replica}')" })
     const newDef = events({ engine: "ReplicatedMergeTree('/t2/{uuid}', '{replica}')" })
-    expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments change')])
+    expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments or read-only settings')])
   })
 
   test('a replication path without {table} or {uuid}, where the shadow would collide', () => {

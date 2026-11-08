@@ -100,6 +100,7 @@ from chkit.core.snapshot import create_snapshot
 from chkit.core.validate import collect_definition_warnings, validate_definitions
 from chkit.plugins import (
     ChxOnPlanCreatedContext,
+    ChxOnSchemaLoadedContext,
     ChxPlugin,
     ChxPluginCommandContext,
     PluginContext,
@@ -462,7 +463,23 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         _exit_validation_failed(ChxValidationError(issues), output_json=output_json)
 
     previous = read_snapshot(meta_dir)
-    old_defs = list(previous.definitions) if previous is not None else []
+    snapshot_defs = list(previous.definitions) if previous is not None else []
+    # The schema went through the plugins' rewrites; a snapshot written before
+    # a rewrite existed goes through it too, so it plans no change (#466).
+    old_defs = canonicalize_definitions(
+        plugin_runtime.run_on_snapshot_loaded(
+            ChxOnSchemaLoadedContext(
+                command="generate",
+                config=config,
+                table_scope=resolve_table_scope(
+                    table_selector, table_keys_from_definitions(snapshot_defs)
+                ),
+                flags=hook_flags,
+                definitions=snapshot_defs,
+                json_mode=output_json,
+            )
+        )
+    )
     try:
         canonical = carry_retained_definitions(
             previous_definitions=old_defs,

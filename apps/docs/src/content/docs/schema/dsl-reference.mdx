@@ -1280,9 +1280,11 @@ drop is `risk=caution` because it holds no rows.
 
 When a property changes, chkit determines whether the table can be altered in place or must be dropped and recreated.
 
-**Structural** (drop + recreate): `engine`, `primaryKey`, `orderBy`, `partitionBy`, `uniqueKey`
+**Structural** (drop + recreate): `engine`, `primaryKey`, `orderBy`, `partitionBy`, `uniqueKey`, and the settings ClickHouse refuses to change on an existing table: `index_granularity`, `index_granularity_bytes`, `enable_mixed_granularity_parts`, `table_disk`, the `add_minmax_index_for_*` settings, and on ObsessionDB also `allow_tuple_element_aggregation` and `share_nested_offsets`
 
-**Alterable** (ALTER in place): columns, indexes, projections, constraints, settings, TTL, comment
+**Alterable** (ALTER in place): columns, indexes, projections, constraints, other settings, TTL, comment
+
+A MergeTree table that does not declare `index_granularity` is treated as `index_granularity: 8192`, the value ClickHouse stores for it, so `CREATE TABLE` writes `SETTINGS index_granularity = 8192` and a schema with or without it plans nothing. Setting values compare by value: `8192` and `"8192"`, `2.0` and `2.` are the same. The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not part of the schema.
 
 Views and materialized views always use drop + recreate.
 

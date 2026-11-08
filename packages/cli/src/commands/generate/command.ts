@@ -124,7 +124,17 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   const dictionaryMappings = mergeDictionaryMappings(schemaMappings.dictionaryMappings, cliDictionaryMappings)
 
   const { migrationsDir, metaDir } = dirs
-  const previousDefinitions = (await readSnapshot(metaDir))?.definitions ?? []
+  const snapshotDefinitions = (await readSnapshot(metaDir))?.definitions ?? []
+  // The schema went through the plugins' rewrites; a snapshot written before
+  // a rewrite existed goes through it too, so it plans no change (#466).
+  const previousDefinitions = await pluginRuntime.runOnSnapshotLoaded({
+    command: 'generate',
+    config,
+    tableScope: resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshotDefinitions)),
+    flags,
+    jsonMode,
+    definitions: snapshotDefinitions,
+  })
   const definitions = carryRetainedDefinitions({
     previousDefinitions,
     definitions: schemaDefinitions,

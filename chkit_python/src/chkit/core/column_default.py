@@ -143,7 +143,19 @@ def render_default(value: ColumnDefaultValue) -> str:
         return f"'{escaped}'"
     if isinstance(literal, bool):
         return "true" if literal else "false"
+    if isinstance(literal, float):
+        return _render_float(literal)
     return str(literal)
+
+
+_JS_EXPONENT_THRESHOLD = 1e21
+
+
+def _render_float(value: float) -> str:
+    """A float as TS ``String(value)`` writes it: ``2.0`` is ``2`` (#466)."""
+    if value.is_integer() and abs(value) < _JS_EXPONENT_THRESHOLD:
+        return str(int(value))
+    return repr(value)
 
 
 def column_type_accepts_string_literal(type_: str) -> bool:

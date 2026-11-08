@@ -28,6 +28,7 @@ import {
   type TableDefinition,
   vectorIndexGranularity,
   type ViewDefinition,
+  withDefaultIndexGranularity,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
 
@@ -452,7 +453,7 @@ export function compareTableShape(
     : expected.settings ?? {}
   const actualSettings = kafka
     ? Object.fromEntries(Object.entries(parseKafkaSettings(actual.settings)).map(([key, value]) => [key, kafkaSettingFingerprint(value)]))
-    : actual.settings
+    : withDefaultIndexGranularity(actual.engine ?? expected.engine, actual.settings) ?? {}
   const settingDiffs = diffSettings(expectedSettings, actualSettings)
 
   const expectedIndexes = new Map(
