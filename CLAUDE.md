@@ -62,7 +62,7 @@ bun run lint         # lint all packages
 
 `bun run test` runs every package's tests, unit and e2e together, through Turbo. Each package's `test` task depends on the root `infra:up` task, which starts the test stack in `test/infra/docker-compose.yml` (ClickHouse 26.3 and a Redpanda Kafka broker) and waits until it is healthy. chkit's `test` also depends on its own `build` (`packages/cli/turbo.json`), because its tests run the built Node entry `dist/bin/chkit.js`. The stack stays up between runs; `bun run infra:down` removes it. Docker is required. To run a second stack beside it (another worktree), set `CHKIT_TEST_PORT` (default 8123) for `infra:up`, the tests and `infra:down`: ClickHouse then listens on that port in its own Compose project, `chkit-test-<port>`. Pick a port other than 8123 (`CHKIT_TEST_PORT=8123` makes a separate project, `chkit-test-8123`, that fights `chkit-test` for the port) and other than the ports `test/cluster` publishes (8124, 8133-8136).
 
-The Python port (`chkit_python/`, published to PyPI as `chkit-py`) is the private workspace `@chkit/python`. Its Turbo tasks run through [uv](https://docs.astral.sh/uv/), which must be installed: `lint` (ruff), `typecheck` (mypy), `test` (pytest over `tests/`, against the same target as the TS e2e tests) and `build` (`scripts/build.sh`: sdist + wheel, `twine check`, a smoke test of the wheel). Dependencies are pinned in `chkit_python/uv.lock`; after changing `pyproject.toml` run `uv lock` there. `tests_cluster/` and `tests_workbench_api/` stay opt-in (run them with `uv run --extra dev pytest tests_cluster`). CI installs the uv version pinned in `.github/actions/setup`.
+The Python port (`chkit_python/`, published to PyPI as `chkit-py`) is the private workspace `@chkit/python`. Its Turbo tasks run through [uv](https://docs.astral.sh/uv/), which must be installed: `lint` (ruff), `typecheck` (mypy), `test` (pytest over `tests/` in 8 pytest-xdist workers, against the same target as the TS e2e tests) and `build` (`scripts/build.sh`: sdist + wheel, `twine check`, a smoke test of the wheel). Dependencies are pinned in `chkit_python/uv.lock`; after changing `pyproject.toml` run `uv lock` there. `tests_cluster/` and `tests_workbench_api/` stay opt-in (run them with `uv run --extra dev pytest tests_cluster`). CI installs the uv version pinned in `.github/actions/setup`.
 
 ### Test target
 
@@ -85,6 +85,7 @@ Key conventions:
 - **Never skip** — an unreachable server fails the test; never `test.skip()` or silently pass.
 - **State-based polling** — use `waitForTable()`, `waitForView()`, `waitForColumn()` instead of blind retry loops. ObsessionDB DDL is eventually consistent.
 - **Unique naming** — every test run uses `createPrefix()` / `createJournalTableName()` with timestamps and random suffixes to avoid collisions.
+- **Independent tests** — test files run side by side (`bun test --parallel` in the packages with E2E files; pytest-xdist hands out single tests), so no test may depend on another test's objects or order. Give a scenario that takes minutes its own file, so it runs beside the rest.
 - **Structured diagnostics** — use `formatTestDiagnostic()` for CLI failure messages.
 
 ### CI
