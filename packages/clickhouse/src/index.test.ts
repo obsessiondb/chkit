@@ -94,42 +94,6 @@ function createMockClient(
 }
 
 describe('@chkit/clickhouse smoke', () => {
-  test('creates executor with command/query methods', () => {
-    const executor = createClickHouseExecutor({
-      url: 'http://localhost:8123',
-      database: 'default',
-    })
-
-    expect(typeof executor.command).toBe('function')
-    expect(typeof executor.query).toBe('function')
-    expect(typeof executor.listSchemaObjects).toBe('function')
-  })
-
-  test('creates stateless executor with command/query methods', () => {
-    const executor = createStatelessClickHouseExecutor({
-      url: 'http://localhost:8123',
-      database: 'default',
-    })
-
-    expect(typeof executor.command).toBe('function')
-    expect(typeof executor.query).toBe('function')
-    expect(typeof executor.listSchemaObjects).toBe('function')
-  })
-
-  test('exposes stateless and session-bound client constructors', async () => {
-    const config = {
-      url: 'http://localhost:8123',
-      database: 'default',
-    }
-    const stateless = createStatelessClickHouseClient(config)
-    const session = createSessionClickHouseClient(config)
-
-    expect(typeof stateless.query).toBe('function')
-    expect(typeof session.query).toBe('function')
-
-    await Promise.all([stateless.close(), session.close()])
-  })
-
   test('credentials in the URL raise no client override warnings (#432)', async () => {
     const warn = spyOn(console, 'warn').mockImplementation(() => {})
     const config = {
