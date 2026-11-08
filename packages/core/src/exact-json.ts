@@ -45,5 +45,7 @@ function canonicalDecimal(text: string): string {
   const digits = integer + fraction
   const first = digits.search(/[1-9]/)
   if (first === -1) return '0'
-  return `${sign}${digits.slice(first).replace(/0+$/, '')}e${integer.length - first + Number(exponent)}`
+  let end = digits.length
+  while (digits[end - 1] === '0') end -= 1
+  return `${sign}${digits.slice(first, end)}e${integer.length - first + Number(exponent)}`
 }
