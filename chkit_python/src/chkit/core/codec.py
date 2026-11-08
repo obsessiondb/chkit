@@ -485,11 +485,13 @@ def _atom_data(step: object) -> object:
 
 def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
     level = data.get("level")
-    if kind == "LZ4HC":
-        return "level must be an integer" if level is not None and not _is_int(level) else None
-    if kind == "ZSTD":
+    if kind in {"LZ4HC", "ZSTD"}:
         if level is not None and not _is_int(level):
             return "level must be an integer"
+        if isinstance(level, int) and not -_MAX_SAFE <= level <= _MAX_SAFE:
+            return "level must be between -9007199254740991 and 9007199254740991"
+        if kind == "LZ4HC":
+            return None
         if isinstance(level, int) and _is_int(level) and level > 22:
             return "level must be at most 22"
         window_log = data.get("windowLog")

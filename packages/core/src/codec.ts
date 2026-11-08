@@ -382,9 +382,12 @@ export function codecAtomProblem(step: unknown): CodecAtomProblem | undefined {
 function codecParameterProblem(kind: string, step: Record<string, unknown>): string | undefined {
   switch (kind) {
     case 'LZ4HC':
-      return step.level !== undefined && !isInteger(step.level) ? 'level must be an integer' : undefined
     case 'ZSTD':
       if (step.level !== undefined && !isInteger(step.level)) return 'level must be an integer'
+      if (step.level !== undefined && !Number.isSafeInteger(step.level)) {
+        return 'level must be between -9007199254740991 and 9007199254740991'
+      }
+      if (kind === 'LZ4HC') return undefined
       if (isInteger(step.level) && step.level > 22) return 'level must be at most 22'
       if (step.windowLog !== undefined && !(isInteger(step.windowLog) && (step.windowLog === 0 || (step.windowLog >= 10 && step.windowLog <= 31)))) {
         return 'windowLog must be 0 or an integer between 10 and 31'
