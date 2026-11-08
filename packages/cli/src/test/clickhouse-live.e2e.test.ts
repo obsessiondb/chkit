@@ -151,97 +151,6 @@ describe('@chkit/cli doppler env e2e', () => {
   )
 
   test(
-    'runs additive second migration cycle in a separate project flow',
-    async () => {
-      const executor = createLiveExecutor(liveEnv)
-      const database = liveEnv.clickhouseDatabase
-      const journalTable = createJournalTableName('additive')
-      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
-      const prefix = createPrefix('additive')
-      const usersTable = `${prefix}users`
-      const usersView = `${prefix}users_view`
-      const fixture = await createFixture({
-        database,
-        usersTableName: usersTable,
-        usersViewName: usersView,
-      })
-
-      try {
-        const firstGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
-        expect(firstGenerate.exitCode).toBe(0)
-
-        const firstExecute = await runCliWithRetry(fixture.dir, [
-          'migrate',
-          '--config',
-          fixture.configPath,
-          '--execute',
-          '--json',
-        ], { extraEnv: cliEnv })
-        if (firstExecute.exitCode !== 0) {
-          throw new Error(formatTestDiagnostic('first migrate --execute failed', firstExecute))
-        }
-        expect(firstExecute.exitCode).toBe(0)
-
-        await writeFile(
-          fixture.schemaPath,
-          renderEvolvedSchema(database, usersTable, usersView),
-          'utf8'
-        )
-
-        const secondGenerate = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
-        expect(secondGenerate.exitCode).toBe(0)
-        const secondGeneratePayload = JSON.parse(secondGenerate.stdout) as {
-          operationCount: number
-          migrationFile: string | null
-        }
-        expect(secondGeneratePayload.operationCount).toBeGreaterThan(0)
-        expect(secondGeneratePayload.migrationFile).toBeTruthy()
-
-        const secondPlan = runCli(fixture.dir, ['migrate', '--config', fixture.configPath, '--json'], cliEnv)
-        if (secondPlan.exitCode !== 0) {
-          throw new Error(formatTestDiagnostic('second migrate --json plan failed', secondPlan))
-        }
-        expect(secondPlan.exitCode).toBe(0)
-        const secondPlanPayload = JSON.parse(secondPlan.stdout) as { pending: string[] }
-        expect(secondPlanPayload.pending.length).toBe(1)
-
-        const secondExecute = await runCliWithRetry(fixture.dir, [
-          'migrate',
-          '--config',
-          fixture.configPath,
-          '--execute',
-          '--json',
-        ], { extraEnv: cliEnv })
-        if (secondExecute.exitCode !== 0) {
-          throw new Error(formatTestDiagnostic('second migrate --execute failed', secondExecute))
-        }
-        expect(secondExecute.exitCode).toBe(0)
-
-        const { payload: statusPayload } = await waitForCliJson<{
-          total: number
-          applied: number
-          pending: number
-        }>(
-          fixture.dir,
-          ['status', '--config', fixture.configPath, '--json'],
-          (p) => p.applied === 2,
-          { extraEnv: cliEnv }
-        )
-        expect(statusPayload.total).toBe(2)
-        expect(statusPayload.applied).toBe(2)
-        expect(statusPayload.pending).toBe(0)
-      } finally {
-        await rm(fixture.dir, { recursive: true, force: true })
-        await executor.command(`DROP VIEW IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersView)}`)
-        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(usersTable)}`)
-        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
-        await executor.close()
-      }
-    },
-    240_000
-  )
-
-  test(
     'migrate applies table + materialized view without DDL race condition',
     async () => {
       const executor = createLiveExecutor(liveEnv)
@@ -776,6 +685,20 @@ export default schema(target, rmv)
         expect(checkPayload.checksumMismatchCount).toBe(0)
         expect(checkPayload.driftEvaluated).toBe(true)
         expect(checkPayload.drifted).toBe(false)
+
+        const { payload: statusPayload } = await waitForCliJson<{
+          total: number
+          applied: number
+          pending: number
+        }>(
+          fixture.dir,
+          ['status', '--config', fixture.configPath, '--json'],
+          (p) => p.applied === 2,
+          { extraEnv: cliEnv }
+        )
+        expect(statusPayload.total).toBe(2)
+        expect(statusPayload.applied).toBe(2)
+        expect(statusPayload.pending).toBe(0)
       } finally {
         await rm(fixture.dir, { recursive: true, force: true })
         // Dropping the throwaway database removes the table, view, and journal in one step.
