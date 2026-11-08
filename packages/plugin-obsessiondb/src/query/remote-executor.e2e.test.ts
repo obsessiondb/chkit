@@ -108,6 +108,42 @@ describe('createRemoteExecutor queryStatus (live)', () => {
 	}, TIMEOUT_MS)
 })
 
+// pull, drift and check read table details through the console API after
+// `chkit obsessiondb login`. They must match a direct connection, codecs included.
+describe('createRemoteExecutor listTableDetails (live)', () => {
+	test('returns the same table details as a direct connection, codecs included', async () => {
+		const env = getLiveEnv()
+		const workbench = startWorkbench(env)
+		const remote = connect(workbench.url)
+		const live = createLiveExecutor(env)
+		const name = `${createPrefix('remote_details')}t`
+		const table = `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(name)}`
+		try {
+			await live.command(
+				`CREATE TABLE ${table} (ts DateTime CODEC(Delta(4), ZSTD(3)), id UInt64) ENGINE = MergeTree ORDER BY ts`,
+			)
+			await waitForTable(live, env.clickhouseDatabase, name)
+
+			const byName = (tables: Array<{ name: string }>) => tables.find((t) => t.name === name)
+			const viaApi = byName(await remote.listTableDetails([env.clickhouseDatabase]))
+			const direct = byName(await live.listTableDetails([env.clickhouseDatabase]))
+
+			expect(viaApi?.columns.map((column) => column.codec)).toEqual([
+				[
+					{ kind: 'Delta', size: 4 },
+					{ kind: 'ZSTD', level: 3 },
+				],
+				undefined,
+			])
+			expect(viaApi).toEqual(direct)
+		} finally {
+			await live.command(`DROP TABLE IF EXISTS ${table}`)
+			await live.close()
+			workbench.stop()
+		}
+	}, TIMEOUT_MS)
+})
+
 function connect(baseUrl: string): ClickHouseExecutor {
 	return createRemoteExecutor({
 		credentials: { access_token: 'test', base_url: baseUrl },
