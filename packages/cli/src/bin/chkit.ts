@@ -242,13 +242,7 @@ async function run(): Promise<void> {
   const resolved = registry.get(commandName)
   let initFlags: ParsedFlags = {}
   if (resolved && !wantsHelp) {
-    const parsed = parseInitFlags({
-      argv,
-      commandName,
-      resolved,
-      registry,
-      plugins: pluginRuntime.plugins,
-    })
+    const parsed = parseInitFlags(argv, registry)
     if (!parsed) return
     initFlags = parsed
   }

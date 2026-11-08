@@ -6,11 +6,7 @@ import {
 	UnknownFlagError,
 } from '@chkit/core'
 
-import {
-	type ChxPluginCommand,
-	type PluginRuntime,
-	typedFlags,
-} from '../plugins.js'
+import { type PluginRuntime, typedFlags } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
 import { GLOBAL_FLAGS } from './global-flags.js'
@@ -102,110 +98,42 @@ export function parseCommandArgs(
 }
 
 /**
- * Parses the onInit flags with the flag set that the command later gets,
- * so onInit and getContext see the same flags. Returns null after a flag error.
+ * Parses the flags that the command gets, for onInit. Returns null after a
+ * reported flag error, and {} when the command reports the problem itself.
  */
-export function parseInitFlags(input: {
-	argv: string[]
-	commandName: string
-	resolved: RegisteredCommand
-	registry: CommandRegistry
-	plugins: PluginRuntime['plugins']
-}): ParsedFlags | null {
-	const argsAfterCommand = input.argv.slice(1)
-	if (input.commandName === 'plugin') {
-		return parseForwardedInitFlags(argsAfterCommand, input.plugins)
+export function parseInitFlags(
+	argv: string[],
+	registry: CommandRegistry,
+): ParsedFlags | null {
+	const [commandName = '', ...args] = argv
+	if (commandName === 'plugin') {
+		// `chkit plugin <plugin> <command>` takes the flags of `chkit <plugin> <command>`.
+		const [pluginName = '', subcommand] = extractPositionals(args, registry.globalFlags)
+		try {
+			return parseFlags(args, registry.resolveFlags(pluginName, subcommand))
+		} catch (error) {
+			if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) return {}
+			throw error
+		}
 	}
-	const subcommand = matchSubcommand(
-		argsAfterCommand,
-		input.resolved,
-		input.registry.globalFlags,
-	)
-	// runResolvedCommand prints help or the unknown subcommand error after onInit.
-	if (!subcommand.ok) return {}
-	const parsed = parseCommandArgs(
-		input.commandName,
-		argsAfterCommand,
-		input.registry.resolveFlags(input.commandName, subcommand.name),
-	)
+	const resolved = registry.get(commandName)
+	const subcommand = resolved && matchSubcommand(args, resolved, registry.globalFlags)
+	if (!subcommand?.ok) return {}
+	const parsed = parseCommandArgs(commandName, args, registry.resolveFlags(commandName, subcommand.name))
 	return parsed ? parsed.flags : null
 }
 
-/**
- * Lists the flags that `chkit plugin <plugin> <command>` parses for the target
- * command: its own flags and the flags that plugins extend onto the plugin.
- */
-export function forwardedCommandFlags(
-	plugins: PluginRuntime['plugins'],
-	pluginName: string,
-	command: ChxPluginCommand,
-): FlagDef[] {
-	const extensionFlags = plugins.flatMap((entry) =>
-		(entry.plugin.extendCommands ?? []).flatMap((extension) => {
-			const targets = Array.isArray(extension.command)
-				? extension.command
-				: [extension.command]
-			return targets.includes(pluginName) ? [...extension.flags] : []
-		}),
-	)
-	return [...(command.flags ?? []), ...extensionFlags]
-}
-
-function parseForwardedInitFlags(
-	argsAfterCommand: string[],
-	plugins: PluginRuntime['plugins'],
-): ParsedFlags {
-	const { flags, rest } = forwarderFlags(argsAfterCommand)
-	const [pluginName, commandName, ...commandArgs] = rest
-	const command = plugins
-		.find((entry) => entry.plugin.manifest.name === pluginName)
-		?.plugin.commands?.find((cmd) => cmd.name === commandName)
-	if (!pluginName || !command) return flags
-	const defs = forwardedCommandFlags(plugins, pluginName, command)
-	if (defs.length === 0) return flags
-	try {
-		return { ...flags, ...parseFlags(commandArgs, defs) }
-	} catch (error) {
-		// The plugin command reports this flag error after onInit, in its own format.
-		if (
-			error instanceof UnknownFlagError ||
-			error instanceof MissingFlagValueError
-		) {
-			return flags
-		}
-		throw error
-	}
-}
-
-function forwarderFlags(argsAfterCommand: string[]): {
-	flags: ParsedFlags
-	rest: string[]
-} {
-	const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
-	const flags: ParsedFlags = {}
-	if (jsonMode) flags['--json'] = true
-	if (tableSelector) flags['--table'] = tableSelector
-	return { flags, rest }
-}
-
 function matchSubcommand(
-	argsAfterCommand: string[],
+	args: string[],
 	resolved: RegisteredCommand,
 	globalFlags: readonly FlagDef[],
-):
-	| { ok: true; name: string | undefined }
-	| { ok: false; token: string | undefined } {
+): { ok: true; name: string | undefined } | { ok: false; token: string | undefined } {
 	if (!resolved.subcommands) return { ok: true, name: undefined }
-	const commandToken = extractPositionals(argsAfterCommand, [
-		...globalFlags,
-		...resolved.flags,
-	])[0]
-	const matchedSub = resolved.subcommands.find((s) => s.name === commandToken)
-	if (matchedSub) return { ok: true, name: matchedSub.name }
-	if (resolved.subcommands.length === 1) {
-		return { ok: true, name: resolved.subcommands[0]?.name }
-	}
-	return { ok: false, token: commandToken }
+	const token = extractPositionals(args, [...globalFlags, ...resolved.flags])[0]
+	const matched = resolved.subcommands.find((s) => s.name === token)
+	if (matched) return { ok: true, name: matched.name }
+	if (resolved.subcommands.length === 1) return { ok: true, name: resolved.subcommands[0]?.name }
+	return { ok: false, token }
 }
 
 function stripGlobalFlags(argv: string[]): {
@@ -300,11 +228,7 @@ export async function runResolvedCommand(input: {
 }): Promise<void> {
 	debug('dispatch', `routing to plugin command "${input.commandName}"`)
 	const argsAfterCommand = input.argv.slice(1)
-	const subcommand = matchSubcommand(
-		argsAfterCommand,
-		input.resolved,
-		input.registry.globalFlags,
-	)
+	const subcommand = matchSubcommand(argsAfterCommand, input.resolved, input.registry.globalFlags)
 	if (!subcommand.ok) {
 		input.onAmbiguousPluginSubcommand?.(subcommand.token)
 		return
@@ -320,9 +244,12 @@ export async function runResolvedCommand(input: {
 	if (isPluginCommandForwarder) {
 		// The plugin command forwards unparsed args to a target plugin command,
 		// so we only strip known global flags and pass the rest through.
-		const forwarded = forwarderFlags(argsAfterCommand)
-		flags = forwarded.flags
-		positionals = forwarded.rest
+		const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
+		const parsed: ParsedFlags = {}
+		if (jsonMode) parsed['--json'] = true
+		if (tableSelector) parsed['--table'] = tableSelector
+		flags = parsed
+		positionals = rest
 	} else {
 		const allFlags = input.registry.resolveFlags(
 			input.commandName,
