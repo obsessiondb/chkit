@@ -122,6 +122,7 @@
     "query-exact-rows",
     "query-json-column-numbers",
     "query-log-comment-option",
+    "query-raw",
     "query-status-exact-decoding",
     "quote-escape-identifiers",
     "read-only-users",
