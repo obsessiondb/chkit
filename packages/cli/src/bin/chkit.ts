@@ -7,7 +7,7 @@ import { cmdInit } from '../commands/init.js'
 import { cmdSkills } from '../commands/skills.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
 import { normalizeGlobalArgs } from '../runtime/argv.js'
-import { parseCommandArgs, runResolvedCommand } from '../runtime/command-dispatch.js'
+import { parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { loadConfig } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
@@ -241,15 +241,16 @@ async function run(): Promise<void> {
 
   const resolved = registry.get(commandName)
   let initFlags: ParsedFlags = {}
-  if (
-    resolved &&
-    !resolved.subcommands &&
-    commandName !== 'plugin' &&
-    !wantsHelp
-  ) {
-    const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
+  if (resolved && !wantsHelp) {
+    const parsed = parseInitFlags({
+      argv,
+      commandName,
+      resolved,
+      registry,
+      plugins: pluginRuntime.plugins,
+    })
     if (!parsed) return
-    initFlags = parsed.flags
+    initFlags = parsed
   }
 
   const initCtx = {

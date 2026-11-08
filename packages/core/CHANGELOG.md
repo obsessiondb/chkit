@@ -1,5 +1,13 @@
 # @chkit/core
 
+## 0.2.0-beta.15
+
+### Patch Changes
+
+- acc8f8c: Column codecs follow ClickHouse's rules and stored forms, and `generate` reports codecs ClickHouse would reject instead of failing the migration partway (#465).
+
+  After upgrading, `generate` plans a codec change for every `Delta` or `Gorilla` column written without `size`, which chkit used to render as `Delta(1)` or `Gorilla(1)`.
+
 ## 0.2.0-beta.14
 
 ### Patch Changes
