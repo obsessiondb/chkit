@@ -95,6 +95,7 @@ export { p, type NamedParam } from './query-param.js'
 export {
   createQuery,
   query,
+  type CreateQueryOptions,
   type Query,
   type QueryCallOptions,
   type QueryClient,

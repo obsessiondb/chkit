@@ -106,9 +106,29 @@ beforeAll(async () => {
   await pollUntil(() => countEvents(), (rows) => rows[0]?.n === 3)
 }, 90_000)
 
+// ObsessionDB users have no CREATE USER (or any access-management) grant
+// (#430), so the tests that create users run in verify, against the local
+// stack, only.
+const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
+const users: string[] = []
+const userClients: Array<ReturnType<typeof createClient>> = []
+
+async function createUser(label: string, settings: string) {
+  const name = `chkit_e2e_${label}_${suffix}`
+  const password = crypto.randomUUID()
+  users.push(name)
+  await client.command({ query: `CREATE USER ${name} IDENTIFIED BY '${password}' ${settings}` })
+  await client.command({ query: `GRANT SELECT ON *.* TO ${name}` })
+  const userClient = createClient({ url: env.url, username: name, password, database: env.database })
+  userClients.push(userClient)
+  return userClient
+}
+
 afterAll(async () => {
   await client.command({ query: `DROP TABLE IF EXISTS ${eventsName}` })
   await client.command({ query: `DROP TABLE IF EXISTS ${catalogName}` })
+  await Promise.all(userClients.map((userClient) => userClient.close()))
+  for (const name of users) await client.command({ query: `DROP USER IF EXISTS ${name}` })
   await client.close()
 })
 
@@ -125,17 +145,17 @@ describe('query execution', () => {
     `
     const queryId = `chkit_e2e_query_${suffix}`
 
-    expect(await topCities({ city: 'Berlin' }, { query_id: queryId, clickhouse_settings: { max_threads: 2 } })).toEqual([
+    expect(await topCities({ city: 'Berlin' }, { query_id: queryId, clickhouse_settings: { max_result_rows: 12345 } })).toEqual([
       { city: 'Berlin', clicks: 8 },
     ])
 
     const queryLog = run`
-      SELECT log_comment, Settings['max_threads'] AS max_threads
+      SELECT log_comment, Settings['max_result_rows'] AS max_result_rows
       FROM clusterAllReplicas('default', system.query_log)
       WHERE query_id = ${p.string('queryId')} AND type = 'QueryFinish'
     `
     expect(await pollUntil(() => queryLog({ queryId }), (rows) => rows.length > 0)).toEqual([
-      { log_comment: JSON.stringify({ query: `top_cities_${suffix}`, version: 2 }), max_threads: '2' },
+      { log_comment: JSON.stringify({ query: `top_cities_${suffix}`, version: 2 }), max_result_rows: '12345' },
     ])
   }, 90_000)
 
@@ -299,4 +319,37 @@ describe('query execution', () => {
     )
     await expect(run({ returns: z.object({ n: z.string() }) })`SELECT toUInt8(1) AS n`()).rejects.toThrow('expected string')
   })
+})
+
+describe('named queries and log_comment', () => {
+  test.skipIf(onObsessionDB)('a readonly = 1 user gets a clear error for a named query, and runs it with logComment: false', async () => {
+    const readonly = await createUser('readonly', 'SETTINGS readonly = 1')
+    const name = `readonly_${suffix}`
+    const one = createQuery(readonly)({ name })`SELECT toUInt8(1) AS one`
+
+    const refused = one()
+    await expect(refused).rejects.toThrow(
+      `query "${name}": ClickHouse refused log_comment because the user has readonly = 1. Give the user readonly = 2 or plain GRANT SELECT, or set logComment: false`,
+    )
+    await expect(refused).rejects.toMatchObject({
+      cause: { message: expect.stringContaining("Cannot modify 'log_comment' setting in readonly mode") },
+    })
+    expect(await one(undefined, { logComment: false })).toEqual([{ one: 1 }])
+    expect(await createQuery(readonly, { logComment: false })({ name })`SELECT toUInt8(1) AS one`()).toEqual([{ one: 1 }])
+  })
+
+  test.skipIf(onObsessionDB)('a user with only GRANT SELECT runs named queries with attribution', async () => {
+    const reader = await createUser('reader', '')
+    const name = `reader_${suffix}`
+    const queryId = `chkit_e2e_reader_${suffix}`
+
+    expect(await createQuery(reader)({ name })`SELECT toUInt8(1) AS one`(undefined, { query_id: queryId })).toEqual([{ one: 1 }])
+    const queryLog = run`
+      SELECT log_comment FROM clusterAllReplicas('default', system.query_log)
+      WHERE query_id = ${p.string('queryId')} AND type = 'QueryFinish'
+    `
+    expect(await pollUntil(() => queryLog({ queryId }), (rows) => rows.length > 0)).toEqual([
+      { log_comment: JSON.stringify({ query: name, version: 1 }) },
+    ])
+  }, 90_000)
 })
