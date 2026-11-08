@@ -13,7 +13,7 @@ from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
 from chkit.core.codec import codec_atom_problem, parse_raw_codec_atoms
-from chkit.core.codec_type import CodecValueType, codec_value_types
+from chkit.core.codec_type import CodecValueType, codec_has_reachable_float, codec_value_types
 from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
@@ -21,6 +21,7 @@ from chkit.core.model import (
     ValidationIssueCode,
     _CodecDeltaLike,
 )
+from chkit.core.sql_lexer import js_trim
 
 
 @dataclass(frozen=True)
@@ -185,9 +186,7 @@ def _chain_problem(steps: list[_ChainStep]) -> CodecProblem | None:  # noqa: PLR
 
 
 def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | None:
-    values = codec_value_types(column_type)
-    if values is None:
-        return None
+    values = codec_value_types(column_type) or []
     for step in steps:
         # An explicit Delta size bypasses ClickHouse's type check.
         if (
@@ -203,22 +202,35 @@ def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | N
             else None
         )
         if step.kind == "Gorilla":
-            # Gorilla checks fixed-size streams individually, then requires a float in the column.
-            rejected = next((value for value in values if value.width is None), None)
-            if rejected is None and not any(_is_float(value) for value in values):
-                rejected = next((value for value in values if not _is_float(value)), None)
+            # An explicit size bypasses the leaf width check, but leaves must still be fixed-size.
+            explicit_size = (
+                isinstance(step.codec, _CodecDeltaLike)
+                and step.codec.kind == "Gorilla"
+                and step.codec.size is not None
+            )
+            rejected = next(
+                (
+                    value for value in values
+                    if value.width is None
+                    or (not explicit_size and value.width not in (1, 2, 4, 8))
+                ),
+                None,
+            )
         if rejected is None:
             continue
-        where = "" if rejected.type == column_type.strip() else f" in {column_type.strip()}"
+        where = "" if rejected.type == js_trim(column_type) else f" in {js_trim(column_type)}"
         return CodecProblem(
             "codec_type_unsupported",
             f"codec {step.kind} does not support type {rejected.type}{where}",
         )
+    float_series = next((step for step in steps if step.kind in _FLOAT_SERIES_KINDS), None)
+    if float_series is not None and codec_has_reachable_float(column_type) is False:
+        return CodecProblem(
+            "codec_type_unsupported",
+            f"codec {float_series.kind} does not support type {js_trim(column_type)}: "
+            "no float leaf reachable through Nullable, Array or Tuple",
+        )
     return None
-
-
-def _is_float(value: CodecValueType) -> bool:
-    return value.family in {"float", "bfloat16"}
 
 
 _NUMERIC_FAMILIES: Final = frozenset(
@@ -231,7 +243,7 @@ def _has_width(value: CodecValueType, widths: tuple[int, ...]) -> bool:
 
 
 _TYPE_RULES: Final[dict[str, Callable[[CodecValueType], bool]]] = {
-    "Delta": lambda v: v.family != "string" and _has_width(v, (1, 2, 4, 8)),
+    "Delta": lambda v: v.width in (1, 2, 4, 8),
     "DoubleDelta": lambda v: v.family in _NUMERIC_FAMILIES and _has_width(v, (1, 2, 4, 8)),
     "GCD": lambda v: v.family in {"int", "decimal", "date", "bool"},
     "T64": lambda v: (

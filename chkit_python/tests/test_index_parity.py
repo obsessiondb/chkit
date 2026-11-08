@@ -994,21 +994,22 @@ def test_plan_bare_delta_gorilla_replaces_the_size_1_of_an_old_snapshot() -> Non
     ]
 
 
+@pytest.mark.parametrize("type_", ['Tuple(Float32, Float64)', 'Tuple (Float32, Float64)', 'Tuple(`a\\`x` Float32, b Float64)', 'Tuple(`a b` Float32, b Float64)', 'Tuple("a" Float32, b Float64)'])
 @pytest.mark.parametrize("raw", [False, True])
 @pytest.mark.parametrize("comment", ["old", "new"])
 def test_plan_mixed_width_fpc_size_changes_survive_codec_and_comment_comparisons(
-    raw: bool, comment: str
+    type_: str, raw: bool, comment: str
 ) -> None:
     def events(float_size: int, comment: str) -> TableDefinition:
         return _codec_events([{
-            "name": "c", "type": "Tuple(Float32, Float64)", "comment": comment,
+            "name": "c", "type": type_, "comment": comment,
             "codec": codec_raw(f"Gorilla, FPC(12, {float_size})") if raw else [
                 {"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": float_size}
             ],
         }])
 
     assert [op.sql for op in plan_diff([events(4, "old")], [events(8, comment)]).operations] == [
-        "ALTER TABLE app.events MODIFY COLUMN `c` Tuple(Float32, Float64) "
+        f"ALTER TABLE app.events MODIFY COLUMN `c` {type_} "
         f"COMMENT '{comment}' CODEC(Gorilla, FPC(12, 8));",
     ]
     assert plan_diff([events(4, "old")], [events(4, "old")]).operations == []

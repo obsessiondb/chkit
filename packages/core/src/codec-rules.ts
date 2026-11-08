@@ -1,5 +1,5 @@
 import { codecAtomProblem, parseRawCodecAtoms } from './codec.js'
-import { type CodecValueType, codecValueTypes } from './codec-type.js'
+import { type CodecValueType, codecHasReachableFloat, codecValueTypes } from './codec-type.js'
 import type { ColumnCodec, ColumnCodecSpec, ValidationIssueCode } from './model-types.js'
 
 /**
@@ -140,27 +140,29 @@ function chainProblem(steps: ChainStep[]): CodecProblem | undefined {
 }
 
 function typeProblem(steps: ChainStep[], columnType: string): CodecProblem | undefined {
-  const values = codecValueTypes(columnType)
-  if (!values) return undefined
+  const values = codecValueTypes(columnType) ?? []
   for (const step of steps) {
     // An explicit Delta size bypasses ClickHouse's type check.
     if (step.codec?.kind === 'Delta' && step.codec.size !== undefined) continue
     const accepts = step.codec ? TYPE_RULES[step.codec.kind] : undefined
     let rejected = accepts ? values.find((value) => !accepts(value)) : undefined
     if (step.kind === 'Gorilla') {
-      // Gorilla checks fixed-size streams individually, then requires a float in the column.
-      rejected = values.find((value) => value.width === undefined) ??
-        (values.some(isFloat) ? undefined : values.find((value) => !isFloat(value)))
+      // An explicit size bypasses the leaf width check, but leaves must still be fixed-size.
+      const explicitSize = step.codec?.kind === 'Gorilla' && step.codec.size !== undefined
+      rejected = values.find((value) => value.width === undefined || (!explicitSize && ![1, 2, 4, 8].includes(value.width)))
     }
     if (!rejected) continue
     const where = rejected.type === columnType.trim() ? '' : ` in ${columnType.trim()}`
     return { code: 'codec_type_unsupported', message: `codec ${step.kind} does not support type ${rejected.type}${where}` }
   }
+  const floatSeries = steps.find((step) => FLOAT_SERIES_KINDS.has(step.kind))
+  if (floatSeries && codecHasReachableFloat(columnType) === false) {
+    return {
+      code: 'codec_type_unsupported',
+      message: `codec ${floatSeries.kind} does not support type ${columnType.trim()}: no float leaf reachable through Nullable, Array or Tuple`,
+    }
+  }
   return undefined
-}
-
-function isFloat(value: CodecValueType): boolean {
-  return value.family === 'float' || value.family === 'bfloat16'
 }
 
 const NUMERIC_FAMILIES = new Set(['int', 'bool', 'float', 'bfloat16', 'decimal', 'date', 'time', 'enum', 'ipv4'])
@@ -171,7 +173,7 @@ function hasWidth(value: CodecValueType, widths: readonly number[]): boolean {
 
 /** The value types each codec accepts, as ClickHouse 26.3 checks them. */
 const TYPE_RULES: Record<string, (value: CodecValueType) => boolean> = {
-  Delta: (value) => value.family !== 'string' && hasWidth(value, [1, 2, 4, 8]),
+  Delta: (value) => value.width !== undefined && [1, 2, 4, 8].includes(value.width),
   DoubleDelta: (value) => NUMERIC_FAMILIES.has(value.family) && hasWidth(value, [1, 2, 4, 8]),
   GCD: (value) => ['int', 'decimal', 'date', 'bool'].includes(value.family),
   T64: (value) =>

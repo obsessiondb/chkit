@@ -32,19 +32,40 @@ export interface CodecValueType {
  */
 export function codecValueTypes(columnType: string): CodecValueType[] | undefined {
   const type = columnType.trim()
-  const wrapper = type.match(/^(Nullable|Array|LowCardinality)\(([\s\S]*)\)$/)
+  const wrapper = type.match(/^(Nullable|Array|LowCardinality)\s*\(([\s\S]*)\)$/)
   if (wrapper?.[2] !== undefined) return codecValueTypes(wrapper[2])
-  const aggregate = type.match(/^SimpleAggregateFunction\(([\s\S]*)\)$/)
+  const aggregate = type.match(/^SimpleAggregateFunction\s*\(([\s\S]*)\)$/)
   if (aggregate?.[1] !== undefined) {
     const args = splitTypeArguments(aggregate[1])
     return args.length === 2 && args[1] !== undefined ? codecValueTypes(args[1]) : undefined
   }
-  const tuple = type.match(/^Tuple\(([\s\S]*)\)$/)
+  const tuple = type.match(/^Tuple\s*\(([\s\S]*)\)$/)
   if (tuple?.[1] !== undefined) return collect(splitTypeArguments(tuple[1]).map(stripElementName))
-  const map = type.match(/^Map\(([\s\S]*)\)$/)
+  const map = type.match(/^Map\s*\(([\s\S]*)\)$/)
   if (map?.[1] !== undefined) return collect(splitTypeArguments(map[1]))
   const leaf = leafType(type)
   return leaf ? [leaf] : undefined
+}
+
+/** Whether a float is reachable without entering Map or LowCardinality; unknown types stay unknown. */
+export function codecHasReachableFloat(columnType: string): boolean | undefined {
+  const type = columnType.trim()
+  if (/^(LowCardinality|Map)\s*\(/.test(type)) return false
+  const wrapper = type.match(/^(Nullable|Array)\s*\(([\s\S]*)\)$/)
+  if (wrapper?.[2] !== undefined) return codecHasReachableFloat(wrapper[2])
+  const aggregate = type.match(/^SimpleAggregateFunction\s*\(([\s\S]*)\)$/)
+  if (aggregate?.[1] !== undefined) {
+    const args = splitTypeArguments(aggregate[1])
+    return args.length === 2 && args[1] !== undefined ? codecHasReachableFloat(args[1]) : undefined
+  }
+  const tuple = type.match(/^Tuple\s*\(([\s\S]*)\)$/)
+  if (tuple?.[1] !== undefined) {
+    const floats = splitTypeArguments(tuple[1]).map((element) => codecHasReachableFloat(stripElementName(element)))
+    if (floats.includes(true)) return true
+    return floats.includes(undefined) ? undefined : false
+  }
+  const leaf = leafType(type)
+  return leaf ? leaf.family === 'float' || leaf.family === 'bfloat16' : undefined
 }
 
 /**
@@ -70,8 +91,8 @@ function collect(types: string[]): CodecValueType[] | undefined {
 }
 
 const INTEGER_TYPE = /^U?Int(8|16|32|64|128|256)$/
-const DECIMAL_SIZED_TYPE = /^Decimal(32|64|128|256)\(/
-const DECIMAL_TYPE = /^Decimal\(\s*(\d+)/
+const DECIMAL_SIZED_TYPE = /^Decimal(32|64|128|256)\s*\(/
+const DECIMAL_TYPE = /^Decimal\s*\(\s*([0-9]+)/
 
 function leafType(type: string): CodecValueType | undefined {
   const integer = type.match(INTEGER_TYPE)
@@ -80,21 +101,16 @@ function leafType(type: string): CodecValueType | undefined {
   if (sizedDecimal?.[1]) return { type, family: 'decimal', width: Number(sizedDecimal[1]) / 8 }
   const decimal = type.match(DECIMAL_TYPE)
   if (decimal?.[1]) return { type, family: 'decimal', width: decimalWidth(Number(decimal[1])) }
-  const fixedString = type.match(/^FixedString\(\s*(\d+)\s*\)$/)
+  const fixedString = type.match(/^FixedString\s*\(\s*([0-9]+)\s*\)$/)
   if (fixedString?.[1]) return { type, family: 'fixedstring', width: Number(fixedString[1]) }
-  if (/^DateTime64\(/.test(type)) return { type, family: 'date', width: 8 }
-  if (/^DateTime(\(|$)/.test(type)) return { type, family: 'date', width: 4 }
-  if (/^Time64\(/.test(type)) return { type, family: 'time', width: 8 }
-  if (/^Enum8\(/.test(type)) return { type, family: 'enum', width: 1 }
-  if (/^Enum16\(/.test(type)) return { type, family: 'enum', width: 2 }
-  const enumeration = type.match(/^Enum\(([\s\S]*)\)$/)
+  if (/^DateTime64\s*\(/.test(type)) return { type, family: 'date', width: 8 }
+  if (/^DateTime(?:\s*\(|$)/.test(type)) return { type, family: 'date', width: 4 }
+  if (/^Time64\s*\(/.test(type)) return { type, family: 'time', width: 8 }
+  if (/^Enum8\s*\(/.test(type)) return { type, family: 'enum', width: 1 }
+  if (/^Enum16\s*\(/.test(type)) return { type, family: 'enum', width: 2 }
+  const enumeration = type.match(/^Enum\s*\(([\s\S]*)\)$/)
   if (enumeration?.[1] !== undefined) {
-    const values = splitTypeArguments(enumeration[1]).map((entry) => {
-      const value = entry.match(/=\s*([+-]?[0-9]+)\s*$/)?.[1]
-      return value === undefined ? undefined : Number(value)
-    })
-    if (values.some((value) => value === undefined)) return { type, family: 'enum' }
-    return { type, family: 'enum', width: values.every((value) => value !== undefined && value >= -128 && value <= 127) ? 1 : 2 }
+    return { type, family: 'enum', width: enumWidth(enumeration[1]) }
   }
   const simple = SIMPLE_TYPES[type]
   return simple ? { type, ...simple } : undefined
@@ -122,9 +138,22 @@ function decimalWidth(precision: number): number {
   return 32
 }
 
+function enumWidth(argumentsText: string): number | undefined {
+  let previous = 0
+  let fitsInt8 = true
+  for (const entry of splitTypeArguments(argumentsText)) {
+    const match = entry.match(/^'(?:\\[\s\S]|''|[^'\\])*'(?:\s*=\s*([+-]?[0-9]+))?\s*$/)
+    if (!match) return undefined
+    const value = match[1] === undefined ? previous + 1 : Number(match[1])
+    fitsInt8 = fitsInt8 && value >= -128 && value <= 127
+    previous = value
+  }
+  return fitsInt8 ? 1 : 2
+}
+
 /** `a UInt8` or `` `a b` UInt8 `` in a named Tuple is the element type `UInt8`. */
 function stripElementName(element: string): string {
-  const named = element.trim().match(/^(?:`[^`]*`|"[^"]*"|[A-Za-z_][A-Za-z0-9_]*)\s+(\S[\s\S]*)$/)
+  const named = element.trim().match(/^(?:`(?:\\[\s\S]|``|[^`\\])*`|"(?:\\[\s\S]|""|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)\s+(\S[\s\S]*)$/)
   return named?.[1] ?? element
 }
 

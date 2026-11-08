@@ -545,3 +545,98 @@ def test_zero_zstd_window_remains_distinct_from_an_omitted_window() -> None:
 ])
 def test_enum_value_parsing_parity(type_: str, expected: str) -> None:
     assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == expected
+
+
+# STORED rows from both additional ClickHouse 26.3 server matrices.
+@pytest.mark.parametrize(("type_", "expression", "stored_type", "stored_codec"), [
+    ('Tuple(LowCardinality(UInt64), Float64)', 'Gorilla', 'Tuple(LowCardinality(UInt64), Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(LowCardinality(Float64), Float64)', 'FPC', 'Tuple(LowCardinality(Float64), Float64)', 'CODEC(FPC(12))'),
+    ('Tuple(LowCardinality(Float64), Float64)', 'ALP', 'Tuple(LowCardinality(Float64), Float64)', 'CODEC(ALP)'),
+    ('Tuple(a LowCardinality(Float32), b Float32)', 'Gorilla', 'Tuple(a LowCardinality(Float32), b Float32)', 'CODEC(Gorilla(4))'),
+    ('Array(Tuple(LowCardinality(Float64), Float64))', 'Gorilla', 'Array(Tuple(LowCardinality(Float64), Float64))', 'CODEC(Gorilla(8))'),
+    ('Tuple(Array(LowCardinality(Float64)), Float64)', 'Gorilla', 'Tuple(Array(LowCardinality(Float64)), Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(Map(UInt64, Float64), Float64)', 'Gorilla', 'Tuple(Map(UInt64, Float64), Float64)', 'CODEC(Gorilla(8))'),
+    ('Nullable(Float64)', 'Gorilla', 'Nullable(Float64)', 'CODEC(Gorilla(8))'),
+    ('Array(Nullable(Float64))', 'Gorilla', 'Array(Nullable(Float64))', 'CODEC(Gorilla(8))'),
+    ('Tuple(Nullable(Float64), Float64)', 'Gorilla', 'Tuple(Nullable(Float64), Float64)', 'CODEC(Gorilla(8))'),
+    ('Array(Float64)', 'Gorilla', 'Array(Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(Float64, Float64)', 'ALP', 'Tuple(Float64, Float64)', 'CODEC(ALP)'),
+    ('Map(UInt64, UInt64)', 'T64', 'Map(UInt64, UInt64)', 'CODEC(T64)'),
+    ('Map(UInt64, UInt64)', 'Delta, LZ4', 'Map(UInt64, UInt64)', 'CODEC(Delta(8), LZ4)'),
+    ('Map(UInt64, UInt64)', 'DoubleDelta', 'Map(UInt64, UInt64)', 'CODEC(DoubleDelta)'),
+    ('Map(UInt64, Float64)', 'DoubleDelta', 'Map(UInt64, Float64)', 'CODEC(DoubleDelta)'),
+    ('Tuple (Float32, Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(Float32, Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple (Float64, Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(Float64, Float64)', 'CODEC(Gorilla(8), FPC(12))'),
+    ('Nullable (Float64)', 'Gorilla', 'Nullable(Float64)', 'CODEC(Gorilla(8))'),
+    ('Array (UInt32)', 'Delta, LZ4', 'Array(UInt32)', 'CODEC(Delta(4), LZ4)'),
+    ("Enum ('a' = 1, 'b' = 1000)", 'Delta, LZ4', "Enum16('a' = 1, 'b' = 1000)", 'CODEC(Delta(2), LZ4)'),
+    ('SimpleAggregateFunction (sum, UInt64)', 'Delta, LZ4', 'SimpleAggregateFunction(sum, UInt64)', 'CODEC(Delta(8), LZ4)'),
+    ('Tuple(`a\\`x` Float32, b Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(`a\\`x` Float32, b Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple(`a b` Float32, b Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(`a b` Float32, b Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ('Tuple("a" Float32, b Float64)', 'Gorilla, FPC(12, 4)', 'Tuple(a Float32, b Float64)', 'CODEC(Gorilla, FPC(12, 4))'),
+    ("Enum('a', 'b')", 'Delta, LZ4', "Enum8('a' = 1, 'b' = 2)", 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = 127, 'b')", 'Delta, LZ4', "Enum16('a' = 127, 'b' = 128)", 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a', 'b' = 1000)", 'Delta, LZ4', "Enum16('a' = 1, 'b' = 1000)", 'CODEC(Delta(2), LZ4)'),
+    ("Enum8('a', 'b')", 'Delta, LZ4', "Enum8('a' = 1, 'b' = 2)", 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = -129)", 'Delta, LZ4', "Enum16('a' = -129)", 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = -128, 'b' = 127)", 'Delta, LZ4', "Enum8('a' = -128, 'b' = 127)", 'CODEC(Delta(1), LZ4)'),
+    ('Tuple(FixedString(8), Float64)', 'Gorilla', 'Tuple(FixedString(8), Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(UInt128, Float64)', 'Gorilla(8)', 'Tuple(UInt128, Float64)', 'CODEC(Gorilla(8))'),
+    ('Tuple(Date32, Float64)', 'Gorilla', 'Tuple(Date32, Float64)', 'CODEC(Gorilla)'),
+])
+def test_additional_server_matrix_fingerprints(
+    type_: str, expression: str, stored_type: str, stored_codec: str
+) -> None:
+    spec = parse_codec(expression)
+    parsed_stored = parse_codec(stored_codec)
+    assert spec is not None
+    assert parsed_stored is not None
+    assert codec_fingerprint(spec, type_) == codec_fingerprint(parsed_stored, type_)
+    assert codec_fingerprint(spec, type_) == codec_fingerprint(parsed_stored, stored_type)
+
+
+# Parser parity includes JS whitespace that Python's built-in \s treats differently.
+_JS_TYPE_WHITESPACE = (
+    "\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006"
+    "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+
+
+@pytest.mark.parametrize("space", list(_JS_TYPE_WHITESPACE))
+def test_type_parser_recognizes_js_whitespace(space: str) -> None:
+    mixed = f"Tuple{space}(a{space}Float32, b{space}Float64)"
+    before: CodecSpecInput = [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 4}]
+    after: CodecSpecInput = [{"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": 8}]
+    assert codec_fingerprint(before, mixed) == "Gorilla,FPC(12,4)"
+    assert not codecs_equal(before, after, mixed)
+    for type_ in [
+        f"Array{space}(UInt64)", f"Nullable{space}(UInt64)", f"LowCardinality{space}(UInt64)",
+        f"SimpleAggregateFunction{space}(max, UInt64)", f"Map{space}(UInt64, UInt64)",
+        f"FixedString{space}({space}8{space})", f"Decimal{space}({space}18, 4)",
+        f"Decimal64{space}(4)", f"DateTime64{space}(3)", f"Time64{space}(3)",
+    ]:
+        assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == "Delta(8),LZ4"
+    assert codec_fingerprint(
+        [{"kind": "Delta"}, {"kind": "LZ4"}], f"Enum{space}('a'{space}={space}1{space})"
+    ) == "Delta(1),LZ4"
+
+
+@pytest.mark.parametrize("space", ["\u001c", "\u001d", "\u001e", "\u001f", "\u0085"])
+def test_type_parser_leaves_non_js_whitespace_unknown(space: str) -> None:
+    for type_ in [f"Tuple(a{space}Float32, b Float64)", f"Tuple{space}(Float32, Float64)"]:
+        assert codec_fingerprint(
+            [{"kind": "Gorilla"}, {"kind": "FPC", "floatSize": 4}], type_
+        ) == "Gorilla,FPC(12)"
+    assert codec_fingerprint(
+        [{"kind": "Delta"}, {"kind": "LZ4"}], f"Enum('a' = 1{space})"
+    ) == "Delta,LZ4"
+
+
+@pytest.mark.parametrize(("type_", "expected"), [
+    ("Enum('has=1000', 'b')", "Delta(1),LZ4"),
+    ("Enum('can\\'t', 'b' = 128)", "Delta(2),LZ4"),
+    ("Enum('a,b' = -129, 'c')", "Delta(2),LZ4"),
+    ("Enum('a''b', 'c')", "Delta(1),LZ4"),
+])
+def test_implicit_enum_values_with_quoted_names(type_: str, expected: str) -> None:
+    assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == expected

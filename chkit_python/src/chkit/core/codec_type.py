@@ -40,9 +40,14 @@ class CodecValueType:
     width: int | None = None
 
 
-_WRAPPER_RE: Final = re.compile(r"^(Nullable|Array|LowCardinality)\(([\s\S]*)\)$")
-_TUPLE_RE: Final = re.compile(r"^Tuple\(([\s\S]*)\)$")
-_MAP_RE: Final = re.compile(r"^Map\(([\s\S]*)\)$")
+_WRAPPER_RE: Final = re.compile(
+    rf"^(Nullable|Array|LowCardinality)[{JS_WHITESPACE}]*\(([\s\S]*)\)$"
+)
+_TUPLE_RE: Final = re.compile(rf"^Tuple[{JS_WHITESPACE}]*\(([\s\S]*)\)$")
+_MAP_RE: Final = re.compile(rf"^Map[{JS_WHITESPACE}]*\(([\s\S]*)\)$")
+_AGGREGATE_RE: Final = re.compile(
+    rf"^SimpleAggregateFunction[{JS_WHITESPACE}]*\(([\s\S]*)\)$"
+)
 
 
 def codec_value_types(column_type: str) -> list[CodecValueType] | None:
@@ -52,7 +57,7 @@ def codec_value_types(column_type: str) -> list[CodecValueType] | None:
     wrapper = _WRAPPER_RE.match(type_)
     if wrapper is not None:
         return codec_value_types(wrapper.group(2))
-    aggregate = re.match(r"^SimpleAggregateFunction\(([\s\S]*)\)$", type_)
+    aggregate = _AGGREGATE_RE.match(type_)
     if aggregate is not None:
         args = _split_type_arguments(aggregate.group(1))
         return codec_value_types(args[1]) if len(args) == 2 else None  # noqa: PLR2004 - function, type
@@ -64,6 +69,34 @@ def codec_value_types(column_type: str) -> list[CodecValueType] | None:
         return _collect(_split_type_arguments(map_.group(1)))
     leaf = _leaf_type(type_)
     return [leaf] if leaf is not None else None
+
+
+def codec_has_reachable_float(column_type: str) -> bool | None:
+    """Whether a float is reachable without entering Map or LowCardinality.
+
+    Unknown types stay unknown.
+    """
+    type_ = js_trim(column_type)
+    if re.match(rf"^(LowCardinality|Map)[{JS_WHITESPACE}]*\(", type_):
+        return False
+    wrapper = re.match(rf"^(Nullable|Array)[{JS_WHITESPACE}]*\(([\s\S]*)\)$", type_)
+    if wrapper is not None:
+        return codec_has_reachable_float(wrapper.group(2))
+    aggregate = _AGGREGATE_RE.match(type_)
+    if aggregate is not None:
+        args = _split_type_arguments(aggregate.group(1))
+        return codec_has_reachable_float(args[1]) if len(args) == 2 else None  # noqa: PLR2004 - function, type
+    tuple_ = _TUPLE_RE.match(type_)
+    if tuple_ is not None:
+        floats = [
+            codec_has_reachable_float(_strip_element_name(element))
+            for element in _split_type_arguments(tuple_.group(1))
+        ]
+        if True in floats:
+            return True
+        return None if None in floats else False
+    leaf = _leaf_type(type_)
+    return leaf.family in {"float", "bfloat16"} if leaf is not None else None
 
 
 def codec_value_width(column_type: str) -> int | None:
@@ -90,9 +123,11 @@ def _collect(types: list[str]) -> list[CodecValueType] | None:
 
 
 _INTEGER_TYPE: Final = re.compile(r"^U?Int(8|16|32|64|128|256)$")
-_DECIMAL_SIZED_TYPE: Final = re.compile(r"^Decimal(32|64|128|256)\(")
-_DECIMAL_TYPE: Final = re.compile(r"^Decimal\(\s*(\d+)")
-_FIXED_STRING_TYPE: Final = re.compile(r"^FixedString\(\s*(\d+)\s*\)$")
+_DECIMAL_SIZED_TYPE: Final = re.compile(rf"^Decimal(32|64|128|256)[{JS_WHITESPACE}]*\(")
+_DECIMAL_TYPE: Final = re.compile(rf"^Decimal[{JS_WHITESPACE}]*\([{JS_WHITESPACE}]*([0-9]+)")
+_FIXED_STRING_TYPE: Final = re.compile(
+    rf"^FixedString[{JS_WHITESPACE}]*\([{JS_WHITESPACE}]*([0-9]+)[{JS_WHITESPACE}]*\)$"
+)
 
 _SIMPLE_TYPES: Final[dict[str, tuple[CodecTypeFamily, int | None]]] = {
     "Bool": ("bool", 1),
@@ -123,30 +158,19 @@ def _leaf_type(type_: str) -> CodecValueType | None:  # noqa: PLR0911 - one bran
     fixed_string = _FIXED_STRING_TYPE.match(type_)
     if fixed_string is not None:
         return CodecValueType(type_, "fixedstring", int(fixed_string.group(1)))
-    if re.match(r"^DateTime64\(", type_):
+    if re.match(rf"^DateTime64[{JS_WHITESPACE}]*\(", type_):
         return CodecValueType(type_, "date", 8)
-    if re.match(r"^DateTime(\(|$)", type_):
+    if re.match(rf"^DateTime(?:[{JS_WHITESPACE}]*\(|$)", type_):
         return CodecValueType(type_, "date", 4)
-    if re.match(r"^Time64\(", type_):
+    if re.match(rf"^Time64[{JS_WHITESPACE}]*\(", type_):
         return CodecValueType(type_, "time", 8)
-    if re.match(r"^Enum8\(", type_):
+    if re.match(rf"^Enum8[{JS_WHITESPACE}]*\(", type_):
         return CodecValueType(type_, "enum", 1)
-    if re.match(r"^Enum16\(", type_):
+    if re.match(rf"^Enum16[{JS_WHITESPACE}]*\(", type_):
         return CodecValueType(type_, "enum", 2)
-    enumeration = re.match(r"^Enum\(([\s\S]*)\)$", type_)
+    enumeration = re.match(rf"^Enum[{JS_WHITESPACE}]*\(([\s\S]*)\)$", type_)
     if enumeration is not None:
-        values = [
-            re.search(rf"=[{JS_WHITESPACE}]*([+-]?[0-9]+)[{JS_WHITESPACE}]*$", entry)
-            for entry in _split_type_arguments(enumeration.group(1))
-        ]
-        if any(value is None for value in values):
-            return CodecValueType(type_, "enum")
-        fits_int8 = all(
-            value is not None and -128 <= float(value.group(1)) <= 127  # noqa: PLR2004 - Int8 bounds
-            for value in values
-        )
-        width = 1 if fits_int8 else 2
-        return CodecValueType(type_, "enum", width)
+        return CodecValueType(type_, "enum", _enum_width(enumeration.group(1)))
     simple = _SIMPLE_TYPES.get(type_)
     return CodecValueType(type_, *simple) if simple is not None else None
 
@@ -161,7 +185,29 @@ def _decimal_width(precision: int) -> int:
     return 32
 
 
-_ELEMENT_NAME_RE: Final = re.compile(r'^(?:`[^`]*`|"[^"]*"|[A-Za-z_][A-Za-z0-9_]*)\s+(\S[\s\S]*)$')
+_ENUM_ENTRY_RE: Final = re.compile(
+    r"^'(?:\\[\s\S]|''|[^'\\])*'"
+    rf"(?:[{JS_WHITESPACE}]*=[{JS_WHITESPACE}]*([+-]?[0-9]+))?[{JS_WHITESPACE}]*$"
+)
+
+
+def _enum_width(arguments_text: str) -> int | None:
+    previous = 0.0
+    fits_int8 = True
+    for entry in _split_type_arguments(arguments_text):
+        match = _ENUM_ENTRY_RE.match(entry)
+        if match is None:
+            return None
+        value = previous + 1 if match.group(1) is None else float(match.group(1))
+        fits_int8 = fits_int8 and -128 <= value <= 127  # noqa: PLR2004 - Int8 bounds
+        previous = value
+    return 1 if fits_int8 else 2
+
+
+_ELEMENT_NAME_RE: Final = re.compile(
+    r'^(?:`(?:\\[\s\S]|``|[^`\\])*`|"(?:\\[\s\S]|""|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)'
+    rf"[{JS_WHITESPACE}]+([^{JS_WHITESPACE}][\s\S]*)$"
+)
 
 
 def _strip_element_name(element: str) -> str:

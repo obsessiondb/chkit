@@ -474,3 +474,90 @@ describe('Enum value parsing parity', () => {
     })
   }
 })
+
+// STORED rows from both additional ClickHouse 26.3 server matrices.
+const TYPE_MATRIX_STORED: Array<[string, string, string, string]> = [
+  ["Tuple(LowCardinality(UInt64), Float64)", "Gorilla", "Tuple(LowCardinality(UInt64), Float64)", "CODEC(Gorilla(8))"],
+  ["Tuple(LowCardinality(Float64), Float64)", "FPC", "Tuple(LowCardinality(Float64), Float64)", "CODEC(FPC(12))"],
+  ["Tuple(LowCardinality(Float64), Float64)", "ALP", "Tuple(LowCardinality(Float64), Float64)", "CODEC(ALP)"],
+  ["Tuple(a LowCardinality(Float32), b Float32)", "Gorilla", "Tuple(a LowCardinality(Float32), b Float32)", "CODEC(Gorilla(4))"],
+  ["Array(Tuple(LowCardinality(Float64), Float64))", "Gorilla", "Array(Tuple(LowCardinality(Float64), Float64))", "CODEC(Gorilla(8))"],
+  ["Tuple(Array(LowCardinality(Float64)), Float64)", "Gorilla", "Tuple(Array(LowCardinality(Float64)), Float64)", "CODEC(Gorilla(8))"],
+  ["Tuple(Map(UInt64, Float64), Float64)", "Gorilla", "Tuple(Map(UInt64, Float64), Float64)", "CODEC(Gorilla(8))"],
+  ["Nullable(Float64)", "Gorilla", "Nullable(Float64)", "CODEC(Gorilla(8))"],
+  ["Array(Nullable(Float64))", "Gorilla", "Array(Nullable(Float64))", "CODEC(Gorilla(8))"],
+  ["Tuple(Nullable(Float64), Float64)", "Gorilla", "Tuple(Nullable(Float64), Float64)", "CODEC(Gorilla(8))"],
+  ["Array(Float64)", "Gorilla", "Array(Float64)", "CODEC(Gorilla(8))"],
+  ["Tuple(Float64, Float64)", "ALP", "Tuple(Float64, Float64)", "CODEC(ALP)"],
+  ["Map(UInt64, UInt64)", "T64", "Map(UInt64, UInt64)", "CODEC(T64)"],
+  ["Map(UInt64, UInt64)", "Delta, LZ4", "Map(UInt64, UInt64)", "CODEC(Delta(8), LZ4)"],
+  ["Map(UInt64, UInt64)", "DoubleDelta", "Map(UInt64, UInt64)", "CODEC(DoubleDelta)"],
+  ["Map(UInt64, Float64)", "DoubleDelta", "Map(UInt64, Float64)", "CODEC(DoubleDelta)"],
+  ["Tuple (Float32, Float64)", "Gorilla, FPC(12, 4)", "Tuple(Float32, Float64)", "CODEC(Gorilla, FPC(12, 4))"],
+  ["Tuple (Float64, Float64)", "Gorilla, FPC(12, 4)", "Tuple(Float64, Float64)", "CODEC(Gorilla(8), FPC(12))"],
+  ["Nullable (Float64)", "Gorilla", "Nullable(Float64)", "CODEC(Gorilla(8))"],
+  ["Array (UInt32)", "Delta, LZ4", "Array(UInt32)", "CODEC(Delta(4), LZ4)"],
+  ["Enum ('a' = 1, 'b' = 1000)", "Delta, LZ4", "Enum16('a' = 1, 'b' = 1000)", "CODEC(Delta(2), LZ4)"],
+  ["SimpleAggregateFunction (sum, UInt64)", "Delta, LZ4", "SimpleAggregateFunction(sum, UInt64)", "CODEC(Delta(8), LZ4)"],
+  ["Tuple(`a\\`x` Float32, b Float64)", "Gorilla, FPC(12, 4)", "Tuple(`a\\`x` Float32, b Float64)", "CODEC(Gorilla, FPC(12, 4))"],
+  ["Tuple(`a b` Float32, b Float64)", "Gorilla, FPC(12, 4)", "Tuple(`a b` Float32, b Float64)", "CODEC(Gorilla, FPC(12, 4))"],
+  ["Tuple(\"a\" Float32, b Float64)", "Gorilla, FPC(12, 4)", "Tuple(a Float32, b Float64)", "CODEC(Gorilla, FPC(12, 4))"],
+  ["Enum('a', 'b')", "Delta, LZ4", "Enum8('a' = 1, 'b' = 2)", "CODEC(Delta(1), LZ4)"],
+  ["Enum('a' = 127, 'b')", "Delta, LZ4", "Enum16('a' = 127, 'b' = 128)", "CODEC(Delta(2), LZ4)"],
+  ["Enum('a', 'b' = 1000)", "Delta, LZ4", "Enum16('a' = 1, 'b' = 1000)", "CODEC(Delta(2), LZ4)"],
+  ["Enum8('a', 'b')", "Delta, LZ4", "Enum8('a' = 1, 'b' = 2)", "CODEC(Delta(1), LZ4)"],
+  ["Enum('a' = -129)", "Delta, LZ4", "Enum16('a' = -129)", "CODEC(Delta(2), LZ4)"],
+  ["Enum('a' = -128, 'b' = 127)", "Delta, LZ4", "Enum8('a' = -128, 'b' = 127)", "CODEC(Delta(1), LZ4)"],
+  ["Tuple(FixedString(8), Float64)", "Gorilla", "Tuple(FixedString(8), Float64)", "CODEC(Gorilla(8))"],
+  ["Tuple(UInt128, Float64)", "Gorilla(8)", "Tuple(UInt128, Float64)", "CODEC(Gorilla(8))"],
+  ["Tuple(Date32, Float64)", "Gorilla", "Tuple(Date32, Float64)", "CODEC(Gorilla)"],
+]
+
+for (const [type, expression, storedType, storedCodec] of TYPE_MATRIX_STORED) {
+  test(`additional server matrix fingerprint: ${type} ${expression}`, () => {
+    const spec = parseCodec(expression)
+    const parsedStored = parseCodec(storedCodec)
+    expect(spec).toBeDefined()
+    expect(parsedStored).toBeDefined()
+    expect(codecFingerprint(spec, type)).toBe(codecFingerprint(parsedStored, type))
+    expect(codecFingerprint(spec, type)).toBe(codecFingerprint(parsedStored, storedType))
+  })
+}
+
+// Parser parity includes JS whitespace that Python's built-in \s treats differently.
+const JS_TYPE_WHITESPACE = '\t\n\v\f\r \u00a0\u1680\u2000\u2001\u2002\u2003\u2004\u2005\u2006\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff'
+for (const space of JS_TYPE_WHITESPACE) {
+  test(`type parser recognizes JS whitespace U+${space.codePointAt(0)?.toString(16)}`, () => {
+    const mixed = `Tuple${space}(a${space}Float32, b${space}Float64)`
+    const before: ColumnCodecSpec = [{ kind: 'Gorilla' }, { kind: 'FPC', level: 12, floatSize: 4 }]
+    const after: ColumnCodecSpec = [{ kind: 'Gorilla' }, { kind: 'FPC', level: 12, floatSize: 8 }]
+    expect(codecFingerprint(before, mixed)).toBe('Gorilla,FPC(12,4)')
+    expect(codecsEqual(before, after, mixed)).toBe(false)
+    for (const type of [
+      `Array${space}(UInt64)`, `Nullable${space}(UInt64)`, `LowCardinality${space}(UInt64)`,
+      `SimpleAggregateFunction${space}(max, UInt64)`, `Map${space}(UInt64, UInt64)`,
+      `FixedString${space}(${space}8${space})`, `Decimal${space}(${space}18, 4)`,
+      `Decimal64${space}(4)`, `DateTime64${space}(3)`, `Time64${space}(3)`,
+    ]) {
+      expect(codecFingerprint([{ kind: 'Delta' }, { kind: 'LZ4' }], type)).toBe('Delta(8),LZ4')
+    }
+    expect(codecFingerprint([{ kind: 'Delta' }, { kind: 'LZ4' }], `Enum${space}('a'${space}=${space}1${space})`)).toBe('Delta(1),LZ4')
+  })
+}
+for (const space of ['\u001c', '\u001d', '\u001e', '\u001f', '\u0085']) {
+  test(`type parser leaves non-JS whitespace U+${space.codePointAt(0)?.toString(16)} unknown`, () => {
+    for (const type of [`Tuple(a${space}Float32, b Float64)`, `Tuple${space}(Float32, Float64)`]) {
+      expect(codecFingerprint([{ kind: 'Gorilla' }, { kind: 'FPC', floatSize: 4 }], type)).toBe('Gorilla,FPC(12)')
+    }
+    expect(codecFingerprint([{ kind: 'Delta' }, { kind: 'LZ4' }], `Enum('a' = 1${space})`)).toBe('Delta,LZ4')
+  })
+}
+
+test.each([
+  ["Enum('has=1000', 'b')", 'Delta(1),LZ4'],
+  ["Enum('can\\'t', 'b' = 128)", 'Delta(2),LZ4'],
+  ["Enum('a,b' = -129, 'c')", 'Delta(2),LZ4'],
+  ["Enum('a''b', 'c')", 'Delta(1),LZ4'],
+])('implicit Enum values with quoted names: %s', (type, expected) => {
+  expect(codecFingerprint([{ kind: 'Delta' }, { kind: 'LZ4' }], type)).toBe(expected)
+})
