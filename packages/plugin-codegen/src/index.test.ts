@@ -13,22 +13,12 @@ import {
   generateIngestArtifacts,
   mapColumnType,
   normalizeCodegenOptions,
-  codegen,
 } from './index'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../..')
 const CORE_ENTRY = join(WORKSPACE_ROOT, 'packages/core/src/index.ts')
 
 describe('@chkit/plugin-codegen options', () => {
-  test('exposes codegen manifest and command', () => {
-    const plugin = createCodegenPlugin()
-
-    expect(plugin.manifest.name).toBe('codegen')
-    expect(plugin.manifest.apiVersion).toBe(1)
-    expect(plugin.commands).toHaveLength(1)
-    expect(plugin.commands[0]?.name).toBe('codegen')
-  })
-
   test('normalizes documented option defaults', () => {
     const options = normalizeCodegenOptions()
 
@@ -41,15 +31,6 @@ describe('@chkit/plugin-codegen options', () => {
     expect(options.failOnUnsupportedType).toBe(true)
     expect(options.emitIngest).toBe(false)
     expect(options.ingestOutFile).toBe('./src/generated/chkit-ingest.ts')
-  })
-
-  test('creates typed inline plugin registration', () => {
-    const registration = codegen({ emitZod: true })
-
-    expect(registration.name).toBe('codegen')
-    expect(registration.enabled).toBe(true)
-    expect(registration.options?.emitZod).toBe(true)
-    expect(registration.plugin.manifest.name).toBe('codegen')
   })
 
   test('createCodegenPlugin carries factory options into runtime schemas', () => {

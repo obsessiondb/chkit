@@ -128,11 +128,11 @@ describe('SQL validation via EXPLAIN AST', () => {
   })
 
   // =========================================================================
-  // CREATE TABLE — Primitive column types
+  // CREATE TABLE — Column types
   // =========================================================================
 
-  describe('CREATE TABLE — primitive column types', () => {
-    const primitiveTypes = [
+  test('CREATE TABLE — primitive, parameterized and nested column types', async () => {
+    const types = [
       'String',
       'UInt8',
       'UInt16',
@@ -153,27 +153,6 @@ describe('SQL validation via EXPLAIN AST', () => {
       'DateTime',
       'DateTime64',
       'Date32',
-    ]
-
-    for (const type of primitiveTypes) {
-      test(`type: ${type}`, async () => {
-        const def = baseTable({
-          columns: [
-            { name: 'id', type: 'UInt64' },
-            { name: 'value', type },
-          ],
-        })
-        await assertValidSQL(client, toCreateSQL(def))
-      })
-    }
-  })
-
-  // =========================================================================
-  // CREATE TABLE — Parameterized types
-  // =========================================================================
-
-  describe('CREATE TABLE — parameterized types', () => {
-    const parameterizedTypes = [
       'DateTime64(3)',
       "DateTime64(3, 'UTC')",
       'FixedString(10)',
@@ -181,27 +160,6 @@ describe('SQL validation via EXPLAIN AST', () => {
       'Decimal32(2)',
       'Decimal64(4)',
       'Decimal128(6)',
-    ]
-
-    for (const type of parameterizedTypes) {
-      test(`type: ${type}`, async () => {
-        const def = baseTable({
-          columns: [
-            { name: 'id', type: 'UInt64' },
-            { name: 'value', type },
-          ],
-        })
-        await assertValidSQL(client, toCreateSQL(def))
-      })
-    }
-  })
-
-  // =========================================================================
-  // CREATE TABLE — Complex/nested types
-  // =========================================================================
-
-  describe('CREATE TABLE — complex/nested types', () => {
-    const complexTypes = [
       'Nullable(String)',
       'LowCardinality(String)',
       'LowCardinality(Nullable(String))',
@@ -217,18 +175,10 @@ describe('SQL validation via EXPLAIN AST', () => {
       'SimpleAggregateFunction(sum, UInt64)',
       'SimpleAggregateFunction(max, DateTime)',
     ]
-
-    for (const type of complexTypes) {
-      test(`type: ${type}`, async () => {
-        const def = baseTable({
-          columns: [
-            { name: 'id', type: 'UInt64' },
-            { name: 'value', type },
-          ],
-        })
-        await assertValidSQL(client, toCreateSQL(def))
-      })
-    }
+    const def = baseTable({
+      columns: [{ name: 'id', type: 'UInt64' }, ...types.map((type, index) => ({ name: `c${index}`, type }))],
+    })
+    await assertValidSQL(client, toCreateSQL(def))
   })
 
   // =========================================================================
