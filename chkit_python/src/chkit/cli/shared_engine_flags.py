@@ -10,7 +10,7 @@ produces (``resolve_strip_behavior`` reads those keys).
 
 from __future__ import annotations
 
-from typing import Annotated, Any
+from typing import Annotated
 
 import typer
 
@@ -29,15 +29,3 @@ ForceSharedEnginesOption = Annotated[
 NoSharedEnginesOption = Annotated[
     bool, typer.Option("--no-shared-engines", help=NO_SHARED_ENGINES_HELP)
 ]
-
-
-def shared_engine_hook_flags(
-    *, force_shared_engines: bool, no_shared_engines: bool
-) -> dict[str, Any]:
-    """Parsed-flag dict for the plugin hooks: only flags that were passed."""
-    flags: dict[str, Any] = {}
-    if force_shared_engines:
-        flags["--force-shared-engines"] = True
-    if no_shared_engines:
-        flags["--no-shared-engines"] = True
-    return flags

@@ -46,6 +46,7 @@ import {
 	readdirSync,
 	readFileSync,
 	writeFileSync,
+	writeSync,
 } from 'node:fs'
 import { join, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
@@ -304,6 +305,7 @@ async function publishRelease({ dryRun, ci }: PublishArgs): Promise<void> {
 	if (unpublished.length > 0) {
 		// 2. Refuse a release commit whose changes the changelog would miss.
 		assertNoUnreleasedChangesets(version)
+		assertNoMajorChangesets()
 
 		// 3. Quality gates (typecheck, lint, test, build) and release guards.
 		runQualityGates()
@@ -999,18 +1001,20 @@ function runCommand(
 		cwd: options?.cwd ?? process.cwd(),
 		encoding: 'utf8',
 		env: process.env,
+		// The 1 MiB default would kill a command with more output, such as verify.
+		maxBuffer: 256 * 1024 * 1024,
 	})
 
 	const stdoutText = result.stdout ?? ''
 	const stderrText = result.stderr ?? ''
 
 	if (stdoutText.length > 0) {
-		process.stdout.write(stdoutText)
+		writeAll(1, stdoutText)
 		appendLog(stdoutText)
 	}
 
 	if (stderrText.length > 0) {
-		process.stderr.write(stderrText)
+		writeAll(2, stderrText)
 		appendLog(stderrText)
 	}
 
@@ -1033,8 +1037,28 @@ function shellQuote(value: string): string {
 }
 
 function logLine(message: string): void {
-	process.stdout.write(`${message}\n`)
+	writeAll(1, `${message}\n`)
 	appendLog(`${message}\n`)
+}
+
+/**
+ * Writes all of `text` to `fd` before returning, so `fail()` cannot exit with
+ * output still buffered. Bun makes stdout and stderr non-blocking, so a pipe
+ * takes only what fits and `writeSync` returns a partial count or EAGAIN.
+ */
+function writeAll(fd: number, text: string): void {
+	const bytes = Buffer.from(text)
+	let offset = 0
+	while (offset < bytes.length) {
+		let written = 0
+		try {
+			written = writeSync(fd, bytes, offset)
+		} catch (error) {
+			if ((error as NodeJS.ErrnoException).code !== 'EAGAIN') throw error
+		}
+		if (written === 0) Bun.sleepSync(10)
+		offset += written
+	}
 }
 
 function appendLog(message: string): void {

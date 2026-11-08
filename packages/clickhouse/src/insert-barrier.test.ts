@@ -103,7 +103,7 @@ describe('waitForExchange', () => {
         return rows as T[]
       },
     } as unknown as ClickHouseExecutor
-    await waitForExchange(db, 'EXCHANGE TABLES app.a AND app.b;')
+    await waitForExchange(db, 'EXCHANGE TABLES app.a AND app.b;', { pollIntervalMs: 1 })
     expect(poll).toBe(2)
   })
 
