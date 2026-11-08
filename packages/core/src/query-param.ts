@@ -12,12 +12,12 @@ export interface NamedParam<N extends string = string> {
 }
 
 /** What `p` requires of a column-only type, which it never has. */
-export interface NotAParam {
+interface NotAParam {
   readonly '~error': 'Tuple, Nested, Variant, Dynamic and AggregateFunction are column-only types'
 }
 
 /** Rejects a schema that is, or holds, a column-only type. */
-export type ParamSchema<S> = IsColumnOnly<S> extends true ? NotAParam : unknown
+type ParamSchema<S> = IsColumnOnly<S> extends true ? NotAParam : unknown
 
 type IsColumnOnly<S> = S extends ColumnOnly
   ? true
