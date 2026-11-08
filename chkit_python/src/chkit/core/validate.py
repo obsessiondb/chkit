@@ -75,7 +75,7 @@ def _validate_column_codec(
     if column.codec is None:
         return
     # The type as rendered (`nullable=True` is `Nullable(T)`), like render_column_type.
-    type_ = str(column.type).strip()
+    type_ = js_trim(str(column.type))
     problem = column_codec_problem(column.codec, f"Nullable({type_})" if column.nullable else type_)
     if problem is None:
         return

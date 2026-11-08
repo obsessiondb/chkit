@@ -197,14 +197,14 @@ def test_canonicalize_fills_in_lz4hc_default_level() -> None:
     ]
 
 
-def test_canonicalize_keeps_bare_delta_gorilla_and_drops_double_delta_size() -> None:
+def test_canonicalize_keeps_bare_delta_gorilla_and_explicit_double_delta_size() -> None:
     # #465: ClickHouse fills in the column's value width for a bare Delta/Gorilla.
     def canon(spec: CodecSpecInput) -> list[dict[str, Any]]:
         return [c.model_dump(exclude_none=True) for c in canonicalize_codec(spec)]
 
     assert canon({"kind": "Delta"}) == [{"kind": "Delta"}]
     assert canon({"kind": "Delta", "size": 1}) == [{"kind": "Delta", "size": 1}]
-    assert canon({"kind": "DoubleDelta", "size": 4}) == [{"kind": "DoubleDelta"}]
+    assert canon({"kind": "DoubleDelta", "size": 4}) == [{"kind": "DoubleDelta", "size": 4}]
     assert canon({"kind": "Gorilla"}) == [{"kind": "Gorilla"}]
 
 
@@ -285,7 +285,7 @@ _STORED: list[tuple[CodecSpecInput, str]] = [
     ({"kind": "LZ4HC", "level": 12}, "CODEC(LZ4HC(12))"),
     ([{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], "CODEC(Delta(8), LZ4)"),
     ([{"kind": "DoubleDelta"}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
-    ([{"kind": "DoubleDelta", "size": 4}, {"kind": "LZ4"}], "CODEC(DoubleDelta, LZ4)"),
+    ([{"kind": "DoubleDelta", "size": 4}, {"kind": "LZ4"}], "CODEC(DoubleDelta(4), LZ4)"),
     ([{"kind": "Gorilla", "size": 8}, {"kind": "ZSTD", "level": 2}], "CODEC(Gorilla(8), ZSTD(2))"),
     ([{"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "LZ4"}], "CODEC(FPC(12), LZ4)"),
     (
@@ -354,10 +354,10 @@ def test_codec_fingerprint_matches_the_typescript_strings() -> None:
 # ───────────── codec forms ClickHouse stores (#465) ─────────────
 
 
-def test_render_bare_delta_gorilla_and_never_a_double_delta_size() -> None:
+def test_render_bare_delta_gorilla_and_explicit_double_delta_size() -> None:
     assert render_codec([{"kind": "Delta"}, {"kind": "ZSTD"}]) == "CODEC(Delta, ZSTD)"
     assert render_codec({"kind": "Gorilla"}) == "CODEC(Gorilla)"
-    assert render_codec({"kind": "DoubleDelta", "size": 8}) == "CODEC(DoubleDelta)"
+    assert render_codec({"kind": "DoubleDelta", "size": 8}) == "CODEC(DoubleDelta(8))"
 
 
 def test_render_and_parse_zstd_window_t64_mode_fpc_level_and_default() -> None:
@@ -538,6 +538,8 @@ def test_zero_zstd_window_remains_distinct_from_an_omitted_window() -> None:
 @pytest.mark.parametrize(("type_", "expected"), [
     ("Enum('can\\'t' = 1000, 'b' = 1)", "Delta(2),LZ4"),
     ("Enum('a\\', b' = 1, 'c' = 2)", "Delta(1),LZ4"),
+    ("Enum()", "Delta,LZ4"),
+    ("Enum('a' = 1 2)", "Delta,LZ4"),
     ("Enum('a' = \u0661)", "Delta,LZ4"),
     ("Enum('a' = 1\u0085)", "Delta,LZ4"),
     ("Enum('a' = 0x1)", "Delta(1),LZ4"),
@@ -673,12 +675,12 @@ def test_opus_server_fingerprints(type_: str, expression: str, stored: str) -> N
     assert codec_fingerprint(codec_raw(expression), type_) == codec_fingerprint(parse_codec(stored), type_)
 
 
-def test_double_delta_retains_a_raw_size_only_in_verbatim_chains() -> None:
+def test_double_delta_retains_a_size_only_in_verbatim_chains() -> None:
     type_ = "Tuple(UInt32, UInt64)"
     assert codec_fingerprint(codec_raw("Delta, DoubleDelta(4)"), type_) == "Delta,DoubleDelta(4)"
     assert not codecs_equal(codec_raw("Delta, DoubleDelta(4)"), codec_raw("Delta, DoubleDelta(8)"), type_)
     assert codecs_equal(codec_raw("DoubleDelta(4), ZSTD"), codec_raw("DoubleDelta(8), ZSTD"), type_)
     assert codecs_equal(codec_raw("Delta, DoubleDelta(4)"), codec_raw("Delta, DoubleDelta(8)"), "UInt64")
     typed: CodecSpecInput = [{"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "DoubleDelta", "size": 8}]
-    assert render_codec(typed) == "CODEC(FPC(12, 4), DoubleDelta)"
-    assert codec_fingerprint(canonicalize_codec(typed), "Tuple(Float32, Float64)") == "FPC(12,4),DoubleDelta"
+    assert render_codec(typed) == "CODEC(FPC(12, 4), DoubleDelta(8))"
+    assert codec_fingerprint(canonicalize_codec(typed), "Tuple(Float32, Float64)") == "FPC(12),DoubleDelta"

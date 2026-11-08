@@ -197,7 +197,10 @@ def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | N
             continue
         accepts = _TYPE_RULES.get(step.codec.kind) if step.codec is not None else None
         rejected = (
-            next((value for value in values if not accepts(value)), None)
+            next(
+                (value for value in values if value.family != "dynamic" and not accepts(value)),
+                None,
+            )
             if accepts is not None
             else None
         )
@@ -205,8 +208,8 @@ def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | N
             rejected = next(
                 (
                     value for value in values
-                    if value.width is None
-                    or value.width not in (1, 2, 4, 8)
+                    if value.family != "dynamic"
+                    and (value.width is None or value.width not in (1, 2, 4, 8))
                 ),
                 None,
             )

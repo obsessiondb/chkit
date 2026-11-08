@@ -409,7 +409,7 @@ function renderCodecStepSource(step: ColumnCodec): string {
   if (step.kind === 'ZSTD' || step.kind === 'LZ4HC') {
     if (step.level !== undefined) parts.push(`level: ${step.level}`)
     if (step.kind === 'ZSTD' && step.windowLog !== undefined) parts.push(`windowLog: ${step.windowLog}`)
-  } else if (step.kind === 'Delta' || step.kind === 'Gorilla') {
+  } else if (step.kind === 'Delta' || step.kind === 'DoubleDelta' || step.kind === 'Gorilla') {
     if (step.size !== undefined) parts.push(`size: ${step.size}`)
   } else if (step.kind === 'T64') {
     if (step.mode !== undefined) parts.push(`mode: ${renderString(step.mode)}`)

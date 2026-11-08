@@ -15,9 +15,16 @@ const INTEGER_ARG = /^[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01
  * level unsigned: `ZSTD(-1)` reads back as `ZSTD(18446744073709551615)`.
  */
 export function parseIntegerArg(raw: string): number | undefined {
-  if (!INTEGER_ARG.test(raw)) return undefined
-  const magnitude = BigInt(raw.replace(/^[+-]/, '').replaceAll('_', ''))
-  const signed = raw.startsWith('-') ? -magnitude : magnitude
+  const signed = parseIntegerLiteral(raw)
+  if (signed === undefined) return undefined
   const value = signed >= UINT64_SIGN ? signed - UINT64_RANGE : signed
   return value >= -MAX_SAFE && value <= MAX_SAFE ? Number(value) : undefined
+}
+
+/** An exact integer literal, before codec argument wrapping and JS number bounds. */
+export function parseIntegerLiteral(raw: string): bigint | undefined {
+  if (!INTEGER_ARG.test(raw)) return undefined
+  const magnitude = BigInt(raw.replace(/^[+-]/, '').replaceAll('_', ''))
+  if (magnitude >= UINT64_RANGE) return undefined
+  return raw.startsWith('-') ? -magnitude : magnitude
 }

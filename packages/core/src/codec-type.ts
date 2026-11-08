@@ -1,4 +1,6 @@
-import { parseIntegerArg } from './codec-integer.js'
+import { parseIntegerLiteral } from './codec-integer.js'
+import { splitTopLevelComma } from './key-clause.js'
+import { tokenizeSQL } from './sql-lexer.js'
 
 /**
  * The value types a column codec sees. ClickHouse applies a codec to each data
@@ -20,6 +22,8 @@ export type CodecTypeFamily =
   | 'uuid'
   | 'string'
   | 'fixedstring'
+  | 'nullable'
+  | 'dynamic'
 
 /** A value type of a column. `width` is its size in bytes when known. */
 export interface CodecValueType {
@@ -30,39 +34,48 @@ export interface CodecValueType {
 
 /**
  * The value types of a column type, or undefined when one of them is a type
- * chkit does not model (JSON, Dynamic, Variant, Nested, AggregateFunction, ...).
+ * chkit does not model (Variant, Nested, AggregateFunction, ...).
  */
 export function codecValueTypes(columnType: string): CodecValueType[] | undefined {
-  const type = columnType.trim()
+  const type = tokenizeSQL(columnType).map((token) =>
+    token.kind === 'line_comment' || token.kind === 'block_comment' ? ' ' : token.text
+  ).join('').trim()
   const wrapper = type.match(/^(Nullable|Array|LowCardinality)\s*\(([\s\S]*)\)$/)
-  if (wrapper?.[2] !== undefined) return codecValueTypes(wrapper[2])
+  if (wrapper?.[2] !== undefined) {
+    if (wrapper[1] === 'LowCardinality' && /^Nullable\s*\(/.test(wrapper[2].trim())) {
+      return [{ type: wrapper[2].trim(), family: 'nullable' }]
+    }
+    return codecValueTypes(wrapper[2])
+  }
   const aggregate = type.match(/^SimpleAggregateFunction\s*\(([\s\S]*)\)$/)
   if (aggregate?.[1] !== undefined) {
-    const args = splitTypeArguments(aggregate[1])
+    const args = splitTopLevelComma(aggregate[1])
     return args.length === 2 && args[1] !== undefined ? codecValueTypes(args[1]) : undefined
   }
   const tuple = type.match(/^Tuple\s*\(([\s\S]*)\)$/)
-  if (tuple?.[1] !== undefined) return collect(splitTypeArguments(tuple[1]).map(stripElementName))
+  if (tuple?.[1] !== undefined) return collect(splitTopLevelComma(tuple[1]).map(stripElementName))
   const map = type.match(/^Map\s*\(([\s\S]*)\)$/)
-  if (map?.[1] !== undefined) return collect(splitTypeArguments(map[1]))
+  if (map?.[1] !== undefined) return collect(splitTopLevelComma(map[1]))
   const leaf = leafType(type)
   return leaf ? [leaf] : undefined
 }
 
 /** Whether a float is reachable without entering Map or LowCardinality; unknown types stay unknown. */
 export function codecHasReachableFloat(columnType: string): boolean | undefined {
-  const type = columnType.trim()
+  const type = tokenizeSQL(columnType).map((token) =>
+    token.kind === 'line_comment' || token.kind === 'block_comment' ? ' ' : token.text
+  ).join('').trim()
   if (/^(LowCardinality|Map)\s*\(/.test(type)) return false
   const wrapper = type.match(/^(Nullable|Array)\s*\(([\s\S]*)\)$/)
   if (wrapper?.[2] !== undefined) return codecHasReachableFloat(wrapper[2])
   const aggregate = type.match(/^SimpleAggregateFunction\s*\(([\s\S]*)\)$/)
   if (aggregate?.[1] !== undefined) {
-    const args = splitTypeArguments(aggregate[1])
+    const args = splitTopLevelComma(aggregate[1])
     return args.length === 2 && args[1] !== undefined ? codecHasReachableFloat(args[1]) : undefined
   }
   const tuple = type.match(/^Tuple\s*\(([\s\S]*)\)$/)
   if (tuple?.[1] !== undefined) {
-    const floats = splitTypeArguments(tuple[1]).map((element) => codecHasReachableFloat(stripElementName(element)))
+    const floats = splitTopLevelComma(tuple[1]).map((element) => codecHasReachableFloat(stripElementName(element)))
     if (floats.includes(true)) return true
     return floats.includes(undefined) ? undefined : false
   }
@@ -112,13 +125,16 @@ function leafType(type: string): CodecValueType | undefined {
   if (/^Enum16\s*\(/.test(type)) return { type, family: 'enum', width: 2 }
   const enumeration = type.match(/^Enum\s*\(([\s\S]*)\)$/)
   if (enumeration?.[1] !== undefined) {
-    return { type, family: 'enum', width: enumWidth(enumeration[1]) }
+    const width = enumWidth(enumeration[1])
+    return width === undefined ? undefined : { type, family: 'enum', width }
   }
   const simple = SIMPLE_TYPES[type]
   return simple ? { type, ...simple } : undefined
 }
 
 const SIMPLE_TYPES: Record<string, { family: CodecTypeFamily; width?: number }> = {
+  Dynamic: { family: 'dynamic', width: 1 },
+  JSON: { family: 'dynamic', width: 1 },
   Bool: { family: 'bool', width: 1 },
   Boolean: { family: 'bool', width: 1 },
   Float32: { family: 'float', width: 4 },
@@ -141,14 +157,18 @@ function decimalWidth(precision: number): number {
 }
 
 function enumWidth(argumentsText: string): number | undefined {
-  let previous = 0
+  let previous = 0n
   let fitsInt8 = true
-  for (const entry of splitTypeArguments(argumentsText)) {
-    const match = entry.match(/^'(?:\\[\s\S]|''|[^'\\])*'(?:\s*=\s*(\S+))?\s*$/)
+  const entries = splitTopLevelComma(argumentsText)
+  if (entries.length === 0) return undefined
+  for (const entry of entries) {
+    const match = entry.match(/^'(?:\\[\s\S]|''|[^'\\])*'(?:\s*=\s*([\s\S]+))?\s*$/)
     if (!match) return undefined
-    const value = match[1] === undefined ? previous + 1 : parseIntegerArg(match[1])
-    if (value === undefined) return undefined
-    fitsInt8 = fitsInt8 && value >= -128 && value <= 127
+    const literal = match[1] === undefined ? previous + 1n : parseIntegerLiteral(match[1].trim().replace(/^([+-])\s+/, '$1'))
+    if (literal === undefined) return undefined
+    // ClickHouse's integer AST reads UInt64 literals as signed Enum values.
+    const value = BigInt.asIntN(64, literal)
+    fitsInt8 = fitsInt8 && value >= -128n && value <= 127n
     previous = value
   }
   return fitsInt8 ? 1 : 2
@@ -157,34 +177,5 @@ function enumWidth(argumentsText: string): number | undefined {
 /** `a UInt8` or `` `a b` UInt8 `` in a named Tuple is the element type `UInt8`. */
 function stripElementName(element: string): string {
   const named = element.trim().match(/^(?:`(?:\\[\s\S]|``|[^`\\])*`|"(?:\\[\s\S]|""|[^"\\])*"|[A-Za-z_][A-Za-z0-9_]*)\s+(\S[\s\S]*)$/)
-  return named?.[1] ?? element
-}
-
-/** Splits type arguments on top-level commas, outside parentheses and quotes. */
-function splitTypeArguments(input: string): string[] {
-  const out: string[] = []
-  let depth = 0
-  let quote: string | undefined
-  let current = ''
-  let escaped = false
-  for (const ch of input) {
-    if (quote) {
-      if (escaped) escaped = false
-      else if (ch === '\\') escaped = true
-      else if (ch === quote) quote = undefined
-    } else if (ch === "'" || ch === '`' || ch === '"') {
-      quote = ch
-    } else if (ch === '(') {
-      depth += 1
-    } else if (ch === ')') {
-      depth -= 1
-    } else if (ch === ',' && depth === 0) {
-      out.push(current.trim())
-      current = ''
-      continue
-    }
-    current += ch
-  }
-  out.push(current.trim())
-  return out
+  return named?.[1] && !named[1].startsWith('(') ? named[1] : element
 }

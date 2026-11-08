@@ -145,9 +145,9 @@ function typeProblem(steps: ChainStep[], columnType: string): CodecProblem | und
     // An explicit Delta/Gorilla size bypasses leaf checks; float reachability is checked below.
     if ((step.codec?.kind === 'Delta' || step.codec?.kind === 'Gorilla') && step.codec.size !== undefined) continue
     const accepts = step.codec ? TYPE_RULES[step.codec.kind] : undefined
-    let rejected = accepts ? values.find((value) => !accepts(value)) : undefined
+    let rejected = accepts ? values.find((value) => value.family !== 'dynamic' && !accepts(value)) : undefined
     if (step.kind === 'Gorilla') {
-      rejected = values.find((value) => value.width === undefined || ![1, 2, 4, 8].includes(value.width))
+      rejected = values.find((value) => value.family !== 'dynamic' && (value.width === undefined || ![1, 2, 4, 8].includes(value.width)))
     }
     if (!rejected) continue
     const where = rejected.type === columnType.trim() ? '' : ` in ${columnType.trim()}`

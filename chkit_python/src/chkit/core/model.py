@@ -117,8 +117,8 @@ _PreprocessorSize: TypeAlias = Annotated[Literal[1, 2, 4, 8], BeforeValidator(_r
 
 class _CodecDeltaLike(_StrictModel):
     """``Delta``/``Gorilla`` without a size render bare: ClickHouse uses the
-    byte width of the column's values. ``DoubleDelta`` never renders its size,
-    which ClickHouse ignores."""
+    byte width of the column's values. ``DoubleDelta`` renders its size when
+    set; ClickHouse retains it only in verbatim chains."""
 
     kind: Literal["Delta", "DoubleDelta", "Gorilla"]
     size: _PreprocessorSize | None = None
@@ -140,7 +140,7 @@ class _CodecT64(_StrictModel):
 
 
 class _CodecFPC(_StrictModel):
-    """``level`` 1-28 (default 12). ClickHouse ignores ``float_size``."""
+    """``level`` 1-28 (default 12). ClickHouse retains ``float_size`` only in verbatim chains."""
 
     kind: Literal["FPC"] = "FPC"
     level: int | None = None

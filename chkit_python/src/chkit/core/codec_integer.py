@@ -25,6 +25,15 @@ def parse_integer_arg(raw: str) -> int | None:
     ClickHouse prints a negative level unsigned: ``ZSTD(-1)`` reads back as
     ``ZSTD(18446744073709551615)``.
     """
+    signed = parse_integer_literal(raw)
+    if signed is None:
+        return None
+    value = signed - _UINT64_RANGE if signed >= _UINT64_SIGN else signed
+    return value if -_MAX_SAFE <= value <= _MAX_SAFE else None
+
+
+def parse_integer_literal(raw: str) -> int | None:
+    """An exact integer literal, before codec argument wrapping and JS number bounds."""
     if _INTEGER_ARG.fullmatch(raw) is None:
         return None
     digits = raw.lstrip("+-").replace("_", "")
@@ -38,6 +47,6 @@ def parse_integer_arg(raw: str) -> int | None:
         if len(decimal) > _UINT64_DECIMAL_DIGITS:
             return None
         magnitude = int(decimal, 10)
-    signed = -magnitude if raw.startswith("-") else magnitude
-    value = signed - _UINT64_RANGE if signed >= _UINT64_SIGN else signed
-    return value if -_MAX_SAFE <= value <= _MAX_SAFE else None
+    if magnitude >= _UINT64_RANGE:
+        return None
+    return -magnitude if raw.startswith("-") else magnitude

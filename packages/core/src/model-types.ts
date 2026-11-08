@@ -48,12 +48,12 @@ export type PreprocessingColumnCodec =
   | { kind: 'Delta' | 'Gorilla'; size?: 1 | 2 | 4 | 8 }
   | {
       kind: 'DoubleDelta'
-      /** @deprecated ClickHouse ignores it; chkit never renders it. */
+      /** Rendered when set; ClickHouse retains it only in verbatim chains. */
       size?: 1 | 2 | 4 | 8
     }
   | { kind: 'GCD' | 'ALP' }
   | { kind: 'T64'; mode?: 'byte' | 'bit' }
-  /** `level` 1–28 (default 12). ClickHouse ignores `floatSize` and stores `FPC(level)`. */
+  /** `level` 1–28 (default 12). ClickHouse retains `floatSize` only in verbatim chains. */
   | { kind: 'FPC'; level?: number; floatSize?: 4 | 8 }
 
 /**

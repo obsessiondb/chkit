@@ -36,10 +36,9 @@ import {
   renderAlterResetSetting,
   renderDictionarySQL,
   columnTypeFingerprint,
-  renderColumnType,
+  columnCodecFingerprint,
   toCreateSQL,
 } from './sql.js'
-import { codecFingerprint } from './codec.js'
 import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
 import { readonlySettingsFingerprint } from './table-settings.js'
@@ -232,17 +231,16 @@ interface TableDiffResult {
 function normalizeColumn(
   column: ColumnDefinition
 ): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> & { codec: string } {
-  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, codec, ...rest } = column
+  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, codec: _codec, ...rest } = column
   // Compare what the DSL renders: inline Nullable(T) and nullable: true are
   // equivalent, while an additional or differently placed wrapper is not.
-  const rendered = renderColumnType(column)
   return {
     // ClickHouse stores `Decimal(10,2)` as `Decimal(10, 2)` (#466).
     type: columnTypeFingerprint(column),
     ...rest,
     ...(column.default === undefined ? {} : { default: defaultFingerprint(column.default) }),
     // Codecs compare in the form ClickHouse stores them, like drift (#465).
-    codec: codecFingerprint(codec, rendered),
+    codec: columnCodecFingerprint(column),
   }
 }
 
@@ -255,7 +253,6 @@ function defaultFingerprint(value: ColumnDefaultValue): string {
   return literalDefaultFingerprint(sql) ?? sql
 }
 
-
 function normalizeColumnWithoutCodec(
   column: ColumnDefinition
 ): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
@@ -265,8 +262,9 @@ function normalizeColumnWithoutCodec(
 
 /** A column without its codec, and without its comment when the plan removes that in its own operation. */
 function columnAfterRemovals(column: ColumnDefinition, removeComment: boolean): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
-  const { comment: _comment, ...rest } = normalizeColumnWithoutCodec(column)
-  return removeComment ? rest : normalizeColumnWithoutCodec(column)
+  const normalized = normalizeColumnWithoutCodec(column)
+  const { comment: _comment, ...rest } = normalized
+  return removeComment ? rest : normalized
 }
 
 function isCommentOnlyChange(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {

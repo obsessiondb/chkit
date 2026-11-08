@@ -150,10 +150,10 @@ describe('canonicalizeCodec', () => {
     expect(canonicalizeCodec({ kind: 'LZ4HC' })).toEqual([{ kind: 'LZ4HC', level: 9 }])
   })
 
-  test('keeps a bare Delta/Gorilla bare and drops the DoubleDelta size ClickHouse ignores (#465)', () => {
+  test('keeps bare Delta/Gorilla and explicit DoubleDelta sizes (#465)', () => {
     expect(canonicalizeCodec({ kind: 'Delta' })).toEqual([{ kind: 'Delta' }])
     expect(canonicalizeCodec({ kind: 'Delta', size: 1 })).toEqual([{ kind: 'Delta', size: 1 }])
-    expect(canonicalizeCodec({ kind: 'DoubleDelta', size: 4 })).toEqual([{ kind: 'DoubleDelta' }])
+    expect(canonicalizeCodec({ kind: 'DoubleDelta', size: 4 })).toEqual([{ kind: 'DoubleDelta', size: 4 }])
     expect(canonicalizeCodec({ kind: 'Gorilla' })).toEqual([{ kind: 'Gorilla' }])
   })
 
@@ -232,7 +232,7 @@ describe('codecFingerprint', () => {
     [{ kind: 'LZ4HC', level: 12 }, 'CODEC(LZ4HC(12))'],
     [[{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }], 'CODEC(Delta(8), LZ4)'],
     [[{ kind: 'DoubleDelta' }, { kind: 'LZ4' }], 'CODEC(DoubleDelta, LZ4)'],
-    [[{ kind: 'DoubleDelta', size: 4 }, { kind: 'LZ4' }], 'CODEC(DoubleDelta, LZ4)'],
+    [[{ kind: 'DoubleDelta', size: 4 }, { kind: 'LZ4' }], 'CODEC(DoubleDelta(4), LZ4)'],
     [[{ kind: 'Gorilla', size: 8 }, { kind: 'ZSTD', level: 2 }], 'CODEC(Gorilla(8), ZSTD(2))'],
     [[{ kind: 'FPC', level: 12, floatSize: 8 }, { kind: 'LZ4' }], 'CODEC(FPC(12), LZ4)'],
     [[{ kind: 'Delta', size: 8 }, { kind: 'T64' }, { kind: 'ZSTD' }], 'CODEC(Delta(8), T64, ZSTD(1))'],
@@ -291,10 +291,10 @@ describe('codecFingerprint', () => {
 })
 
 describe('codec forms ClickHouse stores (#465)', () => {
-  test('renders a bare Delta/Gorilla and never a DoubleDelta size', () => {
+  test('renders bare Delta/Gorilla and explicit DoubleDelta sizes', () => {
     expect(renderCodec([{ kind: 'Delta' }, { kind: 'ZSTD' }])).toBe('CODEC(Delta, ZSTD)')
     expect(renderCodec({ kind: 'Gorilla' })).toBe('CODEC(Gorilla)')
-    expect(renderCodec({ kind: 'DoubleDelta', size: 8 })).toBe('CODEC(DoubleDelta)')
+    expect(renderCodec({ kind: 'DoubleDelta', size: 8 })).toBe('CODEC(DoubleDelta(8))')
   })
 
   test('renders and parses ZSTD windowLog, T64 mode, FPC level and Default', () => {
@@ -463,6 +463,8 @@ describe('Enum value parsing parity', () => {
   const cases: Array<[string, string]> = [
     ["Enum('can\\'t' = 1000, 'b' = 1)", 'Delta(2),LZ4'],
     ["Enum('a\\', b' = 1, 'c' = 2)", 'Delta(1),LZ4'],
+    ["Enum()", 'Delta,LZ4'],
+    ["Enum('a' = 1 2)", 'Delta,LZ4'],
     ["Enum('a' = ١)", 'Delta,LZ4'],
     ["Enum('a' = 1\u0085)", 'Delta,LZ4'],
     ["Enum('a' = 0x1)", 'Delta(1),LZ4'],
@@ -596,13 +598,13 @@ for (const [type, expression, stored] of OPUS_STORED) {
   })
 }
 
-test('DoubleDelta retains a raw size only in verbatim chains', () => {
+test('DoubleDelta retains a size only in verbatim chains', () => {
   const type = 'Tuple(UInt32, UInt64)'
   expect(codecFingerprint(codec.raw('Delta, DoubleDelta(4)'), type)).toBe('Delta,DoubleDelta(4)')
   expect(codecsEqual(codec.raw('Delta, DoubleDelta(4)'), codec.raw('Delta, DoubleDelta(8)'), type)).toBe(false)
   expect(codecsEqual(codec.raw('DoubleDelta(4), ZSTD'), codec.raw('DoubleDelta(8), ZSTD'), type)).toBe(true)
   expect(codecsEqual(codec.raw('Delta, DoubleDelta(4)'), codec.raw('Delta, DoubleDelta(8)'), 'UInt64')).toBe(true)
   const typed: ColumnCodecSpec = [{ kind: 'FPC', level: 12, floatSize: 4 }, { kind: 'DoubleDelta', size: 8 }]
-  expect(renderCodec(typed)).toBe('CODEC(FPC(12, 4), DoubleDelta)')
-  expect(codecFingerprint(canonicalizeCodec(typed), 'Tuple(Float32, Float64)')).toBe('FPC(12,4),DoubleDelta')
+  expect(renderCodec(typed)).toBe('CODEC(FPC(12, 4), DoubleDelta(8))')
+  expect(codecFingerprint(canonicalizeCodec(typed), 'Tuple(Float32, Float64)')).toBe('FPC(12),DoubleDelta')
 })

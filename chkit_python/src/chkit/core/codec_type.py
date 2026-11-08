@@ -12,8 +12,9 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
-from chkit.core.codec_integer import parse_integer_arg
-from chkit.core.sql_lexer import JS_WHITESPACE, js_trim
+from chkit.core.codec_integer import parse_integer_literal
+from chkit.core.key_clause import split_top_level_comma
+from chkit.core.sql_lexer import JS_WHITESPACE, js_trim, tokenize_sql
 
 CodecTypeFamily: TypeAlias = Literal[
     "int",
@@ -29,6 +30,8 @@ CodecTypeFamily: TypeAlias = Literal[
     "uuid",
     "string",
     "fixedstring",
+    "nullable",
+    "dynamic",
 ]
 
 
@@ -53,21 +56,29 @@ _AGGREGATE_RE: Final = re.compile(
 
 def codec_value_types(column_type: str) -> list[CodecValueType] | None:
     """The value types of a column type, or None when one of them is a type
-    chkit does not model (JSON, Dynamic, Variant, Nested, AggregateFunction, ...)."""
-    type_ = js_trim(column_type)
+    chkit does not model (Variant, Nested, AggregateFunction, ...)."""
+    type_ = js_trim("".join(
+        " " if token.kind in {"line_comment", "block_comment"} else token.text
+        for token in tokenize_sql(column_type)
+    ))
     wrapper = _WRAPPER_RE.match(type_)
     if wrapper is not None:
-        return codec_value_types(wrapper.group(2))
+        inner = js_trim(wrapper.group(2))
+        if wrapper.group(1) == "LowCardinality" and re.match(
+            rf"^Nullable[{JS_WHITESPACE}]*\(", inner
+        ):
+            return [CodecValueType(inner, "nullable")]
+        return codec_value_types(inner)
     aggregate = _AGGREGATE_RE.match(type_)
     if aggregate is not None:
-        args = _split_type_arguments(aggregate.group(1))
+        args = split_top_level_comma(aggregate.group(1))
         return codec_value_types(args[1]) if len(args) == 2 else None  # noqa: PLR2004 - function, type
     tuple_ = _TUPLE_RE.match(type_)
     if tuple_ is not None:
-        return _collect([_strip_element_name(e) for e in _split_type_arguments(tuple_.group(1))])
+        return _collect([_strip_element_name(e) for e in split_top_level_comma(tuple_.group(1))])
     map_ = _MAP_RE.match(type_)
     if map_ is not None:
-        return _collect(_split_type_arguments(map_.group(1)))
+        return _collect(split_top_level_comma(map_.group(1)))
     leaf = _leaf_type(type_)
     return [leaf] if leaf is not None else None
 
@@ -77,7 +88,10 @@ def codec_has_reachable_float(column_type: str) -> bool | None:
 
     Unknown types stay unknown.
     """
-    type_ = js_trim(column_type)
+    type_ = js_trim("".join(
+        " " if token.kind in {"line_comment", "block_comment"} else token.text
+        for token in tokenize_sql(column_type)
+    ))
     if re.match(rf"^(LowCardinality|Map)[{JS_WHITESPACE}]*\(", type_):
         return False
     wrapper = re.match(rf"^(Nullable|Array)[{JS_WHITESPACE}]*\(([\s\S]*)\)$", type_)
@@ -85,13 +99,13 @@ def codec_has_reachable_float(column_type: str) -> bool | None:
         return codec_has_reachable_float(wrapper.group(2))
     aggregate = _AGGREGATE_RE.match(type_)
     if aggregate is not None:
-        args = _split_type_arguments(aggregate.group(1))
+        args = split_top_level_comma(aggregate.group(1))
         return codec_has_reachable_float(args[1]) if len(args) == 2 else None  # noqa: PLR2004 - function, type
     tuple_ = _TUPLE_RE.match(type_)
     if tuple_ is not None:
         floats = [
             codec_has_reachable_float(_strip_element_name(element))
-            for element in _split_type_arguments(tuple_.group(1))
+            for element in split_top_level_comma(tuple_.group(1))
         ]
         if True in floats:
             return True
@@ -131,6 +145,8 @@ _FIXED_STRING_TYPE: Final = re.compile(
 )
 
 _SIMPLE_TYPES: Final[dict[str, tuple[CodecTypeFamily, int | None]]] = {
+    "Dynamic": ("dynamic", 1),
+    "JSON": ("dynamic", 1),
     "Bool": ("bool", 1),
     "Boolean": ("bool", 1),
     "Float32": ("float", 4),
@@ -171,7 +187,8 @@ def _leaf_type(type_: str) -> CodecValueType | None:  # noqa: PLR0911 - one bran
         return CodecValueType(type_, "enum", 2)
     enumeration = re.match(rf"^Enum[{JS_WHITESPACE}]*\(([\s\S]*)\)$", type_)
     if enumeration is not None:
-        return CodecValueType(type_, "enum", _enum_width(enumeration.group(1)))
+        width = _enum_width(enumeration.group(1))
+        return CodecValueType(type_, "enum", width) if width is not None else None
     simple = _SIMPLE_TYPES.get(type_)
     return CodecValueType(type_, *simple) if simple is not None else None
 
@@ -188,20 +205,28 @@ def _decimal_width(precision: int) -> int:
 
 _ENUM_ENTRY_RE: Final = re.compile(
     r"^'(?:\\[\s\S]|''|[^'\\])*'"
-    rf"(?:[{JS_WHITESPACE}]*=[{JS_WHITESPACE}]*([^{JS_WHITESPACE}]+))?[{JS_WHITESPACE}]*$"
+    rf"(?:[{JS_WHITESPACE}]*=[{JS_WHITESPACE}]*([\s\S]+))?[{JS_WHITESPACE}]*$"
 )
 
 
 def _enum_width(arguments_text: str) -> int | None:
     previous = 0
     fits_int8 = True
-    for entry in _split_type_arguments(arguments_text):
+    entries = split_top_level_comma(arguments_text)
+    if not entries:
+        return None
+    for entry in entries:
         match = _ENUM_ENTRY_RE.match(entry)
         if match is None:
             return None
-        value = previous + 1 if match.group(1) is None else parse_integer_arg(match.group(1))
+        literal = match.group(1)
+        value = previous + 1 if literal is None else parse_integer_literal(
+            re.sub(rf"^([+-])[{JS_WHITESPACE}]+", r"\1", js_trim(literal))
+        )
         if value is None:
             return None
+        # ClickHouse's integer AST reads UInt64 literals as signed Enum values.
+        value = (value + 2**63) % 2**64 - 2**63
         fits_int8 = fits_int8 and -128 <= value <= 127  # noqa: PLR2004 - Int8 bounds
         previous = value
     return 1 if fits_int8 else 2
@@ -216,34 +241,4 @@ _ELEMENT_NAME_RE: Final = re.compile(
 def _strip_element_name(element: str) -> str:
     """``a UInt8`` or ```a b` UInt8`` in a named Tuple is the element type ``UInt8``."""
     named = _ELEMENT_NAME_RE.match(js_trim(element))
-    return named.group(1) if named is not None else element
-
-
-def _split_type_arguments(text: str) -> list[str]:
-    """Split type arguments on top-level commas, outside parentheses and quotes."""
-    out: list[str] = []
-    depth = 0
-    quote: str | None = None
-    current: list[str] = []
-    escaped = False
-    for ch in text:
-        if quote is not None:
-            if escaped:
-                escaped = False
-            elif ch == "\\":
-                escaped = True
-            elif ch == quote:
-                quote = None
-        elif ch in {"'", "`", '"'}:
-            quote = ch
-        elif ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        elif ch == "," and depth == 0:
-            out.append(js_trim("".join(current)))
-            current = []
-            continue
-        current.append(ch)
-    out.append(js_trim("".join(current)))
-    return out
+    return named.group(1) if named is not None and not named.group(1).startswith("(") else element

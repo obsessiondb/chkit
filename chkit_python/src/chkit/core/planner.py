@@ -7,7 +7,6 @@ import re
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.codec import codec_fingerprint
 from chkit.core.column_default import (
     literal_default_fingerprint,
     parse_column_default,
@@ -44,6 +43,7 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
+    column_codec_fingerprint,
     column_type_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
@@ -63,7 +63,6 @@ from chkit.core.sql import (
     render_alter_remove_column_comment,
     render_alter_remove_column_expression,
     render_alter_reset_setting,
-    render_column_type,
     render_dictionary_sql,
     to_create_sql,
 )
@@ -262,7 +261,7 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
         sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
         data["default"] = literal_default_fingerprint(sql) or sql
     # Codecs compare in the form ClickHouse stores them, like drift (#465).
-    data["codec"] = codec_fingerprint(column.codec, render_column_type(column))
+    data["codec"] = column_codec_fingerprint(column)
     return data
 
 

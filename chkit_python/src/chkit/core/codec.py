@@ -8,8 +8,9 @@ from typing import Any, Final, Literal, NamedTuple, TypeAlias
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
-from chkit.core.codec_integer import parse_integer_arg
+from chkit.core.codec_integer import _MAX_SAFE, parse_integer_arg
 from chkit.core.codec_type import codec_value_types, codec_value_width
+from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ColumnCodec,
     ColumnCodecSpec,
@@ -23,7 +24,7 @@ from chkit.core.model import (
     _CodecT64,
     _CodecZSTD,
 )
-from chkit.core.sql_lexer import is_js_space
+from chkit.core.sql_lexer import is_js_space, js_trim
 
 CodecSpecInput: TypeAlias = ColumnCodecSpec | Mapping[str, Any] | list[ColumnCodec | Mapping[str, Any]]
 """Loose input accepted by public entry points: dicts or models, single or list."""
@@ -106,9 +107,8 @@ def _render_step(step: ColumnCodec) -> str:
             return f"ZSTD({1 if step.level is None else step.level}, {step.window_log})"
         return f"ZSTD({step.level})" if step.level is not None else "ZSTD"
     if isinstance(step, _CodecDeltaLike):
-        # Without a size ClickHouse fills in the column's value width; it
-        # ignores the DoubleDelta size and never stores it.
-        if kind == "DoubleDelta" or step.size is None:
+        # Delta/Gorilla without a size use the column's value width.
+        if step.size is None:
             return kind
         return f"{kind}({step.size})"
     if isinstance(step, _CodecFPC):
@@ -134,7 +134,7 @@ _CODEC_WRAPPER_PATTERN: Final[re.Pattern[str]] = re.compile(
 
 
 def _parse_atom(raw: str) -> ColumnCodec | None:
-    trimmed = raw.strip()
+    trimmed = js_trim(raw)
     if not trimmed:
         return None
     match = _ATOM_PATTERN.match(trimmed)
@@ -147,7 +147,7 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
     if args_raw is None:
         args: list[str] | None = None
     else:
-        parts = [value.strip() for value in args_raw.split(",")]
+        parts = [js_trim(value) for value in args_raw.split(",")]
         args = None if len(parts) == 1 and parts[0] == "" else parts
 
     if name in {"NONE", "LZ4", "Default", "GCD", "ALP"}:
@@ -211,9 +211,6 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
     return None
 
 
-_MAX_SAFE: Final[int] = 2**53 - 1
-
-
 def _strip_whitespace_outside_quotes(text: str) -> str:
     """Remove whitespace except inside quoted strings: ``T64('b it')`` is not ``T64('bit')``."""
     out: list[str] = []
@@ -227,25 +224,6 @@ def _strip_whitespace_outside_quotes(text: str) -> str:
     return "".join(out)
 
 
-def _split_top_level_commas(text: str) -> list[str]:
-    out: list[str] = []
-    depth = 0
-    current: list[str] = []
-    for ch in text:
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth = max(0, depth - 1)
-        if ch == "," and depth == 0:
-            out.append("".join(current))
-            current = []
-            continue
-        current.append(ch)
-    if current:
-        out.append("".join(current))
-    return out
-
-
 def parse_codec(raw: str | None) -> list[ColumnCodec] | None:
     """Parse a ClickHouse codec expression (e.g. `CODEC(Delta(4), ZSTD(1))`).
 
@@ -254,16 +232,16 @@ def parse_codec(raw: str | None) -> list[ColumnCodec] | None:
     """
     if raw is None:
         return None
-    trimmed = raw.strip()
+    trimmed = js_trim(raw)
     if not trimmed:
         return None
 
     inner_match = _CODEC_WRAPPER_PATTERN.match(trimmed)
-    stripped = inner_match.group(1).strip() if inner_match is not None else trimmed
+    stripped = js_trim(inner_match.group(1)) if inner_match is not None else trimmed
     if not stripped:
         return None
 
-    atoms = [a.strip() for a in _split_top_level_commas(stripped) if a.strip()]
+    atoms = [js_trim(a) for a in split_top_level_comma(stripped) if js_trim(a)]
     parsed: list[ColumnCodec] = []
     for atom in atoms:
         step = _parse_atom(atom)
@@ -285,7 +263,7 @@ def parse_raw_codec_atoms(expression: str) -> list[RawCodecAtom]:
 
     Each atom's text has no whitespace outside quotes.
     """
-    texts = [_strip_whitespace_outside_quotes(atom) for atom in _split_top_level_commas(expression)]
+    texts = [_strip_whitespace_outside_quotes(atom) for atom in split_top_level_comma(expression)]
     return [RawCodecAtom(_parse_atom(text), text) for text in texts if text]
 
 
@@ -297,10 +275,8 @@ def _canonicalize_step(step: ColumnCodec) -> ColumnCodec:
         return step.model_copy(update={"level": 1 if step.level is None else step.level})
     if isinstance(step, _CodecLZ4HC):
         return step.model_copy(update={"level": 9 if step.level is None else step.level})
-    if isinstance(step, _CodecDeltaLike) and step.kind == "DoubleDelta":
-        return step.model_copy(update={"size": None})
     if isinstance(step, RawColumnCodec):
-        return RawColumnCodec(expression=step.expression.strip())
+        return RawColumnCodec(expression=js_trim(step.expression))
     return step
 
 
@@ -317,13 +293,15 @@ def codec_fingerprint(spec: CodecSpecInput | None, column_type: str | None = Non
     """The codec in the form `system.columns.compression_codec` reports it (#383).
 
     A schema codec and the live one compare equal however either is spelled;
-    the planner, drift and pull all compare codecs this way (#465). ClickHouse
+    the planner and drift compare codecs this way; pull preserves representable
+    arguments (#465). ClickHouse
     stores a bare `ZSTD` as `ZSTD(1)` and a bare `LZ4HC` as `LZ4HC(0)`, which
     like any level below 1 means the default 9. It fills in the column's value
     width for a bare `Delta` or `Gorilla` (`Delta(8)` on UInt64, still bare on a
-    mixed-width Tuple). A mixed-width chain with a bare Delta, Gorilla,
-    DoubleDelta or T64 retains FPC's float size and raw DoubleDelta sizes;
-    otherwise those sizes are dropped. It keeps no `T64('byte')` mode.
+    mixed-width Tuple). A bare Delta, Gorilla or DoubleDelta on mixed widths,
+    or T64 on different leaf type IDs (Bool uses UInt8), makes storage verbatim.
+    Such chains retain FPC's float size and DoubleDelta's size; otherwise those
+    sizes are dropped. It keeps no `T64('byte')` mode.
     Atoms of a raw codec that parse get the same
     treatment; the others compare without whitespace. No codec is the empty
     string.
@@ -341,18 +319,22 @@ def codec_fingerprint(spec: CodecSpecInput | None, column_type: str | None = Non
         )
     ]
     values = None if column_type is None else codec_value_types(column_type)
-    # A bare width-dependent codec prevents substitution for the whole mixed-width chain.
-    # Unknown types keep the existing comparison until their storage is modelled.
+    # Delta/Gorilla/DoubleDelta depend on the leaf width. T64 also depends
+    # on its type ID (UInt32 and Int32 produce different codec descriptions).
     mixed_widths = (
         values is not None
         and all(value.width is not None for value in values)
         and len({value.width for value in values}) > 1
     )
-    verbatim = mixed_widths and any(
-        isinstance(atom.codec, _CodecT64)
+    mixed_types = values is not None and len({
+        "UInt8" if value.family == "bool" else value.type.split("(", 1)[0].rstrip()
+        for value in values
+    }) > 1
+    verbatim = any(
+        (isinstance(atom.codec, _CodecT64) and mixed_types)
         or (
-            isinstance(atom.codec, _CodecDeltaLike)
-            and atom.codec.kind in {"Delta", "Gorilla", "DoubleDelta"}
+            mixed_widths
+            and isinstance(atom.codec, _CodecDeltaLike)
             and atom.codec.size is None
         )
         for atom in atoms
@@ -365,12 +347,12 @@ def codec_fingerprint(spec: CodecSpecInput | None, column_type: str | None = Non
 
 def _step_fingerprint(step: ColumnCodec, width: int | None, verbatim: bool) -> str:
     if isinstance(step, _CodecZSTD):
-        level = 1 if step.level is None else step.level
+        level = 1 if step.level is None else _int32(step.level)
         window = "" if step.window_log is None else f",{step.window_log}"
         return f"ZSTD({level}{window})"
     if isinstance(step, _CodecLZ4HC):
         # ClickHouse keeps the low 32 bits of the level: LZ4HC(4294967297) is stored as LZ4HC(1).
-        stored = None if step.level is None else (step.level + 2**31) % 2**32 - 2**31
+        stored = None if step.level is None else _int32(step.level)
         return f"LZ4HC({stored if stored is not None and stored >= 1 else 9})"
     if isinstance(step, _CodecDeltaLike):
         if step.kind == "DoubleDelta":
@@ -463,7 +445,7 @@ def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
             return "level must be between -9007199254740991 and 9007199254740991"
         if kind == "LZ4HC":
             return None
-        if isinstance(level, int) and _is_int(level) and level > 22:
+        if isinstance(level, int) and _is_int(level) and _int32(level) > 22:
             return "level must be at most 22"
         window_log = data.get("windowLog")
         if window_log is not None and not (
@@ -492,10 +474,15 @@ def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
         return None
     if kind == "raw":
         expression = data.get("expression")
-        if isinstance(expression, str) and expression.strip():
+        if isinstance(expression, str) and js_trim(expression):
             return None
         return "expression must be a non-empty string"
     return None
+
+
+def _int32(value: int) -> int:
+    """ClickHouse reads compression levels as signed 32-bit integers."""
+    return (value + 2**31) % 2**32 - 2**31
 
 
 def _is_int(value: object) -> bool:
@@ -508,4 +495,4 @@ def _is_one_of(value: object, allowed: tuple[int, ...]) -> bool:
 
 
 def codec_raw(expression: str) -> RawColumnCodec:
-    return RawColumnCodec(expression=expression.strip())
+    return RawColumnCodec(expression=js_trim(expression))

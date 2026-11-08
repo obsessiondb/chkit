@@ -1,5 +1,6 @@
 import { parseIntegerArg } from './codec-integer.js'
 import { codecValueTypes, codecValueWidth } from './codec-type.js'
+import { splitTopLevelComma } from './key-clause.js'
 import type {
   ColumnCodec,
   ColumnCodecSpec,
@@ -63,12 +64,10 @@ function renderStep(step: ColumnCodec): string {
       if (step.windowLog !== undefined) return `ZSTD(${step.level ?? 1}, ${step.windowLog})`
       return step.level !== undefined ? `ZSTD(${step.level})` : 'ZSTD'
     case 'Delta':
-    case 'Gorilla':
-      // Without a size ClickHouse fills in the column's value width.
-      return step.size !== undefined ? `${step.kind}(${step.size})` : step.kind
     case 'DoubleDelta':
-      // ClickHouse ignores the size and never stores it.
-      return 'DoubleDelta'
+    case 'Gorilla':
+      // Delta/Gorilla without a size use the column's value width.
+      return step.size !== undefined ? `${step.kind}(${step.size})` : step.kind
     case 'FPC':
       if (step.floatSize !== undefined) return `FPC(${step.level ?? 12}, ${step.floatSize})`
       return step.level !== undefined ? `FPC(${step.level})` : 'FPC'
@@ -164,24 +163,6 @@ function stripWhitespaceOutsideQuotes(text: string): string {
   return out
 }
 
-function splitTopLevelCommas(input: string): string[] {
-  const out: string[] = []
-  let depth = 0
-  let current = ''
-  for (const ch of input) {
-    if (ch === '(') depth += 1
-    else if (ch === ')') depth = Math.max(0, depth - 1)
-    if (ch === ',' && depth === 0) {
-      out.push(current)
-      current = ''
-      continue
-    }
-    current += ch
-  }
-  if (current.length > 0) out.push(current)
-  return out
-}
-
 /**
  * Parses a ClickHouse-returned codec expression (e.g. `CODEC(Delta(4), ZSTD(1))`).
  * Returns undefined for empty/missing input. Unknown or unparsable tokens fall
@@ -196,7 +177,7 @@ export function parseCodec(raw: string | undefined | null): ColumnCodec[] | unde
   const stripped = trimmed.replace(/^CODEC\s*\(([\s\S]*)\)\s*$/i, '$1').trim()
   if (stripped.length === 0) return undefined
 
-  const atoms = splitTopLevelCommas(stripped)
+  const atoms = splitTopLevelComma(stripped)
     .map((value) => value.trim())
     .filter((value) => value.length > 0)
   const parsed: ColumnCodec[] = []
@@ -213,7 +194,7 @@ export type RawCodecAtom = { codec: ColumnCodec; text: string } | { codec: undef
 
 /** Splits a raw codec expression into its atoms (`Delta, Default` is two). */
 export function parseRawCodecAtoms(expression: string): RawCodecAtom[] {
-  return splitTopLevelCommas(expression)
+  return splitTopLevelComma(expression)
     .map(stripWhitespaceOutsideQuotes)
     .filter((atom) => atom.length > 0)
     .map((text) => ({ codec: parseAtom(text), text }))
@@ -228,6 +209,7 @@ function canonicalizeStep(step: ColumnCodec): ColumnCodec {
     case 'LZ4HC':
       return { kind: 'LZ4HC', level: step.level ?? 9 }
     case 'Delta':
+    case 'DoubleDelta':
     case 'Gorilla':
       return step.size !== undefined ? { kind: step.kind, size: step.size } : { kind: step.kind }
     case 'T64':
@@ -258,14 +240,15 @@ export function canonicalizeCodec(spec: ColumnCodecSpec): ColumnCodec[] {
 /**
  * The codec in the form `system.columns.compression_codec` reports it, so a
  * schema codec and the live one compare equal however either is spelled (#383).
- * The planner, drift and pull all compare codecs this way (#465).
+ * The planner and drift compare codecs this way; pull preserves representable arguments (#465).
  *
  * ClickHouse stores a bare `ZSTD` as `ZSTD(1)` and a bare `LZ4HC` as
  * `LZ4HC(0)`, which like any level below 1 means the default 9. It fills in
  * the column's value width for a bare `Delta` or `Gorilla` (`Delta(8)` on
- * UInt64, still bare on a mixed-width Tuple). A mixed-width chain with a bare
- * Delta, Gorilla, DoubleDelta or T64 retains FPC's float size and raw
- * DoubleDelta sizes; otherwise those sizes are dropped.
+ * UInt64, still bare on a mixed-width Tuple). A bare Delta, Gorilla or
+ * DoubleDelta on mixed widths, or T64 on different leaf type IDs (Bool uses
+ * UInt8), makes storage verbatim. Such chains retain FPC's float size and
+ * DoubleDelta's size; otherwise those sizes are dropped.
  * `T64('byte')` compares as bare T64. Atoms of a raw codec that parse
  * get the same treatment; the others compare without whitespace. No codec is
  * the empty string.
@@ -279,13 +262,14 @@ export function codecFingerprint(spec: ColumnCodecSpec | undefined, columnType?:
       : [{ codec: step, text: '' }]
   )
   const values = columnType === undefined ? undefined : codecValueTypes(columnType)
-  // A bare width-dependent codec prevents substitution for the whole mixed-width chain.
-  // Unknown types keep the existing comparison until their storage is modelled.
-  const mixedWidths = values !== undefined && values.every((value) => value.width !== undefined) &&
+  // Delta/Gorilla/DoubleDelta depend on the leaf width. T64 also depends
+  // on its type ID (UInt32 and Int32 produce different codec descriptions).
+  const mixedWidths = values?.every((value) => value.width !== undefined) &&
     new Set(values.map((value) => value.width)).size > 1
-  const verbatim = mixedWidths && atoms.some(({ codec }) =>
-    codec?.kind === 'T64' ||
-    ((codec?.kind === 'Delta' || codec?.kind === 'Gorilla' || codec?.kind === 'DoubleDelta') && codec.size === undefined)
+  const mixedTypes = values !== undefined && new Set(values.map((value) => value.family === 'bool' ? 'UInt8' : value.type.match(/^\w+/)?.[0])).size > 1
+  const verbatim = atoms.some(({ codec }) =>
+    (codec?.kind === 'T64' && mixedTypes) ||
+    (mixedWidths && (codec?.kind === 'Delta' || codec?.kind === 'Gorilla' || codec?.kind === 'DoubleDelta') && codec.size === undefined)
   )
   return atoms.map((atom) => atom.codec ? stepFingerprint(atom.codec, width, verbatim) : atom.text).join(',')
 }
@@ -293,10 +277,10 @@ export function codecFingerprint(spec: ColumnCodecSpec | undefined, columnType?:
 function stepFingerprint(step: ColumnCodec, width: number | undefined, verbatim: boolean): string {
   switch (step.kind) {
     case 'ZSTD':
-      return `ZSTD(${step.level ?? 1}${step.windowLog !== undefined ? `,${step.windowLog}` : ''})`
+      return `ZSTD(${step.level === undefined ? 1 : int32(step.level)}${step.windowLog !== undefined ? `,${step.windowLog}` : ''})`
     case 'LZ4HC': {
       // ClickHouse keeps the low 32 bits of the level: LZ4HC(4294967297) is stored as LZ4HC(1).
-      const level = Number.isInteger(step.level) ? Number(BigInt.asIntN(32, BigInt(step.level as number))) : step.level
+      const level = step.level === undefined ? undefined : int32(step.level)
       return `LZ4HC(${level !== undefined && level >= 1 ? level : 9})`
     }
     case 'Delta':
@@ -367,7 +351,7 @@ function codecParameterProblem(kind: string, step: Record<string, unknown>): str
         return 'level must be between -9007199254740991 and 9007199254740991'
       }
       if (kind === 'LZ4HC') return undefined
-      if (isInteger(step.level) && step.level > 22) return 'level must be at most 22'
+      if (isInteger(step.level) && int32(step.level) > 22) return 'level must be at most 22'
       if (step.windowLog !== undefined && !(isInteger(step.windowLog) && (step.windowLog === 0 || (step.windowLog >= 10 && step.windowLog <= 31)))) {
         return 'windowLog must be 0 or an integer between 10 and 31'
       }
@@ -390,6 +374,11 @@ function codecParameterProblem(kind: string, step: Record<string, unknown>): str
     default:
       return undefined
   }
+}
+
+/** ClickHouse reads compression levels as signed 32-bit integers. */
+function int32(value: number): number {
+  return Number.isInteger(value) ? Number(BigInt.asIntN(32, BigInt(value))) : value
 }
 
 function parameterProblem(message: string): CodecAtomProblem {

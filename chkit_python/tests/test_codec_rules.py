@@ -14,6 +14,9 @@ from chkit import table
 from chkit.core.validate import validate_definitions
 
 CASES: list[tuple[str, Any, tuple[str, str] | None]] = [
+    # Unparsed Enum types skip leaf checks; the server validates type syntax.
+    ("Enum()", {"kind": "T64"}, None),
+    ("Enum('a' = 1 2)", {"kind": "Gorilla"}, None),
     ("UInt64", [{"kind": "T64"}, {"kind": "NONE"}], ("codec_none_combined", "combines NONE with other codecs; NONE must be the only codec")),
     ("UInt64", [{"kind": "DoubleDelta"}, {"kind": "NONE"}], ("codec_none_combined", "combines NONE with other codecs; NONE must be the only codec")),
     ("UInt64", [{"kind": "Delta"}, {"kind": "NONE"}], ("codec_none_combined", "combines NONE with other codecs; NONE must be the only codec")),
@@ -129,7 +132,7 @@ CASES: list[tuple[str, Any, tuple[str, str] | None]] = [
     ("Map(UInt64, Float64)", {"kind": "T64"}, ("codec_type_unsupported", "codec T64 does not support type Float64 in Map(UInt64, Float64)")),
     ("JSON", [{"kind": "Delta"}, {"kind": "LZ4"}], None),
     ("JSON", [{"kind": "GCD"}, {"kind": "LZ4"}], None),
-    ("JSON", {"kind": "Gorilla"}, None),
+    ("JSON", {"kind": "Gorilla"}, ("codec_type_unsupported", "codec Gorilla does not support type JSON: no float leaf reachable through Nullable, Array or Tuple")),
     ("JSON", {"kind": "T64"}, None),
     ("Time", [{"kind": "Delta"}, {"kind": "LZ4"}], None),
     ("Time", [{"kind": "GCD"}, {"kind": "LZ4"}], ("codec_type_unsupported", "codec GCD does not support type Time")),
@@ -371,8 +374,8 @@ CASES: list[tuple[str, Any, tuple[str, str] | None]] = [
     ('LowCardinality(UInt64)', {'kind': 'raw', 'expression': 'Gorilla'}, ('codec_type_unsupported', 'codec Gorilla does not support type LowCardinality(UInt64): no float leaf reachable through Nullable, Array or Tuple')),
     ('Array(LowCardinality(Float64))', {'kind': 'Gorilla'}, ('codec_type_unsupported', 'codec Gorilla does not support type Array(LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple')),
     ('Array(LowCardinality(Float64))', {'kind': 'raw', 'expression': 'Gorilla'}, ('codec_type_unsupported', 'codec Gorilla does not support type Array(LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple')),
-    ('LowCardinality(Nullable(Float64))', {'kind': 'Gorilla'}, ('codec_type_unsupported', 'codec Gorilla does not support type LowCardinality(Nullable(Float64)): no float leaf reachable through Nullable, Array or Tuple')),
-    ('LowCardinality(Nullable(Float64))', {'kind': 'raw', 'expression': 'Gorilla'}, ('codec_type_unsupported', 'codec Gorilla does not support type LowCardinality(Nullable(Float64)): no float leaf reachable through Nullable, Array or Tuple')),
+    ('LowCardinality(Nullable(Float64))', {'kind': 'Gorilla'}, ('codec_type_unsupported', 'codec Gorilla does not support type Nullable(Float64) in LowCardinality(Nullable(Float64))')),
+    ('LowCardinality(Nullable(Float64))', {'kind': 'raw', 'expression': 'Gorilla'}, ('codec_type_unsupported', 'codec Gorilla does not support type Nullable(Float64) in LowCardinality(Nullable(Float64))')),
     ('LowCardinality(Float64)', {'kind': 'DoubleDelta'}, None),
     ('LowCardinality(Float64)', {'kind': 'raw', 'expression': 'DoubleDelta'}, None),
     ('LowCardinality(Float64)', [{'kind': 'Delta'}, {'kind': 'LZ4'}], None),
@@ -394,12 +397,12 @@ CASES: list[tuple[str, Any, tuple[str, str] | None]] = [
     ('LowCardinality(String)', {'kind': 'ZSTD'}, None),
     ('LowCardinality(String)', {'kind': 'raw', 'expression': 'ZSTD'}, None),
     # Parser coverage: unknown siblings and quoted type-like text.
-    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'Gorilla'}, None),
-    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'raw', 'expression': 'Gorilla'}, None),
-    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'FPC'}, None),
-    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'raw', 'expression': 'FPC'}, None),
-    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'ALP'}, None),
-    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'raw', 'expression': 'ALP'}, None),
+    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'Gorilla'}, ("codec_type_unsupported", "codec Gorilla does not support type Tuple(JSON, LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple")),
+    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'raw', 'expression': 'Gorilla'}, ("codec_type_unsupported", "codec Gorilla does not support type Tuple(JSON, LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple")),
+    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'FPC'}, ("codec_type_unsupported", "codec FPC does not support type Tuple(JSON, LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple")),
+    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'raw', 'expression': 'FPC'}, ("codec_type_unsupported", "codec FPC does not support type Tuple(JSON, LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple")),
+    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'ALP'}, ("codec_type_unsupported", "codec ALP does not support type Tuple(JSON, LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple")),
+    ('Tuple(JSON, LowCardinality(Float64))', {'kind': 'raw', 'expression': 'ALP'}, ("codec_type_unsupported", "codec ALP does not support type Tuple(JSON, LowCardinality(Float64)): no float leaf reachable through Nullable, Array or Tuple")),
     ("Tuple(Enum8('LowCardinality(Float64)' = 1), Float64)", {'kind': 'Gorilla'}, None),
     ("Tuple(Enum8('LowCardinality(Float64)' = 1), Float64)", {'kind': 'raw', 'expression': 'Gorilla'}, None),
     # ClickHouse 26.3 float-series and type-parser server matrices: 60 inputs.

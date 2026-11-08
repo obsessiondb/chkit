@@ -151,10 +151,10 @@
   `codec_type_unsupported`. `ALP` is no longer a general codec, so `[ALP, ZSTD]` is
   accepted.
 - New typed forms: `{"kind": "Default"}`, `ZSTD` `windowLog`, `T64` `mode`, and `FPC` with
-  optional `level` and `floatSize`. `DoubleDelta` never renders its size.
+  optional `level` and `floatSize`. `DoubleDelta` renders an explicit size; ClickHouse retains it only in verbatim chains.
 - `generate`, `drift` and `pull` compare codecs in the form ClickHouse stores, so respellings
   plan nothing and a live change of the `ZSTD` window drifts. `pull` writes stored codecs as
-  typed atoms (`FPC(12)` as `{"kind": "FPC", "level": 12}`, `DoubleDelta` without a size).
+  typed atoms (`FPC(12)` as `{"kind": "FPC", "level": 12}`, `DoubleDelta` with its size when the server retains it).
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed

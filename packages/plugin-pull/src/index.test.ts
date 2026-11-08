@@ -3,7 +3,7 @@ import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
-import type { ColumnDefinition } from '@chkit/core'
+import { type ColumnDefinition, parseCodec, table } from '@chkit/core'
 
 import { __testUtils, createPullPlugin, PullSchema, renderSchemaFile } from './index.js'
 
@@ -30,6 +30,19 @@ describe('@chkit/plugin-pull options', () => {
 })
 
 describe('@chkit/plugin-pull renderSchemaFile', () => {
+  test('preserves DoubleDelta sizes retained by the server in verbatim chains', () => {
+    const definition = table({
+      database: 'db', name: 't', engine: 'MergeTree()', primaryKey: [], orderBy: [],
+      columns: [
+        { name: 'widths', type: 'Tuple(UInt32, UInt64)', codec: parseCodec('CODEC(Delta, DoubleDelta(8))') },
+        { name: 'types', type: 'Tuple(UInt32, Int32)', codec: parseCodec('CODEC(DoubleDelta(4), T64, ZSTD)') },
+      ],
+    })
+    const output = renderSchemaFile([definition])
+    expect(output).toContain('{ kind: "DoubleDelta", size: 8 }')
+    expect(output).toContain('{ kind: "DoubleDelta", size: 4 }')
+  })
+
   test('renders a full table + view + refreshable MV schema byte-for-byte', () => {
     const content = renderSchemaFile([
       {

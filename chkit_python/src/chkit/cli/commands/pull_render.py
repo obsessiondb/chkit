@@ -563,7 +563,7 @@ def _render_codec_step(step: ColumnCodec) -> str:
         window_log = getattr(step, "window_log", None)
         if window_log is not None:
             parts.append(f'"windowLog": {window_log}')
-    elif step.kind in {"Delta", "Gorilla"}:
+    elif step.kind in {"Delta", "DoubleDelta", "Gorilla"}:
         size = getattr(step, "size", None)
         if size is not None:
             parts.append(f'"size": {size}')

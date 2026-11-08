@@ -190,6 +190,8 @@ def test_render_pulls_stored_codecs_as_typed_atoms_without_filled_in_sizes() -> 
         "h": ("String", "CODEC(LZ4HC(0))"),
         "f": ("Float64", "CODEC(FPC(12))"),
         "dd": ("UInt64", "CODEC(DoubleDelta)"),
+        "widths": ("Tuple(UInt32, UInt64)", "CODEC(Delta, DoubleDelta(8))"),
+        "types": ("Tuple(UInt32, Int32)", "CODEC(DoubleDelta(4), T64, ZSTD)"),
         "tb": ("UInt64", "CODEC(T64('bit'))"),
         "zw": ("String", "CODEC(ZSTD(3, 24))"),
         "tu": ("Tuple(a UInt8, b UInt64)", "CODEC(Delta, LZ4)"),
@@ -213,6 +215,8 @@ def test_render_pulls_stored_codecs_as_typed_atoms_without_filled_in_sizes() -> 
     assert 'codec={"kind": "LZ4HC", "level": 0}' in output
     assert 'codec={"kind": "FPC", "level": 12}' in output
     assert 'codec={"kind": "DoubleDelta"}' in output
+    assert '{"kind": "DoubleDelta", "size": 8}' in output
+    assert '{"kind": "DoubleDelta", "size": 4}' in output
     assert 'codec={"kind": "T64", "mode": "bit"}' in output
     assert 'codec={"kind": "ZSTD", "level": 3, "windowLog": 24}' in output
     assert 'codec=[{"kind": "Delta"}, {"kind": "LZ4"}]' in output
