@@ -36,6 +36,22 @@ function clickhouseConfigBlock(env: { url: string; username: string; password: s
   return `clickhouse: {\n    url: '${env.url}',\n    username: '${env.username}',\n    password: '${env.password}',\n    database: '${env.database}',\n  },`
 }
 
+async function createHookProbeFixture() {
+  const fixture = await createFixture()
+  const probePath = join(fixture.dir, 'probe-plugin.ts')
+  await writeFile(
+    probePath,
+    `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'probe', apiVersion: 1 },\n  commands: [\n    { name: 'greet', flags: [{ name: '--name', type: 'string', description: 'Name' }], run() {} },\n    { name: 'other', run() {} },\n  ],\n  hooks: {\n    onInit({ command, flags }) {\n      console.error('onInit ' + command + ' ' + flags['--name'])\n    },\n    getContext({ command, flags }) {\n      console.error('getContext ' + command + ' ' + flags['--name'])\n      return undefined\n    },\n    onComplete({ command }) {\n      console.error('onComplete ' + command)\n    },\n  },\n})\n`,
+    'utf8'
+  )
+  await writeFile(
+    fixture.configPath,
+    `import { plugin } from '${probePath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
+    'utf8'
+  )
+  return fixture
+}
+
 async function waitForParts(
   db: ReturnType<typeof createClickHouseExecutor>,
   database: string,
@@ -322,6 +338,85 @@ describe('plugin runtime', () => {
       expect(payload.command).toBe('schema')
       expect(payload.tableCount).toBe(1)
       expect(existsSync(outFile)).toBe(true)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('pull root command passes the same flags to onInit and getContext', async () => {
+    const fixture = await createFixture()
+    const pullPath = join(fixture.dir, 'pull-plugin.ts')
+    const probePath = join(fixture.dir, 'probe-plugin.ts')
+
+    try {
+      await writeFile(
+        pullPath,
+        `import { pull } from '${PULL_PLUGIN_ENTRY}'\n\nexport const registration = pull({\n  outFile: '${join(fixture.dir, 'pulled.ts')}',\n  databases: ['app'],\n  introspect: async () => [],\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        probePath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'probe', apiVersion: 1 },\n  extendCommands: [{ command: 'pull', flags: [{ name: '--service', type: 'string', description: 'Service' }] }],\n  hooks: {\n    onInit({ flags }) {\n      console.error('onInit ' + flags['--service'])\n    },\n    getContext({ flags }) {\n      console.error('getContext ' + flags['--service'])\n      return undefined\n    },\n  },\n})\n`,
+        'utf8'
+      )
+
+      await writeFile(
+        fixture.configPath,
+        `import { registration } from '${pullPath}'\nimport { plugin as probe } from '${probePath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  clickhouse: {\n    url: 'http://localhost:8123',\n    username: 'default',\n    password: '',\n    database: 'default',\n  },\n  plugins: [registration, { plugin: probe }],\n}\n`,
+        'utf8'
+      )
+
+      const result = runCli([
+        'pull',
+        '--dryrun',
+        '--service',
+        'svc-b',
+        '--config',
+        fixture.configPath,
+        '--json',
+      ])
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr.trim().split('\n')).toEqual(['onInit svc-b', 'getContext svc-b'])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('plugin subcommand passes its parsed flags to onInit', async () => {
+    const fixture = await createHookProbeFixture()
+    try {
+      const result = runCli(['probe', 'greet', '--name', 'ada', '--config', fixture.configPath])
+      expect(result.exitCode).toBe(0)
+      expect(result.stderr.trim().split('\n')).toEqual([
+        'onInit probe ada',
+        'getContext greet ada',
+        'onComplete probe',
+      ])
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('chkit plugin passes the target command flags to onInit', async () => {
+    const fixture = await createHookProbeFixture()
+    try {
+      const result = runCli(['plugin', 'probe', 'greet', '--name', 'ada', '--config', fixture.configPath])
+      expect(result.exitCode).toBe(0)
+      const lines = result.stderr.trim().split('\n')
+      expect(lines[0]).toBe('onInit plugin ada')
+      expect(lines).toContain('getContext greet ada')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('plugin subcommand flag error prints one error and skips onInit and onComplete', async () => {
+    const fixture = await createHookProbeFixture()
+    try {
+      const result = runCli(['probe', 'greet', '--bogus', '--config', fixture.configPath])
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr.trim()).toBe('Unknown flag: --bogus')
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
