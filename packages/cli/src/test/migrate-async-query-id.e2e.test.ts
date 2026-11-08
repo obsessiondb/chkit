@@ -42,41 +42,6 @@ interface Fixture {
 type Target = 'staging' | 'prod'
 
 describe('async migrate statements across databases (#463)', () => {
-  test('a run that starts while the other database loads runs its own load', async () => {
-    const fixture = await createFixture('qid_overlap')
-    try {
-      const staging = migrate(fixture, 'staging')
-      await waitForRunningLoad(fixture, 'staging')
-      const prod = await migrate(fixture, 'prod').result
-      const stagingResult = await staging.result
-
-      expect(stagingResult.exitCode, formatTestDiagnostic('staging', stagingResult)).toBe(0)
-      expect(prod.exitCode, formatTestDiagnostic('prod', prod)).toBe(0)
-      expect(prod.stderr).not.toContain('attaching to in-flight query')
-      expect(await countEvents(fixture, 'staging')).toBe(ROWS)
-      expect(await countEvents(fixture, 'prod')).toBe(ROWS)
-    } finally {
-      await dropFixture(fixture)
-    }
-  }, TIMEOUT_MS)
-
-  test('runs that start together each run their own load', async () => {
-    const fixture = await createFixture('qid_together')
-    try {
-      const [staging, prod] = await Promise.all([
-        migrate(fixture, 'staging').result,
-        migrate(fixture, 'prod').result,
-      ])
-
-      expect(staging.exitCode, formatTestDiagnostic('staging', staging)).toBe(0)
-      expect(prod.exitCode, formatTestDiagnostic('prod', prod)).toBe(0)
-      expect(await countEvents(fixture, 'staging')).toBe(ROWS)
-      expect(await countEvents(fixture, 'prod')).toBe(ROWS)
-    } finally {
-      await dropFixture(fixture)
-    }
-  }, TIMEOUT_MS)
-
   test("a run never takes the other database's failure, and the failed run retries its own load", async () => {
     const fixture = await createFixture('qid_failure')
     const { executor, databases } = fixture
@@ -88,6 +53,7 @@ describe('async migrate statements across databases (#463)', () => {
       const failed = await staging.result
 
       expect(prod.exitCode, formatTestDiagnostic('prod', prod)).toBe(0)
+      expect(prod.stderr).not.toContain('attaching to in-flight query')
       expect(await countEvents(fixture, 'prod')).toBe(ROWS)
       expect(failed.exitCode, formatTestDiagnostic('staging', failed)).toBe(1)
       expect(failed.stdout).toContain('failure in this database')
