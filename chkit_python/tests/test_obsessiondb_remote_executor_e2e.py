@@ -126,7 +126,7 @@ def _start_workbench(
             _ = (format, args)
 
     server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
-    threading.Thread(target=server.serve_forever, daemon=True).start()
+    threading.Thread(target=server.serve_forever, kwargs={"poll_interval": 0.05}, daemon=True).start()
     return server
 
 
@@ -426,7 +426,11 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
         )
         assert earlier.status == "finished"
         # Start the attached attempt well past the bound's 2 s margin.
-        time.sleep(4)
+        _poll_until(
+            lambda: _read_server_now_ms(live),
+            lambda now_ms: now_ms >= earlier_ended_ms + 3_000,
+            interval=0.1,
+        )
         # Fails after about 6 s: one row per block, 0.5 s per row.
         worker.start()
         _poll_until(
