@@ -158,6 +158,9 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
+- `migrate --apply` no longer prints `  Applying <file>` before each migration, so its text
+  output matches TS (#486): the migration's `-- log:` line, if any, then `Applied: <file>`.
+  `--json` output is unchanged.
 - `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
   migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
   `index_granularity`, and leaves out chkit's migration journal and the hidden
