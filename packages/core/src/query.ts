@@ -1,5 +1,6 @@
 import { z } from 'zod'
 
+import { parseJsonEachRow } from './exact-json.js'
 import { quoteIdentifier } from './identifier.js'
 import { splitTopLevelComma } from './key-clause.js'
 import type { DictionaryDefinition, MaterializedViewDefinition, TableDefinition, ViewDefinition } from './model-types.js'
@@ -15,7 +16,7 @@ export interface QueryClient {
     clickhouse_settings?: object
     query_id?: string
     abort_signal?: AbortSignal
-  }): Promise<{ json(): Promise<unknown> }>
+  }): Promise<{ text(): Promise<string> }>
 }
 
 export interface QueryOptions<R extends z.ZodType | undefined = undefined> {
@@ -240,7 +241,7 @@ function defineQuery(
           { cause: error },
         )
       })
-    const rows = await result.json()
+    const rows = parseJsonEachRow(await result.text())
     return options.returns ? z.array(options.returns).parse(rows) : rows
   }
   Object.defineProperties(run, {
