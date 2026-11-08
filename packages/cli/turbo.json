@@ -3,7 +3,14 @@
   "extends": ["//"],
   "tasks": {
     "test": {
-      "dependsOn": ["$TURBO_EXTENDS$", "build", "@chkit/plugin-ingest#build"]
+      "dependsOn": ["$TURBO_EXTENDS$", "build", "@chkit/plugin-ingest#build"],
+      "inputs": [
+        "$TURBO_EXTENDS$",
+        "$TURBO_ROOT$/packages/plugin-backfill/src/**",
+        "$TURBO_ROOT$/packages/plugin-codegen/src/**",
+        "$TURBO_ROOT$/packages/plugin-obsessiondb/src/**",
+        "$TURBO_ROOT$/packages/plugin-pull/src/**"
+      ]
     }
   }
 }

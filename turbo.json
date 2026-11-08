@@ -25,22 +25,12 @@
     "lint": {
       "dependsOn": ["^lint"]
     },
-    "//#infra:up": {
-      "cache": false,
-      "passThroughEnv": ["CHKIT_TEST_PORT", "CLICKHOUSE_HOST", "CLICKHOUSE_URL"]
-    },
     "test": {
-      "dependsOn": ["^build", "//#infra:up"],
-      "cache": false,
-      "passThroughEnv": [
-        "CHKIT_E2E_TARGET",
-        "CHKIT_TEST_PORT",
-        "CLICKHOUSE_DB",
-        "CLICKHOUSE_HOST",
-        "CLICKHOUSE_PASSWORD",
-        "CLICKHOUSE_URL",
-        "CLICKHOUSE_USER"
-      ]
+      "dependsOn": ["^build"],
+      "inputs": ["$TURBO_DEFAULT$", "$TURBO_ROOT$/test/infra/**", "$TURBO_ROOT$/test/fixtures/**", "$TURBO_ROOT$/scripts/infra-up.ts"],
+      "outputs": [],
+      "env": ["CHKIT_E2E_TARGET", "CLICKHOUSE_DB", "CLICKHOUSE_HOST", "CLICKHOUSE_URL", "CLICKHOUSE_USER"],
+      "passThroughEnv": ["CHKIT_TEST_PORT", "CLICKHOUSE_PASSWORD"]
     },
     "deploy": {
       "dependsOn": ["build"],
