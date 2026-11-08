@@ -84,7 +84,7 @@ def test_on_before_apply_gets_the_fixture_statements_and_they_keep_their_meaning
     monkeypatch.chdir(tmp_path)
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
-    (tmp_path / "probe_plugin.py").write_text(PROBE_PLUGIN, encoding="utf-8")
+    (tmp_path / "statements_probe.py").write_text(PROBE_PLUGIN, encoding="utf-8")
     config = {
         "schema": "./schema.py",
         "outDir": "./chkit",
@@ -98,7 +98,7 @@ def test_on_before_apply_gets_the_fixture_statements_and_they_keep_their_meaning
         },
     }
     (tmp_path / "clickhouse.config.py").write_text(
-        "from chkit import define_config\nfrom probe_plugin import probe\n\n"
+        "from chkit import define_config\nfrom statements_probe import probe\n\n"
         f"config = define_config({json.dumps(config)[:-1]}, \"plugins\": [probe()]}})\n",
         encoding="utf-8",
     )
