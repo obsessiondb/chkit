@@ -17,7 +17,17 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { isoWithoutZone } from '../commands/migrate/async-apply.js'
 import { createJournalStore, type MigrationRowState } from '../runtime/journal-store.js'
-import { CORE_ENTRY, createJournalTableName, createPrefix, formatTestDiagnostic, runCli, type CliResult } from './e2e-testkit.js'
+import {
+  CORE_ENTRY,
+  createJournalTableName,
+  createLiveExecutor,
+  createPrefix,
+  createStatelessLiveExecutor,
+  formatTestDiagnostic,
+  getLiveEnv,
+  runCli,
+  type CliResult,
+} from './e2e-testkit.js'
 
 const WORKSPACE_ROOT = join(import.meta.dir, '../../../..')
 const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
@@ -40,6 +50,27 @@ export interface CutoverTarget {
   readSettings: string
   /** Runs before verification reads, e.g. syncing the replicas of a cluster. */
   settle?: (tables: string[]) => Promise<void>
+}
+
+/** The default test target: the local stack, or ObsessionDB (CHKIT_E2E_TARGET=obsessiondb). */
+export function liveCutoverTarget(): CutoverTarget {
+  const env = getLiveEnv()
+  const remote = env.clickhouseUrl.startsWith('https://')
+  return {
+    database: env.clickhouseDatabase,
+    connection: {
+      url: env.clickhouseUrl,
+      username: env.clickhouseUser,
+      password: env.clickhousePassword,
+      database: env.clickhouseDatabase,
+    },
+    admin: createLiveExecutor(env),
+    writers: [createStatelessLiveExecutor(env), createStatelessLiveExecutor(env)],
+    engine: 'MergeTree',
+    rowsOf: (table) => `${env.clickhouseDatabase}.${table}`,
+    // A SharedMergeTree replica reads the parts every replica committed.
+    readSettings: remote ? ' SETTINGS select_sequential_consistency = 1' : '',
+  }
 }
 
 export interface CutoverProject {

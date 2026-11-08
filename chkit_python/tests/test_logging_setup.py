@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Iterator
 
 import pytest
 
@@ -15,9 +16,22 @@ from chkit.cli.logging_setup import (
 
 
 @pytest.fixture(autouse=True)
-def _reset_configured(monkeypatch: pytest.MonkeyPatch) -> None:
+def _isolated_chkit_logger(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+    """Configure from scratch, then leave the ``chkit`` logger as the test found it.
+
+    A handler configured here writes to this test's captured stderr, which is
+    closed once the test ends. Left in place, it turns every later DEBUG record
+    on the same pytest-xdist worker into a "--- Logging error ---" on the
+    stderr of whichever command is running then.
+    """
+    logger = logging.getLogger("chkit")
+    handlers, level, propagate = logger.handlers[:], logger.level, logger.propagate
     monkeypatch.setattr(logging_setup, "_CONFIGURED", False)
-    logging.getLogger("chkit").handlers.clear()
+    logger.handlers.clear()
+    yield
+    logger.handlers[:] = handlers
+    logger.setLevel(level)
+    logger.propagate = propagate
 
 
 def test_is_debug_enabled_false_by_default(monkeypatch: pytest.MonkeyPatch) -> None:

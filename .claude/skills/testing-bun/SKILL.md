@@ -103,6 +103,8 @@ Use inline setup unless lifecycle hooks are required for async cleanup/reset.
 ## Env-Dependent Tests
 
 If tests need a new env var:
-1. Ensure var is in `turbo.json` `passThroughEnv` for the `test` task
+1. Add the var to the `test` task in `turbo.json`: under `env` when its value changes test results (it joins the cache key), under `passThroughEnv` for secrets and values that don't
 2. Ensure CI mapping in `.github/workflows/ci.yml` if the ObsessionDB job needs it
 3. Treat a missing var as a hard failure, not a skip path
+
+Test results are cached by their inputs. A test that reads a file outside its package (a shared fixture, another package's source, a root script) must list it under the `test` task's `inputs` in that package's `turbo.json`, or a change to the file will not rerun the test.

@@ -386,7 +386,7 @@ When `chkit migrate --apply` encounters migrations that drop tables, drop column
 The CLI scans pending migration SQL for dangerous operations. When found and `--allow-destructive` is not passed, the command:
 
 - In `--json` mode: emits an error payload with `destructiveMigrations` and `destructiveOperations` arrays, then exits with code 3
-- In text mode: prints destructive operation details and exits with an error
+- In text mode: prints destructive operation details and exits with code 3
 
 ### Safety gate pattern
 
