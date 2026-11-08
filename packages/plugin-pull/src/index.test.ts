@@ -109,7 +109,7 @@ const app_events = table({
   partitionBy: "toYYYYMM(received_at)",
   ttl: "received_at + INTERVAL 30 DAY",
   settings: {
-    index_granularity: 8192,
+    index_granularity: 8192, // read-only: a change recreates the table (DROP + CREATE, or --cutover)
     ttl_only_drop_parts: 1,
   },
   indexes: [

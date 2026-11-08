@@ -18,7 +18,7 @@ import {
 
 const PULL_PLUGIN_ENTRY = resolve(import.meta.dir, '../../../plugin-pull/src/index.ts')
 // ObsessionDB writes storage_policy = 's3' into every Shared table; its plugin
-// leaves it out of the schema and the snapshot. On other targets it does nothing here.
+// gives the schema and the snapshot the same value. On other targets it does nothing here.
 const OBSESSIONDB_PLUGIN_ENTRY = resolve(import.meta.dir, '../../../plugin-obsessiondb/src/index.ts')
 
 // On a database chkit migrated, pull then generate plans nothing and drift is

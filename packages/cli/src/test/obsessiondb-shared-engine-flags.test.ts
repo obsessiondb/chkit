@@ -59,11 +59,25 @@ describe('obsessiondb Shared-engine override flags', () => {
     expect(operations).toEqual([])
   })
 
-  test("ObsessionDB's implicit storage_policy = 's3' never reaches a migration", async () => {
-    // Every Shared table has it, so pull reads it back; writing it is a no-op (#466).
-    const createTable = await planCreateTable(OBSESSIONDB_URL, [], "'s3'")
-    expect(createTable).not.toContain('storage_policy')
-    expect(createTable).toContain('SETTINGS index_granularity = 8192;')
+  test("an ObsessionDB host gives a table without storage_policy the 's3' every Shared table has", async () => {
+    // Pull reads it back, so the schema, snapshot and CREATE carry it too (#466).
+    const createTable = await planCreateTable(OBSESSIONDB_URL, [], null)
+    expect(createTable).toContain("SETTINGS index_granularity = 8192, storage_policy = 's3';")
+  })
+
+  test('an ObsessionDB host rejects a storage_policy change in generate', async () => {
+    const fixture = await createObsessionDBFixture(OBSESSIONDB_URL, "'s3'")
+    try {
+      const env = { XDG_CONFIG_HOME: fixture.xdgConfigHome }
+      expect(runCli(['generate', '--config', fixture.configPath, '--name', 'init', '--json'], env).exitCode).toBe(0)
+      const schemaPath = join(fixture.dir, 'schema.ts')
+      await writeFile(schemaPath, (await readFile(schemaPath, 'utf8')).replace(`"'s3'"`, `"'default'"`), 'utf8')
+      const changed = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'], env)
+      expect(changed.exitCode).not.toBe(0)
+      expect(`${changed.stdout}${changed.stderr}`).toContain('cannot change storage_policy')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
   })
 
   test('snapshot rebuild accepts the overrides and matches what generate would write', async () => {
@@ -78,7 +92,7 @@ describe('obsessiondb Shared-engine override flags', () => {
   })
 })
 
-async function planCreateTable(url: string, flags: string[], storagePolicy?: string): Promise<string> {
+async function planCreateTable(url: string, flags: string[], storagePolicy?: string | null): Promise<string> {
   const fixture = await createObsessionDBFixture(url, storagePolicy)
   try {
     const result = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json', ...flags], {
@@ -132,7 +146,7 @@ async function rebuildSnapshotSettings(url: string, flags: string[]): Promise<un
   }
 }
 
-async function createObsessionDBFixture(url: string, storagePolicy = "'hot_cold'"): Promise<{
+async function createObsessionDBFixture(url: string, storagePolicy: string | null = "'hot_cold'"): Promise<{
   dir: string
   configPath: string
   metaDir: string
@@ -147,7 +161,7 @@ async function createObsessionDBFixture(url: string, storagePolicy = "'hot_cold'
   await mkdir(xdgConfigHome)
   await writeFile(
     schemaPath,
-    `import { schema, table } from '${CORE_ENTRY}'\n\nconst events = table({\n  database: 'app',\n  name: 'events',\n  columns: [{ name: 'id', type: 'UInt64' }],\n  engine: 'SharedMergeTree',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  settings: { index_granularity: 8192, storage_policy: "${storagePolicy}" },\n})\n\nexport default schema(events)\n`,
+    `import { schema, table } from '${CORE_ENTRY}'\n\nconst events = table({\n  database: 'app',\n  name: 'events',\n  columns: [{ name: 'id', type: 'UInt64' }],\n  engine: 'SharedMergeTree',\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  settings: { index_granularity: 8192${storagePolicy === null ? '' : `, storage_policy: "${storagePolicy}"`} },\n})\n\nexport default schema(events)\n`,
     'utf8',
   )
   await writeFile(

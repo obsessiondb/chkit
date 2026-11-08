@@ -158,13 +158,13 @@ export default schema(app_events, app_events_view, app_events_mv)
   </TabItem>
 </Tabs>
 
-Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, `projections`, and `constraints` when present in the source metadata. Every setting the server stores is pulled, including the ones it fills in itself, such as `index_granularity = 8192` on every MergeTree table. The hidden `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not pulled. An index type with no structured DSL form (or arguments the structured form cannot express exactly) is written as a [raw index](/schema/dsl-reference/#raw-indexes) that carries ClickHouse's type verbatim, so the pulled schema recreates the same index. Constraint expressions are written as ClickHouse stores them, e.g. `(s IN ('a', 'b')) AND (id > 0)`.
+Tables may also include `uniqueKey`, `ttl`, `settings`, `indexes`, `projections`, and `constraints` when present in the source metadata. Every setting the server stores is pulled, including the ones it fills in itself, such as `index_granularity = 8192` on every MergeTree table. A setting that cannot be altered on an existing table gets a comment saying so: the [read-only settings](/schema/dsl-reference/#structural-vs-alterable-properties) (a change recreates the table) and, on an ObsessionDB `Shared` table, `storage_policy`. The hidden `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not pulled. An index type with no structured DSL form (or arguments the structured form cannot express exactly) is written as a [raw index](/schema/dsl-reference/#raw-indexes) that carries ClickHouse's type verbatim, so the pulled schema recreates the same index. Constraint expressions are written as ClickHouse stores them, e.g. `(s IN ('a', 'b')) AND (id > 0)`.
 
 chkit's migration journal (`_chkit_migrations`, or the table `CHKIT_JOURNAL_TABLE` names) is never pulled. On a database chkit migrated, `chkit generate` on the pulled schema plans no operations and `chkit drift` reports none:
 
 - A literal default and the expression pull reads back compare by value: `7` and `{ expression: "7" }`, `2.0` and `2.`, `"it's"` and `'it\'s'`.
 - Settings compare by value (`4096` and `"4096"`), and a MergeTree table without `index_granularity` has the `8192` ClickHouse stores.
-- With the [ObsessionDB plugin](/obsessiondb/engine-rewriting/), the `storage_policy = 's3'` every ObsessionDB `Shared` table has is left out of the schema and the snapshot.
+- With the [ObsessionDB plugin](/obsessiondb/engine-rewriting/), a table without `storage_policy` has the `'s3'` every ObsessionDB `Shared` table has.
 - A dictionary `lifetime` compares in the form ClickHouse stores (`300` and `MIN 0 MAX 300`).
 
 ## Credential handling (`[HIDDEN]` passwords)

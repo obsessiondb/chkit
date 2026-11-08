@@ -64,12 +64,16 @@ describe('@chkit/plugin-pull round trip', () => {
     const { content } = await pullContent([
       introspected('local_t', 'MergeTree', { index_granularity: '8192', merge_with_ttl_timeout: '3600' }),
       introspected('shared_t', 'SharedMergeTree', { storage_policy: "'s3'", index_granularity: '4096' }),
+      introspected('self_hosted_s3', 'MergeTree', { storage_policy: "'s3'" }),
     ])
     const block = (name: string) => content.slice(content.indexOf(`name: "${name}"`), content.indexOf('})', content.indexOf(`name: "${name}"`)))
-    expect(block('local_t')).toContain('index_granularity: "8192"')
-    expect(block('local_t')).toContain('merge_with_ttl_timeout: "3600"')
-    expect(block('shared_t')).toContain('index_granularity: "4096"')
-    expect(block('shared_t')).toContain(`storage_policy: "'s3'"`)
+    // A setting that cannot be altered in place says so.
+    expect(block('local_t')).toContain('index_granularity: "8192", // read-only: a change recreates the table (DROP + CREATE, or --cutover)')
+    expect(block('local_t')).toContain('merge_with_ttl_timeout: "3600",\n')
+    expect(block('shared_t')).toContain('index_granularity: "4096", // read-only')
+    expect(block('shared_t')).toContain(`storage_policy: "'s3'", // set by ObsessionDB on every Shared table; it cannot change`)
+    // An 's3' policy a self-hosted server defines is an ordinary setting.
+    expect(block('self_hosted_s3')).toContain(`storage_policy: "'s3'",\n`)
   })
 
   test('leaves out the journal table, by default and when CHKIT_JOURNAL_TABLE names it', async () => {

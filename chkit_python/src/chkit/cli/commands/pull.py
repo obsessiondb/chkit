@@ -550,7 +550,13 @@ def run(  # noqa: PLR0912, PLR0917
             definitions = _pull_definitions(client, selected)
     definitions = [d for d in definitions if _is_pulled_object(d)]
 
-    content = render_schema_file(definitions)
+    # ObsessionDB reports the engine as Shared*, which rendering canonicalizes away.
+    shared_tables = frozenset(
+        f"{d.database}.{d.name}"
+        for d in definitions
+        if isinstance(d, TableDefinition) and d.engine.startswith("Shared")
+    )
+    content = render_schema_file(definitions, shared_tables=shared_tables)
     out_file_abs = (Path.cwd() / out_file).resolve()
 
     if not dryrun:

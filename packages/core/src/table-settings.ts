@@ -94,3 +94,27 @@ export function readonlySettingsFingerprint(settings: Record<string, SettingValu
     .filter(Boolean)
     .join(',')
 }
+
+/** The read-only settings either definition declares, in list order. */
+export function declaredReadonlySettings(...settings: Array<Record<string, SettingValue> | undefined>): string[] {
+  return READONLY_MERGE_TREE_SETTINGS.filter((key) => settings.some((values) => values?.[key] !== undefined))
+}
+
+/**
+ * SQL over `system.tables` giving the `keys` read-only settings of a table as
+ * stored in `engine_full`, one element per setting ('' when absent; a missing
+ * `index_granularity` reads as 8192, as above). The cutover adds it to the
+ * layout that tells the old table from the new one, so a change of only these
+ * settings can be cut over and an interrupted swap is never replayed (#511).
+ * A number compares by value, as `settingValueFingerprint` does: a table
+ * created with `1e6` stores `1000000.`, the snapshot table chkit creates from
+ * the same definition may store `1000000`, and they are the same layout.
+ */
+export function readonlySettingsLayoutSQL(keys: readonly string[]): string {
+  const elements = keys.map((key) => {
+    const stored = `extract(engine_full, '(?:SETTINGS |, )${key} = ([^,]*)')`
+    const value = key === 'index_granularity' ? `if(${stored} = '', '${DEFAULT_INDEX_GRANULARITY}', ${stored})` : stored
+    return `ifNull(toString(toFloat64OrNull(${value})), ${value})`
+  })
+  return `tuple(${elements.join(', ')})`
+}

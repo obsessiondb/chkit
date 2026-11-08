@@ -172,6 +172,21 @@ describe('planCutover', () => {
     expect(verify).toContain('The table was not swapped.')
   })
 
+  test('cuts over a change of read-only settings only, telling the tables apart by them (#511)', () => {
+    const newDef = events({ settings: { index_granularity: 4096 } })
+    const ops = plan({ newDef }).operations
+    const guard = ops.find((op) => op.type === 'exchange_tables')?.beforeRetry ?? ''
+    expect(guard).toContain("if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192',")
+    expect(ops.find((op) => op.type === 'create_table')?.sql).toContain('SETTINGS index_granularity = 4096;')
+    const minmax = plan({ newDef: events({ settings: { add_minmax_index_for_numeric_columns: 1 } }) }).operations
+    expect(minmax.find((op) => op.type === 'exchange_tables')?.beforeRetry).toContain('add_minmax_index_for_numeric_columns = ([^,]*)')
+  })
+
+  test('compares a numeric read-only setting by value, as ClickHouse may store 1e6 as 1000000. (#511)', () => {
+    const guard = plan({ newDef: events({ settings: { index_granularity_bytes: 1e6 } }) }).operations.find((op) => op.type === 'exchange_tables')?.beforeRetry ?? ''
+    expect(guard).toContain("ifNull(toString(toFloat64OrNull(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))), extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))")
+  })
+
   test('guards the exchange on every attempt, so a replay never swaps the tables back', () => {
     const ops = plan().operations
     const exchange = ops[10]
@@ -179,7 +194,7 @@ describe('planCutover', () => {
     expect(exchange?.beforeRetry).toBeDefined()
     expect(`${exchange?.beforeRetry};`).toBe(ops[9]?.sql)
     expect(exchange?.beforeRetry).toContain(
-      "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables WHERE database = 'app' AND name = 'events__cutover_20261024120000_snapshot')"
+      "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))))) FROM system.tables WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))))) FROM system.tables WHERE database = 'app' AND name = 'events__cutover_20261024120000_snapshot')"
     )
     expect(exchange?.beforeRetry).not.toContain('\n')
   })
@@ -329,7 +344,7 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
   test('a change of the engine arguments only', () => {
     const oldDef = events({ engine: "ReplicatedMergeTree('/t/{uuid}', '{replica}')" })
     const newDef = events({ engine: "ReplicatedMergeTree('/t2/{uuid}', '{replica}')" })
-    expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments or read-only settings')])
+    expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments change')])
   })
 
   test('a replication path without {table} or {uuid}, where the shadow would collide', () => {

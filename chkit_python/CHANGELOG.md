@@ -137,10 +137,11 @@
   as `index_granularity=8192`, so new `CREATE TABLE` statements write it. Setting values and
   literal column defaults compare by value (`2.0` and `2.`, `"it's"` and `'it\'s'`). A change
   to a setting ClickHouse cannot alter on an existing table plans `DROP TABLE` and
-  `CREATE TABLE` instead of an `ALTER` the server rejects. The ObsessionDB plugin leaves
-  `storage_policy = 's3'` out of the schema and the snapshot, through a new
-  `on_snapshot_loaded` plugin hook for the snapshot. A dictionary `lifetime` compares in the
-  form ClickHouse stores.
+  `CREATE TABLE` instead of an `ALTER` the server rejects, and `--cutover` supports it. `pull`
+  comments the settings that cannot change. On an ObsessionDB host the ObsessionDB plugin
+  treats a table without `storage_policy` as `'s3'`, in the schema and, through a new
+  `on_snapshot_loaded` plugin hook, the snapshot, and `generate` rejects a change to it. A
+  dictionary `lifetime` compares in the form ClickHouse stores.
 - Async `migrate` statements no longer fail on a fresh ClickHouse server that has not
   created `system.query_log` yet, as in TS.
 - Concurrent `migrate --apply` runs of one migration file against other databases, or by

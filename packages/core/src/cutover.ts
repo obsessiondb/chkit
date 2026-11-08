@@ -10,6 +10,12 @@ import {
   type TableDefinition,
 } from './model.js'
 import { renderColumnType, toCreateSQL } from './sql.js'
+import {
+  declaredReadonlySettings,
+  readonlySettingsFingerprint,
+  readonlySettingsLayoutSQL,
+  withDefaultIndexGranularity,
+} from './table-settings.js'
 
 /**
  * Zero-downtime cutover of a structural table change (`chkit generate
@@ -193,7 +199,18 @@ export function planCutover(input: {
   const { request, options } = input
   const names = cutoverNames(request.table, options.stamp)
   const columns = assertCutoverSupported({ oldDef, newDef, request, options, definitions: input.definitions, names })
-  const sql = createCutoverSql({ database: request.database, table: request.table, names, columns, key: request.key, cluster: options.cluster })
+  const sql = createCutoverSql({
+    database: request.database,
+    table: request.table,
+    names,
+    columns,
+    key: request.key,
+    cluster: options.cluster,
+    readonlySettings: declaredReadonlySettings(
+      withDefaultIndexGranularity(oldDef.engine, oldDef.settings),
+      withDefaultIndexGranularity(newDef.engine, newDef.settings),
+    ),
+  })
   const metadata: CutoverMetadata = {
     chkitCutover: 1,
     database: request.database,
@@ -429,8 +446,10 @@ function createCutoverSql(input: {
   columns: string[]
   key: string[]
   cluster?: string
+  /** Read-only settings the layout compares, besides engine and keys. */
+  readonlySettings: string[]
 }): CutoverSql {
-  const { database, table, names, columns, key, cluster } = input
+  const { database, table, names, columns, key, cluster, readonlySettings } = input
   const q = (name: string) => renderQualifiedName(database, name)
   const target = `${database}.${table}`
   const columnList = columns.map(quoteColumn).join(', ')
@@ -438,7 +457,7 @@ function createCutoverSql(input: {
   const everyReplica = (query: string) => (cluster ? `clusterAllReplicas(${stringLiteral(cluster)}, view(${query}))` : `(${query})`)
   const tableCount = (name: string) => `(SELECT count() FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
   const layout = (name: string) =>
-    `(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
+    `(SELECT any(tuple(engine, sorting_key, primary_key, partition_key${readonlySettings.length > 0 ? `, ${readonlySettingsLayoutSQL(readonlySettings)}` : ''})) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
   // Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
   const guard = (condition: string, message: string) =>
     `SELECT throwIf(countIf(ok = 0) > 0 OR count() = 0, ${stringLiteral(message)}) FROM ${everyReplica(`SELECT toUInt8(${condition}) AS ok`)}`
@@ -617,14 +636,16 @@ function assertCutoverSupported(input: {
     }
   }
 
+  const readonlySettings = (def: TableDefinition) => readonlySettingsFingerprint(withDefaultIndexGranularity(def.engine, def.settings))
   const layoutChanged =
     engineName(oldDef.engine) !== engineName(newDef.engine) ||
     oldDef.orderBy.join(',') !== newDef.orderBy.join(',') ||
     oldDef.primaryKey.join(',') !== newDef.primaryKey.join(',') ||
-    (oldDef.partitionBy ?? '') !== (newDef.partitionBy ?? '')
+    (oldDef.partitionBy ?? '') !== (newDef.partitionBy ?? '') ||
+    readonlySettings(oldDef) !== readonlySettings(newDef)
   if (!layoutChanged) {
     problems.push(
-      'only the engine arguments or read-only settings (such as index_granularity) change. The cutover tells the old table from the new one by engine name, sorting key, primary key and partition key, so at least one of them must change. Without --cutover, generate plans DROP TABLE and CREATE TABLE, which loses the rows.'
+      'only the engine arguments change. The cutover tells the old table from the new one by engine name, sorting key, primary key, partition key and read-only settings (such as index_granularity), so at least one of them must change.'
     )
   }
 

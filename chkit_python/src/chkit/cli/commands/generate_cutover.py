@@ -140,8 +140,8 @@ def apply_cutovers(
             msg = (
                 f"--cutover {target}: the plan does not recreate {target}. A cutover replaces "
                 "the DROP TABLE and CREATE TABLE of a change to the engine, ORDER BY, PRIMARY "
-                f"KEY or PARTITION BY of an existing table{empty}. Check the table name and "
-                "the --table scope."
+                "KEY, PARTITION BY or a read-only setting (such as index_granularity) of an "
+                f"existing table{empty}. Check the table name and the --table scope."
             )
             raise ValueError(msg)
         _assert_no_dependent_recreated(

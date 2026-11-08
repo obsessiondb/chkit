@@ -105,3 +105,33 @@ def readonly_settings_fingerprint(settings: dict[str, SettingValue] | None) -> s
         for key in READONLY_MERGE_TREE_SETTINGS
         if settings is not None and key in settings
     )
+
+
+def declared_readonly_settings(*settings: dict[str, SettingValue] | None) -> list[str]:
+    """The read-only settings either definition declares, in list order."""
+    return [
+        key
+        for key in READONLY_MERGE_TREE_SETTINGS
+        if any(values is not None and key in values for values in settings)
+    ]
+
+
+def readonly_settings_layout_sql(keys: list[str]) -> str:
+    """SQL over ``system.tables`` giving the ``keys`` read-only settings of a
+    table as stored in ``engine_full``, one element per setting ('' when absent;
+    a missing ``index_granularity`` reads as 8192). The cutover adds it to the
+    layout that tells the old table from the new one, so a change of only these
+    settings can be cut over and an interrupted swap is never replayed (#511).
+    A number compares by value, as ``setting_value_fingerprint`` does: a table
+    created with ``1e6`` stores ``1000000.``, the snapshot table chkit creates
+    from the same definition may store ``1000000``, and they are the same layout."""
+    elements: list[str] = []
+    for key in keys:
+        stored = f"extract(engine_full, '(?:SETTINGS |, ){key} = ([^,]*)')"
+        value = (
+            f"if({stored} = '', '{DEFAULT_INDEX_GRANULARITY}', {stored})"
+            if key == "index_granularity"
+            else stored
+        )
+        elements.append(f"ifNull(toString(toFloat64OrNull({value})), {value})")
+    return f"tuple({', '.join(elements)})"

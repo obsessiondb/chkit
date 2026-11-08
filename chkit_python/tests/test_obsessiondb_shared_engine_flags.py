@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -20,7 +21,7 @@ from chkit.cli.main import app
 from chkit.cli.table_scope import TableScope
 from chkit.core import parse_flags
 from chkit.core.model import ChxUserConfig, resolve_config, table
-from chkit.plugins import ChxOnSchemaLoadedContext
+from chkit.plugins import ChxOnPlanCreatedContext, ChxOnSchemaLoadedContext
 from chkit_plugin_obsessiondb import obsessiondb, resolve_strip_behavior
 from chkit_plugin_obsessiondb.plugin import _ObsessionDBHooks
 
@@ -140,35 +141,40 @@ def test_on_schema_loaded_honors_parsed_override_flags_for_storage_policy() -> N
         )
     )
 
-    assert kept is not None
-    assert kept[0].settings == {"storage_policy": "'hot_cold'"}
+    # Kept as written: not a recognized ObsessionDB host, so no storage_policy rules apply.
+    assert kept is None
     assert stripped is not None
     assert stripped[0].settings is None
 
 
-def test_the_implicit_storage_policy_s3_is_left_out_of_the_schema_and_the_snapshot() -> None:
+def test_an_obsessiondb_target_gives_every_merge_tree_table_storage_policy_s3() -> None:
     # ObsessionDB writes storage_policy = 's3' into every Shared table, so pull
-    # reads it back; the schema and the snapshot both leave it out (#466).
+    # reads it back; on ObsessionDB the schema and the snapshot both carry it (#466).
     hooks = _ObsessionDBHooks()
 
-    def events(name: str, settings: dict[str, Any]) -> Any:
+    def events(name: str, settings: dict[str, Any] | None) -> Any:
         return table(
             database="app", name=name, columns=[{"name": "id", "type": "UInt64"}],
             engine="MergeTree", primary_key=["id"], order_by=["id"], settings=settings,
         )
 
     definitions = [
-        events("events", {"storage_policy": "'s3'", "index_granularity": "8192"}),
+        events("events", {"index_granularity": "8192"}),
+        events("pulled", {"storage_policy": "'s3'"}),
         events("hot", {"storage_policy": "'hot_cold'"}),
     ]
 
-    def context(url: str) -> ChxOnSchemaLoadedContext:
+    def context(url: str, flags: dict[str, Any] | None = None) -> ChxOnSchemaLoadedContext:
         return ChxOnSchemaLoadedContext(
             command="generate", table_scope=TableScope(enabled=False), config=_config(url),
-            flags={}, definitions=definitions, json_mode=True,
+            flags=flags or {}, definitions=definitions, json_mode=True,
         )
 
-    expected = [{"index_granularity": "8192"}, {"storage_policy": "'hot_cold'"}]
+    expected = [
+        {"index_granularity": "8192", "storage_policy": "'s3'"},
+        {"storage_policy": "'s3'"},
+        {"storage_policy": "'hot_cold'"},
+    ]
     obsession = "https://my-cluster.obsessiondb.com:8443"
     schema_side = hooks.on_schema_loaded(context(obsession))
     assert schema_side is not None
@@ -178,7 +184,36 @@ def test_the_implicit_storage_policy_s3_is_left_out_of_the_schema_and_the_snapsh
     assert [d.settings for d in hooks.on_snapshot_loaded(context(LOCAL_URL))] == [
         {"index_granularity": "8192"},
         None,
+        None,
     ]
+    # --force-shared-engines on another host may be a self-hosted server with its
+    # own policies: kept as is.
+    forced = hooks.on_snapshot_loaded(context(LOCAL_URL, {"--force-shared-engines": True}))
+    assert [d.settings for d in forced] == [d.settings for d in definitions]
+
+
+def test_an_obsessiondb_target_rejects_a_plan_that_changes_storage_policy() -> None:
+    hooks = _ObsessionDBHooks()
+    plan = SimpleNamespace(
+        operations=[
+            SimpleNamespace(
+                type="alter_table_modify_setting",
+                key="table:app.events:setting:storage_policy",
+            )
+        ]
+    )
+
+    def run(url: str) -> Any:
+        return hooks.on_plan_created(
+            ChxOnPlanCreatedContext(
+                command="generate", table_scope=TableScope(enabled=False), config=_config(url),
+                flags={}, plan=plan,
+            )
+        )
+
+    with pytest.raises(ValueError, match=r"app\.events cannot change storage_policy"):
+        run("https://my-cluster.obsessiondb.com:8443")
+    assert run(LOCAL_URL) is None
 
 
 # ---------- CLI ----------
@@ -188,10 +223,13 @@ def test_the_implicit_storage_policy_s3_is_left_out_of_the_schema_and_the_snapsh
 def make_project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Any:
     monkeypatch.chdir(tmp_path)
 
-    def make(url: str, storage_policy: str = "'hot_cold'") -> Path:
-        (tmp_path / "schema.py").write_text(
-            SCHEMA.replace("STORAGE_POLICY", storage_policy), encoding="utf-8"
+    def make(url: str, storage_policy: str | None = "'hot_cold'") -> Path:
+        schema = (
+            SCHEMA.replace(', "storage_policy": "STORAGE_POLICY"', "")
+            if storage_policy is None
+            else SCHEMA.replace("STORAGE_POLICY", storage_policy)
         )
+        (tmp_path / "schema.py").write_text(schema, encoding="utf-8")
         (tmp_path / "clickhouse.config.py").write_text(
             "from chkit import define_config\n"
             "from chkit_plugin_obsessiondb import obsessiondb\n\n"
@@ -280,16 +318,30 @@ def test_a_later_generate_without_the_override_plans_nothing_for_storage_policy(
     assert json.loads(later.stdout)["operations"] == []
 
 
-def test_obsessiondb_implicit_storage_policy_s3_never_reaches_a_migration(
-    make_project: Any,
-) -> None:
-    # Every Shared table has it, so pull reads it back; writing it is a no-op (#466).
-    make_project(OBSESSIONDB_URL, "'s3'")
+def test_an_obsessiondb_host_gives_a_table_without_storage_policy_s3(make_project: Any) -> None:
+    # Pull reads it back, so the schema, snapshot and CREATE carry it too (#466).
+    make_project(OBSESSIONDB_URL, None)
 
     sql = _plan_create_table([])
 
-    assert "storage_policy" not in sql
-    assert sql.endswith("SETTINGS index_granularity = 8192;")
+    assert sql.endswith("SETTINGS index_granularity = 8192, storage_policy = 's3';")
+
+
+def test_an_obsessiondb_host_rejects_a_storage_policy_change_in_generate(
+    make_project: Any,
+) -> None:
+    project = make_project(OBSESSIONDB_URL, "'s3'")
+    first = CliRunner().invoke(app, ["generate", "--name", "init", "--json"])
+    assert first.exit_code == 0, first.output
+    schema = project / "schema.py"
+    schema.write_text(
+        schema.read_text(encoding="utf-8").replace("\"'s3'\"", "\"'default'\""), encoding="utf-8"
+    )
+
+    changed = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
+
+    assert changed.exit_code != 0
+    assert "cannot change storage_policy" in changed.output
 
 
 def test_snapshot_rebuild_accepts_the_overrides_and_matches_generate(make_project: Any) -> None:

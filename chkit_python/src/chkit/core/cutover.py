@@ -51,6 +51,12 @@ from chkit.core.model import (
     ValidationIssue,
 )
 from chkit.core.sql import render_column_type, to_create_sql
+from chkit.core.table_settings import (
+    declared_readonly_settings,
+    readonly_settings_fingerprint,
+    readonly_settings_layout_sql,
+    with_default_index_granularity,
+)
 
 CutoverCopyMode: TypeAlias = Literal["migration", "backfill"]
 CutoverOldTableMode: TypeAlias = Literal["keep", "drop"]
@@ -241,6 +247,10 @@ def plan_cutover(
         columns=columns,
         key=request.key,
         cluster=options.cluster,
+        readonly_settings=declared_readonly_settings(
+            with_default_index_granularity(old_def.engine, old_def.settings),
+            with_default_index_granularity(new_def.engine, new_def.settings),
+        ),
     )
     metadata = CutoverMetadata(
         database=request.database,
@@ -544,6 +554,7 @@ def _create_cutover_sql(
     columns: list[str],
     key: list[str],
     cluster: str | None,
+    readonly_settings: list[str],
 ) -> _CutoverSql:
     def q(name: str) -> str:
         return render_qualified_name(database, name)
@@ -563,9 +574,13 @@ def _create_cutover_sql(
             f"AND name = {_string_literal(name)})"
         )
 
+    settings_layout = (
+        f", {readonly_settings_layout_sql(readonly_settings)}" if readonly_settings else ""
+    )
+
     def layout(name: str) -> str:
         return (
-            "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) "
+            f"(SELECT any(tuple(engine, sorting_key, primary_key, partition_key{settings_layout})) "
             f"FROM system.tables WHERE database = {_string_literal(database)} "
             f"AND name = {_string_literal(name)})"
         )
@@ -874,18 +889,23 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
         if constraint.check and f"{constraint.name}:{constraint.check}" not in old_checks
     )
 
+    def readonly_settings(definition: TableDefinition) -> str:
+        return readonly_settings_fingerprint(
+            with_default_index_granularity(definition.engine, definition.settings)
+        )
+
     layout_changed = (
         engine_name(old_def.engine) != engine_name(new_def.engine)
         or ",".join(old_def.order_by) != ",".join(new_def.order_by)
         or ",".join(old_def.primary_key) != ",".join(new_def.primary_key)
         or (old_def.partition_by or "") != (new_def.partition_by or "")
+        or readonly_settings(old_def) != readonly_settings(new_def)
     )
     if not layout_changed:
         problems.append(
-            "only the engine arguments or read-only settings (such as index_granularity) change. "
-            "The cutover tells the old table from the new one by engine name, sorting key, "
-            "primary key and partition key, so at least one of them must change. Without "
-            "--cutover, generate plans DROP TABLE and CREATE TABLE, which loses the rows."
+            "only the engine arguments change. The cutover tells the old table from the new "
+            "one by engine name, sorting key, primary key, partition key and read-only "
+            "settings (such as index_granularity), so at least one of them must change."
         )
 
     columns = _copied_columns(old_def, new_def, problems)

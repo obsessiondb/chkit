@@ -20,7 +20,6 @@ with ``--force-shared-engines`` (keep them) or ``--no-shared-engines``
 
 from __future__ import annotations
 
-import re
 from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Any
@@ -137,37 +136,59 @@ def strip_cloud_settings(
     )
 
 
-def _unquoted(value: str) -> str:
-    return re.sub(r"^'(.*)'$", r"\1", value.strip(), flags=re.DOTALL)
+_OBSESSIONDB_STORAGE_POLICY = "'s3'"
 
 
-def without_implicit_storage_policy(
+def is_obsessiondb_target(config: ChxResolvedConfig, flags: dict[str, Any]) -> bool:
+    """A target the plugin knows is ObsessionDB: an ObsessionDB host, not forced
+    to strip (TS ``isObsessionDBTarget``). ``--force-shared-engines`` on another
+    host may be a self-hosted server with its own policies, so it keeps
+    storage_policy without these rules."""
+    url = config.clickhouse.url if config.clickhouse is not None else None
+    if resolve_strip_behavior(config, flags) or not url:
+        return False
+    return is_obsessiondb_host(url)
+
+
+def with_obsessiondb_storage_policy(
     definitions: Sequence[SchemaDefinition],
 ) -> list[SchemaDefinition]:
-    """Leave out the ``storage_policy = 's3'`` ObsessionDB writes into every
-    Shared table (TS ``withoutImplicitStoragePolicy``, #466).
-
-    It is the only policy such a table can have, so pull reads it back on
-    tables that never declared it. chkit leaves that value out of the schema
-    and the snapshot alike, for every target, so neither plans a change against
-    the other. Any other policy is kept and compared.
-    """
+    """ObsessionDB writes ``storage_policy = 's3'`` into every Shared table, the
+    only policy such a table can have, so a table that does not declare it has
+    it, and pull reads it back. On an ObsessionDB target the schema and the
+    snapshot both get it, so neither plans a change against the other (TS
+    ``withObsessionDBStoragePolicy``, #466)."""
     out: list[SchemaDefinition] = []
     for definition in definitions:
         if (
             not isinstance(definition, TableDefinition)
             or not is_merge_tree_engine(definition.engine)
-            or not definition.settings
+            or (definition.settings is not None and "storage_policy" in definition.settings)
         ):
             out.append(definition)
             continue
-        value = definition.settings.get("storage_policy")
-        if not isinstance(value, str) or _unquoted(value) != "s3":
-            out.append(definition)
-            continue
-        settings = {k: v for k, v in definition.settings.items() if k != "storage_policy"}
-        out.append(definition.model_copy(update={"settings": settings or None}))
+        settings = {**(definition.settings or {}), "storage_policy": _OBSESSIONDB_STORAGE_POLICY}
+        out.append(definition.model_copy(update={"settings": settings}))
     return out
+
+
+def storage_policy_change_errors(plan: Any) -> list[str]:
+    """ObsessionDB rejects any other storage_policy on a Shared table, so on an
+    ObsessionDB target a plan that changes it fails in generate, with the
+    reason, instead of at migrate (TS ``storagePolicyChangeErrors``)."""
+    errors: list[str] = []
+    for op in plan.operations:
+        if op.type not in ("alter_table_modify_setting", "alter_table_reset_setting"):
+            continue
+        if not op.key.endswith(":setting:storage_policy"):
+            continue
+        table = op.key.removeprefix("table:").removesuffix(":setting:storage_policy")
+        errors.append(
+            f"obsessiondb: {table} cannot change storage_policy: ObsessionDB stores every "
+            "Shared table with storage_policy = 's3' and rejects any other. Keep "
+            f'storage_policy: "{_OBSESSIONDB_STORAGE_POLICY}" in the schema, or leave it out.'
+        )
+    return errors
 
 
 def rewrite_shared_engines(

@@ -47,7 +47,7 @@ def test_pull_then_generate_plans_nothing(
     (tmp_path / "clickhouse.config.py").write_text(
         "from chkit import define_config\n"
         # ObsessionDB writes storage_policy = 's3' into every Shared table; its
-        # plugin leaves it out of the schema and the snapshot.
+        # plugin gives the schema and the snapshot the same value.
         "from chkit_plugin_obsessiondb import obsessiondb\n\n"
         "config = define_config({\n"
         '    "schema": "./schema.py",\n'

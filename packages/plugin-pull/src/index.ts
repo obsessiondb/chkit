@@ -358,7 +358,14 @@ async function pullSchema(input: {
   ).filter(isPulledObject)
 
   const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
-  const content = renderSchemaFile(definitions)
+  // ObsessionDB reports the engine as Shared*, which canonicalization strips.
+  const sharedTables = new Set(
+    introspected
+      .filter((object) => !('kind' in object) || object.kind === 'table')
+      .filter((object) => ((object as { engine?: string }).engine ?? '').startsWith('Shared'))
+      .map((object) => `${object.database}.${object.name}`)
+  )
+  const content = renderSchemaFile(definitions, { sharedTables })
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
   const warnings = [

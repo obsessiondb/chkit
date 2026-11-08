@@ -80,6 +80,7 @@ def events(
     name: str = "events",
     engine: str = "MergeTree",
     columns: list[Any] | None = None,
+    settings: dict[str, Any] | None = None,
 ) -> TableDefinition:
     order = order_by or ["id"]
     return table(
@@ -89,6 +90,7 @@ def events(
         columns=columns or COLUMNS,
         primaryKey=order,
         orderBy=order,
+        settings=settings,
     )
 
 
@@ -271,12 +273,43 @@ def test_exchange_is_guarded_on_every_attempt() -> None:
     assert exchange.before_retry is not None
     assert f"{exchange.before_retry};" == ops[9].sql
     assert "\n" not in exchange.before_retry
+    stored = (
+        "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', "
+        "extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))"
+    )
+    granularity = f"ifNull(toString(toFloat64OrNull({stored})), {stored})"
+
+    def layout(name: str) -> str:
+        return (
+            f"(SELECT any(tuple(engine, sorting_key, primary_key, partition_key, "
+            f"tuple({granularity}))) FROM system.tables WHERE database = 'app' AND name = '{name}')"
+        )
+
     assert (
-        "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables "
-        "WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, "
-        "primary_key, partition_key)) FROM system.tables WHERE database = 'app' AND "
-        "name = 'events__cutover_20261024120000_snapshot')"
-    ) in exchange.before_retry
+        f"{layout('events')} = {layout('events__cutover_20261024120000_snapshot')}"
+        in exchange.before_retry
+    )
+
+
+def test_compares_a_numeric_read_only_setting_by_value() -> None:
+    # ClickHouse may store 1e6 as 1000000. on one table and 1000000 on another (#511).
+    ops = plan(new_def=events(settings={"index_granularity_bytes": 1e6})).operations
+    guard = next(op for op in ops if op.type == "exchange_tables").before_retry or ""
+    stored = "extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')"
+    assert f"ifNull(toString(toFloat64OrNull({stored})), {stored})" in guard
+
+
+def test_cuts_over_a_change_of_read_only_settings_only() -> None:
+    # The layout tells the tables apart by those settings too (#511).
+    new_def = events(settings={"index_granularity": 4096})
+    ops = plan(new_def=new_def).operations
+    guard = next(op for op in ops if op.type == "exchange_tables").before_retry or ""
+    assert "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192'," in guard
+    created = next(op for op in ops if op.type == "create_table")
+    assert "SETTINGS index_granularity = 4096;" in created.sql
+    minmax = plan(new_def=events(settings={"add_minmax_index_for_numeric_columns": 1})).operations
+    minmax_guard = next(op for op in minmax if op.type == "exchange_tables").before_retry or ""
+    assert "add_minmax_index_for_numeric_columns = ([^,]*)" in minmax_guard
 
 
 # An INSERT that resolved the table before the swap and the mirror's target
@@ -479,7 +512,7 @@ def test_refuses_an_engine_argument_only_change() -> None:
         cluster="c2",
     )
     assert len(found) == 1
-    assert "only the engine arguments or read-only settings" in found[0]
+    assert "only the engine arguments change" in found[0]
 
 
 def test_refuses_a_replication_path_without_a_macro() -> None:

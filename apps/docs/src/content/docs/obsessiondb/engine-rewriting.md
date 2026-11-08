@@ -39,7 +39,7 @@ chkit snapshot rebuild --force-shared-engines
 
 The migration files and `snapshot.json` keep what the flag decided, so pass the same flag every time `generate` or `snapshot rebuild` runs for that target. `generate` applies the flag's decision to the previous snapshot too, so dropping the flag plans no `RESET SETTING storage_policy` for existing tables (the server would reject it); those tables keep the policy they were created with. Adding the flag later plans `MODIFY SETTING storage_policy` for existing tables that declare one.
 
-ObsessionDB writes `storage_policy = 's3'` into every `Shared` table, so `chkit pull` reads it back on tables that never declared it. It is the only policy such a table can have, so the plugin leaves `storage_policy = 's3'` out of the schema and the snapshot on every target, and it never appears in a migration.
+ObsessionDB writes `storage_policy = 's3'` into every `Shared` table, and it is the only policy such a table can have. When the target is an ObsessionDB host, the plugin treats a table that does not declare `storage_policy` as `storage_policy: "'s3'"`, in the schema and in the snapshot, so `CREATE TABLE` writes it and a schema pulled with `chkit pull` (which reads it back, with a comment) plans nothing. A schema that changes it is rejected by `chkit generate` with the reason, instead of failing at `migrate`. These two rules apply only to a recognized ObsessionDB host, not to a self-hosted server reached with `--force-shared-engines`, where any policy, `'s3'` included, is an ordinary setting.
 
 `migrate`, `status`, `drift` and `check` also accept both flags, so scripts can pass them to all six commands, but those four ignore them: they work from the migration files and snapshot that `generate` already wrote.
 
@@ -54,8 +54,8 @@ ObsessionDB writes `storage_policy = 's3'` into every `Shared` table, so `chkit 
 
 | Table setting | Regular ClickHouse | ObsessionDB |
 |---|---|---|
-| `storage_policy = 's3'` | stripped | left out (ObsessionDB sets it on every `Shared` table) |
-| `storage_policy` (any other value) | stripped | kept |
+| `storage_policy` not declared | — | `'s3'` (ObsessionDB sets it on every `Shared` table) |
+| `storage_policy` (any value) | stripped | kept; a change is rejected by `generate` |
 | Any other setting | kept | kept |
 
 Only tables are affected. Views and materialized views pass through unchanged.

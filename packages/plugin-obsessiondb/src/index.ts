@@ -4,6 +4,7 @@ import {
 	type ChxInlinePluginRegistration,
 	isDistributedEngine,
 	isMergeTreeEngine,
+	type MigrationPlan,
 	type ResolvedChxConfig,
 	type SchemaDefinition,
 } from '@chkit/core'
@@ -109,6 +110,11 @@ interface ObsessionDBPlugin {
 			flags: Record<string, string | string[] | boolean | undefined>
 			definitions: SchemaDefinition[]
 		}): SchemaDefinition[]
+		onPlanCreated(context: {
+			config: ResolvedChxConfig
+			flags: Record<string, string | string[] | boolean | undefined>
+			plan: MigrationPlan
+		}): MigrationPlan | undefined
 		onCheck(context: {
 			config: ResolvedChxConfig
 			configPath: string
@@ -238,21 +244,51 @@ function stripCloudSettings(
 	}
 }
 
+const OBSESSIONDB_STORAGE_POLICY = "'s3'"
+
+/**
+ * A target the plugin knows is ObsessionDB: an ObsessionDB host, not forced to
+ * strip. `--force-shared-engines` on another host may be a self-hosted server
+ * with its own policies, so it keeps storage_policy without these rules.
+ */
+export function isObsessionDBTarget(
+	config: ResolvedChxConfig,
+	flags: Record<string, string | string[] | boolean | undefined>,
+): boolean {
+	const url = config.clickhouse?.url
+	return !resolveStripBehavior(config, flags) && url !== undefined && isObsessionDBHost(url)
+}
+
 /**
  * ObsessionDB writes `storage_policy = 's3'` into every Shared table, the only
- * policy such a table can have, so pull reads it back on tables that never
- * declared it. chkit leaves that value out of the schema and the snapshot alike,
- * for every target, so neither plans a change against the other (#466). Any
- * other policy is kept and compared.
+ * policy such a table can have, so a table that does not declare it has it, and
+ * pull reads it back. On an ObsessionDB target the schema and the snapshot both
+ * get it, so neither plans a change against the other and pull's file matches
+ * the snapshot (#466).
  */
-export function withoutImplicitStoragePolicy(definitions: SchemaDefinition[]): SchemaDefinition[] {
+export function withObsessionDBStoragePolicy(definitions: SchemaDefinition[]): SchemaDefinition[] {
 	return definitions.map((def) => {
-		if (def.kind !== 'table' || !isMergeTreeEngine(def.engine) || !def.settings) return def
-		const value = def.settings.storage_policy
-		if (typeof value !== 'string' || value.trim().replace(/^'(.*)'$/s, '$1') !== 's3') return def
-		const { storage_policy: _implicit, ...settings } = def.settings
-		return { ...def, settings: Object.keys(settings).length > 0 ? settings : undefined }
+		if (def.kind !== 'table' || !isMergeTreeEngine(def.engine) || def.settings?.storage_policy !== undefined) return def
+		return { ...def, settings: { ...def.settings, storage_policy: OBSESSIONDB_STORAGE_POLICY } }
 	})
+}
+
+/**
+ * ObsessionDB rejects any other storage_policy on a Shared table, so on an
+ * ObsessionDB target a plan that changes it fails in generate, with the reason,
+ * instead of at migrate.
+ */
+export function storagePolicyChangeErrors(plan: MigrationPlan): string[] {
+	return plan.operations
+		.filter(
+			(op) =>
+				(op.type === 'alter_table_modify_setting' || op.type === 'alter_table_reset_setting') &&
+				op.key.endsWith(':setting:storage_policy'),
+		)
+		.map((op) => {
+			const table = op.key.replace(/^table:/, '').replace(/:setting:storage_policy$/, '')
+			return `obsessiondb: ${table} cannot change storage_policy: ObsessionDB stores every Shared table with storage_policy = 's3' and rejects any other. Keep storage_policy: "${OBSESSIONDB_STORAGE_POLICY}" in the schema, or leave it out.`
+		})
 }
 
 /**
@@ -414,7 +450,9 @@ function createObsessionDBPlugin(
 				if (!shouldStrip) {
 					const distributed = findDistributedTables(context.definitions)
 					if (distributed.length > 0) throw new Error(distributed.join('\n'))
-					return withoutImplicitStoragePolicy(context.definitions)
+					return isObsessionDBTarget(context.config, context.flags)
+						? withObsessionDBStoragePolicy(context.definitions)
+						: undefined
 				}
 
 				const rewritten = rewriteSharedEngines(context.definitions)
@@ -434,9 +472,18 @@ function createObsessionDBPlugin(
 			// The same settings rewrite as onSchemaLoaded, without its notices and
 			// checks: they are about the schema, not about the last snapshot.
 			onSnapshotLoaded(context) {
-				return resolveStripBehavior(context.config, context.flags)
-					? rewriteSharedEngines(context.definitions).definitions
-					: withoutImplicitStoragePolicy(context.definitions)
+				if (resolveStripBehavior(context.config, context.flags)) {
+					return rewriteSharedEngines(context.definitions).definitions
+				}
+				return isObsessionDBTarget(context.config, context.flags)
+					? withObsessionDBStoragePolicy(context.definitions)
+					: context.definitions
+			},
+			onPlanCreated(context) {
+				if (!isObsessionDBTarget(context.config, context.flags)) return undefined
+				const errors = storagePolicyChangeErrors(context.plan)
+				if (errors.length > 0) throw new Error(errors.join('\n'))
+				return undefined
 			},
 			async onCheck({ config, configPath, flags }) {
 				// Same target decision as onSchemaLoaded: ObsessionDB host or

@@ -7,6 +7,7 @@ from typing import Any
 import pytest
 
 from chkit.cli.commands.pull import _introspected_table_to_definition, _is_pulled_object
+from chkit.cli.commands.pull_render import render_schema_file
 from chkit.clickhouse.introspect import IntrospectedTable
 from chkit.core.model import (
     ColumnDefinition,
@@ -203,6 +204,29 @@ def test_pull_keeps_every_setting_the_server_stores() -> None:
     pulled = _introspected_table_to_definition(shared)
     assert pulled is not None
     assert pulled.settings == {"storage_policy": "'s3'", "index_granularity": 4096}
+
+
+def test_pull_comments_the_settings_that_cannot_change() -> None:
+    tables = [
+        _introspected("local_t", "MergeTree", {"index_granularity": "8192", "merge_with_ttl_timeout": "3600"}),
+        _introspected("shared_t", "SharedMergeTree", {"storage_policy": "'s3'"}),
+        _introspected("self_hosted_s3", "MergeTree", {"storage_policy": "'s3'"}),
+    ]
+    definitions = [d for d in (_introspected_table_to_definition(t) for t in tables) if d is not None]
+    assert [d.engine for d in definitions][1].startswith("Shared")
+    content = render_schema_file(definitions, shared_tables=frozenset({"app.shared_t"}))
+    assert (
+        '"index_granularity": 8192,  # read-only: a change recreates the table '
+        "(DROP + CREATE, or --cutover)"
+    ) in content
+    assert '"merge_with_ttl_timeout": 3600,\n' in content
+    shared = content[content.index('name="shared_t"') :]
+    assert (
+        "\"storage_policy\": \"'s3'\",  # set by ObsessionDB on every Shared table; it cannot change"
+    ) in shared[: shared.index("\n)\n")]
+    # An 's3' policy a self-hosted server defines is an ordinary setting.
+    self_hosted = content[content.index('name="self_hosted_s3"') :]
+    assert "\"storage_policy\": \"'s3'\",\n" in self_hosted[: self_hosted.index("\n)\n")]
 
 
 def test_pull_leaves_out_the_journal_table(monkeypatch: pytest.MonkeyPatch) -> None:
