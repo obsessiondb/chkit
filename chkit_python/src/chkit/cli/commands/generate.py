@@ -396,20 +396,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     # (``migrationFile``, ``snapshotFile``) reads the same in both CLIs.
     meta_dir = Path(os.path.abspath(config.meta_dir))
     migrations_dir = Path(os.path.abspath(config.migrations_dir))
-    # `--empty` scaffolds a blank manual migration: no schema diff, no plugin
-    # pipeline, and the snapshot is left untouched. Short-circuit before any of
-    # that machinery so the file is a pristine stub for hand-editing.
-    if empty:
-        _emit_empty_migration(
-            generate_empty_migration(
-                migrations_dir,
-                migration_name=migration_name,
-                migration_id=migration_id,
-                cli_version=__version__,
-            ).sql_path,
-            output_json=output_json,
-        )
-        return
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
@@ -425,6 +411,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             "--rename-dictionary": rename_dictionary,
             "--dryrun": dryrun,
             "--json": output_json,
+            "--empty": empty,
             "--cutover": cutover,
             "--cutover-copy": cutover_copy,
             "--cutover-old": cutover_old,
@@ -434,20 +421,33 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             "--service": service,
         }
     )
-    if service is not None:
-        # generate sends no SQL, but as in TS --service still names the
-        # service, and an unknown name fails.
-        executor = resolve_plugin_executor(
-            plugin_runtime,
-            config,
-            command="generate",
-            config_path=str(config_path or "clickhouse.config.py"),
-            json_mode=output_json,
-            service=service,
-            flags=hook_flags,
+    # As in TS, on_init and get_context run, though generate sends no SQL:
+    # --service names the service, and an unknown name fails.
+    executor = resolve_plugin_executor(
+        plugin_runtime,
+        config,
+        command="generate",
+        config_path=str(config_path or "clickhouse.config.py"),
+        json_mode=output_json,
+        service=service,
+        flags=hook_flags,
+    )
+    if executor is not None:
+        executor.close()
+    # `--empty` scaffolds a blank manual migration: no schema diff, no schema
+    # hooks, and the snapshot is left untouched. Short-circuit before any of
+    # that machinery so the file is a pristine stub for hand-editing.
+    if empty:
+        _emit_empty_migration(
+            generate_empty_migration(
+                migrations_dir,
+                migration_name=migration_name,
+                migration_id=migration_id,
+                cli_version=__version__,
+            ).sql_path,
+            output_json=output_json,
         )
-        if executor is not None:
-            executor.close()
+        return
     threaded_defs = load_schema_definitions_with_hooks(
         command="generate",
         config=config,
