@@ -260,8 +260,15 @@ def test_a_changed_default_plans_a_change_where_a_float_would_round_both_alike(
 
 def test_defaults_clickhouse_stores_in_another_number_form_plan_nothing() -> None:
     assert plan_diff([_events(default=1e21)], [_events(default="fn:1e21")]).operations == []
-    stored = _events(default="fn:18446744073709551615.")
-    assert plan_diff([stored], [_events(default="fn:18446744073709551615")]).operations == []
+    # The forms ClickHouse 26.3 stores: an integer within UInt64 as written, and
+    # ``9007199254740993.`` as the Float64 it reads, ``9007199254740992.``.
+    stored = _events(default="fn:18446744073709551615")
+    assert plan_diff([stored], [_events(default=18446744073709551615)]).operations == []
+    float_spelled = _events(default="fn:9007199254740993.")
+    assert plan_diff([float_spelled], [_events(default="fn:9007199254740992.")]).operations == []
+    # An integer and the Float64 spelling of it above 2^53 are different defaults.
+    changed = plan_diff([float_spelled], [_events(default="fn:9007199254740993")])
+    assert [op.type for op in changed.operations] == ["alter_table_modify_column"]
 
 
 @pytest.mark.parametrize(

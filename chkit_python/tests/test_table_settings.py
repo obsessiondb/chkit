@@ -33,9 +33,14 @@ FINGERPRINTS: list[tuple[str | int | float | bool, str]] = [
     ("123.456", "123.456"),
     ("9007199254740993", "9007199254740993"),
     ("18446744073709551615", "18446744073709551615"),
-    ("18446744073709551615.", "18446744073709551615"),
+    # A ``.``, an exponent, or an integer outside Int64/UInt64 makes ClickHouse read a Float64.
+    ("18446744073709551615.", "18446744073709551616"),
+    ("9007199254740993.", "9007199254740992"),
+    ("18446744073709552000", "18446744073709551616"),
+    ("-9223372036854775808", "-9223372036854775808"),
+    ("-9223372036854775809", "-9223372036854775808"),
     ("1e500", "1e500"),
-    ("1.5e-500", "15e-501"),
+    ("1.5e-500", "0"),
     (True, "1"),
     (False, "0"),
     ("true", "1"),
@@ -59,4 +64,8 @@ def test_tells_apart_integers_a_float_cannot() -> None:
     )
     assert setting_value_fingerprint("18446744073709551615") != setting_value_fingerprint(
         "18446744073709551614"
+    )
+    # ClickHouse reads ``9007199254740993.`` as the Float64 9007199254740992, so it is another default.
+    assert setting_value_fingerprint("9007199254740993.") != setting_value_fingerprint(
+        "9007199254740993"
     )

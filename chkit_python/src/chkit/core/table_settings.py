@@ -5,6 +5,7 @@ Mirrors ``packages/core/src/table-settings.ts``.
 
 from __future__ import annotations
 
+import math
 import re
 
 from chkit.core.engine import is_merge_tree_engine
@@ -62,8 +63,34 @@ def setting_value_fingerprint(value: SettingValue) -> str:
         return "1"
     if lower == "false":
         return "0"
-    decimal = _canonical_decimal(text)
-    return text if decimal is None else decimal
+    number = _number_fingerprint(text)
+    return text if number is None else number
+
+
+_MIN_INT64 = -(2**63)
+_MAX_UINT64 = 2**64 - 1
+
+
+def _number_fingerprint(text: str) -> str | None:
+    """A number as ClickHouse reads it (TS ``numberFingerprint``): an integer
+    literal within Int64/UInt64 is exact, while a literal with a ``.`` or an
+    exponent, or an integer outside that range, is a Float64. So
+    ``9007199254740993.`` is 9007199254740992 and differs from the integer
+    ``9007199254740993``, and ``2.``, ``2.0`` and ``2`` are the same value. The
+    text is the exact decimal of that value."""
+    exact = _canonical_decimal(text)
+    if exact is None:
+        return None
+    # _canonical_decimal keeps an exponent for a huge value, which is no Int64/UInt64 anyway.
+    plain_integer = not re.search(r"[.eE]", text) and "e" not in exact
+    if plain_integer and _MIN_INT64 <= int(exact) <= _MAX_UINT64:
+        return exact
+    value = float(text)
+    if not math.isfinite(value):
+        return _canonical_decimal(text)
+    if value.is_integer():
+        return str(int(value))
+    return _canonical_decimal(js_number_to_string(value))
 
 
 def _canonical_decimal(text: str) -> str | None:  # noqa: PLR0911
@@ -204,8 +231,13 @@ def _normalized_setting_sql(value: str) -> str:
     creates from the same definition may store ``1000000``, and they are the
     same layout. Float64 is exact enough here: read-only settings hold small
     numbers and flags, unlike the column defaults ``setting_value_fingerprint``
-    also compares."""
-    return f"ifNull(toString(toFloat64OrNull({value})), {value})"
+    also compares. ``true``/``false`` read as ``1``/``0``, as there: ClickHouse
+    stores the word as written, so a table created with ``true`` matches a
+    snapshot that says ``1``."""
+    return (
+        f"multiIf(lower({value}) = 'true', '1', lower({value}) = 'false', '0', "
+        f"ifNull(toString(toFloat64OrNull({value})), {value}))"
+    )
 
 
 def _string_literal(value: str) -> str:

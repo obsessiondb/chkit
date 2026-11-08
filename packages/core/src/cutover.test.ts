@@ -184,27 +184,27 @@ describe('planCutover', () => {
 
   test('compares a numeric read-only setting by value, as ClickHouse may store 1e6 as 1000000. (#511)', () => {
     const guard = plan({ newDef: events({ settings: { index_granularity_bytes: 1e6 } }) }).operations.find((op) => op.type === 'exchange_tables')?.beforeRetry ?? ''
-    expect(guard).toContain("ifNull(toString(toFloat64OrNull(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))), extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))")
+    expect(guard).toContain("multiIf(lower(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')) = 'true', '1', lower(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')) = 'false', '0', ifNull(toString(toFloat64OrNull(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))), extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')))")
   })
 
   test('checks the old table stores the read-only settings it expects before it creates anything (#466)', () => {
     const start = plan().operations[0]
     expect(start?.type).toBe('cutover_validate')
     expect(start?.sql).toContain(
-      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))))) FROM system.tables WHERE database = 'app' AND name = 'events') = tuple(ifNull(toString(toFloat64OrNull('8192')), '8192'))) AS settings"
+      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(tuple(multiIf(lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'true', '1', lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'false', '0', ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))))) FROM system.tables WHERE database = 'app' AND name = 'events') = tuple(multiIf(lower('8192') = 'true', '1', lower('8192') = 'false', '0', ifNull(toString(toFloat64OrNull('8192')), '8192')))) AS settings"
     )
     expect(start?.sql).toContain("throwIf(min(settings) = 0, 'app.events does not store the read-only settings this migration expects (index_granularity = 8192)")
     expect(start?.sql).toContain('Nothing was created or copied.')
 
     // A setting only the new table declares is expected absent from the old one.
     const minmax = plan({ newDef: events({ settings: { add_minmax_index_for_numeric_columns: true } }) }).operations[0]?.sql ?? ''
-    expect(minmax).toContain("= tuple(ifNull(toString(toFloat64OrNull('')), ''), ifNull(toString(toFloat64OrNull('8192')), '8192'))) AS settings")
+    expect(minmax).toContain("= tuple(multiIf(lower('') = 'true', '1', lower('') = 'false', '0', ifNull(toString(toFloat64OrNull('')), '')), multiIf(lower('8192') = 'true', '1', lower('8192') = 'false', '0', ifNull(toString(toFloat64OrNull('8192')), '8192')))) AS settings")
     expect(minmax).toContain('(add_minmax_index_for_numeric_columns unset, index_granularity = 8192)')
   })
 
   test('takes a missing index_granularity as the configured server default', () => {
     const ops = plan({ options: { indexGranularity: 4096 } }).operations
-    expect(ops[0]?.sql).toContain("= tuple(ifNull(toString(toFloat64OrNull('4096')), '4096'))) AS settings")
+    expect(ops[0]?.sql).toContain("= tuple(multiIf(lower('4096') = 'true', '1', lower('4096') = 'false', '0', ifNull(toString(toFloat64OrNull('4096')), '4096')))) AS settings")
     expect(ops[0]?.sql).toContain("if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',")
     expect(ops.find((op) => op.type === 'exchange_tables')?.beforeRetry).toContain("= '', '4096',")
     expect(ops.find((op) => op.key === 'table:app.events__cutover_20261024120000_snapshot')?.sql).toContain('SETTINGS index_granularity = 4096')
@@ -217,7 +217,7 @@ describe('planCutover', () => {
     expect(exchange?.beforeRetry).toBeDefined()
     expect(`${exchange?.beforeRetry};`).toBe(ops[9]?.sql)
     expect(exchange?.beforeRetry).toContain(
-      "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))))) FROM system.tables WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))))) FROM system.tables WHERE database = 'app' AND name = 'events__cutover_20261024120000_snapshot')"
+      "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(multiIf(lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'true', '1', lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'false', '0', ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))))))) FROM system.tables WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(multiIf(lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'true', '1', lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'false', '0', ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))))))) FROM system.tables WHERE database = 'app' AND name = 'events__cutover_20261024120000_snapshot')"
     )
     expect(exchange?.beforeRetry).not.toContain('\n')
   })

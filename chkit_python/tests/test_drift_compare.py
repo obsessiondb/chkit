@@ -605,7 +605,8 @@ def test_table_shape_compares_a_column_type_in_the_spacing_clickhouse_stores() -
 def test_table_shape_compares_a_literal_default_by_value_as_generate_does() -> None:
     same: list[tuple[object, str]] = [
         (1e21, "1e21"),
-        ("fn:18446744073709551615", "18446744073709551615."),
+        # ClickHouse stores ``9007199254740993.`` as the Float64 it reads.
+        ("fn:9007199254740993.", "9007199254740992."),
         (2.0, "2."),
         ("it's", "'it\\'s'"),
     ]

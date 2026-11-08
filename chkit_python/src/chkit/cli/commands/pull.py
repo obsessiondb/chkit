@@ -65,6 +65,7 @@ from chkit.clickhouse.introspect import (
     list_schema_objects,
     list_table_details,
 )
+from chkit.core.canonical import canonicalize_definitions
 from chkit.core.kafka import is_kafka_engine, parse_kafka_settings
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
@@ -615,6 +616,11 @@ def run(  # noqa: PLR0912, PLR0917
         f"{d.database}.{d.name}"
         for d in definitions
         if isinstance(d, TableDefinition) and d.engine.startswith("Shared")
+    )
+    # A table that does not declare index_granularity gets the configured
+    # default, as in TS, not the 8192 rendering would assume (#466).
+    definitions = canonicalize_definitions(
+        definitions, index_granularity=configured_index_granularity(config)
     )
     content = render_schema_file(definitions, shared_tables=shared_tables)
     out_file_abs = (Path.cwd() / out_file).resolve()

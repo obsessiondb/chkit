@@ -28,9 +28,14 @@ const FINGERPRINTS: Array<[string | number | boolean, string]> = [
   ['123.456', '123.456'],
   ['9007199254740993', '9007199254740993'],
   ['18446744073709551615', '18446744073709551615'],
-  ['18446744073709551615.', '18446744073709551615'],
+  // A `.`, an exponent, or an integer outside Int64/UInt64 makes ClickHouse read a Float64.
+  ['18446744073709551615.', '18446744073709551616'],
+  ['9007199254740993.', '9007199254740992'],
+  ['18446744073709552000', '18446744073709551616'],
+  ['-9223372036854775808', '-9223372036854775808'],
+  ['-9223372036854775809', '-9223372036854775808'],
   ['1e500', '1e500'],
-  ['1.5e-500', '15e-501'],
+  ['1.5e-500', '0'],
   [true, '1'],
   [false, '0'],
   ['true', '1'],
@@ -48,5 +53,7 @@ describe('settingValueFingerprint', () => {
   test('tells apart integers a float cannot (#466)', () => {
     expect(settingValueFingerprint('9007199254740992')).not.toBe(settingValueFingerprint('9007199254740993'))
     expect(settingValueFingerprint('18446744073709551615')).not.toBe(settingValueFingerprint('18446744073709551614'))
+    // ClickHouse reads `9007199254740993.` as the Float64 9007199254740992, so it is another default.
+    expect(settingValueFingerprint('9007199254740993.')).not.toBe(settingValueFingerprint('9007199254740993'))
   })
 })

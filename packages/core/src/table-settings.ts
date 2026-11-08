@@ -53,7 +53,31 @@ export function settingValueFingerprint(value: SettingValue): string {
   const lower = text.toLowerCase()
   if (lower === 'true') return '1'
   if (lower === 'false') return '0'
-  return canonicalDecimal(text) ?? text
+  return numberFingerprint(text) ?? text
+}
+
+const MIN_INT64 = -(2n ** 63n)
+const MAX_UINT64 = 2n ** 64n - 1n
+
+/**
+ * A number as ClickHouse reads it: an integer literal within Int64/UInt64 is
+ * exact, while a literal with a `.` or an exponent, or an integer outside that
+ * range, is a Float64. So `9007199254740993.` is 9007199254740992 and differs
+ * from the integer `9007199254740993`, and `2.`, `2.0` and `2` are the same
+ * value. The text is the exact decimal of that value; chkit-py's twin gives
+ * the same text.
+ */
+function numberFingerprint(text: string): string | undefined {
+  const exact = canonicalDecimal(text)
+  if (exact === undefined) return undefined
+  // canonicalDecimal keeps an exponent for a huge value, which is no Int64/UInt64 anyway.
+  if (!/[.e]/i.test(text) && !exact.includes('e')) {
+    const integer = BigInt(exact)
+    if (integer >= MIN_INT64 && integer <= MAX_UINT64) return exact
+  }
+  const value = Number(text)
+  if (!Number.isFinite(value)) return exact
+  return Number.isInteger(value) ? BigInt(value).toString() : canonicalDecimal(String(value))
 }
 
 /**
@@ -169,9 +193,11 @@ export function readonlySettingsExpectedSQL(keys: readonly string[], settings: R
  * the same definition may store `1000000`, and they are the same layout.
  * Float64 is exact enough here: read-only settings hold small numbers and
  * flags, unlike the column defaults `settingValueFingerprint` also compares.
+ * `true`/`false` read as `1`/`0`, as there: ClickHouse stores the word as
+ * written, so a table created with `true` matches a snapshot that says `1`.
  */
 function normalizedSettingSQL(value: string): string {
-  return `ifNull(toString(toFloat64OrNull(${value})), ${value})`
+  return `multiIf(lower(${value}) = 'true', '1', lower(${value}) = 'false', '0', ifNull(toString(toFloat64OrNull(${value})), ${value}))`
 }
 
 function stringLiteral(value: string): string {

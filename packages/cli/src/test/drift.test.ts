@@ -1407,7 +1407,8 @@ describe('@chkit/cli drift comparer on what ClickHouse stores (#466)', () => {
   test('compares a literal default by value, as generate does', () => {
     const same: Array<[ColumnDefinition['default'], string]> = [
       [1e21, '1e21'],
-      [{ expression: '18446744073709551615' }, '18446744073709551615.'],
+      // ClickHouse stores `9007199254740993.` as the Float64 it reads.
+      [{ expression: '9007199254740993.' }, '9007199254740992.'],
       [2.0, '2.'],
       ["it's", "'it\\'s'"],
     ]

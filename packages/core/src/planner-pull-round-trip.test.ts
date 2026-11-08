@@ -148,7 +148,13 @@ describe('@chkit/core planner: pulled schema round trip', () => {
       expect(plan.operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
     }
     expect(planDiff([events({ default: 1e21 })], [events({ default: { expression: '1e21' } })]).operations).toEqual([])
-    expect(planDiff([events({ default: { expression: '18446744073709551615.' } })], [events({ default: { expression: '18446744073709551615' } })]).operations).toEqual([])
+    // The forms ClickHouse 26.3 stores: the JS number 2^64 renders 18446744073709552000, which
+    // ClickHouse reads as a Float64 and stores as `18446744073709552000.`; `9007199254740993.` is
+    // stored as the Float64 it reads, `9007199254740992.`.
+    expect(planDiff([events({ default: 2 ** 64 })], [events({ default: { expression: '18446744073709552000.' } })]).operations).toEqual([])
+    expect(planDiff([events({ default: { expression: '9007199254740993.' } })], [events({ default: { expression: '9007199254740992.' } })]).operations).toEqual([])
+    // An integer and the Float64 spelling of it above 2^53 are different defaults (Codex review).
+    expect(planDiff([events({ default: { expression: '9007199254740993.' } })], [events({ default: { expression: '9007199254740993' } })]).operations.map((op) => op.type)).toEqual(['alter_table_modify_column'])
   })
 
   test('a string default with an escape ClickHouse decodes otherwise is a change', () => {

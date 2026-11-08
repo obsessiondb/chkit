@@ -94,6 +94,23 @@ def events(
     )
 
 
+def _norm(sql: str) -> str:
+    """The normalization the cutover applies to a stored read-only setting."""
+    return (
+        f"multiIf(lower({sql}) = 'true', '1', lower({sql}) = 'false', '0', "
+        f"ifNull(toString(toFloat64OrNull({sql})), {sql}))"
+    )
+
+
+_LIT_8192 = "'8192'"
+_LIT_4096 = "'4096'"
+_LIT_EMPTY = "''"
+_GRANULARITY = (
+    "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', "
+    "extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))"
+)
+
+
 OLD = events(["id"])
 NEW = events(["user_id", "id"])
 STAMP = "20261024120000"
@@ -275,11 +292,7 @@ def test_exchange_is_guarded_on_every_attempt() -> None:
     assert exchange.before_retry is not None
     assert f"{exchange.before_retry};" == ops[9].sql
     assert "\n" not in exchange.before_retry
-    stored = (
-        "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', "
-        "extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))"
-    )
-    granularity = f"ifNull(toString(toFloat64OrNull({stored})), {stored})"
+    granularity = _norm(_GRANULARITY)
 
     def layout(name: str) -> str:
         return (
@@ -298,7 +311,7 @@ def test_compares_a_numeric_read_only_setting_by_value() -> None:
     ops = plan(new_def=events(settings={"index_granularity_bytes": 1e6})).operations
     guard = next(op for op in ops if op.type == "exchange_tables").before_retry or ""
     stored = "extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')"
-    assert f"ifNull(toString(toFloat64OrNull({stored})), {stored})" in guard
+    assert _norm(stored) in guard
 
 
 def test_cuts_over_a_change_of_read_only_settings_only() -> None:
@@ -1380,13 +1393,8 @@ def test_checks_the_old_table_stores_the_readonly_settings_before_it_creates_any
     assert start.type == "cutover_validate"
     assert (
         "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
-        "(SELECT any(tuple(ifNull(toString(toFloat64OrNull(if(extract(engine_full, "
-        "'(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, "
-        "'(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, "
-        "'(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, "
-        "'(?:SETTINGS |, )index_granularity = ([^,]*)'))))) FROM system.tables WHERE database = "
-        "'app' AND name = 'events') = tuple(ifNull(toString(toFloat64OrNull('8192')), '8192'))) "
-        "AS settings"
+        f"(SELECT any(tuple({_norm(_GRANULARITY)})) FROM system.tables WHERE database = "
+        f"'app' AND name = 'events') = tuple({_norm(_LIT_8192)})) AS settings"
     ) in start.sql
     assert (
         "throwIf(min(settings) = 0, 'app.events does not store the read-only settings this "
@@ -1398,16 +1406,13 @@ def test_checks_the_old_table_stores_the_readonly_settings_before_it_creates_any
     minmax = plan(
         new_def=events(settings={"add_minmax_index_for_numeric_columns": True})
     ).operations[0].sql
-    assert (
-        "= tuple(ifNull(toString(toFloat64OrNull('')), ''), "
-        "ifNull(toString(toFloat64OrNull('8192')), '8192'))) AS settings"
-    ) in minmax
+    assert f"= tuple({_norm(_LIT_EMPTY)}, {_norm(_LIT_8192)})) AS settings" in minmax
     assert "(add_minmax_index_for_numeric_columns unset, index_granularity = 8192)" in minmax
 
 
 def test_takes_a_missing_index_granularity_as_the_configured_server_default() -> None:
     ops = plan(index_granularity=4096).operations
-    assert "= tuple(ifNull(toString(toFloat64OrNull('4096')), '4096'))) AS settings" in ops[0].sql
+    assert f"= tuple({_norm(_LIT_4096)})) AS settings" in ops[0].sql
     assert (
         "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',"
     ) in ops[0].sql
