@@ -55,6 +55,19 @@ describe('resolveNode', () => {
     expect(resolve("SELECT 'FROM users' -- FROM users\nFROM events")).toBe("SELECT 'FROM users' -- FROM users\nFROM analytics.events AS events")
   })
 
+  test('a CTE hides a datasource only in the query that declares it', () => {
+    expect(resolve('SELECT * FROM (WITH events AS (SELECT 1) SELECT * FROM events) x, events')).toBe(
+      'SELECT * FROM (WITH events AS (SELECT 1) SELECT * FROM events) x, analytics.events AS events'
+    )
+    expect(resolve('WITH events AS (SELECT 1) SELECT * FROM (SELECT * FROM events) AS x')).toBe('WITH events AS (SELECT 1) SELECT * FROM (SELECT * FROM events) AS x')
+  })
+
+  test('resolves a datasource named like a keyword', () => {
+    const extra = { datasources: new Set(['window', 'events']) }
+    expect(resolve('SELECT * FROM window', extra)).toBe('SELECT * FROM analytics.window AS `window`')
+    expect(resolve('SELECT * FROM events WINDOW w AS (ORDER BY 1)', extra)).toBe('SELECT * FROM analytics.events AS events WINDOW w AS (ORDER BY 1)')
+  })
+
   test('leaves CTE names alone', () => {
     expect(resolve('WITH recent AS (SELECT * FROM users), other AS (SELECT 1) SELECT * FROM recent, other')).toBe(
       'WITH recent AS (SELECT * FROM analytics.users AS users), other AS (SELECT 1) SELECT * FROM recent, other'

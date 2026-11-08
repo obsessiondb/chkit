@@ -7,6 +7,8 @@ SQL >
       AND event_type = {{ String(event_type, 'click') }}
       AND user_id > {{ UInt64(min_user, 0) }}
       AND events.amount >= {{ Float64(min_amount, 1) }}
+      AND user_id <= {{ UInt64(max_user, 18446744073709551615) }}
+      AND event_type != {{ String(skip, 'none', required=True) }}
     GROUP BY event_type
     LIMIT {{ Int32(limit, 100) }}
 

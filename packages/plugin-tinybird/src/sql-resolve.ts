@@ -1,4 +1,4 @@
-import { identifierName, isTrivia, renderIdentifier, renderQualifiedName, type SQLToken, tokenizeSQL } from '@chkit/core'
+import { identifierName, isTrivia, quoteIdentifier, renderIdentifier, renderQualifiedName, type SQLToken, tokenizeSQL } from '@chkit/core'
 
 /**
  * Resolves the SQL of a pipe node the way Tinybird does before it sends it to
@@ -26,8 +26,8 @@ export interface ResolveScope {
   nodes: ReadonlyMap<string, string>
   /** Other pipes a node may read from, by pipe name: their output node and every node's SQL. */
   pipes: ReadonlyMap<string, { outputNode: string; nodes: ReadonlyMap<string, string> }>
-  /** Pipes whose SQL depends on template params, which cannot be inlined. */
-  templatedPipes?: ReadonlySet<string>
+  /** Pipes that cannot be inlined (template params, INCLUDE), with the reason. */
+  unreadablePipes?: ReadonlyMap<string, string>
 }
 
 export interface ResolvedSql {
@@ -75,18 +75,25 @@ function resolveIn(
   if (sql === undefined) throw new SqlResolveError(`node ${key} does not exist`)
   if (stack.includes(key)) throw new SqlResolveError(`nodes reference each other in a cycle: ${[...stack, key].join(' → ')}`)
   const tokens = tokenizeSQL(sql.trim().replace(/;\s*$/, ''))
-  const ctes = cteNames(tokens)
   const replacements = new Map<number, string>()
+  const known = new Set([
+    ...nodes.keys(),
+    ...scope.datasources,
+    ...scope.untranslatableDatasources.keys(),
+    ...scope.pipes.keys(),
+    ...(scope.unreadablePipes?.keys() ?? []),
+  ])
 
-  for (const ref of tableReferences(tokens)) {
+  for (const ref of tableReferences(tokens, known)) {
     const { name } = ref
     if (ref.database !== undefined) {
       if (ref.database === 'system') continue
       if (ref.database === 'tinybird') throw new SqlResolveError(`reads the Tinybird service datasource tinybird.${name}`)
       throw new SqlResolveError(`reads ${ref.database}.${name}, a datasource of another Tinybird workspace`)
     }
-    if (ctes.has(name)) continue
-    const alias = ref.hasAlias ? '' : ` AS ${renderIdentifier(name)}`
+    if (ref.cte) continue
+    // A keyword-named alias is quoted, so ClickHouse cannot read it as the next clause.
+    const alias = ref.hasAlias ? '' : ` AS ${NOT_AN_ALIAS.has(name.toUpperCase()) ? quoteIdentifier(name) : renderIdentifier(name)}`
     if (name !== nodeName && nodes.has(name)) {
       const inner = resolveIn({ pipe: at.pipe, node: name }, nodes, scope, result, [...stack, key])
       replacements.set(ref.tokenIndex, `(\n${inner}\n)${alias}`)
@@ -95,8 +102,8 @@ function resolveIn(
       replacements.set(ref.tokenIndex, `${renderQualifiedName(scope.database, name)}${alias}`)
     } else if (scope.untranslatableDatasources.has(name)) {
       throw new SqlResolveError(`reads datasource ${name}, which does not translate (${scope.untranslatableDatasources.get(name)})`)
-    } else if (scope.templatedPipes?.has(name)) {
-      throw new SqlResolveError(`reads pipe ${name}, whose SQL uses Tinybird template expressions`)
+    } else if (scope.unreadablePipes?.has(name)) {
+      throw new SqlResolveError(`reads pipe ${name}, which cannot be inlined (${scope.unreadablePipes.get(name)})`)
     } else if (scope.pipes.has(name)) {
       const pipe = scope.pipes.get(name)
       if (!pipe) continue
@@ -115,10 +122,16 @@ interface TableReference {
   name: string
   database?: string
   hasAlias: boolean
+  /** The name is a CTE declared in this query or an enclosing one. */
+  cte: boolean
 }
 
-/** Every table reference in query scope, by token index into `tokens`. */
-export function tableReferences(tokens: SQLToken[]): TableReference[] {
+/**
+ * Every table reference in query scope, by token index into `tokens`. A name
+ * that is also a SQL keyword (`window`, `all`) counts only when it is in
+ * `known`, the datasources, nodes and pipes it may name.
+ */
+export function tableReferences(tokens: SQLToken[], known: ReadonlySet<string> = new Set()): TableReference[] {
   const significant = tokens.map((token, index) => ({ token, index })).filter(({ token }) => !isTrivia(token))
   const word = (at: number) => {
     const token = significant[at]?.token
@@ -128,13 +141,15 @@ export function tableReferences(tokens: SQLToken[]): TableReference[] {
   const references: TableReference[] = []
   // One entry per open parenthesis: whether its content is a query.
   const scopes: boolean[] = [true]
+  // CTE names declared at each depth; visible in that query and the ones it nests.
+  const ctes: Array<Set<string>> = [new Set()]
   // Paren depths at which a FROM list is open.
   const openLists = new Set<number>()
 
   const readTable = (at: number) => {
     const first = significant[at]
     if (!first || (first.token.kind !== 'identifier' && first.token.kind !== 'quoted_identifier')) return
-    if (first.token.kind === 'identifier' && NOT_AN_ALIAS.has(first.token.text.toUpperCase())) return
+    if (first.token.kind === 'identifier' && NOT_AN_ALIAS.has(first.token.text.toUpperCase()) && !known.has(first.token.text)) return
     let nameAt = at
     let database: string | undefined
     if (text(at + 1) === '.') {
@@ -148,7 +163,8 @@ export function tableReferences(tokens: SQLToken[]): TableReference[] {
     const next = significant[nameAt + 1]?.token
     const nextWord = next?.kind === 'identifier' ? next.text.toUpperCase() : undefined
     const hasAlias = nextWord === 'AS' || next?.kind === 'quoted_identifier' || (next?.kind === 'identifier' && !NOT_AN_ALIAS.has(nextWord ?? ''))
-    references.push({ tokenIndex: significant[nameAt]?.index ?? -1, name, ...(database !== undefined ? { database } : {}), hasAlias })
+    const cte = database === undefined && ctes.some((names) => names.has(name))
+    references.push({ tokenIndex: significant[nameAt]?.index ?? -1, name, ...(database !== undefined ? { database } : {}), hasAlias, cte })
   }
 
   for (let at = 0; at < significant.length; at++) {
@@ -157,16 +173,24 @@ export function tableReferences(tokens: SQLToken[]): TableReference[] {
       const next = word(at + 1)
       const previous = word(at - 1)
       scopes.push(next === 'SELECT' || next === 'WITH' || previous === 'FROM' || previous === 'JOIN' || previous === 'IN')
+      ctes.push(new Set())
       continue
     }
     if (current === ')') {
       openLists.delete(scopes.length - 1)
       scopes.pop()
+      ctes.pop()
       continue
     }
     if (!scopes.at(-1)) continue
     const keyword = word(at)
     const depth = scopes.length - 1
+    // `WITH name AS (` and `, name AS (` declare a CTE in this query.
+    const previousText = text(at - 1)?.toUpperCase()
+    if ((previousText === 'WITH' || previousText === ',') && word(at + 1) === 'AS' && text(at + 2) === '(') {
+      const name = identifierName(significant[at]?.token ?? { kind: 'whitespace', text: '', start: 0, end: 0, terminated: true })
+      if (name) ctes[depth]?.add(name)
+    }
     if (keyword === 'FROM') {
       openLists.add(depth)
       readTable(at + 1)
@@ -179,18 +203,4 @@ export function tableReferences(tokens: SQLToken[]): TableReference[] {
     }
   }
   return references
-}
-
-/** Names declared as CTEs: `WITH name AS (` and `, name AS (`. */
-function cteNames(tokens: SQLToken[]): Set<string> {
-  const significant = tokens.filter((token) => !isTrivia(token))
-  const names = new Set<string>()
-  significant.forEach((token, at) => {
-    const previous = significant[at - 1]?.text.toUpperCase()
-    if ((previous === 'WITH' || previous === ',') && significant[at + 1]?.text.toUpperCase() === 'AS' && significant[at + 2]?.text === '(') {
-      const name = identifierName(token)
-      if (name) names.add(name)
-    }
-  })
-  return names
 }

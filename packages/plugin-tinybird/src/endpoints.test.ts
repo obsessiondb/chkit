@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import { parseDatafile } from './datafile.js'
-import { renderQueriesFile, translateEndpoint } from './endpoints.js'
+import { identifier, renderQueriesFile, translateEndpoint } from './endpoints.js'
 import type { PipeScope } from './pipes.js'
 
 const scope: PipeScope = {
@@ -74,9 +74,35 @@ describe('translateEndpoint', () => {
     expect(translated.ok && translated.value.source).toBe('export const top = query({ name: "top" })`\nSELECT \\`a\\` FROM analytics.events AS events -- note\n`')
   })
 
-  test('a required param keeps one name even when its samples differ', () => {
-    const translated = endpoint(['%', "SELECT {{ String(a, 'x', required=True) }}, {{ String(a, 'y', required=True) }} FROM events"])
-    expect(translated.ok && translated.value.params).toEqual([{ name: 'a', type: 'String', required: true, default: 'x' }])
+  test('a default applies with required=True too, as Tinybird uses it whenever the param is missing', () => {
+    const translated = endpoint(['%', "SELECT {{ String(a, 'x', required=True) }}, {{ String(a, 'x', required=True) }} FROM events WHERE id > {{ Int32(n, 5, required=True) }}"])
+    expect(translated.ok && translated.value.params).toEqual([
+      { name: 'a', type: 'String', required: true, default: 'x' },
+      { name: 'n', type: 'Int32', required: true, default: 5 },
+    ])
+    // biome-ignore lint/suspicious/noTemplateCurlyInString: the expected TypeScript source contains template interpolations
+    expect(translated.ok && translated.value.source).toContain('${p("a", t.string()).default("x")}')
+    expect(translated.ok && translated.value.paramSets[0]).toEqual({})
+    const differing = endpoint(['%', "SELECT {{ String(a, 'x', required=True) }}, {{ String(a, 'y', required=True) }} FROM events"])
+    expect(!differing.ok && differing.reasons.join(' | ')).toContain('param a is declared twice with different types or defaults')
+  })
+
+  test('a 64-bit integer default keeps every digit', () => {
+    const translated = endpoint(['%', 'SELECT 1 FROM events WHERE id <= {{ UInt64(max, 18446744073709551615) }} AND id > {{ Int64(min, -9007199254740993) }}'])
+    expect(translated.ok && translated.value.params.map((param) => param.default)).toEqual(['18446744073709551615', '-9007199254740993'])
+    expect(translated.ok && translated.value.source).toContain('.default(18446744073709551615n)')
+    expect(translated.ok && translated.value.source).toContain('.default(-9007199254740993n)')
+    const fraction = endpoint(['%', 'SELECT {{ Int32(n, 1.5) }} FROM events'])
+    expect(!fraction.ok && fraction.reasons.join(' | ')).toContain('the default 1.5 of n is not an integer')
+  })
+
+  test('a DateTime64 value needs a fraction, as Tinybird requires', () => {
+    const translated = endpoint(['%', "SELECT {{ DateTime64(ts, '2024-01-01 00:00:00.000') }} FROM events"])
+    expect(translated.ok).toBe(true)
+    const source = translated.ok ? renderQueriesFile([translated.value], 'analytics') : ''
+    const pattern = new RegExp(/const DATE_TIME64 = \/(.*)\//.exec(source)?.[1] ?? '^$')
+    expect(pattern.test('2024-01-02 03:04:05.678')).toBe(true)
+    expect(pattern.test('2024-01-02 03:04:05')).toBe(false)
   })
 
   test('reports what has no static query equivalent', () => {
@@ -109,5 +135,13 @@ describe('renderQueriesFile', () => {
     expect(source.startsWith("import { p, query, t } from '@chkit/core'\n")).toBe(true)
     expect(source).toContain('const DATE = /^\\d{4}-\\d{2}-\\d{2}$/\n')
     expect(source).not.toContain('const DATE_TIME =')
+  })
+})
+
+describe('identifier', () => {
+  test('never yields a reserved word or a name the module declares', () => {
+    expect(['default', 'delete', 'new', 'p', 't', 'query', 'pythonFloat', 'DATE', 'top_users', '1st'].map(identifier)).toEqual([
+      'default_endpoint', 'delete_endpoint', 'new_endpoint', 'p_endpoint', 't_endpoint', 'query_endpoint', 'pythonFloat_endpoint', 'DATE_endpoint', 'top_users', '_1st',
+    ])
   })
 })

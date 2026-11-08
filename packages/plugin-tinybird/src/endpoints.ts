@@ -1,7 +1,7 @@
 import type { Datafile, DatafileNode } from './datafile.js'
 import type { PipeScope } from './pipes.js'
-import type { Translation } from './report.js'
 import { PYTHON_FLOAT_SOURCE } from './python-float.js'
+import { oneLine, type Translation } from './report.js'
 import { resolveNode, SqlResolveError } from './sql-resolve.js'
 
 /**
@@ -52,7 +52,8 @@ interface ParamKind {
 const PATTERNS = {
   DATE: String.raw`^\d{4}-\d{2}-\d{2}$`,
   DATE_TIME: String.raw`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}$`,
-  DATE_TIME64: String.raw`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}(?:\.\d+)?$`,
+  // Tinybird rejects a DateTime64 value without a fraction.
+  DATE_TIME64: String.raw`^\d{4}-\d{2}-\d{2} \d{2}:\d{2}:\d{2}\.\d+$`,
 } as const
 
 /** The template param types whose rendering was verified against Tinybird Local. */
@@ -116,7 +117,7 @@ export function renderQueriesFile(endpoints: TranslatedEndpoint[], database: str
   const lines = [
     `import { p, query, t } from '@chkit/core'`,
     '',
-    `// Imported from Tinybird endpoints by chkit plugin tinybird import, reading database ${database}.`,
+    `// Imported from Tinybird endpoints by chkit plugin tinybird import, reading database ${oneLine(database)}.`,
     '// Every param binds as a ClickHouse String inside the function Tinybird wraps it in, e.g.',
     "// toInt32({limit:String}), so ClickHouse runs the SQL Tinybird runs; p still validates its type.",
     '// Floats are sent as Python formats them (1 → 1.0), as Tinybird renders them.',
@@ -149,9 +150,9 @@ function renderTemplate(sql: string, params: Map<string, EndpointParam>): Transl
       reasons.push(...param.reasons)
       return tag
     }
-    // A required param's default is only Tinybird's sample: a call without the param fails.
+    // Tinybird renders a missing param with each site's own default, required=True or not.
     const seen = params.get(param.value.name)
-    const differs = (a: EndpointParam, b: EndpointParam) => a.type !== b.type || a.required !== b.required || (!a.required && a.default !== b.default)
+    const differs = (a: EndpointParam, b: EndpointParam) => a.type !== b.type || a.required !== b.required || a.default !== b.default
     if (seen && differs(seen, param.value)) {
       reasons.push(`param ${param.value.name} is declared twice with different types or defaults`)
       return tag
@@ -198,12 +199,20 @@ function parseParam(expression: string): Translation<EndpointParam> {
   if (typeof defaultValue === 'string' && kind?.cast && !/^-?\d+(?:\.\d+)?$/.test(defaultValue)) {
     return { ok: false, reasons: [`the default '${defaultValue}' of ${nameArg.value} is not a number`] }
   }
+  if (defaultValue !== undefined && kind?.cast && !isFloat(type) && !/^-?\d+$/.test(String(defaultValue))) {
+    return { ok: false, reasons: [`the default ${defaultValue} of ${nameArg.value} is not an integer`] }
+  }
   return { ok: true, value: { name: nameArg.value, type, required, ...(defaultValue !== undefined ? { default: normalizeDefault(defaultValue, kind) } : {}) }, notes: [] }
 }
 
+/**
+ * Numbers as numbers, except an integer beyond 2^53, which keeps its digits as
+ * a string (rendered as a BigInt literal). Strings as strings.
+ */
 function normalizeDefault(value: string | number, kind: ParamKind | undefined): string | number {
-  if (kind?.cast) return Number(value)
-  return String(value)
+  if (!kind?.cast) return String(value)
+  const number = Number(value)
+  return Number.isInteger(number) && !Number.isSafeInteger(number) ? String(value) : number
 }
 
 /** Top-level comma-separated call arguments, `key=value` or positional. */
@@ -242,7 +251,8 @@ function splitArgs(text: string): Array<{ key?: string; value: string }> | undef
 function pythonLiteral(text: string): string | number | undefined {
   const quoted = /^(['"])([\s\S]*)\1$/.exec(text)
   if (quoted) return (quoted[2] ?? '').replace(/\\(['"\\])/g, '$1')
-  if (/^-?\d+(?:\.\d+)?$/.test(text)) return Number(text)
+  // Kept as text, so a 64-bit integer keeps every digit.
+  if (/^-?\d+(?:\.\d+)?$/.test(text)) return text
   return undefined
 }
 
@@ -261,8 +271,10 @@ function paramSource(param: EndpointParam): string {
   // A float is sent as Python formats it; prefault runs the default through that transform too.
   const schema = `${kind.schema}${kind.pattern ? `.regex(${kind.pattern})` : ''}${kind.cast ? `.meta({ clickhouse: 'String' })` : ''}${float ? '.transform(pythonFloat)' : ''}`
   const value = `p(${JSON.stringify(param.name)}, ${schema})`
-  if (param.required || param.default === undefined) return value
-  return `${value}.${float ? 'prefault' : 'default'}(${JSON.stringify(param.default)})`
+  // Tinybird uses the default whenever the param is missing, also with required=True.
+  if (param.default === undefined) return value
+  const literal = typeof param.default === 'string' && kind.cast ? `${param.default}n` : JSON.stringify(param.default)
+  return `${value}.${float ? 'prefault' : 'default'}(${literal})`
 }
 
 export function isFloat(type: string): boolean {
@@ -274,10 +286,10 @@ function escapeTemplate(sql: string): string {
   return sql.replace(/\\/g, '\\\\').replace(/`/g, '\\`').replace(/\$\{/g, '\\${')
 }
 
-/** The defaults (a required param takes its Tinybird default, else a sample), then a sample value for every param. */
+/** Every param left out (a param without a default takes a sample), then a sample value for every param. */
 function paramSets(params: EndpointParam[]): Array<Record<string, string>> {
   const defaults = Object.fromEntries(
-    params.filter((param) => param.required).map((param) => [param.name, param.default !== undefined ? String(param.default) : (PARAM_KINDS[param.type]?.sample ?? '')])
+    params.filter((param) => param.default === undefined).map((param) => [param.name, PARAM_KINDS[param.type]?.sample ?? ''])
   )
   const samples = Object.fromEntries(params.map((param) => [param.name, PARAM_KINDS[param.type]?.sample ?? '']))
   const sets = [defaults]
@@ -285,7 +297,18 @@ function paramSets(params: EndpointParam[]): Array<Record<string, string>> {
   return sets
 }
 
-function identifier(name: string): string {
+/** JavaScript reserved words, and the names the generated module declares itself. */
+const UNAVAILABLE_NAMES = new Set([
+  'arguments', 'await', 'break', 'case', 'catch', 'class', 'const', 'continue', 'debugger', 'default', 'delete', 'do',
+  'else', 'enum', 'eval', 'export', 'extends', 'false', 'finally', 'for', 'function', 'if', 'implements', 'import',
+  'in', 'instanceof', 'interface', 'let', 'new', 'null', 'package', 'private', 'protected', 'public', 'return',
+  'static', 'super', 'switch', 'this', 'throw', 'true', 'try', 'typeof', 'undefined', 'var', 'void', 'while', 'with',
+  'yield', 'NaN', 'Infinity', 'p', 'query', 't', 'pythonFloat', ...Object.keys(PATTERNS),
+])
+
+/** The export name for a pipe: a JavaScript identifier that is not reserved and not one the module declares. */
+export function identifier(name: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9_$]/g, '_')
-  return /^[0-9]/.test(cleaned) ? `_${cleaned}` : cleaned
+  const valid = /^[0-9]/.test(cleaned) ? `_${cleaned}` : cleaned
+  return UNAVAILABLE_NAMES.has(valid) ? `${valid}_endpoint` : valid
 }

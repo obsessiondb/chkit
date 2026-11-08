@@ -27,7 +27,6 @@ describe('parseDatafile', () => {
     expect(file.kind).toBe('datasource')
     expect(file.name).toBe('events')
     expect(file.description).toBe('Raw events.')
-    expect(file.tokens).toEqual(['reader'])
     expect(file.blocks.get('SCHEMA')).toBe('    `id` UInt64 `json:$.id`,\n    `ts` DateTime\n')
     expect(file.blocks.get('INDEXES')).toBe('    idx id TYPE minmax GRANULARITY 1\n')
     expect(file.vars.get('ENGINE')).toBe('MergeTree')

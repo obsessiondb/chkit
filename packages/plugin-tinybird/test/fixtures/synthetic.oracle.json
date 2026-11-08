@@ -145,7 +145,7 @@
    "renders": [
     {
      "params": {},
-     "sql": "SELECT\n    event_type,\n    count() AS events,\n    sum(amount) AS amount\nFROM events AS events\nWHERE (event_time >= '2024-01-01 00:00:00') AND (event_type = 'click') AND (user_id > toUInt64('0')) AND (events.amount >= toFloat64('1.0'))\nGROUP BY event_type\nLIMIT toInt32('100')"
+     "sql": "SELECT\n    event_type,\n    count() AS events,\n    sum(amount) AS amount\nFROM events AS events\nWHERE (event_time >= '2024-01-01 00:00:00') AND (event_type = 'click') AND (user_id > toUInt64('0')) AND (events.amount >= toFloat64('1.0')) AND (user_id <= toUInt64('18446744073709551615')) AND (event_type != 'none')\nGROUP BY event_type\nLIMIT toInt32('100')"
     },
     {
      "params": {
@@ -153,9 +153,11 @@
       "event_type": "chkit",
       "min_user": "7",
       "min_amount": "1.5",
+      "max_user": "7",
+      "skip": "chkit",
       "limit": "-7"
      },
-     "sql": "SELECT\n    event_type,\n    count() AS events,\n    sum(amount) AS amount\nFROM events AS events\nWHERE (event_time >= '2025-01-02 03:04:05') AND (event_type = 'chkit') AND (user_id > toUInt64('7')) AND (events.amount >= toFloat64('1.5'))\nGROUP BY event_type\nLIMIT toInt32('-7')"
+     "sql": "SELECT\n    event_type,\n    count() AS events,\n    sum(amount) AS amount\nFROM events AS events\nWHERE (event_time >= '2025-01-02 03:04:05') AND (event_type = 'chkit') AND (user_id > toUInt64('7')) AND (events.amount >= toFloat64('1.5')) AND (user_id <= toUInt64('7')) AND (event_type != 'chkit')\nGROUP BY event_type\nLIMIT toInt32('-7')"
     }
    ]
   },

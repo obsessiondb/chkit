@@ -77,7 +77,10 @@ export async function compareParity(
   const names = oracleNameMap(oracle, chkit.database)
   const entries: ParityEntry[] = []
   for (const object of oracle.objects) {
-    const imported = report.entries.find((entry) => entry.kind === object.kind && entry.name === object.name)
+    // A pipe the importer could not classify (INCLUDE) is reported as kind 'pipe'.
+    const imported =
+      report.entries.find((entry) => entry.kind === object.kind && entry.name === object.name) ??
+      report.entries.find((entry) => entry.kind === 'pipe' && entry.name === object.name)
     if (!imported) {
       entries.push(entry(object, 'different', [`the importer did not report ${object.kind} ${object.name}`]))
       continue

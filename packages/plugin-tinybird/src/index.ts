@@ -164,7 +164,6 @@ export function createTinybirdPlugin(options: TinybirdPluginOptions = {}): Tinyb
                 counts,
                 entries: imported.report.entries,
                 copyFallbacks: imported.copyFallbacks,
-                warnings: imported.report.warnings,
                 ...(dryrun ? { content: imported.schemaSource, queries: imported.queriesSource } : {}),
               })
               return 0
@@ -173,7 +172,6 @@ export function createTinybirdPlugin(options: TinybirdPluginOptions = {}): Tinyb
             for (const entry of imported.report.entries) {
               if (entry.status === 'untranslatable') print(`  not translated: ${entry.kind} ${entry.name}: ${entry.reasons.join('; ')}`)
             }
-            for (const warning of imported.report.warnings) print(`Warning: ${warning}`)
             if (dryrun) {
               print(imported.schemaSource)
               if (imported.queriesSource) print(imported.queriesSource)
@@ -209,18 +207,27 @@ export async function importTinybirdProject(input: { projectDir: string; databas
 
   // Pipes other pipes may read from: Tinybird allows default, endpoint and materialized pipes.
   const readable = project.pipes.filter(({ type, output }) => output && (type === 'default' || type === 'endpoint' || type === 'materialized'))
-  const isStatic = (pipe: (typeof readable)[number]) => pipe.file.nodes.every((node) => staticSql(node.sql) !== undefined)
+  const unreadablePipes = new Map<string, string>()
+  for (const { file } of readable) {
+    if (file.unsupported.length > 0) unreadablePipes.set(file.name, includeReason(file))
+    else if (file.nodes.some((node) => staticSql(node.sql) === undefined)) unreadablePipes.set(file.name, 'its SQL uses Tinybird template expressions')
+  }
   const referenceable = new Map(
     readable
-      .filter(isStatic)
+      .filter(({ file }) => !unreadablePipes.has(file.name))
       .map(({ file, output }) => [file.name, { outputNode: output?.name ?? '', nodes: new Map(file.nodes.map((node) => [node.name, staticSql(node.sql) ?? ''])) }])
   )
-  const templatedPipes = new Set(readable.filter((pipe) => !isStatic(pipe)).map(({ file }) => file.name))
-  const scope = { database, datasources, untranslatableDatasources, pipes: referenceable, templatedPipes }
+  const scope = { database, datasources, untranslatableDatasources, pipes: referenceable, unreadablePipes }
   const copyFallbacks: TinybirdImport['copyFallbacks'] = []
   const endpoints: TranslatedEndpoint[] = []
 
   for (const { file, type, output } of project.pipes) {
+    // INCLUDE splices datafile text in place, so nodes and even the pipe's TYPE may come from it.
+    if (file.unsupported.length > 0) {
+      const kind = type === 'materialized' || type === 'copy' || type === 'endpoint' ? type : 'pipe'
+      entries.push({ kind, name: file.name, file: file.path, status: 'untranslatable', reasons: [includeReason(file)] })
+      continue
+    }
     if (type === 'materialized' || type === 'copy') {
       const copy = type === 'copy' ? translateCopy(file, output, scope) : undefined
       const translated = copy ?? translateMaterialized(file, output, scope)
@@ -236,6 +243,12 @@ export async function importTinybirdProject(input: { projectDir: string; databas
     if (type === 'endpoint') {
       const translated = translateEndpoint(file, output, scope)
       if (translated.ok) {
+        let exportName = translated.value.exportName
+        for (let n = 2; endpoints.some((endpoint) => endpoint.exportName === exportName); n++) exportName = `${translated.value.exportName}_${n}`
+        if (exportName !== translated.value.exportName) {
+          translated.value.source = translated.value.source.replace(`export const ${translated.value.exportName} =`, `export const ${exportName} =`)
+          translated.value.exportName = exportName
+        }
         endpoints.push(translated.value)
         entries.push({ kind: 'endpoint', name: file.name, file: file.path, status: 'translated', chkit: { kind: 'query', name: translated.value.exportName }, notes: translated.notes })
       } else {
@@ -249,7 +262,7 @@ export async function importTinybirdProject(input: { projectDir: string; databas
     entries.push({ kind: 'other', name: path, file: path, status: 'skipped', reasons: ['connection and include files are not translated (ingestion and connectors are out of scope)'] })
   }
 
-  const report: ImportReport = { project: project.dir, database, entries, warnings: [] }
+  const report: ImportReport = { project: project.dir, database, entries }
   const canonical = canonicalizeDefinitions(definitions)
   const schemaSource = renderSchemaFile(canonical, {
     header: [`Imported from a Tinybird project by chkit plugin tinybird import, into database ${database}`, ...untranslatableSummary(report)],
@@ -265,6 +278,10 @@ export async function importTinybirdProject(input: { projectDir: string; databas
 }
 
 // ───── Helpers ─────
+
+function includeReason(file: { unsupported: Array<{ command: string; line: number }> }): string {
+  return `${file.unsupported.map(({ command, line }) => `${command} (line ${line})`).join(', ')} is not evaluated by the importer, so the pipe's nodes are not all known`
+}
 
 function skipReason(type: string): string {
   if (type === 'sink') return 'sink pipes export data out of Tinybird and are not translated'
@@ -289,7 +306,8 @@ function reportJson(imported: TinybirdImport) {
 }
 
 function summaryLine(counts: ImportCounts, outFile: string | undefined): string {
-  const kinds = (['datasource', 'materialized', 'copy', 'endpoint'] as const)
+  const kinds = (['datasource', 'materialized', 'copy', 'endpoint', 'pipe'] as const)
+    .filter((kind) => kind !== 'pipe' || counts.pipe.untranslatable > 0)
     .map((kind) => `${kind}: ${counts[kind].translated} translated, ${counts[kind].untranslatable} not`)
     .join('; ')
   return `${outFile ? `Imported Tinybird project to ${outFile}` : 'Tinybird import preview'} (${kinds})`

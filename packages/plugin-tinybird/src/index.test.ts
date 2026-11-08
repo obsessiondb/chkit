@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { access, mkdtemp, readFile, rm } from 'node:fs/promises'
+import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -96,6 +96,37 @@ describe('tinybird import command', () => {
     )
     expect(printed.some((line) => String(line).startsWith("import { schema, table, materializedView } from '@chkit/core'"))).toBe(true)
     expect(await access(outFile).then(() => true, () => false)).toBe(false)
+  })
+
+  test('datafile text in a not-translated reason cannot escape the schema file header', async () => {
+    const dir = await tempDir()
+    await mkdir(join(dir, 'endpoints'), { recursive: true })
+    await writeFile(join(dir, 'endpoints', 'evil.pipe'), ['NODE endpoint', 'SQL >', '    %', '    SELECT 1 {% if', '    process.exit(42) // %} {% end %}', '', 'TYPE endpoint', ''].join('\n'))
+    const imported = await importTinybirdProject({ projectDir: dir, database: 'analytics' })
+    expect(imported.schemaSource).toContain('// Not translated')
+    expect(imported.schemaSource).not.toMatch(/^\s*process\.exit/m)
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(imported.schemaSource)).not.toThrow()
+  })
+
+  test('a pipe with INCLUDE is not translated, and pipes reading it say why', async () => {
+    const dir = await tempDir()
+    await mkdir(join(dir, 'datasources'), { recursive: true })
+    await mkdir(join(dir, 'pipes'), { recursive: true })
+    await writeFile(join(dir, 'datasources', 'ev.datasource'), 'SCHEMA >\n    `id` UInt64\n\nENGINE "MergeTree"\nENGINE_SORTING_KEY "id"\n')
+    await writeFile(join(dir, 'datasources', 'target.datasource'), 'SCHEMA >\n    `id` UInt64\n\nENGINE "MergeTree"\nENGINE_SORTING_KEY "id"\n')
+    await writeFile(join(dir, 'pipes', 'included.pipe'), 'INCLUDE "../includes/node.incl"\n')
+    await writeFile(join(dir, 'pipes', 'shared.pipe'), 'INCLUDE "../includes/other.incl"\n\nNODE n\nSQL >\n    SELECT id FROM ev\n')
+    await writeFile(
+      join(dir, 'pipes', 'reader.pipe'),
+      'NODE n\nSQL >\n    SELECT id FROM shared\n\nTYPE materialized\nDATASOURCE target\n'
+    )
+    const { report } = await importTinybirdProject({ projectDir: dir, database: 'analytics' })
+    const byName = new Map(report.entries.map((entry) => [entry.name, entry]))
+    expect(byName.get('included')).toMatchObject({ kind: 'pipe', status: 'untranslatable', reasons: ['INCLUDE (line 1) is not evaluated by the importer, so the pipe\'s nodes are not all known'] })
+    expect(byName.get('shared')).toMatchObject({ kind: 'pipe', status: 'untranslatable' })
+    expect(byName.get('reader')).toMatchObject({ kind: 'materialized', status: 'untranslatable' })
+    const reader = byName.get('reader')
+    expect(reader?.status === 'untranslatable' && reader.reasons[0]).toContain('reads pipe shared, which cannot be inlined (INCLUDE (line 1) is not evaluated')
   })
 
   test('an unreadable project is an error, not a partial import', async () => {

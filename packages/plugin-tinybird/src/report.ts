@@ -1,7 +1,8 @@
 /** The outcome of translating one Tinybird object. */
 export type Translation<T> = { ok: true; value: T; notes: string[] } | { ok: false; reasons: string[] }
 
-export type ObjectKind = 'datasource' | 'materialized' | 'copy' | 'endpoint'
+/** `pipe`: a pipe whose kind is unknown because it INCLUDEs datafile text the importer does not evaluate. */
+export type ObjectKind = 'datasource' | 'materialized' | 'copy' | 'endpoint' | 'pipe'
 
 export type ImportEntry =
   | {
@@ -20,7 +21,6 @@ export interface ImportReport {
   project: string
   database: string
   entries: ImportEntry[]
-  warnings: string[]
 }
 
 export type ImportCounts = Record<ObjectKind, { translated: number; untranslatable: number }> & { skipped: number }
@@ -31,6 +31,7 @@ export function countEntries(report: ImportReport): ImportCounts {
     materialized: { translated: 0, untranslatable: 0 },
     copy: { translated: 0, untranslatable: 0 },
     endpoint: { translated: 0, untranslatable: 0 },
+    pipe: { translated: 0, untranslatable: 0 },
     skipped: 0,
   }
   for (const entry of report.entries) {
@@ -47,7 +48,12 @@ export function untranslatableSummary(report: ImportReport): string[] {
   return [
     'Not translated (see the import report for details):',
     ...entries.flatMap((entry) =>
-      entry.status === 'untranslatable' ? [`  ${entry.kind} ${entry.name}: ${entry.reasons.join('; ')}`] : []
+      entry.status === 'untranslatable' ? [`  ${entry.kind} ${oneLine(entry.name)}: ${oneLine(entry.reasons.join('; '))}`] : []
     ),
   ]
+}
+
+/** Datafile text quoted in a reason may span lines; a comment line must not. */
+export function oneLine(text: string): string {
+  return text.replace(/\s*[\r\n\u2028\u2029]+\s*/g, ' ')
 }

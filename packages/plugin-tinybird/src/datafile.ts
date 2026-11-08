@@ -29,7 +29,6 @@ export interface Datafile {
   /** File-level blocks by upper-case name (SCHEMA, INDEXES, FORWARD_QUERY). */
   blocks: Map<string, string>
   nodes: DatafileNode[]
-  tokens: string[]
   /** Commands the importer does not evaluate (INCLUDE, VERSION), with their line. */
   unsupported: Array<{ command: string; line: number }>
 }
@@ -78,7 +77,6 @@ export function parseDatafile(path: string, text: string): Datafile {
     vars: new Map(),
     blocks: new Map(),
     nodes: [],
-    tokens: [],
     unsupported: [],
   }
   let current: DatafileNode | undefined
@@ -119,10 +117,7 @@ export function parseDatafile(path: string, text: string): Datafile {
       file.nodes.push(current)
       return
     }
-    if (command === 'token') {
-      file.tokens.push(unquote(args[0] ?? ''))
-      return
-    }
+    if (command === 'token') return
     if (command === 'description') {
       setDescription(file, current, args.join(' ').trim())
       return
