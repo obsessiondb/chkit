@@ -46,6 +46,7 @@ import {
 	readdirSync,
 	readFileSync,
 	writeFileSync,
+	writeSync,
 } from 'node:fs'
 import { join, resolve } from 'node:path'
 import process, { stdin, stdout } from 'node:process'
@@ -1005,12 +1006,12 @@ function runCommand(
 	const stderrText = result.stderr ?? ''
 
 	if (stdoutText.length > 0) {
-		process.stdout.write(stdoutText)
+		writeSync(1, stdoutText)
 		appendLog(stdoutText)
 	}
 
 	if (stderrText.length > 0) {
-		process.stderr.write(stderrText)
+		writeSync(2, stderrText)
 		appendLog(stderrText)
 	}
 
@@ -1033,7 +1034,7 @@ function shellQuote(value: string): string {
 }
 
 function logLine(message: string): void {
-	process.stdout.write(`${message}\n`)
+	writeSync(1, `${message}\n`)
 	appendLog(`${message}\n`)
 }
 
