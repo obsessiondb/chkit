@@ -11,6 +11,7 @@ from __future__ import annotations
 
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Literal
 
 import pytest
 
@@ -73,13 +74,17 @@ def test_copies_through_the_backfill_plugin_then_swaps_and_drops_the_old_table(
     run_backfill_scenario(target, "cutover_backfill", tmp_path)
 
 
+# Each retry scenario fails one half of the statements per test, so xdist runs
+# the halves side by side.
+@pytest.mark.parametrize("half", ["first", "second"])
 def test_resumes_after_a_failure_at_every_step_and_never_replays_the_swap(
-    target: CutoverTarget, tmp_path: Path
+    target: CutoverTarget, tmp_path: Path, half: Literal["first", "second"]
 ) -> None:
-    run_retry_scenario(target, "cutover_retry", tmp_path)
+    run_retry_scenario(target, "cutover_retry", tmp_path, half=half)
 
 
+@pytest.mark.parametrize("half", ["first", "second"])
 def test_cuts_over_an_index_granularity_change_resuming_after_a_failure_at_every_step(
-    target: CutoverTarget, tmp_path: Path
+    target: CutoverTarget, tmp_path: Path, half: Literal["first", "second"]
 ) -> None:
-    run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE)
+    run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE, half)

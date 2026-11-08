@@ -21,7 +21,7 @@ from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 from typer.testing import CliRunner
 
@@ -511,17 +511,22 @@ def run_backfill_scenario(target: CutoverTarget, label: str, directory: Path) ->
         drop_cutover_project(target, project)
 
 
-def run_retry_scenario(
+def run_retry_scenario(  # noqa: PLR0915
     target: CutoverTarget,
     label: str,
     directory: Path,
     change: CutoverChange = ORDER_BY_CHANGE,
+    half: Literal["first", "second"] | None = None,
 ) -> None:
     """Fail every statement of the cutover once and resume it with --retry, and
     replay the statements whose acknowledgement can be lost: the snapshot
     (re-taken after a TRUNCATE), the copy (skips what it wrote), the EXCHANGE
     (refuses: it must never swap back) and the drop of the old table. Writers
-    insert the whole time; no row may be lost or duplicated."""
+    insert the whole time; no row may be lost or duplicated.
+
+    With ``half``, only the first or the second half of the statements fails;
+    the other half runs straight through. Two runs, one per half, cover every
+    statement and can run side by side."""
     project = create_cutover_project(target, label, directory)
     writers: Writers | None = None
     try:
@@ -548,9 +553,12 @@ def run_retry_scenario(
                 ["migrate", "--apply", "--allow-destructive", "--json", *(["--retry", file] if retry else [])]
             )
 
-        for step in range(len(types)):
+        middle = (len(types) + 1) // 2
+        first = middle if half == "second" else 0
+        last = middle if half == "first" else len(types)
+        for step in range(first, last):
             path.write_text(_inject_failure(blocks, step), encoding="utf-8")
-            failed = migrate(retry=step > 0)
+            failed = migrate(retry=step > first)
             assert failed.exit_code != 0, f"statement {step + 1} ({types[step]}) must fail"
             assert f"injected failure at statement {step + 1}" in failed.output, failed.output
             lost = replayed.get(step - 1)

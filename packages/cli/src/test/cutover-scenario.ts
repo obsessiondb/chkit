@@ -463,11 +463,16 @@ export async function runBackfillScenario(target: CutoverTarget, label: string):
  * (re-taken after a TRUNCATE), the copy (skips what it wrote), the EXCHANGE
  * (refuses: it must never swap back) and the drop of the old table. Writers
  * insert the whole time; no row may be lost or duplicated.
+ *
+ * With `half`, only the first or the second half of the statements fails;
+ * the other half runs straight through. Two runs, one per half, cover every
+ * statement and can run side by side.
  */
 export async function runRetryScenario(
   target: CutoverTarget,
   label: string,
   change: CutoverChange = ORDER_BY_CHANGE,
+  half?: 'first' | 'second',
 ): Promise<void> {
   const project = await createCutoverProject(target, label)
   const writers = startWriters(target, project, 1)
@@ -497,9 +502,12 @@ export async function runRetryScenario(
       cliAsync(project, ['migrate', '--apply', '--allow-destructive', '--json', ...(retry ? ['--retry', file] : [])])
     const write = (content: string) => writeFile(join(project.dir, 'chkit/migrations', file), content, 'utf8')
 
-    for (let step = 0; step < types.length; step += 1) {
+    const middle = Math.ceil(types.length / 2)
+    const first = half === 'second' ? middle : 0
+    const last = half === 'first' ? middle : types.length
+    for (let step = first; step < last; step += 1) {
       await write(injectFailure(blocks, step))
-      const failed = await migrate(step > 0)
+      const failed = await migrate(step > first)
       if (failed.exitCode === 0 || !`${failed.stdout}${failed.stderr}`.includes(`injected failure at statement ${step + 1}`)) {
         throw new Error(formatTestDiagnostic(`statement ${step + 1} (${types[step]}) must fail`, failed))
       }
