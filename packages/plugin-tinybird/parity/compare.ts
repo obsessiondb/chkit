@@ -22,7 +22,7 @@ export type OracleObject =
   | { kind: 'datasource'; name: string; table: string; createTableQuery: string }
   | { kind: 'materialized'; name: string; node: string; table: string; createTableQuery: string }
   | { kind: 'copy'; name: string; mode: string; cron: string | null; timezone: string; target: string; debugQuery: string }
-  | { kind: 'endpoint'; name: string; renders: EndpointRender[] }
+  | { kind: 'endpoint'; name: string; renders: EndpointRender[]; failedRenders?: Array<{ params: Record<string, string>; error: string }> }
 
 export interface EndpointRender {
   params: Record<string, string>
@@ -96,6 +96,19 @@ export async function compareParity(
     } else {
       entries.push(await compareEndpoint(object, chkit, deps))
     }
+  }
+  // Whatever chkit translated must exist in Tinybird too: an extra object is a difference, not silence.
+  for (const imported of report.entries) {
+    if (imported.status !== 'translated' || imported.kind === 'pipe') continue
+    if (oracle.objects.some((object) => object.kind === imported.kind && object.name === imported.name)) continue
+    entries.push({
+      kind: imported.kind,
+      name: imported.name,
+      status: 'different',
+      reasons: [`chkit created ${imported.kind} ${imported.name}, which Tinybird does not have`],
+      checks: [],
+      normalizations: [],
+    })
   }
   return entries
 }
@@ -215,6 +228,14 @@ async function compareEndpoint(object: Extract<OracleObject, { kind: 'endpoint' 
   const reasons: string[] = []
   const checks: string[] = []
   let diff: ParityEntry['diff']
+  // Every param set chkit renders must have a Tinybird render to compare with.
+  for (const ours of renders) {
+    const key = JSON.stringify(ours.params)
+    if (object.renders.some((render) => JSON.stringify(render.params) === key)) continue
+    const failure = object.failedRenders?.find((failed) => JSON.stringify(failed.params) === key)
+    reasons.push(`Tinybird has no render for params ${key}${failure ? `: ${failure.error}` : ''}`)
+  }
+  if (object.renders.length === 0 && renders.length === 0) reasons.push('no param set was compared')
   for (const expected of object.renders) {
     const key = JSON.stringify(expected.params)
     const actual = renders.find((render) => JSON.stringify(render.params) === key)

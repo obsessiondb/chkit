@@ -164,14 +164,17 @@ export async function captureOracle(
       })
     } else if (pipe.type === 'endpoint') {
       const renders: EndpointRender[] = []
+      const failedRenders: Array<{ params: Record<string, string>; error: string }> = []
       for (const params of endpointParams.get(pipe.name) ?? [{}]) {
         const query = new URLSearchParams(params).toString()
-        const explain = await api<{ debug_query?: string }>(target, token, `/v0/pipes/${pipe.name}/explain${query ? `?${query}` : ''}`).catch(
-          (error: unknown) => ({ debug_query: undefined, error })
+        const explain = await api<{ debug_query?: string }>(target, token, `/v0/pipes/${pipe.name}/explain${query ? `?${query}` : ''}`).then(
+          (result): { sql: string } | { error: string } => (result.debug_query ? { sql: result.debug_query } : { error: 'explain returned no debug_query' }),
+          (error: unknown): { error: string } => ({ error: error instanceof Error ? error.message : String(error) })
         )
-        if (explain.debug_query) renders.push({ params, sql: explain.debug_query })
+        if ('sql' in explain) renders.push({ params, sql: explain.sql })
+        else failedRenders.push({ params, error: explain.error })
       }
-      objects.push({ kind: 'endpoint', name: pipe.name, renders })
+      objects.push({ kind: 'endpoint', name: pipe.name, renders, ...(failedRenders.length > 0 ? { failedRenders } : {}) })
     }
   }
   return {
