@@ -1,7 +1,7 @@
 import { createClient } from '@clickhouse/client'
 import { z } from 'zod'
 
-import { createQuery, p, query as unboundQuery, t, table } from '../src/index.js'
+import { createQuery, p, type QueryResult, query as unboundQuery, t, table } from '../src/index.js'
 
 // Compile-time checks of the query API's inference; `bun run typecheck` runs them.
 // Queries are exported so declaration emit is checked too.
@@ -133,6 +133,12 @@ export async function calls() {
   assertType<Equal<typeof untyped, Record<string, unknown>[]>>()
   const typed = await noParams.returns<{ one: number }>()()
   assertType<Equal<typeof typed, { one: number }[]>>()
+  const result = await topCities.raw({ city: 'Berlin' })
+  assertType<Equal<typeof result, Awaited<ReturnType<typeof client.query>>>>()
+  const unboundResult = await unboundQuery`SELECT 1`.raw(undefined, { client })
+  assertType<Equal<typeof unboundResult, QueryResult>>()
+  // @ts-expect-error raw takes the same params as a call
+  await topCities.raw({ limit: 3 })
 
   await topCities(
     { city: 'Berlin', limit: 3 },

@@ -128,6 +128,7 @@ export const topCities = query({ name: 'top_cities', version: 2, returns: z.obje
 - A `readonly = 1` user can't send `log_comment`. Give app users `readonly = 2` or plain grants, or skip it with `createQuery(client, { logComment: false })`.
 - `returns` parses every row. `.returns<Row>()` sets the row type without parsing.
 - An integer a JS number would round, such as a large UInt64, comes back as a string of its digits; other values stay numbers. `returns: z.object({ id: z.coerce.bigint() })` makes it a bigint.
+- `topCities.raw(params, options)` skips row parsing for bulk reads: it returns the client's result, such as `@clickhouse/client`'s `ResultSet` with `text()`, `json()` and `stream()`.
 
 ## Call options
 
