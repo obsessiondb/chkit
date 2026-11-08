@@ -94,7 +94,11 @@ export { importModuleFile } from './ts-import.js'
 export { t } from './clickhouse-type.js'
 export { p, type NamedParam } from './query-param.js'
 export {
+  createQuery,
   query,
+  type Query,
+  type QueryCallOptions,
+  type QueryClient,
   type QueryDefinition,
   type QueryInterpolation,
   type QueryObjectRef,
