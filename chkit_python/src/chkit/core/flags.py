@@ -63,7 +63,9 @@ def _add_array_value(flags: ParsedFlags, key: str, raw: str) -> None:
 def parse_flags(argv: list[str], flag_defs: list[FlagDef]) -> ParsedFlags:
     """Parse ``argv`` against ``flag_defs``.
 
-    - Positional tokens (not starting with ``--``) are ignored.
+    - Positional tokens (not starting with ``-``, or a bare ``-``) are ignored.
+    - Short tokens (``-t``) raise ``UnknownFlagError``: no short flags are
+      defined, and skipping one would silently drop it.
     - ``--flag value`` and ``--flag=value`` are both accepted for string and
       ``string[]`` flags.
     - Boolean flags reject the equals form (``--json=true`` raises).
@@ -84,13 +86,16 @@ def parse_flags(argv: list[str], flag_defs: list[FlagDef]) -> ParsedFlags:
     i = 0
     while i < len(argv):
         token = argv[i]
-        if not token or not token.startswith("--"):
+        if not token or token == "-" or not token.startswith("-"):
             i += 1
             continue
 
         eq_idx = token.find("=")
         name = token if eq_idx == -1 else token[:eq_idx]
         inline_value: str | None = None if eq_idx == -1 else token[eq_idx + 1 :]
+        # No short flags are defined; skipping `-t` would run unscoped (#491).
+        if not token.startswith("--"):
+            raise UnknownFlagError(name)
 
         if eq_idx == -1 and name in negation_map:
             original_name = negation_map[name]

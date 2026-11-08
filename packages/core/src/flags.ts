@@ -151,10 +151,14 @@ export function parseFlags<const T extends readonly FlagDef[]>(argv: string[], f
 
   for (let i = 0; i < argv.length; i += 1) {
     const token = argv[i]
-    if (!token || !token.startsWith('--')) continue
+    if (!token || token === '-' || !token.startsWith('-')) continue
 
     const eqIdx = token.indexOf('=')
     const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+    // No short flags are defined; skipping `-t` would run unscoped (#491).
+    if (!token.startsWith('--')) {
+      throw new UnknownFlagError(name)
+    }
     const inlineValue = eqIdx === -1 ? undefined : token.slice(eqIdx + 1)
 
     if (eqIdx === -1 && negationMap.has(name)) {

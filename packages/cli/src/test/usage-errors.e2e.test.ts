@@ -107,6 +107,63 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
     }
   })
 
+  test('an unknown short flag is a usage error, like an unknown long flag (#491)', async () => {
+    const fixture = await createFixture()
+    try {
+      const scoped = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json', '-t', 'users'])
+      expect(scoped.exitCode).toBe(1)
+      expect(JSON.parse(scoped.stdout)).toEqual({
+        command: 'generate',
+        schemaVersion: 1,
+        ok: false,
+        error: { code: 'usage', message: 'Unknown flag: -t' },
+      })
+      expect(scoped.stderr.trim()).toBe('Unknown flag: -t')
+
+      const apply = runCli(['migrate', '-t', 'users', '--apply', '--config', fixture.configPath])
+      expect(apply.exitCode).toBe(1)
+      expect(apply.stdout).toBe('')
+      expect(apply.stderr.trim()).toBe('Unknown flag: -t')
+
+      const config = runCli(['status', '--config', fixture.configPath, '-c', '/nonexistent.ts'])
+      expect(config.exitCode).toBe(1)
+      expect(config.stderr.trim()).toBe('Unknown flag: -c')
+
+      const long = runCli(['status', '--config', fixture.configPath, '--bogus'])
+      expect([long.exitCode, long.stderr.trim()]).toEqual([1, 'Unknown flag: --bogus'])
+
+      const help = runCli(['status', '-h'])
+      expect(help.exitCode).toBe(0)
+      expect(help.stdout).toContain('chkit status')
+
+      const version = runCli(['-v'])
+      expect(version.exitCode).toBe(0)
+      expect(version.stdout.trim()).toMatch(/^\d+\.\d+\.\d+/)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('a plugin command rejects an unknown short flag and keeps dash-leading values (#491)', async () => {
+    const fixture = await createIngestFixture()
+    try {
+      const shortcut = runCli(['ingest', 'list', '-x', '--config', fixture.configPath, '--json'])
+      expect(shortcut.exitCode).toBe(1)
+      expect(JSON.parse(shortcut.stdout)).toMatchObject({ ok: false, command: 'ingest', error: { code: 'usage', message: 'Unknown flag: -x' } })
+
+      const forwarded = runCli(['plugin', 'ingest', 'list', '-x', '--config', fixture.configPath, '--json'])
+      expect(forwarded.exitCode).toBe(1)
+      expect(JSON.parse(forwarded.stdout)).toMatchObject({ ok: false, error: 'Unknown flag: -x' })
+
+      const dashValue = runCli(['ingest', 'list', '--tag', '-x', '--config', fixture.configPath, '--json'])
+      // The flag parses; the command then fails on the fixture's missing pipeline.
+      expect(dashValue.exitCode).toBe(2)
+      expect(JSON.parse(dashValue.stdout)).toMatchObject({ ok: false, error: expect.stringContaining('No ingestion pipeline') })
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('a plugin subcommand flag error keeps the --json contract and its help lists the flags', async () => {
     const fixture = await createIngestFixture()
     try {

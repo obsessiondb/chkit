@@ -56,6 +56,22 @@ describe('parseFlags', () => {
     expect(() => parseFlags(['--typo'], defs)).toThrow(UnknownFlagError)
   })
 
+  it('throws UnknownFlagError for short flags instead of skipping them (#491)', () => {
+    expect(() => parseFlags(['-t', 'alpha', '--dryrun'], defs)).toThrow('Unknown flag: -t')
+    expect(() => parseFlags(['--dryrun', '-c', 'x.ts'], defs)).toThrow('Unknown flag: -c')
+    expect(() => parseFlags(['-t=alpha'], defs)).toThrow('Unknown flag: -t')
+    expect(() => parseFlags(['-5'], defs)).toThrow('Unknown flag: -5')
+    expect(() => parseFlags(['-v'], defs)).toThrow(UnknownFlagError)
+  })
+
+  it('keeps values that start with a dash and a bare dash', () => {
+    expect(parseFlags(['--name', '-5'], defs)['--name']).toBe('-5')
+    expect(parseFlags(['--name', '-t'], defs)['--name']).toBe('-t')
+    expect(parseFlags(['--database', '-1,-2'], defs)['--database']).toEqual(['-1', '-2'])
+    expect(parseFlags(['--name=-x'], defs)['--name']).toBe('-x')
+    expect(parseFlags(['-', '--dryrun'], defs)['--dryrun']).toBe(true)
+  })
+
   it('throws MissingFlagValueError for string flag without value', () => {
     expect(() => parseFlags(['--name'], defs)).toThrow(MissingFlagValueError)
   })

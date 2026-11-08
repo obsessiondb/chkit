@@ -158,6 +158,9 @@
 - `generate` warns about each operation that sets the experimental `ALP` codec.
 
 ### Fixed
+- `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
+  such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
+  plugin command as a positional argument (#491, fixed in TS too).
 - `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit
   migrated (#466, fixed in TS too). `pull` keeps every setting the server stores, including
   `index_granularity`, and leaves out chkit's migration journal and the hidden

@@ -69,6 +69,26 @@ def test_throws_unknown_flag_error() -> None:
         parse_flags(["--typo"], DEFS)
 
 
+def test_throws_unknown_flag_error_for_short_flags() -> None:
+    for argv, flag in [
+        (["-t", "alpha", "--dryrun"], "-t"),
+        (["--dryrun", "-c", "x.ts"], "-c"),
+        (["-t=alpha"], "-t"),
+        (["-5"], "-5"),
+        (["-v"], "-v"),
+    ]:
+        with pytest.raises(UnknownFlagError, match=f"^Unknown flag: {flag}$"):
+            parse_flags(argv, DEFS)
+
+
+def test_keeps_values_that_start_with_a_dash_and_a_bare_dash() -> None:
+    assert parse_flags(["--name", "-5"], DEFS)["--name"] == "-5"
+    assert parse_flags(["--name", "-t"], DEFS)["--name"] == "-t"
+    assert parse_flags(["--database", "-1,-2"], DEFS)["--database"] == ["-1", "-2"]
+    assert parse_flags(["--name=-x"], DEFS)["--name"] == "-x"
+    assert parse_flags(["-", "--dryrun"], DEFS)["--dryrun"] is True
+
+
 def test_throws_missing_value_for_string_flag_without_value() -> None:
     with pytest.raises(MissingFlagValueError):
         parse_flags(["--name"], DEFS)

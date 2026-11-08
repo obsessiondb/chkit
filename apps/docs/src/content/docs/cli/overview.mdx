@@ -62,6 +62,8 @@ These flags are available on every command that loads a config file:
 | `--help-plugins` | boolean | n/a | Include configured plugin flags; evaluates config/plugin registration but skips lifecycle hooks |
 | `--version` | boolean | n/a | Print CLI version |
 
+The TypeScript CLI accepts only `-h` (help) and `-v` (version) as short forms. Any other short flag, such as `-t`, is rejected as an unknown flag with exit code 1, the same as an unknown long flag.
+
 The effect of `--table` depends on the command:
 
 - `generate`, `migrate`, and `drift` use it to narrow the schema/migration operations they plan or evaluate.
