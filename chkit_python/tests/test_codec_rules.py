@@ -154,8 +154,9 @@ CASES: list[tuple[str, Any, tuple[str, str] | None]] = [
     ("UInt64", {"kind": "raw", "expression": "T64( 'bit' )"}, None),
     ("UInt64", {"kind": "raw", "expression": "T64('b it')"}, ("codec_parameter_invalid", "codec raw \"T64('b it')\" has invalid arguments for T64")),
     ("UInt64", {"kind": "raw", "expression": "LZ4HC(-1)"}, None),
-    ("UInt64", {"kind": "raw", "expression": "LZ4HC(2147483648)"}, ("codec_parameter_invalid", "codec LZ4HC level must be between -2147483648 and 2147483647")),
-    ("UInt64", {"kind": "LZ4HC", "level": 4294967297}, ("codec_parameter_invalid", "codec LZ4HC level must be between -2147483648 and 2147483647")),
+    ("UInt64", {"kind": "raw", "expression": "LZ4HC(2147483648)"}, None),
+    ("UInt64", {"kind": "LZ4HC", "level": 4294967297}, None),
+    ("UInt64", {"kind": "raw", "expression": "ZSTD(-9007199254740993)"}, ("codec_parameter_invalid", "codec raw \"ZSTD(-9007199254740993)\" has invalid arguments for ZSTD")),
     ("Float64", {"kind": "Gorilla", "size": True}, ("codec_parameter_invalid", "codec Gorilla size must be 1, 2, 4 or 8")),
 ]
 

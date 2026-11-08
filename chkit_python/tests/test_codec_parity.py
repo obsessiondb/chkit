@@ -418,6 +418,13 @@ def test_codec_fingerprint_compares_respelled_codecs_equal() -> None:
         ("String", codec_raw("ZSTD(3, 0x18)"), {"kind": "ZSTD", "level": 3, "windowLog": 24}),
         ("String", codec_raw("LZ4HC(0b1_0)"), {"kind": "LZ4HC", "level": 2}),
         ("UInt64", codec_raw("T64( 'bit' )"), {"kind": "T64", "mode": "bit"}),
+        # ClickHouse keeps the low 32 bits of an LZ4HC level (observed on 26.3).
+        ("String", {"kind": "LZ4HC", "level": 4294967297}, parse_codec("CODEC(LZ4HC(1))") or []),
+        (
+            "String",
+            codec_raw("LZ4HC(2147483648)"),
+            parse_codec("CODEC(LZ4HC(18446744071562067968))") or [],
+        ),
     ]
     for type_, a, b in same:
         assert codec_fingerprint(a, type_) == codec_fingerprint(b, type_)
@@ -428,6 +435,11 @@ def test_codec_fingerprint_tells_apart_a_zstd_window_and_a_t64_bit_mode() -> Non
         {"kind": "ZSTD", "level": 3}
     )
     assert codec_fingerprint({"kind": "T64", "mode": "bit"}) != codec_fingerprint({"kind": "T64"})
+
+
+def test_codec_fingerprint_leaves_a_decimal_argument_too_long_for_a_number_unparsed() -> None:
+    expression = "ZSTD(-" + "9" * 4301 + ")"
+    assert codec_fingerprint(codec_raw(expression)) == expression
 
 
 def test_codec_fingerprint_keeps_whitespace_inside_a_quoted_argument() -> None:

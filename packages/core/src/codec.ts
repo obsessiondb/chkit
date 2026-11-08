@@ -153,8 +153,13 @@ function parseAtom(raw: string): ColumnCodec | undefined {
 
 const UINT64_SIGN = 9223372036854775808n
 const UINT64_RANGE = 18446744073709551616n
+const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
 
-/** The integer literals ClickHouse takes as a codec argument; a float such as `1.0` is not one. */
+/**
+ * The integer literals ClickHouse takes as a codec argument; a float such as
+ * `1.0` is not one. Beyond ±(2^53 - 1) a JS number is not exact, so chkit-py
+ * leaves such an argument unparsed too.
+ */
 const INTEGER_ARG = /^[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01]+)*|\d+(?:_\d+)*)$/
 
 /**
@@ -165,8 +170,9 @@ const INTEGER_ARG = /^[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01
 function parseIntegerArg(raw: string): number | undefined {
   if (!INTEGER_ARG.test(raw)) return undefined
   const magnitude = BigInt(raw.replace(/^[+-]/, '').replaceAll('_', ''))
-  const value = raw.startsWith('-') ? -magnitude : magnitude
-  return Number(value >= UINT64_SIGN ? value - UINT64_RANGE : value)
+  const signed = raw.startsWith('-') ? -magnitude : magnitude
+  const value = signed >= UINT64_SIGN ? signed - UINT64_RANGE : signed
+  return value >= -MAX_SAFE && value <= MAX_SAFE ? Number(value) : undefined
 }
 
 /** Removes whitespace except inside quoted strings: `T64('b it')` is not `T64('bit')`. */
@@ -301,8 +307,11 @@ function stepFingerprint(step: ColumnCodec, width: number | undefined): string {
   switch (step.kind) {
     case 'ZSTD':
       return `ZSTD(${step.level ?? 1}${step.windowLog !== undefined ? `,${step.windowLog}` : ''})`
-    case 'LZ4HC':
-      return `LZ4HC(${step.level !== undefined && step.level >= 1 ? step.level : 9})`
+    case 'LZ4HC': {
+      // ClickHouse keeps the low 32 bits of the level: LZ4HC(4294967297) is stored as LZ4HC(1).
+      const level = Number.isInteger(step.level) ? Number(BigInt.asIntN(32, BigInt(step.level as number))) : step.level
+      return `LZ4HC(${level !== undefined && level >= 1 ? level : 9})`
+    }
     case 'Delta':
     case 'Gorilla': {
       const size = step.size ?? width
@@ -365,12 +374,7 @@ export function codecAtomProblem(step: unknown): CodecAtomProblem | undefined {
 function codecParameterProblem(kind: string, step: Record<string, unknown>): string | undefined {
   switch (kind) {
     case 'LZ4HC':
-      if (step.level !== undefined && !isInteger(step.level)) return 'level must be an integer'
-      // ClickHouse keeps only the low 32 bits: LZ4HC(4294967297) is stored as LZ4HC(1).
-      if (isInteger(step.level) && (step.level < INT32_MIN || step.level > INT32_MAX)) {
-        return `level must be between ${INT32_MIN} and ${INT32_MAX}`
-      }
-      return undefined
+      return step.level !== undefined && !isInteger(step.level) ? 'level must be an integer' : undefined
     case 'ZSTD':
       if (step.level !== undefined && !isInteger(step.level)) return 'level must be an integer'
       if (isInteger(step.level) && step.level > 22) return 'level must be at most 22'
@@ -397,9 +401,6 @@ function codecParameterProblem(kind: string, step: Record<string, unknown>): str
       return undefined
   }
 }
-
-const INT32_MIN = -2147483648
-const INT32_MAX = 2147483647
 
 function parameterProblem(message: string): CodecAtomProblem {
   return { code: 'codec_parameter_invalid', message }

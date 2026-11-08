@@ -212,9 +212,11 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
 
 _UINT64_SIGN: Final[int] = 2**63
 _UINT64_RANGE: Final[int] = 2**64
+_MAX_SAFE: Final[int] = 2**53 - 1
 
 
 # The integer literals ClickHouse takes as a codec argument; a float such as `1.0` is not one.
+# Beyond ±(2^53 - 1) a JS number is not exact, so such an argument stays unparsed, as in TS.
 _INTEGER_ARG: Final[re.Pattern[str]] = re.compile(
     r"[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01]+)*|[0-9]+(?:_[0-9]+)*)"
 )
@@ -235,9 +237,14 @@ def _parse_integer_arg(raw: str) -> int | None:
     elif digits[:2] == "0b":
         magnitude = int(digits[2:], 2)
     else:
-        magnitude = int(digits, 10)
-    value = -magnitude if raw.startswith("-") else magnitude
-    return value - _UINT64_RANGE if value >= _UINT64_SIGN else value
+        # More than 20 digits is beyond UInt64; int() refuses very long strings.
+        decimal = digits.lstrip("0") or "0"
+        if len(decimal) > 20:
+            return None
+        magnitude = int(decimal, 10)
+    signed = -magnitude if raw.startswith("-") else magnitude
+    value = signed - _UINT64_RANGE if signed >= _UINT64_SIGN else signed
+    return value if -_MAX_SAFE <= value <= _MAX_SAFE else None
 
 
 def _strip_whitespace_outside_quotes(text: str) -> str:
@@ -373,7 +380,9 @@ def _step_fingerprint(step: ColumnCodec, width: int | None) -> str:
         window = "" if step.window_log is None else f",{step.window_log}"
         return f"ZSTD({level}{window})"
     if isinstance(step, _CodecLZ4HC):
-        return f"LZ4HC({step.level if step.level is not None and step.level >= 1 else 9})"
+        # ClickHouse keeps the low 32 bits of the level: LZ4HC(4294967297) is stored as LZ4HC(1).
+        stored = None if step.level is None else (step.level + 2**31) % 2**32 - 2**31
+        return f"LZ4HC({stored if stored is not None and stored >= 1 else 9})"
     if isinstance(step, _CodecDeltaLike):
         if step.kind == "DoubleDelta":
             return "DoubleDelta"
@@ -457,12 +466,7 @@ def _atom_data(step: object) -> object:
 def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
     level = data.get("level")
     if kind == "LZ4HC":
-        if level is not None and not _is_int(level):
-            return "level must be an integer"
-        # ClickHouse keeps only the low 32 bits: LZ4HC(4294967297) is stored as LZ4HC(1).
-        if isinstance(level, int) and _is_int(level) and not _INT32_MIN <= level <= _INT32_MAX:
-            return f"level must be between {_INT32_MIN} and {_INT32_MAX}"
-        return None
+        return "level must be an integer" if level is not None and not _is_int(level) else None
     if kind == "ZSTD":
         if level is not None and not _is_int(level):
             return "level must be an integer"
@@ -497,10 +501,6 @@ def _codec_parameter_problem(kind: str, data: dict[str, Any]) -> str | None:
             return None
         return "expression must be a non-empty string"
     return None
-
-
-_INT32_MIN: Final[int] = -2147483648
-_INT32_MAX: Final[int] = 2147483647
 
 
 def _is_int(value: object) -> bool:

@@ -510,7 +510,7 @@ Sets the column compression codec, rendered as a `CODEC(...)` clause. A codec is
 | `kind` | Args | Renders | ClickHouse stores |
 |--------|------|---------|-------------------|
 | `LZ4` | — | `CODEC(LZ4)` | `LZ4` |
-| `LZ4HC` | `level?: number` (a 32-bit integer, default 9; ClickHouse keeps only the low 32 bits of a larger one) | `CODEC(LZ4HC(9))` | as written; a bare `LZ4HC` as `LZ4HC(0)`, the default |
+| `LZ4HC` | `level?: number` (any integer, default 9; ClickHouse keeps its low 32 bits, and chkit compares those) | `CODEC(LZ4HC(9))` | as written; a bare `LZ4HC` as `LZ4HC(0)`, the default |
 | `ZSTD` | `level?: number` (at most 22, default 1; negative levels are faster), `windowLog?: number` (10–31) | `CODEC(ZSTD(3))`, `CODEC(ZSTD(3, 24))` | as written; a bare `ZSTD` as `ZSTD(1)` |
 | `Default` | — | `CODEC(Default)` | `Default`, the server's default compression |
 | `NONE` | — | `CODEC(NONE)` | `NONE`. It stores data uncompressed and must be the only codec of its column |
@@ -1279,7 +1279,7 @@ chkit validates schema definitions and throws a `ChxValidationError` if any issu
 - **Order by references missing column** -- `orderBy` includes a bare column name not in `columns` (function expressions like `toStartOfHour(ts)` are passed through to ClickHouse unchecked)
 - **Empty codec chain** (`codec_chain_empty`) -- a `codec` array with no steps; provide at least one codec or omit the field
 - **Unknown codec** (`codec_unknown`) -- a codec atom without a `kind`, a `kind` chkit does not know (kinds are case-sensitive: `Zstd` is not `ZSTD`), or a raw atom such as `zstd` that names a codec in the wrong case
-- **Invalid codec parameter** (`codec_parameter_invalid`) -- a field the codec does not take, or a value out of range: a non-integer level, `LZ4HC` level outside the 32-bit range, `ZSTD` level above 22 or `windowLog` outside 10–31, `FPC` level outside 1–28, a `size` other than 1, 2, 4 or 8, a `floatSize` other than 4 or 8, a `T64` mode other than `'byte'` or `'bit'`, an empty raw expression, or a raw atom such as `Delta(3)` or `ZSTD(1.0)` whose arguments ClickHouse rejects (raw arguments are integers written as ClickHouse reads them: decimal, `0x` hex or `0b` binary, with `_` between digits)
+- **Invalid codec parameter** (`codec_parameter_invalid`) -- a field the codec does not take, or a value out of range: a non-integer level, `ZSTD` level above 22 or `windowLog` outside 10–31, `FPC` level outside 1–28, a `size` other than 1, 2, 4 or 8, a `floatSize` other than 4 or 8, a `T64` mode other than `'byte'` or `'bit'`, an empty raw expression, or a raw atom such as `Delta(3)` or `ZSTD(1.0)` whose arguments ClickHouse rejects (raw arguments are integers written as ClickHouse reads them: decimal, `0x` hex or `0b` binary, with `_` between digits, and at most 2^53 - 1 in size)
 - **NONE combined** (`codec_none_combined`) -- `NONE` with any other codec
 - **Multiple general codecs** (`codec_chain_multiple_general`) -- more than one of `LZ4`, `LZ4HC`, `ZSTD` and `Default` in a chain
 - **Codec after the general codec** (`codec_chain_must_end_with_general`) -- a transform or compression codec after the general codec; only encryption codecs may follow it

@@ -352,6 +352,9 @@ describe('codec forms ClickHouse stores (#465)', () => {
       ['String', codec.raw('ZSTD(3, 0x18)'), { kind: 'ZSTD', level: 3, windowLog: 24 }],
       ['String', codec.raw('LZ4HC(0b1_0)'), { kind: 'LZ4HC', level: 2 }],
       ['UInt64', codec.raw("T64( 'bit' )"), { kind: 'T64', mode: 'bit' }],
+      // ClickHouse keeps the low 32 bits of an LZ4HC level (observed on 26.3).
+      ['String', { kind: 'LZ4HC', level: 4294967297 }, parseCodec('CODEC(LZ4HC(1))') ?? []],
+      ['String', codec.raw('LZ4HC(2147483648)'), parseCodec('CODEC(LZ4HC(18446744071562067968))') ?? []],
     ]
     for (const [type, a, b] of same) expect(codecFingerprint(a, type)).toBe(codecFingerprint(b, type))
   })
@@ -359,6 +362,10 @@ describe('codec forms ClickHouse stores (#465)', () => {
   test('tells apart a ZSTD window and a T64 bit mode', () => {
     expect(codecFingerprint({ kind: 'ZSTD', level: 3, windowLog: 24 })).not.toBe(codecFingerprint({ kind: 'ZSTD', level: 3 }))
     expect(codecFingerprint({ kind: 'T64', mode: 'bit' })).not.toBe(codecFingerprint({ kind: 'T64' }))
+  })
+
+  test('leaves a decimal argument too long for a number unparsed', () => {
+    expect(codecFingerprint(codec.raw(`ZSTD(-${'9'.repeat(4301)})`))).toBe(`ZSTD(-${'9'.repeat(4301)})`)
   })
 
   test('keeps whitespace inside a quoted argument: ClickHouse rejects T64(\'b it\')', () => {
