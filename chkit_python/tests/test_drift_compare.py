@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+import pytest
+
 from chkit.cli.commands.drift_compare import (
     KindMismatch,
     MapSqlCanonicalizer,
@@ -262,6 +264,28 @@ def test_table_shape_ignores_stored_enclosing_index_parens() -> None:
     expected_idx = SkipIndexMinmax(name="idx_x", expression="lower(x)", granularity=1)
     stored_idx = SkipIndexMinmax(name="idx_x", expression="(lower(x))", granularity=1)
     assert compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[stored_idx])) is None
+
+
+# A schema may write more than one pair (``((s))``); ObsessionDB keeps the one
+# chkit renders and stock ClickHouse none, so every enclosing pair is peeled,
+# quote-aware (#512).
+@pytest.mark.parametrize(
+    ("declared", "stored"),
+    [
+        ("((lower(a)))", "lower(a)"),
+        ("((lower(a)))", "(lower(a))"),
+        ("(a = ')(')", "a = ')('"),
+        ("((a, b))", "a, b"),
+    ],
+)
+def test_table_shape_peels_every_enclosing_index_paren(declared: str, stored: str) -> None:
+    expected_idx = SkipIndexMinmax(name="idx_x", expression=declared, granularity=1)
+    stored_idx = SkipIndexMinmax(name="idx_x", expression=stored, granularity=1)
+    assert compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[stored_idx])) is None
+    changed_idx = SkipIndexMinmax(name="idx_x", expression=f"({stored}) || 'x'", granularity=1)
+    detail = compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[changed_idx]))
+    assert detail is not None
+    assert "index_mismatch" in detail.reason_codes
 
 
 def test_table_shape_keeps_parens_that_do_not_enclose_the_expression() -> None:

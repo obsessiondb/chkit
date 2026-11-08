@@ -108,6 +108,27 @@ definitions = schema(
             "merge_selecting_sleep_slowdown_factor": 2.0,
         }},
     ),
+    # ObsessionDB keeps the parentheses chkit renders around an index
+    # expression ('(s)'), stock ClickHouse drops them ('s'); a tuple reads back
+    # as 'a, b' on both (#512).
+    table(
+        database=db, name="indexed", engine="MergeTree()", primary_key=["a"], order_by=["a"],
+        columns=[
+            {{"name": "a", "type": "UInt32"}}, {{"name": "b", "type": "UInt32"}},
+            {{"name": "c", "type": "UInt32"}}, {{"name": "s", "type": "String"}},
+        ],
+        indexes=[
+            {{"name": "idx_s", "expression": "s", "type": "bloom_filter",
+             "falsePositiveRate": 0.01, "granularity": 1}},
+            {{"name": "idx_nested", "expression": "((lower(s)))", "type": "bloom_filter",
+             "granularity": 1}},
+            {{"name": "idx_tuple", "expression": "(a, b)", "type": "minmax", "granularity": 1}},
+            {{"name": "idx_arith", "expression": "(a + b) * c", "type": "minmax",
+             "granularity": 1}},
+            {{"name": "idx_literal", "expression": "s = ')('", "type": "set", "maxRows": 10,
+             "granularity": 1}},
+        ],
+    ),
     table(
         database=db, name="daily", engine="MergeTree()", primary_key=["day"], order_by=["day"],
         columns=[{{"name": "day", "type": "Date"}}, {{"name": "c", "type": "UInt64"}}],
@@ -142,10 +163,10 @@ definitions = schema(
         pulled = poll_until(
             pull,
             lambda result: result.exit_code == 0
-            and json.loads(result.stdout)["definitionCount"] == 9,
+            and json.loads(result.stdout)["definitionCount"] == 10,
         )
         assert pulled.exit_code == 0, format_test_diagnostic("chkit pull", pulled)
-        assert json.loads(pulled.stdout)["definitionCount"] == 9
+        assert json.loads(pulled.stdout)["definitionCount"] == 10
         pulled_content = (tmp_path / "pulled.py").read_text()
         assert journal_table not in pulled_content
         assert "index_granularity" in pulled_content
@@ -162,6 +183,10 @@ definitions = schema(
         payload = json.loads(drift.stdout)
         assert payload["tableDrift"] == []
         assert payload["drifted"] is False
+        # Pull writes the form stock ClickHouse stores, on either server (#512).
+        assert 'expression="s"' in pulled_content
+        assert 'expression="lower(s)"' in pulled_content
+        assert 'expression="(a + b) * c"' in pulled_content
     finally:
         with ClickHouseClient.connect(
             ChxResolvedClickHouseConfig(

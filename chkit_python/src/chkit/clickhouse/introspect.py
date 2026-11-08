@@ -56,6 +56,7 @@ from chkit.core.model import (
 )
 from chkit.core.sql_lexer import identifier_name, is_trivia, tokenize_sql
 from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
+from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.table_settings import AUTO_MINMAX_INDEX_PREFIX
 from chkit.core.text_index import parse_text_index_params
 from chkit.core.text_index_sql import normalize_text_index_sql
@@ -242,9 +243,11 @@ def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
     carrying ``type_full`` verbatim, so pull and drift never rewrite an index
     into a different one (TS parity).
     """
+    # ObsessionDB keeps the parentheses chkit renders around the expression
+    # (``(s)``), stock ClickHouse stores ``s``; read back the stock form (#512).
     base_payload: dict[str, Any] = {
         "name": row.name,
-        "expression": normalize_sql_fragment(row.expr),
+        "expression": strip_wrapping_parens(normalize_sql_fragment(row.expr)),
         "granularity": int(row.granularity),
     }
     raw = SkipIndexRaw(**base_payload, raw_type=normalize_sql_fragment(row.type))
@@ -265,7 +268,11 @@ def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
         except ValueError:
             return raw
         return SkipIndexText.model_validate(
-            {**base_payload, "expression": normalize_text_index_sql(row.expr), **params}
+            {
+                **base_payload,
+                "expression": strip_wrapping_parens(normalize_text_index_sql(row.expr)),
+                **params,
+            }
         )
     if base_name == "vector_similarity":
         vector = parse_vector_index_args(args_str) if args_str is not None else None

@@ -51,6 +51,7 @@ from chkit.core.sql_normalizer import (
     normalize_sql_fragment,
     sql_expression_fingerprint,
 )
+from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY, with_default_index_granularity
 from chkit.core.text_index import render_text_index_type, text_index_fingerprint
 from chkit.core.vector_index import render_vector_index_type
@@ -376,27 +377,20 @@ def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:  # noqa: 
     )
 
 
-def _strip_enclosing_parens(value: str) -> str:
-    """Drop one pair of parentheses only when it encloses the whole value.
-
-    chkit renders ``INDEX name (expr)`` and ClickHouse keeps those parentheses
-    in ``system.data_skipping_indices.expr``; ``(a) || (b)`` stays as written.
-    """
-    if not (value.startswith("(") and value.endswith(")")):
-        return value
-    depth = 0
-    for i, ch in enumerate(value):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        if depth == 0 and i < len(value) - 1:
-            return value
-    return value[1:-1].strip()
-
-
 def _index_expression_base(index: SkipIndexDefinition) -> str:
-    return _strip_enclosing_parens(normalize_sql_fragment(index.expression))
+    """The index expression without the parentheses that enclose all of it.
+
+    chkit renders ``INDEX name (expr)``. Stock ClickHouse drops those
+    parentheses, ObsessionDB keeps one pair (#512), and a schema may write more
+    (``((s))``). Every such pair is peeled, quote-aware, so ``(a) + (b)`` and
+    the literal in ``(s = ')(')`` stay intact.
+    """
+    expression = normalize_sql_fragment(index.expression)
+    peeled = strip_wrapping_parens(expression)
+    while peeled != expression:
+        expression = peeled
+        peeled = strip_wrapping_parens(expression)
+    return expression
 
 
 def _normalize_index_shape(

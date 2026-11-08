@@ -18,6 +18,7 @@ import {
   renderKeyClauseColumns,
   splitTopLevelComma,
   sqlExpressionFingerprint,
+  stripWrappingParens,
   unquoteIdentifiers,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -314,22 +315,16 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   }
 }
 
-// chkit renders `INDEX name (expr)`, and ClickHouse keeps those parentheses in
-// system.data_skipping_indices.expr. Strip one pair only when it encloses the
-// whole expression, so `(a) + (b)` stays intact.
-function stripEnclosingParens(value: string): string {
-  if (!value.startsWith('(') || !value.endsWith(')')) return value
-  let depth = 0
-  for (let i = 0; i < value.length; i++) {
-    if (value[i] === '(') depth++
-    else if (value[i] === ')') depth--
-    if (depth === 0 && i < value.length - 1) return value
-  }
-  return value.slice(1, -1).trim()
-}
-
+// chkit renders `INDEX name (expr)`. Stock ClickHouse drops the parentheses
+// that enclose the whole expression, ObsessionDB keeps one pair (#512), and a
+// schema may write more (`((s))`). Peel every such pair, quote-aware, so
+// `(a) + (b)` and `(s = ')(')`'s literal stay intact.
 function indexExpressionBase(index: SkipIndexDefinition): string {
-  return stripEnclosingParens(normalizeSQLFragment(index.expression))
+  let expression = normalizeSQLFragment(index.expression)
+  for (let peeled = stripWrappingParens(expression); peeled !== expression; peeled = stripWrappingParens(expression)) {
+    expression = peeled
+  }
+  return expression
 }
 
 function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCanonicalizer): string {

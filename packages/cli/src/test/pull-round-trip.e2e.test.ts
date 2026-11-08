@@ -92,6 +92,23 @@ export default schema(
     columns: [{ name: 'id', type: 'UInt64' }, { name: 's', type: 'String' }],
     settings: { add_minmax_index_for_numeric_columns: 1, merge_selecting_sleep_slowdown_factor: 2.0 },
   }),
+  // ObsessionDB keeps the parentheses chkit renders around an index
+  // expression ('(s)'), stock ClickHouse drops them ('s'); a tuple reads back
+  // as 'a, b' on both (#512).
+  table({
+    database: db, name: 'indexed', engine: 'MergeTree()', primaryKey: ['a'], orderBy: ['a'],
+    columns: [
+      { name: 'a', type: 'UInt32' }, { name: 'b', type: 'UInt32' },
+      { name: 'c', type: 'UInt32' }, { name: 's', type: 'String' },
+    ],
+    indexes: [
+      { name: 'idx_s', expression: 's', type: 'bloom_filter', falsePositiveRate: 0.01, granularity: 1 },
+      { name: 'idx_nested', expression: '((lower(s)))', type: 'bloom_filter', granularity: 1 },
+      { name: 'idx_tuple', expression: '(a, b)', type: 'minmax', granularity: 1 },
+      { name: 'idx_arith', expression: '(a + b) * c', type: 'minmax', granularity: 1 },
+      { name: 'idx_literal', expression: "s = ')('", type: 'set', maxRows: 10, granularity: 1 },
+    ],
+  }),
   table({
     database: db, name: 'daily', engine: 'MergeTree()', primaryKey: ['day'], orderBy: ['day'],
     columns: [{ name: 'day', type: 'Date' }, { name: 'c', type: 'UInt64' }],
@@ -119,10 +136,10 @@ export default schema(
     const pull = () => runCli(dir, ['pull', '--config', configPath, '--database', database, '--out-file', pulledPath, '--force', '--json'], cliEnv)
     const pulled = await pollUntil(
       async () => pull(),
-      (result) => result.exitCode === 0 && (JSON.parse(result.stdout) as { definitionCount: number }).definitionCount === 9
+      (result) => result.exitCode === 0 && (JSON.parse(result.stdout) as { definitionCount: number }).definitionCount === 10
     )
     expect(pulled.exitCode, formatTestDiagnostic('pull', pulled)).toBe(0)
-    expect((JSON.parse(pulled.stdout) as { definitionCount: number }).definitionCount).toBe(9)
+    expect((JSON.parse(pulled.stdout) as { definitionCount: number }).definitionCount).toBe(10)
     const pulledContent = await readFile(pulledPath, 'utf8')
     expect(pulledContent).not.toContain(journalTable)
     expect(pulledContent).toContain('index_granularity')
@@ -137,6 +154,10 @@ export default schema(
     const drift = runCli(dir, ['drift', '--config', configPath, '--json'], cliEnv)
     expect(drift.exitCode, formatTestDiagnostic('drift', drift)).toBe(0)
     expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
+    // Pull writes the form stock ClickHouse stores, on either server (#512).
+    expect(pulledContent).toContain('expression: "s"')
+    expect(pulledContent).toContain('expression: "lower(s)"')
+    expect(pulledContent).toContain('expression: "(a + b) * c"')
   } finally {
     await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
     await executor.close()

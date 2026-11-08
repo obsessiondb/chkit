@@ -401,6 +401,35 @@ describe('@chkit/cli drift comparer', () => {
     ).toContain('index_mismatch')
   })
 
+  // A schema may write more than one pair (`((s))`); ObsessionDB keeps the one
+  // chkit renders and stock ClickHouse none, so every enclosing pair is peeled,
+  // quote-aware (#512).
+  test.each([
+    ['((lower(a)))', 'lower(a)'],
+    ['((lower(a)))', '(lower(a))'],
+    ["(a = ')(')", "a = ')('"],
+    ['((a, b))', 'a, b'],
+  ])('treats the skip index expression %s as clean against the stored %s', (declared, stored) => {
+    const index = { name: 'idx', type: 'set' as const, maxRows: 0, granularity: 1 }
+    const columns = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'a', type: 'String' },
+      { name: 'b', type: 'String' },
+    ]
+    const expected = table({
+      database: 'app', name: 'events', engine: 'MergeTree()', columns, primaryKey: ['id'], orderBy: ['id'],
+      indexes: [{ ...index, expression: declared }],
+    })
+    const actual = {
+      engine: 'MergeTree()', primaryKey: '(id)', orderBy: '(id)', columns, settings: {},
+      indexes: [{ ...index, expression: stored }], projections: [],
+    }
+    expect(compareTableShape(expected, actual)).toBeNull()
+    expect(
+      compareTableShape(expected, { ...actual, indexes: [{ ...index, expression: `(${stored}) || 'x'` }] })?.reasonCodes
+    ).toContain('index_mismatch')
+  })
+
   test('reports projection_mismatch when an index projection changes type', () => {
     const expected = table({
       database: 'app',

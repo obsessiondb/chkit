@@ -163,6 +163,54 @@ def test_hidden_minmax_indexes_the_server_creates_plan_nothing() -> None:
     ]
 
 
+# chkit renders ``INDEX name (expr)``: stock ClickHouse reads ``(s)`` back as
+# ``s``, ObsessionDB as ``(s)``, and a tuple as ``a, b`` on both (#512).
+def _index_plan(before: str, after: str) -> list[str]:
+    def indexed(expression: str) -> TableDefinition:
+        return _events(
+            indexes=[{"name": "idx", "expression": expression, "type": "minmax", "granularity": 1}]
+        )
+
+    return [op.type for op in plan_diff([indexed(before)], [indexed(after)]).operations]
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("n", "(n)"),
+        ("n", "((n))"),
+        ("(n)", "((n))"),
+        ("(id, n)", "id, n"),
+        ("((id, n))", "id, n"),
+        ("(id + n) * 2", "((id + n) * 2)"),
+        ("n = ')('", "(n = ')(')"),
+        ("lower(toString(n))", "(lower(toString(n)))"),
+        ("`n`", "(n)"),
+    ],
+)
+def test_skip_index_expressions_compare_without_enclosing_parentheses(
+    before: str, after: str
+) -> None:
+    assert _index_plan(before, after) == []
+    assert _index_plan(after, before) == []
+
+
+@pytest.mark.parametrize(
+    ("before", "after"),
+    [
+        ("n", "(id, n)"),
+        ("(id, n)", "(id), (n)"),
+        ("(id + n) * 2", "id + n * 2"),
+        ("(id) + (n)", "id) + (n"),
+        ("n = ')('", "n = '('"),
+        ("'(n)'", "n"),
+        ("arrayMap(x -> (x + 1), [n])", "arrayMap(x -> x + 1, [n])"),
+    ],
+)
+def test_different_skip_index_expressions_still_plan_a_change(before: str, after: str) -> None:
+    assert _index_plan(before, after) == ["alter_table_drop_index", "alter_table_add_index"]
+
+
 def test_engines_outside_the_merge_tree_family_get_no_index_granularity() -> None:
     memory = table(
         database="app", name="buffer", engine="Memory()", columns=[{"name": "id", "type": "UInt64"}]
