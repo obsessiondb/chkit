@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Fixed
+- `generate` no longer drops and re-adds a skip index whose expression differs only by
+  enclosing parentheses, such as the `(s)` ObsessionDB stores for `s`; `pull` writes `s` on
+  every server, and `drift` ignores those parentheses too, as in TS (#512).
+
 ## 0.3.0 — 2026-11-06
 
 **`pull` writes SQL column defaults correctly:** 0.2.0 wrote them as plain strings
