@@ -5,7 +5,7 @@ import type {
   RiskLevel,
   SchemaDefinition,
 } from '@chkit/core'
-import { quoteIdentifier, renderQualifiedName } from '@chkit/core'
+import { quoteIdentifier, renderIdentifier, renderQualifiedName } from '@chkit/core'
 
 import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping } from './rename-mappings.js'
 
@@ -77,7 +77,7 @@ export function applyExplicitTableRenames(
           type: 'create_database',
           key: dbKey,
           risk: 'safe',
-          sql: `CREATE DATABASE IF NOT EXISTS ${mapping.newDatabase};`,
+          sql: `CREATE DATABASE IF NOT EXISTS ${renderIdentifier(mapping.newDatabase)};`,
         })
         createDatabaseOps.add(dbKey)
       }
@@ -124,7 +124,7 @@ export function applyExplicitDictionaryRenames(
           type: 'create_database',
           key: dbKey,
           risk: 'safe',
-          sql: `CREATE DATABASE IF NOT EXISTS ${mapping.newDatabase};`,
+          sql: `CREATE DATABASE IF NOT EXISTS ${renderIdentifier(mapping.newDatabase)};`,
         })
         createDatabaseOps.add(dbKey)
       }

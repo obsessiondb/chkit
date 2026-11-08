@@ -401,7 +401,7 @@ SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND name NOT LIKE '_chkit_%'\
+  AND NOT startsWith(name, '_chkit_')\
 """
 
 
