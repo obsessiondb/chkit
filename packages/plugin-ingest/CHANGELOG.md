@@ -1,5 +1,21 @@
 # @chkit/plugin-ingest
 
+## 0.2.0-beta.13
+
+### Patch Changes
+
+- 8c01425: `chkit ingest doctor` and `chkit ingest repair` stream the journal table instead of loading it whole, so their memory grows with the selected stream's history rather than with the whole journal.
+- 10c2676: With `clickhouse.cluster` set, `chkit ingest run` creates its journal as one `ReplicatedMergeTree` on every replica and refuses to run on a journal that is not.
+
+  - Breaking: on a cluster, a local journal an earlier version created now fails `ingest run`; copy its rows into a replicated journal and set `journalTable` to it.
+
+- bdf8a2d: A rate-limit hint too far in the future for a `Date` no longer fails the stream with "Invalid time value"; ingestion waits it out like any other long hint.
+- c467d57: Ingestion no longer silently drops row fields the destination has no column for: they land in a `_chkit_rest` JSON column when the table declares one, and the run logs their names.
+
+  - Breaking: without `_chkit_rest`, a yielded field with no column fails the stream; map it to a column or declare `_chkit_rest`.
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.13`, `@chkit/clickhouse@0.2.0-beta.13`
+
 ## 0.2.0-beta.12
 
 ### Patch Changes
