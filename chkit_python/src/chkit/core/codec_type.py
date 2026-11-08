@@ -12,6 +12,7 @@ import re
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
+from chkit.core.codec_integer import parse_integer_arg
 from chkit.core.sql_lexer import JS_WHITESPACE, js_trim
 
 CodecTypeFamily: TypeAlias = Literal[
@@ -187,18 +188,20 @@ def _decimal_width(precision: int) -> int:
 
 _ENUM_ENTRY_RE: Final = re.compile(
     r"^'(?:\\[\s\S]|''|[^'\\])*'"
-    rf"(?:[{JS_WHITESPACE}]*=[{JS_WHITESPACE}]*([+-]?[0-9]+))?[{JS_WHITESPACE}]*$"
+    rf"(?:[{JS_WHITESPACE}]*=[{JS_WHITESPACE}]*([^{JS_WHITESPACE}]+))?[{JS_WHITESPACE}]*$"
 )
 
 
 def _enum_width(arguments_text: str) -> int | None:
-    previous = 0.0
+    previous = 0
     fits_int8 = True
     for entry in _split_type_arguments(arguments_text):
         match = _ENUM_ENTRY_RE.match(entry)
         if match is None:
             return None
-        value = previous + 1 if match.group(1) is None else float(match.group(1))
+        value = previous + 1 if match.group(1) is None else parse_integer_arg(match.group(1))
+        if value is None:
+            return None
         fits_int8 = fits_int8 and -128 <= value <= 127  # noqa: PLR2004 - Int8 bounds
         previous = value
     return 1 if fits_int8 else 2

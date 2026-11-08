@@ -8,6 +8,7 @@ from typing import Any, Final, Literal, NamedTuple, TypeAlias
 
 from pydantic import BaseModel, TypeAdapter, ValidationError
 
+from chkit.core.codec_integer import parse_integer_arg
 from chkit.core.codec_type import codec_value_types, codec_value_width
 from chkit.core.model import (
     ColumnCodec,
@@ -165,7 +166,7 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             return _GENERAL_ADAPTER.validate_python({"kind": "LZ4HC"})
         if len(args) != 1:
             return None
-        level = _parse_integer_arg(args[0])
+        level = parse_integer_arg(args[0])
         if level is None:
             return None
         return _normalize_atom({"kind": "LZ4HC", "level": level})
@@ -174,12 +175,12 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             return _GENERAL_ADAPTER.validate_python({"kind": "ZSTD"})
         if len(args) > 2:
             return None
-        level = _parse_integer_arg(args[0])
+        level = parse_integer_arg(args[0])
         if level is None:
             return None
         if len(args) == 1:
             return _normalize_atom({"kind": "ZSTD", "level": level})
-        window_log = _parse_integer_arg(args[1])
+        window_log = parse_integer_arg(args[1])
         if window_log is None:
             return None
         return _normalize_atom({"kind": "ZSTD", "level": level, "windowLog": window_log})
@@ -188,7 +189,7 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             return _PREPROCESSOR_ADAPTER.validate_python({"kind": name})
         if len(args) != 1:
             return None
-        size = _parse_integer_arg(args[0])
+        size = parse_integer_arg(args[0])
         if size not in {1, 2, 4, 8}:
             return None
         return _PREPROCESSOR_ADAPTER.validate_python({"kind": name, "size": size})
@@ -198,53 +199,19 @@ def _parse_atom(raw: str) -> ColumnCodec | None:
             return _PREPROCESSOR_ADAPTER.validate_python({"kind": "FPC"})
         if len(args) > 2:
             return None
-        level = _parse_integer_arg(args[0])
+        level = parse_integer_arg(args[0])
         if level is None:
             return None
         if len(args) == 1:
             return _normalize_atom({"kind": "FPC", "level": level})
-        float_size = _parse_integer_arg(args[1])
+        float_size = parse_integer_arg(args[1])
         if float_size not in {4, 8}:
             return None
         return _normalize_atom({"kind": "FPC", "level": level, "floatSize": float_size})
     return None
 
 
-_UINT64_SIGN: Final[int] = 2**63
-_UINT64_RANGE: Final[int] = 2**64
 _MAX_SAFE: Final[int] = 2**53 - 1
-
-
-# The integer literals ClickHouse takes as a codec argument; a float such as `1.0` is not one.
-# Beyond ±(2^53 - 1) a JS number is not exact, so such an argument stays unparsed, as in TS.
-_INTEGER_ARG: Final[re.Pattern[str]] = re.compile(
-    r"[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01]+)*|[0-9]+(?:_[0-9]+)*)"
-)
-
-
-def _parse_integer_arg(raw: str) -> int | None:
-    """An integer codec argument as ClickHouse reads it.
-
-    Decimal (``1_0`` is 10), ``0x`` hex or ``0b`` binary, optionally signed.
-    ClickHouse prints a negative level unsigned: ``ZSTD(-1)`` reads back as
-    ``ZSTD(18446744073709551615)``.
-    """
-    if _INTEGER_ARG.fullmatch(raw) is None:
-        return None
-    digits = raw.lstrip("+-").replace("_", "")
-    if digits[:2] in ("0x", "0X"):
-        magnitude = int(digits[2:], 16)
-    elif digits[:2] == "0b":
-        magnitude = int(digits[2:], 2)
-    else:
-        # More than 20 digits is beyond UInt64; int() refuses very long strings.
-        decimal = digits.lstrip("0") or "0"
-        if len(decimal) > 20:
-            return None
-        magnitude = int(decimal, 10)
-    signed = -magnitude if raw.startswith("-") else magnitude
-    value = signed - _UINT64_RANGE if signed >= _UINT64_SIGN else signed
-    return value if -_MAX_SAFE <= value <= _MAX_SAFE else None
 
 
 def _strip_whitespace_outside_quotes(text: str) -> str:
@@ -354,9 +321,10 @@ def codec_fingerprint(spec: CodecSpecInput | None, column_type: str | None = Non
     stores a bare `ZSTD` as `ZSTD(1)` and a bare `LZ4HC` as `LZ4HC(0)`, which
     like any level below 1 means the default 9. It fills in the column's value
     width for a bare `Delta` or `Gorilla` (`Delta(8)` on UInt64, still bare on a
-    mixed-width Tuple), keeps no `DoubleDelta` width, no `FPC` float size
-    (except in a mixed-width chain with bare Delta/Gorilla) and
-    no `T64('byte')` mode. Atoms of a raw codec that parse get the same
+    mixed-width Tuple). A mixed-width chain with a bare Delta, Gorilla,
+    DoubleDelta or T64 retains FPC's float size and raw DoubleDelta sizes;
+    otherwise those sizes are dropped. It keeps no `T64('byte')` mode.
+    Atoms of a raw codec that parse get the same
     treatment; the others compare without whitespace. No codec is the empty
     string.
     """
@@ -381,9 +349,12 @@ def codec_fingerprint(spec: CodecSpecInput | None, column_type: str | None = Non
         and len({value.width for value in values}) > 1
     )
     verbatim = mixed_widths and any(
-        isinstance(atom.codec, _CodecDeltaLike)
-        and atom.codec.kind in {"Delta", "Gorilla"}
-        and atom.codec.size is None
+        isinstance(atom.codec, _CodecT64)
+        or (
+            isinstance(atom.codec, _CodecDeltaLike)
+            and atom.codec.kind in {"Delta", "Gorilla", "DoubleDelta"}
+            and atom.codec.size is None
+        )
         for atom in atoms
     )
     return ",".join(
@@ -403,7 +374,7 @@ def _step_fingerprint(step: ColumnCodec, width: int | None, verbatim: bool) -> s
         return f"LZ4HC({stored if stored is not None and stored >= 1 else 9})"
     if isinstance(step, _CodecDeltaLike):
         if step.kind == "DoubleDelta":
-            return "DoubleDelta"
+            return f"DoubleDelta({step.size})" if verbatim and step.size is not None else "DoubleDelta"
         size = step.size if step.size is not None else width
         return f"{step.kind}({size})" if size is not None else step.kind
     if isinstance(step, _CodecT64):

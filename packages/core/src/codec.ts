@@ -1,3 +1,4 @@
+import { parseIntegerArg } from './codec-integer.js'
 import { codecValueTypes, codecValueWidth } from './codec-type.js'
 import type {
   ColumnCodec,
@@ -151,30 +152,6 @@ function parseAtom(raw: string): ColumnCodec | undefined {
   }
 }
 
-const UINT64_SIGN = 9223372036854775808n
-const UINT64_RANGE = 18446744073709551616n
-const MAX_SAFE = BigInt(Number.MAX_SAFE_INTEGER)
-
-/**
- * The integer literals ClickHouse takes as a codec argument; a float such as
- * `1.0` is not one. Beyond ±(2^53 - 1) a JS number is not exact, so chkit-py
- * leaves such an argument unparsed too.
- */
-const INTEGER_ARG = /^[+-]?(?:0[xX][0-9a-fA-F]+(?:_[0-9a-fA-F]+)*|0b[01]+(?:_[01]+)*|\d+(?:_\d+)*)$/
-
-/**
- * An integer codec argument as ClickHouse reads it: decimal (`1_0` is 10),
- * `0x` hex or `0b` binary, optionally signed. ClickHouse prints a negative
- * level unsigned: `ZSTD(-1)` reads back as `ZSTD(18446744073709551615)`.
- */
-function parseIntegerArg(raw: string): number | undefined {
-  if (!INTEGER_ARG.test(raw)) return undefined
-  const magnitude = BigInt(raw.replace(/^[+-]/, '').replaceAll('_', ''))
-  const signed = raw.startsWith('-') ? -magnitude : magnitude
-  const value = signed >= UINT64_SIGN ? signed - UINT64_RANGE : signed
-  return value >= -MAX_SAFE && value <= MAX_SAFE ? Number(value) : undefined
-}
-
 /** Removes whitespace except inside quoted strings: `T64('b it')` is not `T64('bit')`. */
 function stripWhitespaceOutsideQuotes(text: string): string {
   let out = ''
@@ -286,9 +263,10 @@ export function canonicalizeCodec(spec: ColumnCodecSpec): ColumnCodec[] {
  * ClickHouse stores a bare `ZSTD` as `ZSTD(1)` and a bare `LZ4HC` as
  * `LZ4HC(0)`, which like any level below 1 means the default 9. It fills in
  * the column's value width for a bare `Delta` or `Gorilla` (`Delta(8)` on
- * UInt64, still bare on a mixed-width Tuple), keeps no `DoubleDelta` width, no
- * `FPC` float size (except in a mixed-width chain with bare Delta/Gorilla)
- * and no `T64('byte')` mode. Atoms of a raw codec that parse
+ * UInt64, still bare on a mixed-width Tuple). A mixed-width chain with a bare
+ * Delta, Gorilla, DoubleDelta or T64 retains FPC's float size and raw
+ * DoubleDelta sizes; otherwise those sizes are dropped.
+ * `T64('byte')` compares as bare T64. Atoms of a raw codec that parse
  * get the same treatment; the others compare without whitespace. No codec is
  * the empty string.
  */
@@ -306,7 +284,8 @@ export function codecFingerprint(spec: ColumnCodecSpec | undefined, columnType?:
   const mixedWidths = values !== undefined && values.every((value) => value.width !== undefined) &&
     new Set(values.map((value) => value.width)).size > 1
   const verbatim = mixedWidths && atoms.some(({ codec }) =>
-    (codec?.kind === 'Delta' || codec?.kind === 'Gorilla') && codec.size === undefined
+    codec?.kind === 'T64' ||
+    ((codec?.kind === 'Delta' || codec?.kind === 'Gorilla' || codec?.kind === 'DoubleDelta') && codec.size === undefined)
   )
   return atoms.map((atom) => atom.codec ? stepFingerprint(atom.codec, width, verbatim) : atom.text).join(',')
 }
@@ -326,7 +305,7 @@ function stepFingerprint(step: ColumnCodec, width: number | undefined, verbatim:
       return size !== undefined ? `${step.kind}(${size})` : step.kind
     }
     case 'DoubleDelta':
-      return 'DoubleDelta'
+      return verbatim && step.size !== undefined ? `DoubleDelta(${step.size})` : 'DoubleDelta'
     case 'T64':
       return step.mode === 'bit' ? "T64('bit')" : 'T64'
     case 'FPC':

@@ -501,7 +501,7 @@ _MATRIX_STORED: list[tuple[str, CodecSpecInput, str]] = [
     ('Tuple(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'LZ4HC'}], 'CODEC(Delta, LZ4HC)'),
     ('Tuple(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'T64'}], 'CODEC(Delta, T64)'),
     ('Tuple(UInt32, UInt64)', [{'kind': 'DoubleDelta'}, {'kind': 'Delta'}, {'kind': 'ZSTD'}], 'CODEC(DoubleDelta, Delta, ZSTD)'),
-    ('Tuple(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'DoubleDelta', 'size': 4}], 'CODEC(Delta, DoubleDelta(4))'),
+    ('Tuple(UInt32, UInt64)', {'kind': 'raw', 'expression': 'Delta, DoubleDelta(4)'}, 'CODEC(Delta, DoubleDelta(4))'),
     ('Tuple(Float32, Float64)', [{'kind': 'FPC', 'level': 12, 'floatSize': 4}, {'kind': 'Gorilla'}], 'CODEC(FPC(12, 4), Gorilla)'),
     ('Map(UInt32, UInt64)', [{'kind': 'Delta'}, {'kind': 'ZSTD'}], 'CODEC(Delta, ZSTD)'),
     ('Tuple(UInt32, Float32)', [{'kind': 'Delta'}, {'kind': 'ZSTD'}], 'CODEC(Delta(4), ZSTD(1))'),
@@ -540,8 +540,8 @@ def test_zero_zstd_window_remains_distinct_from_an_omitted_window() -> None:
     ("Enum('a\\', b' = 1, 'c' = 2)", "Delta(1),LZ4"),
     ("Enum('a' = \u0661)", "Delta,LZ4"),
     ("Enum('a' = 1\u0085)", "Delta,LZ4"),
-    ("Enum('a' = 0x1)", "Delta,LZ4"),
-    ("Enum('a' = " + "9" * 4301 + ")", "Delta(2),LZ4"),
+    ("Enum('a' = 0x1)", "Delta(1),LZ4"),
+    ("Enum('a' = " + "9" * 4301 + ")", "Delta,LZ4"),
 ])
 def test_enum_value_parsing_parity(type_: str, expected: str) -> None:
     assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == expected
@@ -640,3 +640,45 @@ def test_type_parser_leaves_non_js_whitespace_unknown(space: str) -> None:
 ])
 def test_implicit_enum_values_with_quoted_names(type_: str, expected: str) -> None:
     assert codec_fingerprint([{"kind": "Delta"}, {"kind": "LZ4"}], type_) == expected
+
+
+@pytest.mark.parametrize(("type_", "expression", "stored"), [
+    ('Tuple(Float32, Float64)', 'FPC(12, 4), DoubleDelta', 'CODEC(FPC(12, 4), DoubleDelta)'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 4), DoubleDelta, ZSTD', 'CODEC(FPC(12, 4), DoubleDelta, ZSTD)'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 8), DoubleDelta', 'CODEC(FPC(12, 8), DoubleDelta)'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 8), DoubleDelta, ZSTD', 'CODEC(FPC(12, 8), DoubleDelta, ZSTD)'),
+    ('Tuple(Float32, Float64)', 'DoubleDelta, ZSTD', 'CODEC(DoubleDelta, ZSTD)'),
+    ('Tuple(Float32, Float64)', 'DoubleDelta(4), ZSTD', 'CODEC(DoubleDelta, ZSTD(1))'),
+    ('Tuple(UInt32, UInt64)', 'DoubleDelta, ZSTD', 'CODEC(DoubleDelta, ZSTD)'),
+    ('Tuple(UInt32, UInt64)', 'DoubleDelta(4), ZSTD', 'CODEC(DoubleDelta, ZSTD(1))'),
+    ('Tuple(UInt32, UInt64)', 'T64, ZSTD', 'CODEC(T64, ZSTD)'),
+    ('Tuple(UInt32, UInt64)', "T64('byte'), ZSTD", "CODEC(T64('byte'), ZSTD)"),
+    ('Tuple(UInt32, UInt64)', 'GCD, ZSTD', 'CODEC(GCD, ZSTD(1))'),
+    ('Tuple(Float32, Float64)', 'FPC(12, 4), ZSTD', 'CODEC(FPC(12), ZSTD(1))'),
+    ('Float64', 'FPC(12, 4), DoubleDelta, ZSTD', 'CODEC(FPC(12), DoubleDelta, ZSTD(1))'),
+    ('Tuple(UInt32, UInt64)', 'Delta, DoubleDelta(4)', 'CODEC(Delta, DoubleDelta(4))'),
+    ('Tuple(UInt32, UInt64)', 'Delta, DoubleDelta(8)', 'CODEC(Delta, DoubleDelta(8))'),
+    ("Enum('a' = 0x10)", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = 0x7f, 'b')", 'Delta, LZ4', 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = -0x80, 'b')", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = 1_0, 'b')", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Enum('a' = +0b1111111, 'b')", 'Delta, LZ4', 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = 0x0_7f, 'b')", 'Delta, LZ4', 'CODEC(Delta(2), LZ4)'),
+    ("Enum('a' = -1_2_8, 'b')", 'Delta, LZ4', 'CODEC(Delta(1), LZ4)'),
+    ("Tuple(Enum('a' = 0x10), Float64)", 'Gorilla', 'CODEC(Gorilla)'),
+    ('Tuple(String, Float64)', 'Gorilla(8)', 'CODEC(Gorilla(8))'),
+    ('Tuple(UUID, Float64)', 'Gorilla(8)', 'CODEC(Gorilla(8))'),
+])
+def test_opus_server_fingerprints(type_: str, expression: str, stored: str) -> None:
+    assert codec_fingerprint(codec_raw(expression), type_) == codec_fingerprint(parse_codec(stored), type_)
+
+
+def test_double_delta_retains_a_raw_size_only_in_verbatim_chains() -> None:
+    type_ = "Tuple(UInt32, UInt64)"
+    assert codec_fingerprint(codec_raw("Delta, DoubleDelta(4)"), type_) == "Delta,DoubleDelta(4)"
+    assert not codecs_equal(codec_raw("Delta, DoubleDelta(4)"), codec_raw("Delta, DoubleDelta(8)"), type_)
+    assert codecs_equal(codec_raw("DoubleDelta(4), ZSTD"), codec_raw("DoubleDelta(8), ZSTD"), type_)
+    assert codecs_equal(codec_raw("Delta, DoubleDelta(4)"), codec_raw("Delta, DoubleDelta(8)"), "UInt64")
+    typed: CodecSpecInput = [{"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "DoubleDelta", "size": 8}]
+    assert render_codec(typed) == "CODEC(FPC(12, 4), DoubleDelta)"
+    assert codec_fingerprint(canonicalize_codec(typed), "Tuple(Float32, Float64)") == "FPC(12,4),DoubleDelta"

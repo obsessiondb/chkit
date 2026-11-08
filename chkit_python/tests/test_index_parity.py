@@ -1015,6 +1015,39 @@ def test_plan_mixed_width_fpc_size_changes_survive_codec_and_comment_comparisons
     assert plan_diff([events(4, "old")], [events(4, "old")]).operations == []
 
 
+@pytest.mark.parametrize("general", [False, True])
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("comment", ["old", "new"])
+def test_double_delta_preserves_fpc_size_changes(general: bool, raw: bool, comment: str) -> None:
+    def events(float_size: int, comment: str) -> TableDefinition:
+        return _codec_events([{
+            "name": "c", "type": "Tuple(Float32, Float64)", "comment": comment,
+            "codec": codec_raw(f"FPC(12, {float_size}), DoubleDelta" + (", ZSTD" if general else "")) if raw else [
+                {"kind": "FPC", "level": 12, "floatSize": float_size}, {"kind": "DoubleDelta"},
+                *([{"kind": "ZSTD"}] if general else []),
+            ],
+        }])
+    suffix = (", ZSTD" if raw else ", ZSTD(1)") if general else ""
+    assert [op.sql for op in plan_diff([events(4, "old")], [events(8, comment)]).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `c` Tuple(Float32, Float64) "
+        f"COMMENT '{comment}' CODEC(FPC(12, 8), DoubleDelta{suffix});",
+    ]
+    assert plan_diff([events(4, "old")], [events(4, "old")]).operations == []
+
+
+@pytest.mark.parametrize("comment", ["old", "new"])
+def test_raw_verbatim_double_delta_size_change(comment: str) -> None:
+    def events(size: int, comment: str) -> TableDefinition:
+        return _codec_events([{
+            "name": "c", "type": "Tuple(UInt32, UInt64)", "comment": comment,
+            "codec": codec_raw(f"Delta, DoubleDelta({size})"),
+        }])
+    assert [op.sql for op in plan_diff([events(4, "old")], [events(8, comment)]).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `c` Tuple(UInt32, UInt64) "
+        f"COMMENT '{comment}' CODEC(Delta, DoubleDelta(8));",
+    ]
+
+
 def test_plan_codecs_clickhouse_stores_the_same_yield_no_operation() -> None:
     pairs: list[tuple[str, Any, Any]] = [
         ("String", {"kind": "ZSTD"}, {"kind": "ZSTD", "level": 1}),

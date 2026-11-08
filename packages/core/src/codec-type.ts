@@ -1,3 +1,5 @@
+import { parseIntegerArg } from './codec-integer.js'
+
 /**
  * The value types a column codec sees. ClickHouse applies a codec to each data
  * stream of a column: the values inside Nullable, Array and LowCardinality, and
@@ -142,9 +144,10 @@ function enumWidth(argumentsText: string): number | undefined {
   let previous = 0
   let fitsInt8 = true
   for (const entry of splitTypeArguments(argumentsText)) {
-    const match = entry.match(/^'(?:\\[\s\S]|''|[^'\\])*'(?:\s*=\s*([+-]?[0-9]+))?\s*$/)
+    const match = entry.match(/^'(?:\\[\s\S]|''|[^'\\])*'(?:\s*=\s*(\S+))?\s*$/)
     if (!match) return undefined
-    const value = match[1] === undefined ? previous + 1 : Number(match[1])
+    const value = match[1] === undefined ? previous + 1 : parseIntegerArg(match[1])
+    if (value === undefined) return undefined
     fitsInt8 = fitsInt8 && value >= -128 && value <= 127
     previous = value
   }

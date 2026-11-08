@@ -188,10 +188,10 @@ def _chain_problem(steps: list[_ChainStep]) -> CodecProblem | None:  # noqa: PLR
 def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | None:
     values = codec_value_types(column_type) or []
     for step in steps:
-        # An explicit Delta size bypasses ClickHouse's type check.
+        # An explicit Delta/Gorilla size bypasses leaf checks; float reachability is checked below.
         if (
             isinstance(step.codec, _CodecDeltaLike)
-            and step.codec.kind == "Delta"
+            and step.codec.kind in {"Delta", "Gorilla"}
             and step.codec.size is not None
         ):
             continue
@@ -202,17 +202,11 @@ def _type_problem(steps: list[_ChainStep], column_type: str) -> CodecProblem | N
             else None
         )
         if step.kind == "Gorilla":
-            # An explicit size bypasses the leaf width check, but leaves must still be fixed-size.
-            explicit_size = (
-                isinstance(step.codec, _CodecDeltaLike)
-                and step.codec.kind == "Gorilla"
-                and step.codec.size is not None
-            )
             rejected = next(
                 (
                     value for value in values
                     if value.width is None
-                    or (not explicit_size and value.width not in (1, 2, 4, 8))
+                    or value.width not in (1, 2, 4, 8)
                 ),
                 None,
             )

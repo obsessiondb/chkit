@@ -427,7 +427,7 @@ const MATRIX_STORED: Array<[string, ColumnCodecSpec, string]> = [
   ["Tuple(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "LZ4HC"}], "CODEC(Delta, LZ4HC)"],
   ["Tuple(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "T64"}], "CODEC(Delta, T64)"],
   ["Tuple(UInt32, UInt64)", [{"kind": "DoubleDelta"}, {"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(DoubleDelta, Delta, ZSTD)"],
-  ["Tuple(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "DoubleDelta", "size": 4}], "CODEC(Delta, DoubleDelta(4))"],
+  ["Tuple(UInt32, UInt64)", {"kind": "raw", "expression": "Delta, DoubleDelta(4)"}, "CODEC(Delta, DoubleDelta(4))"],
   ["Tuple(Float32, Float64)", [{"kind": "FPC", "level": 12, "floatSize": 4}, {"kind": "Gorilla"}], "CODEC(FPC(12, 4), Gorilla)"],
   ["Map(UInt32, UInt64)", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta, ZSTD)"],
   ["Tuple(UInt32, Float32)", [{"kind": "Delta"}, {"kind": "ZSTD"}], "CODEC(Delta(4), ZSTD(1))"],
@@ -465,8 +465,8 @@ describe('Enum value parsing parity', () => {
     ["Enum('a\\', b' = 1, 'c' = 2)", 'Delta(1),LZ4'],
     ["Enum('a' = ١)", 'Delta,LZ4'],
     ["Enum('a' = 1\u0085)", 'Delta,LZ4'],
-    ["Enum('a' = 0x1)", 'Delta,LZ4'],
-    [`Enum('a' = ${'9'.repeat(4301)})`, 'Delta(2),LZ4'],
+    ["Enum('a' = 0x1)", 'Delta(1),LZ4'],
+    [`Enum('a' = ${'9'.repeat(4301)})`, 'Delta,LZ4'],
   ]
   for (const [type, expected] of cases) {
     test(`parses Enum values: ${type.slice(0, 80)}`, () => {
@@ -560,4 +560,49 @@ test.each([
   ["Enum('a''b', 'c')", 'Delta(1),LZ4'],
 ])('implicit Enum values with quoted names: %s', (type, expected) => {
   expect(codecFingerprint([{ kind: 'Delta' }, { kind: 'LZ4' }], type)).toBe(expected)
+})
+
+
+const OPUS_STORED: Array<[string, string, string]> = [
+  ["Tuple(Float32, Float64)", "FPC(12, 4), DoubleDelta", "CODEC(FPC(12, 4), DoubleDelta)"],
+  ["Tuple(Float32, Float64)", "FPC(12, 4), DoubleDelta, ZSTD", "CODEC(FPC(12, 4), DoubleDelta, ZSTD)"],
+  ["Tuple(Float32, Float64)", "FPC(12, 8), DoubleDelta", "CODEC(FPC(12, 8), DoubleDelta)"],
+  ["Tuple(Float32, Float64)", "FPC(12, 8), DoubleDelta, ZSTD", "CODEC(FPC(12, 8), DoubleDelta, ZSTD)"],
+  ["Tuple(Float32, Float64)", "DoubleDelta, ZSTD", "CODEC(DoubleDelta, ZSTD)"],
+  ["Tuple(Float32, Float64)", "DoubleDelta(4), ZSTD", "CODEC(DoubleDelta, ZSTD(1))"],
+  ["Tuple(UInt32, UInt64)", "DoubleDelta, ZSTD", "CODEC(DoubleDelta, ZSTD)"],
+  ["Tuple(UInt32, UInt64)", "DoubleDelta(4), ZSTD", "CODEC(DoubleDelta, ZSTD(1))"],
+  ["Tuple(UInt32, UInt64)", "T64, ZSTD", "CODEC(T64, ZSTD)"],
+  ["Tuple(UInt32, UInt64)", "T64('byte'), ZSTD", "CODEC(T64('byte'), ZSTD)"],
+  ["Tuple(UInt32, UInt64)", "GCD, ZSTD", "CODEC(GCD, ZSTD(1))"],
+  ["Tuple(Float32, Float64)", "FPC(12, 4), ZSTD", "CODEC(FPC(12), ZSTD(1))"],
+  ["Float64", "FPC(12, 4), DoubleDelta, ZSTD", "CODEC(FPC(12), DoubleDelta, ZSTD(1))"],
+  ["Tuple(UInt32, UInt64)", "Delta, DoubleDelta(4)", "CODEC(Delta, DoubleDelta(4))"],
+  ["Tuple(UInt32, UInt64)", "Delta, DoubleDelta(8)", "CODEC(Delta, DoubleDelta(8))"],
+  ["Enum('a' = 0x10)", "Delta, LZ4", "CODEC(Delta(1), LZ4)"],
+  ["Enum('a' = 0x7f, 'b')", "Delta, LZ4", "CODEC(Delta(2), LZ4)"],
+  ["Enum('a' = -0x80, 'b')", "Delta, LZ4", "CODEC(Delta(1), LZ4)"],
+  ["Enum('a' = 1_0, 'b')", "Delta, LZ4", "CODEC(Delta(1), LZ4)"],
+  ["Enum('a' = +0b1111111, 'b')", "Delta, LZ4", "CODEC(Delta(2), LZ4)"],
+  ["Enum('a' = 0x0_7f, 'b')", "Delta, LZ4", "CODEC(Delta(2), LZ4)"],
+  ["Enum('a' = -1_2_8, 'b')", "Delta, LZ4", "CODEC(Delta(1), LZ4)"],
+  ["Tuple(Enum('a' = 0x10), Float64)", "Gorilla", "CODEC(Gorilla)"],
+  ["Tuple(String, Float64)", "Gorilla(8)", "CODEC(Gorilla(8))"],
+  ["Tuple(UUID, Float64)", "Gorilla(8)", "CODEC(Gorilla(8))"],
+]
+for (const [type, expression, stored] of OPUS_STORED) {
+  test(`Opus server fingerprint: ${type} ${expression}`, () => {
+    expect(codecFingerprint(codec.raw(expression), type)).toBe(codecFingerprint(parseCodec(stored), type))
+  })
+}
+
+test('DoubleDelta retains a raw size only in verbatim chains', () => {
+  const type = 'Tuple(UInt32, UInt64)'
+  expect(codecFingerprint(codec.raw('Delta, DoubleDelta(4)'), type)).toBe('Delta,DoubleDelta(4)')
+  expect(codecsEqual(codec.raw('Delta, DoubleDelta(4)'), codec.raw('Delta, DoubleDelta(8)'), type)).toBe(false)
+  expect(codecsEqual(codec.raw('DoubleDelta(4), ZSTD'), codec.raw('DoubleDelta(8), ZSTD'), type)).toBe(true)
+  expect(codecsEqual(codec.raw('Delta, DoubleDelta(4)'), codec.raw('Delta, DoubleDelta(8)'), 'UInt64')).toBe(true)
+  const typed: ColumnCodecSpec = [{ kind: 'FPC', level: 12, floatSize: 4 }, { kind: 'DoubleDelta', size: 8 }]
+  expect(renderCodec(typed)).toBe('CODEC(FPC(12, 4), DoubleDelta)')
+  expect(codecFingerprint(canonicalizeCodec(typed), 'Tuple(Float32, Float64)')).toBe('FPC(12,4),DoubleDelta')
 })
