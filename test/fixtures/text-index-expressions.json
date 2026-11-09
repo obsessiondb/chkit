@@ -35,5 +35,6 @@
   { "schema": "if(NOT a AND b, concat(s, '  '), '')", "server": "if((NOT a) AND b, concat(s, ' '), '')", "equal": false },
   { "schema": "if(NOT a AND b, concat(s, 'A'), '')", "server": "if((NOT a) AND b, concat(s, 'a'), '')", "equal": false },
   { "schema": "toString(`null`)", "server": "toString(NULL)", "equal": false },
-  { "schema": "lower(s)", "server": "lower(x)", "equal": false }
+  { "schema": "lower(s)", "server": "lower(x)", "equal": false },
+  { "schema": "replaceAll(s, '\\xff', 'x')", "server": "replaceAll(s, '\ufffd', 'x')", "equal": false }
 ]
