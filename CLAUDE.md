@@ -135,9 +135,9 @@ Without CI: `bun run release:prepare [--stable]` opens the release PR from a cle
 
 ### chkit-py (PyPI)
 
-chkit-py has its own version, outside the changesets `fixed` group, and its own changelog (`chkit_python/CHANGELOG.md`, `## Unreleased` until a release). To release it:
+chkit-py has its own version, outside the changesets `fixed` group, and its own changelog (`chkit_python/CHANGELOG.md`). A PR adds a fragment in `chkit_python/changelog.d/` (`<issue>.<type>.md` or `+<slug>.<type>.md`, type `added`, `changed` or `fixed`) instead of editing `CHANGELOG.md`. To release it:
 
-1. In a PR, set `version` in `chkit_python/pyproject.toml` and move the `## Unreleased` entries under that version in `chkit_python/CHANGELOG.md`. Merge it.
+1. In a PR, set `version` in `chkit_python/pyproject.toml` and run `uvx towncrier==26.9.0 build --version <version> --yes` in `chkit_python/`, which moves the fragments into `CHANGELOG.md`. Merge it.
 2. Push the tag `chkit-py-v<version>` on that commit of `main`. `.github/workflows/publish-chkit-py.yml` checks that the tag matches the pyproject version, builds and checks the dists with `chkit_python/scripts/build.sh` (the same script `verify` runs), and publishes to PyPI through OIDC Trusted Publishing in the `pypi` environment. No PyPI token is stored anywhere.
 
 To rehearse, run the workflow manually: `dry-run` (the default) builds, checks and smoke-tests without uploading; `testpypi` also uploads to TestPyPI. A version can be uploaded to PyPI (or TestPyPI) only once.
