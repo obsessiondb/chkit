@@ -19,7 +19,7 @@ import { envSubstitutions } from './datafile.js'
 import { translateDatasource } from './datasource.js'
 import { renderQueriesFile, translateEndpoint, type TranslatedEndpoint } from './endpoints.js'
 import { type CopyFallback, staticSql, translateCopy, translateMaterialized } from './pipes.js'
-import { readProject } from './project.js'
+import { DEFAULT_MAX_DEPTH, readProject } from './project.js'
 import { countEntries, type ImportCounts, type ImportEntry, type ImportReport, untranslatableSummary } from './report.js'
 
 export type { ImportCounts, ImportEntry, ImportReport, ObjectKind } from './report.js'
@@ -33,6 +33,7 @@ export const TinybirdImportSchema = z.object({
   outFile: z.string().min(1).default('./src/db/schema/tinybird.ts'),
   queriesOutFile: z.string().min(1).default('./src/db/queries/tinybird.ts'),
   reportFile: z.string().min(1).optional(),
+  maxDepth: z.coerce.number().int().positive().default(DEFAULT_MAX_DEPTH),
   overwrite: z.boolean().default(false),
 })
 type TinybirdImportOptions = z.infer<typeof TinybirdImportSchema>
@@ -48,6 +49,8 @@ export interface TinybirdPluginOptions {
   /** Optional JSON report of every object and why it did or did not translate. */
   reportFile?: string
   overwrite?: boolean
+  /** Folder levels scanned, as `tb --max-depth` (default 3, as `tb build`). */
+  maxDepth?: number
 }
 
 export interface TinybirdImport {
@@ -93,6 +96,7 @@ const IMPORT_FLAGS = defineFlags([
   { name: '--out-file', type: 'string', description: 'Schema file to write', placeholder: '<path>' },
   { name: '--queries-out-file', type: 'string', description: 'Typed queries file to write', placeholder: '<path>' },
   { name: '--report', type: 'string', description: 'Write the import report as JSON', placeholder: '<path>' },
+  { name: '--max-depth', type: 'string', description: 'Folder levels to scan, as tb --max-depth (default 3)', placeholder: '<n>' },
   { name: '--force', type: 'boolean', description: 'Overwrite existing output files' },
   { name: '--dryrun', type: 'boolean', description: 'Print the result without writing files' },
 ] as const)
@@ -103,6 +107,7 @@ const IMPORT_FLAG_MAP: FlagMapping = {
   '--out-file': { key: 'outFile' },
   '--queries-out-file': { key: 'queriesOutFile' },
   '--report': { key: 'reportFile' },
+  '--max-depth': { key: 'maxDepth' },
   '--force': { key: 'overwrite' },
 }
 
@@ -142,7 +147,7 @@ export function createTinybirdPlugin(options: TinybirdPluginOptions = {}): Tinyb
               ...flagOptions(flags),
             })
             const dryrun = flags['--dryrun'] === true
-            const imported = await importTinybirdProject({ projectDir: effective.project, database: effective.database })
+            const imported = await importTinybirdProject({ projectDir: effective.project, database: effective.database, maxDepth: effective.maxDepth })
             const outFile = resolve(process.cwd(), effective.outFile)
             const queriesOutFile = imported.queriesSource ? resolve(process.cwd(), effective.queriesOutFile) : undefined
             const reportFile = effective.reportFile ? resolve(process.cwd(), effective.reportFile) : undefined
@@ -186,8 +191,8 @@ export function createTinybirdPlugin(options: TinybirdPluginOptions = {}): Tinyb
 }
 
 /** Reads a Tinybird project and translates it into chkit definitions, typed queries and a report. */
-export async function importTinybirdProject(input: { projectDir: string; database: string }): Promise<TinybirdImport> {
-  const project = await readProject(input.projectDir)
+export async function importTinybirdProject(input: { projectDir: string; database: string; maxDepth?: number }): Promise<TinybirdImport> {
+  const project = await readProject(input.projectDir, { maxDepth: input.maxDepth })
   const { database } = input
   const entries: ImportEntry[] = []
   const definitions: SchemaDefinition[] = []
@@ -210,8 +215,9 @@ export async function importTinybirdProject(input: { projectDir: string; databas
   const readable = project.pipes.filter(({ type, output }) => output && (type === 'default' || type === 'endpoint'))
   const unreadablePipes = new Map<string, string>()
   for (const { file } of readable) {
+    const substituted = envSubstitutions(file)
     if (file.unsupported.length > 0) unreadablePipes.set(file.name, includeReason(file))
-    else if (envSubstitutions(file).length > 0) unreadablePipes.set(file.name, envSubstitutions(file).join('; '))
+    else if (substituted.length > 0) unreadablePipes.set(file.name, substituted.join('; '))
     else if (file.nodes.some((node) => staticSql(node.sql) === undefined)) unreadablePipes.set(file.name, 'its SQL uses Tinybird template expressions')
   }
   const referenceable = new Map(
@@ -303,6 +309,7 @@ function flagOptions(flags: TinybirdPluginCommandContext['flags']): Partial<Tiny
     ...(value('--out-file') ? { outFile: value('--out-file') } : {}),
     ...(value('--queries-out-file') ? { queriesOutFile: value('--queries-out-file') } : {}),
     ...(value('--report') ? { reportFile: value('--report') } : {}),
+    ...(value('--max-depth') ? { maxDepth: Number(value('--max-depth')) } : {}),
     ...(flags['--force'] === true ? { overwrite: true } : {}),
   }
 }

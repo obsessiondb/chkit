@@ -122,6 +122,24 @@ describe('translateEndpoint', () => {
     expect(accepts('DATE', ['2023-04-19', '2023-04-19T00'])).toEqual([true, false])
   })
 
+  test('only the nodes the output reads are rendered, as in Tinybird', () => {
+    const file = parseDatafile(
+      'endpoints/ep.pipe',
+      [
+        'NODE unread', 'SQL >', '    %', '    SELECT 1 {% if defined(x) %} WHERE {{ Int32(x) }} > 0 {% end %}', '',
+        'NODE base', 'SQL >', '    %', "    SELECT * FROM events WHERE type = {{ String(t, 'a') }}", '',
+        'NODE out', 'SQL >', '    SELECT count() FROM base', '', 'TYPE endpoint',
+      ].join('\n')
+    )
+    const translated = translateEndpoint(file, file.nodes[2], scope)
+    expect(translated.ok && translated.value.params).toEqual([{ name: 't', type: 'String', required: false, default: 'a' }])
+  })
+
+  test('required= at one site and not at another is the same param', () => {
+    const translated = endpoint(['%', "SELECT 1 FROM events WHERE {{ String(t, 'a', required=True) }} = 'a' OR {{ String(t, 'a') }} = 'a'"])
+    expect(translated.ok && translated.value.params).toEqual([{ name: 't', type: 'String', required: true, default: 'a' }])
+  })
+
   test('a 64-bit integer default keeps every digit', () => {
     const translated = endpoint(['%', 'SELECT 1 FROM events WHERE id <= {{ UInt64(max, 18446744073709551615) }} AND id > {{ Int64(min, -9007199254740993) }}'])
     expect(translated.ok && translated.value.params.map((param) => param.default)).toEqual(['18446744073709551615', '-9007199254740993'])

@@ -29,7 +29,7 @@ export interface Datafile {
   /** File-level blocks by upper-case name (SCHEMA, INDEXES, FORWARD_QUERY). */
   blocks: Map<string, string>
   nodes: DatafileNode[]
-  /** Commands the importer does not evaluate (INCLUDE, VERSION), with their line. */
+  /** Commands the importer does not evaluate (INCLUDE), with their line. */
   unsupported: Array<{ command: string; line: number }>
 }
 
@@ -241,7 +241,8 @@ const ENV_SUBSTITUTION = /\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*
  * each command that uses it is reported.
  */
 export function envSubstitutions(file: Datafile): string[] {
-  const vars = [...file.vars, ...file.nodes.flatMap((node) => [...node.vars])]
+  // TAGS and SHARED_WITH have their own handlers in the Tinybird CLI, which do not substitute.
+  const vars = [...file.vars, ...file.nodes.flatMap((node) => [...node.vars])].filter(([key]) => key !== 'TAGS' && key !== 'SHARED_WITH')
   return vars.flatMap(([key, value]) => {
     const match = ENV_SUBSTITUTION.exec(value.replace(/\$\$/g, ''))
     return match ? [`${key} uses environment substitution (${match[0]}), which the importer does not evaluate`] : []

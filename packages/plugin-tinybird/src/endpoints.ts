@@ -1,8 +1,10 @@
+import { tokenizeSQL } from '@chkit/core'
+
 import type { Datafile, DatafileNode } from './datafile.js'
 import type { PipeScope } from './pipes.js'
 import { PYTHON_FLOAT_SOURCE, pythonFloat } from './python-float.js'
 import { oneLine, type Translation } from './report.js'
-import { resolveNode, SqlResolveError } from './sql-resolve.js'
+import { resolveNode, SqlResolveError, tableReferences } from './sql-resolve.js'
 
 /**
  * Tinybird endpoints → chkit typed queries (`query` + `p`).
@@ -89,7 +91,9 @@ export function translateEndpoint(file: Datafile, output: DatafileNode | undefin
   const params = new Map<string, EndpointParam>()
   const reasons: string[] = []
   const nodes = new Map<string, string>()
-  for (const node of file.nodes) {
+  // Tinybird renders only the nodes the output node reads, directly or through other nodes.
+  const reached = reachableNodes(file.nodes, output.name)
+  for (const node of file.nodes.filter((candidate) => reached.has(candidate.name))) {
     const rendered = renderTemplate(node.sql ?? '', params)
     if (rendered.ok) nodes.set(node.name, rendered.value)
     else reasons.push(...rendered.reasons.map((reason) => `node ${node.name}: ${reason}`))
@@ -157,14 +161,14 @@ function renderTemplate(sql: string, params: Map<string, EndpointParam>): Transl
       reasons.push(...param.reasons)
       return tag
     }
-    // Tinybird renders a missing param with each site's own default, required=True or not.
+    // Tinybird renders a missing param with each site's own default; required= is never read.
     const seen = params.get(param.value.name)
-    const differs = (a: EndpointParam, b: EndpointParam) => a.type !== b.type || a.required !== b.required || a.default !== b.default
-    if (seen && differs(seen, param.value)) {
+    if (seen && (seen.type !== param.value.type || seen.default !== param.value.default)) {
       reasons.push(`param ${param.value.name} is declared twice with different types or defaults`)
       return tag
     }
-    if (!seen) params.set(param.value.name, param.value)
+    if (seen) seen.required ||= param.value.required
+    else params.set(param.value.name, param.value)
     const kind = PARAM_KINDS[param.value.type]
     const placeholder = `{${param.value.name}:String}`
     return kind?.cast ? `${kind.cast}(${placeholder})` : placeholder
@@ -325,4 +329,25 @@ export function identifier(name: string): string {
   const cleaned = name.replace(/[^A-Za-z0-9_$]/g, '_')
   const valid = /^[0-9]/.test(cleaned) ? `_${cleaned}` : cleaned
   return UNAVAILABLE_NAMES.has(valid) ? `${valid}_endpoint` : valid
+}
+
+/**
+ * The output node and every node it reads, directly or through other nodes.
+ * References are found in the raw node SQL, so a table read in only one
+ * branch of a template condition still counts (it may be rendered).
+ */
+function reachableNodes(nodes: readonly DatafileNode[], output: string): Set<string> {
+  const byName = new Map(nodes.map((node) => [node.name, node.sql ?? '']))
+  const names = new Set(byName.keys())
+  const reached = new Set<string>()
+  const queue = [output]
+  while (queue.length > 0) {
+    const name = queue.pop() ?? ''
+    if (reached.has(name) || !byName.has(name)) continue
+    reached.add(name)
+    for (const ref of tableReferences(tokenizeSQL(byName.get(name) ?? ''), names)) {
+      if (ref.database === undefined && names.has(ref.name)) queue.push(ref.name)
+    }
+  }
+  return reached
 }

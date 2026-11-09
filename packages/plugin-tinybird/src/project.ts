@@ -18,13 +18,10 @@ export interface TinybirdProject {
 }
 
 /**
- * Tinybird's project scan (`Project.get_project_files`): `<folder>/*.ext` and
- * `<folder>/*\/*.ext` only (max_depth 2), without `<folder>/vendor`, which holds
- * other workspaces' datasources. Deeper folders are walked only to report
- * their datafiles; these are never descended into.
+ * The scan depth of `tb build`: the Forward CLI's `--max-depth` defaults to 3,
+ * so `<folder>/*.ext` to `<folder>/*\/*\/*.ext` (`Project.get_files`).
  */
-const MAX_DEPTH = 2
-const NOT_WALKED = new Set(['node_modules', 'venv'])
+export const DEFAULT_MAX_DEPTH = 3
 const PIPE_TYPES: Record<string, PipeType> = {
   materialized: 'materialized',
   copy: 'copy',
@@ -33,7 +30,18 @@ const PIPE_TYPES: Record<string, PipeType> = {
   default: 'default',
 }
 
-export async function readProject(projectDir: string): Promise<TinybirdProject> {
+/**
+ * Reads the datafiles `tb build --max-depth <maxDepth>` reads
+ * (`Project.get_project_files`). Every other datafile in the folder is listed
+ * in `ignoredFiles` with the reason, never dropped silently: files deeper
+ * than `maxDepth`, files under a top-level entry whose name starts with
+ * `vendor` (Tinybird excludes by the substring `<folder>/vendor`; vendored
+ * datasources belong to other workspaces), and hidden files and folders,
+ * which Python's glob does not match. Only `.git` is not walked.
+ */
+export async function readProject(projectDir: string, options: { maxDepth?: number } = {}): Promise<TinybirdProject> {
+  const maxDepth = options.maxDepth ?? DEFAULT_MAX_DEPTH
+  if (!Number.isInteger(maxDepth) || maxDepth < 1) throw new Error(`maxDepth must be a positive integer, got ${maxDepth}`)
   const base = resolve(projectDir)
   const dir = resolve(base, await configuredFolder(base))
   const paths = (await walk(dir)).sort()
@@ -46,12 +54,19 @@ export async function readProject(projectDir: string): Promise<TinybirdProject> 
   for (const path of paths) {
     const relativePath = relative(dir, path)
     const segments = relativePath.split(sep)
-    if (segments[0] === 'vendor' && segments.length > 1) {
-      ignoredFiles.push({ path: relativePath, reason: 'vendored: a datasource of another workspace, which Tinybird builds as that workspace' })
+    if (segments.some((segment) => segment.startsWith('.'))) {
+      ignoredFiles.push({ path: relativePath, reason: 'hidden: Tinybird does not read hidden files or folders' })
       continue
     }
-    if (segments.length > MAX_DEPTH) {
-      ignoredFiles.push({ path: relativePath, reason: `deeper than the ${MAX_DEPTH} folder levels Tinybird scans, so Tinybird does not build it` })
+    if (segments[0]?.startsWith('vendor')) {
+      ignoredFiles.push({ path: relativePath, reason: 'vendored: Tinybird excludes everything under <folder>/vendor* from the workspace (other workspaces\' datasources)' })
+      continue
+    }
+    if (segments.length > maxDepth) {
+      ignoredFiles.push({
+        path: relativePath,
+        reason: `deeper than the scan depth ${maxDepth} (tb --max-depth ${maxDepth}), so Tinybird does not build it; raise maxDepth if the project is built with a higher --max-depth`,
+      })
       continue
     }
     if (!path.endsWith('.datasource') && !path.endsWith('.pipe')) {
@@ -88,7 +103,7 @@ async function walk(dir: string): Promise<string[]> {
   const nested = await Promise.all(
     entries.map(async (entry) => {
       const path = join(dir, entry.name)
-      if (entry.isDirectory()) return entry.name.startsWith('.') || NOT_WALKED.has(entry.name) ? [] : walk(path)
+      if (entry.isDirectory()) return entry.name === '.git' ? [] : walk(path)
       return /\.(datasource|pipe|connection|incl)$/.test(entry.name) ? [path] : []
     })
   )

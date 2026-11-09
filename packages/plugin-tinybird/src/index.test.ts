@@ -1,7 +1,7 @@
 import { afterAll, describe, expect, test } from 'bun:test'
 import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
-import { join } from 'node:path'
+import { join, sep } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
 
@@ -129,22 +129,49 @@ describe('tinybird import command', () => {
     expect(reader?.status === 'untranslatable' && reader.reasons[0]).toContain('reads pipe shared, which cannot be inlined (INCLUDE (line 1) is not evaluated')
   })
 
-  test('vendored and too-deep datafiles are skipped, as Tinybird does not build them in this workspace', async () => {
+  test('reads what tb build reads, and lists every other datafile as skipped', async () => {
     const dir = await tempDir()
-    const datasource = 'SCHEMA >\n    `id` UInt64\n\nENGINE "MergeTree"\nENGINE_SORTING_KEY "id"\n'
-    await mkdir(join(dir, 'datasources'), { recursive: true })
-    await mkdir(join(dir, 'vendor', 'other_ws', 'datasources'), { recursive: true })
-    await mkdir(join(dir, 'tests', 'deep', 'more'), { recursive: true })
-    await writeFile(join(dir, 'root.datasource'), datasource)
-    await writeFile(join(dir, 'datasources', 'ev.datasource'), datasource)
-    await writeFile(join(dir, 'vendor', 'other_ws', 'datasources', 'ev.datasource'), datasource)
-    await writeFile(join(dir, 'tests', 'deep', 'more', 'x.datasource'), datasource)
+    const datasource = 'SCHEMA >\n    `id` UInt64\n\nENGINE "MergeTree"\nENGINE_SORTING_KEY "id"\nTAGS "cost=$5"\n'
+    const files = [
+      'root.datasource',
+      'datasources/ev.datasource',
+      'datasources/chain/deep3.datasource',
+      'datasources/chain/sub/deep4.datasource',
+      'node_modules/nm.datasource',
+      'vendor/other_ws/datasources/ev.datasource',
+      'vendor_x/vx.datasource',
+      'vendor.datasource',
+      '.hidden.datasource',
+      '.dir/hd.datasource',
+    ]
+    for (const path of files) {
+      await mkdir(join(dir, path, '..'), { recursive: true })
+      await writeFile(join(dir, path), datasource)
+    }
     const { report, definitions } = await importTinybirdProject({ projectDir: dir, database: 'analytics' })
-    expect(definitions.map((definition) => definition.name).sort()).toEqual(['ev', 'root'])
-    expect(report.entries.filter((entry) => entry.status === 'skipped').map((entry) => [entry.name, entry.reasons[0]?.split(':')[0]])).toEqual([
-      [join('tests', 'deep', 'more', 'x.datasource'), 'deeper than the 2 folder levels Tinybird scans, so Tinybird does not build it'],
-      [join('vendor', 'other_ws', 'datasources', 'ev.datasource'), 'vendored'],
-    ])
+    // tb build scans three levels (tb --max-depth 3), node_modules included, TAGS not substituted.
+    expect(definitions.map((definition) => definition.name).sort()).toEqual(['deep3', 'ev', 'nm', 'root'])
+    const skipped = Object.fromEntries(
+      report.entries.filter((entry) => entry.status === 'skipped').map((entry) => [entry.name.split(sep).join('/'), entry.reasons[0]?.split(':')[0]])
+    )
+    expect(skipped).toEqual({
+      '.dir/hd.datasource': 'hidden',
+      '.hidden.datasource': 'hidden',
+      'datasources/chain/sub/deep4.datasource': 'deeper than the scan depth 3 (tb --max-depth 3), so Tinybird does not build it; raise maxDepth if the project is built with a higher --max-depth',
+      'vendor.datasource': 'vendored',
+      'vendor/other_ws/datasources/ev.datasource': 'vendored',
+      'vendor_x/vx.datasource': 'vendored',
+    })
+    const deeper = await importTinybirdProject({ projectDir: dir, database: 'analytics', maxDepth: 4 })
+    expect(deeper.definitions.map((definition) => definition.name).sort()).toEqual(['deep3', 'deep4', 'ev', 'nm', 'root'])
+  })
+
+  test('--max-depth sets the scan depth', async () => {
+    const dir = await tempDir()
+    const { code, printed } = await runImport({ '--out-file': join(dir, 'schema.ts'), '--queries-out-file': join(dir, 'q.ts'), '--max-depth': '1', '--dryrun': true })
+    expect(code).toBe(0)
+    // With one level only the root of the fixture is read, which holds no datafiles.
+    expect(printed[0]).toMatchObject({ counts: { datasource: { translated: 0, untranslatable: 0 } } })
   })
 
   test('a pipe whose commands use environment substitution is not translated', async () => {

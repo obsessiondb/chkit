@@ -55,6 +55,7 @@ export default defineConfig({
 | `queriesOutFile` | `string` | `./src/db/queries/tinybird.ts` | Typed queries file, written when at least one endpoint translates |
 | `reportFile` | `string` | — | Write the import report (every object, its outcome and reasons) as JSON |
 | `overwrite` | `boolean` | `false` | Overwrite existing output files |
+| `maxDepth` | `number` | `3` | Folder levels scanned, as `tb --max-depth` (3 is the `tb build` default) |
 
 The import reads only local files; it does not connect to Tinybird or ClickHouse.
 
@@ -69,6 +70,7 @@ The import reads only local files; it does not connect to Tinybird or ClickHouse
 | `--out-file <path>` | No | Schema file to write |
 | `--queries-out-file <path>` | No | Typed queries file to write |
 | `--report <path>` | No | Write the import report as JSON |
+| `--max-depth <n>` | No | Folder levels to scan, for a project built with `tb --max-depth <n>` |
 | `--force` | No | Overwrite existing output files |
 | `--dryrun` | No | Print the result without writing files |
 
@@ -120,7 +122,7 @@ Translated param types: `String`, `Int8`–`Int64`, `UInt8`–`UInt64`, `Float32
 - `ENGINE_SAMPLING_KEY`: the chkit table DSL has no `SAMPLE BY`. Pipes that read such a datasource are not translated either.
 - Templated SQL in materialized and copy pipes, reads of Tinybird service datasources (`tinybird.*`) and of other workspaces.
 - Ingestion (Events API, connectors, JSONPaths at runtime), tokens, sinks and connection files.
-- Datafiles Tinybird does not build in the workspace: under `vendor/` (other workspaces' datasources) or deeper than two folder levels. They are listed as skipped.
+- Datafiles `tb build` does not read: deeper than the scan depth (`maxDepth`, 3 by default), under a top-level entry whose name starts with `vendor` (other workspaces' datasources), or hidden. Each is listed as skipped with the reason.
 - Commands that use environment substitution (`$VAR`, `${VAR}`), which Tinybird evaluates at build time.
 
 ## Parity with Tinybird
