@@ -18,6 +18,9 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- `drift` no longer reports a column as changed when its default wraps a heredoc that holds a
+  parenthesis, such as `($$a)$$)`, which ClickHouse stores as `'a)'`: parentheses inside a
+  heredoc or a comment no longer count as structure (#587, fixed in TS too).
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement
