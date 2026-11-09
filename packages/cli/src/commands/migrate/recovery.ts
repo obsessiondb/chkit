@@ -210,6 +210,24 @@ export function rebaseInProgressState(
   return { ...state, checksum: input.checksum, appliedAt: input.appliedAt, operations }
 }
 
+/**
+ * The statements (1-based) of an in-progress state that completed or started
+ * at a position where the split before #562 and the current split of the file
+ * give different statements. A state recorded with the old split would resume
+ * at the wrong statements there: skip one that never ran, or run one again.
+ */
+export function splitChangedStatements(
+  operations: readonly OperationState[],
+  legacyStatements: readonly string[],
+  statements: readonly string[],
+): number[] {
+  return operations
+    .filter((op) => op.status === 'completed' || op.status === 'started')
+    .filter((op) => legacyStatements[op.operationIndex] !== statements[op.operationIndex])
+    .map((op) => op.operationIndex + 1)
+    .sort((a, b) => a - b)
+}
+
 /** Whether any statement of an in-progress state completed or may have run. */
 export function hasStatementProgress(state: MigrationRowState): boolean {
   return state.operations.some((op) => op.status === 'completed' || op.status === 'started')

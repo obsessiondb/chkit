@@ -26,13 +26,17 @@ from chkit.cli.commands.migrate_async_apply import (
     iso_without_zone,
     upsert_operation,
 )
-from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
+from chkit.cli.commands.migrate_errors import (
+    in_progress_checksum_mismatch_error,
+    statement_split_changed_error,
+)
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
     StatementIdentity,
     has_statement_progress,
     rebase_in_progress_state,
     retry_mismatch_error,
+    split_changed_statements,
     statement_identities,
     statement_identity,
     verify_retry_edit,
@@ -60,7 +64,10 @@ from chkit.clickhouse.ddl_propagation import (
 )
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.core.model import ChxResolvedConfig
-from chkit.core.sql_splitter import extract_executable_statements
+from chkit.core.sql_splitter import (
+    extract_executable_statements,
+    extract_legacy_executable_statements,
+)
 from chkit.plugins import ChxOnAfterApplyContext, ChxOnBeforeApplyContext
 
 _WHITESPACE_RE = re.compile(r"\s+")
@@ -122,6 +129,26 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
     migration_checksum = checksum_sql(sql)
 
     initial_state = journal_store.read_migration_state(file)
+    # Releases before #562 did not know `//` and `#` comments, so the statement
+    # positions they recorded do not hold where their split and this one
+    # differ. A state this release recorded is split as now.
+    if (
+        initial_state is not None
+        and not initial_state.migration_completed
+        and initial_state.chkit_version != __version__
+    ):
+        changed = split_changed_statements(
+            initial_state.operations,
+            extract_legacy_executable_statements(sql),
+            parsed_statements,
+        )
+        if changed:
+            raise statement_split_changed_error(
+                migration=file,
+                statements=changed,
+                recorded_by=initial_state.chkit_version,
+                cli_version=__version__,
+            )
     if (
         initial_state is not None
         and not initial_state.migration_completed

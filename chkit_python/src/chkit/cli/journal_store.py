@@ -31,6 +31,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chkit import __version__
 from chkit.cli.migration_store import (
     ChecksumMismatch,
     MigrationJournal,
@@ -506,6 +507,10 @@ class JournalStore:
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         """Upsert one migration row with INSERT race retry (5 x backoff)."""
+        # The release that first recorded the state; migrate checks it before
+        # it resumes the state (#562).
+        if not state.chkit_version:
+            state = state.model_copy(update={"chkit_version": __version__})
         if self._database_missing:
             self._database_missing = False
             self._bootstrapped = False

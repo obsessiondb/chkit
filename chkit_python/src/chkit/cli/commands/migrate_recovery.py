@@ -302,6 +302,30 @@ def rebase_in_progress_state(
     )
 
 
+def split_changed_statements(
+    operations: Sequence[OperationState],
+    legacy_statements: Sequence[str],
+    statements: Sequence[str],
+) -> list[int]:
+    """The statements (1-based) of an in-progress state that completed or
+    started at a position where the split before #562 and the current split of
+    the file give different statements.
+
+    A state recorded with the old split would resume at the wrong statements
+    there: skip one that never ran, or run one again.
+    """
+
+    def at(items: Sequence[str], index: int) -> str | None:
+        return items[index] if 0 <= index < len(items) else None
+
+    return sorted(
+        op.operation_index + 1
+        for op in operations
+        if op.status in {"completed", "started"}
+        and at(legacy_statements, op.operation_index) != at(statements, op.operation_index)
+    )
+
+
 def has_statement_progress(state: MigrationRowState) -> bool:
     """Whether any statement of an in-progress state completed or may have run."""
     return any(op.status in {"completed", "started"} for op in state.operations)

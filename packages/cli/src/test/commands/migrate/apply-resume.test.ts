@@ -13,6 +13,7 @@ import type {
   OperationState,
 } from '../../../runtime/journal-store.js'
 import { checksumSQL, type MigrationJournalEntry } from '../../../runtime/migration-store.js'
+import { CLI_VERSION } from '../../../runtime/version.js'
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../../plugins.js'
 
 function createFakeStore(initial: MigrationRowState | null = null) {
@@ -792,6 +793,129 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     rmSync(dir, { recursive: true, force: true })
 
     expect(commandCalls).toEqual([])
+  })
+})
+
+// Releases before #562 cut at a `;` inside a `//` comment: this file was
+// [a, DROP z, b, c] for them, and is [a…b, c] now.
+describe('applyMigration with a state another release split differently (#562)', () => {
+  const SPLIT_SQL =
+    'ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n' +
+    'ALTER TABLE t ADD COLUMN b UInt64;\n' +
+    'ALTER TABLE t ADD COLUMN c UInt64;\n'
+
+  function apply(dir: string, store: JournalStore, db: ClickHouseExecutor) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+  }
+
+  test('refuses to resume when the recorded statements are not the same in this split', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    // The old release ran a and DROP z, then b failed. Resuming by position
+    // would skip c, which never ran.
+    const { store, writes, appended } = createFakeStore(
+      inProgressState(checksumSQL(SPLIT_SQL), [
+        operation(0, 'completed'),
+        operation(1, 'completed'),
+        operation(2, 'failed'),
+      ]),
+    )
+
+    const attempt = apply(dir, store, db)
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow(
+      `Cannot resume m.sql: chkit 0.2.0-test recorded its partial run, and this chkit (${CLI_VERSION}) splits the file into different statements.`,
+    )
+    await expect(attempt).rejects.toThrow('The journal recorded statements 1, 2 as completed or started')
+    await expect(attempt).rejects.toThrow('chkit migrate --apply --abandon m.sql')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+    expect(writes).toEqual([])
+    expect(appended).toEqual([])
+  })
+
+  test('refuses a started statement too, and names a state without a release as an earlier one', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore({
+      ...inProgressState(checksumSQL(SPLIT_SQL), [operation(0, 'completed'), operation(1, 'started')]),
+      chkitVersion: '',
+    })
+
+    const attempt = apply(dir, store, db)
+    await expect(attempt).rejects.toThrow('Cannot resume m.sql: an earlier chkit release recorded its partial run')
+    await expect(attempt).rejects.toThrow('The journal recorded statements 1, 2 as completed or started')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test('resumes a state this release recorded', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore({
+      ...inProgressState(checksumSQL(SPLIT_SQL), [operation(0, 'completed'), operation(1, 'failed')]),
+      chkitVersion: CLI_VERSION,
+    })
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual(['ALTER TABLE t ADD COLUMN c UInt64;'])
+    expect(appended).toHaveLength(1)
+  })
+
+  test('resumes when every recorded statement is the same in both splits', async () => {
+    const sql =
+      'ALTER TABLE t ADD COLUMN a UInt64;\n' +
+      'ALTER TABLE t ADD COLUMN b UInt64;\n' +
+      'ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n' +
+      'ALTER TABLE t ADD COLUMN d UInt64;\n'
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(sql), [operation(0, 'completed'), operation(1, 'failed')]),
+    )
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([
+      'ALTER TABLE t ADD COLUMN b UInt64;',
+      'ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\nALTER TABLE t ADD COLUMN d UInt64;',
+    ])
+    expect(appended).toHaveLength(1)
+  })
+
+  test('runs an abandoned state from statement 1', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(SPLIT_SQL), [
+        { ...operation(0, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was completed)' },
+        { ...operation(1, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was completed)' },
+        { ...operation(2, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was failed)' },
+      ]),
+    )
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([
+      'ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\nALTER TABLE t ADD COLUMN b UInt64;',
+      'ALTER TABLE t ADD COLUMN c UInt64;',
+    ])
+    expect(appended).toHaveLength(1)
   })
 })
 

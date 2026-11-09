@@ -103,6 +103,8 @@ Migration 20260929001110_funnel-model.sql has in-progress journal state for chec
   Or restore the original file content and re-run chkit migrate --apply.
 ```
 
+chkit reads `//`, `# ` and `#!` comments as ClickHouse does, up to the end of the line, so a `;`, quote or `/*` inside one does not end a statement or open a string. Releases before [#562](https://github.com/obsessiondb/chkit/issues/562) cut a statement at a `;` inside such a comment. When another chkit release applied part of a migration whose file has such a comment, and the statements it recorded as completed (or started) are not the same statements in the current split, `migrate` stops with the code `statement_split_changed` instead of resuming by position. Finish that migration with the release that recorded it, or [abandon](#abandoning-a-failed-migration) the partial run.
+
 :::caution
 Edit a failed migration only if no other environment that runs the same files has applied it, because checksum verification fails there. If the migration succeeded elsewhere, fix the cause in the failing environment and re-run `chkit migrate --apply` with the unchanged file.
 :::
@@ -443,6 +445,7 @@ A failure that stops the command prints the standard error envelope:
 | Code | When |
 |------|------|
 | `in_progress_checksum_mismatch` | The file of an in-progress migration changed after some of its statements ran, and `--retry` was not given for it |
+| `statement_split_changed` | Another chkit release applied part of the migration, and the statements it recorded are not the same in the current split (a `;`, quote or `/*` inside a `//` or `#` comment, [#562](https://github.com/obsessiondb/chkit/issues/562)) |
 | `retry_mismatch` | `--retry`: a statement that completed, or an async statement that may still be running, no longer matches the edited file, or the edit left fewer statements with a marker that a completed statement shares |
 | `migration_not_found` | `--retry` names a file that is not in the migrations directory |
 | `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |

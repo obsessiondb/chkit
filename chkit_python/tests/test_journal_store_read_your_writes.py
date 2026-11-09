@@ -13,6 +13,7 @@ from typing import Any
 
 import pytest
 
+from chkit import __version__
 from chkit.cli.journal_store import JournalStore, MigrationRowState, OperationState
 
 pytestmark = pytest.mark.usefixtures("single_replica")
@@ -113,3 +114,20 @@ def test_read_returns_our_write_when_the_replica_has_no_row_yet() -> None:
     store.write_migration_state(written)
 
     assert store.read_migration_state("001_init.sql") == written
+
+
+# migrate resumes a state without checking its split only when this release
+# recorded it (#562), so a new state carries the release, read back from the
+# server or from the last write.
+def test_write_records_this_release_on_a_state_that_has_none() -> None:
+    client = _LaggingClient([])
+    store = _store(client)
+    store.write_migration_state(
+        _state("2026-10-09T12:00:00.200", ["started"]).model_copy(update={"chkit_version": ""})
+    )
+
+    insert = next(sql for sql in client.executed if sql.startswith("INSERT"))
+    assert f"'abc', '{__version__}', false" in insert
+    state = store.read_migration_state("001_init.sql")
+    assert state is not None
+    assert state.chkit_version == __version__
