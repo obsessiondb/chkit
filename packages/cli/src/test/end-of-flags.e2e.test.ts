@@ -115,6 +115,9 @@ describe('@chkit/cli -- ends a core command\'s flags (#614)', () => {
         [['init', '-y', '--', 'foo'], 'foo'],
         [['init', '--', '--yes'], '--yes'],
         [['init', '-y', '--', '--connect', 'bogus'], '--connect bogus'],
+        // Help counts only before `--`, as in chkit-py.
+        [['init', '--', '--help'], '--help'],
+        [['init', '--', '-h'], '-h'],
       ] as const) {
         const result = runCli([...args], dir)
         expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([args, 1, '', extraArgs(rest)])

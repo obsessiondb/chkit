@@ -60,16 +60,14 @@ function splitQueryArgs(
 	const byName = new Map<string, FlagDef>()
 	for (const def of flagDefs) byName.set(def.name, def)
 
-	const tokens = expandShortFlags(argv, flagDefs)
+	// Split at the first `--` before scanning, so a value flag never takes it
+	// as its value and nothing after it is read as a flag (#614).
+	const { flagArgs: tokens, rest } = splitAtEndOfFlags(expandShortFlags(argv, flagDefs))
 	const flagArgs: string[] = []
 	const positionals: string[] = []
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i]
 		if (token === undefined) continue
-		if (token === '--') {
-			positionals.push(...tokens.slice(i + 1))
-			break
-		}
 
 		const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
 		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
@@ -91,7 +89,7 @@ function splitQueryArgs(
 		}
 	}
 
-	return { flagArgs, positionals }
+	return { flagArgs, positionals: [...positionals, ...rest] }
 }
 
 /**
