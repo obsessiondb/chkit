@@ -4,7 +4,10 @@ import { stringLiteral } from './text-index-sql.js'
 /**
  * Split on commas outside parentheses. The input is read with the SQL lexer, so
  * a comma or paren in a string, quoted name, heredoc (`$$a, b$$`) or comment is
- * text (#596). Comments stay in the part they belong to.
+ * text (#596). Comments are dropped, each leaving one space so the tokens
+ * around it never fuse: a part is trimmed and its callers rejoin parts on one
+ * line, where a kept `--` comment would swallow the rest. An unterminated
+ * block comment is kept as written for ClickHouse to report.
  */
 export function splitTopLevelComma(input: string): string[] {
   const out: string[] = []
@@ -12,6 +15,10 @@ export function splitTopLevelComma(input: string): string[] {
   let depth = 0
 
   for (const token of sqlTokens(input)) {
+    if (token.kind === 'line_comment' || (token.kind === 'block_comment' && token.terminated)) {
+      current += ' '
+      continue
+    }
     if (token.kind === 'punctuation') {
       if (token.text === '(') depth += 1
       else if (token.text === ')') depth = Math.max(0, depth - 1)

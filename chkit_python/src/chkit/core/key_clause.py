@@ -26,13 +26,19 @@ def split_top_level_comma(text: str) -> list[str]:
     """Split on commas outside parentheses.
 
     The input is read with the SQL lexer, so a comma or paren in a string,
-    quoted name, heredoc (``$$a, b$$``) or comment is text (#596). Comments stay
-    in the part they belong to.
+    quoted name, heredoc (``$$a, b$$``) or comment is text (#596). Comments are
+    dropped, each leaving one space so the tokens around it never fuse: a part
+    is trimmed and its callers rejoin parts on one line, where a kept ``--``
+    comment would swallow the rest. An unterminated block comment is kept as
+    written for ClickHouse to report.
     """
     out: list[str] = []
     current: list[str] = []
     depth = 0
     for token in iter_sql_tokens(text):
+        if token.kind == "line_comment" or (token.kind == "block_comment" and token.terminated):
+            current.append(" ")
+            continue
         if token.kind == "punctuation":
             if token.text == "(":
                 depth += 1

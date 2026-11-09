@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
 import fixture from '../../../test/fixtures/sql-scan.json'
+import { normalizeDistributedEngine } from './engine.js'
 import { splitTopLevelComma } from './key-clause.js'
 import { normalizeProjectionIndex } from './projection.js'
 import { tokenizeSQL } from './sql-lexer.js'
@@ -122,6 +123,12 @@ describe('heredoc and comment cases shared with chkit-py (#596)', () => {
   for (const { name, input, expected } of fixture.normalizeProjectionIndex) {
     test(`normalizeProjectionIndex: ${name}`, () => {
       expect(normalizeProjectionIndex(input)).toBe(expected)
+    })
+  }
+
+  for (const { name, input, expected } of fixture.normalizeDistributedEngine) {
+    test(`normalizeDistributedEngine: ${name}`, () => {
+      expect(normalizeDistributedEngine(input)).toBe(expected)
     })
   }
 })

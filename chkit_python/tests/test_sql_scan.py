@@ -10,6 +10,7 @@ from typing import Any
 
 import pytest
 
+from chkit.core.engine import normalize_distributed_engine
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.projection import normalize_projection_index
 from chkit.core.sql_lexer import js_trim, tokenize_sql
@@ -148,6 +149,13 @@ def test_find_top_level_sql_pattern_shared_fixture(case: dict[str, Any]) -> None
 @pytest.mark.parametrize("case", FIXTURE["normalizeProjectionIndex"], ids=lambda case: case["name"])
 def test_normalize_projection_index_shared_fixture(case: dict[str, Any]) -> None:
     assert normalize_projection_index(case["input"]) == case["expected"]
+
+
+@pytest.mark.parametrize(
+    "case", FIXTURE["normalizeDistributedEngine"], ids=lambda case: case["name"]
+)
+def test_normalize_distributed_engine_shared_fixture(case: dict[str, Any]) -> None:
+    assert normalize_distributed_engine(case["input"]) == case["expected"]
 
 
 # The scanners as they were before #596, which skipped only quotes. On input
