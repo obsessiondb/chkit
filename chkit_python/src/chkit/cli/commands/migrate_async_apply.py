@@ -319,7 +319,7 @@ def _poll_until_terminal(
             if transient_errors > MAX_TRANSIENT_POLL_ERRORS:
                 msg = (
                     f"Async migration step {input_.operation_type} "
-                    f"(query_id {query_id}): polling failed {transient_errors}x "
+                    f"(query_id {query_id}): polling failed {transient_errors}\u00d7 "
                     f"({_describe_error(poll_error)}). The load may still be "
                     f"running server-side — re-run `chkit migrate --apply` to re-attach."
                 )

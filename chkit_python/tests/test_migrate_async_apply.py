@@ -398,6 +398,26 @@ def test_apply_async_failed_status_raises_and_writes_failure() -> None:
     )
 
 
+def test_apply_async_gives_up_after_poll_error_budget_with_ts_message() -> None:
+    poll_error = RuntimeError("ClickHouse request failed: error code: 524")
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")]
+        + [poll_error] * (migrate_async_apply.MAX_TRANSIENT_POLL_ERRORS + 1)
+    )
+    query_id = make_deterministic_query_id(
+        SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
+    )
+    with pytest.raises(RuntimeError) as raised:
+        apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
+    # Same text as the TS port, byte for byte: a multiplication sign, not "x".
+    assert str(raised.value) == (
+        f"Async migration step alter_table_modify_column (query_id {query_id}): "
+        "polling failed 21\u00d7 (ClickHouse request failed: error code: 524). "
+        "The load may still be running server-side — re-run "
+        "`chkit migrate --apply` to re-attach."
+    )
+
+
 def test_apply_async_resubmit_runs_before_retry() -> None:
     prior = OperationState(
         operation_index=0,
