@@ -204,7 +204,14 @@ def _split_forwarded_args(
             # Without a value (as parse_flags reads it), the plugin command
             # reports the missing value and the next flag, such as --json,
             # still counts.
-            if table_token == "--table" and i < len(args) and not args[i].startswith("--"):
+            # Under help, a -h / --help is the help, not the value (TS reads
+            # help from every token before `--`).
+            if (
+                table_token == "--table"
+                and i < len(args)
+                and not args[i].startswith("--")
+                and not (help_requested and args[i] in _HELP_OPTION_NAMES)
+            ):
                 leading_table.append(args[i])
                 i += 1
             continue
@@ -317,6 +324,27 @@ def _check_config_value(args: list[str], params: list[Any]) -> None:
             raise MissingFlagValueError("--config")
 
 
+def _first_plugin_positional(args: list[str]) -> str | None:
+    """Port of TS ``firstPluginPositional``, the subcommand whose help a
+    forwarder shows: the first token that is not a global flag (or ``--table``)
+    with its value, or the token after ``--``. TS expands only the global short
+    flags (``-c``) of a plugin command here, so ``-t`` and ``-h`` count as the
+    subcommand, and the forwarder's help is shown."""
+    argv = expand_short_flags(args, GLOBAL_FLAGS)
+    flags: dict[str, FlagDef] = {flag["name"]: flag for flag in [*GLOBAL_FLAGS, _TABLE_FLAG]}
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--":
+            return argv[i + 1] if i + 1 < len(argv) else None
+        name, equal, _value = token.partition("=") if token.startswith("--") else (token, "", "")
+        flag = flags.get(name)
+        if flag is None:
+            return token
+        i += 2 if flag["type"] != "boolean" and not equal else 1
+    return None
+
+
 def _read_help_plugins(ctx: Any, args: list[str]) -> list[str]:
     """As in TS, ``--help-plugins`` before any ``--`` is the help, with the
     flags plugins add to the command (``chkit.cli.help``)."""
@@ -335,6 +363,9 @@ class _ChkitCommand(TyperCommand):
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
+        if ctx.ignore_unknown_options:
+            # `chkit obsessiondb login -h` shows the help of `login`.
+            ctx.meta[HELP_SUBCOMMAND_META] = _first_plugin_positional(args)
         args = _read_help_plugins(ctx, args)
         # TS shows the help of a built-in command before reading --config,
         # unless --help-plugins asks for it (that help loads the config). init
@@ -345,11 +376,6 @@ class _ChkitCommand(TyperCommand):
         try:
             if ctx.ignore_unknown_options:
                 normalized = _split_forwarded_args(args, params, config_first=config_first)
-                # `chkit obsessiondb login -h` shows the help of `login` (TS
-                # `firstPluginPositional`): the first token that is not one
-                # of the forwarder's own options.
-                forwarded = normalized[normalized.index("--") + 1 :]
-                ctx.meta[HELP_SUBCOMMAND_META] = forwarded[0] if forwarded else None
             elif any(token in _HELP_OPTION_NAMES for token in _option_args(args)):
                 # As in TS, -h / --help anywhere before `--` shows the help, even
                 # next to a flag error or where it would be a flag's value. Where TS

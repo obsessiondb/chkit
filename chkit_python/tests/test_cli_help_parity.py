@@ -89,6 +89,25 @@ def test_obsessiondb_help_is_the_ts_help(args: list[str]) -> None:
     assert _help(args) == FIXTURE[f"{key} --help"]
 
 
+@pytest.mark.parametrize(
+    ("args", "key"),
+    [
+        # As TS `firstPluginPositional`: global flags and --table (long) with
+        # their values are skipped; the first other token names the subcommand.
+        (["obsessiondb", "--json", "-c", "x", "whoami", "-h"], "obsessiondb whoami"),
+        (["obsessiondb", "--table", "x", "service", "-h"], "obsessiondb service"),
+        (["obsessiondb", "--help-plugins", "logout"], "obsessiondb logout"),
+        # TS expands no -t of a plugin command here, and -h is no global flag:
+        # either is the first positional, so the forwarder's own help shows.
+        (["obsessiondb", "-h", "whoami"], "obsessiondb"),
+        (["obsessiondb", "-t", "x", "whoami", "-h"], "obsessiondb"),
+        (["obsessiondb", "-t", "-h"], "obsessiondb"),
+    ],
+)
+def test_forwarder_help_names_the_ts_subcommand(args: list[str], key: str) -> None:
+    assert _help(args) == FIXTURE[f"{key} --help"]
+
+
 @pytest.mark.parametrize("args", [[], ["-h"], ["--help"], ["--help-plugins"]])
 def test_top_level_help_lists_the_python_commands_in_the_ts_layout(args: list[str]) -> None:
     assert _only_in_each(FIXTURE["--help"], _help(args)) == (
