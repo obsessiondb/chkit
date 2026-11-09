@@ -18,6 +18,8 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- Waits for a created, dropped or altered table, view, column or dictionary check 21 times,
+  0.5 s apart, like TS (#578). They checked 20 times and slept 0.5 s after the last check.
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement
