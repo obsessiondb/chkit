@@ -131,3 +131,19 @@ def test_a_value_flag_followed_by_a_double_dash_token_does_not_take_it(
     result = CliRunner().invoke(app, ["generate", "--name", "--json"])
     assert result.exit_code == 1
     assert not (project / "chkit").exists()
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["status", "--help", "--nope"],
+        ["status", "--nope", "-h"],
+        ["generate", "--name", "--help"],
+        ["drift", "--table", "-h"],
+    ],
+)
+@pytest.mark.usefixtures("project")
+def test_help_wins_over_a_flag_error_as_in_ts(args: list[str]) -> None:
+    result = CliRunner().invoke(app, args)
+    assert (result.exit_code, result.stderr) == (0, ""), result.output
+    assert "Usage:" in result.stdout

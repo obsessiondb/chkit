@@ -165,6 +165,10 @@ class _ChkitCommand(TyperCommand):
         try:
             if ctx.ignore_unknown_options:
                 normalized = _split_forwarded_args(args, params)
+            elif any(token in _HELP_OPTION_NAMES for token in args):
+                # As in TS, -h / --help anywhere shows the help, even next to a
+                # flag error or where it would be a flag's value.
+                normalized = ["--help"]
             else:
                 normalized = _normalize_short_options(args, params)
         except (UnknownFlagError, MissingFlagValueError) as error:
