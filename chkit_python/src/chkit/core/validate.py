@@ -45,7 +45,13 @@ from chkit.core.model import (
     ValidationIssueCode,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql_lexer import SQLToken, js_trim, string_literal_value, tokenize_sql
+from chkit.core.sql_lexer import (
+    SQLToken,
+    js_regex,
+    js_trim,
+    string_literal_value,
+    tokenize_sql,
+)
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.text_index import render_text_index_type
@@ -212,10 +218,10 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
                 "ALIAS, or EPHEMERAL definition. Compute values in the materialized view.",
             )
     settings = definition.settings or {}
-    if re.fullmatch(r"Kafka\s*(?:\(\s*\))?", definition.engine.strip(), re.IGNORECASE):
+    if re.fullmatch(js_regex(r"Kafka\s*(?:\(\s*\))?"), js_trim(definition.engine), re.IGNORECASE):
         for key in ("kafka_broker_list", "kafka_topic_list", "kafka_group_name", "kafka_format"):
             setting = settings.get(key)
-            if not isinstance(setting, str) or not setting.strip():
+            if not isinstance(setting, str) or not js_trim(setting):
                 _push(
                     issues,
                     definition,
@@ -526,7 +532,7 @@ def _validate_unstored_column_references(
 def _engine_arguments(engine: str) -> list[str]:
     """Bare engine arguments, with one tuple level flattened: ``SummingMergeTree((a, b))``."""
     # Only MergeTree-family parameters name columns; e.g. Distributed takes a cluster name.
-    match = re.fullmatch(r"\s*\w*MergeTree\s*\((.*)\)\s*", engine, re.DOTALL)
+    match = re.fullmatch(js_regex(r"\s*\w*MergeTree\s*\((.*)\)\s*"), engine, re.DOTALL)
     arguments = split_top_level_comma(match.group(1)) if match else []
     parts = [p for arg in arguments for p in split_top_level_comma(strip_wrapping_parens(arg))]
     return [part for part in parts if not part.startswith("'")]
@@ -632,8 +638,10 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
 
 
 _INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)"
-    r"(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$",
+    js_regex(
+        r"^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)"
+        r"(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$"
+    ),
     re.IGNORECASE,
 )
 
@@ -785,7 +793,7 @@ def _validate_dictionary(  # noqa: PLR0912
                     f'references missing attribute "{column}"',
                 )
 
-    if len(definition.source.strip()) == 0:
+    if len(js_trim(definition.source)) == 0:
         _push(
             issues,
             definition,
@@ -794,7 +802,7 @@ def _validate_dictionary(  # noqa: PLR0912
             f'requires a non-empty "source"',
         )
 
-    if len(definition.layout.strip()) == 0:
+    if len(js_trim(definition.layout)) == 0:
         _push(
             issues,
             definition,
@@ -803,7 +811,7 @@ def _validate_dictionary(  # noqa: PLR0912
             f'requires a non-empty "layout"',
         )
 
-    if len(definition.lifetime.strip()) == 0:
+    if len(js_trim(definition.lifetime)) == 0:
         _push(
             issues,
             definition,
