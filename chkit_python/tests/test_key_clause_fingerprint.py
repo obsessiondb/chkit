@@ -8,13 +8,13 @@ joined the parts with commas and dropped every backtick and space.
 
 from __future__ import annotations
 
-from chkit.cli.commands.drift_compare import compare_table_shape
+from chkit.cli.commands.drift_compare import TableDriftReasonCode, compare_table_shape
 from chkit.clickhouse.introspect import IntrospectedTable
 from chkit.core.key_clause import key_clause_fingerprint, split_top_level_comma
-from chkit.core.model import ColumnDefinition, TableDefinition, table
+from chkit.core.model import ColumnDefinition, ColumnInput, TableDefinition, table
 from chkit.core.planner import plan_diff
 
-_COLUMNS = [
+_COLUMNS: list[ColumnInput] = [
     {"name": "id", "type": "UInt64"},
     {"name": "a", "type": "String"},
     {"name": "b", "type": "String"},
@@ -45,7 +45,7 @@ def _live(key: str) -> IntrospectedTable:
     return IntrospectedTable(
         database="app",
         name="events",
-        columns=[ColumnDefinition(**column) for column in _COLUMNS],
+        columns=[ColumnDefinition.model_validate(column) for column in _COLUMNS],
         settings={},
         indexes=[],
         projections=[],
@@ -55,7 +55,7 @@ def _live(key: str) -> IntrospectedTable:
     )
 
 
-def _drift_codes(order_by: list[str], key: str) -> list[str] | None:
+def _drift_codes(order_by: list[str], key: str) -> list[TableDriftReasonCode] | None:
     detail = compare_table_shape(_events(order_by, []), _live(key))
     return None if detail is None else detail.reason_codes
 

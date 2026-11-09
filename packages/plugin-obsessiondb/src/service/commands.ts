@@ -63,6 +63,8 @@ async function runServiceSelect(
 	return 0
 }
 
+// chkit before #624 passed the command name in args on `chkit obsessiondb service ...`;
+// dropping it keeps this plugin working with those CLIs.
 function serviceArgs(args: string[]): string[] {
 	return args[0] === 'service' ? args.slice(1) : args
 }
