@@ -24,6 +24,10 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- `migrate --apply` no longer waits for an async (`mode=async`) statement's HTTP response
+  before polling, so it prints progress lines while the load runs, as TS does (#603). The
+  submit has its own HTTP session, so polls keep working after a proxy cuts it (HTTP 524)
+  instead of failing with `Session ... is locked by a concurrent client`.
 - `migrate` reads `//`, `# ` and `#!` comments as ClickHouse does, so a `;` inside one no
   longer runs the commented-out text after it as a statement, and a quote or `/*` inside one
   no longer joins statements (#562, fixed in TS too). A partly applied migration whose

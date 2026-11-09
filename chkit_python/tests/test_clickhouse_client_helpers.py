@@ -10,6 +10,7 @@ from __future__ import annotations
 
 from unittest.mock import MagicMock
 
+import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 
@@ -119,6 +120,52 @@ def test_execute_reraises_other_database_errors_without_retry() -> None:
         client.execute("CREATE TABL x")
 
     assert fake.command.call_count == 1
+
+
+# ---------- submit ----------
+
+
+def test_submit_runs_on_its_own_driver_without_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The submit request holds the session it is sent in until the query ends,
+    so polling on the main driver's session would be locked out (TS sends it
+    through a session-less client)."""
+    drivers: list[tuple[MagicMock, dict[str, object]]] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        drivers.append((driver, kwargs))
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123",
+            username="default",
+            password="pw",
+            database="analytics",
+            secure=False,
+        )
+    )
+    assert client.submit("INSERT INTO t SELECT 1", query_id="q1", settings={"x": "1"}) == "q1"
+    assert client.submit("INSERT INTO t SELECT 2", query_id="q2") == "q2"
+
+    [(main, main_kwargs), (submit_driver, submit_kwargs)] = drivers
+    main.command.assert_not_called()
+    assert submit_driver.database == "analytics"
+    assert submit_kwargs == {**main_kwargs, "autogenerate_session_id": False}
+    assert [call.args for call in submit_driver.command.call_args_list] == [
+        ("INSERT INTO t SELECT 1",),
+        ("INSERT INTO t SELECT 2",),
+    ]
+    assert [call.kwargs for call in submit_driver.command.call_args_list] == [
+        {"settings": {"x": "1", "query_id": "q1"}},
+        {"settings": {"query_id": "q2"}},
+    ]
+    client.close()
+    main.close.assert_called_once()
+    submit_driver.close.assert_called_once()
 
 
 # ---------- clickhouse_error_message ----------
