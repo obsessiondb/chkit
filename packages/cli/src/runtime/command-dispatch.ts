@@ -391,6 +391,22 @@ async function resolvePluginTableScope(input: {
 	}
 }
 
+/**
+ * `chkit <plugin> <command> x` gives the command the args that
+ * `chkit plugin <plugin> <command> x` gives it: the positionals after its
+ * name (#624). The name is the first positional when the user typed it; the
+ * only subcommand of a plugin also runs without it, and then nothing is dropped.
+ */
+function withoutSubcommandName(
+	positionals: string[],
+	subcommandName: string | undefined,
+): string[] {
+	if (subcommandName === undefined || positionals[0] !== subcommandName) {
+		return positionals
+	}
+	return positionals.slice(1)
+}
+
 export async function runResolvedCommand(input: {
 	argv: string[]
 	commandName: string
@@ -439,7 +455,7 @@ export async function runResolvedCommand(input: {
 		)
 		if (!parsed) return
 		flags = parsed.flags
-		positionals = parsed.positionals
+		positionals = withoutSubcommandName(parsed.positionals, subcommandName)
 	}
 
 	const gf = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)

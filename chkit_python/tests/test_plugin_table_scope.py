@@ -124,7 +124,7 @@ def test_an_unmatched_selector_is_an_empty_scope_and_no_selector_is_unscoped() -
         "matchedTables": [],
         "matchCount": 0,
     }
-    unscoped = {"enabled": False, "selector": None, "matchedTables": [], "matchCount": 0}
+    unscoped: dict[str, Any] = {"enabled": False, "selector": None, "matchedTables": [], "matchCount": 0}
     assert _scope() == unscoped
     assert _scope("--table", "") == unscoped
 

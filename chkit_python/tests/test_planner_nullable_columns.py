@@ -7,12 +7,12 @@ from typing import Any
 import pytest
 
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import TableDefinition, table
+from chkit.core.model import SchemaDefinition, table
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
 
 
-def _definition(column: dict[str, Any]) -> list[TableDefinition]:
+def _definition(column: dict[str, Any]) -> list[SchemaDefinition]:
     return canonicalize_definitions(
         [
             table(
@@ -27,7 +27,7 @@ def _definition(column: dict[str, Any]) -> list[TableDefinition]:
     )
 
 
-def _op_types(old: list[TableDefinition], new: list[TableDefinition]) -> list[str]:
+def _op_types(old: list[SchemaDefinition], new: list[SchemaDefinition]) -> list[str]:
     return [operation.type for operation in plan_diff(old, new).operations]
 
 
