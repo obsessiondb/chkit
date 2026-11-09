@@ -163,8 +163,10 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         if token in takes_value:
             own.append(token)
             if takes_value[token]:
-                # Without its value, click would take the `--` below as the value.
-                if i >= len(args):
+                # As TS `extractConfigPath`: last, or followed by a `--` token,
+                # the flag has no value. click would take that token (or the
+                # `--` below) as the value.
+                if i >= len(args) or args[i].startswith("--"):
                     raise MissingFlagValueError(long_form[token])
                 own.append(args[i])
                 i += 1
@@ -256,7 +258,14 @@ class _ChkitCommand(TyperCommand):
                     args = _query_sql_behind_terminator(args, params)
                 normalized = _normalize_short_options(args, params)
         except (UnknownFlagError, MissingFlagValueError) as error:
-            report_flag_error(ctx.info_name, str(error), json_mode="--json" in args)
+            # A forwarder's own flag error here is a missing --config, which TS
+            # reports before dispatching, so `plugin` gets the usage envelope.
+            report_flag_error(
+                ctx.info_name,
+                str(error),
+                json_mode="--json" in args,
+                global_flag=ctx.ignore_unknown_options,
+            )
         return super().parse_args(ctx, normalized)
 
 
