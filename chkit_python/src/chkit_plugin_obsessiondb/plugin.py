@@ -306,9 +306,9 @@ def create_obsessiondb_plugin(
     return ChxPlugin(
         manifest=ChxPluginManifest(name="obsessiondb", api_version=1),
         hooks=_ObsessionDBHooks(),
+        # In the TS order and wording, which `chkit obsessiondb -h` and
+        # `chkit plugin obsessiondb` print and an unknown command's error names.
         commands=[
-            # In the TS order and wording, which `chkit obsessiondb -h` and
-            # `chkit plugin obsessiondb` print.
             ChxPluginCommand(
                 name="login",
                 description="Authenticate with ObsessionDB",

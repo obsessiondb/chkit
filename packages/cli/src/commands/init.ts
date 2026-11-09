@@ -28,7 +28,10 @@ interface InitOptions {
 }
 
 export async function cmdInit(argv: string[] = []): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  // Only before `--`: what follows it is an argument, which init rejects (#614).
+  const end = argv.indexOf('--')
+  const beforeEnd = end === -1 ? argv : argv.slice(0, end)
+  if (beforeEnd.includes('--help') || beforeEnd.includes('-h')) {
     console.log(`chkit init [options]
 
 Create a TypeScript config and example schema; install project dependencies.

@@ -7,10 +7,12 @@ import re
 from typing import Any
 
 import typer
+from typer._click.exceptions import UsageError  # click, which typer vendors privately
 from typer.core import TyperCommand, TyperGroup
 from typer.exceptions import TyperException
 
 from chkit import __version__
+from chkit.cli.argv import GLOBAL_FLAGS, extract_config_path, normalize_global_args
 from chkit.cli.commands import (
     check,
     codegen_shortcut,
@@ -36,7 +38,7 @@ from chkit.cli.help import (
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
 from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
-from chkit.core.flags import MissingFlagValueError, UnknownFlagError
+from chkit.core.flags import MissingFlagValueError, UnknownFlagError, expand_short_flags
 
 _HELP_OPTION_NAMES = ("-h", "--help")
 _HELP_PLUGINS_OPTION = "--help-plugins"
@@ -47,6 +49,14 @@ _HELP_PLUGINS_OPTION = "--help-plugins"
 _TS_BUILTIN_COMMANDS = frozenset(
     {"generate", "migrate", "status", "drift", "check", "snapshot", "query", "plugin"}
 )
+# The top-level options, which TS reads only as the first token.
+_ROOT_OPTION_NAMES = (*_HELP_OPTION_NAMES, "-v", "-V", "--version")
+
+
+def _option_args(args: list[str]) -> list[str]:
+    """The tokens before the first ``--`` (TS ``optionArgs``): after it,
+    ``--json`` is an argument, not an option (#568)."""
+    return args[: args.index("--")] if "--" in args else args
 
 
 def _option_forms(params: list[Any]) -> tuple[dict[str, bool], dict[str, str]]:
@@ -128,19 +138,6 @@ def _after_dash_dash(rest: list[str], missing_names: int) -> list[str]:
     if len(rest) < missing:
         return rest
     return [*rest[:missing], "--", *rest[missing:]]
-
-
-def _reject_group_bundles(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
-    """The top-level options (``-h``, ``-v`` / ``-V`` / ``--version``) take no
-    value, so a token such as ``-vx`` before the command is a bundle, which TS
-    rejects (#491). The arguments from the command on belong to the command."""
-    takes_value, _long_form = _option_forms(params)
-    for token in args:
-        if token == "--" or not token.startswith("-"):
-            break
-        if not token.startswith("--") and token[:2] in takes_value and token[2:]:
-            ctx.fail(f"No such option: {token}")
-    return args
 
 
 def _split_forwarded_args(
@@ -303,23 +300,6 @@ def _read_help_plugins(ctx: Any, args: list[str]) -> list[str]:
     ] + args[end:]
 
 
-def _group_help_plugins(ctx: Any, args: list[str]) -> list[str]:
-    """``chkit --help-plugins`` is the top-level help; ``chkit --help-plugins
-    generate`` is the help of ``generate``, as in TS."""
-    end = next(
-        (i for i, token in enumerate(args) if token == "--" or not token.startswith("-")),
-        len(args),
-    )
-    if _HELP_PLUGINS_OPTION not in args[:end]:
-        return args
-    ctx.meta[HELP_PLUGINS_META] = True
-    leading = [token for token in args[:end] if token != _HELP_PLUGINS_OPTION]
-    rest = args[end:]
-    if rest and rest[0] != "--":
-        return [*leading, rest[0], _HELP_PLUGINS_OPTION, *rest[1:]]
-    return [*leading, "--help"]
-
-
 class _ChkitCommand(TyperCommand):
     """Every chkit command reads its options as TS does (#491) and reports a
     flag error as TS does (#563)."""
@@ -341,9 +321,9 @@ class _ChkitCommand(TyperCommand):
                 # of the forwarder's own options.
                 forwarded = normalized[normalized.index("--") + 1 :]
                 ctx.meta[HELP_SUBCOMMAND_META] = forwarded[0] if forwarded else None
-            elif any(token in _HELP_OPTION_NAMES for token in args):
-                # As in TS, -h / --help anywhere shows the help, even next to a
-                # flag error or where it would be a flag's value. Where TS
+            elif any(token in _HELP_OPTION_NAMES for token in _option_args(args)):
+                # As in TS, -h / --help anywhere before `--` shows the help, even
+                # next to a flag error or where it would be a flag's value. Where TS
                 # reads --config first, a --config without its value fails
                 # first. TS then knows only its internal registry's flags:
                 # not the plugins' (--service), and for pull, a plugin
@@ -374,7 +354,7 @@ class _ChkitCommand(TyperCommand):
             report_flag_error(
                 ctx.info_name,
                 str(error),
-                json_mode="--json" in args,
+                json_mode="--json" in _option_args(args),
                 global_flag=ctx.ignore_unknown_options,
             )
         return super().parse_args(ctx, normalized)
@@ -388,12 +368,43 @@ class _ChkitGroup(TyperGroup):
     a command that fails under ``--json`` without having written JSON yet still
     leaves stdout a parseable error envelope. An unhandled error then prints
     its message as one line on stderr and exits 1; ``CHKIT_DEBUG=1`` also logs
-    the traceback. Usage errors are re-raised, so click still reports them.
+    the traceback. A usage error of the command (an unexpected argument, a
+    value that is not one of the choices) is reported as TS reports one: one
+    line on stderr, exit 1 and, under ``--json``, a ``usage`` error envelope.
+    A usage error before the command is resolved is re-raised, so click
+    still reports it.
     """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
-        args = _group_help_plugins(ctx, args)
-        return super().parse_args(ctx, _reject_group_bundles(ctx, args, self.get_params(ctx)))
+        """Read the tokens before the command as ``run`` in ``packages/cli/src/bin/chkit.ts``
+        does (#597): leading global flags move behind the command, help or the
+        version first ignores the rest, and any other first token that is not
+        a command is an unknown command."""
+        try:
+            normalized = normalize_global_args(args)
+        except MissingFlagValueError as error:
+            # TS's top-level catch: command "chkit", the error's own JSON code.
+            if "--json" in _option_args(args):
+                emit_json_error("chkit", {"code": json_error_code(error), "message": str(error)})
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1) from error
+        if normalized and normalized[0] in _ROOT_OPTION_NAMES:
+            normalized = normalized[:1]
+        elif normalized and self.get_command(ctx, normalized[0]) is None:
+            command = normalized[0]
+            # As TS, which reads the config path before it finds the command unknown.
+            try:
+                extract_config_path(expand_short_flags(normalized[1:], GLOBAL_FLAGS))
+            except MissingFlagValueError as error:
+                report_flag_error(command, str(error), json_mode="--json" in normalized)
+            message = f"Unknown command: {command}"
+            typer.echo(message, err=True)
+            if "--json" in _option_args(normalized):
+                emit_json_error(command, {"code": "unknown_command", "message": message})
+            else:
+                typer.echo(ctx.get_help())
+            raise typer.Exit(code=1)
+        return super().parse_args(ctx, normalized)
 
     def get_help(self, ctx: Any) -> str:  # noqa: ARG002 - click's signature
         return global_help_text(self.commands, __version__)
@@ -402,12 +413,20 @@ class _ChkitGroup(TyperGroup):
     # typer.Context subclass would narrow the parameter (mypy [override]).
     def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
-        json_mode = "--json" in ctx.args
+        json_mode = "--json" in _option_args(ctx.args)
         try:
             return super().invoke(ctx)
         except (typer.Exit, typer.Abort, BrokenPipeError):
             raise
         except Exception as error:
+            # A usage error of the resolved command: its arguments or its
+            # option values. A command that already wrote JSON keeps it alone.
+            if isinstance(error, UsageError) and ctx.invoked_subcommand is not None:
+                report_flag_error(
+                    ctx.invoked_subcommand,
+                    error.format_message(),
+                    json_mode=json_mode and not has_emitted_json(),
+                )
             if is_debug_enabled():
                 configure_cli_logging()
                 logging.getLogger("chkit.cli").debug("fatal error", exc_info=error)
