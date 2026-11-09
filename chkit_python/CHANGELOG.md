@@ -23,6 +23,8 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- `chkit query` runs SQL passed as one argument that starts with a line comment, such as
+  `"-- note\nSELECT 1"`, instead of rejecting it as an unknown option, as TS does (#584).
 - `drift` no longer reports a column as changed when its default wraps a heredoc that holds a
   parenthesis, such as `($$a)$$)`, which ClickHouse stores as `'a)'`: parentheses inside a
   heredoc or a comment no longer count as structure (#587, fixed in TS too).
