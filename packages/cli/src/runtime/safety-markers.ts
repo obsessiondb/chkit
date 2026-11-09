@@ -134,9 +134,9 @@ export function findNonSelectBarriers(
  * A SELECT, possibly in parentheses, a `WITH ... SELECT` or a FROM-first
  * `FROM ... SELECT`. ClickHouse also reads `WITH ... INSERT INTO`, and runs
  * the statements joined by `PARALLEL WITH` even when it then rejects a SELECT
- * among them, so an `INSERT` or a `PARALLEL WITH` outside a subquery makes
- * it something else. A column or alias named `insert` or `parallel` there
- * has to be quoted.
+ * among them, so an `INSERT INTO` or a `PARALLEL WITH` outside a subquery
+ * makes it something else. A column or alias named `parallel` followed by a
+ * WITH modifier (`GROUP BY parallel WITH TOTALS`) there has to be quoted.
  */
 export function isSelectStatement(statement: string): boolean {
   const tokens = tokenizeSQL(statement).filter((token) => !isTrivia(token))
@@ -154,8 +154,8 @@ export function isSelectStatement(statement: string): boolean {
 }
 
 function isOtherStatementKeyword(token: SQLToken, next: SQLToken | undefined): boolean {
-  const word = keyword(token)
-  return word === 'INSERT' || (word === 'PARALLEL' && keyword(next) === 'WITH')
+  const pair = `${keyword(token)} ${keyword(next)}`
+  return pair === 'INSERT INTO' || pair === 'PARALLEL WITH'
 }
 
 function isPunctuation(token: SQLToken | undefined, text: string): boolean {

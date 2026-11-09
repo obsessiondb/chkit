@@ -233,9 +233,9 @@ def is_select_statement(statement: str) -> bool:
 
     ClickHouse also reads ``WITH ... INSERT INTO``, and runs the statements
     joined by ``PARALLEL WITH`` even when it then rejects a SELECT among them,
-    so an ``INSERT`` or a ``PARALLEL WITH`` outside a subquery makes it
-    something else. A column or alias named ``insert`` or ``parallel`` there
-    has to be quoted.
+    so an ``INSERT INTO`` or a ``PARALLEL WITH`` outside a subquery makes it
+    something else. A column or alias named ``parallel`` followed by a WITH
+    modifier (``GROUP BY parallel WITH TOTALS``) there has to be quoted.
     """
     tokens = [token for token in tokenize_sql(statement) if not is_trivia(token)]
     start = 0
@@ -258,10 +258,8 @@ def is_select_statement(statement: str) -> bool:
 
 
 def _is_other_statement_keyword(token: SQLToken, following: SQLToken | None) -> bool:
-    word = _keyword(token)
-    return word == "INSERT" or (
-        word == "PARALLEL" and following is not None and _keyword(following) == "WITH"
-    )
+    pair = (_keyword(token), _keyword(following) if following is not None else None)
+    return pair in (("INSERT", "INTO"), ("PARALLEL", "WITH"))
 
 
 def _is_punctuation(token: SQLToken, text: str) -> bool:

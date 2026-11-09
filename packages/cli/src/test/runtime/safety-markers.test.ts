@@ -320,6 +320,8 @@ describe('isSelectStatement (#634)', () => {
     '(WITH 1 AS x SELECT x);',
     'WITH 1 AS x SELECT `insert` FROM t',
     'SELECT * FROM (SELECT 1 AS insert, 2 AS parallel)',
+    "SELECT query_id FROM system.processes AS insert WHERE query_kind = 'Insert'",
+    'WITH 1 AS insert SELECT insert.x FROM t AS insert',
     "FROM system.processes SELECT query_id WHERE query_kind = 'Insert';",
   ]
   const others = [
