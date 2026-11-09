@@ -33,7 +33,6 @@ from chkit.cli.migration_store import (
     checksum_sql,
 )
 from chkit.cli.safety_markers import extract_migration_operation_summaries
-from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import parse_exchange_tables, wait_for_exchange
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.clickhouse.replicas import ReplicaFanout
@@ -792,7 +791,7 @@ def test_parse_exchange_tables() -> None:
 
 
 def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
     answers = [
         [
             {"database": "app", "name": "a", "replicas": 2, "uuids": 2, "sample_uuid": "u1"},
@@ -986,10 +985,9 @@ def test_apply_barrier_waits_instead_of_executing(
     )
     client = _RecordingClient(polls=[["q1"], ["q1"], []])
     store = _FakeStore()
-    barrier = migrate_apply.wait_for_insert_barrier
 
     def fast_barrier(*args: Any, **kwargs: Any) -> int:
-        return barrier(*args, **kwargs, sleep=lambda _s: None)
+        return wait_for_insert_barrier(*args, **kwargs, sleep=lambda _s: None)
 
     monkeypatch.setattr(migrate_apply, "wait_for_insert_barrier", fast_barrier)
     _run(tmp_path, sql, client, store)
@@ -1095,7 +1093,7 @@ def test_apply_stops_when_the_exchange_does_not_reach_every_replica(
         "chkit.clickhouse.ddl_propagation.resolve_replica_fanout",
         lambda *_: ReplicaFanout(cluster="default", replicas=2),
     )
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
     client = _QueryLogClient(lambda _sql: [])
     store = _FakeStore()
     with pytest.raises(

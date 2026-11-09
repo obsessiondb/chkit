@@ -6,16 +6,19 @@ import hashlib
 import json
 import re
 from collections import Counter
+from collections.abc import Callable
 from pathlib import Path
+from typing import Any, TypedDict
 
 from chkit.core.codec import (
+    CodecSpecInput,
     canonicalize_codec,
     codec_fingerprint,
     codec_raw,
     parse_codec,
     render_codec,
 )
-from chkit.core.model import table
+from chkit.core.model import TableDefinition, table
 from chkit.core.planner import plan_diff
 from chkit.core.sql import column_type_fingerprint
 from chkit.core.validate import validate_definitions
@@ -36,12 +39,23 @@ EXCEPTIONS = [
 ]
 
 
-def matrix_table(type_, spec):
+class _Counts(TypedDict):
+    stored: int
+    rejected: int
+    exceptions: Counter[str]
+
+
+def matrix_table(type_: str, spec: CodecSpecInput) -> TableDefinition:
     return table(database="db", name="t", engine="MergeTree()", primaryKey=[], orderBy=[],
                  columns=[{"name": "c", "type": type_, "codec": spec}])
 
 
-def check_stored(entry, forms, issues, check):
+def check_stored(
+    entry: dict[str, Any],
+    forms: list[CodecSpecInput],
+    issues: list[list[list[str]]],
+    check: Callable[[bool, str], None],
+) -> None:
     live = parse_codec(entry["stored"])
     assert live is not None
     pulled = canonicalize_codec(live)
@@ -69,10 +83,10 @@ def check_stored(entry, forms, issues, check):
             check(not plan_diff([target], [source]).operations, f"reverse planner form {index}")
 
 
-def test_codec_server_matrix():
-    failures = []
-    rows = []
-    counts = {"stored": 0, "rejected": 0, "exceptions": Counter()}
+def test_codec_server_matrix() -> None:
+    failures: list[str] = []
+    rows: list[list[object]] = []
+    counts: _Counts = {"stored": 0, "rejected": 0, "exceptions": Counter()}
     hits = [0] * len(EXCEPTIONS)
     for entry in FIXTURE["cases"]:
         matches = [i for i, (_, field, pattern, _) in enumerate(EXCEPTIONS)
@@ -80,7 +94,7 @@ def test_codec_server_matrix():
         exception_index = matches[0] if matches else None
         exception = EXCEPTIONS[exception_index] if exception_index is not None else None
         parsed = parse_codec(f"CODEC({entry['codec']})")
-        forms = [codec_raw(entry["codec"])]
+        forms: list[CodecSpecInput] = [codec_raw(entry["codec"])]
         if parsed and all(atom.kind != "raw" for atom in parsed):
             forms.append(parsed)
         issues = [[[issue.code, issue.message]
@@ -88,11 +102,11 @@ def test_codec_server_matrix():
                    if issue.code.startswith("codec_")] for spec in forms]
         rows.append([entry["type"], entry["codec"], entry["server"],
                      exception[0] if exception else "", issues])
-        if exception is not None:
+        if exception_index is not None:
             hits[exception_index] += 1
-            counts["exceptions"][exception[0]] += 1
+            counts["exceptions"][EXCEPTIONS[exception_index][0]] += 1
         else:
-            def check(ok, label, entry=entry):
+            def check(ok: bool, label: str, entry: dict[str, Any] = entry) -> None:
                 if not ok:
                     failures.append(f"{entry['type']} / {entry['codec']}: {label}")
 

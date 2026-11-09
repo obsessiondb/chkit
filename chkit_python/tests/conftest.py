@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -81,7 +82,7 @@ def ch_server_version(ch_client: Any) -> tuple[int, ...]:
 
 
 @pytest.fixture
-def assert_valid_sql(ch_client: _QueryClient):
+def assert_valid_sql(ch_client: _QueryClient) -> Callable[[str], None]:
     """Returns a callable that asserts a SQL statement parses via EXPLAIN AST."""
 
     def _assert(sql: str) -> None:

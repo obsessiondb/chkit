@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import io
 import sys
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
@@ -16,9 +15,8 @@ from chkit.cli.commands.migrate_prompts import (
 
 
 @pytest.fixture
-def clean_ci_env(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
+def clean_ci_env(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("CI", raising=False)
-    return
 
 
 # ---------- is_background_or_ci ----------
@@ -89,7 +87,7 @@ def test_ci_env_other_values_do_not_trigger(
 
 
 @pytest.fixture
-def captured_stdout(monkeypatch: pytest.MonkeyPatch) -> Iterator[io.StringIO]:
+def captured_stdout(monkeypatch: pytest.MonkeyPatch) -> io.StringIO:
     buf = io.StringIO()
     monkeypatch.setattr(sys, "stdout", buf)
     return buf
