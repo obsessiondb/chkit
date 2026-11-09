@@ -248,9 +248,9 @@ class _ChkitCommand(TyperCommand):
         try:
             if ctx.ignore_unknown_options:
                 normalized = _split_forwarded_args(args, params)
-            elif any(token in _HELP_OPTION_NAMES for token in args):
-                # As in TS, -h / --help anywhere shows the help, even next to a
-                # flag error or where it would be a flag's value.
+            elif any(token in _HELP_OPTION_NAMES for token in _option_args(args)):
+                # As in TS, -h / --help anywhere before `--` shows the help, even
+                # next to a flag error or where it would be a flag's value.
                 normalized = ["--help"]
             else:
                 # query first moves its SQL arguments behind `--` (#584), so SQL
@@ -264,7 +264,7 @@ class _ChkitCommand(TyperCommand):
             report_flag_error(
                 ctx.info_name,
                 str(error),
-                json_mode="--json" in args,
+                json_mode="--json" in _option_args(args),
                 global_flag=ctx.ignore_unknown_options,
             )
         return super().parse_args(ctx, normalized)
@@ -317,7 +317,7 @@ class _ChkitGroup(TyperGroup):
     # typer.Context subclass would narrow the parameter (mypy [override]).
     def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
-        json_mode = "--json" in ctx.args
+        json_mode = "--json" in _option_args(ctx.args)
         try:
             return super().invoke(ctx)
         except (typer.Exit, typer.Abort, BrokenPipeError):
