@@ -138,7 +138,10 @@ export function parseCommandArgs(
 	commandName: string,
 	argv: string[],
 	flagDefs: readonly FlagDef[],
-	{ endOfFlags = false }: { endOfFlags?: boolean } = {},
+	{
+		endOfFlags = false,
+		rejectPositionals = false,
+	}: { endOfFlags?: boolean; rejectPositionals?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } | null {
 	if (commandName === 'query') {
 		const { flagArgs, positionals } = splitQueryArgs(argv, flagDefs)
@@ -152,15 +155,46 @@ export function parseCommandArgs(
 		: { flagArgs: argv, rest: [] }
 	const flags = parseFlagsOrReport(commandName, flagArgs, flagDefs)
 	if (!flags) return null
-	return {
-		flags,
-		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
+	const positionals = [...extractPositionals(flagArgs, flagDefs), ...rest]
+	if (rejectPositionals && positionals.length > 0) {
+		// click's words in chkit-py; reported after any flag error, as click does (#612).
+		reportCommandUsageError(
+			commandName,
+			`Got unexpected extra argument(s) (${positionals.join(' ')})`,
+			flags['--json'] === true,
+		)
+		return null
 	}
+	return { flags, positionals }
 }
 
 /** Core commands keep rejecting `--`; plugin commands read it as the end of their flags. */
 function isPluginCommand(resolved: RegisteredCommand): boolean {
 	return resolved.pluginName !== undefined && resolved.pluginName !== 'core'
+}
+
+/** The core commands that read positionals: the SQL, the snapshot subcommand, the forwarded plugin command. */
+const CORE_COMMANDS_WITH_POSITIONALS = new Set(['query', 'snapshot', 'plugin'])
+
+/**
+ * Every other core command takes none, so a stray argument is a usage error
+ * instead of being ignored (#612). Plugin commands get theirs in `args`.
+ */
+function rejectsPositionals(
+	commandName: string,
+	resolved: RegisteredCommand,
+): boolean {
+	return (
+		resolved.pluginName === 'core' &&
+		!CORE_COMMANDS_WITH_POSITIONALS.has(commandName)
+	)
+}
+
+function commandArgsOptions(commandName: string, resolved: RegisteredCommand) {
+	return {
+		endOfFlags: isPluginCommand(resolved),
+		rejectPositionals: rejectsPositionals(commandName, resolved),
+	}
 }
 
 /**
@@ -189,7 +223,7 @@ export function parseInitFlags(input: {
 		input.commandName,
 		argsAfterCommand,
 		input.registry.resolveFlags(input.commandName, subcommand.name),
-		{ endOfFlags: isPluginCommand(input.resolved) },
+		commandArgsOptions(input.commandName, input.resolved),
 	)
 	return parsed ? parsed.flags : null
 }
@@ -361,15 +395,21 @@ export function parseFlagsOrReport(
 			error instanceof UnknownFlagError ||
 			error instanceof MissingFlagValueError
 		) {
-			console.error(error.message)
-			if (args.includes('--json')) {
-				emitJsonError(commandName, { code: 'usage', message: error.message })
-			}
-			process.exitCode = 1
+			reportCommandUsageError(commandName, error.message, args.includes('--json'))
 			return null
 		}
 		throw error
 	}
+}
+
+function reportCommandUsageError(
+	commandName: string,
+	message: string,
+	jsonMode: boolean,
+): void {
+	console.error(message)
+	if (jsonMode) emitJsonError(commandName, { code: 'usage', message })
+	process.exitCode = 1
 }
 
 async function resolvePluginTableScope(input: {
@@ -435,7 +475,7 @@ export async function runResolvedCommand(input: {
 			input.commandName,
 			argsAfterCommand,
 			allFlags,
-			{ endOfFlags: isPluginCommand(input.resolved) },
+			commandArgsOptions(input.commandName, input.resolved),
 		)
 		if (!parsed) return
 		flags = parsed.flags

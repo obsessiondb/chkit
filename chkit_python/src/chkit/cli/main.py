@@ -238,7 +238,7 @@ def _query_sql_behind_terminator(args: list[str], params: list[Any]) -> list[str
 
 class _ChkitCommand(TyperCommand):
     """Every chkit command reads its options as TS does (#491) and reports a
-    flag error as TS does (#563)."""
+    flag error (#563) or a stray argument (#612) as TS does."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
@@ -257,7 +257,22 @@ class _ChkitCommand(TyperCommand):
                 normalized = _normalize_short_options(args, params)
         except (UnknownFlagError, MissingFlagValueError) as error:
             report_flag_error(ctx.info_name, str(error), json_mode="--json" in args)
-        return super().parse_args(ctx, normalized)
+        # click would raise its own usage error (exit 2) for a stray argument;
+        # report it with click's words as TS does: exit 1, usage envelope (#612).
+        # The options are still checked first, as click checks them.
+        allow_extra_args = ctx.allow_extra_args
+        ctx.allow_extra_args = True
+        try:
+            extra = super().parse_args(ctx, normalized)
+        finally:
+            ctx.allow_extra_args = allow_extra_args
+        if extra and not allow_extra_args and not ctx.resilient_parsing:
+            report_flag_error(
+                ctx.info_name,
+                f"Got unexpected extra argument(s) ({' '.join(extra)})",
+                json_mode="--json" in args,
+            )
+        return extra
 
 
 class _ChkitGroup(TyperGroup):
