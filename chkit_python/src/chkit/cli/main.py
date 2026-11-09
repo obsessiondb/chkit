@@ -317,9 +317,12 @@ class _ChkitGroup(TyperGroup):
     # typer.Context subclass would narrow the parameter (mypy [override]).
     def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
-        # As TS optionArgs(): after `--`, `--json` is an argument (#568).
+        # A failure is JSON only with `--json` before `--`, as TS's top-level
+        # catch reads optionArgs() (#568). A usage error reads every argument,
+        # as TS's reportUsageError for a command's flags reads argv.
         args = list(ctx.args)
         json_mode = "--json" in (args[: args.index("--")] if "--" in args else args)
+        usage_json_mode = "--json" in args
         try:
             return super().invoke(ctx)
         except (typer.Exit, typer.Abort, BrokenPipeError):
@@ -331,7 +334,7 @@ class _ChkitGroup(TyperGroup):
                 report_flag_error(
                     ctx.invoked_subcommand,
                     error.format_message(),
-                    json_mode=json_mode and not has_emitted_json(),
+                    json_mode=usage_json_mode and not has_emitted_json(),
                 )
             if is_debug_enabled():
                 configure_cli_logging()
