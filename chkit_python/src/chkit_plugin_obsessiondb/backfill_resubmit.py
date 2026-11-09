@@ -3,8 +3,8 @@
 Port of ``packages/plugin-obsessiondb/src/backfill/resubmit.ts``.
 
 ``backfill submit --plan-id <id>`` re-submits only a plan whose job failed or
-was cancelled, and only with the chunks whose task did not finish in that job,
-so no chunk is written twice.
+was cancelled, and only with the chunks that job carried but did not finish, so
+no chunk is written twice, however often a plan is re-submitted.
 """
 
 from __future__ import annotations
@@ -28,7 +28,7 @@ class ReplacedJob:
 class ResubmitPlan:
     plan: BackfillPlanState
     replaced_job: ReplacedJob
-    # Chunks left out because they finished in the replaced job.
+    # Chunks left out because they already finished.
     skipped_chunks: int
 
 
@@ -70,7 +70,9 @@ def load_plan_for_resubmit(
             )
             raise ValueError(msg)
 
-    # Task ids are the chunk ids sent by submit.
+    # Task ids are the chunk ids sent by submit. A re-submitted job carries only
+    # the chunks still owed, so a chunk missing from it finished in an earlier job.
+    carried = {task.get("id") for task in job.tasks}
     finished = {
         task.get("id")
         for task in job.tasks
@@ -80,7 +82,11 @@ def load_plan_for_resubmit(
         )
     }
     plan = saved.plan
-    remaining = [chunk for chunk in plan.chunk_plan.chunks if chunk.id not in finished]
+    remaining = [
+        chunk
+        for chunk in plan.chunk_plan.chunks
+        if chunk.id in carried and chunk.id not in finished
+    ]
     if not remaining:
         msg = (
             f"Every chunk of plan {plan_id} already finished in job {job_id}."

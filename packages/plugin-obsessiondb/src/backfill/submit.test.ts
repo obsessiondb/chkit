@@ -410,6 +410,34 @@ describe('handleSubmit --plan-id', () => {
 		)
 	})
 
+	test('leaves out a chunk that finished in an earlier job on every later re-submit', async () => {
+		const { configPath, planId } = await setupPlan({ jobId: 'job-1' })
+		const jobs: Record<string, { taskIds: string[]; doneTaskIds: string[] }> = {
+			'job-1': { taskIds: ['c1', 'c2'], doneTaskIds: ['c1'] },
+		}
+		const submitted: string[][] = []
+		globalThis.fetch = mock(async (input: RequestInfo | URL, init?: RequestInit) => {
+			const request = new Request(input, init)
+			const procedure = new URL(request.url).pathname.replace(/^\/rpc\//, '')
+			const { json } = (await request.json()) as { json: { jobId?: string; tasks?: Array<{ id: string }> } }
+			if (procedure === 'jobs/submit') {
+				const taskIds = (json.tasks ?? []).map((task) => task.id)
+				submitted.push(taskIds)
+				const jobId = `job-${submitted.length + 1}`
+				jobs[jobId] = { taskIds, doneTaskIds: [] }
+				return orpcResponse({ jobId })
+			}
+			const job = jobs[json.jobId ?? '']
+			return orpcResponse(jobDetail('failed', job?.doneTaskIds ?? [], job?.taskIds))
+		}) as typeof fetch
+
+		await resubmit(configPath, { '--plan-id': planId })
+		const { printed } = await resubmit(configPath, { '--plan-id': planId })
+
+		expect(submitted).toEqual([['c2'], ['c2']])
+		expect(printed[0]).toMatchObject({ jobId: 'job-3', replacedJobId: 'job-2', taskCount: 1, skippedChunks: 1 })
+	})
+
 	test('refuses when every chunk finished in the replaced job', async () => {
 		const { configPath, planId } = await setupPlan({ jobId: 'job-old' })
 		const calls = mockJobsApi('failed', ['c1', 'c2'])
@@ -470,7 +498,7 @@ describe('handleSubmit --plan-id', () => {
 	})
 })
 
-function jobDetail(status: string, doneTaskIds: string[]) {
+function jobDetail(status: string, doneTaskIds: string[], taskIds = ['c1', 'c2']) {
 	return {
 		id: 'job-old',
 		serviceId: 'svc-1',
@@ -490,7 +518,7 @@ function jobDetail(status: string, doneTaskIds: string[]) {
 		maxRetries: 3,
 		workflowId: null,
 		metadata: null,
-		tasks: ['c1', 'c2'].map((id, taskIndex) => jobTask(id, taskIndex, doneTaskIds.includes(id) ? 'done' : 'failed')),
+		tasks: taskIds.map((id, taskIndex) => jobTask(id, taskIndex, doneTaskIds.includes(id) ? 'done' : 'failed')),
 	}
 }
 
