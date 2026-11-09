@@ -90,12 +90,14 @@ function splitQueryArgs(
 }
 
 /**
- * A query argument that starts with `-` is a flag unless its name (the part
- * before any `=`) holds whitespace: SQL that starts with a line comment, such
- * as `-- note\nSELECT 1`, stays SQL. A lone `-` is SQL too.
+ * A query argument that starts with `-` is a flag unless it holds a line
+ * break, or whitespace before any `=`: SQL that starts with a line comment,
+ * such as `-- note\nSELECT 1` or `--tag=x\nSELECT 1`, stays SQL. A lone `-`
+ * is SQL too.
  */
 function looksLikeFlag(token: string): boolean {
 	if (!token.startsWith('-') || token === '-') return false
+	if (/[\r\n]/.test(token)) return false
 	const eqIdx = token.indexOf('=')
 	const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
 	return !/\s/.test(name)

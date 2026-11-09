@@ -15,7 +15,7 @@ chkit query "<sql>" [flags]
 
 The SQL must be a single positional argument. Wrap it in quotes if it contains spaces.
 
-An argument that starts with `-`, such as `-x` or `--bogus`, is read as a flag, and an unknown one is an error. SQL that starts with a line comment (`-- note` followed by a newline and the query) is still SQL. To pass any other SQL that starts with `-`, put `--` before it: `chkit query -- "<sql>"`.
+An argument that starts with `-`, such as `-x` or `--bogus`, is read as a flag, and an unknown one is an error. SQL that starts with a line comment (`-- note` followed by a newline and the query) is still SQL: an argument that holds a line break, or a space before any `=`, is never read as a flag. To pass any other SQL that starts with `-`, put `--` before it: `chkit query -- "<sql>"`.
 
 ## Flags
 

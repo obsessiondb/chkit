@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import typer
@@ -123,13 +124,22 @@ def _split_forwarded_args(ctx: Any, args: list[str], params: list[Any]) -> list[
     return [*own, "--", *forwarded]
 
 
+# JavaScript's `\s`, so both ports split SQL from flags on the same characters.
+_JS_WHITESPACE = re.compile(
+    "[\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]"
+)
+
+
 def _looks_like_flag(token: str) -> bool:
-    """As TS ``looksLikeFlag``: a ``-`` token is a flag unless its name (the
-    part before any ``=``) holds whitespace, as SQL that starts with a line
-    comment does (``-- note\\nSELECT 1``). A lone ``-`` is not a flag."""
+    """As TS ``looksLikeFlag``: a ``-`` token is a flag unless it holds a line
+    break, or whitespace before any ``=``, as SQL that starts with a line
+    comment does (``-- note\\nSELECT 1``, ``--tag=x\\nSELECT 1``). A lone
+    ``-`` is not a flag."""
     if not token.startswith("-") or token == "-":
         return False
-    return not any(char.isspace() for char in token.split("=", 1)[0])
+    if "\n" in token or "\r" in token:
+        return False
+    return _JS_WHITESPACE.search(token.split("=", 1)[0]) is None
 
 
 def _query_sql_behind_terminator(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
@@ -156,7 +166,10 @@ def _query_sql_behind_terminator(ctx: Any, args: list[str], params: list[Any]) -
         if token == "--":
             positionals.extend(args[i:])
             break
-        if not _looks_like_flag(token):
+        # A declared option, with its value attached (`-c/my dir/c.py`,
+        # `--config=/my dir/c.py`) or not, is an option whatever it holds.
+        name = token.split("=", 1)[0] if token.startswith("--") else token[:2]
+        if name not in takes_value and not _looks_like_flag(token):
             positionals.append(token)
             continue
         options.append(token)
