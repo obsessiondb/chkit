@@ -11,7 +11,7 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
-from chkit.cli.commands import codegen_shortcut
+from chkit.cli.commands import codegen_shortcut, obsessiondb_shortcut
 from chkit.cli.main import app
 
 # CI forces rich to colour usage errors.
@@ -79,6 +79,23 @@ def test_args_hold_the_positionals_and_dash_dash_ends_the_flags() -> None:
         "name": None,
         "loud": True,
     }
+    # After --, help and the JSON flag are arguments too.
+    assert _echo("--", "--help", "-h", "--help-plugins")["args"] == [
+        "--help",
+        "-h",
+        "--help-plugins",
+    ]
+
+
+@pytest.mark.usefixtures("project")
+def test_a_dash_dash_before_the_names_ends_the_flags_and_the_names_come_first() -> None:
+    for args, expected in (
+        (["--", "echoer", "echo", "--loud"], ["--loud"]),
+        (["echoer", "--", "echo", "-z"], ["-z"]),
+    ):
+        result = CliRunner().invoke(app, ["plugin", "--json", *args])
+        assert result.exit_code == 0, (args, result.output)
+        assert json.loads(result.stdout)["args"] == expected, args
 
 
 @pytest.mark.usefixtures("project")
@@ -105,3 +122,16 @@ def test_a_shortcut_passes_dash_dash_on_to_the_plugin(
     result = CliRunner().invoke(app, ["codegen", "--check", "--", "-c", "x"])
     assert result.exit_code == 0, result.output
     assert calls[0]["tokens"] == ["--check", "--", "-c", "x"]
+
+
+def test_the_obsessiondb_command_name_may_follow_dash_dash(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+    monkeypatch.setattr(
+        obsessiondb_shortcut, "dispatch_plugin_command", lambda **kw: calls.append(kw)
+    )
+    result = CliRunner().invoke(app, ["obsessiondb", "--", "service", "alias", "-x"])
+    assert result.exit_code == 0, result.output
+    assert calls[0]["command_name"] == "service"
+    assert calls[0]["tokens"] == ["--", "alias", "-x"]

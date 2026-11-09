@@ -193,12 +193,35 @@ export function forwardedCommandFlags(
 	return [...(command.flags ?? []), ...extensionFlags]
 }
 
+/**
+ * Splits `chkit plugin` arguments into the plugin name, the command name and
+ * the command's arguments. A `--` before the names ends the flags but the
+ * names still come first, as click reads them in chkit-py:
+ * `chkit plugin -- p c x` runs `p c` with `-- x` (#568).
+ */
+export function routeForwardedArgs(rest: string[]): {
+	pluginName: string | undefined
+	commandName: string | undefined
+	commandArgs: string[]
+} {
+	const end = rest.indexOf('--')
+	if (end === -1 || end >= 2) {
+		const [pluginName, commandName, ...commandArgs] = rest
+		return { pluginName, commandName, commandArgs }
+	}
+	const [pluginName, commandName, ...after] = [
+		...rest.slice(0, end),
+		...rest.slice(end + 1),
+	]
+	return { pluginName, commandName, commandArgs: ['--', ...after] }
+}
+
 function parseForwardedInitFlags(
 	argsAfterCommand: string[],
 	plugins: PluginRuntime['plugins'],
 ): ParsedFlags {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
-	const [pluginName, commandName, ...commandArgs] = rest
+	const { pluginName, commandName, commandArgs } = routeForwardedArgs(rest)
 	const command = plugins
 		.find((entry) => entry.plugin.manifest.name === pluginName)
 		?.plugin.commands?.find((cmd) => cmd.name === commandName)

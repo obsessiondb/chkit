@@ -1,5 +1,5 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
-import { forwardedCommandFlags, parsePluginCommandArgs } from '../runtime/command-dispatch.js'
+import { forwardedCommandFlags, parsePluginCommandArgs, routeForwardedArgs } from '../runtime/command-dispatch.js'
 import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
 import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
@@ -17,9 +17,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   const { flags, args, config, configPath, pluginRuntime } = ctx
   const jsonMode = flags['--json'] === true
 
-  const pluginName = args[0]
-  const commandName = args[1]
-  const commandArgs = args.slice(2)
+  const { pluginName, commandName, commandArgs } = routeForwardedArgs(args)
 
   if (pluginRuntime.plugins.length === 0) {
     if (jsonMode) {

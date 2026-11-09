@@ -176,6 +176,15 @@ describe('plugin runtime', () => {
         name: null,
         loud: true,
       })
+      // After --, help and the JSON flag are arguments too.
+      expect(run(['plugin', 'echoer', 'echo', '--', '--help', '-h', '--help-plugins']).args).toEqual([
+        '--help',
+        '-h',
+        '--help-plugins',
+      ])
+      // A -- before the names ends the flags; the names still come first.
+      expect(run(['plugin', '--', 'echoer', 'echo', '--loud']).args).toEqual(['--loud'])
+      expect(run(['plugin', 'echoer', '--', 'echo', '-z']).args).toEqual(['-z'])
       // The shortcut path passes the subcommand name too, as before.
       expect(run(['echoer', 'echo', 'alpha', '--name', 'ada', '--', '--loud', '-z'])).toEqual({
         args: ['echo', 'alpha', '--loud', '-z'],

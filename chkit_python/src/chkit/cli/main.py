@@ -77,6 +77,19 @@ def _normalize_short_options(
     return normalized
 
 
+def _after_dash_dash(rest: list[str], missing_names: int) -> list[str]:
+    """The forwarded tokens for the user's ``--`` and the ``rest`` after it.
+
+    Names the forwarder still needs (plugin, command) come first, then the
+    ``--`` that ends the plugin command's flags (#568). Without those names the
+    ``--`` ends nothing and is dropped, as in TS.
+    """
+    missing = max(missing_names, 0)
+    if len(rest) < missing:
+        return rest
+    return [*rest[:missing], "--", *rest[missing:]]
+
+
 def _split_forwarded_args(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
     """Separate a plugin forwarder's own options from the plugin's arguments.
 
@@ -87,13 +100,18 @@ def _split_forwarded_args(ctx: Any, args: list[str], params: list[Any]) -> list[
     (``-h``, ``--json``, ``-c x`` / ``-c=x`` / ``-cx``, ``--config x``) are
     read here; every other token goes behind ``--``, in order, so click hands
     it to the plugin untouched (#491). A ``--`` of the user's own is kept, so
-    the plugin command reads it as the end of its flags (#568).
+    the plugin command reads it as the end of its flags (#568). The plugin and
+    command names still come first, as in TS: ``plugin -- p c x`` forwards
+    ``p c -- x``.
     """
     takes_value: dict[str, bool] = {}
+    names = 0
     for param in params:
         if param.param_type_name == "option":
             for opt in [*param.opts, *param.secondary_opts]:
                 takes_value[opt] = not (param.is_flag or param.count)
+        elif param.param_type_name == "argument" and param.nargs == 1:
+            names += 1
 
     own: list[str] = []
     forwarded: list[str] = []
@@ -102,7 +120,7 @@ def _split_forwarded_args(ctx: Any, args: list[str], params: list[Any]) -> list[
         token = args[i]
         i += 1
         if token == "--":
-            forwarded.extend(args[i - 1 :])
+            forwarded.extend(_after_dash_dash(args[i:], names - len(forwarded)))
             break
         long_name = token.split("=", 1)[0] if token.startswith("--") else None
         short_name = token[:2] if long_name is None else None
