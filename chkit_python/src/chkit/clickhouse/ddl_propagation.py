@@ -34,6 +34,7 @@ from chkit.clickhouse.alter_column_statement import (
     parse_rename_column,
 )
 from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
+from chkit.core.sql_lexer import js_regex
 
 # Retries after the first check, like TS ``retries: 20``: 21 checks in all.
 MAX_RETRIES = 20
@@ -527,9 +528,11 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
 
 _QUOTED_OR_BARE = r"(?:`(?:[^`\\]|\\.)*`|[^\s.`;]+)"
 _EXCHANGE_PATTERN = re.compile(
-    rf"^\s*EXCHANGE\s+TABLES\s+"
-    rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})\s+AND\s+"
-    rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})",
+    js_regex(
+        rf"^\s*EXCHANGE\s+TABLES\s+"
+        rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})\s+AND\s+"
+        rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})"
+    ),
     re.IGNORECASE,
 )
 

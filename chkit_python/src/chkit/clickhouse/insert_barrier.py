@@ -22,12 +22,13 @@ from collections.abc import Callable
 from typing import Any
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.sql_lexer import js_regex
 
 DEFAULT_TIMEOUT_SECONDS = 10 * 60.0
 DEFAULT_POLL_INTERVAL_SECONDS = 1.0
 _PROGRESS_EVERY_SECONDS = 30.0
 _SYSTEM_PROCESSES = re.compile(r"\bsystem\.processes\b")
-_TRAILING_SEMICOLON = re.compile(r";\s*$")
+_TRAILING_SEMICOLON = re.compile(js_regex(r";\s*$"))
 _MAX_LISTED_IDS = 10
 
 

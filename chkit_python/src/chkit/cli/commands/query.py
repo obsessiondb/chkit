@@ -31,12 +31,15 @@ from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.clickhouse.client import ClickHouseJsonQueryResult, clickhouse_error_message
 from chkit.core.jsnum import js_number_to_string
 from chkit.core.model import ChxConfigEnv
+from chkit.core.sql_lexer import js_regex, js_trim
 from chkit.plugins import ChxPlugin
 
 DEFAULT_SHOWN_ROW_LIMIT = 25
 EXPECTED_TOKEN_CAP = 8
 
-_INJECTED_FORMAT_RE = re.compile(r"\s+FORMAT\s+JSON(?:EachRow)?\b", re.IGNORECASE)
+_INJECTED_FORMAT_RE = re.compile(
+    js_regex(r"\s+FORMAT\s+JSON(?:EachRow)?\b"), re.IGNORECASE
+)
 _EXPECTED_ONE_OF_RE = re.compile(r"Expected one of: ([^.]*)\.")
 
 
@@ -48,7 +51,7 @@ def clean_query_error(error: BaseException) -> BaseException:
     message = _INJECTED_FORMAT_RE.sub("", original)
 
     def _truncate_expected(match: re.Match[str]) -> str:
-        tokens = [t.strip() for t in match.group(1).split(",") if t.strip()]
+        tokens = [t for t in (js_trim(t) for t in match.group(1).split(",")) if t]
         if len(tokens) <= EXPECTED_TOKEN_CAP:
             return f"Expected one of: {', '.join(tokens)}."
         shown = ", ".join(tokens[:EXPECTED_TOKEN_CAP])
@@ -61,7 +64,7 @@ def clean_query_error(error: BaseException) -> BaseException:
     if message == original:
         return error
     # As TS, a plain error: --json reports its code as "error".
-    return RuntimeError(message.strip())
+    return RuntimeError(js_trim(message))
 
 
 # Keys in the order TS prints them: data, meta, the rest of the envelope as
@@ -190,7 +193,7 @@ def run(
     ] = False,
     service: ServiceOption = None,
 ) -> None:
-    if sql is None or len(sql) == 0 or not sql[0].strip():
+    if sql is None or len(sql) == 0 or not js_trim(sql[0]):
         msg = (
             'query requires a SQL string as the first positional argument '
             '(e.g. `chkit query "SELECT 1"`)'

@@ -9,14 +9,14 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import js_regex, js_trim
 
 # Keep each batched query well under ClickHouse's default max_query_size
 # (262144 bytes) so a large schema doesn't overflow a single query — which would
 # throw and silently drop the whole run back to string comparison.
 MAX_BATCH_LITERAL_BYTES = 128_000
 
-_SELECT_PREFIX_RE = re.compile(r"^SELECT\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+(.+)$"), re.IGNORECASE | re.DOTALL)
 
 
 def canonicalize_sql_fragments(

@@ -11,6 +11,8 @@ from __future__ import annotations
 import logging
 import re
 
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
+
 CHKIT_LOGGER_CATEGORY = ("chkit",)
 CHKIT_BACKFILL_LOGGER_CATEGORY = (*CHKIT_LOGGER_CATEGORY, "backfill")
 SLOW_CLICKHOUSE_QUERY_MS = 5000
@@ -102,11 +104,8 @@ def describe_sql_context(sql: str) -> str | None:
     return None
 
 
-_WS_RE = re.compile(r"\s+")
-
-
 def _normalize_sql(sql: str) -> str:
-    return _WS_RE.sub(" ", sql).strip()
+    return js_trim(JS_WHITESPACE_RUN.sub(" ", sql))
 
 
 __all__ = [

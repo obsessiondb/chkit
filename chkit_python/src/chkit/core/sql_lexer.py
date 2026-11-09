@@ -49,6 +49,11 @@ JS_WHITESPACE: Final[str] = (
     "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 )
 JS_WHITESPACE_RUN: Final[re.Pattern[str]] = re.compile(f"[{JS_WHITESPACE}]+")
+# The same set as regex escapes, for the inside of a character class.
+_JS_SPACE_ESCAPES: Final[str] = (
+    r"\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+_ANY_CHAR: Final[str] = r"[\s\S]"
 
 _WHITESPACE: Final[frozenset[str]] = frozenset(" \t\n\r\f\v")
 _ASCII_LETTERS: Final[str] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -126,6 +131,48 @@ def is_js_space(char: str) -> bool:
 def js_trim(value: str) -> str:
     """``String.prototype.trim()``: strips JavaScript whitespace at both ends."""
     return value.strip(JS_WHITESPACE)
+
+
+def js_regex(pattern: str) -> str:
+    r"""``pattern`` with ``\s`` and ``\S`` meaning JavaScript's whitespace.
+
+    Python's ``\s`` also matches \x1c-\x1f and \x85 and misses the BOM, so a
+    regex ported from TS goes through this to match the same text. ``[\s\S]``
+    (any character) is kept as written.
+    """
+    out: list[str] = []
+    in_class = False
+    i = 0
+    while i < len(pattern):
+        if not in_class and pattern.startswith(_ANY_CHAR, i):
+            out.append(_ANY_CHAR)
+            i += len(_ANY_CHAR)
+            continue
+        char = pattern[i]
+        if char == "\\" and i + 1 < len(pattern):
+            escape = pattern[i : i + 2]
+            if escape == r"\s":
+                out.append(_JS_SPACE_ESCAPES if in_class else f"[{_JS_SPACE_ESCAPES}]")
+            elif escape == r"\S":
+                if in_class:
+                    raise ValueError(rf"js_regex: \S inside a character class: {pattern!r}")
+                out.append(f"[^{_JS_SPACE_ESCAPES}]")
+            else:
+                out.append(escape)
+            i += 2
+            continue
+        out.append(char)
+        i += 1
+        if char == "[" and not in_class:
+            in_class = True
+            # A ']' first in a class (after an optional '^') is literal.
+            for literal in ("^", "]"):
+                if pattern.startswith(literal, i):
+                    out.append(literal)
+                    i += 1
+        elif char == "]" and in_class:
+            in_class = False
+    return "".join(out)
 
 
 _TokenEnd: TypeAlias = tuple[SQLTokenKind, int, bool]
