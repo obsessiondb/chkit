@@ -62,9 +62,9 @@ def test_format_bytes_rounds_ties_up_like_js_to_fixed(bytes_: float, expected: s
 
 def test_planner_timing_rounds_ties_up_like_js(monkeypatch: pytest.MonkeyPatch) -> None:
     # TS logs Math.round(performance.now() - startedAt) ms.
-    monkeypatch.setattr(planner.time, "monotonic", lambda: 0.0025)
+    monkeypatch.setattr("chkit_plugin_backfill.chunking.planner.time.monotonic", lambda: 0.0025)
     assert planner._ms_since(0.0) == 3
-    monkeypatch.setattr(planner.time, "monotonic", lambda: 0.0005)
+    monkeypatch.setattr("chkit_plugin_backfill.chunking.planner.time.monotonic", lambda: 0.0005)
     assert planner._ms_since(0.0) == 1
 
 
