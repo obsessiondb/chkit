@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from typing import Any, Literal, NoReturn, Self
 from urllib.parse import unquote, urlparse
@@ -102,15 +103,24 @@ class QueryStatus(BaseModel):
 class ClickHouseClient:
     """Imperative client wrapper. Use as a context manager."""
 
-    __slots__ = ("_client", "_config")
+    __slots__ = ("_client", "_closed", "_config", "_submit_client", "_submit_client_lock")
 
     def __init__(self, client: Any, config: ChxResolvedClickHouseConfig) -> None:
         self._client: Any = client
         self._config: ChxResolvedClickHouseConfig = config
+        # The driver `submit` sends through, opened on first use.
+        self._submit_client: Any = None
+        self._submit_client_lock = threading.Lock()
+        self._closed = False
 
     @classmethod
     def connect(cls, config: ChxResolvedClickHouseConfig) -> Self:
         """Connect using a resolved config block."""
+        return cls(cls._open_driver(config), config)
+
+    @staticmethod
+    def _open_driver(config: ChxResolvedClickHouseConfig, **options: Any) -> Any:
+        """Open a ``clickhouse-connect`` client; ``options`` go to ``get_client``."""
         parsed = urlparse(config.url)
         # Like the TS client (``@clickhouse/client``): the URL scheme sets the
         # protocol, a URL without a port uses the scheme's default port, and
@@ -144,14 +154,21 @@ class ClickHouseClient:
                 username=username,
                 password=password,
                 secure=secure,
+                **options,
             )
         except Exception as error:
             wrap_connection_error(error, config.url, config.username)
         client.database = config.database
-        return cls(client, config)
+        return client
 
     def close(self) -> None:
+        # Set before taking the lock: a submit driver still opening (on the
+        # thread of an interrupted async migrate) sees it and sends nothing.
+        self._closed = True
         self._client.close()
+        with self._submit_client_lock:
+            if self._submit_client is not None:
+                self._submit_client.close()
 
     def __enter__(self) -> Self:
         return self
@@ -223,19 +240,42 @@ class ClickHouseClient:
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
     ) -> str:
-        """Fire-and-forget a query. Returns the assigned query_id.
+        """Send a query that ``query_status`` follows. Returns its query_id.
 
         Used by ``chkit migrate --apply`` for long-running ``ALTER`` /
         ``OPTIMIZE`` statements: the server starts processing immediately
         and the CLI polls ``query_status`` until terminal. ``settings`` are
         sent with the query (TS ``submit(sql, queryId, settings)``).
+
+        Like TS, this returns when the request does, at the end of the query;
+        a caller that polls meanwhile runs it on another thread. The request
+        goes through a driver without a session, as TS's fire-and-forget
+        client does: ClickHouse runs one query at a time per session, so in
+        the session ``query_status`` uses, the polls would be locked out
+        (``Session ... is locked by a concurrent client``) until the query
+        ends, even after a proxy cut the request (HTTP 524).
         """
         qid = query_id or str(uuid.uuid4())
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
-        self._client.command(statement, settings={**(settings or {}), "query_id": qid})
+        self._submit_driver().command(
+            statement, settings={**(settings or {}), "query_id": qid}
+        )
         return qid
+
+    def _submit_driver(self) -> Any:
+        with self._submit_client_lock:
+            if self._submit_client is None and not self._closed:
+                self._submit_client = self._open_driver(
+                    self._config, autogenerate_session_id=False
+                )
+            # close() may have started while the driver opened; it closes the
+            # driver once this lock is free.
+            if self._closed:
+                msg = "ClickHouse client is closed."
+                raise RuntimeError(msg)
+            return self._submit_client
 
     def insert(
         self,
