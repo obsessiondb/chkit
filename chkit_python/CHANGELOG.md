@@ -15,6 +15,8 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- Splitting and normalizing SQL with many unclosed `$tag$` openers takes linear time instead
+  of quadratic (#585, fixed in TS too).
 - Text index SQL in generated migrations, snapshots and `chkit pull` output keeps the space
   between a keyword and `(` (`a OR (b)`, `NOT (x)`), as ClickHouse writes it, instead of
   `OR(` (#586, fixed in TS too). Existing indexes and snapshots plan no migration.
