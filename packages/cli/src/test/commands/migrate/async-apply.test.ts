@@ -620,6 +620,7 @@ describe('applyAsyncStatement', () => {
       { failSubmit: () => new Error('Syntax error: failed at position 1') },
     )
     const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
 
     await expect(
       applyAsyncStatement({
@@ -627,7 +628,7 @@ describe('applyAsyncStatement', () => {
         sql: 'NOT VALID SQL',
         db,
         journalStore: store,
-        log: () => {},
+        log: (line) => lines.push(line),
         sleep: NO_SLEEP,
         now: FIXED_NOW,
       }),
@@ -637,6 +638,42 @@ describe('applyAsyncStatement', () => {
     // an edited file can then run again without --retry.
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
     expect(writes[1]?.operations[0]?.lastError).toBe('Syntax error: failed at position 1')
+    // The submit error is the command's error; no progress line repeats it (#561).
+    expect(lines).toEqual([`  load_table_data: submitting async (query_id=${QUERY_ID})`])
+  })
+
+  // A gateway can fail the submit request (e.g. HTTP 524) while the query keeps
+  // running on the server. The poller decides the outcome, and the progress
+  // lines are the poller's only (#561).
+  test('a submit that fails while the query runs completes with the poller lines only', async () => {
+    const { db, submitCalls } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+      ],
+      { failSubmit: () => new Error('HTTP 524: error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: (line) => lines.push(line),
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(submitCalls).toHaveLength(1)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    expect(lines).toEqual([
+      `  load_table_data: submitting async (query_id=${QUERY_ID})`,
+      '  load_table_data: written=9 rows (72 B), elapsed 0s',
+      '  load_table_data: finished — written=16 rows (128 B) in 8s',
+    ])
   })
   // The query id is deterministic, so query_log still holds the earlier
   // attempt's QueryFinish after `migrate --abandon` (#233). A submission that

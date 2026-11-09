@@ -276,15 +276,13 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     state_after_start = journal_store.read_migration_state(input_.migration_name)
 
     poll_after_time = _query_log_lower_bound(_read_server_state(client)[0], 0)
+    # Polling decides the outcome, as in TS: the submit error is raised only
+    # when the server never saw the query, so it is not logged here (#561).
     submit_error: Exception | None = None
     try:
         client.submit(input_.sql, query_id=query_id, settings=input_.settings)
     except Exception as error:
         submit_error = error
-        input_.log(
-            f"  {input_.operation_type}: submit raised "
-            f"({_describe_error(error)}) — polling for the server-side state"
-        )
 
     return _poll_until_terminal(
         input_=input_,
