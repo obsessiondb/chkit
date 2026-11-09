@@ -3,7 +3,6 @@
 from __future__ import annotations
 
 import decimal
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -39,9 +38,8 @@ SERVER_TIME_QUERY = (
 
 
 @pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(migrate_async_apply.time, "sleep", lambda _: None)
-    return
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
 
 
 # ---------- pure helpers ----------

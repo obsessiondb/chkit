@@ -14,7 +14,7 @@ from typing import Any
 
 import pytest
 
-from chkit import table
+from chkit import TableDefinition, table
 from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.planner import plan_diff
@@ -68,14 +68,14 @@ def test_planned_modify_remove_rename_and_index_statements_pass_the_wait(ch_clie
     }
     replaced = {"m": {"name": "m", "type": "DateTime64(3, 'UTC')"}, "x": {"name": "x", "type": "UInt64"}}
 
-    def definition(cols: list[dict[str, Any]], index: str, granularity: int) -> Any:
+    def definition(cols: list[dict[str, Any]], index: str, granularity: int) -> TableDefinition:
         return table(
             database=db,
             name=name,
             engine="MergeTree()",
             primary_key=["id"],
             order_by=["id"],
-            columns=cols,
+            columns=list(cols),
             indexes=[{"name": "idx", "expression": index, "type": "minmax", "granularity": granularity}],
         )
 
