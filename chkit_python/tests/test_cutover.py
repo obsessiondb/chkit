@@ -472,6 +472,40 @@ def test_refuses_an_engine_argument_only_change() -> None:
     assert "only the engine arguments change" in found[0]
 
 
+def test_refuses_keys_that_differ_only_in_spelling() -> None:
+    # As the planner compares keys; TS cutover.test.ts asserts the same.
+    old = events(["user_id", "id"], engine="ReplicatedMergeTree('/t/{uuid}', '{replica}')")
+    new = table(
+        database="app",
+        name="events",
+        engine="ReplicatedMergeTree('/t2/{uuid}', '{replica}')",
+        columns=COLUMNS,
+        primaryKey=["`user_id`,  id"],
+        orderBy=['"user_id"', "id"],
+    )
+    found = messages(old_def=old, new_def=new, cluster="c2")
+    assert len(found) == 1
+    assert "only the engine arguments change" in found[0]
+
+
+def test_cuts_over_a_key_on_a_column_named_with_a_comma() -> None:
+    # A key on column `a,b` to one on columns a and b, as the planner reads it;
+    # TS cutover.test.ts asserts the same.
+    named: list[Any] = [
+        {"name": "a,b", "type": "UInt64"},
+        {"name": "a", "type": "UInt64"},
+        {"name": "b", "type": "UInt64"},
+    ]
+    ops = plan(
+        old_def=events(["a,b"], columns=named),
+        new_def=events(["a", "b"], columns=named),
+        key=["a"],
+    ).operations
+    create = next(op for op in ops if op.type == "create_table")
+    assert "PRIMARY KEY (`a`, `b`)" in create.sql
+    assert any(op.type == "exchange_tables" for op in ops)
+
+
 def test_refuses_a_replication_path_without_a_macro() -> None:
     engine = "ReplicatedMergeTree('/clickhouse/tables/{shard}/app/events', '{replica}')"
     found = messages(
