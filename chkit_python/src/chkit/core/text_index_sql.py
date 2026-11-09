@@ -138,6 +138,37 @@ def text_sql_tokens(sql: str) -> list[str]:
     return tokens
 
 
+# Keywords that are operators after an operand (`a OR (b)`) but function names
+# in operand position (`or(a, b)`), and keywords that are never function names.
+_BINARY_KEYWORDS = {"and", "or", "in", "is", "like", "ilike", "between", "div", "mod", "regexp"}
+_PREFIX_KEYWORDS = {"not", "case", "when", "then", "else"}
+
+
+def _ends_operand(token: str | None) -> bool:
+    if token is None:
+        return False
+    if token in (")", "]", "}") or token[:1] in ("'", '"', "`"):
+        return True
+    word = token.lower()
+    # NOT and GLOBAL end an operand for what follows: `x NOT IN (...)`, `x GLOBAL IN (...)`.
+    return (
+        re.match(r"[\w$]", token) is not None
+        and word not in _BINARY_KEYWORDS
+        and not (word in _PREFIX_KEYWORDS and word != "not")
+    )
+
+
+def _is_call(tokens: list[str], i: int) -> bool:
+    """Whether `(` at tokens[i] calls the word before it rather than following a keyword."""
+    word = tokens[i - 1]
+    if not re.fullmatch(r"[^\W\d]\w*", word):
+        return False
+    lower = word.lower()
+    if lower in _PREFIX_KEYWORDS:
+        return False
+    return not (lower in _BINARY_KEYWORDS and _ends_operand(tokens[i - 2] if i >= 2 else None))
+
+
 def format_text_sql(tokens: list[str]) -> str:
     parts = []
     for i, token in enumerate(tokens):
@@ -146,7 +177,7 @@ def format_text_sql(tokens: list[str]) -> str:
             i == 0
             or token in (")", "]", "}", ",", ".")
             or previous in ("(", "[", "{", ".")
-            or (token == "(" and re.fullmatch(r"[^\W\d]\w*", previous))
+            or (token == "(" and _is_call(tokens, i))
         )
         parts.append(("" if tight else " ") + token)
     return "".join(parts)

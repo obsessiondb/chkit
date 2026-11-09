@@ -46,27 +46,26 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 
 
 @pytest.mark.parametrize(
-    ("command", "message"),
+    "command",
     [
-        (["status"], "No such option: {flag}"),
-        (["query", "SELECT 1"], "No such option: {flag}"),
-        (["pull", "--dryrun"], "No such option: {flag}"),
-        (["codegen"], "Unknown flag: {flag}"),
-        (["plugin", "codegen", "codegen"], "Unknown flag: {flag}"),
+        ["status"],
+        ["query", "SELECT 1"],
+        ["pull", "--dryrun"],
+        ["codegen"],
+        ["plugin", "codegen", "codegen"],
     ],
     ids=["status", "query", "pull", "codegen", "plugin"],
 )
-def test_commands_that_ignore_a_scope_reject_table(
-    project: Path, command: list[str], message: str
-) -> None:
+def test_commands_that_ignore_a_scope_reject_table(project: Path, command: list[str]) -> None:
     for flag_args, flag in (
         (["--table", "app.users"], "--table"),
         (["-t", "app.users"], "-t"),
     ):
         result = CliRunner().invoke(app, [*command, *flag_args])
         output = ANSI_STYLE.sub("", result.output)
-        assert result.exit_code == 2, (command, flag_args, output)
-        assert message.format(flag=flag) in output, (command, flag_args, output)
+        # Reported as TS reports an unknown flag (#563).
+        assert result.exit_code == 1, (command, flag_args, output)
+        assert f"Unknown flag: {flag}" in output, (command, flag_args, output)
     assert not (project / "gen").exists()
 
 

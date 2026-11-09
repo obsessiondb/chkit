@@ -15,7 +15,12 @@ import {
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
 import { GLOBAL_FLAGS, TABLE_FLAG } from './global-flags.js'
-import { emitJsonError, printOutput, writeStdout } from './json-output.js'
+import {
+	emitJson,
+	emitJsonError,
+	printOutput,
+	writeStdout,
+} from './json-output.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 
@@ -70,7 +75,9 @@ function splitQueryArgs(
 		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
 		const def = byName.get(name)
 		if (!def) {
-			positionals.push(token)
+			// An unknown `-x` or `--bogus` goes to parseFlags, which rejects it (#584).
+			if (looksLikeFlag(token)) flagArgs.push(token)
+			else positionals.push(token)
 			continue
 		}
 
@@ -85,6 +92,20 @@ function splitQueryArgs(
 	}
 
 	return { flagArgs, positionals }
+}
+
+/**
+ * A query argument that starts with `-` is a flag unless it holds a line
+ * break, or whitespace before any `=`: SQL that starts with a line comment,
+ * such as `-- note\nSELECT 1` or `--tag=x\nSELECT 1`, stays SQL. A lone `-`
+ * is SQL too.
+ */
+function looksLikeFlag(token: string): boolean {
+	if (!token.startsWith('-') || token === '-') return false
+	if (/[\r\n]/.test(token)) return false
+	const eqIdx = token.indexOf('=')
+	const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+	return !/\s/.test(name)
 }
 
 export function parseCommandArgs(
@@ -157,7 +178,7 @@ export function forwardedCommandFlags(
 function parseForwardedInitFlags(
 	argsAfterCommand: string[],
 	plugins: PluginRuntime['plugins'],
-): ParsedFlags {
+): ParsedFlags | null {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
 	const [pluginName, commandName, ...commandArgs] = rest
 	const command = plugins
@@ -165,16 +186,22 @@ function parseForwardedInitFlags(
 		?.plugin.commands?.find((cmd) => cmd.name === commandName)
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)
-	if (defs.length === 0) return flags
 	try {
 		return { ...flags, ...parseFlags(commandArgs, defs) }
 	} catch (error) {
-		// The plugin command reports this flag error after onInit, in its own format.
+		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
+		// does, in the format the plugin command uses for it.
 		if (
 			error instanceof UnknownFlagError ||
 			error instanceof MissingFlagValueError
 		) {
-			return flags
+			if (flags['--json'] === true) {
+				emitJson('plugin', { ok: false, error: error.message })
+			} else {
+				console.error(error.message)
+			}
+			process.exitCode = 1
+			return null
 		}
 		throw error
 	}

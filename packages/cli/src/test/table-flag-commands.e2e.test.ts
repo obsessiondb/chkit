@@ -151,12 +151,9 @@ describe('@chkit/cli --table only where it scopes the command (#565)', () => {
   test('query does not read --table as a flag', async () => {
     const fixture = await createPluginFixture()
     try {
-      // query passes unknown tokens through as SQL, so the selector makes a second argument.
+      // query rejects an unknown flag instead of reading it as SQL (#584).
       const result = runCli(['query', '--config', fixture.configPath, '--table', 'app.users', 'SELECT 1'], fixture.dir)
-      expect([result.exitCode, result.stderr.trim()]).toEqual([
-        1,
-        'query accepts a single SQL string. Wrap it in quotes if it contains spaces.',
-      ])
+      expect([result.exitCode, result.stderr.trim()]).toEqual([1, 'Unknown flag: --table'])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
