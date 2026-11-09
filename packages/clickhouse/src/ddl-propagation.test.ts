@@ -218,6 +218,34 @@ describe('waitForDDLPropagation: deadline', () => {
   })
 })
 
+// chkit-py's tests/test_ddl_propagation.py pins the same budget (#578).
+describe('waitForDDLPropagation: catalog waits check 21 times', () => {
+  test('a table that never appears is checked 21 times', async () => {
+    const { db, polled } = fakeTarget([[]], { replicas: 1 })
+
+    await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)).rejects.toThrow(
+      'waitForTable: app.events not yet visible',
+    )
+    expect(polled('system.tables')).toHaveLength(21)
+  })
+
+  test('a table that appears on the 21st check passes', async () => {
+    const { db, polled } = fakeTarget([...Array.from({ length: 20 }, () => []), [{ x: 1 }]], { replicas: 1 })
+
+    await waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)
+    expect(polled('system.tables')).toHaveLength(21)
+  })
+
+  test('a dictionary that never appears is checked 21 times', async () => {
+    const { db, polled } = fakeTarget([[]], { replicas: 1 })
+
+    await expect(waitForDDLPropagation(db, 'create_dictionary', 'dictionary:app.users', FAST)).rejects.toThrow(
+      'waitForDictionary: app.users not yet visible',
+    )
+    expect(polled('system.tables')).toHaveLength(21)
+  })
+})
+
 describe('waitForDDLPropagation: other column and index operations', () => {
   test('ADD COLUMN waits for every replica to agree without checking what the statement sets', async () => {
     const { db, polled, queries } = fakeTarget([

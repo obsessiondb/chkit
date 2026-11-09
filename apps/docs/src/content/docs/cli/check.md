@@ -18,6 +18,7 @@ chkit check [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--strict` | boolean | `false` | Force all check policies on, regardless of config |
+| `-t`, `--table <selector>` | string | — | Scope the drift and plugin checks to matching tables; pending and checksum checks still cover all migrations ([details](/cli/overview/#table-scope)) |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 

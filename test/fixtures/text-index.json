@@ -88,6 +88,11 @@
     "tokenizer": "splitByString(['\\e', 'a\\Nb'])"
   },
   {
+    "name": "keywords before parentheses",
+    "expression": "if((body = '(') OR (body = ')'), '', if(NOT (body = ''), body, ''))",
+    "tokenizer": "splitByNonAlpha"
+  },
+  {
     "name": "quoted column expression",
     "expression": "lower(`body`)",
     "tokenizer": "splitByNonAlpha"

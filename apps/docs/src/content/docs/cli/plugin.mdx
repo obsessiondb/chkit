@@ -33,7 +33,11 @@ With a plugin name, lists the commands available for that plugin with their desc
 
 ### Run a plugin command
 
-With both a plugin name and command name, executes the command. Any additional arguments are forwarded to the plugin command handler.
+With both a plugin name and command name, executes the command. The remaining arguments are forwarded to it: the flags the command declares are parsed into its `flags`, and the other arguments are its positional `args`. An undeclared flag is an error. Everything after `--` is a positional, even when it starts with `-`:
+
+```sh
+chkit plugin my-plugin echo --name ada -- --not-a-flag
+```
 
 ### CLI shortcuts
 
