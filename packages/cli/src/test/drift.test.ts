@@ -1454,6 +1454,8 @@ describe('@chkit/cli drift comparer on what ClickHouse stores (#466)', () => {
       [{ expression: '9007199254740993.' }, '9007199254740992.'],
       [2.0, '2.'],
       ["it's", "'it\\'s'"],
+      // The `)` inside the heredoc is text, so the outer pair still wraps it (#587).
+      [{ expression: '($$a)$$)' }, "'a)'"],
     ]
     for (const [declared, stored] of same) {
       expect(compareColumn({ name: 'value', type: 'Float64', default: declared }, { name: 'value', type: 'Float64', default: stored })).toBeNull()

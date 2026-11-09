@@ -48,10 +48,11 @@ const HEX_EXPONENT = /^[pP][+-]?[0-9]/
 
 export function tokenizeSQL(sql: string): SQLToken[] {
   const tokens: SQLToken[] = []
+  const heredocEnd = heredocReader(sql)
   let previous: SQLToken | undefined
   let i = 0
   while (i < sql.length) {
-    const { kind, end, terminated } = readToken(sql, i, previous)
+    const { kind, end, terminated } = readToken(sql, i, previous, heredocEnd)
     const token: SQLToken = { kind, text: sql.slice(i, end), start: i, end, terminated }
     tokens.push(token)
     if (!isTrivia(token)) previous = token
@@ -62,10 +63,11 @@ export function tokenizeSQL(sql: string): SQLToken[] {
 
 /** The tokens of `tokenizeSQL`, one at a time, for a caller that keeps few of them. */
 export function* sqlTokens(sql: string): Generator<SQLToken> {
+  const heredocEnd = heredocReader(sql)
   let previous: SQLToken | undefined
   let i = 0
   while (i < sql.length) {
-    const { kind, end, terminated } = readToken(sql, i, previous)
+    const { kind, end, terminated } = readToken(sql, i, previous, heredocEnd)
     const token: SQLToken = { kind, text: sql.slice(i, end), start: i, end, terminated }
     yield token
     if (!isTrivia(token)) previous = token
@@ -97,7 +99,7 @@ export function stringLiteralValue(token: SQLToken): string | undefined {
 
 // `previous` is the last token that is not trivia; ClickHouse uses it to tell
 // a qualifier dot from the start of a number.
-function readToken(sql: string, i: number, previous: SQLToken | undefined): TokenEnd {
+function readToken(sql: string, i: number, previous: SQLToken | undefined, readHeredoc: HeredocReader): TokenEnd {
   const char = sql[i] ?? ''
   const next = sql[i + 1] ?? ''
   if (WHITESPACE.test(char)) return complete('whitespace', skipWhile(sql, i, WHITESPACE))
@@ -113,7 +115,7 @@ function readToken(sql: string, i: number, previous: SQLToken | undefined): Toke
   if (char === "'") return { kind: 'string', ...readQuoted(sql, i, "'") }
   if (char === '`' || char === '"') return { kind: 'quoted_identifier', ...readQuoted(sql, i, char) }
   if (char === '$') {
-    const heredocEnd = readHeredoc(sql, i)
+    const heredocEnd = readHeredoc(i)
     if (heredocEnd !== undefined) return complete('string', heredocEnd)
     if (WORD_CHAR.test(next)) return complete('identifier', skipWhile(sql, i, IDENTIFIER_PART))
   }
@@ -219,15 +221,52 @@ function readQuoted(sql: string, i: number, quote: string): { end: number; termi
   return { end: sql.length, terminated: false }
 }
 
+/** The end of the heredoc that opens at `i`, or undefined when none does. */
+type HeredocReader = (i: number) => number | undefined
+
 // `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
 // is only a literal when the same tag closes it later; otherwise ClickHouse
-// reads the `$` as part of an identifier or as punctuation.
-function readHeredoc(sql: string, i: number): number | undefined {
-  const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
-  if (sql[tagEnd] !== '$') return undefined
-  const tag = sql.slice(i, tagEnd + 1)
-  const close = sql.indexOf(tag, tagEnd + 1)
-  return close === -1 ? undefined : close + tag.length
+// reads the `$` as part of an identifier or as punctuation. The closer is the
+// first later occurrence of the opener's text. Searching the rest of the input
+// once per opener is quadratic on many unclosed openers (#585), so the first
+// opener indexes every `$tag$` in the input and each one is a lookup.
+function heredocReader(sql: string): HeredocReader {
+  let tagStarts: Map<string, number[]> | undefined
+  return (i) => {
+    const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
+    if (sql[tagEnd] !== '$') return undefined
+    tagStarts ??= indexHeredocTags(sql)
+    const close = firstAtOrAfter(tagStarts.get(sql.slice(i + 1, tagEnd)) ?? [], tagEnd + 1)
+    return close === undefined ? undefined : close + tagEnd + 1 - i
+  }
+}
+
+// Every offset where `$tag$` occurs, in order, by tag. An occurrence is a `$`,
+// the longest run of tag characters after it, then a `$` (a tag character is
+// never `$`), so each `$` starts at most one and the scan is linear.
+function indexHeredocTags(sql: string): Map<string, number[]> {
+  const starts = new Map<string, number[]>()
+  for (let i = sql.indexOf('$'); i !== -1; i = sql.indexOf('$', i + 1)) {
+    const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
+    if (sql[tagEnd] !== '$') continue
+    const tag = sql.slice(i + 1, tagEnd)
+    const offsets = starts.get(tag)
+    if (offsets === undefined) starts.set(tag, [i])
+    else offsets.push(i)
+  }
+  return starts
+}
+
+// The first of the ascending `offsets` that is at least `from`.
+function firstAtOrAfter(offsets: number[], from: number): number | undefined {
+  let low = 0
+  let high = offsets.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if ((offsets[middle] ?? 0) < from) low = middle + 1
+    else high = middle
+  }
+  return offsets[low]
 }
 
 // Resolves a doubled delimiter and backslash escapes to the escaped character,
