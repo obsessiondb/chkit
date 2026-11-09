@@ -21,24 +21,54 @@ from chkit.core.sql_lexer import (
 
 # The characters that can start a string, quoted name, block comment or heredoc.
 _OPENERS = frozenset("/`'\"$")
+# ... and, when the split reads them, a ``//``, ``# `` or ``#!`` comment.
+_OPENERS_WITH_LINE_COMMENTS = _OPENERS | {"#"}
 _HEREDOC_OPEN = re.compile(r"\$[A-Za-z0-9_]*\$")
 
 
 def split_sql_statements(text: str) -> list[str]:
     """Split a SQL blob into statements, each ending in ``;``.
 
-    A ``;`` inside a string, a quoted identifier, a block comment or a
-    ``$tag$`` heredoc does not end a statement. ``--`` comments are not
-    special here: `extract_executable_statements` strips them first.
+    A ``;`` inside a string, a quoted identifier, a block comment, a
+    ``$tag$`` heredoc or a ``//``, ``# `` or ``#!`` comment does not end a
+    statement. ``--`` comments are not special here:
+    `extract_executable_statements` strips them first.
     """
+    return _split(text, line_comments=True)
+
+
+def extract_executable_statements(text: str) -> list[str]:
+    """The statements chkit runs: ``--`` comments stripped, ``;`` kept, as in TS.
+
+    ``--`` inside a string, a quoted identifier, a block comment, a heredoc or
+    a ``//``, ``# `` or ``#!`` comment is text and stays. A statement made only
+    of comments is not executable: ClickHouse rejects it as "Empty query" (for
+    example a block comment after the last statement), so it is dropped.
+    """
+    return _extract(text, line_comments=True)
+
+
+def extract_legacy_executable_statements(text: str) -> list[str]:
+    """The statements chkit ran before #562.
+
+    The splitter then did not know ``//``, ``# `` and ``#!`` comments: it cut
+    at a ``;`` inside one and read a quote, ``/*`` or ``$tag$`` inside one as
+    live. Only for telling whether a migration that an older chkit applied in
+    part resumes at the statements it recorded.
+    """
+    return _extract(text, line_comments=False)
+
+
+def _split(text: str, *, line_comments: bool) -> list[str]:
     statements: list[str] = []
     current: list[str] = []
     lexed_end = _lexed_end_at(text)
+    openers = _OPENERS_WITH_LINE_COMMENTS if line_comments else _OPENERS
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
-        end = _quoted_end(text, i, lexed_end) if ch in _OPENERS else None
+        end = _region_end(text, i, lexed_end, line_comments) if ch in openers else None
         if end is not None:
             current.append(text[i:end])
             i = end
@@ -59,20 +89,10 @@ def split_sql_statements(text: str) -> list[str]:
     return statements
 
 
-def extract_executable_statements(text: str) -> list[str]:
-    """The statements chkit runs: ``--`` comments stripped, ``;`` kept, as in TS.
-
-    ``--`` inside a string, a quoted identifier, a block comment or a heredoc
-    is text and stays. A statement made only of comments is not executable:
-    ClickHouse rejects it as "Empty query" (for example a block comment after
-    the last statement), so it is dropped. The splitter does not know ``#``
-    and ``//`` line comments; when one of them holds a ``;`` the splitter cut
-    that comment line in two, and keeping the comment-only piece makes
-    ClickHouse reject the file instead of running the commented-out text after
-    the ``;``.
-    """
+def _extract(text: str, *, line_comments: bool) -> list[str]:
     stripped: list[str] = []
     lexed_end = _lexed_end_at(text)
+    openers = _OPENERS_WITH_LINE_COMMENTS if line_comments else _OPENERS
     i = 0
     n = len(text)
     while i < n:
@@ -84,7 +104,7 @@ def extract_executable_statements(text: str) -> list[str]:
                 break
             i = newline
             continue
-        end = _quoted_end(text, i, lexed_end) if ch in _OPENERS else None
+        end = _region_end(text, i, lexed_end, line_comments) if ch in openers else None
         if end is not None:
             stripped.append(text[i:end])
             i = end
@@ -93,13 +113,39 @@ def extract_executable_statements(text: str) -> list[str]:
         i += 1
 
     stripped_text = "".join(stripped)
-    statements = split_sql_statements(stripped_text)
+    statements = _split(stripped_text, line_comments=line_comments)
     executable = [s for s in statements if _has_executable_content(s)]
     if len(executable) == len(statements):
         return statements
-    if any(_is_line_comment_with_semicolon(token) for token in tokenize_sql(stripped_text)):
+    # Before #562 the splitter cut a ``#`` or ``//`` comment that holds a ``;``
+    # in two; keeping the comment-only piece made ClickHouse reject the file
+    # instead of running the commented-out text after the ``;``.
+    if not line_comments and any(
+        _is_line_comment_with_semicolon(token) for token in tokenize_sql(stripped_text)
+    ):
         return statements
     return executable
+
+
+def _region_end(
+    text: str, i: int, lexed_end: Callable[[int], int | None], line_comments: bool
+) -> int | None:
+    """The end of the string, quoted identifier, block comment, heredoc or,
+    with ``line_comments``, ``//``, ``# `` or ``#!`` comment that starts at ``i``."""
+    end = _quoted_end(text, i, lexed_end)
+    if end is not None or not line_comments:
+        return end
+    return _line_comment_end(text, i)
+
+
+def _line_comment_end(text: str, i: int) -> int | None:
+    """ClickHouse reads ``//``, ``# `` and ``#!`` as a comment up to the next
+    ``\\n``, which stays; ``#`` before anything else is not a comment
+    (ClickHouse rejects it)."""
+    if not text.startswith(("//", "# ", "#!"), i):
+        return None
+    newline = text.find("\n", i)
+    return len(text) if newline == -1 else newline
 
 
 def _lexed_end_at(text: str) -> Callable[[int], int | None]:
@@ -107,9 +153,10 @@ def _lexed_end_at(text: str) -> Callable[[int], int | None]:
     or a backtick-quoted name (with backslash escapes), the offset of its first
     character maps to its end.
 
-    The scanner takes these ends only where it is at such a token itself;
-    inside a ``//`` or ``#`` comment, which it does not know (#197), it keeps
-    its own reading, so statements end where they always did. The input is
+    The scanner takes these ends only where it is at such a token itself. The
+    legacy split does not know ``//`` and ``#`` comments, so inside one it
+    keeps its own reading and statements end where they did before #562. The
+    input is
     lexed once, only as far as an offset the scanner asks about, and only when
     a token there could end elsewhere than the scanner reads it.
     """

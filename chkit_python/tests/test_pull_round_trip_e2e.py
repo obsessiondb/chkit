@@ -9,6 +9,7 @@ ClickHouse stores compare equal to the ones the schema declares.
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from pathlib import Path
 from typing import Any
 
@@ -133,6 +134,16 @@ definitions = schema(
         database=db, name="daily", engine="MergeTree()", primary_key=["day"], order_by=["day"],
         columns=[{{"name": "day", "type": "Date"}}, {{"name": "c", "type": "UInt64"}}],
     ),
+    # Key columns whose names hold a comma or a space read back quoted (#558).
+    table(
+        database=db, name="keyed", engine="MergeTree()",
+        order_by=["id", "a, b", "a b", "cityHash64(a,b)"],
+        columns=[
+            {{"name": "id", "type": "UInt64"}}, {{"name": "a", "type": "String"}},
+            {{"name": "b", "type": "String"}}, {{"name": "a, b", "type": "String"}},
+            {{"name": "a b", "type": "String"}}, {{"name": "ab", "type": "String"}},
+        ],
+    ),
     view(database=db, name="recent", as_="SELECT id, n FROM {database}.events"),
     materialized_view(
         database=db, name="daily_mv", to={{"database": db, "name": "daily"}},
@@ -163,10 +174,10 @@ definitions = schema(
         pulled = poll_until(
             pull,
             lambda result: result.exit_code == 0
-            and json.loads(result.stdout)["definitionCount"] == 10,
+            and json.loads(result.stdout)["definitionCount"] == 11,
         )
         assert pulled.exit_code == 0, format_test_diagnostic("chkit pull", pulled)
-        assert json.loads(pulled.stdout)["definitionCount"] == 10
+        assert json.loads(pulled.stdout)["definitionCount"] == 11
         pulled_content = (tmp_path / "pulled.py").read_text()
         assert journal_table not in pulled_content
         assert "index_granularity" in pulled_content
@@ -187,6 +198,8 @@ definitions = schema(
         assert 'expression="s"' in pulled_content
         assert 'expression="lower(s)"' in pulled_content
         assert 'expression="(a + b) * c"' in pulled_content
+
+        _assert_rekeyed_table_recreates_and_drifts(chkit, tmp_path, pulled_content, database)
     finally:
         with ClickHouseClient.connect(
             ChxResolvedClickHouseConfig(
@@ -198,6 +211,31 @@ definitions = schema(
             )
         ) as client:
             client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+
+
+def _assert_rekeyed_table_recreates_and_drifts(
+    chkit: Callable[..., Any], tmp_path: Path, pulled_content: str, database: str
+) -> None:
+    """The pulled key names the column `a, b`; as columns a and b it is another
+    key, which generate plans and drift reports (#558)."""
+    assert 'order_by=["id", "`a, b`", "`a b`", "cityHash64(a, b)"]' in pulled_content
+    (tmp_path / "schema.py").write_text(pulled_content.replace('"`a, b`"', '"a", "b"'))
+    rekeyed = chkit("generate", "--dryrun", "--json")
+    assert rekeyed.exit_code == 0, format_test_diagnostic("chkit generate --dryrun", rekeyed)
+    assert [(op["type"], op["key"]) for op in json.loads(rekeyed.stdout)["operations"]] == [
+        ("drop_table", f"table:{database}.keyed"),
+        ("create_table", f"table:{database}.keyed"),
+    ]
+    # Drift compares the snapshot, which generate writes, with the live table.
+    regenerated = chkit("generate", "--name", "rekey", "--json")
+    assert regenerated.exit_code == 0, format_test_diagnostic("chkit generate", regenerated)
+    drift = chkit("drift", "--json")
+    assert drift.exit_code == 0, format_test_diagnostic("chkit drift", drift)
+    payload = json.loads(drift.stdout)
+    assert payload["drifted"] is True
+    assert [(item["table"], item["reasonCodes"]) for item in payload["tableDrift"]] == [
+        (f"{database}.keyed", ["primary_key_mismatch", "order_by_mismatch"])
+    ]
 
 
 def test_pull_uses_order_by_as_the_primary_key_a_table_does_not_declare(

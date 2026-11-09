@@ -52,6 +52,7 @@ from chkit.core.model import (
     ValidationIssue,
 )
 from chkit.core.sql import column_type_fingerprint, render_column_type, to_create_sql
+from chkit.core.sql_lexer import js_trim
 from chkit.core.table_settings import (
     DEFAULT_INDEX_GRANULARITY,
     declared_readonly_settings,
@@ -160,18 +161,18 @@ def cutover_names(table: str, stamp: str) -> CutoverNames:
 def parse_cutover_request(value: str) -> CutoverRequest:
     """Parses ``db.table=col[,col...]`` from ``--cutover``."""
     eq = value.find("=")
-    target = (value if eq == -1 else value[:eq]).strip()
+    target = js_trim(value if eq == -1 else value[:eq])
     key_part = "" if eq == -1 else value[eq + 1 :]
     dot = target.find(".")
-    database = "" if dot == -1 else target[:dot].strip()
-    table = "" if dot == -1 else target[dot + 1 :].strip()
+    database = "" if dot == -1 else js_trim(target[:dot])
+    table = "" if dot == -1 else js_trim(target[dot + 1 :])
     if not database or not table:
         msg = (
             f'Invalid --cutover "{value}". '
             "Expected <database>.<table>=<key column>[,<key column>...]."
         )
         raise ValueError(msg)
-    key = [column.strip() for column in key_part.split(",") if column.strip()]
+    key = [column for column in (js_trim(part) for part in key_part.split(",")) if column]
     if not key:
         msg = (
             f"--cutover {target} needs the columns that identify a row: "
@@ -1137,7 +1138,7 @@ def _is_buffer_into(engine: str, request: CutoverRequest) -> bool:
 
 
 def _unquote_argument(value: str) -> str:
-    return re.sub(r"^['\"`]|['\"`]$", "", value.strip())
+    return re.sub(r"^['\"`]|['\"`]$", "", js_trim(value))
 
 
 def _canonical_table(definition: TableDefinition, index_granularity: int) -> TableDefinition:

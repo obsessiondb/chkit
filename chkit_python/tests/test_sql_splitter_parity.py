@@ -14,7 +14,10 @@ from typing import Any
 import pytest
 
 from chkit.cli.safety_markers import extract_migration_operation_summaries
-from chkit.core.sql_splitter import extract_executable_statements
+from chkit.core.sql_splitter import (
+    extract_executable_statements,
+    extract_legacy_executable_statements,
+)
 
 FIXTURE: dict[str, Any] = json.loads(
     (Path(__file__).resolve().parents[2] / "test/fixtures/sql-splitter.json").read_text(
@@ -48,3 +51,16 @@ def test_operation_markers_are_still_read_from_the_file() -> None:
 )
 def test_shared_cases(sql: str, statements: list[str]) -> None:
     assert extract_executable_statements(sql) == statements
+
+
+# The split before #562, which resume compares against: ``legacyStatements``
+# where it differs from ``statements``.
+@pytest.mark.parametrize(
+    ("sql", "statements"),
+    [
+        pytest.param(sql_case["sql"], sql_case.get("legacyStatements", sql_case["statements"]), id=sql_case["name"])
+        for sql_case in FIXTURE["cases"]
+    ],
+)
+def test_shared_cases_legacy(sql: str, statements: list[str]) -> None:
+    assert extract_legacy_executable_statements(sql) == statements

@@ -4,7 +4,7 @@ import { relative, resolve } from 'node:path'
 import { defineFlags, typedFlags } from '@chkit/core'
 import type { ConnectChoice } from '@chkit/plugin-obsessiondb'
 
-import { parseFlagsOrReport } from '../runtime/command-dispatch.js'
+import { parseCommandArgs } from '../runtime/command-dispatch.js'
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 import { ensureProjectDependencies } from '../runtime/deps.js'
 
@@ -136,22 +136,38 @@ const INIT_FLAGS = defineFlags([
   { name: '--org-name', type: 'string', description: 'Organization name', placeholder: '<name>' },
 ] as const)
 
-/** Returns null after reporting an unknown flag, a missing value or an invalid --connect choice, as other commands do (#491). */
+/**
+ * Returns null after reporting a usage error, as other commands do (#491): an unknown flag or a
+ * missing value, then an invalid --connect, then a stray argument, in chkit-py's order and words (#569).
+ */
 function parseInitOptions(argv: string[]): InitOptions | null {
-  const parsed = parseFlagsOrReport('init', argv, INIT_FLAGS)
+  const parsed = parseCommandArgs('init', argv, INIT_FLAGS)
   if (!parsed) return null
-  const flags = typedFlags(parsed, INIT_FLAGS)
+  const flags = typedFlags(parsed.flags, INIT_FLAGS)
   const connect = flags['--connect']
-  if (connect !== undefined && !CONNECT_CHOICES.includes(connect as ConnectChoice)) {
-    console.error(`Invalid value for --connect: ${connect}. Expected one of: ${CONNECT_CHOICES.join(', ')}`)
-    process.exitCode = 1
-    return null
+  if (connect !== undefined && !isConnectChoice(connect)) {
+    const choices = CONNECT_CHOICES.map((choice) => `'${choice}'`).join(', ')
+    return reportUsageError(`Invalid value for '--connect': '${connect}' is not one of ${choices}.`)
+  }
+  if (parsed.positionals.length > 0) {
+    return reportUsageError(`Got unexpected extra argument(s) (${parsed.positionals.join(' ')})`)
   }
   return {
     yes: flags['--yes'] === true,
-    connect: connect as ConnectChoice | undefined,
+    connect,
     email: flags['--email'],
     code: flags['--code'],
     orgName: flags['--org-name'],
   }
+}
+
+function isConnectChoice(value: string): value is ConnectChoice {
+  return CONNECT_CHOICES.some((choice) => choice === value)
+}
+
+/** Reports like parseFlagsOrReport. No envelope: init has no --json, so its flag error comes first. */
+function reportUsageError(message: string): null {
+  console.error(message)
+  process.exitCode = 1
+  return null
 }

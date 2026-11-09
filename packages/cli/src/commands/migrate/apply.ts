@@ -11,7 +11,7 @@ import {
   type ClickHouseSettings,
   type QualifiedTable,
 } from '@chkit/clickhouse'
-import type { ResolvedChxConfig } from '@chkit/core'
+import { extractLegacyExecutableStatements, type ResolvedChxConfig } from '@chkit/core'
 
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../plugins.js'
 import { debug } from '../../runtime/debug.js'
@@ -27,17 +27,19 @@ import {
   extractMigrationOperationSummaries,
   type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
+import { CLI_VERSION } from '../../runtime/version.js'
 import {
   applyAsyncStatement,
   freshMigrationState,
   isoWithoutZone,
   upsertOperation,
 } from './async-apply.js'
-import { inProgressChecksumMismatchError } from './errors.js'
+import { inProgressChecksumMismatchError, statementSplitChangedError } from './errors.js'
 import {
   hasStatementProgress,
   rebaseInProgressState,
   retryMismatchError,
+  splitChangedStatements,
   statementIdentities,
   statementIdentity,
   verifyRetryEdit,
@@ -67,8 +69,15 @@ function propagationWaitPending(state: MigrationRowState, index: number): boolea
   )
 }
 
+/**
+ * A barrier is meant to be a SELECT and changes no object, so it has no wait.
+ * An `exchange_tables` statement keeps its wait even when marked barrier:
+ * nothing stops the barrier read from running an EXCHANGE TABLES, and the
+ * statements after a swap must not run on a replica that still has the old
+ * names. The wait only acts on a statement that is an EXCHANGE TABLES (#577).
+ */
 function hasPropagationWait(operation: MigrationOperationSummary | undefined): operation is MigrationOperationSummary {
-  return operation !== undefined && operation.mode !== 'barrier'
+  return operation !== undefined && (operation.type === 'exchange_tables' || operation.mode !== 'barrier')
 }
 
 /**
@@ -190,6 +199,30 @@ export async function applyMigration(input: {
   // replayed — so a partial failure no longer bricks the migration on re-run
   // with "column already exists". Resuming across a file edit needs care (#233).
   const initialState = await journalStore.readMigrationState(file)
+  // Releases before #562 did not know `//` and `#` comments, so the statement
+  // positions they recorded do not hold where their split and this one differ.
+  // A state this release recorded is split as now.
+  if (
+    initialState !== null &&
+    !initialState.migrationCompleted &&
+    initialState.chkitVersion !== CLI_VERSION
+  ) {
+    const changed = splitChangedStatements(initialState.operations, {
+      legacy: extractLegacyExecutableStatements(sql),
+      current: parsedStatements,
+      positionsKept:
+        statements.length === parsedStatements.length &&
+        statements.every((statement, index) => statement === parsedStatements[index]),
+    })
+    if (changed.length > 0) {
+      throw statementSplitChangedError({
+        migration: file,
+        statements: changed,
+        recordedBy: initialState.chkitVersion,
+        cliVersion: CLI_VERSION,
+      })
+    }
+  }
   if (
     initialState !== null &&
     !initialState.migrationCompleted &&

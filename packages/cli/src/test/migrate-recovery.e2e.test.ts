@@ -235,6 +235,68 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
     }
   }, TIMEOUT_MS)
 
+  // Releases before #562 cut at the `;` inside the `//` comment: for them this
+  // file was [CREATE a, ALTER a ADD x, CREATE b]; ClickHouse reads [CREATE a, CREATE b].
+  test('refuses to resume a partial run that another release split differently, until --abandon (#562)', async () => {
+    const project = await createProject('split')
+    const { database: db, prefix, executor } = project
+    const [a, b] = [`${prefix}a`, `${prefix}b`]
+    const M = '20990101000000_split.sql'
+    const sql = [
+      `CREATE TABLE IF NOT EXISTS ${db}.${a} (id UInt64) ENGINE = MergeTree ORDER BY id // keep; ALTER TABLE ${db}.${a} ADD COLUMN x UInt64`,
+      ';',
+      `CREATE TABLE ${db}.${b} (id UInt64) ENGINE = MergeTree ORDER BY id;`,
+      '',
+    ].join('\n')
+
+    try {
+      await createTable(executor, db, b)
+      await writeMigration(project, M, sql)
+      const run1 = migrate(project, ['--execute', '--json'])
+      expect(run1.exitCode).toBe(1)
+      expect(errorOf(run1).message).toContain(`Migration ${M} failed at statement 2 of 2`)
+      await waitForJournal(project, M, (row) => row.statuses === 'completed,failed')
+
+      // A state this release recorded resumes: statement 1 is skipped.
+      const run2 = migrate(project, ['--execute', '--json'])
+      expect(run2.exitCode).toBe(1)
+      expect(errorOf(run2).message).toContain(`Migration ${M} failed at statement 2 of 2`)
+
+      // An older release's state with nothing completed resumes. The run writes
+      // the state as this release, so after another failure it resumes again.
+      await recordOldReleaseState(project, M, ['failed'])
+      await waitForJournal(project, M, (row) => row.statuses === 'failed')
+      const run3 = migrate(project, ['--execute', '--json'])
+      expect(errorOf(run3).message).toContain(`Migration ${M} failed at statement 2 of 2`)
+      await waitForJournal(project, M, (row) => row.statuses === 'completed,failed')
+      const run4 = migrate(project, ['--execute', '--json'])
+      expect(errorOf(run4).message).toContain(`Migration ${M} failed at statement 2 of 2`)
+
+      // The state an older release would have left: it ran the CREATE and the
+      // commented-out ALTER, then CREATE b failed.
+      await recordOldReleaseState(project, M, ['completed', 'completed', 'failed'])
+      await waitForJournal(project, M, (row) => row.statuses === 'completed,completed,failed')
+      const refused = migrate(project, ['--execute', '--json'])
+      expect(refused.exitCode).toBe(1)
+      expect(errorOf(refused).code).toBe('statement_split_changed')
+      expect(errorOf(refused).message).toContain(
+        `Cannot resume ${M}: chkit 0.0.1-old recorded its partial run`,
+      )
+      expect(errorOf(refused).message).toContain('The journal recorded statements 1, 2 as completed or started')
+      expect(errorOf(refused).message).toContain(`chkit migrate --apply --abandon ${M}`)
+      await waitForJournal(project, M, (row) => row.statuses === 'completed,completed,failed')
+
+      parseJson(migrate(project, ['--abandon', M, '--apply', '--json']))
+      await executor.command(`DROP TABLE ${quoteIdent(db)}.${quoteIdent(b)}`)
+      const rerun = migrate(project, ['--execute', '--json'])
+      expect(rerun.exitCode, formatTestDiagnostic('apply after abandon', rerun)).toBe(0)
+      await waitForTable(executor, db, b)
+      await waitForJournal(project, M, (row) => row.completed === 1 && row.statuses === 'completed,completed,failed')
+    } finally {
+      await dropProject(project, { views: [], tables: [a, b] })
+    }
+  }, TIMEOUT_MS)
+
   test('--abandon needs neither the migration file nor a parseable snapshot.json', async () => {
     const project = await createProject('abandon_gone')
     const { database: db, prefix, executor } = project
@@ -532,6 +594,23 @@ async function waitForJournal(
   const row = rows[0]
   expect(row).toBeDefined()
   return toJournalRow(row ?? { checksum: '', completed: '0', statuses: '' })
+}
+
+// Writes the next version of a migration's row as a release that records
+// `0.0.1-old` would, with unmarked statements of the given statuses.
+async function recordOldReleaseState(project: Project, migration: string, statuses: string[]): Promise<void> {
+  const journal = `${quoteIdent(project.database)}.${quoteIdent(project.journalTable)}`
+  const operations = statuses
+    .map(
+      (status, index) =>
+        `(${index}, 'statement:${index}', 'sql_statement', '', '${status}', applied_at, applied_at, '${status === 'failed' ? 'boom' : ''}')`,
+    )
+    .join(', ')
+  await project.executor.command(
+    `INSERT INTO ${journal} (name, applied_at, checksum, chkit_version, migration_completed, operations) ` +
+      `SELECT name, applied_at + toIntervalMillisecond(1), checksum, '0.0.1-old', false, [${operations}] ` +
+      `FROM ${journal} FINAL WHERE name = '${migration}' SETTINGS select_sequential_consistency = 1`,
+  )
 }
 
 function toJournalRow(row: { checksum: string; completed: string; statuses: string }): JournalRow {

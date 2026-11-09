@@ -13,6 +13,7 @@ import type {
   OperationState,
 } from '../../../runtime/journal-store.js'
 import { checksumSQL, type MigrationJournalEntry } from '../../../runtime/migration-store.js'
+import { CLI_VERSION } from '../../../runtime/version.js'
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../../plugins.js'
 
 function createFakeStore(initial: MigrationRowState | null = null) {
@@ -795,6 +796,178 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
   })
 })
 
+// Releases before #562 cut at a `;` inside a `//` comment: this file was
+// [a, DROP z, b, c] for them, and is [a…b, c] now.
+describe('applyMigration with a state another release split differently (#562)', () => {
+  const SPLIT_SQL =
+    'ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n' +
+    'ALTER TABLE t ADD COLUMN b UInt64;\n' +
+    'ALTER TABLE t ADD COLUMN c UInt64;\n'
+
+  function apply(dir: string, store: JournalStore, db: ClickHouseExecutor) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+  }
+
+  test('refuses to resume when the recorded statements are not the same in this split', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    // The old release ran a and DROP z, then b failed. Resuming by position
+    // would skip c, which never ran.
+    const { store, writes, appended } = createFakeStore(
+      inProgressState(checksumSQL(SPLIT_SQL), [
+        operation(0, 'completed'),
+        operation(1, 'completed'),
+        operation(2, 'failed'),
+      ]),
+    )
+
+    const attempt = apply(dir, store, db)
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow(
+      `Cannot resume m.sql: chkit 0.2.0-test recorded its partial run, and this chkit (${CLI_VERSION}) splits the file into different statements.`,
+    )
+    await expect(attempt).rejects.toThrow('The journal recorded statements 1, 2 as completed or started')
+    await expect(attempt).rejects.toThrow('chkit migrate --apply --abandon m.sql')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+    expect(writes).toEqual([])
+    expect(appended).toEqual([])
+  })
+
+  test('refuses a started statement too, and names a state without a release as an earlier one', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore({
+      ...inProgressState(checksumSQL(SPLIT_SQL), [operation(0, 'completed'), operation(1, 'started')]),
+      chkitVersion: '',
+    })
+
+    const attempt = apply(dir, store, db)
+    await expect(attempt).rejects.toThrow('Cannot resume m.sql: an earlier chkit release recorded its partial run')
+    await expect(attempt).rejects.toThrow('The journal recorded statements 1, 2 as completed or started')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test('resumes a state this release recorded', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore({
+      ...inProgressState(checksumSQL(SPLIT_SQL), [operation(0, 'completed'), operation(1, 'failed')]),
+      chkitVersion: CLI_VERSION,
+    })
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual(['ALTER TABLE t ADD COLUMN c UInt64;'])
+    expect(appended).toHaveLength(1)
+  })
+
+  test('resumes when every recorded statement is the same in both splits', async () => {
+    const sql =
+      'ALTER TABLE t ADD COLUMN a UInt64;\n' +
+      'ALTER TABLE t ADD COLUMN b UInt64;\n' +
+      'ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n' +
+      'ALTER TABLE t ADD COLUMN d UInt64;\n'
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(sql), [operation(0, 'completed'), operation(1, 'failed')]),
+    )
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([
+      'ALTER TABLE t ADD COLUMN b UInt64;',
+      'ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\nALTER TABLE t ADD COLUMN d UInt64;',
+    ])
+    expect(appended).toHaveLength(1)
+  })
+
+  // The journal indexes the statements onBeforeApply returns: once a plugin
+  // removes one, the old and new positions cannot be matched.
+  test('refuses when onBeforeApply removed statements of a file the two splits differ on', async () => {
+    const sql = `SET allow_experimental_x = 1;\n${SPLIT_SQL}`
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(inProgressState(checksumSQL(sql), [operation(0, 'completed')]))
+
+    const attempt = applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime((statements) => statements.filter((s) => !s.startsWith('SET '))),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow('The journal recorded statement 1 as completed or started, which is not')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test('refuses when onBeforeApply moved statements without changing their count', async () => {
+    const sql = `SET allow_experimental_x = 1;\n${SPLIT_SQL}`
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(inProgressState(checksumSQL(sql), [operation(0, 'completed')]))
+
+    const attempt = applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(([first, second, ...rest]) =>
+        first !== undefined && second !== undefined ? [second, first, ...rest] : [],
+      ),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test('runs an abandoned state from statement 1', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(SPLIT_SQL), [
+        { ...operation(0, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was completed)' },
+        { ...operation(1, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was completed)' },
+        { ...operation(2, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was failed)' },
+      ]),
+    )
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([
+      'ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\nALTER TABLE t ADD COLUMN b UInt64;',
+      'ALTER TABLE t ADD COLUMN c UInt64;',
+    ])
+    expect(appended).toHaveLength(1)
+  })
+})
+
 describe('applyMigration -- before-retry on sync statements', () => {
   const SQL =
     '-- operation: cutover_validate key=table:default.t:cutover:start risk=caution\n' +
@@ -893,6 +1066,110 @@ describe('applyMigration mode=barrier', () => {
     expect(appended).toHaveLength(1)
     rmSync(dir, { recursive: true, force: true })
   }, 15_000)
+
+  // An exchange_tables statement keeps its replica wait when marked barrier:
+  // the barrier read runs an EXCHANGE TABLES as ClickHouse would (#577).
+  const EXCHANGE_BARRIER_SQL =
+    '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n' +
+    'EXCHANGE TABLES default.a AND default.b;\n' +
+    '-- operation: drop_table key=table:default.b risk=danger\n' +
+    'DROP TABLE IF EXISTS default.b SYNC;\n'
+  const DROP_SENT = 'DROP TABLE IF EXISTS default.b SYNC;'
+
+  // A two-replica target: no INSERT is running, the replicas agree on both
+  // exchanged tables, and the dropped table is gone everywhere.
+  function twoReplicaDb() {
+    const events: string[] = []
+    const db = {
+      async command(statement: string) {
+        events.push(`command ${statement}`)
+      },
+      async query<T>(statement: string): Promise<T[]> {
+        if (statement.includes('system.one')) return [{ replicas: 2 }] as T[]
+        if (statement.includes('EXCHANGE TABLES')) events.push('barrier read')
+        if (statement.includes('system.processes')) events.push('barrier read')
+        if (statement.includes('uniqExact(uuid)')) {
+          events.push('exchange wait')
+          return [
+            { database: 'default', name: 'a', replicas: 2, uuids: 1, sample_uuid: 'u1' },
+            { database: 'default', name: 'b', replicas: 2, uuids: 1, sample_uuid: 'u2' },
+          ] as T[]
+        }
+        return [] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    return { db, events }
+  }
+
+  function applyOnTwoReplicas(db: ClickHouseExecutor, dir: string, store: JournalStore) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    })
+  }
+
+  test('an EXCHANGE TABLES marked mode=barrier waits for every replica before the next statement', async () => {
+    const dir = writeMigration(EXCHANGE_BARRIER_SQL)
+    const { db, events } = twoReplicaDb()
+    const { store, appended, writes } = createFakeStore()
+    await applyOnTwoReplicas(db, dir, store)
+    expect(events).toEqual(['barrier read', 'exchange wait', `command ${DROP_SENT}`])
+    const exchangeRecords = writes.flatMap((state) =>
+      state.operations.filter((op) => op.operationIndex === 0).map((op) => [op.status, op.lastError]),
+    )
+    expect(exchangeRecords.slice(0, 3)).toEqual([
+      ['started', ''],
+      ['completed', PROPAGATION_WAIT_PENDING],
+      ['completed', ''],
+    ])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('a resumed EXCHANGE TABLES barrier with a pending marker waits again before the next statement', async () => {
+    const dir = writeMigration(EXCHANGE_BARRIER_SQL)
+    const { db, events } = twoReplicaDb()
+    const { store, appended, state } = createFakeStore(
+      inProgressState(checksumSQL(EXCHANGE_BARRIER_SQL), [
+        {
+          ...operation(0, 'completed', { type: 'exchange_tables', key: 'table:default.a' }),
+          lastError: PROPAGATION_WAIT_PENDING,
+        },
+      ]),
+    )
+    await applyOnTwoReplicas(db, dir, store)
+    expect(events).toEqual(['exchange wait', `command ${DROP_SENT}`])
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status, op.lastError])).toEqual([
+      [0, 'completed', ''],
+      [1, 'completed', ''],
+    ])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('a SELECT barrier has no propagation wait', async () => {
+    const sql =
+      '-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier risk=safe mode=barrier\n' +
+      "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n"
+    const dir = writeMigration(sql)
+    const { db, events } = twoReplicaDb()
+    const { store, appended, writes } = createFakeStore()
+    await applyOnTwoReplicas(db, dir, store)
+    expect(events).toEqual(['barrier read'])
+    expect(writes.flatMap((state) => state.operations.map((op) => [op.status, op.lastError]))).toEqual([
+      ['started', ''],
+      ['completed', ''],
+    ])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
 
 

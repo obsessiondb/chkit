@@ -1,8 +1,8 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
-import { forwardedCommandFlags } from '../runtime/command-dispatch.js'
-import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
+import { forwardedCommandFlags, parsePluginCommandArgs, routeForwardedArgs } from '../runtime/command-dispatch.js'
+import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
-import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
+import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
 import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
@@ -17,9 +17,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   const { flags, args, config, configPath, pluginRuntime } = ctx
   const jsonMode = flags['--json'] === true
 
-  const pluginName = args[0]
-  const commandName = args[1]
-  const commandArgs = args.slice(2)
+  const { pluginName, commandName, commandArgs } = routeForwardedArgs(args)
 
   if (pluginRuntime.plugins.length === 0) {
     if (jsonMode) {
@@ -100,18 +98,6 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 0
   }
 
-  const gf = typedFlags(flags, GLOBAL_FLAGS)
-  const tableSelector = gf['--table']
-  let tableScope: ReturnType<typeof resolveTableScope>
-  try {
-    // Without --table the scope is unfiltered, so only a selector needs the schema.
-    // A plugin command that needs it loads it and reports its load errors itself.
-    const definitions = tableSelector ? await loadSchemaDefinitions(ctx.config.schema) : []
-    tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
-  } catch {
-    tableScope = resolveTableScope(tableSelector, [])
-  }
-
   // Parse plugin-specific flags when the command declares them or another plugin
   // extends this plugin's namespace (the same flags `chkit <plugin> <command>` accepts).
   const targetCommand = (selectedPlugin.plugin.commands ?? []).find((cmd) => cmd.name === commandName)
@@ -128,9 +114,14 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, pluginName, targetCommand)
   // Parse even when the command declares no flags, so an unknown flag is
   // rejected as in `chkit <plugin> <command>` instead of reaching the args (#491).
+  // As there, the command gets its flags in `flags` and only the positionals
+  // in `args`, and `--` ends its flags (#568).
   let mergedFlags: ParsedFlags
+  let positionals: string[]
   try {
-    mergedFlags = { ...flags, ...parseFlags(commandArgs, commandFlags) }
+    const parsed = parsePluginCommandArgs(commandArgs, commandFlags)
+    mergedFlags = { ...flags, ...parsed.flags }
+    positionals = parsed.positionals
   } catch (error) {
     if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
       if (jsonMode) {
@@ -143,12 +134,24 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     throw error
   }
 
+  // Set only when the target command declares --table (#565).
+  const tableSelector = typedFlags(mergedFlags, [TABLE_FLAG] as const)['--table']
+  let tableScope: ReturnType<typeof resolveTableScope>
+  try {
+    // Without --table the scope is unfiltered, so only a selector needs the schema.
+    // A plugin command that needs it loads it and reports its load errors itself.
+    const definitions = tableSelector ? await loadSchemaDefinitions(ctx.config.schema) : []
+    tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
+  } catch {
+    tableScope = resolveTableScope(tableSelector, [])
+  }
+
   const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {
     config,
     configPath,
     jsonMode,
     tableScope,
-    args: commandArgs,
+    args: positionals,
     flags: mergedFlags,
     print(value) {
       printOutput(value, jsonMode)

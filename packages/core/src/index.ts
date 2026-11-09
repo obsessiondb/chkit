@@ -49,7 +49,7 @@ export {
   renderConstraint,
   type ConstraintKind,
 } from './constraint.js'
-export { splitTopLevelComma } from './key-clause.js'
+export { keyClauseFingerprint, splitTopLevelComma } from './key-clause.js'
 export { insertColumnList, insertableColumnNames } from './insert-columns.js'
 export {
   quoteIdentifier,
@@ -97,7 +97,11 @@ export {
 } from './codec.js'
 export { assertValidDefinitions, collectDefinitionWarnings, validateDefinitions } from './validate.js'
 export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plugin-error.js'
-export { splitSqlStatements, extractExecutableStatements } from './sql-splitter.js'
+export {
+  splitSqlStatements,
+  extractExecutableStatements,
+  extractLegacyExecutableStatements,
+} from './sql-splitter.js'
 export { parseJsonEachRow, parseJsonEachRowLine, roundTripNumber } from './exact-json.js'
 export { t } from './clickhouse-type.js'
 export { p, type NamedParam } from './query-param.js'
