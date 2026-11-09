@@ -8,6 +8,10 @@
   message see the SQL without the migration's header and marker comments.
 
 ### Fixed
+- `migrate` no longer records a migration as applied when re-run after a DDL propagation
+  wait timed out (#513, fixed in TS too): the re-run waits again for that statement before it
+  runs the next one, and stops with the same error if the change has still not reached every
+  replica.
 - `generate` no longer drops and re-adds a skip index whose expression differs only by
   enclosing parentheses, such as the `(s)` ObsessionDB stores for `s`; `pull` writes `s` on
   every server, and `drift` ignores those parentheses too, as in TS (#512).
