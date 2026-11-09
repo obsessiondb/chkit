@@ -19,6 +19,12 @@
   string `error`). A value flag followed by a `--` token now lacks its value, as in TS:
   `generate --name --json` fails instead of naming the migration `--json`. A bundle such as
   `-ax` is reported whole, and a boolean flag given a value (`--json=1`) is an unknown flag.
+- The other usage errors fail as in TS too (#607): an unexpected argument, an invalid
+  `init --connect` choice, `query` without one SQL string, an unknown plugin or plugin command,
+  and `codegen` without its plugin print one line on stderr and exit 1 (it was 2, with click's
+  usage banner), with TS's messages and `--json` envelopes. `chkit obsessiondb` without a
+  command shows its help, as in TS, and `chkit plugin obsessiondb` lists the commands in TS's
+  order.
 - `chkit obsessiondb service alias set` rejects an alias that starts with `-`, which the
   command line would read as a flag (#491). An alias saved earlier still loads and is
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
