@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 
 import { spawnWithTimeout } from './spawn-cli.js'
-import { CODEGEN_PLUGIN_ENTRY, createFixture, PULL_PLUGIN_ENTRY, renderScopedSchema, WORKSPACE_ROOT } from './testkit.test'
+import { CLI_ENTRY as CLI_SOURCE_ENTRY, CODEGEN_PLUGIN_ENTRY, createFixture, PULL_PLUGIN_ENTRY, renderScopedSchema, WORKSPACE_ROOT } from './testkit.test'
 
 const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/dist/bin/chkit.js')
 
@@ -31,6 +31,35 @@ export default {
     pull({ outFile: ${JSON.stringify(join(fixture.dir, 'pulled.ts'))}, introspect: async () => [] }),
   ],
 }
+`,
+  )
+  return fixture
+}
+
+async function createArchiveFixture(): Promise<{ dir: string; configPath: string }> {
+  const fixture = await createFixture(renderScopedSchema())
+  // backup declares --table, so it gets the scope; restore does not, so it rejects it.
+  const pluginPath = join(fixture.dir, 'archive-plugin.ts')
+  await writeFile(
+    pluginPath,
+    `import { definePlugin } from ${JSON.stringify(CLI_SOURCE_ENTRY)}
+export const plugin = definePlugin({
+  manifest: { name: 'archive', apiVersion: 1 },
+  commands: [
+    {
+      name: 'backup',
+      flags: [{ name: '--table', short: '-t', type: 'string', description: 'Tables to back up' }],
+      run({ tableScope }) { console.log('backup ' + tableScope.selector + ' ' + tableScope.matchedTables.join(',')) },
+    },
+    { name: 'restore', run() { console.log('restore') } },
+  ],
+})
+`,
+  )
+  await writeFile(
+    fixture.configPath,
+    `import { plugin } from ${JSON.stringify(pluginPath)}
+export default { schema: ${JSON.stringify(fixture.schemaPath)}, outDir: ${JSON.stringify(join(fixture.dir, 'chkit'))}, plugins: [{ plugin }] }
 `,
   )
   return fixture
@@ -76,6 +105,39 @@ describe('@chkit/cli --table only where it scopes the command (#565)', () => {
         command: 'status',
         error: { code: 'usage', message: 'Unknown flag: --table' },
       })
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('a plugin command that declares --table gets it wherever it is written', async () => {
+    const fixture = await createArchiveFixture()
+    try {
+      const config = ['--config', fixture.configPath]
+      for (const args of [
+        ['archive', 'backup', '--table', 'app.users', ...config],
+        ['archive', '--table', 'app.users', 'backup', ...config],
+        ['--table', 'app.users', 'archive', 'backup', ...config],
+        ['plugin', 'archive', 'backup', '-t', 'app.users', ...config],
+        ['plugin', '--table', 'app.users', 'archive', 'backup', ...config],
+        ['plugin', '-t=app.users', 'archive', 'backup', ...config],
+        ['--table', 'app.users', 'plugin', 'archive', 'backup', ...config],
+      ]) {
+        const result = runCli(args, fixture.dir)
+        expect([args, result.exitCode, result.stdout.trim(), result.stderr]).toEqual([args, 0, 'backup app.users app.users', ''])
+      }
+
+      // A selector that names another subcommand is still the selector.
+      const named = runCli(['archive', '--table', 'restore', 'backup', ...config], fixture.dir)
+      expect([named.exitCode, named.stdout.trim()]).toEqual([0, 'backup restore'])
+
+      for (const args of [
+        ['archive', '--table', 'app.users', 'restore', ...config],
+        ['plugin', '--table', 'app.users', 'archive', 'restore', ...config],
+      ]) {
+        const result = runCli(args, fixture.dir)
+        expect([args, result.exitCode, result.stderr.trim(), result.stdout]).toEqual([args, 1, 'Unknown flag: --table', ''])
+      }
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

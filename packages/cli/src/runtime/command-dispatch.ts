@@ -198,8 +198,11 @@ function matchSubcommand(
 	| { ok: true; name: string | undefined }
 	| { ok: false; token: string | undefined } {
 	if (!resolved.subcommands) return { ok: true, name: undefined }
+	// A subcommand may declare --table, so its value is never the subcommand name;
+	// the subcommand's own flag parsing then accepts or rejects it (#565).
 	const commandToken = extractPositionals(argsAfterCommand, [
 		...globalFlags,
+		TABLE_FLAG,
 		...resolved.flags,
 	])[0]
 	const matchedSub = resolved.subcommands.find((s) => s.name === commandToken)
@@ -210,12 +213,15 @@ function matchSubcommand(
 	return { ok: false, token: commandToken }
 }
 
-// `--table` is not global: it stays in the rest, for the target command to accept or reject (#565).
+// `--table` is not global: it stays in the rest, for the target command to accept or
+// reject (#565). One given before the plugin and command names moves behind them, so
+// it is never read as either.
 function stripGlobalFlags(argv: string[]): {
 	jsonMode: boolean
 	rest: string[]
 } {
 	const rest: string[] = []
+	const leadingTable: string[] = []
 	let jsonMode = false
 
 	for (let i = 0; i < argv.length; i++) {
@@ -231,10 +237,19 @@ function stripGlobalFlags(argv: string[]): {
 		if (token.startsWith('--config=')) {
 			continue
 		}
+		const tableToken = expandShortFlags([token], [TABLE_FLAG])[0] as string
+		if (rest.length < 2 && (tableToken === '--table' || tableToken.startsWith('--table='))) {
+			leadingTable.push(tableToken)
+			if (tableToken === '--table' && i + 1 < argv.length) {
+				leadingTable.push(argv[i + 1] as string)
+				i++
+			}
+			continue
+		}
 		rest.push(token)
 	}
 
-	return { jsonMode, rest }
+	return { jsonMode, rest: [...rest.slice(0, 2), ...leadingTable, ...rest.slice(2)] }
 }
 
 export function parseFlagsOrReport(
