@@ -13,7 +13,7 @@ import pytest
 
 from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import (
-    MAX_ATTEMPTS,
+    MAX_RETRIES,
     wait_for_column,
     wait_for_ddl_propagation,
     wait_for_dictionary,
@@ -68,7 +68,7 @@ def test_wait_for_table_retries_until_visible() -> None:
 
 
 def test_wait_for_table_raises_after_max_attempts() -> None:
-    client = _ScriptedClient([[] for _ in range(MAX_ATTEMPTS + 1)])
+    client = _ScriptedClient([[] for _ in range(MAX_RETRIES + 1)])
     with pytest.raises(RuntimeError, match="not yet visible"):
         wait_for_table(client, "db", "ghost")
 
@@ -91,7 +91,7 @@ def test_wait_for_view_requires_view_engine_filter() -> None:
 
 
 def test_wait_for_view_raises_when_never_visible() -> None:
-    client = _ScriptedClient([[] for _ in range(MAX_ATTEMPTS + 1)])
+    client = _ScriptedClient([[] for _ in range(MAX_RETRIES + 1)])
     with pytest.raises(RuntimeError, match="not yet visible"):
         wait_for_view(client, "db", "v")
 
@@ -122,7 +122,7 @@ def test_wait_for_table_absent_retries_until_gone() -> None:
 
 
 def test_wait_for_table_absent_raises_when_still_present() -> None:
-    client = _ScriptedClient([[{"x": 1}] for _ in range(MAX_ATTEMPTS + 1)])
+    client = _ScriptedClient([[{"x": 1}] for _ in range(MAX_RETRIES + 1)])
     with pytest.raises(RuntimeError, match="still present"):
         wait_for_table_absent(client, "db", "t")
 
@@ -199,3 +199,42 @@ def test_dispatch_malformed_key_returns_immediately() -> None:
     client = _ScriptedClient([])
     wait_for_ddl_propagation(client, "create_table", "weird-key")
     assert client.queries == []
+
+
+# ---------- retry budget (#578) ----------
+# TS's p-retry ``{ retries: 20, minTimeout: 500, factor: 1 }``: 21 checks,
+# 0.5 s apart, no delay after the last. ddl-propagation.test.ts pins the same.
+
+
+def _record_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    sleeps: list[float] = []
+    monkeypatch.setattr(ddl_propagation.time, "sleep", sleeps.append)
+    return sleeps
+
+
+def test_table_that_never_appears_is_checked_21_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _ScriptedClient([])
+    with pytest.raises(RuntimeError, match=r"waitForTable: db\.events not yet visible"):
+        wait_for_ddl_propagation(client, "create_table", "table:db.events")
+    assert len(client.queries) == 21
+    assert sleeps == [0.5] * 20
+
+
+def test_table_that_appears_on_the_21st_check_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _ScriptedClient([*([] for _ in range(20)), [{"x": 1}]])
+    wait_for_ddl_propagation(client, "create_table", "table:db.events")
+    assert len(client.queries) == 21
+    assert sleeps == [0.5] * 20
+
+
+def test_dictionary_that_never_appears_is_checked_21_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _ScriptedClient([])
+    with pytest.raises(RuntimeError, match=r"waitForDictionary: db\.users not yet visible"):
+        wait_for_ddl_propagation(client, "create_dictionary", "dictionary:db.users")
+    assert len(client.queries) == 21
+    assert sleeps == [0.5] * 20
