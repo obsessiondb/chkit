@@ -184,7 +184,10 @@ export function formatTextSQL(tokens: string[]): string {
       i === 0 ||
       [')', ']', '}', ',', '.'].includes(token) ||
       ['(', '[', '{', '.'].includes(previous ?? '') ||
-      (token === '(' && isCall(tokens, i))
+      (token === '(' && isCall(tokens, i)) ||
+      // `[` after an operand subscripts it, as ClickHouse writes `lower(s)[1]`;
+      // after an operator or keyword it opens an array: `x IN [1]`, `NOT [1]`.
+      (token === '[' && endsOperand(previous) && previous?.toLowerCase() !== 'not')
     sql += (tight ? '' : ' ') + token
   }
   return sql

@@ -259,8 +259,9 @@ function parseForwardedInitFlags(
 ): ParsedFlags | null {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
 	const { pluginName, commandName, commandArgs } = routeForwardedArgs(rest)
+	// As in `cmdPlugin`, the built-in plugins are not targets of `chkit plugin`.
 	const command = plugins
-		.find((entry) => entry.plugin.manifest.name === pluginName)
+		.find((entry) => !entry.internal && entry.plugin.manifest.name === pluginName)
 		?.plugin.commands?.find((cmd) => cmd.name === commandName)
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)

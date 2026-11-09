@@ -18,10 +18,11 @@ from chkit.cli.commands.plugin import dispatch_plugin_command
 
 
 def run(
+    ctx: typer.Context,
     command_name: Annotated[
-        str,
+        str | None,
         typer.Argument(help="ObsessionDB command (login, signup, whoami, service, ...)."),
-    ],
+    ] = None,
     args: Annotated[
         list[str] | None,
         typer.Argument(
@@ -38,6 +39,10 @@ def run(
         typer.Option("--json", help="Emit a JSON-formatted summary."),
     ] = False,
 ) -> None:
+    if command_name is None:
+        # As in TS, `chkit obsessiondb` without a command shows its help.
+        typer.echo(ctx.get_help())
+        return
     dispatch_plugin_command(
         plugin_name="obsessiondb",
         command_name=command_name,
@@ -46,4 +51,6 @@ def run(
         output_json=output_json,
         invoking_command="obsessiondb",
         config_flag=config_path,
+        # A callable: with rich, get_help() prints the help as it builds it.
+        print_help=lambda: typer.echo(ctx.get_help()),
     )
