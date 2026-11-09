@@ -32,6 +32,7 @@ from chkit.cli.command_target import (
     ServiceOption,
     open_client,
     resolve_plugin_executor,
+    run_on_config_loaded_or_exit,
 )
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.cli.commands.pull_view_parser import (
@@ -43,7 +44,7 @@ from chkit.cli.commands.pull_view_parser import (
 from chkit.cli.config_loader import load_config
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
-from chkit.cli.plugin_runtime import PluginExecutionError, PluginRuntime, load_plugin_runtime
+from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.create_dictionary_parser import (
@@ -259,25 +260,6 @@ def _assert_index_granularity(
         else:
             typer.echo(f"Pull schema failed: {error}")
         raise typer.Exit(code=1) from error
-
-
-def _run_on_config_loaded(
-    plugin_runtime: PluginRuntime, context: ChxOnConfigLoadedContext, *, output_json: bool
-) -> None:
-    """Run the on_config_loaded hooks. Report a hook error as the TS dispatcher
-    (``command-dispatch.ts``) reports it for a plugin command, and exit 2.
-
-    With ``--json`` the error goes to stdout as ``{ok: false, error}``.
-    Without it the message goes to stderr.
-    """
-    try:
-        plugin_runtime.run_on_config_loaded(context)
-    except PluginExecutionError as error:
-        if output_json:
-            print_output({"ok": False, "error": str(error)}, json_mode=True)
-        else:
-            typer.echo(str(error), err=True)
-        raise typer.Exit(code=2) from error
 
 
 def _pull_definitions(
@@ -586,7 +568,7 @@ def run(  # noqa: PLR0912, PLR0917
         service=service,
         flags=hook_flags,
         # TS runs on_config_loaded for every plugin command, and pull is one.
-        after_init=lambda: _run_on_config_loaded(
+        after_init=lambda: run_on_config_loaded_or_exit(
             plugin_runtime,
             ChxOnConfigLoadedContext(
                 command="pull",

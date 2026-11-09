@@ -11,15 +11,19 @@ Usage:
 
 from __future__ import annotations
 
+import sys
 from pathlib import Path
 from typing import Annotated, Any, cast
 
 import typer
 
+from chkit.cli import command_lifecycle
+from chkit.cli.command_target import run_on_config_loaded_or_exit
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import (
+    PluginRuntime,
     load_plugin_runtime,
     make_plugin_context,
     null_plugin_context,
@@ -34,8 +38,11 @@ from chkit.core.flags import (
     expand_short_flags,
     parse_flags,
 )
-from chkit.core.model import ChxConfigEnv
+from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
 from chkit.plugins import (
+    ChxGetContextInput,
+    ChxOnConfigLoadedContext,
+    ChxOnInitContext,
     ChxPlugin,
     ChxPluginCommandContext,
     LoadedPlugin,
@@ -126,6 +133,48 @@ def _extended_flag_defs(
     return extended
 
 
+def _init_hooks(
+    runtime: PluginRuntime,
+    config: ChxResolvedConfig,
+    *,
+    command: str,
+    config_path: str,
+    output_json: bool,
+    flags: ParsedFlags,
+) -> None:
+    """Run the on_init hooks, as TS ``bin/chkit.ts`` does before any command."""
+    command_lifecycle.run_on_init(
+        runtime,
+        ChxOnInitContext(
+            command=command,
+            config_path=config_path,
+            is_interactive=sys.stdin.isatty(),
+            json_mode=output_json,
+            flags=dict(flags),
+            config=config,
+            options={},
+        ),
+    )
+
+
+def _forwarder_context_hooks(
+    runtime: PluginRuntime, config: ChxResolvedConfig, *, config_path: str, flags: ParsedFlags
+) -> None:
+    """``chkit plugin`` is itself a command, so its get_context hooks run with
+    its own flags, as in TS (where every command is a plugin command)."""
+    plugin_context = runtime.resolve_context(
+        ChxGetContextInput(
+            config=config,
+            config_path=config_path,
+            command="plugin",
+            flags=dict(flags),
+            defaults=null_plugin_context(),
+        )
+    )
+    if plugin_context is not None:
+        runtime.dispose_context(plugin_context)
+
+
 def dispatch_plugin_command(
     *,
     plugin_name: str,
@@ -140,6 +189,10 @@ def dispatch_plugin_command(
 
     Shared by ``chkit plugin <name> <cmd>`` and the top-level shortcuts
     (``chkit codegen``, ``chkit obsessiondb ...``), mirroring the TS CLI.
+    As there, a flag error ends the command before any hook; then on_init
+    runs, then on_config_loaded on a shortcut, then the command (with its
+    on_before_plugin_command and get_context hooks). The CLI group runs
+    on_complete (#488).
     """
     # As in TS, `obsessiondb` / `plugin obsessiondb` may load the ObsessionDB
     # profile without a project config or credentials (to run `login`).
@@ -151,18 +204,52 @@ def dispatch_plugin_command(
     runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    resolved_config_path = loaded_config_path(config_path)
+    is_forwarder = invoking_command == "plugin"
+
+    # The flags TS parses for the command itself: --json, and on a shortcut
+    # also --config (a global flag there; `chkit plugin` strips it).
+    own_flags: ParsedFlags = {"--json": True} if output_json else {}
+    if not is_forwarder and config_path is not None:
+        own_flags["--config"] = str(config_path)
 
     entry = next(
         (e for e in runtime.plugins if e.plugin.manifest.name == plugin_name), None
     )
+    found = runtime.get_command(plugin_name, command_name)
+    flags: ParsedFlags
+    positionals: list[str] = []
+    if found is None:
+        # As in TS, an unknown plugin or command is reported after on_init,
+        # which then gets only the forwarder's flags (none on a shortcut).
+        flags = own_flags if is_forwarder else {}
+    else:
+        flag_defs = [*(found[0].flags or []), *_extended_flag_defs(runtime, plugin_name)]
+        try:
+            positionals, parsed = _split_positionals_and_flags(tokens, flag_defs)
+        except (UnknownFlagError, MissingFlagValueError) as error:
+            report_flag_error(invoking_command, str(error), json_mode=output_json)
+        flags = {**own_flags, **parsed, **(extra_flags or {})}
+
+    _init_hooks(
+        runtime,
+        config,
+        command=invoking_command,
+        config_path=resolved_config_path,
+        output_json=output_json,
+        flags=flags,
+    )
+    if is_forwarder:
+        _forwarder_context_hooks(
+            runtime, config, config_path=resolved_config_path, flags=own_flags
+        )
+
     if entry is None:
         msg = (
             f'No plugin named "{plugin_name}" is configured. '
             f"Run `chkit plugin` to see registered plugins."
         )
         raise typer.BadParameter(msg)
-
-    found = runtime.get_command(plugin_name, command_name)
     if found is None:
         msg = (
             f'Plugin "{plugin_name}" has no command "{command_name}". '
@@ -170,16 +257,50 @@ def dispatch_plugin_command(
         )
         raise typer.BadParameter(msg)
 
-    command_def, _command_owner = found
-    flag_defs = list(command_def.flags or [])
-    flag_defs.extend(_extended_flag_defs(runtime, plugin_name))
-    try:
-        positionals, flags = _split_positionals_and_flags(tokens, flag_defs)
-    except (UnknownFlagError, MissingFlagValueError) as error:
-        report_flag_error(invoking_command, str(error), json_mode=output_json)
-    if extra_flags:
-        flags.update(extra_flags)
+    table_scope = TableScope(enabled=False)
+    if not is_forwarder:
+        # TS runs on_config_loaded for a plugin command run by its own name,
+        # not through `chkit plugin`.
+        run_on_config_loaded_or_exit(
+            runtime,
+            ChxOnConfigLoadedContext(
+                command=invoking_command,
+                config=config,
+                table_scope=table_scope,
+                flags=dict(flags),
+                config_path=resolved_config_path,
+                options={},
+            ),
+            output_json=output_json,
+        )
 
+    exit_code = _run_command(
+        runtime,
+        config,
+        plugin_name=plugin_name,
+        command_name=command_name,
+        config_path=resolved_config_path,
+        output_json=output_json,
+        args=positionals,
+        flags=flags,
+        table_scope=table_scope,
+    )
+    if exit_code != 0:
+        raise typer.Exit(code=exit_code)
+
+
+def _run_command(
+    runtime: PluginRuntime,
+    config: ChxResolvedConfig,
+    *,
+    plugin_name: str,
+    command_name: str,
+    config_path: str,
+    output_json: bool,
+    args: list[str],
+    flags: ParsedFlags,
+    table_scope: TableScope,
+) -> int:
     # Connect opportunistically — some plugin commands don't need a DB
     # (codegen, backfill status, ...). Mirroring TS, an unreachable
     # ClickHouse must not block those: fall back to a null context and let
@@ -197,13 +318,13 @@ def dispatch_plugin_command(
         ctx = ChxPluginCommandContext(
             plugin_name=plugin_name,
             config=config,
-            config_path=loaded_config_path(config_path),
+            config_path=config_path,
             json_mode=output_json,
-            args=positionals,
+            args=args,
             flags=dict(flags),
             options={},
             raw_options={},
-            table_scope=TableScope(enabled=False),
+            table_scope=table_scope,
             # TS routes plugin prints through printOutput: --json emits real
             # JSON (bare strings wrapped in {schemaVersion, message}); plain
             # mode prints strings only.
@@ -211,13 +332,10 @@ def dispatch_plugin_command(
             plugin_runtime=runtime,
             plugin_context=plugin_context,
         )
-        exit_code = runtime.run_plugin_command(plugin_name, command_name, ctx)
+        return runtime.run_plugin_command(plugin_name, command_name, ctx)
     finally:
         if cm is not None:
             cm.close()
-
-    if exit_code != 0:
-        raise typer.Exit(code=exit_code)
 
 
 def run(
@@ -257,6 +375,20 @@ def run(
         )
         runtime = load_plugin_runtime(
             [p for p in config.plugins if isinstance(p, ChxPlugin)]
+        )
+        # As in TS, listing is a command too: on_init and get_context run.
+        resolved_config_path = loaded_config_path(config_path)
+        own_flags: ParsedFlags = {"--json": True} if output_json else {}
+        _init_hooks(
+            runtime,
+            config,
+            command="plugin",
+            config_path=resolved_config_path,
+            output_json=output_json,
+            flags=own_flags,
+        )
+        _forwarder_context_hooks(
+            runtime, config, config_path=resolved_config_path, flags=own_flags
         )
         loaded = list(runtime.plugins)
         if plugin_name is None:

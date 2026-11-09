@@ -24,6 +24,15 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- Plugin hooks run around every command as in TS (#488). `on_complete` now runs after each
+  command whose `on_init` ran, with its exit code, on success and on error; an `on_complete`
+  error fails a command that succeeded and is dropped after one that failed.
+  `chkit plugin <plugin> <command>`, `chkit codegen` and `chkit obsessiondb ...` now run
+  `on_init` first and `get_context` right before the command (`chkit plugin`, listing
+  included, also runs `get_context` with its own flags first), and the two shortcuts run
+  `on_config_loaded` in between (a hook error there exits 2). The plugin command and its
+  hooks get `--json` in their flags, and `--config` on a shortcut. `generate` runs the
+  `get_context` hooks before it runs the codegen plugin.
 - `migrate` reads `//`, `# ` and `#!` comments as ClickHouse does, so a `;` inside one no
   longer runs the commented-out text after it as a statement, and a quote or `/*` inside one
   no longer joins statements (#562, fixed in TS too). A partly applied migration whose
