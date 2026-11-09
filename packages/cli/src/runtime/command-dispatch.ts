@@ -172,11 +172,30 @@ function commandTakesArgs(commandName: string, resolved: RegisteredCommand): boo
 }
 
 /** Reports like parseFlagsOrReport, in the words chkit-py (click) uses. */
-function reportStrayArgs(commandName: string, args: string[], jsonMode: boolean): void {
+export function reportStrayArgs(commandName: string, args: string[], jsonMode: boolean): void {
 	const message = `Got unexpected extra argument(s) (${args.join(' ')})`
 	console.error(message)
 	if (jsonMode) emitJsonError(commandName, { code: 'usage', message })
 	process.exitCode = 1
+}
+
+/**
+ * Reports the arguments of a plugin command that takes none (`takesArgs:
+ * false`) as a core command's, before the command runs (#659). Returns
+ * whether it did.
+ */
+function reportsStrayPluginArgs(
+	commandName: string,
+	resolved: RegisteredCommand,
+	subcommandName: string | undefined,
+	parsed: { flags: ParsedFlags; positionals: string[] },
+): boolean {
+	const target = resolved.subcommands?.find((s) => s.name === subcommandName) ?? resolved
+	if (target.takesArgs !== false) return false
+	const args = withoutSubcommandName(parsed.positionals, subcommandName)
+	if (args.length === 0) return false
+	reportStrayArgs(commandName, args, parsed.flags['--json'] === true)
+	return true
 }
 
 /**
@@ -207,7 +226,11 @@ export function parseInitFlags(input: {
 		input.registry.resolveFlags(input.commandName, subcommand.name),
 		{ takesArgs: commandTakesArgs(input.commandName, input.resolved) },
 	)
-	return parsed ? parsed.flags : null
+	if (!parsed) return null
+	if (reportsStrayPluginArgs(input.commandName, input.resolved, subcommand.name, parsed)) {
+		return null
+	}
+	return parsed.flags
 }
 
 /**
@@ -266,7 +289,13 @@ function parseForwardedInitFlags(
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)
 	try {
-		return { ...flags, ...parsePluginCommandArgs(commandArgs, defs).flags }
+		const parsed = parsePluginCommandArgs(commandArgs, defs)
+		// As in `cmdPlugin`, a command that takes no arguments rejects them (#659).
+		if (command.takesArgs === false && parsed.positionals.length > 0) {
+			reportStrayArgs('plugin', parsed.positionals, flags['--json'] === true)
+			return null
+		}
+		return { ...flags, ...parsed.flags }
 	} catch (error) {
 		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
 		// does, in the format the plugin command uses for it.
@@ -471,6 +500,9 @@ export async function runResolvedCommand(input: {
 			{ takesArgs: commandTakesArgs(input.commandName, input.resolved) },
 		)
 		if (!parsed) return
+		if (reportsStrayPluginArgs(input.commandName, input.resolved, subcommandName, parsed)) {
+			return
+		}
 		flags = parsed.flags
 		positionals = withoutSubcommandName(parsed.positionals, subcommandName)
 	}

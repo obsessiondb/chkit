@@ -313,21 +313,25 @@ def create_obsessiondb_plugin(
                 name="login",
                 description="Authenticate with ObsessionDB",
                 run=_login_run,
+                takes_args=False,
             ),
             ChxPluginCommand(
                 name="signup",
                 description="Sign up or log in with a one-time email code (passwordless)",
                 run=_signup_run,
+                takes_args=False,
             ),
             ChxPluginCommand(
                 name="logout",
                 description="Remove stored ObsessionDB credentials",
                 run=_logout_run,
+                takes_args=False,
             ),
             ChxPluginCommand(
                 name="whoami",
                 description="Show current ObsessionDB user",
                 run=_whoami_run,
+                takes_args=False,
             ),
             ChxPluginCommand(
                 name="service",
