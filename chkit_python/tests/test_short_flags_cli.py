@@ -153,15 +153,14 @@ def test_a_forwarder_config_never_takes_a_double_dash_token_as_its_value(
         ["--help", "--config"],
     ],
 )
-@pytest.mark.parametrize(
-    "command", [["codegen"], ["plugin", "codegen", "codegen"], ["obsessiondb", "logout"]]
-)
-def test_a_forwarder_config_next_to_help_shows_the_help_and_runs_nothing(
+@pytest.mark.parametrize("command", [["plugin"], ["plugin", "codegen", "codegen"]])
+def test_a_plugin_config_next_to_help_shows_the_help_and_runs_nothing(
     command: list[str], tail: list[str], monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A valueless ``--config`` next to -h / --help shows the help, as TS
-    handles help first (#621), and the help flag is never the config path: a
-    later ``--config`` cannot let the plugin command run (#619)."""
+    """``plugin`` is a built-in command in TS, which shows its help before
+    reading --config (#621): a valueless ``--config`` next to -h / --help shows
+    the help, and the help flag is never the config path, so a later
+    ``--config`` cannot let the plugin command run (#619)."""
     calls: list[dict[str, object]] = []
     for module in (codegen_shortcut, obsessiondb_shortcut, plugin_command):
         monkeypatch.setattr(
@@ -170,6 +169,35 @@ def test_a_forwarder_config_next_to_help_shows_the_help_and_runs_nothing(
     result = CliRunner().invoke(app, [*command, *tail])
     assert (result.exit_code, result.stderr) == (0, ""), result.output
     assert "Global options:" in result.stdout
+    assert calls == []
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        ["--help", "--config"],
+        ["--config", "--help", "--config=other.py"],
+        ["-h", "-c"],
+        ["--out-file", "-c", "--help"],
+    ],
+)
+@pytest.mark.parametrize("command", [["codegen"], ["obsessiondb"], ["obsessiondb", "logout"]])
+def test_a_shortcut_reads_a_valueless_config_before_the_help(
+    command: list[str], tail: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The shortcuts are plugin commands in TS, which reads --config before
+    their help, unlike ``plugin``'s (#619)."""
+    calls: list[dict[str, object]] = []
+    for module in (codegen_shortcut, obsessiondb_shortcut):
+        monkeypatch.setattr(
+            module, "dispatch_plugin_command", lambda **kwargs: calls.append(kwargs)
+        )
+    result = CliRunner().invoke(app, [*command, *tail])
+    assert (result.exit_code, result.stdout, result.stderr) == (
+        1,
+        "",
+        "Missing value for --config\n",
+    )
     assert calls == []
 
 

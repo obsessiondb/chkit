@@ -39,6 +39,13 @@ from chkit.core.flags import MissingFlagValueError, UnknownFlagError
 
 _HELP_OPTION_NAMES = ("-h", "--help")
 _HELP_PLUGINS_OPTION = "--help-plugins"
+# The commands of the TS CLI's internal registry
+# (packages/cli/src/internal-plugins/core/plugin.ts). TS shows their help before
+# reading --config; its plugin commands (codegen, obsessiondb, pull) read the
+# config first.
+_TS_BUILTIN_COMMANDS = frozenset(
+    {"generate", "migrate", "status", "drift", "check", "snapshot", "query", "plugin"}
+)
 
 
 def _option_forms(params: list[Any]) -> tuple[dict[str, bool], dict[str, str]]:
@@ -136,7 +143,7 @@ def _reject_group_bundles(ctx: Any, args: list[str], params: list[Any]) -> list[
 
 
 def _split_forwarded_args(
-    args: list[str], params: list[Any], *, help_plugins: bool = False
+    args: list[str], params: list[Any], *, config_first: bool = False
 ) -> list[str]:
     """Separate a plugin forwarder's own options from the plugin's arguments.
 
@@ -159,12 +166,11 @@ def _split_forwarded_args(
     )
 
     end = args.index("--") if "--" in args else len(args)
-    # TS shows the help before reading --config, unless --help-plugins asks
-    # for it (that help loads the config), so `help_plugins` (its `--help`
-    # here) does not count.
-    help_requested = not help_plugins and any(
-        token in _HELP_OPTION_NAMES for token in args[:end]
-    )
+    help_requested = any(token in _HELP_OPTION_NAMES for token in args[:end])
+    # Where TS reads --config before the help (`config_first`), a --config
+    # without its value fails first, as in TS.
+    if help_requested and config_first:
+        _check_config_value(args, params)
 
     own: list[str] = []
     forwarded: list[str] = []
@@ -183,10 +189,11 @@ def _split_forwarded_args(
                 # As TS `extractConfigPath`: last, or followed by a `--` token,
                 # the flag has no value. click would take that token (or the
                 # `--` below) as the value. A -h / --help before `--` still
-                # shows the help, as TS handles help first: the flag is
-                # dropped, and a -h / --help after it is never its value, so
-                # `--config -h --config=x` shows the help instead of running
-                # the plugin command with `x` (#619).
+                # shows the help (once the check above passed, where TS reads
+                # --config first): the flag is dropped, and a -h / --help
+                # after it is never its value, so `--config -h --config=x`
+                # shows the help instead of running the plugin command with
+                # `x` (#619).
                 missing = i >= len(args) or args[i].startswith("--")
                 if help_requested and (missing or args[i] in _HELP_OPTION_NAMES):
                     own.pop()
@@ -264,17 +271,22 @@ def _query_sql_behind_terminator(args: list[str], params: list[Any]) -> list[str
 
 
 def _check_config_value(args: list[str], params: list[Any]) -> None:
-    """As TS ``extractConfigPath``: a ``--config`` / ``-c`` before ``--``,
-    last or followed by a ``--`` token, has no value."""
+    """As TS ``extractConfigPath`` after ``expandShortFlags``: a ``--config`` /
+    ``-c`` before ``--``, last or followed by a ``--`` token, has no value.
+    A value flag of ``params`` takes the next token unless it starts with
+    ``--``, so a ``-c`` that is a value (``--name -c``) is not the flag."""
     takes_value, long_form = _option_forms(params)
-    for i, token in enumerate(args):
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
         if token == "--":
             return
-        if (
-            long_form.get(token) == "--config"
-            and takes_value.get(token)
-            and (i + 1 >= len(args) or args[i + 1].startswith("--"))
-        ):
+        if not takes_value.get(token):
+            continue
+        if i < len(args) and not args[i].startswith("--"):
+            i += 1
+        elif long_form[token] == "--config":
             raise MissingFlagValueError("--config")
 
 
@@ -314,11 +326,15 @@ class _ChkitCommand(TyperCommand):
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
         args = _read_help_plugins(ctx, args)
+        # TS shows the help of a built-in command before reading --config,
+        # unless --help-plugins asks for it (that help loads the config). init
+        # reads no config.
+        config_first = self.name != "init" and (
+            bool(ctx.meta.get(HELP_PLUGINS_META)) or self.name not in _TS_BUILTIN_COMMANDS
+        )
         try:
             if ctx.ignore_unknown_options:
-                normalized = _split_forwarded_args(
-                    args, params, help_plugins=bool(ctx.meta.get(HELP_PLUGINS_META))
-                )
+                normalized = _split_forwarded_args(args, params, config_first=config_first)
                 # `chkit obsessiondb login -h` shows the help of `login` (TS
                 # `firstPluginPositional`): the first token that is not one
                 # of the forwarder's own options.
@@ -326,10 +342,17 @@ class _ChkitCommand(TyperCommand):
                 ctx.meta[HELP_SUBCOMMAND_META] = forwarded[0] if forwarded else None
             elif any(token in _HELP_OPTION_NAMES for token in args):
                 # As in TS, -h / --help anywhere shows the help, even next to a
-                # flag error or where it would be a flag's value. TS reads
-                # --config before the --help-plugins help (`extractConfigPath`).
-                if ctx.meta.get(HELP_PLUGINS_META) and self.name != "init":
-                    _check_config_value(args, params)
+                # flag error or where it would be a flag's value. Where TS
+                # reads --config first, a --config without its value fails
+                # first. pull is a plugin command in TS, whose flags TS does
+                # not know then: only --config takes a value.
+                if config_first:
+                    _check_config_value(
+                        args,
+                        params
+                        if self.name in _TS_BUILTIN_COMMANDS
+                        else [param for param in params if "--config" in param.opts],
+                    )
                 normalized = ["--help"]
             else:
                 # query first moves its SQL arguments behind `--` (#584), so SQL

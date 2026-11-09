@@ -59,6 +59,20 @@ def test_help_plugins_adds_the_obsessiondb_flags_as_ts_does(command: str) -> Non
     assert _help(["--help-plugins", command]) == expected
 
 
+@pytest.mark.parametrize("value_flag", ["--name", "-n", "--table", "-t"])
+def test_a_c_that_is_a_flag_value_is_not_a_valueless_config(value_flag: str) -> None:
+    """As TS ``expandShortFlags``: ``--name -c`` gives --name the value ``-c``,
+    so the --help-plugins help shows instead of a missing --config (#619)."""
+    args = ["generate", value_flag, "-c", "--help-plugins"]
+    assert _help(args) == FIXTURE["generate --help-plugins"]
+
+
+@pytest.mark.parametrize("args", [["--help", "--config"], ["-c", "-h"], ["-h", "-c"]])
+def test_a_builtin_command_shows_its_help_before_reading_config(args: list[str]) -> None:
+    # As TS, which shows the help of its built-in commands without the config.
+    assert _help(["status", *args]) == FIXTURE["status --help"]
+
+
 @pytest.mark.parametrize(
     "args",
     [
