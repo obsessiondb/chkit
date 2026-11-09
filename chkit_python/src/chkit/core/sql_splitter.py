@@ -119,7 +119,11 @@ def _quoted_end(text: str, i: int, *, in_line_comment: bool) -> int | None:
     """
     ch = text[i]
     if text.startswith("/*", i):
-        return _block_comment_end(text, i)
+        if not in_line_comment:
+            return _block_comment_end(text, i)
+        # As before nesting: a `/*` inside a line comment ends at the first `*/`.
+        close = text.find("*/", i + 2)
+        return len(text) if close == -1 else close + 2
     if ch in ("'", '"', "`"):
         return _quote_end(text, i, ch)
     # `a$$b` is one name: a heredoc starts only where a name does not go on.

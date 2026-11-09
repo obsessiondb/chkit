@@ -95,7 +95,12 @@ function startsLineComment(sql: string, i: number): boolean {
 // unclosed `$tag$` is not a heredoc, as in ClickHouse.
 function quotedEnd(sql: string, i: number, inLineComment: boolean): number | undefined {
   const ch = sql[i] ?? ''
-  if (ch === '/' && sql[i + 1] === '*') return blockCommentEnd(sql, i)
+  if (ch === '/' && sql[i + 1] === '*') {
+    if (!inLineComment) return blockCommentEnd(sql, i)
+    // As before nesting: a `/*` inside a line comment ends at the first `*/`.
+    const close = sql.indexOf('*/', i + 2)
+    return close === -1 ? sql.length : close + 2
+  }
   if (ch === "'" || ch === '"' || ch === '`') return quoteEnd(sql, i, ch)
   // `a$$b` is one name: a heredoc starts only where a name does not go on.
   if (ch === '$' && !inLineComment && !NAME_CHAR.test(sql[i - 1] ?? '')) return readHeredoc(sql, i)
