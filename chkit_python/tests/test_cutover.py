@@ -775,13 +775,6 @@ def test_parse_exchange_tables() -> None:
         "EXCHANGE TABLES app.events AND app.`events shadow` ON CLUSTER 'c';"
     ) == (("app", "events"), ("app", "events shadow"))
     assert parse_exchange_tables("DROP TABLE app.events") is None
-    # migrate_apply runs a statement together with its marker comment lines.
-    assert parse_exchange_tables(
-        "-- operation: exchange_tables key=table:app.events risk=caution\n"
-        "-- before-retry: SELECT 1\n"
-        "EXCHANGE TABLES app.events AND app.events__cutover_1"
-    ) == (("app", "events"), ("app", "events__cutover_1"))
-    assert parse_exchange_tables("-- EXCHANGE TABLES app.a AND app.b") is None
 
 
 def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -886,11 +879,6 @@ class _RecordingClient:
         return _Rows([{"x": 1}])
 
 
-def _sql_lines(calls: list[str]) -> list[str]:
-    """The executed SQL without the marker comments a statement carries."""
-    return [call.split("\n")[-1] for call in calls]
-
-
 def _op_state(index: int, status: str, type_: str, key: str) -> OperationState:
     return OperationState(
         operation_index=index,
@@ -950,7 +938,7 @@ EXCHANGE = ("exchange_tables", "table:default.t")
 def test_apply_does_not_run_before_retry_on_the_first_attempt(tmp_path: Path) -> None:
     client = _RecordingClient()
     _run(tmp_path, _SQL, client, _FakeStore())
-    assert _sql_lines(client.calls) == ["SELECT 1", "EXCHANGE TABLES default.t AND default.s"]
+    assert client.calls == ["SELECT 1;", "EXCHANGE TABLES default.t AND default.s;"]
 
 
 @pytest.mark.usefixtures("_apply_env")
@@ -967,9 +955,9 @@ def test_apply_retries_a_failed_statement_once_its_guard_passes(tmp_path: Path) 
     client = _RecordingClient()
     store = _FakeStore(_state([_op_state(0, "completed", *START), _op_state(1, "failed", *EXCHANGE)]))
     _run(tmp_path, _SQL, client, store)
-    assert _sql_lines(client.calls) == [
+    assert client.calls == [
         "SELECT throwIf(swapped, 'already swapped')",
-        "EXCHANGE TABLES default.t AND default.s",
+        "EXCHANGE TABLES default.t AND default.s;",
     ]
     assert len(store.appended) == 1
 
@@ -1058,9 +1046,9 @@ def test_apply_refuses_the_exchange_when_such_inserts_started_during_the_cutover
     store = _FakeStore()
     with pytest.raises(migrate_apply.StatementError, match="wait_for_async_insert = 0"):
         _run(tmp_path, _GUARD_SQL, client, store)
-    assert _sql_lines(client.calls) == [
-        "SELECT 1",
-        "ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events",
+    assert client.calls == [
+        "SELECT 1;",
+        "ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;",
     ]
     # The refused EXCHANGE is not journaled as started.
     assert store.state is not None

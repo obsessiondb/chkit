@@ -2,6 +2,11 @@
 
 ## Unreleased
 
+### Changed
+- `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
+  each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement
+  message see the SQL without the migration's header and marker comments.
+
 ### Fixed
 - `migrate --apply` no longer prints `  Applying <file>` before each migration, so its text
   output matches TS (#486): the migration's `-- log:` line, if any, then `Applied: <file>`.
@@ -16,6 +21,7 @@
   skip only names that start with `_chkit_`. `drift` lists such a table as an extra
   object, and `check` counts it. `pull` with no `--database` finds a database that holds
   only such tables.
+- `migrate` no longer splits a statement at a `;` inside a `$$ … $$` heredoc.
 
 ## 0.3.0 — 2026-11-06
 

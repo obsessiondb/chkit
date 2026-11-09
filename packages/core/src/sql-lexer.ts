@@ -60,6 +60,19 @@ export function tokenizeSQL(sql: string): SQLToken[] {
   return tokens
 }
 
+/** The tokens of `tokenizeSQL`, one at a time, for a caller that keeps few of them. */
+export function* sqlTokens(sql: string): Generator<SQLToken> {
+  let previous: SQLToken | undefined
+  let i = 0
+  while (i < sql.length) {
+    const { kind, end, terminated } = readToken(sql, i, previous)
+    const token: SQLToken = { kind, text: sql.slice(i, end), start: i, end, terminated }
+    yield token
+    if (!isTrivia(token)) previous = token
+    i = end
+  }
+}
+
 /** Whitespace and comments: tokens that never change what a statement means. */
 export function isTrivia(token: SQLToken): boolean {
   return token.kind === 'whitespace' || token.kind === 'line_comment' || token.kind === 'block_comment'
