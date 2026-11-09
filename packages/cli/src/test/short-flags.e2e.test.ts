@@ -99,7 +99,8 @@ describe('@chkit/cli short flags (#491)', () => {
       for (const args of [
         ['generate', '--config', '--json'],
         ['generate', '-c', a, '--config', '--json'],
-        ['generate', '-c', a, '-c', '--', '--config', b, '--json'],
+        // A --json after -- is no option (#614), so this one comes before it.
+        ['generate', '-c', a, '--json', '-c', '--', '--config', b],
       ]) {
         const result = runCli(args, first.dir)
         expect([args, result.exitCode, result.stderr.trim()]).toEqual([args, 1, 'Missing value for --config'])

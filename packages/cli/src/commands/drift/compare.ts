@@ -1,4 +1,5 @@
 import {
+  canonicalizeTextIndex,
   columnCodecFingerprint,
   columnTypeFingerprint,
   DEFAULT_INDEX_GRANULARITY,
@@ -24,6 +25,7 @@ import {
   type ProjectionDefinition,
   type SkipIndexDefinition,
   textIndexFingerprint,
+  type TextSkipIndex,
   tokenizeSQL,
   renderVectorIndexType,
   type MaterializedViewDefinition,
@@ -338,8 +340,20 @@ function indexExpressionBase(index: SkipIndexDefinition): string {
   }
 }
 
+// ClickHouse re-formats a text index expression when it stores it, e.g.
+// `NOT a AND b` comes back as `(NOT a) AND b`, so the expression goes through
+// the canonicalizer like any other index expression. It is read with the text
+// index lexer rather than normalizeSQLFragment, which would collapse the spaces
+// inside its string literals.
+function textIndexExpressionBase(index: TextSkipIndex): string {
+  return canonicalizeTextIndex(index).expression
+}
+
 function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCanonicalizer): string {
-  if (index.type === 'text') return textIndexFingerprint(index)
+  if (index.type === 'text') {
+    const expression = canonicalizer?.expression(textIndexExpressionBase(index))
+    return textIndexFingerprint(expression == null ? index : { ...index, expression })
+  }
   return [
     `expr=${canonicalizeExpression(indexExpressionBase(index), canonicalizer)}`,
     // A raw type is compared as ClickHouse formats it, so a structured index on
@@ -443,7 +457,7 @@ export function collectTableSqlFragments(
   const queries: string[] = []
 
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
-    if (index.type !== 'text') expressions.push(indexExpressionBase(index))
+    expressions.push(index.type === 'text' ? textIndexExpressionBase(index) : indexExpressionBase(index))
   }
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
     if (index.type !== 'text') expressions.push(renderIndexTypeFingerprint(index))

@@ -11,9 +11,15 @@ import {
   type TableDefinition,
   type TextSkipIndex,
 } from '@chkit/core'
+import { canonicalizeSqlFragments } from '@chkit/clickhouse'
 import { renderSchemaFile } from '../../../plugin-pull/src/render-schema.js'
+import expressionPairs from '../../../../test/fixtures/text-index-expressions.json'
 import fixtures from '../../../../test/fixtures/text-index.json'
-import { compareTableShape } from '../commands/drift/compare.js'
+import {
+  collectTableSqlFragments,
+  compareTableShape,
+  type SqlCanonicalizer,
+} from '../commands/drift/compare.js'
 import {
   CORE_ENTRY,
   createJournalTableName,
@@ -380,3 +386,124 @@ test('quoted NULL column round-trips and changing it to a literal migrates the i
     await rm(dir, { recursive: true, force: true })
   }
 }, 60000)
+
+// ClickHouse stores a text index expression the way its formatter prints it:
+// `NOT a AND b` comes back as `(NOT a) AND b`, BETWEEN as two comparisons.
+const expressionColumns = [
+  { name: 'id', type: 'UInt64' },
+  { name: 's', type: 'String' },
+  { name: 'x', type: 'String' },
+  { name: 'a', type: 'UInt8' },
+  { name: 'b', type: 'UInt8' },
+  { name: 'c', type: 'UInt8' },
+  { name: 'd', type: 'UInt8' },
+]
+
+test('text index expressions compare equal exactly when ClickHouse parses them the same', async () => {
+  const executor = createLiveExecutor(env)
+  try {
+    const cases = expressionPairs.map(({ schema, server, equal }) => {
+      const index = (expression: string): TextSkipIndex => ({
+        name: 'idx',
+        type: 'text',
+        expression,
+        tokenizer: 'splitByNonAlpha',
+      })
+      const expected = table({
+        database: 'app',
+        name: 'docs',
+        engine: 'MergeTree()',
+        columns: expressionColumns,
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        indexes: [index(schema)],
+      })
+      const actual = {
+        engine: 'MergeTree()',
+        primaryKey: '(id)',
+        orderBy: '(id)',
+        columns: expressionColumns,
+        settings: {},
+        indexes: [{ ...index(server), granularity: 100000000 }],
+        projections: [],
+      }
+      return { label: `${schema} vs ${server}`, expected, actual, equal }
+    })
+    const formatted = await canonicalizeSqlFragments(
+      executor,
+      cases.flatMap(({ expected, actual }) => collectTableSqlFragments(expected, actual).expressions),
+      { wrap: true },
+    )
+    const canonicalizer: SqlCanonicalizer = {
+      expression: (fragment) => formatted.get(fragment) ?? null,
+      query: () => null,
+    }
+    for (const { label, expected, actual, equal } of cases) {
+      expect(compareTableShape(expected, actual, canonicalizer)?.indexDiffs ?? [], label).toEqual(
+        equal ? [] : ['idx'],
+      )
+    }
+  } finally {
+    await executor.close()
+  }
+}, 60000)
+
+test('generate, migrate, and drift read clean when ClickHouse re-parenthesizes text index expressions', async () => {
+  const executor = createLiveExecutor(env)
+  const name = `${createPrefix('text_expr')}docs`
+  const expressions = [
+    ...new Set(expressionPairs.filter(({ equal }) => equal).map(({ schema }) => schema)),
+  ]
+  // One table holds them all. ClickHouse allows one text index per expression
+  // and several spellings in the fixture parse the same, so each is suffixed.
+  const definition = table({
+    database: env.clickhouseDatabase,
+    name,
+    engine: 'MergeTree()',
+    columns: expressionColumns,
+    primaryKey: ['id'],
+    orderBy: ['id'],
+    indexes: expressions.map((expression, i) => ({
+      name: `idx${i}`,
+      type: 'text' as const,
+      expression: `concat(${expression}, '${i}')`,
+      tokenizer: 'splitByNonAlpha',
+    })),
+  })
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-text-expr-'))
+  const schemaPath = join(dir, 'schema.ts')
+  const configPath = join(dir, 'clickhouse.config.ts')
+  const journal = createJournalTableName('text_expr')
+  const extraEnv = { CHKIT_JOURNAL_TABLE: journal }
+  const command = (args: string[]) => {
+    const result = runCli(dir, [...args, '--config', configPath, '--json'], extraEnv)
+    if (result.exitCode !== 0) throw new Error(formatTestDiagnostic(args.join(' '), result))
+    return JSON.parse(result.stdout)
+  }
+  try {
+    await writeFile(
+      configPath,
+      `export default ${JSON.stringify({ schema: schemaPath, outDir: join(dir, 'chkit'), migrationsDir: join(dir, 'chkit/migrations'), metaDir: join(dir, 'chkit/meta'), clickhouse: { url: env.clickhouseUrl, username: env.clickhouseUser, password: env.clickhousePassword, database: env.clickhouseDatabase } })}`,
+    )
+    await writeFile(
+      schemaPath,
+      renderSchemaFile([definition]).replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)),
+    )
+    command(['generate'])
+    const migrate = await runCliWithRetry(
+      dir,
+      ['migrate', '--execute', '--config', configPath, '--json'],
+      { extraEnv },
+    )
+    if (migrate.exitCode !== 0) throw new Error(formatTestDiagnostic('migrate', migrate))
+    await waitForTable(executor, definition.database, name)
+    const drift = command(['drift', '--table', `${definition.database}.${name}`])
+    expect(drift.tableDrift).toEqual([])
+    expect(drift.drifted).toBe(false)
+  } finally {
+    await executor.command(`DROP TABLE IF EXISTS ${definition.database}.${name} SYNC`)
+    await executor.command(`DROP TABLE IF EXISTS ${definition.database}.${journal} SYNC`)
+    await executor.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 120000)

@@ -60,16 +60,14 @@ function splitQueryArgs(
 	const byName = new Map<string, FlagDef>()
 	for (const def of flagDefs) byName.set(def.name, def)
 
-	const tokens = expandShortFlags(argv, flagDefs)
+	// Split at the first `--` before scanning, so a value flag never takes it
+	// as its value and nothing after it is read as a flag (#614).
+	const { flagArgs: tokens, rest } = splitAtEndOfFlags(expandShortFlags(argv, flagDefs))
 	const flagArgs: string[] = []
 	const positionals: string[] = []
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i]
 		if (token === undefined) continue
-		if (token === '--') {
-			positionals.push(...tokens.slice(i + 1))
-			break
-		}
 
 		const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
 		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
@@ -91,13 +89,13 @@ function splitQueryArgs(
 		}
 	}
 
-	return { flagArgs, positionals }
+	return { flagArgs, positionals: [...positionals, ...rest] }
 }
 
 /**
- * Splits a plugin command's arguments at the first `--`. A flag never takes
+ * Splits a command's arguments at the first `--`. A flag never takes
  * `--` as its value, so that one ends the flags: every token after it is a
- * positional as is, even when it starts with `-` (#568).
+ * positional as is, even when it starts with `-` (#568, #614).
  */
 function splitAtEndOfFlags(argv: string[]): { flagArgs: string[]; rest: string[] } {
 	const end = argv.indexOf('--')
@@ -134,11 +132,16 @@ function looksLikeFlag(token: string): boolean {
 	return !/\s/.test(name)
 }
 
+/**
+ * Parses a command's arguments. `--` ends the flags of every command: what
+ * follows it is a positional (#568, #614). A command that does not take
+ * arguments rejects those with click's message, as chkit-py does.
+ */
 export function parseCommandArgs(
 	commandName: string,
 	argv: string[],
 	flagDefs: readonly FlagDef[],
-	{ endOfFlags = false }: { endOfFlags?: boolean } = {},
+	{ takesArgs = true }: { takesArgs?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } | null {
 	if (commandName === 'query') {
 		const { flagArgs, positionals } = splitQueryArgs(argv, flagDefs)
@@ -147,20 +150,33 @@ export function parseCommandArgs(
 		return { flags, positionals }
 	}
 
-	const { flagArgs, rest } = endOfFlags
-		? splitAtEndOfFlags(argv)
-		: { flagArgs: argv, rest: [] }
+	const { flagArgs, rest } = splitAtEndOfFlags(argv)
 	const flags = parseFlagsOrReport(commandName, flagArgs, flagDefs)
 	if (!flags) return null
+	if (!takesArgs && rest.length > 0) {
+		reportStrayArgs(commandName, rest, flagArgs.includes('--json'))
+		return null
+	}
 	return {
 		flags,
 		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
 	}
 }
 
-/** Core commands keep rejecting `--`; plugin commands read it as the end of their flags. */
-function isPluginCommand(resolved: RegisteredCommand): boolean {
-	return resolved.pluginName !== undefined && resolved.pluginName !== 'core'
+/** The core commands that read positionals; the others reject what follows `--` (#614). */
+const CORE_COMMANDS_WITH_ARGS = new Set(['snapshot', 'query', 'plugin'])
+
+function commandTakesArgs(commandName: string, resolved: RegisteredCommand): boolean {
+	const isCore = resolved.pluginName === undefined || resolved.pluginName === 'core'
+	return !isCore || CORE_COMMANDS_WITH_ARGS.has(commandName)
+}
+
+/** Reports like parseFlagsOrReport, in the words chkit-py (click) uses. */
+function reportStrayArgs(commandName: string, args: string[], jsonMode: boolean): void {
+	const message = `Got unexpected extra argument(s) (${args.join(' ')})`
+	console.error(message)
+	if (jsonMode) emitJsonError(commandName, { code: 'usage', message })
+	process.exitCode = 1
 }
 
 /**
@@ -189,7 +205,7 @@ export function parseInitFlags(input: {
 		input.commandName,
 		argsAfterCommand,
 		input.registry.resolveFlags(input.commandName, subcommand.name),
-		{ endOfFlags: isPluginCommand(input.resolved) },
+		{ takesArgs: commandTakesArgs(input.commandName, input.resolved) },
 	)
 	return parsed ? parsed.flags : null
 }
@@ -452,7 +468,7 @@ export async function runResolvedCommand(input: {
 			input.commandName,
 			argsAfterCommand,
 			allFlags,
-			{ endOfFlags: isPluginCommand(input.resolved) },
+			{ takesArgs: commandTakesArgs(input.commandName, input.resolved) },
 		)
 		if (!parsed) return
 		flags = parsed.flags
