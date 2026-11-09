@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import math
 import re
+from decimal import ROUND_HALF_UP, Context, Decimal, InvalidOperation
 
 # JS Number() grammar (after trimming JS whitespace): decimal with optional
 # exponent, hex/octal/binary literals, Infinity, empty string == 0. Compiled
@@ -32,6 +33,10 @@ _BIN_RE = re.compile(r"^0[bB][01]+$", re.ASCII)
 
 _JS_POSITIONAL_EXP_MIN = -7  # exclusive: exponent -7 → e-notation in JS
 _JS_POSITIONAL_EXP_MAX = 21  # exclusive: exponent 21 → e-notation in JS
+# Rounding never reads the ambient decimal context, which user code can change
+# (lower precision, FloatOperation trap). 60 digits hold any toFixed result
+# below 1e21 exactly.
+_ROUNDING_CONTEXT = Context(prec=60, rounding=ROUND_HALF_UP, traps=[InvalidOperation])
 
 
 def parse_js_number(raw: str) -> float:  # noqa: PLR0911 — Number() grammar arms
@@ -91,4 +96,24 @@ def js_number_to_string(value: float) -> str:  # noqa: PLR0911 — String() gram
     return f"{sign}{js_mantissa}e{exponent_sign}{abs(exponent)}"
 
 
-__all__ = ["js_number_to_string", "parse_js_number"]
+def js_to_fixed(value: float, digits: int) -> str:
+    """Replicate JS ``value.toFixed(digits)`` for a finite ``0 <= value < 1e21``.
+
+    JS rounds the double's exact value and takes the larger candidate on a
+    tie: ``(1.25).toFixed(1)`` is ``1.3``, where ``f"{1.25:.1f}"`` rounds half
+    to even and gives ``1.2``. ``Decimal.from_float`` is that exact value, so a
+    double just below a decimal tie (1.005 is 1.00499...) still rounds down,
+    as in JS.
+    """
+    exact = Decimal.from_float(value)
+    step = Decimal((0, (1,), -digits))
+    return str(exact.quantize(step, rounding=ROUND_HALF_UP, context=_ROUNDING_CONTEXT))
+
+
+def js_math_round(value: float) -> float:
+    """Replicate JS ``Math.round`` for a finite ``value >= 0``: a tie rounds up, not to even."""
+    exact = Decimal.from_float(value)
+    return float(exact.to_integral_value(rounding=ROUND_HALF_UP, context=_ROUNDING_CONTEXT))
+
+
+__all__ = ["js_math_round", "js_number_to_string", "js_to_fixed", "parse_js_number"]
