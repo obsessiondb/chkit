@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import re
 import sys
 from pathlib import Path
 from types import ModuleType
@@ -160,11 +161,43 @@ def test_onboarding_threads_all_flag_values_to_plugin(
     assert captured["org_name"] == "acme"
 
 
-def test_connect_rejects_unknown_value(
-    runner: CliRunner, isolated_cwd: Path
+def _usage_message(output: str) -> str:
+    """The usage error's text, without click's box drawing and line wrapping."""
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", output).split())
+
+
+# TS prints the same messages (packages/cli/src/test/short-flags.e2e.test.ts, #569).
+@pytest.mark.parametrize(
+    ("args", "message"),
+    [
+        (
+            ["--yes", "--connect", "totally-bogus"],
+            "Invalid value for '--connect': 'totally-bogus' is not one of "
+            "'claim', 'account', 'clickhouse', 'later'.",
+        ),
+        (
+            ["--connect=CLAIM", "--yes"],
+            "Invalid value for '--connect': 'CLAIM' is not one of "
+            "'claim', 'account', 'clickhouse', 'later'.",
+        ),
+        (
+            ["--connect", "bogus", "foo"],
+            "Invalid value for '--connect': 'bogus' is not one of "
+            "'claim', 'account', 'clickhouse', 'later'.",
+        ),
+        (["foo", "--yes"], "Got unexpected extra argument(s) (foo)"),
+        (["--yes", "foo", "bar"], "Got unexpected extra argument(s) (foo bar)"),
+        (["--connect", "claim", "-", "--yes"], "Got unexpected extra argument(s) (-)"),
+    ],
+)
+def test_rejects_invalid_connect_and_extra_arguments_before_writing(
+    runner: CliRunner, isolated_cwd: Path, args: list[str], message: str
 ) -> None:
-    result = runner.invoke(app, ["init", "--yes", "--connect", "totally-bogus"])
+    result = runner.invoke(app, ["init", *args])
     assert result.exit_code != 0
+    assert message in _usage_message(result.output)
+    assert not (isolated_cwd / DEFAULT_CONFIG_FILE).exists()
+    assert not (isolated_cwd / "src").exists()
 
 
 def test_connect_accepts_account(runner: CliRunner, isolated_cwd: Path) -> None:
