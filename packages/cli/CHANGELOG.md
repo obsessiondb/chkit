@@ -1,5 +1,16 @@
 # chkit
 
+## 0.2.0-beta.16
+
+### Patch Changes
+
+- 0.2.0-beta.15 was never published to npm, so upgrading from 0.2.0-beta.14 also brings the changes in its release notes (#531).
+- 3421760: `drift`, `check` and `pull` no longer skip tables such as `xchkit_events`; only names that start with `_chkit_` are skipped (#490).
+- b740a75: `migrate --apply` exits with code 3, as documented, when it blocks a destructive migration in a non-interactive run or when you cancel it at the prompt. It exited with code 1 before (#486).
+- 92deddc: Plugin `onInit` hooks now get the parsed flags for `pull`, `chkit plugin` and other plugin subcommands, so `chkit pull --service <name>` shows the banner for the service it connects to (#488).
+- 3421760: A table or dictionary rename into another database now quotes that database in its `CREATE DATABASE` statement, so a name such as `repro-old` no longer fails with a syntax error (#490).
+- Updated dependencies: `@chkit/core@0.2.0-beta.16`, `@chkit/clickhouse@0.2.0-beta.16`, `@chkit/codegen@0.2.0-beta.16`
+
 ## 0.2.0-beta.15
 
 ### Patch Changes

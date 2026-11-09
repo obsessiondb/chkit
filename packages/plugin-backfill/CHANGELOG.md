@@ -1,5 +1,11 @@
 # @chkit/plugin-backfill
 
+## 0.2.0-beta.16
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.16`, `@chkit/clickhouse@0.2.0-beta.16`
+
 ## 0.2.0-beta.15
 
 ### Patch Changes
