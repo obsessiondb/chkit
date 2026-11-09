@@ -11,7 +11,7 @@ import json
 import time
 from collections.abc import Callable
 from pathlib import Path
-from typing import Any
+from typing import Any, TypeVar
 
 import pytest
 from typer.testing import CliRunner
@@ -75,7 +75,10 @@ def _render_schema(
     ])
 
 
-def _retry(run: Callable[[], Any], ok: Callable[[Any], bool], attempts: int = 20) -> Any:
+T = TypeVar("T")
+
+
+def _retry(run: Callable[[], T], ok: Callable[[T], bool], attempts: int = 20) -> T:
     result = run()
     for _ in range(attempts):
         if ok(result):

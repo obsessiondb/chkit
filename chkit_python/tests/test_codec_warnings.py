@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from chkit.cli.commands.codec_warnings import detect_experimental_codec_warnings
-from chkit.core.model import MigrationOperation, MigrationPlan
+from chkit.core.model import MigrationOperation, MigrationPlan, _RiskSummary
 
 
 def _plan_of(sql: list[str]) -> MigrationPlan:
@@ -17,8 +17,8 @@ def _plan_of(sql: list[str]) -> MigrationPlan:
             )
             for i, statement in enumerate(sql)
         ],
-        riskSummary={"safe": 0, "caution": len(sql), "danger": 0},
-        renameSuggestions=[],
+        risk_summary=_RiskSummary(safe=0, caution=len(sql), danger=0),
+        rename_suggestions=[],
     )
 
 

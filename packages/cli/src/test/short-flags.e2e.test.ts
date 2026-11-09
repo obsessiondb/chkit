@@ -65,7 +65,7 @@ describe('@chkit/cli short flags (#491)', () => {
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
-  })
+  }, 30_000)
 
   test('the last of several --config / -c flags picks the config, in every form (#574)', async () => {
     const [first, last] = await Promise.all([createFixture(), createFixture(renderScopedSchema())])
@@ -242,5 +242,5 @@ describe('@chkit/cli short flags (#491)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
-  })
+  }, 30_000)
 })

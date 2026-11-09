@@ -183,7 +183,7 @@ def dispatch_plugin_command(
     config_path: Path | None,
     output_json: bool,
     invoking_command: str = "plugin",
-    extra_flags: ParsedFlags | None = None,
+    config_flag: str | None = None,
 ) -> None:
     """Load config + plugins, parse forwarded flags, run one plugin command.
 
@@ -193,6 +193,11 @@ def dispatch_plugin_command(
     runs, then on_config_loaded on a shortcut, then the command (with its
     on_before_plugin_command and get_context hooks). The CLI group runs
     on_complete (#488).
+
+    As in TS, the command's flags also hold the global flags given:
+    ``--json`` on every path, and ``--config`` (``config_flag``, the raw
+    value) only from the shortcuts, which parse it with the command's flags;
+    ``chkit plugin`` strips it first. A flag not given has no key.
     """
     # As in TS, `obsessiondb` / `plugin obsessiondb` may load the ObsessionDB
     # profile without a project config or credentials (to run `login`).
@@ -207,11 +212,14 @@ def dispatch_plugin_command(
     resolved_config_path = loaded_config_path(config_path)
     is_forwarder = invoking_command == "plugin"
 
-    # The flags TS parses for the command itself: --json, and on a shortcut
-    # also --config (a global flag there; `chkit plugin` strips it).
-    own_flags: ParsedFlags = {"--json": True} if output_json else {}
-    if not is_forwarder and config_path is not None:
-        own_flags["--config"] = str(config_path)
+    # The global flags TS parses with the command's own: --json, and on a
+    # shortcut also --config (`chkit plugin` strips it, so passes no
+    # config_flag).
+    own_flags: ParsedFlags = {}
+    if config_flag is not None:
+        own_flags["--config"] = config_flag
+    if output_json:
+        own_flags["--json"] = True
 
     entry = next(
         (e for e in runtime.plugins if e.plugin.manifest.name == plugin_name), None
@@ -229,7 +237,7 @@ def dispatch_plugin_command(
             positionals, parsed = _split_positionals_and_flags(tokens, flag_defs)
         except (UnknownFlagError, MissingFlagValueError) as error:
             report_flag_error(invoking_command, str(error), json_mode=output_json)
-        flags = {**own_flags, **parsed, **(extra_flags or {})}
+        flags = {**own_flags, **parsed}
 
     _init_hooks(
         runtime,

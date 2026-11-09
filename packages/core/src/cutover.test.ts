@@ -191,6 +191,16 @@ describe('planCutover', () => {
     expect(minmax.find((op) => op.type === 'exchange_tables')?.beforeRetry).toContain('add_minmax_index_for_numeric_columns = ([^,]*)')
   })
 
+  test('cuts over a key on a column named `a,b` to a key on columns a and b, as the planner reads it', () => {
+    // chkit-py's test_cutover.py asserts the same.
+    const named = [{ name: 'a,b', type: 'UInt64' }, { name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64' }] as TableDefinition['columns']
+    const oldDef = events({ columns: named, primaryKey: ['a,b'], orderBy: ['a,b'] })
+    const newDef = events({ columns: named, primaryKey: ['a', 'b'], orderBy: ['a', 'b'] })
+    const ops = plan({ oldDef, newDef, key: ['a'] }).operations
+    expect(ops.find((op) => op.type === 'create_table')?.sql).toContain('PRIMARY KEY (`a`, `b`)')
+    expect(ops.some((op) => op.type === 'exchange_tables')).toBe(true)
+  })
+
   test('compares a numeric read-only setting by value, as ClickHouse may store 1e6 as 1000000. (#511)', () => {
     const guard = plan({ newDef: events({ settings: { index_granularity_bytes: 1e6 } }) }).operations.find((op) => op.type === 'exchange_tables')?.beforeRetry ?? ''
     expect(guard).toContain("multiIf(lower(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')) = 'true', '1', lower(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')) = 'false', '0', ifNull(toString(toFloat64OrNull(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))), extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')))")
@@ -376,6 +386,13 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
   test('a change of the engine arguments only', () => {
     const oldDef = events({ engine: "ReplicatedMergeTree('/t/{uuid}', '{replica}')" })
     const newDef = events({ engine: "ReplicatedMergeTree('/t2/{uuid}', '{replica}')" })
+    expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments change')])
+  })
+
+  test('keys that differ only in spelling, as the planner compares them', () => {
+    // chkit-py's test_cutover.py asserts the same.
+    const oldDef = events({ engine: "ReplicatedMergeTree('/t/{uuid}', '{replica}')", primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] })
+    const newDef = events({ engine: "ReplicatedMergeTree('/t2/{uuid}', '{replica}')", primaryKey: ['`user_id`,  id'], orderBy: ['"user_id"', 'id'] })
     expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments change')])
   })
 

@@ -211,7 +211,7 @@ def test_codegen_read_and_insert_models() -> None:
         update={
             "columns": [
                 *expected.columns,
-                ColumnDefinition(name="raw", type="String", defaultKind="EPHEMERAL"),
+                ColumnDefinition(name="raw", type="String", default_kind="EPHEMERAL"),
                 ColumnDefinition(
                     name="label", type="String", default_kind="ALIAS", default="fn:toString(day)"
                 ),
@@ -403,14 +403,14 @@ def test_expression_kinds_require_sql_expression_for_string_defaults(kind: str) 
         assert "\n" not in message
     # Raw definitions (to_create_sql) keep SQLExpression; canonical ones
     # (plan_diff, snapshot rebuild) hold it as the fn: string.
-    for value in [
+    for valid in [
         "fn:'text'",
         SQLExpression(expression="toDate(ts)"),
         {"expression": "'text'"},
         1,
         True,
     ]:
-        defn = definition(default_kind=kind, default=value)
+        defn = definition(default_kind=kind, default=valid)
         assert validate_definitions([defn]) == []
         assert validate_definitions(canonicalize_definitions([defn])) == []
 

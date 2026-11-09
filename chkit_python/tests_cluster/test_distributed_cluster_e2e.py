@@ -15,8 +15,8 @@ from __future__ import annotations
 
 import json
 import os
+from collections.abc import Callable
 from pathlib import Path
-from typing import Any
 
 import pytest
 from tests.e2e_testkit import create_journal_table_name, create_prefix, poll_until
@@ -112,7 +112,7 @@ def test_distributed_over_replicated_merge_tree(  # noqa: PLR0915 — mirrors th
         assert payload["tableDrift"] == [], drift.output
         assert payload["drifted"] is False
 
-    def count(node: ClickHouseClient, source: str, expected: Any) -> int:
+    def count(node: ClickHouseClient, source: str, expected: Callable[[int], bool]) -> int:
         def read() -> int:
             return int(node.query(f"SELECT count() AS c FROM {source}").rows[0]["c"])
 
