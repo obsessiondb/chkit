@@ -642,6 +642,37 @@ describe('applyAsyncStatement', () => {
     expect(lines).toEqual([`  load_table_data: submitting async (query_id=${QUERY_ID})`])
   })
 
+  // When polling gives up, the submit error is the only trace of e.g. a rejected
+  // statement, so the error names it (#561).
+  for (const submitFails of [true, false]) {
+    test(`polling that exhausts its budget names the submit error (submit fails: ${submitFails})`, async () => {
+      const { db } = createFakeExecutor(
+        [
+          { status: 'unknown' }, // initial in-flight check
+          ...Array.from({ length: 21 }, () => new Error('HTTP 502: bad gateway')),
+        ],
+        submitFails ? { failSubmit: () => new Error('Authentication failed') } : {},
+      )
+      const { store, writes } = createFakeJournalStore(null)
+
+      const submitTail = submitFails ? ' The submit request failed too (Authentication failed).' : ''
+      await expect(
+        applyAsyncStatement({
+          ...BASE_INPUT,
+          db,
+          journalStore: store,
+          log: () => {},
+          sleep: NO_SLEEP,
+          now: FIXED_NOW,
+        }),
+      ).rejects.toThrow(
+        `Async migration step load_table_data (query_id ${QUERY_ID}): polling failed 21× (HTTP 502: bad gateway).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+      )
+      // The outcome is unknown, so the attempt stays started for a re-run to re-attach.
+      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+    })
+  }
+
   // A gateway can fail the submit request (e.g. HTTP 524) while the query keeps
   // running on the server. The poller decides the outcome, and the progress
   // lines are the poller's only (#561).

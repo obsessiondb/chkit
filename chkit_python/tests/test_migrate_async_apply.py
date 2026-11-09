@@ -574,6 +574,33 @@ def test_apply_async_submit_rejected_before_start_is_recorded_failed() -> None:
     assert lines == [f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})"]
 
 
+@pytest.mark.parametrize("submit_fails", [True, False])
+def test_apply_async_poll_budget_exhausted_names_submit_error(submit_fails: bool) -> None:
+    """When polling gives up, the submit error is the only trace of e.g. a
+    rejected statement, so the error names it (#561)."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            *[RuntimeError("HTTP 502: bad gateway") for _ in range(21)],
+        ],
+        submit_raises=RuntimeError("Authentication failed") if submit_fails else None,
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_async_statement(_input(client=client, journal=journal))
+    submit_tail = (
+        " The submit request failed too (Authentication failed)." if submit_fails else ""
+    )
+    assert str(excinfo.value) == (
+        f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
+        f"polling failed 21\u00d7 (HTTP 502: bad gateway).{submit_tail} The load may still "
+        "be running server-side — re-run `chkit migrate --apply` to re-attach."
+    )
+    # The outcome is unknown, so the attempt stays started for a re-run to re-attach.
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started"]
+
+
 def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() -> None:
     """A gateway can fail the submit (e.g. HTTP 524) while the query keeps running.
 

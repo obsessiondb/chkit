@@ -268,8 +268,12 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         transientPollErrors += 1
         const failedElapsed = Math.floor((now() - pollStartedAt) / 1000)
         if (transientPollErrors > MAX_TRANSIENT_POLL_ERRORS) {
+          // A submit error is the only trace of e.g. a rejected statement (#561).
+          const submitTail = submitError
+            ? ` The submit request failed too (${describeError(submitError)}).`
+            : ''
           throw new Error(
-            `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}). The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+            `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
           )
         }
         log(

@@ -315,10 +315,16 @@ def _poll_until_terminal(
             transient_errors += 1
             elapsed_sec = int(time.monotonic() - poll_started_at)
             if transient_errors > MAX_TRANSIENT_POLL_ERRORS:
+                # A submit error is the only trace of e.g. a rejected statement (#561).
+                submit_tail = (
+                    f" The submit request failed too ({_describe_error(submit_error)})."
+                    if submit_error is not None
+                    else ""
+                )
                 msg = (
                     f"Async migration step {input_.operation_type} "
-                    f"(query_id {query_id}): polling failed {transient_errors}x "
-                    f"({_describe_error(poll_error)}). The load may still be "
+                    f"(query_id {query_id}): polling failed {transient_errors}\u00d7 "
+                    f"({_describe_error(poll_error)}).{submit_tail} The load may still be "
                     f"running server-side — re-run `chkit migrate --apply` to re-attach."
                 )
                 raise RuntimeError(msg) from poll_error
