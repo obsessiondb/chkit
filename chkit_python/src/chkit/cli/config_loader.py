@@ -86,15 +86,15 @@ def _read_profile_layer(
     return None
 
 
-def _resolve_like_node(path: Path) -> Path:
-    """The path TS checks, loads and names: Node ``path.resolve`` makes it
+def _resolve_like_node(path: Path) -> str:
+    """The path TS names in its config errors: Node ``path.resolve`` makes it
     absolute against the working directory and collapses ``.`` and ``..``
     lexically, keeping symlinks (unlike :meth:`Path.resolve`)."""
     resolved = os.path.abspath(path)
     # POSIX ``abspath`` keeps exactly two leading slashes; Node collapses them.
     if resolved.startswith("//") and not resolved.startswith("///"):
         resolved = resolved[1:]
-    return Path(resolved)
+    return resolved
 
 
 def load_config(
@@ -120,7 +120,7 @@ def load_config(
     Without a project config (and no explicit ``config_path``) the profile is
     used alone, except for :data:`PROJECT_ONLY_COMMANDS` (``env.command``).
     """
-    path = _resolve_like_node(config_path if config_path is not None else Path(DEFAULT_CONFIG_FILE))
+    path = config_path if config_path is not None else Path(DEFAULT_CONFIG_FILE)
     if path.exists():
         user_config = _to_user_config(_read_raw_config(path, env, "chkit_user_config"))
         profile = _read_profile_layer(env, allow_synthesized=allow_synthesized_profile)
@@ -128,8 +128,9 @@ def load_config(
             user_config = merge_user_config(profile, user_config)
         return resolve_config(user_config)
 
+    shown_path = _resolve_like_node(path)
     if config_path is not None:
-        msg = f"Config not found at {path}."
+        msg = f"Config not found at {shown_path}."
         raise FileNotFoundError(msg)
 
     command = env.command if env is not None else None
@@ -137,14 +138,14 @@ def load_config(
     if profile is None:
         if command == "query":
             msg = (
-                f"No project config found at {path}, "
+                f"No project config found at {shown_path}, "
                 "and no ObsessionDB profile is available.\n"
                 "Run 'chkit obsessiondb login' to query ObsessionDB from any directory, "
                 "or run 'chkit init' in a project."
             )
         else:
             msg = (
-                f"Config not found at {path}.\n"
+                f"Config not found at {shown_path}.\n"
                 "Either run 'chkit init' in your project, or run "
                 "'chkit obsessiondb login' to use chkit from any directory."
             )
