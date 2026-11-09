@@ -38,6 +38,7 @@ _PLUGIN_FLAG_GROUPS: tuple[tuple[str, tuple[str, ...]], ...] = (
     ("obsessiondb", ("--force-shared-engines", "--no-shared-engines")),
     ("obsessiondb", ("--service",)),
 )
+PLUGIN_FLAG_NAMES = frozenset(name for _plugin, names in _PLUGIN_FLAG_GROUPS for name in names)
 
 
 @dataclass(frozen=True)
@@ -218,11 +219,10 @@ def command_help_text(command: Any, meta: Mapping[str, Any]) -> str:
         return format_init_help(
             INIT_HELP_DESCRIPTION, [_option_flag(param) for param in options.values()]
         )
-    plugin_flag_names = {name for _plugin, names in _PLUGIN_FLAG_GROUPS for name in names}
     flags = tuple(
         _option_flag(param)
         for name, param in options.items()
-        if name not in _GLOBAL_OPTIONS and name not in plugin_flag_names
+        if name not in _GLOBAL_OPTIONS and name not in PLUGIN_FLAG_NAMES
     )
     plugin_flags: tuple[tuple[str, tuple[HelpFlag, ...]], ...] = ()
     if meta.get(HELP_PLUGINS_META):

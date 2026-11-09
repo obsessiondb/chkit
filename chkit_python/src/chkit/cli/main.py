@@ -29,6 +29,7 @@ from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.help import (
     HELP_PLUGINS_META,
     HELP_SUBCOMMAND_META,
+    PLUGIN_FLAG_NAMES,
     command_help_text,
     global_help_text,
 )
@@ -344,14 +345,21 @@ class _ChkitCommand(TyperCommand):
                 # As in TS, -h / --help anywhere shows the help, even next to a
                 # flag error or where it would be a flag's value. Where TS
                 # reads --config first, a --config without its value fails
-                # first. pull is a plugin command in TS, whose flags TS does
-                # not know then: only --config takes a value.
+                # first. TS then knows only its internal registry's flags:
+                # not the plugins' (--service), and for pull, a plugin
+                # command in TS, none but --config.
                 if config_first:
                     _check_config_value(
                         args,
-                        params
-                        if self.name in _TS_BUILTIN_COMMANDS
-                        else [param for param in params if "--config" in param.opts],
+                        [
+                            param
+                            for param in params
+                            if "--config" in param.opts
+                            or (
+                                self.name in _TS_BUILTIN_COMMANDS
+                                and not PLUGIN_FLAG_NAMES.intersection(param.opts)
+                            )
+                        ],
                     )
                 normalized = ["--help"]
             else:

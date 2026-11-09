@@ -93,6 +93,9 @@ CASES = [
     (["pull", "--help", "--config"], "Missing value for --config"),
     # There TS knows only the global flags, so -c is no --out-file value.
     (["pull", "--out-file", "-c", "--help"], "Missing value for --config"),
+    # Nor the flags plugins add to the built-in commands (--service).
+    (["generate", "--service", "-c", "--help-plugins"], "Missing value for --config"),
+    (["status", "--service", "x", "-c", "--help-plugins"], "Missing value for --config"),
 ]
 
 
