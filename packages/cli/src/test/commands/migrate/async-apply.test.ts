@@ -39,7 +39,8 @@ const ATTACH_BOUND = '2023-11-14T22:14:28.000Z'
 function createFakeExecutor(
   // An Error is thrown by the queryStatus call it answers.
   statuses: Array<QueryStatus | Error>,
-  options: { failSubmit?: () => Error } = {},
+  // deferSubmit settles the submit only after the polls of a no-sleep test ran.
+  options: { failSubmit?: () => Error; deferSubmit?: boolean } = {},
 ): FakeExecutor {
   const statusCalls: StatusCall[] = []
   const submitCalls: SubmitCall[] = []
@@ -54,6 +55,7 @@ function createFakeExecutor(
     async submit(sql: string, queryId?: string, settings?: ClickHouseSettings) {
       events.push('submit')
       submitCalls.push({ sql, queryId, ...(settings ? { settings } : {}) })
+      if (options.deferSubmit) await new Promise((resolve) => setTimeout(resolve, 10))
       if (options.failSubmit) throw options.failSubmit()
       return queryId ?? 'fallback-id'
     },
@@ -644,14 +646,19 @@ describe('applyAsyncStatement', () => {
 
   // When polling gives up, the submit error is the only trace of e.g. a rejected
   // statement, so the error names it (#561).
-  for (const submitFails of [true, false]) {
-    test(`polling that exhausts its budget names the submit error (submit fails: ${submitFails})`, async () => {
+  // A deferred submit is still pending when the budget runs out.
+  for (const [submitFails, deferSubmit] of [
+    [true, false],
+    [true, true],
+    [false, false],
+  ] as const) {
+    test(`polling that exhausts its budget names the submit error (submit fails: ${submitFails}, deferred: ${deferSubmit})`, async () => {
       const { db } = createFakeExecutor(
         [
           { status: 'unknown' }, // initial in-flight check
           ...Array.from({ length: 21 }, () => new Error('HTTP 502: bad gateway')),
         ],
-        submitFails ? { failSubmit: () => new Error('Authentication failed') } : {},
+        submitFails ? { failSubmit: () => new Error('Authentication failed'), deferSubmit } : {},
       )
       const { store, writes } = createFakeJournalStore(null)
 

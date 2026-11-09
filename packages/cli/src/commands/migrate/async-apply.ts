@@ -269,6 +269,9 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         const failedElapsed = Math.floor((now() - pollStartedAt) / 1000)
         if (transientPollErrors > MAX_TRANSIENT_POLL_ERRORS) {
           // A submit error is the only trace of e.g. a rejected statement (#561).
+          // The finally block waits for the submit anyway; wait here so its error
+          // makes it into the message.
+          if (submitPromiseGuarded) await submitPromiseGuarded
           const submitTail = submitError
             ? ` The submit request failed too (${describeError(submitError)}).`
             : ''
