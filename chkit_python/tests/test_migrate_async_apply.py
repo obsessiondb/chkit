@@ -651,3 +651,71 @@ def test_apply_async_new_submission_ignores_earlier_attempt(prior: str) -> None:
     assert journal.writes is not None
     # Recorded as a failed attempt, never as completed.
     assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+
+
+# #556: TS prints the same lines for the same statuses (async-apply.test.ts
+# has this table). JS toFixed rounds the double's exact value and takes the
+# larger candidate on a tie; Math.round takes the one closer to +inf. Exact
+# ties: 1.25, 1.125, 2.5, 0.5. Just below a decimal tie in binary: 1.15,
+# 1.005, 2.675. Just above: 1.35.
+_ROUNDING_CASES = [
+    (999, 1000, 0, "999 rows (1000 B)", "999 rows (1000 B) in 0s"),
+    (1000, 1024, 499, "1.0K rows (1.0 KiB)", "1.0K rows (1.0 KiB) in 0s"),
+    (1005, 1029, 500, "1.0K rows (1.0 KiB)", "1.0K rows (1.0 KiB) in 1s"),
+    (1050, 1075, 1499, "1.1K rows (1.0 KiB)", "1.1K rows (1.0 KiB) in 1s"),
+    (1150, 1177, 1500, "1.1K rows (1.1 KiB)", "1.1K rows (1.1 KiB) in 2s"),
+    (1250, 1280, 2500, "1.3K rows (1.3 KiB)", "1.3K rows (1.3 KiB) in 3s"),
+    (1350, 3584, 3500, "1.4K rows (3.5 KiB)", "1.4K rows (3.5 KiB) in 4s"),
+    (
+        999_950, 1_048_575, 123_456_500,
+        "1000.0K rows (1024.0 KiB)", "1000.0K rows (1024.0 KiB) in 123457s",
+    ),
+    (1_005_000, 1_310_720, 4500, "1.00M rows (1.3 MiB)", "1.00M rows (1.3 MiB) in 5s"),
+    (
+        1_125_000, 1_079_194_419, 5500,
+        "1.13M rows (1.01 GiB)", "1.13M rows (1.01 GiB) in 6s",
+    ),
+    (
+        2_675_000, 1_207_959_552, 6500,
+        "2.67M rows (1.13 GiB)", "2.67M rows (1.13 GiB) in 7s",
+    ),
+    # UInt64 max: TS reads it as the nearest double.
+    (
+        18_446_744_073_709_551_615, 18_446_744_073_709_551_615, 1_000_000_500,
+        "18446744073709.55M rows (17179869184.00 GiB)",
+        "18446744073709.55M rows (17179869184.00 GiB) in 1000001s",
+    ),
+]
+
+
+@pytest.mark.parametrize(
+    ("rows", "byte_count", "duration_ms", "progress", "finished"), _ROUNDING_CASES
+)
+def test_apply_async_progress_rounds_like_ts(
+    rows: int, byte_count: int, duration_ms: int, progress: str, finished: str
+) -> None:
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=rows, written_bytes=byte_count),
+            QueryStatus(
+                status="finished",
+                written_rows=rows,
+                written_bytes=byte_count,
+                duration_ms=duration_ms,
+            ),
+        ]
+    )
+    lines: list[str] = []
+    apply_async_statement(
+        _input(
+            client=client,
+            journal=_FakeJournalStore(),
+            operation_type="load_table_data",
+            log=lines.append,
+        )
+    )
+    assert [line for line in lines if "written=" in line] == [
+        f"  load_table_data: written={progress}, elapsed 0s",
+        f"  load_table_data: finished — written={finished}",
+    ]

@@ -35,6 +35,7 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
@@ -145,9 +146,9 @@ def _format_rows(value: int | None) -> str:
     if value is None or value == 0:
         return "0 rows"
     if value >= _ROWS_M:
-        return f"{value / _ROWS_M:.2f}M rows"
+        return f"{_js_to_fixed(float(value) / _ROWS_M, 2)}M rows"
     if value >= _ROWS_K:
-        return f"{value / _ROWS_K:.1f}K rows"
+        return f"{_js_to_fixed(float(value) / _ROWS_K, 1)}K rows"
     return f"{value} rows"
 
 
@@ -155,12 +156,30 @@ def _format_bytes(value: int | None) -> str:
     if value is None or value == 0:
         return "0 B"
     if value >= _BYTES_GIB:
-        return f"{value / _BYTES_GIB:.2f} GiB"
+        return f"{_js_to_fixed(float(value) / _BYTES_GIB, 2)} GiB"
     if value >= _BYTES_MIB:
-        return f"{value / _BYTES_MIB:.1f} MiB"
+        return f"{_js_to_fixed(float(value) / _BYTES_MIB, 1)} MiB"
     if value >= _BYTES_KIB:
-        return f"{value / _BYTES_KIB:.1f} KiB"
+        return f"{_js_to_fixed(float(value) / _BYTES_KIB, 1)} KiB"
     return f"{value} B"
+
+
+def _js_to_fixed(value: float, digits: int) -> str:
+    """JS ``value.toFixed(digits)`` for a non-negative ``value`` below 1e21.
+
+    JS rounds the double's exact value and takes the larger candidate on a
+    tie: ``(1.25).toFixed(1)`` is ``1.3``, where ``f"{1.25:.1f}"`` rounds
+    half to even and gives ``1.2``. ``Decimal(value)`` is that exact value,
+    so a double just below a decimal tie (1.005 is 1.00499...) still rounds
+    down, as in JS. ``float(value)`` above mirrors TS reading the count as a
+    double before dividing.
+    """
+    return str(Decimal(value).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP))
+
+
+def _js_math_round(value: float) -> int:
+    """JS ``Math.round`` for a non-negative ``value``: ties round up, not to even."""
+    return int(Decimal(value).to_integral_value(rounding=ROUND_HALF_UP))
 
 
 def _progress_line(label: str, status: QueryStatus, elapsed_sec: int) -> str:
@@ -354,7 +373,7 @@ def _poll_until_terminal(
                     iso_without_zone(datetime.now(tz=UTC)),
                 )
             )
-            finished_sec = round((status.duration_ms or 0) / 1000)
+            finished_sec = _js_math_round((status.duration_ms or 0) / 1000)
             input_.log(
                 f"  {input_.operation_type}: finished — "
                 f"written={_format_rows(status.written_rows)} "
