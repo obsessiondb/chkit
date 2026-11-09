@@ -9,6 +9,7 @@ names from numbers; it is not a parser.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
@@ -75,6 +76,19 @@ def tokenize_sql(sql: str) -> list[SQLToken]:
             previous = token
         i = end
     return tokens
+
+
+def iter_sql_tokens(sql: str) -> Iterator[SQLToken]:
+    """The tokens of `tokenize_sql`, one at a time, for a caller that keeps few of them."""
+    previous: SQLToken | None = None
+    i = 0
+    while i < len(sql):
+        kind, end, terminated = _read_token(sql, i, previous)
+        token = SQLToken(kind=kind, text=sql[i:end], start=i, end=end, terminated=terminated)
+        yield token
+        if not is_trivia(token):
+            previous = token
+        i = end
 
 
 def is_trivia(token: SQLToken) -> bool:

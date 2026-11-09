@@ -2,10 +2,21 @@
 
 ## Unreleased
 
+### Changed
+- `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
+  each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement
+  message see the SQL without the migration's header and marker comments.
+
 ### Fixed
 - `generate` no longer drops and re-adds a skip index whose expression differs only by
   enclosing parentheses, such as the `(s)` ObsessionDB stores for `s`; `pull` writes `s` on
   every server, and `drift` ignores those parentheses too, as in TS (#512).
+- A `primary_key`, `order_by` or `unique_key` entry that names a column containing a comma
+  (`"e,f)"`) is kept whole, as in TS, instead of failing validation; key entries are trimmed
+  like TS (#523).
+- `migrate --apply` no longer prints `  Applying <file>` before each migration, so its text
+  output matches TS (#486): the migration's `-- log:` line, if any, then `Applied: <file>`.
+  `--json` output is unchanged.
 - Validation rejects empty names and names with a control character (`invalid_identifier`),
   as in TS (#490). This covers database, object, column, index, constraint, projection,
   attribute and materialized view target names.
@@ -16,6 +27,7 @@
   skip only names that start with `_chkit_`. `drift` lists such a table as an extra
   object, and `check` counts it. `pull` with no `--database` finds a database that holds
   only such tables.
+- `migrate` no longer splits a statement at a `;` inside a `$$ … $$` heredoc.
 
 ## 0.3.0 — 2026-11-06
 

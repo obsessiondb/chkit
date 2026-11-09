@@ -312,61 +312,9 @@ def collect_destructive_operation_markers(
     return markers
 
 
-_LINE_COMMENT_RE = re.compile(r"^\s*--.*$", re.MULTILINE)
-
-
-def _strip_line_comments(statement: str) -> str:  # noqa: PLR0912
-    """Remove `-- ...` line comments outside string literals.
-
-    The Python sql_splitter preserves comments inside the statement text;
-    the TS equivalent strips them in ``extractExecutableStatements``. To
-    keep destructive-SQL classification identical across the two ports
-    we strip line comments here too. A more thorough rewrite of the
-    splitter is tracked in DRIFT.md.
-    """
-    out: list[str] = []
-    in_single = in_double = in_backtick = False
-    i = 0
-    n = len(statement)
-    while i < n:
-        ch = statement[i]
-        nxt = statement[i + 1] if i + 1 < n else ""
-        if in_single:
-            out.append(ch)
-            if ch == "'" and statement[i - 1 : i] != "\\":
-                in_single = False
-        elif in_double:
-            out.append(ch)
-            if ch == '"' and statement[i - 1 : i] != "\\":
-                in_double = False
-        elif in_backtick:
-            out.append(ch)
-            if ch == "`":
-                in_backtick = False
-        elif ch == "-" and nxt == "-":
-            # Skip until end of line (or end of string).
-            while i < n and statement[i] != "\n":
-                i += 1
-            continue
-        elif ch == "'":
-            in_single = True
-            out.append(ch)
-        elif ch == '"':
-            in_double = True
-            out.append(ch)
-        elif ch == "`":
-            in_backtick = True
-            out.append(ch)
-        else:
-            out.append(ch)
-        i += 1
-    return "".join(out)
-
-
 def _classify_destructive_statement(statement: str) -> str | None:
-    cleaned = _strip_line_comments(statement)
     for type_, pattern in _DESTRUCTIVE_SQL_RULES:
-        if pattern.search(cleaned):
+        if pattern.search(statement):
             return type_
     return None
 

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Set
 from typing import Final
 
 from chkit.core.sql_lexer import js_trim
@@ -57,8 +58,20 @@ def split_top_level_comma(text: str) -> list[str]:
     return out
 
 
-def normalize_key_columns(values: list[str]) -> list[str]:
+def normalize_key_columns(
+    values: list[str], declared_columns: Set[str] = frozenset()
+) -> list[str]:
+    """Flatten key entries into one token per key part.
+
+    An entry may hold several comma-separated parts (``'id, toDate(ts)'``), but
+    one that exactly names a declared column is kept whole, since the name
+    itself may contain a comma.
+    """
     out: list[str] = []
     for value in values:
-        out.extend(split_top_level_comma(value.strip()))
+        trimmed = js_trim(value)
+        if trimmed in declared_columns:
+            out.append(trimmed)
+        else:
+            out.extend(split_top_level_comma(trimmed))
     return out

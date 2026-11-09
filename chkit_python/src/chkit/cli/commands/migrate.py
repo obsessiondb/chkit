@@ -728,7 +728,6 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
             )
             if meta.log:
                 typer.echo(f"  {meta.log}")
-            typer.echo(f"  Applying {filename}")
         entry = apply_migration(
             ApplyMigrationInput(
                 client=ctx.client,

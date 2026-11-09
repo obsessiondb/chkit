@@ -272,7 +272,7 @@ function columnAfterRemovals(column: ColumnDefinition, removeComment: boolean): 
 function isCommentOnlyChange(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
   const { comment: _oldComment, ...oldRest } = normalizeColumn(oldCol)
   const { comment: _newComment, ...newRest } = normalizeColumn(newCol)
-  return JSON.stringify(oldRest) === JSON.stringify(newRest)
+  return shapeKey(oldRest) === shapeKey(newRest)
 }
 
 /**

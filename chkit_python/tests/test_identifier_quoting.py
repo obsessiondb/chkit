@@ -243,6 +243,33 @@ def test_on_cluster_lands_after_quoted_object_references() -> None:
     ]
 
 
+# TS ``identifier-quoting.test.ts`` "key clauses keep declared column names whole" (#523).
+def _comma_column_table() -> TableDefinition:
+    return _events_table(
+        columns=[{"name": "id", "type": "UInt64"}, {"name": "e,f)", "type": "UInt8"}],
+        order_by=["id", "e,f)"],
+    )
+
+
+def test_a_declared_column_name_containing_a_comma_is_not_split() -> None:
+    definition = _comma_column_table()
+    assert validate_definitions([definition]) == []
+    assert "ORDER BY (`id`, `e,f)`)" in to_create_sql(definition)
+
+
+def test_an_identical_definition_with_a_comma_column_plans_no_changes() -> None:
+    definition = _comma_column_table()
+    assert plan_diff([definition], [definition]).operations == []
+
+
+def test_a_comma_separated_expression_entry_is_still_split() -> None:
+    definition = _events_table(
+        columns=[{"name": "id", "type": "UInt64"}, {"name": "ts", "type": "DateTime"}],
+        order_by=["id, toDate(ts)"],
+    )
+    assert "ORDER BY (`id`, toDate(ts))" in to_create_sql(definition)
+
+
 def test_validate_definitions_rejects_unusable_identifiers() -> None:
     issues = validate_definitions([
         _events_table(
