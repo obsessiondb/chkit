@@ -73,12 +73,13 @@ def probe():
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
     monkeypatch.syspath_prepend(str(tmp_path))
-    (tmp_path / "probe_plugin.py").write_text(PROBE_PLUGIN, encoding="utf-8")
+    # Its own module name: test_hook_flags imports another `probe_plugin`.
+    (tmp_path / "flag_error_probe.py").write_text(PROBE_PLUGIN, encoding="utf-8")
     (tmp_path / "schema.py").write_text(
         "from chkit import schema\n\ndefinitions = schema()\n", encoding="utf-8"
     )
     (tmp_path / "clickhouse.config.py").write_text(
-        "from chkit import define_config\nfrom probe_plugin import probe, watch\n\n"
+        "from chkit import define_config\nfrom flag_error_probe import probe, watch\n\n"
         'config = define_config({"schema": "./schema.py", "outDir": "./chkit", '
         '"plugins": [probe(), watch()]})\n',
         encoding="utf-8",
