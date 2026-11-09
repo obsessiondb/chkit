@@ -817,6 +817,40 @@ def test_barrier_times_out_with_the_running_query_ids() -> None:
         )
 
 
+def test_barrier_rounds_elapsed_seconds_half_up_like_js() -> None:
+    # TS prints Math.round(elapsed / 1000): a .5 tie rounds up, where Python's
+    # round() rounds to even (2.5 -> 2, 30.5 -> 30).
+    clock = [0.0]
+    lines: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    client = _ProcessesClient([["a"], ["a"], ["a"]])
+    with pytest.raises(RuntimeError, match=r"still running after 61s \(query_id a\)"):
+        wait_for_insert_barrier(
+            client,
+            _BARRIER,
+            sleep=sleep,
+            now=lambda: clock[0],
+            log=lines.append,
+            poll_interval_seconds=30.5,
+            timeout_seconds=61.0,
+        )
+    assert "  still waiting for 1 INSERT query (elapsed 31s)" in lines
+
+    clock[0] = 0.0
+    with pytest.raises(RuntimeError, match=r"still running after 3s \(query_id a\)"):
+        wait_for_insert_barrier(
+            _ProcessesClient([["a"], ["a"]]),
+            _BARRIER,
+            sleep=sleep,
+            now=lambda: clock[0],
+            poll_interval_seconds=2.5,
+            timeout_seconds=2.5,
+        )
+
+
 def test_parse_exchange_tables() -> None:
     assert parse_exchange_tables(
         "EXCHANGE TABLES app.events AND app.`events shadow` ON CLUSTER 'c';"
