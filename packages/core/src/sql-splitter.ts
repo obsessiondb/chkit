@@ -1,12 +1,4 @@
-import {
-  isTrivia,
-  readBlockComment,
-  readHeredoc,
-  readQuoted,
-  sqlTokens,
-  tokenizeSQL,
-  type SQLToken,
-} from './sql-lexer.js'
+import { isTrivia, sqlTokens, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
@@ -116,23 +108,29 @@ function lexedEndAt(sql: string): (i: number) => number | undefined {
 function quotedEnd(sql: string, i: number, lexedEnd: (i: number) => number | undefined): number | undefined {
   const ch = sql[i] ?? ''
   if (ch === '/' && sql[i + 1] === '*') {
-    const end = closeEnd(sql, i + 2, '*/')
-    return readBlockComment(sql, i).end === end ? end : (lexedEnd(i) ?? end)
+    const close = sql.indexOf('*/', i + 2)
+    if (close === -1) return sql.length
+    // The lexer nests comments: it ends elsewhere only when a `/*` opens first.
+    const nested = sql.slice(i + 2, close + 1).includes('/*')
+    return nested ? (lexedEnd(i) ?? close + 2) : close + 2
   }
   if (ch === '`') {
-    const end = closeEnd(sql, i + 1, '`')
-    return readQuoted(sql, i, ch).end === end ? end : (lexedEnd(i) ?? end)
+    const close = sql.indexOf('`', i + 1)
+    if (close === -1) return sql.length
+    // The lexer reads backslash escapes and doubled backticks, so it can end later.
+    const escaped = sql.slice(i + 1, close).includes('\\') || sql[close + 1] === '`'
+    return escaped ? (lexedEnd(i) ?? close + 1) : close + 1
   }
   if (ch === "'" || ch === '"') return quoteEnd(sql, i, ch)
-  // Only a heredoc ClickHouse reads: an unclosed `$tag$`, or a `$` inside a name.
-  if (ch === '$') return readHeredoc(sql, i) === undefined ? undefined : lexedEnd(i)
+  if (ch === '$') {
+    // Only a heredoc ClickHouse reads: not an unclosed `$tag$`, nor a `$` inside a name.
+    HEREDOC_OPEN.lastIndex = i
+    return HEREDOC_OPEN.test(sql) ? lexedEnd(i) : undefined
+  }
   return undefined
 }
 
-function closeEnd(sql: string, from: number, close: string): number {
-  const at = sql.indexOf(close, from)
-  return at === -1 ? sql.length : at + close.length
-}
+const HEREDOC_OPEN = /\$[A-Za-z0-9_]*\$/y
 
 // A backslash escapes the next character. A doubled quote ends one quoted part
 // and starts the next, which ends where the escaped quote would.

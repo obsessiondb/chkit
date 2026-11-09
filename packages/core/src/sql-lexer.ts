@@ -180,7 +180,7 @@ function endsOperand(token: SQLToken | undefined): boolean {
 }
 
 // ClickHouse block comments nest: `/* a /* b */ c */` is one comment.
-export function readBlockComment(sql: string, i: number): TokenEnd {
+function readBlockComment(sql: string, i: number): TokenEnd {
   let depth = 0
   let j = i
   while (j < sql.length) {
@@ -199,7 +199,7 @@ export function readBlockComment(sql: string, i: number): TokenEnd {
 }
 
 // A doubled delimiter or a backslash escapes the delimiter inside quotes.
-export function readQuoted(sql: string, i: number, quote: string): { end: number; terminated: boolean } {
+function readQuoted(sql: string, i: number, quote: string): { end: number; terminated: boolean } {
   let j = i + 1
   while (j < sql.length) {
     const char = sql[j]
@@ -222,7 +222,7 @@ export function readQuoted(sql: string, i: number, quote: string): { end: number
 // `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
 // is only a literal when the same tag closes it later; otherwise ClickHouse
 // reads the `$` as part of an identifier or as punctuation.
-export function readHeredoc(sql: string, i: number): number | undefined {
+function readHeredoc(sql: string, i: number): number | undefined {
   const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
   if (sql[tagEnd] !== '$') return undefined
   const tag = sql.slice(i, tagEnd + 1)

@@ -143,15 +143,15 @@ def _read_token(sql: str, i: int, previous: SQLToken | None) -> _TokenEnd:  # no
     ):
         return ("line_comment", _line_end(sql, i), True)
     if char == "/" and nxt == "*":
-        return read_block_comment(sql, i)
+        return _read_block_comment(sql, i)
     if char == "'":
-        end, terminated = read_quoted(sql, i, "'")
+        end, terminated = _read_quoted(sql, i, "'")
         return ("string", end, terminated)
     if char in ("`", '"'):
-        end, terminated = read_quoted(sql, i, char)
+        end, terminated = _read_quoted(sql, i, char)
         return ("quoted_identifier", end, terminated)
     if char == "$":
-        heredoc_end = read_heredoc(sql, i)
+        heredoc_end = _read_heredoc(sql, i)
         if heredoc_end is not None:
             return ("string", heredoc_end, True)
         if nxt in _WORD_CHAR:
@@ -218,7 +218,7 @@ def _ends_operand(token: SQLToken | None) -> bool:
     return token.kind in ("identifier", "quoted_identifier", "number") or token.text in (")", "]")
 
 
-def read_block_comment(sql: str, i: int) -> _TokenEnd:
+def _read_block_comment(sql: str, i: int) -> _TokenEnd:
     # ClickHouse block comments nest: `/* a /* b */ c */` is one comment.
     depth = 0
     j = i
@@ -236,7 +236,7 @@ def read_block_comment(sql: str, i: int) -> _TokenEnd:
     return ("block_comment", len(sql), False)
 
 
-def read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
+def _read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
     # A doubled delimiter or a backslash escapes the delimiter inside quotes.
     j = i + 1
     while j < len(sql):
@@ -253,7 +253,7 @@ def read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
     return (len(sql), False)
 
 
-def read_heredoc(sql: str, i: int) -> int | None:
+def _read_heredoc(sql: str, i: int) -> int | None:
     # `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
     # is only a literal when the same tag closes it later; otherwise ClickHouse
     # reads the `$` as part of an identifier or as punctuation.

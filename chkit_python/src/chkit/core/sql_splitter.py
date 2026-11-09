@@ -8,6 +8,7 @@ check.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable
 
 from chkit.core.sql_lexer import (
@@ -15,14 +16,12 @@ from chkit.core.sql_lexer import (
     is_trivia,
     iter_sql_tokens,
     js_trim,
-    read_block_comment,
-    read_heredoc,
-    read_quoted,
     tokenize_sql,
 )
 
 # The characters that can start a string, quoted name, block comment or heredoc.
 _OPENERS = frozenset("/`'\"$")
+_HEREDOC_OPEN = re.compile(r"\$[A-Za-z0-9_]*\$")
 
 
 def split_sql_statements(text: str) -> list[str]:
@@ -145,26 +144,37 @@ def _quoted_end(text: str, i: int, lexed_end: Callable[[int], int | None]) -> in
     """
     ch = text[i]
     if text.startswith("/*", i):
-        end = _close_end(text, i + 2, "*/")
-        return end if read_block_comment(text, i)[1] == end else _or(lexed_end(i), end)
+        return _block_comment_end(text, i, lexed_end)
     if ch == "`":
-        end = _close_end(text, i + 1, "`")
-        return end if read_quoted(text, i, ch)[0] == end else _or(lexed_end(i), end)
+        return _backtick_end(text, i, lexed_end)
     if ch in ("'", '"'):
         return _quote_end(text, i, ch)
-    # Only a heredoc ClickHouse reads: an unclosed `$tag$`, or a `$` inside a name.
-    if ch == "$":
-        return None if read_heredoc(text, i) is None else lexed_end(i)
+    # Only a heredoc ClickHouse reads: not an unclosed `$tag$`, nor a `$` inside a name.
+    if ch == "$" and _HEREDOC_OPEN.match(text, i):
+        return lexed_end(i)
     return None
 
 
-def _or(value: int | None, default: int) -> int:
-    return default if value is None else value
+def _block_comment_end(text: str, i: int, lexed_end: Callable[[int], int | None]) -> int:
+    close = text.find("*/", i + 2)
+    if close == -1:
+        return len(text)
+    # The lexer nests comments: it ends elsewhere only when a `/*` opens first.
+    if "/*" not in text[i + 2 : close + 1]:
+        return close + 2
+    end = lexed_end(i)
+    return close + 2 if end is None else end
 
 
-def _close_end(text: str, start: int, close: str) -> int:
-    at = text.find(close, start)
-    return len(text) if at == -1 else at + len(close)
+def _backtick_end(text: str, i: int, lexed_end: Callable[[int], int | None]) -> int:
+    close = text.find("`", i + 1)
+    if close == -1:
+        return len(text)
+    # The lexer reads backslash escapes and doubled backticks, so it can end later.
+    if "\\" not in text[i + 1 : close] and text[close + 1 : close + 2] != "`":
+        return close + 1
+    end = lexed_end(i)
+    return close + 1 if end is None else end
 
 
 def _quote_end(text: str, i: int, quote: str) -> int:
