@@ -306,8 +306,8 @@ def create_obsessiondb_plugin(
     return ChxPlugin(
         manifest=ChxPluginManifest(name="obsessiondb", api_version=1),
         hooks=_ObsessionDBHooks(),
-        # In the TS plugin's order, which `chkit plugin` and the unknown-command
-        # message list them in.
+        # In TS's order, which `chkit plugin obsessiondb` lists and an unknown
+        # command's error names.
         commands=[
             ChxPluginCommand(
                 name="login",

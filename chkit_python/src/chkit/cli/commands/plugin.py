@@ -11,15 +11,15 @@ Usage:
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, NoReturn, cast
+from typing import Annotated, Any, cast
 
 import typer
 
 from chkit.cli.config_loader import load_config, loaded_config_path
-from chkit.cli.flag_errors import report_flag_error
-from chkit.cli.json_output import emit_json, print_output
+from chkit.cli.flag_errors import report_flag_error, report_usage_error
+from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import (
     load_plugin_runtime,
     make_plugin_context,
@@ -42,56 +42,18 @@ from chkit.plugins import (
     LoadedPlugin,
 )
 
-# The shortcuts TS names in its "plugin is not configured" message
-# (WELL_KNOWN_PLUGIN_COMMANDS in packages/cli/src/bin/chkit.ts).
-_SHORTCUT_PLUGIN_LABELS = {"codegen": "Codegen"}
+
+class UnknownPluginError(LookupError):
+    """No configured plugin has the name. As in TS, a plain error of the
+    command: its message on stderr, exit 1 and the ``error`` envelope under
+    ``--json``."""
 
 
-class PluginUsageError(RuntimeError):
-    """An unknown plugin or plugin command. The top-level handler prints the
-    message on stderr, exits 1 and, under ``--json``, emits the error envelope
-    with ``code``, as the TS CLI does (#606)."""
-
-    def __init__(self, message: str, code: str = "error") -> None:
-        super().__init__(message)
-        self.code = code
-
-
-def _unknown_plugin_error(
-    plugin_name: str, loaded: Sequence[LoadedPlugin], invoking_command: str
-) -> PluginUsageError:
-    """TS: ``chkit plugin <name>`` throws in ``commands/plugin.ts``; a
-    shortcut whose plugin is missing is a usage error in ``bin/chkit.ts``."""
-    if invoking_command == "plugin":
-        names = sorted(entry.plugin.manifest.name for entry in loaded)
-        known = ", ".join(names) if names else "(none)"
-        return PluginUsageError(f'Unknown plugin "{plugin_name}". Available: {known}.')
-    label = _SHORTCUT_PLUGIN_LABELS.get(invoking_command)
-    if label is not None:
-        return PluginUsageError(
-            f"{label} plugin is not configured. Add it to config.plugins first.",
-            "plugin_not_configured",
-        )
-    return PluginUsageError(f"Unknown command: {invoking_command}", "unknown_command")
-
-
-def _report_unknown_command(
-    entry: LoadedPlugin, command_name: str, invoking_command: str, *, json_mode: bool
-) -> NoReturn:
-    """``chkit plugin <name> <command>`` reports it as ``commands/plugin.ts``
-    does: under ``--json`` the string ``error`` replaces the stderr line. A
-    shortcut reports an ``unknown_subcommand`` usage error, as ``bin/chkit.ts``."""
-    plugin_name = entry.plugin.manifest.name
-    names = [command.name for command in entry.plugin.commands or []]
-    known = ", ".join(names) if names else "(none)"
-    message = f'Unknown {plugin_name} command "{command_name}". Available: {known}.'
-    if invoking_command != "plugin":
-        raise PluginUsageError(message, "unknown_subcommand")
-    if json_mode:
-        emit_json("plugin", {"ok": False, "error": message})
-    else:
-        typer.echo(message, err=True)
-    raise typer.Exit(code=1)
+def _unknown_plugin_error(plugin_name: str, loaded: list[LoadedPlugin]) -> UnknownPluginError:
+    known = sorted(entry.plugin.manifest.name for entry in loaded)
+    return UnknownPluginError(
+        f'Unknown plugin "{plugin_name}". Available: {", ".join(known) or "(none)"}.'
+    )
 
 
 def _list_all(loaded: list[LoadedPlugin]) -> None:
@@ -178,7 +140,7 @@ def _extended_flag_defs(
     return extended
 
 
-def dispatch_plugin_command(
+def dispatch_plugin_command(  # noqa: PLR0912
     *,
     plugin_name: str,
     command_name: str,
@@ -187,11 +149,14 @@ def dispatch_plugin_command(
     output_json: bool,
     invoking_command: str = "plugin",
     config_flag: str | None = None,
+    print_help: Callable[[], None] | None = None,
 ) -> None:
     """Load config + plugins, parse forwarded flags, run one plugin command.
 
     Shared by ``chkit plugin <name> <cmd>`` and the top-level shortcuts
     (``chkit codegen``, ``chkit obsessiondb ...``), mirroring the TS CLI.
+    A shortcut given an unknown command runs ``print_help`` after the error
+    (not under ``--json``), as TS prints the command's help.
 
     As in TS, the command's flags also hold the global flags given:
     ``--json`` on every path, and ``--config`` (``config_flag``, the raw
@@ -213,11 +178,32 @@ def dispatch_plugin_command(
         (e for e in runtime.plugins if e.plugin.manifest.name == plugin_name), None
     )
     if entry is None:
-        raise _unknown_plugin_error(plugin_name, runtime.plugins, invoking_command)
+        if invoking_command == "codegen":
+            # As TS reports a well-known plugin command whose plugin is missing.
+            report_usage_error(
+                "codegen",
+                "Codegen plugin is not configured. Add it to config.plugins first.",
+                json_mode=output_json,
+                code="plugin_not_configured",
+            )
+        raise _unknown_plugin_error(plugin_name, list(runtime.plugins))
 
     found = runtime.get_command(plugin_name, command_name)
     if found is None:
-        _report_unknown_command(entry, command_name, invoking_command, json_mode=output_json)
+        known = [command.name for command in entry.plugin.commands or []]
+        message = (
+            f'Unknown {plugin_name} command "{command_name}". '
+            f'Available: {", ".join(known) or "(none)"}.'
+        )
+        if invoking_command == "plugin":
+            report_flag_error("plugin", message, json_mode=output_json)
+        report_usage_error(
+            invoking_command,
+            message,
+            json_mode=output_json,
+            code="unknown_subcommand",
+            on_text=print_help,
+        )
 
     command_def, _command_owner = found
     flag_defs = list(command_def.flags or [])
@@ -319,7 +305,7 @@ def run(
             (e for e in loaded if e.plugin.manifest.name == plugin_name), None
         )
         if entry is None:
-            raise _unknown_plugin_error(plugin_name, loaded, "plugin")
+            raise _unknown_plugin_error(plugin_name, loaded)
         _list_one(entry)
         return
 
