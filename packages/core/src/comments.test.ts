@@ -165,6 +165,24 @@ describe('@chkit/core comments (#464)', () => {
       ).toEqual([['alter_table_modify_column', 'safe', "ALTER TABLE app.events COMMENT COLUMN `id` 'it''s';"]])
     })
 
+    test('a comment change on a column whose fields are reordered is COMMENT COLUMN (#523)', () => {
+      const commentOnly = [['alter_table_modify_column', 'safe', "ALTER TABLE app.events COMMENT COLUMN `id` 'new';"]]
+      expect(
+        plan(
+          { name: 'id', type: 'UInt64', comment: 'old', default: 7, defaultKind: 'DEFAULT', nullable: false },
+          { nullable: false, defaultKind: 'DEFAULT', default: 7, comment: 'new', type: 'UInt64', name: 'id' }
+        )
+      ).toEqual(commentOnly)
+      // A field the DSL does not type (e.g. from a JavaScript schema file) is
+      // compared too, so its key order must not matter either.
+      expect(
+        plan(
+          { name: 'id', type: 'UInt64', comment: 'old', a: 1, b: 2 } as ColumnDefinition,
+          { b: 2, a: 1, comment: 'new', type: 'UInt64', name: 'id' } as ColumnDefinition
+        )
+      ).toEqual(commentOnly)
+    })
+
     test('removing only the comment is REMOVE COMMENT', () => {
       expect(plan({ name: 'id', type: 'UInt64', comment: 'old' }, { name: 'id', type: 'UInt64' })).toEqual([
         ['alter_table_modify_column', 'safe', 'ALTER TABLE app.events MODIFY COLUMN `id` REMOVE COMMENT;'],

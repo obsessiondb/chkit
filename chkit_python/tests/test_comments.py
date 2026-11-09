@@ -194,6 +194,20 @@ def test_adding_or_changing_only_a_column_comment_is_comment_column() -> None:
     ]
 
 
+def test_a_comment_change_on_a_column_whose_fields_are_reordered_is_comment_column() -> None:
+    # TS comments.test.ts asserts the same (#523).
+    assert _column_plan(
+        ColumnDefinition.model_validate(
+            {"name": "id", "type": "UInt64", "comment": "old", "default": 7,
+             "defaultKind": "DEFAULT", "nullable": False}
+        ),
+        ColumnDefinition.model_validate(
+            {"nullable": False, "defaultKind": "DEFAULT", "default": 7, "comment": "new",
+             "type": "UInt64", "name": "id"}
+        ),
+    ) == [("alter_table_modify_column", "safe", "ALTER TABLE app.events COMMENT COLUMN `id` 'new';")]
+
+
 def test_removing_only_a_column_comment_is_remove_comment() -> None:
     assert _column_plan(
         ColumnDefinition(name="id", type="UInt64", comment="old"),

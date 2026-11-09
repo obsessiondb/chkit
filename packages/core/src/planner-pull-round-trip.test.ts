@@ -114,6 +114,43 @@ describe('@chkit/core planner: pulled schema round trip', () => {
     expect(userIndex.operations.map((op) => op.type)).toEqual(['alter_table_add_index'])
   })
 
+  // chkit renders `INDEX name (expr)`: stock ClickHouse reads `(s)` back as
+  // `s`, ObsessionDB as `(s)`, and a tuple as `a, b` on both (#512).
+  describe('skip index expressions compare without their enclosing parentheses', () => {
+    const indexed = (expression: string) => ({
+      ...events({}),
+      indexes: [{ name: 'idx', expression, type: 'minmax' as const, granularity: 1 }],
+    })
+    const plan = (before: string, after: string) => planDiff([indexed(before)], [indexed(after)]).operations.map((op) => op.type)
+
+    test.each([
+      ['n', '(n)'],
+      ['n', '((n))'],
+      ['(n)', '((n))'],
+      ['(id, n)', 'id, n'],
+      ['((id, n))', 'id, n'],
+      ['(id + n) * 2', '((id + n) * 2)'],
+      ["n = ')('", "(n = ')(')"],
+      ['lower(toString(n))', '(lower(toString(n)))'],
+      ['`n`', '(n)'],
+    ])('%s and %s plan nothing', (before, after) => {
+      expect(plan(before, after)).toEqual([])
+      expect(plan(after, before)).toEqual([])
+    })
+
+    test.each([
+      ['n', '(id, n)'],
+      ['(id, n)', '(id), (n)'],
+      ['(id + n) * 2', 'id + n * 2'],
+      ['(id) + (n)', 'id) + (n'],
+      ["n = ')('", "n = '('"],
+      ["'(n)'", 'n'],
+      ['arrayMap(x -> (x + 1), [n])', 'arrayMap(x -> x + 1, [n])'],
+    ])('%s and %s are different expressions', (before, after) => {
+      expect(plan(before, after)).toEqual(['alter_table_drop_index', 'alter_table_add_index'])
+    })
+  })
+
   test('engines outside the MergeTree family get no index_granularity', () => {
     const memory = table({ database: 'app', name: 'buffer', engine: 'Memory()', columns: [{ name: 'id', type: 'UInt64' }] })
     expect(planDiff([], [memory]).operations.find((op) => op.type === 'create_table')?.sql).not.toContain('index_granularity')

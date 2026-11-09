@@ -11,6 +11,7 @@ import type {
   MigrationPlan,
   RiskLevel,
   SchemaDefinition,
+  SkipIndexDefinition,
   TableConstraintDefinition,
   TableDefinition,
   ValidationIssue,
@@ -42,6 +43,7 @@ import {
 import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
 import { readonlySettingsFingerprint } from './table-settings.js'
+import { sqlExpressionFingerprint } from './sql-normalizer.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
@@ -270,7 +272,7 @@ function columnAfterRemovals(column: ColumnDefinition, removeComment: boolean): 
 function isCommentOnlyChange(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
   const { comment: _oldComment, ...oldRest } = normalizeColumn(oldCol)
   const { comment: _newComment, ...newRest } = normalizeColumn(newCol)
-  return JSON.stringify(oldRest) === JSON.stringify(newRest)
+  return shapeKey(oldRest) === shapeKey(newRest)
 }
 
 /**
@@ -436,6 +438,14 @@ function dictionaryLifetimeFingerprint(lifetime: string): string {
  * JSON with object keys sorted, for comparing definitions: key order follows
  * how the schema spelled an object, and pull writes its own order (#466).
  */
+// chkit renders `INDEX name (expr)`. Stock ClickHouse stores `s` for `(s)`,
+// ObsessionDB keeps `(s)`, so the parentheses around the whole expression are
+// not compared (#512). Inside the rendered parentheses `(a, b)` and `a, b` are
+// the same tuple, and `((s))`, `(s)` and `s` the same expression.
+function indexComparisonShape(index: SkipIndexDefinition): SkipIndexDefinition {
+  return { ...index, expression: sqlExpressionFingerprint(index.expression) }
+}
+
 function shapeKey(value: unknown): string {
   return JSON.stringify(value, sortObjectKeys)
 }
@@ -578,7 +588,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     (index) => index.name,
     (left, right) => left.type === 'text' && right.type === 'text'
       ? textIndexFingerprint(left) === textIndexFingerprint(right)
-      : shapeKey(left) === shapeKey(right)
+      : shapeKey(indexComparisonShape(left)) === shapeKey(indexComparisonShape(right))
   )
   for (const index of indexDiff.added) {
     ops.push( {

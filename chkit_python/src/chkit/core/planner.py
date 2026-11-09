@@ -66,6 +66,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
+from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.validate import assert_valid_definitions
@@ -287,7 +288,14 @@ def _columns_equal(left: ColumnDefinition, right: ColumnDefinition) -> bool:
 
 
 def _index_identity(index: SkipIndexDefinition) -> str:
-    return json.dumps(index.model_dump(mode="json", by_alias=False), sort_keys=True, default=str)
+    # chkit renders ``INDEX name (expr)``. Stock ClickHouse stores ``s`` for
+    # ``(s)``, ObsessionDB keeps ``(s)``, so the parentheses around the whole
+    # expression are not compared (#512). Inside the rendered parentheses
+    # ``(a, b)`` and ``a, b`` are the same tuple, and ``((s))``, ``(s)`` and
+    # ``s`` the same expression.
+    data = index.model_dump(mode="json", by_alias=False)
+    data["expression"] = sql_expression_fingerprint(index.expression)
+    return json.dumps(data, sort_keys=True, default=str)
 
 
 def _indexes_equal(left: SkipIndexDefinition, right: SkipIndexDefinition) -> bool:

@@ -936,28 +936,28 @@ def test_split_sql_statements_keeps_comment_only_piece() -> None:
         ("/* only a comment */;", []),
         (
             "CREATE TABLE t (id UInt64) ENGINE = Memory;\n/* TODO */\n",
-            ["CREATE TABLE t (id UInt64) ENGINE = Memory"],
+            ["CREATE TABLE t (id UInt64) ENGINE = Memory;"],
         ),
         ("-- header\n/* block; with semicolon */\n-- more\n", []),
-        ("SELECT 1;\n/* a */ /* b */;\nSELECT 2;", ["SELECT 1", "SELECT 2"]),
+        ("SELECT 1;\n/* a */ /* b */;\nSELECT 2;", ["SELECT 1;", "SELECT 2;"]),
         ("# note\n;", []),
         ("#! shebang\n", []),
         ("// note\n;", []),
         ("/* a /* nested */ b */;", []),
-        ("SELECT 1;\n// trailing note", ["SELECT 1"]),
-        ("SELECT '/* not a comment */';", ["SELECT '/* not a comment */'"]),
-        ("SELECT `/*x*/` FROM t;", ["SELECT `/*x*/` FROM t"]),
-        ("SELECT '# a; b';\n/* end */", ["SELECT '# a; b'"]),
+        ("SELECT 1;\n// trailing note", ["SELECT 1;"]),
+        ("SELECT '/* not a comment */';", ["SELECT '/* not a comment */';"]),
+        ("SELECT `/*x*/` FROM t;", ["SELECT `/*x*/` FROM t;"]),
+        ("SELECT '# a; b';\n/* end */", ["SELECT '# a; b';"]),
         # `#x` is not a comment (ClickHouse needs `# ` or `#!`).
-        ("#x;", ["#x"]),
-        ("SELECT 1;\n/* never closed", ["SELECT 1", "/* never closed"]),
+        ("#x;", ["#x;"]),
+        ("SELECT 1;\n/* never closed", ["SELECT 1;", "/* never closed;"]),
         # ClickHouse reads the whole line as one comment; the splitter cuts it at
         # the `;`, so the file keeps its old split.
         (
             "// DROP TABLE a; DROP TABLE b;\nSELECT 1;",
-            ["// DROP TABLE a", "DROP TABLE b", "SELECT 1"],
+            ["// DROP TABLE a;", "DROP TABLE b;", "SELECT 1;"],
         ),
-        ("# old: DROP TABLE a; DROP TABLE b;\n", ["# old: DROP TABLE a", "DROP TABLE b"]),
+        ("# old: DROP TABLE a; DROP TABLE b;\n", ["# old: DROP TABLE a;", "DROP TABLE b;"]),
         (
             "-- chkit-migration-format: v1\n-- generated-at: 2026-01-01T00:00:00.000Z\n\n"
             "-- Empty migration scaffold. Write your SQL statements below.\n",
@@ -1059,8 +1059,8 @@ def test_apply_skips_completed_statement_after_partial_failure(tmp_path: Path) -
     store = FakeStore()
     with pytest.raises(RuntimeError, match="failed at statement 2 of 2") as info:
         _apply(_write(tmp_path, sql), client, store)
-    assert "boom: ALTER TABLE t ADD COLUMN b UInt64" in str(info.value)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN a UInt64", "ALTER TABLE t ADD COLUMN b UInt64"]
+    assert "boom: ALTER TABLE t ADD COLUMN b UInt64;" in str(info.value)
+    assert client.calls == ["ALTER TABLE t ADD COLUMN a UInt64;", "ALTER TABLE t ADD COLUMN b UInt64;"]
     assert store.state is not None
     assert [(o.operation_index, o.status) for o in store.state.operations] == [
         (0, "completed"),
@@ -1071,7 +1071,7 @@ def test_apply_skips_completed_statement_after_partial_failure(tmp_path: Path) -
     fail_b[0] = False
     client.calls.clear()
     _apply(tmp_path, client, store)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN b UInt64"]
+    assert client.calls == ["ALTER TABLE t ADD COLUMN b UInt64;"]
     assert len(store.appended) == 1
 
 
@@ -1271,7 +1271,7 @@ def test_apply_retry_rekeys_and_skips_completed(tmp_path: Path) -> None:
     store = FakeStore(in_progress([op(0, "completed"), op(1, "failed")], checksum="old"))
     _apply(_write(tmp_path, EDITED_SQL), client, store, retry=_retry_for(EDITED_SQL))
     new = checksum_sql(EDITED_SQL)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64"]
+    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64;"]
     assert store.writes[0].checksum == new
     assert [(o.operation_index, o.status) for o in store.writes[0].operations] == [
         (0, "completed"),
@@ -1319,8 +1319,8 @@ def test_apply_edited_file_without_progress_runs_from_statement_1(
         "completed, so it runs again from statement 1."
     ]
     assert client.calls == [
-        "ALTER TABLE t ADD COLUMN a UInt64",
-        "ALTER TABLE t ADD COLUMN b2 UInt64",
+        "ALTER TABLE t ADD COLUMN a UInt64;",
+        "ALTER TABLE t ADD COLUMN b2 UInt64;",
     ]
     assert store.writes[0].checksum == checksum_sql(EDITED_SQL)
     assert store.appended[0].checksum == checksum_sql(EDITED_SQL)
@@ -1346,7 +1346,7 @@ def test_apply_retry_that_fails_again_resumes_without_retry(tmp_path: Path) -> N
     fail[0] = False
     client.calls.clear()
     _apply(tmp_path, client, store)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64"]
+    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64;"]
     assert len(store.appended) == 1
 
 
@@ -1376,9 +1376,7 @@ def test_apply_retry_skips_kept_remove_and_runs_modify(tmp_path: Path) -> None:
     client = _RecordingClient()
     store = FakeStore(_remove_failed_state())
     _apply(_write(tmp_path, sql), client, store, retry=_retry_for(sql))
-    # Python keeps the `-- operation:` line in the statement it executes.
-    assert len(client.calls) == 1
-    assert client.calls[0].endswith(_MODIFY.rstrip(";"))
+    assert client.calls == [_MODIFY]
     assert store.appended[0].checksum == checksum_sql(sql)
 
 
