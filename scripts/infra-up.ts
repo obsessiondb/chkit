@@ -47,7 +47,11 @@ await unlink(lockPath).catch(() => {})
 process.exit(exitCode)
 
 async function ensureStack(): Promise<number> {
-	if (!stackCurrent()) return await startStack([])
+	if (!stackCurrent()) {
+		// `compose up` leaves a service with unchanged settings as it is, stale mounts included.
+		const up = await startStack([])
+		if (up !== 0) return up
+	}
 	const stale = servicesWithStaleMounts()
 	if (stale.length === 0) return 0
 	console.log(
@@ -97,7 +101,9 @@ function stackCurrent(): boolean {
 
 /**
  * Services whose bind-mounted files, read inside the running container, differ
- * from the checkout's files or cannot be read there at all.
+ * from the checkout's files or are missing there. `cat` failing inside the
+ * container exits 97; any other failure is the probe's own (Docker unreachable,
+ * container gone) and recreates nothing.
  */
 function servicesWithStaleMounts(): string[] {
 	const config = Bun.spawnSync([...compose, 'config', '--format', 'json'], {
@@ -114,11 +120,28 @@ function servicesWithStaleMounts(): string[] {
 			)
 			if (binds.length === 0) return false
 			const mounted = Bun.spawnSync(
-				[...compose, 'exec', '-T', name, 'cat', ...binds.map((b) => b.target)],
+				[
+					...compose,
+					'exec',
+					'-T',
+					name,
+					'sh',
+					'-c',
+					'cat "$@" || exit 97',
+					'sh',
+					...binds.map((b) => b.target),
+				],
 				{ cwd: root },
 			)
+			if (mounted.exitCode === 97) return true
+			if (mounted.exitCode !== 0) {
+				console.warn(
+					`Could not read the files mounted into ${name}; leaving it as it is.\n${mounted.stderr.toString()}`,
+				)
+				return false
+			}
 			const wanted = Buffer.concat(binds.map((b) => readFileSync(b.source)))
-			return mounted.exitCode !== 0 || !wanted.equals(mounted.stdout)
+			return !wanted.equals(mounted.stdout)
 		})
 		.map(([name]) => name)
 }
