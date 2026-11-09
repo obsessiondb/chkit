@@ -51,7 +51,12 @@ from chkit.core.model import (
     TableRetainedBy,
     ValidationIssue,
 )
-from chkit.core.sql import column_type_fingerprint, render_column_type, to_create_sql
+from chkit.core.sql import (
+    column_type_fingerprint,
+    key_fingerprint,
+    render_column_type,
+    to_create_sql,
+)
 from chkit.core.sql_lexer import js_trim
 from chkit.core.table_settings import (
     DEFAULT_INDEX_GRANULARITY,
@@ -947,8 +952,9 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
 
     layout_changed = (
         engine_name(old_def.engine) != engine_name(new_def.engine)
-        or ",".join(old_def.order_by) != ",".join(new_def.order_by)
-        or ",".join(old_def.primary_key) != ",".join(new_def.primary_key)
+        or key_fingerprint(old_def, old_def.order_by) != key_fingerprint(new_def, new_def.order_by)
+        or key_fingerprint(old_def, old_def.primary_key)
+        != key_fingerprint(new_def, new_def.primary_key)
         or (old_def.partition_by or "") != (new_def.partition_by or "")
         or readonly_settings(old_def) != readonly_settings(new_def)
     )
