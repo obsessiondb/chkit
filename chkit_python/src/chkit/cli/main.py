@@ -115,6 +115,12 @@ def _after_dash_dash(rest: list[str], missing_names: int) -> list[str]:
     return [*rest[:missing], "--", *rest[missing:]]
 
 
+def _option_args(args: list[str]) -> list[str]:
+    """The tokens before the first ``--``: after it, ``--help`` or ``--json``
+    is an argument, not an option, as in TS (``optionArgs``, #614)."""
+    return args[: args.index("--")] if "--" in args else args
+
+
 def _reject_group_bundles(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
     """The top-level options (``-h``, ``-v`` / ``-V`` / ``--version``) take no
     value, so a token such as ``-vx`` before the command is a bundle, which TS
@@ -245,9 +251,9 @@ class _ChkitCommand(TyperCommand):
         try:
             if ctx.ignore_unknown_options:
                 normalized = _split_forwarded_args(args, params)
-            elif any(token in _HELP_OPTION_NAMES for token in args):
-                # As in TS, -h / --help anywhere shows the help, even next to a
-                # flag error or where it would be a flag's value.
+            elif any(token in _HELP_OPTION_NAMES for token in _option_args(args)):
+                # As in TS, -h / --help anywhere before `--` shows the help, even
+                # next to a flag error or where it would be a flag's value.
                 normalized = ["--help"]
             else:
                 # query first moves its SQL arguments behind `--` (#584), so SQL
@@ -256,7 +262,7 @@ class _ChkitCommand(TyperCommand):
                     args = _query_sql_behind_terminator(args, params)
                 normalized = _normalize_short_options(args, params)
         except (UnknownFlagError, MissingFlagValueError) as error:
-            report_flag_error(ctx.info_name, str(error), json_mode="--json" in args)
+            report_flag_error(ctx.info_name, str(error), json_mode="--json" in _option_args(args))
         return super().parse_args(ctx, normalized)
 
 
@@ -275,7 +281,7 @@ class _ChkitGroup(TyperGroup):
     # typer.Context subclass would narrow the parameter (mypy [override]).
     def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
-        json_mode = "--json" in ctx.args
+        json_mode = "--json" in _option_args(ctx.args)
         try:
             return super().invoke(ctx)
         except (typer.Exit, typer.Abort, BrokenPipeError):
