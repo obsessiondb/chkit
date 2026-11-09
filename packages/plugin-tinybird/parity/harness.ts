@@ -40,6 +40,7 @@ async function main(): Promise<void> {
   if (!existsSync(CLI)) throw new Error(`build the chkit CLI first (bun run build): ${CLI} is missing`)
   const projectDir = resolve(values.project)
   const maxDepth = Number(values['max-depth'])
+  if (!Number.isInteger(maxDepth) || maxDepth < 1) throw new Error(`--max-depth must be a positive integer, got ${values['max-depth']}`)
   const target = DEFAULT_TARGET
   const runId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
   const database = `chkit_tb_parity_${runId}`
