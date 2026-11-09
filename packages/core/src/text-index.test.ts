@@ -127,6 +127,17 @@ describe('text indexes', () => {
     expect(planDiff(canonicalizeDefinitions([docs(before)]), [docs(after)]).operations).toEqual([])
   })
 
+  test('indexes written before the subscript spacing fix plan no migration', () => {
+    // Snapshots and pulled files from before #645 hold `lower(s) [1]`.
+    const before = index({ expression: "splitByChar(',', lower(body)) [1]", preprocessor: "m ['k']" })
+    const after = index({ expression: "splitByChar(',', lower(body))[1]", preprocessor: "m['k']" })
+    expect(toCreateSQL(docs(after))).toContain(
+      "INDEX `idx` (splitByChar(',', lower(body))[1]) TYPE text(tokenizer = splitByNonAlpha, preprocessor = m['k'])",
+    )
+    expect(textIndexFingerprint(before)).toBe(textIndexFingerprint(after))
+    expect(planDiff(canonicalizeDefinitions([docs(before)]), [docs(after)]).operations).toEqual([])
+  })
+
   test('equivalent string escape spellings compare equally', () => {
     expect(normalizeTextIndexSQL("splitByString(['\t', 'é', ''''])")).toBe(
       normalizeTextIndexSQL(String.raw`splitByString(['\x09', '\xc3\xa9', '\''])`),
