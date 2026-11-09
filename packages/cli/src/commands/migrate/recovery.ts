@@ -5,7 +5,7 @@ import type {
   OperationStatus,
 } from '../../runtime/journal-store.js'
 import type { MigrationOperationSummary } from '../../runtime/safety-markers.js'
-import { MigrateError } from './errors.js'
+import { MigrateError, recordedStatementsChangedError } from './errors.js'
 
 export interface RecoveryTargets {
   /** `--retry <migration>` as a file name. */
@@ -268,6 +268,28 @@ export function recordedStatementMismatches(
     .filter((op) => fingerprints[op.operationIndex] !== op.fingerprint)
     .map((op) => op.operationIndex + 1)
     .sort((a, b) => a - b)
+}
+
+/**
+ * Throws when the journal records statement `index` as completed with a
+ * fingerprint the statement this run would skip does not have (#599). Every
+ * skip checks the record it reads, not only the state the run started with:
+ * a later read can return a version the first check never saw.
+ */
+export function assertCompletedStatement(
+  state: MigrationRowState,
+  input: { migration: string; index: number; fingerprint: string; cliVersion: string },
+): void {
+  const recorded = state.operations.find(
+    (op) => op.operationIndex === input.index && op.status === 'completed',
+  )
+  if (recorded === undefined || recorded.fingerprint === '' || recorded.fingerprint === input.fingerprint) return
+  throw recordedStatementsChangedError({
+    migration: input.migration,
+    statements: [input.index + 1],
+    recordedBy: state.chkitVersion,
+    cliVersion: input.cliVersion,
+  })
 }
 
 /** Whether any statement of an in-progress state completed or may have run. */

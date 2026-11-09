@@ -37,8 +37,12 @@ from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
 
+from chkit import __version__
 from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
-from chkit.cli.commands.migrate_recovery import has_statement_progress
+from chkit.cli.commands.migrate_recovery import (
+    assert_completed_statement,
+    has_statement_progress,
+)
 from chkit.cli.journal_store import (
     JournalStore,
     MigrationRowState,
@@ -198,8 +202,15 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             None,
         )
 
-    # 1. Already completed → skip entirely
-    if prior_op is not None and prior_op.status == "completed":
+    # 1. Already completed → skip entirely, when it is this statement that ran (#599)
+    if initial_state is not None and prior_op is not None and prior_op.status == "completed":
+        assert_completed_statement(
+            initial_state,
+            migration=input_.migration_name,
+            index=input_.statement_index,
+            fingerprint=input_.fingerprint,
+            cli_version=__version__,
+        )
         input_.log(
             f"  {input_.operation_type}: query_id={prior_op.query_id} already "
             f"completed in prior run — skipping"
@@ -222,6 +233,17 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     )
     in_flight = _check_in_flight(client, query_id, input_.operation_type)
     if in_flight.status == "running":
+        # The running attempt is the SQL its record names (#599): an attempt
+        # of other SQL, kept by --abandon and an edit, must not finish as this one.
+        attempt_fingerprint = prior_op.fingerprint if prior_op is not None else ""
+        if attempt_fingerprint not in ("", input_.fingerprint):
+            msg = (
+                f"Async migration step {input_.operation_type} (query_id {query_id}): an "
+                "earlier attempt with different SQL is still running on the server. Wait "
+                f"for it to finish or run KILL QUERY WHERE query_id = '{query_id}', then "
+                "re-run chkit migrate --apply."
+            )
+            raise RuntimeError(msg)
         input_.log(
             f"  {input_.operation_type}: query_id={query_id} already running on "
             f"server — attaching to in-flight query"
@@ -232,6 +254,9 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             query_id=query_id,
             poll_after_time=_attach_lower_bound(server_now_ms, in_flight.elapsed_ms),
             submit_error=None,
+            # What is known about the attempt that runs: a record without a
+            # fingerprint stays without one.
+            fingerprint=attempt_fingerprint,
             started_at=prior_op.started_at
             if prior_op is not None
             else iso_without_zone(datetime.now(tz=UTC)),
@@ -296,6 +321,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         poll_after_time=poll_after_time,
         submit_error=submit_error,
         started_at=started_at,
+        fingerprint=input_.fingerprint,
     )
 
 
@@ -307,6 +333,7 @@ def _poll_until_terminal(
     poll_after_time: str,
     submit_error: Exception | None,
     started_at: str,
+    fingerprint: str,
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
     transient_errors = 0
@@ -355,7 +382,7 @@ def _poll_until_terminal(
                 started_at=started_at,
                 finished_at=iso_without_zone(datetime.now(tz=UTC)),
                 last_error="",
-                fingerprint=input_.fingerprint,
+                fingerprint=fingerprint,
             )
             input_.journal_store.write_migration_state(
                 upsert_operation(
@@ -385,7 +412,7 @@ def _poll_until_terminal(
                 started_at=started_at,
                 finished_at=iso_without_zone(datetime.now(tz=UTC)),
                 last_error=status.error or "<unknown>",
-                fingerprint=input_.fingerprint,
+                fingerprint=fingerprint,
             )
             input_.journal_store.write_migration_state(
                 upsert_operation(
@@ -421,7 +448,7 @@ def _poll_until_terminal(
                             "startedAt": started_at,
                             "finishedAt": iso_without_zone(datetime.now(tz=UTC)),
                             "lastError": _describe_error(submit_error),
-                            "fingerprint": input_.fingerprint,
+                            "fingerprint": fingerprint,
                         }
                     ),
                     iso_without_zone(datetime.now(tz=UTC)),

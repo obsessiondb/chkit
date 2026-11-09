@@ -1098,6 +1098,37 @@ describe('applyMigration with statement fingerprints (#599)', () => {
     expect(commandCalls).toEqual([C_BROKEN, D])
   })
 
+  test('checks the record of every skip, not only the state the run started with', async () => {
+    const recorded = await failedRun()
+    const dir = writeMigration(ORIGINAL)
+    const { db, commandCalls } = recordingDb()
+    // The first read sees no state (a stale replica); a later one returns the
+    // recorded run, whose statement 1 is not the one this run gets.
+    let reads = 0
+    const store: JournalStore = {
+      databaseMissing: false,
+      async readJournal() {
+        return { version: 1, applied: [] }
+      },
+      async readMigrationState() {
+        reads += 1
+        return reads === 1 ? null : recorded
+      },
+      async writeMigrationState() {},
+      async appendEntry() {},
+    }
+
+    const attempt = applyMigration({
+      ...args(dir, store, db),
+      pluginRuntime: fakePluginRuntime((all) => [all[0]?.replace('p_a', 'p_x') ?? '', ...all.slice(1)]),
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow('the journal recorded statement 1 as completed or started')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
   test("another release's state with fingerprints is checked by them, not by the split before #562", async () => {
     // The two splits differ on statement 1; its fingerprint shows the
     // statement there is the one that ran.

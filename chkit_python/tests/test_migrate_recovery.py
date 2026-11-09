@@ -1990,6 +1990,26 @@ def test_apply_resumes_an_unchanged_file_whose_statements_match(tmp_path: Path) 
     assert client.calls == [_FP_C_BROKEN, _FP_D]
 
 
+class _StaleFirstReadStore(FakeStore):
+    """The first read sees no state (a stale replica); later reads see it."""
+
+    def read_migration_state(self, name: str) -> MigrationRowState | None:
+        self.reads.append(name)
+        return None if len(self.reads) == 1 else self.state
+
+
+def test_apply_checks_the_record_of_every_skip(tmp_path: Path) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    client = _RecordingClient()
+    store = _StaleFirstReadStore(recorded)
+    runtime = _FakeRuntime(lambda all_: [all_[0].replace("p_a", "p_x"), *all_[1:]])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, _FP_ORIGINAL), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert "the journal recorded statement 1 as completed or started" in str(info.value)
+    assert client.calls == []
+
+
 def test_apply_checks_another_releases_fingerprinted_state_by_fingerprint(
     tmp_path: Path,
 ) -> None:

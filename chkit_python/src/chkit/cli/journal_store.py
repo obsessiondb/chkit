@@ -234,7 +234,6 @@ _UNKNOWN_IDENTIFIER = (
     re.compile(r"Unknown expression identifier|Missing columns"),
 )
 _READONLY = (164, "READONLY", re.compile(r"in readonly mode"))
-_NO_SUCH_COLUMN = (16, "NO_SUCH_COLUMN_IN_TABLE", re.compile(r"No such column"))
 
 
 def _is_clickhouse_error(error: BaseException, kind: tuple[int, str, re.Pattern[str]]) -> bool:
@@ -283,9 +282,11 @@ class JournalStore:
         # The database exists but the journal does not: reads see no rows, and
         # the first write creates it.
         self._table_missing: bool = False
-        # Whether the journal has the operation_fingerprints column (#599).
-        # Without it chkit reads and writes no fingerprints, as an older
-        # release does.
+        # Whether the journal has the operation_fingerprints column (#599). It
+        # is False only once chkit saw that the column is missing, in a journal
+        # an older release created: this run then reads and writes it as that
+        # release does. Any other failure to tell stops the run instead, so
+        # fingerprints that were recorded are never read as missing.
         self._fingerprint_column: bool = False
         self._fingerprint_column_added: bool = False
         # Read-your-writes: the last row version this store wrote per migration.
@@ -345,8 +346,8 @@ class JournalStore:
             self._client.query(
                 f"SELECT name, migration_completed, operations FROM {self._table} LIMIT 0"
             )
-            self._fingerprint_column = self._has_fingerprint_column()
             self._wait_for_every_replica()
+            self._fingerprint_column = self._detect_fingerprint_column()
             self._bootstrapped = True
             self._table_missing = False
             return
@@ -358,16 +359,16 @@ class JournalStore:
             if _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
                 # The journal predates per-operation tracking.
                 self._ensure_schema_upgraded()
-                self._fingerprint_column = True
                 self._wait_for_every_replica()
+                self._fingerprint_column = self._detect_fingerprint_column()
                 self._bootstrapped = True
                 return
             if not create:
                 if not _is_clickhouse_error(exc, _UNKNOWN_TABLE):
                     raise
                 if self._exists_on_another_replica():
-                    self._fingerprint_column = self._has_fingerprint_column()
                     self._wait_for_every_replica()
+                    self._fingerprint_column = self._detect_fingerprint_column()
                     self._bootstrapped = True
                     return
                 self._table_missing = True
@@ -380,9 +381,9 @@ class JournalStore:
                 self._bootstrapped = True
                 return
             raise
-        # Another process, maybe an older release, may have created it first.
-        self._fingerprint_column = self._has_fingerprint_column()
         self._wait_for_every_replica()
+        # Another process, maybe an older release, may have created it first.
+        self._fingerprint_column = self._detect_fingerprint_column()
         self._bootstrapped = True
         self._table_missing = False
 
@@ -407,33 +408,47 @@ class JournalStore:
         """
         if resolve_replica_fanout(self._client, self._cluster) is None:
             return
-        database = self._current_database()
-        wait_for_table(self._client, database, self._table, cluster=self._cluster)
-        # Reads and writes name operation_fingerprints, so every replica needs
-        # it; when one never gets it, this run records no fingerprints.
-        if self._fingerprint_column and not self._fingerprint_column_on_every_replica(database):
-            self._fingerprint_column = False
+        wait_for_table(self._client, self._current_database(), self._table, cluster=self._cluster)
 
     def _current_database(self) -> str:
         rows = self._client.query("SELECT currentDatabase() AS database").rows
         return str(rows[0]["database"]) if rows else "default"
 
-    def _fingerprint_column_on_every_replica(self, database: str) -> bool:
-        try:
-            wait_for_column(
-                self._client, database, self._table, _FINGERPRINTS_COLUMN, cluster=self._cluster
-            )
-        except Exception:
-            return False
-        return True
+    def _detect_fingerprint_column(self) -> bool:
+        """Whether the journal has the fingerprint column.
 
-    def _has_fingerprint_column(self) -> bool:
-        """Any failure reads as no column: a journal without fingerprints is
-        what every older release reads and writes."""
-        try:
-            self._client.query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
-        except Exception:
+        Only a server that says the column is missing makes it False; any
+        other error stops the run. On several replicas, the column counts when
+        any replica has it (one that lags may not yet), and then every replica
+        must get it, because reads and writes name it.
+        """
+        fanout = resolve_replica_fanout(self._client, self._cluster)
+        if fanout is None:
+            try:
+                self._client.query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
+            except Exception as exc:
+                # A table this replica does not show yet has no rows to read either.
+                if not (
+                    _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER)
+                    or _is_clickhouse_error(exc, _UNKNOWN_TABLE)
+                ):
+                    raise
+                return False
+            return True
+        rows = self._client.query(
+            f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.columns')} "
+            f"WHERE database = currentDatabase() AND table = '{self._table}' "
+            f"AND name = '{_FINGERPRINTS_COLUMN}'"
+        ).rows
+        if not rows or int(rows[0]["replicas"]) == 0:
             return False
+        wait_for_column(
+            self._client,
+            self._current_database(),
+            self._table,
+            _FINGERPRINTS_COLUMN,
+            cluster=self._cluster,
+        )
         return True
 
     def _ensure_fingerprint_column(self) -> None:
@@ -452,11 +467,15 @@ class JournalStore:
             )
         except Exception:
             return
-        self._fingerprint_column = True
         if resolve_replica_fanout(self._client, self._cluster) is not None:
-            self._fingerprint_column = self._fingerprint_column_on_every_replica(
-                self._current_database()
+            wait_for_column(
+                self._client,
+                self._current_database(),
+                self._table,
+                _FINGERPRINTS_COLUMN,
+                cluster=self._cluster,
             )
+        self._fingerprint_column = True
 
     def _ensure_schema_upgraded(self) -> None:
         # Old journal tables predate per-operation tracking. Add the columns
@@ -485,20 +504,6 @@ class JournalStore:
             ) from exc
 
     def _journal_rows(self, where: str, *, limit: str = "") -> list[dict[str, Any]]:
-        if not self._fingerprint_column:
-            return self._select_journal_rows(where, limit=limit, fingerprints=False)
-        try:
-            return self._select_journal_rows(where, limit=limit, fingerprints=True)
-        except Exception as exc:
-            # A replica that has not applied another process's ALTER yet.
-            if not _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
-                raise
-            self._fingerprint_column = False
-            return self._select_journal_rows(where, limit=limit, fingerprints=False)
-
-    def _select_journal_rows(
-        self, where: str, *, limit: str, fingerprints: bool
-    ) -> list[dict[str, Any]]:
         """The rows to read the journal from.
 
         A single replica reads the table with FINAL. With several replicas
@@ -508,6 +513,7 @@ class JournalStore:
         ``applied_at`` in milliseconds as the row version, which is what
         ``ReplacingMergeTree(applied_at)`` keeps too.
         """
+        fingerprints = self._fingerprint_column
         fanout = resolve_replica_fanout(self._client, self._cluster)
         fingerprint_select = f"toJSONString({_FINGERPRINTS_COLUMN})"
         if fanout is None:
@@ -641,14 +647,7 @@ class JournalStore:
             # INSERT would otherwise fall back to the server's default database.
             return
         self._ensure_fingerprint_column()
-        try:
-            self._insert_state(state, fingerprints=self._fingerprint_column)
-        except Exception as exc:
-            # A replica that has not applied another process's ALTER yet.
-            if not self._fingerprint_column or not _is_clickhouse_error(exc, _NO_SUCH_COLUMN):
-                raise
-            self._fingerprint_column = False
-            self._insert_state(state, fingerprints=False)
+        self._insert_state(state, fingerprints=self._fingerprint_column)
         self._last_written[state.name] = state
         self._try_sync_replica()
 

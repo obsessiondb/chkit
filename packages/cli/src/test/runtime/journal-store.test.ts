@@ -776,21 +776,19 @@ describe('createJournalStore', () => {
       expect(commands.filter((sql) => sql.startsWith('ALTER TABLE'))).toHaveLength(1)
     })
 
-    test('an INSERT that lands on a replica without the column is written again without fingerprints', async () => {
-      const { store, commands } = storeWith({
-        commandError: (sql) =>
-          sql.includes('operation_fingerprints) VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
+    // Fingerprints that were recorded are never read as missing (#599): only a
+    // server that says the column is missing switches to the old format.
+    test('a probe that fails for another reason stops the read', async () => {
+      const { store } = storeWith({
+        rows: [row([tuple(0)], ['v1:a'])],
+        queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? new Error('HTTP 503 Service Unavailable') : undefined),
       })
 
-      await store.writeMigrationState(state(['v1:a']))
-
-      const inserts = commands.filter((sql) => sql.startsWith('INSERT INTO'))
-      expect(inserts).toHaveLength(2)
-      expect(inserts[1]).not.toContain('operation_fingerprints')
+      await expect(store.readMigrationState('m.sql')).rejects.toThrow('HTTP 503')
     })
 
-    test('a read that lands on a replica without the column reads again without fingerprints', async () => {
-      const { store, queries } = storeWith({
+    test('a read that fails on the column is not retried without it', async () => {
+      const { store } = storeWith({
         rows: [row([tuple(0)], ['v1:a'])],
         queryError: (sql) =>
           sql.includes("name = 'm.sql'") && sql.includes('operation_fingerprints')
@@ -798,10 +796,59 @@ describe('createJournalStore', () => {
             : undefined,
       })
 
-      const read = await store.readMigrationState('m.sql')
+      await expect(store.readMigrationState('m.sql')).rejects.toThrow('UNKNOWN_IDENTIFIER')
+    })
 
-      expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
-      expect(queries.filter((sql) => sql.includes("name = 'm.sql'"))).toHaveLength(2)
+    test('an INSERT that fails on the column is not written again without it', async () => {
+      const { store, commands } = storeWith({
+        commandError: (sql) =>
+          sql.includes('operation_fingerprints) VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
+      })
+
+      await expect(store.writeMigrationState(state(['v1:a']))).rejects.toThrow('NO_SUCH_COLUMN_IN_TABLE')
+      expect(commands.filter((sql) => sql.startsWith('INSERT INTO'))).toHaveLength(1)
+    })
+
+    describe('on several replicas', () => {
+      function replicatedStore(replicasWithColumn: number[]) {
+        let polls = 0
+        const queries: string[] = []
+        const db = {
+          async command() {},
+          async query<T>(sql: string): Promise<T[]> {
+            queries.push(sql)
+            if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('currentDatabase() AS database')) return [{ database: 'default' }] as T[]
+            if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('system.columns') && sql.includes('AS replicas')) {
+              const seen = replicasWithColumn[Math.min(polls, replicasWithColumn.length - 1)]
+              polls += 1
+              return [{ replicas: seen }] as T[]
+            }
+            return []
+          },
+        } as unknown as ClickHouseExecutor
+        return { store: createJournalStore(db), queries }
+      }
+
+      test('a column one replica has is waited for on every replica, then read', async () => {
+        const { store, queries } = replicatedStore([1, 1, 2])
+
+        await store.readMigrationState('m.sql')
+
+        const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
+        expect(read).toContain('toJSONString(operation_fingerprints)')
+        expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(3)
+      })
+
+      test('a column no replica has is read as missing', async () => {
+        const { store, queries } = replicatedStore([0])
+
+        await store.readMigrationState('m.sql')
+
+        const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
+        expect(read).not.toContain('operation_fingerprints')
+      })
     })
   })
 })

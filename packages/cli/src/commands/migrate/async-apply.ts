@@ -10,8 +10,9 @@ import {
   type OperationState,
   resolveJournalTableName,
 } from '../../runtime/journal-store.js'
+import { CLI_VERSION } from '../../runtime/version.js'
 import { inProgressChecksumMismatchError } from './errors.js'
-import { hasStatementProgress } from './recovery.js'
+import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
 
 const POLL_INTERVAL_MS = 5_000
 // The query id is deterministic, so system.query_log can still hold entries of
@@ -89,8 +90,14 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     (op) => op.operationIndex === statementIndex,
   )
 
-  // 1. Already completed → skip entirely
-  if (priorOpState?.status === 'completed') {
+  // 1. Already completed → skip entirely, when it is this statement that ran (#599)
+  if (initialMigrationState !== null && priorOpState?.status === 'completed') {
+    assertCompletedStatement(initialMigrationState, {
+      migration: migrationName,
+      index: statementIndex,
+      fingerprint,
+      cliVersion: CLI_VERSION,
+    })
     log(
       `  ${operationType}: query_id=${priorOpState.queryId} already completed in prior run — skipping`,
     )
@@ -113,6 +120,14 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   )
   const inFlight = await checkInFlight(db, queryId, operationType)
   if (inFlight.status === 'running') {
+    // The running attempt is the SQL its record names (#599): an attempt of
+    // other SQL, kept by --abandon and an edit, must not finish as this one.
+    const attemptFingerprint = priorOpState?.fingerprint ?? ''
+    if (attemptFingerprint !== '' && attemptFingerprint !== fingerprint) {
+      throw new Error(
+        `Async migration step ${operationType} (query_id ${queryId}): an earlier attempt with different SQL is still running on the server. Wait for it to finish or run KILL QUERY WHERE query_id = '${queryId}', then re-run chkit migrate --apply.`,
+      )
+    }
     log(
       `  ${operationType}: query_id=${queryId} already running on server — attaching to in-flight query`,
     )
@@ -125,7 +140,9 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       statementIndex,
       operationType,
       operationKey,
-      fingerprint,
+      // What is known about the attempt that runs: a record without a
+      // fingerprint stays without one.
+      fingerprint: attemptFingerprint,
       queryId,
       pollAfterTime: attachLowerBound(serverNowMs, inFlight.elapsedMs),
       log,

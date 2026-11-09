@@ -34,6 +34,7 @@ from chkit.cli.commands.migrate_errors import (
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
     StatementIdentity,
+    assert_completed_statement,
     has_statement_progress,
     rebase_in_progress_state,
     recorded_statement_mismatches,
@@ -221,6 +222,13 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         identity = statement_identity(operation_summaries, index)
         fingerprint = fingerprints[index]
         if state_before is not None and _operation_is_completed(state_before, index):
+            assert_completed_statement(
+                state_before,
+                migration=file,
+                index=index,
+                fingerprint=fingerprint,
+                cli_version=__version__,
+            )
             if _propagation_wait_pending(state_before, index):
                 # The run that completed it stopped before its propagation
                 # wait passed (#513): wait again before the next statement runs.

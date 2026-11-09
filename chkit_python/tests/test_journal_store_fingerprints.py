@@ -15,6 +15,7 @@ from typing import Any
 import pytest
 
 from chkit.cli.journal_store import JournalStore, MigrationRowState, OperationState
+from chkit.clickhouse.replicas import ReplicaFanout
 
 pytestmark = pytest.mark.usefixtures("single_replica")
 
@@ -188,21 +189,20 @@ def test_a_user_that_cannot_alter_the_journal_still_writes_without_fingerprints(
     assert len([sql for sql in client.executed if sql.startswith("ALTER TABLE")]) == 1
 
 
-def test_an_insert_on_a_replica_without_the_column_is_written_again_without_fingerprints() -> None:
+def test_a_probe_that_fails_for_another_reason_stops_the_read() -> None:
+    """Fingerprints that were recorded are never read as missing: only a server
+    that says the column is missing switches to the old format."""
     client = _Client(
-        execute_error=lambda sql: (
-            _clickhouse_error(16, "NO_SUCH_COLUMN_IN_TABLE")
-            if "operation_fingerprints) VALUES" in sql
-            else None
-        )
+        rows=[_row([_tuple(0)], ["v1:a"])],
+        query_error=lambda sql, _executed: (
+            Exception("HTTP 503 Service Unavailable") if sql == FINGERPRINT_PROBE else None
+        ),
     )
-    _store(client).write_migration_state(_state(["v1:a"]))
-    inserts = [sql for sql in client.executed if sql.startswith("INSERT INTO")]
-    assert len(inserts) == 2
-    assert "operation_fingerprints" not in inserts[1]
+    with pytest.raises(Exception, match="HTTP 503"):
+        _store(client).read_migration_state("m.sql")
 
 
-def test_a_read_on_a_replica_without_the_column_reads_again_without_fingerprints() -> None:
+def test_a_read_that_fails_on_the_column_is_not_retried_without_it() -> None:
     client = _Client(
         rows=[_row([_tuple(0)], ["v1:a"])],
         query_error=lambda sql, _executed: (
@@ -211,10 +211,72 @@ def test_a_read_on_a_replica_without_the_column_reads_again_without_fingerprints
             else None
         ),
     )
-    state = _store(client).read_migration_state("m.sql")
-    assert state is not None
-    assert [op.fingerprint for op in state.operations] == [""]
-    assert len([sql for sql in client.queries if "name = 'm.sql'" in sql]) == 2
+    with pytest.raises(Exception, match="UNKNOWN_IDENTIFIER"):
+        _store(client).read_migration_state("m.sql")
+
+
+def test_an_insert_that_fails_on_the_column_is_not_written_again_without_it() -> None:
+    client = _Client(
+        execute_error=lambda sql: (
+            _clickhouse_error(16, "NO_SUCH_COLUMN_IN_TABLE")
+            if "operation_fingerprints) VALUES" in sql
+            else None
+        )
+    )
+    with pytest.raises(Exception, match="NO_SUCH_COLUMN_IN_TABLE"):
+        _store(client).write_migration_state(_state(["v1:a"]))
+    assert len([sql for sql in client.executed if sql.startswith("INSERT INTO")]) == 1
+
+
+@dataclass
+class _ReplicatedClient:
+    """Two replicas; ``with_column`` is how many have the column on each poll."""
+
+    with_column: list[int]
+    queries: list[str] = field(default_factory=list[str])
+    polls: int = 0
+
+    def query(self, sql: str) -> _Result:
+        self.queries.append(sql)
+        if "system.one" in sql:
+            return _Result([{"replicas": 2}])
+        if "currentDatabase() AS database" in sql:
+            return _Result([{"database": "default"}])
+        if "system.columns" in sql:
+            seen = self.with_column[min(self.polls, len(self.with_column) - 1)]
+            self.polls += 1
+            return _Result([{"replicas": seen}])
+        if "system.tables" in sql:
+            return _Result([{"replicas": 2}])
+        return _Result([])
+
+    def execute(self, sql: str) -> None:
+        _ = sql
+
+
+@pytest.fixture
+def two_replicas(single_replica: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    _ = single_replica  # replaced below
+    fanout = ReplicaFanout(cluster="default", replicas=2)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.resolve_replica_fanout", lambda *_: fanout)
+    monkeypatch.setattr("chkit.cli.journal_store.resolve_replica_fanout", lambda *_: fanout)
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_a_column_one_replica_has_is_waited_for_on_every_replica() -> None:
+    client = _ReplicatedClient(with_column=[1, 1, 2])
+    JournalStore(client, cluster="default").read_migration_state("m.sql")  # type: ignore[arg-type]
+    read = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
+    assert "toJSONString(operation_fingerprints)" in read
+    assert len([sql for sql in client.queries if "system.columns" in sql]) == 3
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_a_column_no_replica_has_is_read_as_missing() -> None:
+    client = _ReplicatedClient(with_column=[0])
+    JournalStore(client, cluster="default").read_migration_state("m.sql")  # type: ignore[arg-type]
+    read = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
+    assert "operation_fingerprints" not in read
 
 
 def test_the_abandon_report_leaves_fingerprints_out() -> None:

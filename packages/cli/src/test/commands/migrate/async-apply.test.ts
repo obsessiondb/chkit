@@ -881,3 +881,80 @@ describe('applyAsyncStatement progress rounding', () => {
     },
   )
 })
+
+// The journal records which SQL each attempt ran (#599).
+describe('applyAsyncStatement with recorded fingerprints', () => {
+  const abandonedRunning = (fingerprint: string): MigrationRowState =>
+    freshStateWith({
+      operationIndex: 0,
+      operationKey: BASE_INPUT.operationKey,
+      operationType: BASE_INPUT.operationType,
+      queryId: QUERY_ID,
+      status: 'failed',
+      startedAt: '2026-05-26 11:00:00.000',
+      finishedAt: '2026-05-26 11:00:01.000',
+      lastError: 'abandoned via chkit migrate --abandon (was started)',
+      fingerprint,
+    })
+
+  test('refuses to attach to a running attempt of other SQL', async () => {
+    const { db, submitCalls } = createFakeExecutor([{ status: 'running', elapsedMs: RUNNING_ELAPSED_MS }])
+    const { store, writes } = createFakeJournalStore(abandonedRunning('v1:old'))
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        fingerprint: 'v1:new',
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(
+      `an earlier attempt with different SQL is still running on the server. Wait for it to finish or run KILL QUERY WHERE query_id = '${QUERY_ID}'`,
+    )
+    expect(submitCalls).toEqual([])
+    expect(writes).toEqual([])
+  })
+
+  test('an attach records the fingerprint of the attempt it attached to', async () => {
+    const { db } = createFakeExecutor([
+      { status: 'running', elapsedMs: RUNNING_ELAPSED_MS },
+      { status: 'finished', writtenRows: 1, durationMs: 1000 },
+    ])
+    const { store, writes } = createFakeJournalStore(abandonedRunning(''))
+
+    await applyAsyncStatement({
+      ...BASE_INPUT,
+      fingerprint: 'v1:new',
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(writes.at(-1)?.operations[0]).toMatchObject({ status: 'completed', fingerprint: '' })
+  })
+
+  test('refuses to skip a completed record of other SQL', async () => {
+    const { db } = createFakeExecutor([])
+    const { store } = createFakeJournalStore({
+      ...abandonedRunning('v1:old'),
+      operations: [{ ...abandonedRunning('v1:old').operations[0], status: 'completed', lastError: '' } as OperationState],
+    })
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        fingerprint: 'v1:new',
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toMatchObject({ code: 'statement_split_changed' })
+  })
+})

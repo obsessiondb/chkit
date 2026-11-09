@@ -29,6 +29,11 @@
       "name": "numbers and tuple access",
       "sql": "SELECT t.1.2, 1_000, 0x1F, 1.5e+3, .5 FROM db.t;",
       "fingerprint": "v1:d6b132a0cc60f569ba323a645e0b56aecca8ac9b8bf03c41d7e551af1161c44e"
+    },
+    {
+      "name": "inline INSERT data",
+      "sql": "INSERT INTO app.events FORMAT TabSeparated\nalpha beta -- not a comment\n;",
+      "fingerprint": "v1:babc25e726eec99b69b6eba62067bcc391a70773cf1dbde8681f2bab0cfbe023"
     }
   ],
   "same": [
@@ -59,6 +64,27 @@
         "SELECT a b;",
         "SELECT a/**/b;",
         "SELECT a -- c\nb;"
+      ]
+    },
+    {
+      "name": "SELECT ... FORMAT has no inline data",
+      "sql": [
+        "SELECT 1 FORMAT JSONEachRow;",
+        "SELECT 1\n  FORMAT /* c */ JSONEachRow"
+      ]
+    },
+    {
+      "name": "a column named format inside parentheses is not FORMAT",
+      "sql": [
+        "INSERT INTO t (format, x) VALUES (1, 2);",
+        "INSERT INTO t ( format , x ) -- c\nVALUES (1,2)"
+      ]
+    },
+    {
+      "name": "comments and whitespace before the inline data of INSERT ... FORMAT",
+      "sql": [
+        "INSERT INTO t FORMAT CSV\n1,2\n;",
+        "INSERT /* c */ INTO  t -- c\nFORMAT CSV\n1,2\n;"
       ]
     }
   ],
@@ -108,6 +134,16 @@
       "sql": [
         "SELECT 1 // x, 2\n;",
         "SELECT 1 // x\n, 2;"
+      ]
+    },
+    {
+      "name": "the inline data of INSERT ... FORMAT counts byte for byte",
+      "sql": [
+        "INSERT INTO t FORMAT TabSeparated\nalpha beta\n;",
+        "INSERT INTO t FORMAT TabSeparated\nalpha  beta\n;",
+        "INSERT INTO t FORMAT TabSeparated\nalpha beta -- x\n;",
+        "INSERT INTO t FORMAT TabSeparated\nalpha beta\n",
+        "INSERT INTO t FORMAT TSV\nalpha beta\n;"
       ]
     }
   ]

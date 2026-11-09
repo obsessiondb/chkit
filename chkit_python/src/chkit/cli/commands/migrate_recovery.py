@@ -11,7 +11,7 @@ from dataclasses import dataclass
 
 from pydantic import BaseModel, ConfigDict, Field
 
-from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_errors import MigrateError, recorded_statements_changed_error
 from chkit.cli.journal_store import MigrationRowState, OperationState, OperationStatus
 from chkit.cli.safety_markers import MigrationOperationSummary
 
@@ -382,6 +382,38 @@ def recorded_statement_mismatches(
             else None
         )
         != op.fingerprint
+    )
+
+
+def assert_completed_statement(
+    state: MigrationRowState,
+    *,
+    migration: str,
+    index: int,
+    fingerprint: str,
+    cli_version: str,
+) -> None:
+    """Raise when statement ``index`` is recorded as completed with a
+    fingerprint the statement this run would skip does not have (#599).
+
+    Every skip checks the record it reads, not only the state the run started
+    with: a later read can return a version the first check never saw.
+    """
+    recorded = next(
+        (
+            op
+            for op in state.operations
+            if op.operation_index == index and op.status == "completed"
+        ),
+        None,
+    )
+    if recorded is None or recorded.fingerprint in ("", fingerprint):
+        return
+    raise recorded_statements_changed_error(
+        migration=migration,
+        statements=[index + 1],
+        recorded_by=state.chkit_version,
+        cli_version=cli_version,
     )
 
 

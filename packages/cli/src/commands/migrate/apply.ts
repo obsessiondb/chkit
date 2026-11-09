@@ -40,6 +40,7 @@ import {
   statementSplitChangedError,
 } from './errors.js'
 import {
+  assertCompletedStatement,
   hasStatementProgress,
   rebaseInProgressState,
   recordedStatementMismatches,
@@ -302,6 +303,7 @@ export async function applyMigration(input: {
     const stateBefore = await journalStore.readMigrationState(file)
     const identity: RecordedIdentity = { ...statementIdentity(operationSummaries, i), fingerprint: fingerprints[i] ?? '' }
     if (stateBefore !== null && operationIsCompleted(stateBefore, i)) {
+      assertCompletedStatement(stateBefore, { migration: file, index: i, fingerprint: identity.fingerprint, cliVersion: CLI_VERSION })
       if (propagationWaitPending(stateBefore, i)) {
         // The run that completed it stopped before its propagation wait
         // passed (#513): wait again before the next statement runs.

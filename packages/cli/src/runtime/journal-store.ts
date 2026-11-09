@@ -123,11 +123,6 @@ const UNKNOWN_IDENTIFIER: ClickHouseErrorKind = {
   message: /Unknown expression identifier|Missing columns/,
 }
 const READONLY: ClickHouseErrorKind = { code: '164', name: 'READONLY', message: /in readonly mode/ }
-const NO_SUCH_COLUMN: ClickHouseErrorKind = {
-  code: '16',
-  name: 'NO_SUCH_COLUMN_IN_TABLE',
-  message: /No such column/,
-}
 
 /** Whether `error` is the ClickHouse error `kind`. The native client sets `code`. */
 function isClickHouseError(error: unknown, kind: ClickHouseErrorKind): boolean {
@@ -269,8 +264,11 @@ SETTINGS index_granularity = 1`
   // first write creates it.
   let tableMissing = false
   let replicaSyncSupported: boolean | undefined
-  // Whether the journal has the operation_fingerprints column (#599). Without
-  // it chkit reads and writes no fingerprints, as an older release does.
+  // Whether the journal has the operation_fingerprints column (#599). It is
+  // false only once chkit saw that the column is missing, in a journal an
+  // older release created: this run then reads and writes it as that release
+  // does. Any other failure to tell stops the run instead, so fingerprints
+  // that were recorded are never read as missing.
   let fingerprintColumn = false
   let fingerprintColumnAdded = false
   // Read-your-writes: the last row version this store wrote per migration.
@@ -287,8 +285,8 @@ SETTINGS index_granularity = 1`
     try {
       await db.query(`SELECT name, migration_completed, operations FROM ${journalTable} LIMIT 0`)
       debug('journal', 'journal table exists')
-      fingerprintColumn = await hasFingerprintColumn()
       await waitForEveryReplica()
+      fingerprintColumn = await detectFingerprintColumn()
       bootstrapped = true
       tableMissing = false
       return
@@ -302,16 +300,16 @@ SETTINGS index_granularity = 1`
       if (isClickHouseError(error, UNKNOWN_IDENTIFIER)) {
         debug('journal', 'journal table predates per-operation tracking — upgrading')
         await ensureSchemaUpgraded()
-        fingerprintColumn = true
         await waitForEveryReplica()
+        fingerprintColumn = await detectFingerprintColumn()
         bootstrapped = true
         return
       }
       if (!create) {
         if (!isClickHouseError(error, UNKNOWN_TABLE)) throw error
         if (await existsOnAnotherReplica()) {
-          fingerprintColumn = await hasFingerprintColumn()
           await waitForEveryReplica()
+          fingerprintColumn = await detectFingerprintColumn()
           bootstrapped = true
           return
         }
@@ -336,9 +334,9 @@ SETTINGS index_granularity = 1`
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
     }, { retries: 9, minTimeout: 250, factor: 1 }).catch(() => undefined)
-    // Another process, maybe an older release, may have created it first.
-    fingerprintColumn = await hasFingerprintColumn()
     await waitForEveryReplica()
+    // Another process, maybe an older release, may have created it first.
+    fingerprintColumn = await detectFingerprintColumn()
     bootstrapped = true
     tableMissing = false
   }
@@ -359,11 +357,7 @@ SETTINGS index_granularity = 1`
   // CREATE above or another process's. A single replica needs no wait.
   async function waitForEveryReplica(): Promise<void> {
     if (!(await resolveReplicaFanout(db, cluster))) return
-    const database = await currentDatabase()
-    await waitForTable(db, database, journalTable, { cluster })
-    // Reads and writes name operation_fingerprints, so every replica needs it;
-    // when one never gets it, this run records no fingerprints.
-    if (fingerprintColumn && !(await fingerprintColumnOnEveryReplica(database))) fingerprintColumn = false
+    await waitForTable(db, await currentDatabase(), journalTable, { cluster })
   }
 
   async function currentDatabase(): Promise<string> {
@@ -371,26 +365,35 @@ SETTINGS index_granularity = 1`
     return row?.database ?? 'default'
   }
 
-  async function fingerprintColumnOnEveryReplica(database: string): Promise<boolean> {
-    try {
-      await waitForColumn(db, database, journalTable, FINGERPRINTS_COLUMN, { cluster })
-      return true
-    } catch (error) {
-      debug('journal', `${FINGERPRINTS_COLUMN} is not on every replica — recording no fingerprints: ${errorText(error)}`)
+  /**
+   * Whether the journal has the fingerprint column. Only a server that says
+   * the column is missing makes it false; any other error stops the run. On
+   * several replicas, the column counts when any replica has it (one that
+   * lags may not yet), and then every replica must get it, because reads and
+   * writes name it.
+   */
+  async function detectFingerprintColumn(): Promise<boolean> {
+    const fanout = await resolveReplicaFanout(db, cluster)
+    if (!fanout) {
+      try {
+        await db.query(`SELECT ${FINGERPRINTS_COLUMN} FROM ${journalTable} LIMIT 0`)
+        return true
+      } catch (error) {
+        // A table this replica does not show yet has no rows to read either.
+        if (!isClickHouseError(error, UNKNOWN_IDENTIFIER) && !isClickHouseError(error, UNKNOWN_TABLE)) throw error
+        debug('journal', `journal table has no ${FINGERPRINTS_COLUMN} column`)
+        return false
+      }
+    }
+    const [row] = await db.query<{ replicas: number | string }>(
+      `SELECT count() AS replicas FROM ${allReplicas(fanout, 'system.columns')} WHERE database = currentDatabase() AND table = '${journalTable}' AND name = '${FINGERPRINTS_COLUMN}'`,
+    )
+    if (Number(row?.replicas ?? 0) === 0) {
+      debug('journal', `no replica has the ${FINGERPRINTS_COLUMN} column`)
       return false
     }
-  }
-
-  // Any failure reads as no column: a journal without fingerprints is what
-  // every older release reads and writes.
-  async function hasFingerprintColumn(): Promise<boolean> {
-    try {
-      await db.query(`SELECT ${FINGERPRINTS_COLUMN} FROM ${journalTable} LIMIT 0`)
-      return true
-    } catch (error) {
-      debug('journal', `journal table has no ${FINGERPRINTS_COLUMN} column: ${errorText(error)}`)
-      return false
-    }
+    await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
+    return true
   }
 
   /**
@@ -407,10 +410,10 @@ SETTINGS index_granularity = 1`
       debug('journal', `could not add ${FINGERPRINTS_COLUMN} — recording no fingerprints: ${errorText(error)}`)
       return
     }
-    fingerprintColumn = true
     if (await resolveReplicaFanout(db, cluster)) {
-      fingerprintColumn = await fingerprintColumnOnEveryReplica(await currentDatabase())
+      await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
     }
+    fingerprintColumn = true
   }
 
   async function ensureSchemaUpgraded(): Promise<void> {
@@ -446,19 +449,7 @@ SETTINGS index_granularity = 1`
    * ReplacingMergeTree(applied_at) keeps too.
    */
   async function journalRows(where: string, limit = ''): Promise<MigrationRow[]> {
-    if (!fingerprintColumn) return await selectJournalRows(where, limit, false)
-    try {
-      return await selectJournalRows(where, limit, true)
-    } catch (error) {
-      // A replica that has not applied another process's ALTER yet.
-      if (!isClickHouseError(error, UNKNOWN_IDENTIFIER)) throw error
-      debug('journal', `a replica has no ${FINGERPRINTS_COLUMN} column yet — reading without fingerprints`)
-      fingerprintColumn = false
-      return await selectJournalRows(where, limit, false)
-    }
-  }
-
-  async function selectJournalRows(where: string, limit: string, fingerprints: boolean): Promise<MigrationRow[]> {
+    const fingerprints = fingerprintColumn
     const fanout = await resolveReplicaFanout(db, cluster)
     const fingerprintSelect = `toJSONString(${FINGERPRINTS_COLUMN})`
     const columns = `name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations${fingerprints ? `, ${fingerprintSelect} AS ${FINGERPRINTS_COLUMN}` : ''}`
@@ -590,15 +581,7 @@ SETTINGS index_granularity = 1`
         return
       }
       await ensureFingerprintColumn()
-      try {
-        await insertState(state, fingerprintColumn)
-      } catch (error) {
-        // A replica that has not applied another process's ALTER yet.
-        if (!fingerprintColumn || !isClickHouseError(error, NO_SUCH_COLUMN)) throw error
-        debug('journal', `a replica has no ${FINGERPRINTS_COLUMN} column yet — writing without fingerprints`)
-        fingerprintColumn = false
-        await insertState(state, false)
-      }
+      await insertState(state, fingerprintColumn)
       lastWritten.set(state.name, state)
       await trySyncReplica()
     },
