@@ -8,7 +8,21 @@ check.
 
 from __future__ import annotations
 
-from chkit.core.sql_lexer import SQLToken, is_trivia, js_trim, tokenize_sql
+from collections.abc import Callable
+
+from chkit.core.sql_lexer import (
+    SQLToken,
+    is_trivia,
+    iter_sql_tokens,
+    js_trim,
+    read_block_comment,
+    read_heredoc,
+    read_quoted,
+    tokenize_sql,
+)
+
+# The characters that can start a string, quoted name, block comment or heredoc.
+_OPENERS = frozenset("/`'\"$")
 
 
 def split_sql_statements(text: str) -> list[str]:
@@ -20,12 +34,12 @@ def split_sql_statements(text: str) -> list[str]:
     """
     statements: list[str] = []
     current: list[str] = []
-    lexed = _lexed_ends(text)
+    lexed_end = _lexed_end_at(text)
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
-        end = _quoted_end(text, i, lexed)
+        end = _quoted_end(text, i, lexed_end) if ch in _OPENERS else None
         if end is not None:
             current.append(text[i:end])
             i = end
@@ -59,7 +73,7 @@ def extract_executable_statements(text: str) -> list[str]:
     the ``;``.
     """
     stripped: list[str] = []
-    lexed = _lexed_ends(text)
+    lexed_end = _lexed_end_at(text)
     i = 0
     n = len(text)
     while i < n:
@@ -71,7 +85,7 @@ def extract_executable_statements(text: str) -> list[str]:
                 break
             i = newline
             continue
-        end = _quoted_end(text, i, lexed)
+        end = _quoted_end(text, i, lexed_end) if ch in _OPENERS else None
         if end is not None:
             stripped.append(text[i:end])
             i = end
@@ -89,28 +103,41 @@ def extract_executable_statements(text: str) -> list[str]:
     return executable
 
 
-def _lexed_ends(text: str) -> dict[int, int]:
+def _lexed_end_at(text: str) -> Callable[[int], int | None]:
     """Where the ClickHouse lexer reads a heredoc, a block comment (they nest)
     or a backtick-quoted name (with backslash escapes), the offset of its first
     character maps to its end.
 
     The scanner takes these ends only where it is at such a token itself;
     inside a ``//`` or ``#`` comment, which it does not know (#197), it keeps
-    its own reading, so statements end where they always did.
+    its own reading, so statements end where they always did. The input is
+    lexed once, only as far as an offset the scanner asks about, and only when
+    a token there could end elsewhere than the scanner reads it.
     """
+    tokens = iter_sql_tokens(text)
     ends: dict[int, int] = {}
-    for token in tokenize_sql(text):
-        first = token.text[:1]
-        if (
-            token.kind == "block_comment"
-            or (token.kind == "string" and first == "$")
-            or (token.kind == "quoted_identifier" and first == "`")
-        ):
-            ends[token.start] = token.end
-    return ends
+    lexed_to = 0
+
+    def end_at(i: int) -> int | None:
+        nonlocal lexed_to
+        while lexed_to <= i:
+            token = next(tokens, None)
+            if token is None:
+                break
+            first = token.text[:1]
+            if (
+                token.kind == "block_comment"
+                or (token.kind == "string" and first == "$")
+                or (token.kind == "quoted_identifier" and first == "`")
+            ):
+                ends[token.start] = token.end
+            lexed_to = token.end
+        return ends.get(i)
+
+    return end_at
 
 
-def _quoted_end(text: str, i: int, lexed: dict[int, int]) -> int | None:
+def _quoted_end(text: str, i: int, lexed_end: Callable[[int], int | None]) -> int | None:
     """The end of the string, quoted identifier, block comment or heredoc that
     starts at ``i``, or None when none starts there.
 
@@ -118,15 +145,21 @@ def _quoted_end(text: str, i: int, lexed: dict[int, int]) -> int | None:
     """
     ch = text[i]
     if text.startswith("/*", i):
-        return lexed.get(i, _close_end(text, i + 2, "*/"))
+        end = _close_end(text, i + 2, "*/")
+        return end if read_block_comment(text, i)[1] == end else _or(lexed_end(i), end)
     if ch == "`":
-        return lexed.get(i, _close_end(text, i + 1, "`"))
+        end = _close_end(text, i + 1, "`")
+        return end if read_quoted(text, i, ch)[0] == end else _or(lexed_end(i), end)
     if ch in ("'", '"'):
         return _quote_end(text, i, ch)
     # Only a heredoc ClickHouse reads: an unclosed `$tag$`, or a `$` inside a name.
     if ch == "$":
-        return lexed.get(i)
+        return None if read_heredoc(text, i) is None else lexed_end(i)
     return None
+
+
+def _or(value: int | None, default: int) -> int:
+    return default if value is None else value
 
 
 def _close_end(text: str, start: int, close: str) -> int:

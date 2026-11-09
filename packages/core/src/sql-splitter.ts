@@ -1,14 +1,22 @@
-import { isTrivia, tokenizeSQL, type SQLToken } from './sql-lexer.js'
+import {
+  isTrivia,
+  readBlockComment,
+  readHeredoc,
+  readQuoted,
+  sqlTokens,
+  tokenizeSQL,
+  type SQLToken,
+} from './sql-lexer.js'
 
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
   let current = ''
-  const lexed = lexedEnds(sql)
+  const lexedEnd = lexedEndAt(sql)
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
 
-    const end = quotedEnd(sql, i, lexed)
+    const end = quotedEnd(sql, i, lexedEnd)
     if (end !== undefined) {
       current += sql.slice(i, end)
       i = end - 1
@@ -35,7 +43,7 @@ export function extractExecutableStatements(sql: string): string[] {
   // We can't use a naive line-based filter because `--` inside string
   // literals must be preserved.
   let stripped = ''
-  const lexed = lexedEnds(sql)
+  const lexedEnd = lexedEndAt(sql)
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
@@ -49,7 +57,7 @@ export function extractExecutableStatements(sql: string): string[] {
       continue
     }
 
-    const end = quotedEnd(sql, i, lexed)
+    const end = quotedEnd(sql, i, lexedEnd)
     if (end !== undefined) {
       stripped += sql.slice(i, end)
       i = end - 1
@@ -77,31 +85,47 @@ export function extractExecutableStatements(sql: string): string[] {
 // character maps to its end. The scanner takes these ends only where it is at
 // such a token itself; inside a `//` or `#` comment, which it does not know
 // (#197), it keeps its own reading, so statements end where they always did.
-function lexedEnds(sql: string): Map<number, number> {
+// The input is lexed once, only as far as an offset the scanner asks about, and
+// only when a token there could end elsewhere than the scanner reads it.
+function lexedEndAt(sql: string): (i: number) => number | undefined {
+  const tokens = sqlTokens(sql)
   const ends = new Map<number, number>()
-  for (const token of tokenizeSQL(sql)) {
-    const first = token.text[0]
-    if (
-      token.kind === 'block_comment' ||
-      (token.kind === 'string' && first === '$') ||
-      (token.kind === 'quoted_identifier' && first === '`')
-    ) {
-      ends.set(token.start, token.end)
+  let lexedTo = 0
+  return (i) => {
+    while (lexedTo <= i) {
+      const next = tokens.next()
+      if (next.done) break
+      const token = next.value
+      const first = token.text[0]
+      if (
+        token.kind === 'block_comment' ||
+        (token.kind === 'string' && first === '$') ||
+        (token.kind === 'quoted_identifier' && first === '`')
+      ) {
+        ends.set(token.start, token.end)
+      }
+      lexedTo = token.end
     }
+    return ends.get(i)
   }
-  return ends
 }
 
 // The end of the string, quoted identifier, block comment or heredoc that
 // starts at `i`, or undefined when none starts there: a `;` or `--` inside one
 // is text. An unclosed quote or block comment runs to the end of the input.
-function quotedEnd(sql: string, i: number, lexed: Map<number, number>): number | undefined {
+function quotedEnd(sql: string, i: number, lexedEnd: (i: number) => number | undefined): number | undefined {
   const ch = sql[i] ?? ''
-  if (ch === '/' && sql[i + 1] === '*') return lexed.get(i) ?? closeEnd(sql, i + 2, '*/')
-  if (ch === '`') return lexed.get(i) ?? closeEnd(sql, i + 1, '`')
+  if (ch === '/' && sql[i + 1] === '*') {
+    const end = closeEnd(sql, i + 2, '*/')
+    return readBlockComment(sql, i).end === end ? end : (lexedEnd(i) ?? end)
+  }
+  if (ch === '`') {
+    const end = closeEnd(sql, i + 1, '`')
+    return readQuoted(sql, i, ch).end === end ? end : (lexedEnd(i) ?? end)
+  }
   if (ch === "'" || ch === '"') return quoteEnd(sql, i, ch)
   // Only a heredoc ClickHouse reads: an unclosed `$tag$`, or a `$` inside a name.
-  if (ch === '$') return lexed.get(i)
+  if (ch === '$') return readHeredoc(sql, i) === undefined ? undefined : lexedEnd(i)
   return undefined
 }
 

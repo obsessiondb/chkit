@@ -60,6 +60,19 @@ export function tokenizeSQL(sql: string): SQLToken[] {
   return tokens
 }
 
+/** The tokens of `tokenizeSQL`, one at a time, for a caller that keeps few of them. */
+export function* sqlTokens(sql: string): Generator<SQLToken> {
+  let previous: SQLToken | undefined
+  let i = 0
+  while (i < sql.length) {
+    const { kind, end, terminated } = readToken(sql, i, previous)
+    const token: SQLToken = { kind, text: sql.slice(i, end), start: i, end, terminated }
+    yield token
+    if (!isTrivia(token)) previous = token
+    i = end
+  }
+}
+
 /** Whitespace and comments: tokens that never change what a statement means. */
 export function isTrivia(token: SQLToken): boolean {
   return token.kind === 'whitespace' || token.kind === 'line_comment' || token.kind === 'block_comment'
@@ -167,7 +180,7 @@ function endsOperand(token: SQLToken | undefined): boolean {
 }
 
 // ClickHouse block comments nest: `/* a /* b */ c */` is one comment.
-function readBlockComment(sql: string, i: number): TokenEnd {
+export function readBlockComment(sql: string, i: number): TokenEnd {
   let depth = 0
   let j = i
   while (j < sql.length) {
@@ -186,7 +199,7 @@ function readBlockComment(sql: string, i: number): TokenEnd {
 }
 
 // A doubled delimiter or a backslash escapes the delimiter inside quotes.
-function readQuoted(sql: string, i: number, quote: string): { end: number; terminated: boolean } {
+export function readQuoted(sql: string, i: number, quote: string): { end: number; terminated: boolean } {
   let j = i + 1
   while (j < sql.length) {
     const char = sql[j]
@@ -209,7 +222,7 @@ function readQuoted(sql: string, i: number, quote: string): { end: number; termi
 // `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
 // is only a literal when the same tag closes it later; otherwise ClickHouse
 // reads the `$` as part of an identifier or as punctuation.
-function readHeredoc(sql: string, i: number): number | undefined {
+export function readHeredoc(sql: string, i: number): number | undefined {
   const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
   if (sql[tagEnd] !== '$') return undefined
   const tag = sql.slice(i, tagEnd + 1)

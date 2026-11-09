@@ -9,6 +9,7 @@ names from numbers; it is not a parser.
 from __future__ import annotations
 
 import re
+from collections.abc import Iterator
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
@@ -77,6 +78,19 @@ def tokenize_sql(sql: str) -> list[SQLToken]:
     return tokens
 
 
+def iter_sql_tokens(sql: str) -> Iterator[SQLToken]:
+    """The tokens of `tokenize_sql`, one at a time, for a caller that keeps few of them."""
+    previous: SQLToken | None = None
+    i = 0
+    while i < len(sql):
+        kind, end, terminated = _read_token(sql, i, previous)
+        token = SQLToken(kind=kind, text=sql[i:end], start=i, end=end, terminated=terminated)
+        yield token
+        if not is_trivia(token):
+            previous = token
+        i = end
+
+
 def is_trivia(token: SQLToken) -> bool:
     """Whitespace and comments: tokens that never change what a statement means."""
     return token.kind in ("whitespace", "line_comment", "block_comment")
@@ -129,15 +143,15 @@ def _read_token(sql: str, i: int, previous: SQLToken | None) -> _TokenEnd:  # no
     ):
         return ("line_comment", _line_end(sql, i), True)
     if char == "/" and nxt == "*":
-        return _read_block_comment(sql, i)
+        return read_block_comment(sql, i)
     if char == "'":
-        end, terminated = _read_quoted(sql, i, "'")
+        end, terminated = read_quoted(sql, i, "'")
         return ("string", end, terminated)
     if char in ("`", '"'):
-        end, terminated = _read_quoted(sql, i, char)
+        end, terminated = read_quoted(sql, i, char)
         return ("quoted_identifier", end, terminated)
     if char == "$":
-        heredoc_end = _read_heredoc(sql, i)
+        heredoc_end = read_heredoc(sql, i)
         if heredoc_end is not None:
             return ("string", heredoc_end, True)
         if nxt in _WORD_CHAR:
@@ -204,7 +218,7 @@ def _ends_operand(token: SQLToken | None) -> bool:
     return token.kind in ("identifier", "quoted_identifier", "number") or token.text in (")", "]")
 
 
-def _read_block_comment(sql: str, i: int) -> _TokenEnd:
+def read_block_comment(sql: str, i: int) -> _TokenEnd:
     # ClickHouse block comments nest: `/* a /* b */ c */` is one comment.
     depth = 0
     j = i
@@ -222,7 +236,7 @@ def _read_block_comment(sql: str, i: int) -> _TokenEnd:
     return ("block_comment", len(sql), False)
 
 
-def _read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
+def read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
     # A doubled delimiter or a backslash escapes the delimiter inside quotes.
     j = i + 1
     while j < len(sql):
@@ -239,7 +253,7 @@ def _read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
     return (len(sql), False)
 
 
-def _read_heredoc(sql: str, i: int) -> int | None:
+def read_heredoc(sql: str, i: int) -> int | None:
     # `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
     # is only a literal when the same tag closes it later; otherwise ClickHouse
     # reads the `$` as part of an identifier or as punctuation.
