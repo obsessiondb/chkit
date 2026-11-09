@@ -8,10 +8,19 @@ from __future__ import annotations
 import re
 from collections.abc import Sequence
 from dataclasses import dataclass
+from typing import Any
 
 from pydantic import BaseModel, ConfigDict, Field
 
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_statement_state import (
+    Abandoned,
+    Completed,
+    Failed,
+    Running,
+    StatementState,
+    statement_state,
+)
 from chkit.cli.journal_store import MigrationRowState, OperationState, OperationStatus
 from chkit.cli.safety_markers import MigrationOperationSummary
 from chkit.core.sql_lexer import js_trim
@@ -51,6 +60,43 @@ class OperationMismatch(BaseModel):
     recorded: Marker
     # None when the edited file has no statement at that position.
     current: Marker | None
+
+
+@dataclass(frozen=True, slots=True)
+class InProgressStatement:
+    # 1-based statement number.
+    statement: int
+    type: str
+    key: str
+    state: StatementState
+
+
+@dataclass(frozen=True, slots=True)
+class InProgressMigration:
+    """A migration that failed part-way, as ``chkit status`` reports it."""
+
+    name: str
+    # The file changed after some of its statements ran.
+    file_changed: bool
+    # Statements the next apply skips.
+    completed_statements: int
+    # The other recorded statements.
+    statements: list[InProgressStatement]
+    # The command that continues the migration, as apply would decide it.
+    next_steps: list[str]
+
+    def to_payload(self) -> dict[str, Any]:
+        """The ``inProgressMigrations`` entry of ``status --json`` (camelCase keys)."""
+        return {
+            "name": self.name,
+            "fileChanged": self.file_changed,
+            "completedStatements": self.completed_statements,
+            "statements": [
+                {"statement": s.statement, "type": s.type, "key": s.key, **_state_payload(s.state)}
+                for s in self.statements
+            ],
+            "nextSteps": self.next_steps,
+        }
 
 
 class RecordedStatement(BaseModel):
@@ -343,6 +389,45 @@ def split_changed_statements(
 def has_statement_progress(state: MigrationRowState) -> bool:
     """Whether any statement of an in-progress state completed or may have run."""
     return any(op.status in {"completed", "started"} for op in state.operations)
+
+
+def describe_in_progress(state: MigrationRowState, file_checksum: str) -> InProgressMigration:
+    """Where an in-progress migration stands and how it continues.
+
+    An edited file whose statements already ran needs --retry, because apply
+    refuses it (``in_progress_checksum_mismatch``); otherwise apply resumes it,
+    or runs it from statement 1 when nothing ran.
+    """
+    file_changed = state.checksum != file_checksum
+    statements = [
+        InProgressStatement(
+            op.operation_index + 1, op.operation_type, op.operation_key, statement_state(op)
+        )
+        for op in sorted(state.operations, key=lambda op: op.operation_index)
+    ]
+    return InProgressMigration(
+        name=state.name,
+        file_changed=file_changed,
+        completed_statements=sum(1 for op in state.operations if op.status == "completed"),
+        statements=[s for s in statements if not isinstance(s.state, Completed)],
+        next_steps=[
+            f"chkit migrate --apply --retry {state.name}"
+            if file_changed and has_statement_progress(state)
+            else "chkit migrate --apply"
+        ],
+    )
+
+
+def _state_payload(state: StatementState) -> dict[str, str]:
+    match state:
+        case Running(query_id=query_id):
+            return {"state": state.state, "queryId": query_id}
+        case Failed(error=error):
+            return {"state": state.state, "error": error}
+        case Abandoned(was=was):
+            return {"state": state.state, "was": was}
+        case _:
+            return {"state": state.state}
 
 
 def _find_shared_marker_mismatches(

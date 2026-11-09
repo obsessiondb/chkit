@@ -6,7 +6,8 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
+import { applyMigration } from '../../../commands/migrate/apply.js'
+import { PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/statement-state.js'
 import type {
   JournalStore,
   MigrationRowState,
@@ -21,6 +22,9 @@ function createFakeStore(initial: MigrationRowState | null = null) {
   const appended: MigrationJournalEntry[] = []
   const writes: MigrationRowState[] = []
   const store: JournalStore = {
+    async readInProgress() {
+      return []
+    },
     databaseMissing: false,
     async readJournal() {
       return { version: 1, applied: [] }
@@ -182,6 +186,9 @@ describe('applyMigration sync resume (#6)', () => {
 
     let current: MigrationRowState | null = null
     const store: JournalStore = {
+      async readInProgress() {
+        return []
+      },
       databaseMissing: false,
       async readJournal() {
         return { version: 1, applied: [] }

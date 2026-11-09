@@ -42,6 +42,11 @@ from chkit.cli.commands.migrate_recovery import (
     verify_retry_edit,
 )
 from chkit.cli.commands.migrate_retry import RetryResume
+from chkit.cli.commands.migrate_statement_state import (
+    PROPAGATION_WAIT_PENDING,
+    AwaitingReplicas,
+    statement_state,
+)
 from chkit.cli.journal_store import (
     JournalStore,
     MigrationRowState,
@@ -72,14 +77,6 @@ from chkit.core.sql_splitter import (
 from chkit.plugins import ChxOnAfterApplyContext, ChxOnBeforeApplyContext
 
 _CUTOVER_START_KEY = re.compile(r"^table:([^.]+)\.(.+):cutover:start$")
-
-# ``last_error`` of a completed sync statement whose DDL propagation wait has
-# not passed yet (#513, TS ``PROPAGATION_WAIT_PENDING``). A statement is
-# recorded completed before its wait, so a re-run never replays it; while this
-# marker is set, a re-run waits for it again before it runs the next statement.
-# A write after the wait passes clears it. --abandon replaces it, and --retry
-# keeps it with the record.
-PROPAGATION_WAIT_PENDING = "executed; waiting for the change to reach every replica"
 
 
 @dataclass(frozen=True, slots=True)
@@ -356,9 +353,7 @@ def _propagation_wait_pending(state: MigrationRowState, index: int) -> bool:
     """Whether completed statement ``index`` carries PROPAGATION_WAIT_PENDING
     (TS ``propagationWaitPending``)."""
     return any(
-        op.operation_index == index
-        and op.status == "completed"
-        and op.last_error == PROPAGATION_WAIT_PENDING
+        op.operation_index == index and isinstance(statement_state(op), AwaitingReplicas)
         for op in state.operations
     )
 

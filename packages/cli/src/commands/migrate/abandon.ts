@@ -6,6 +6,7 @@ import type {
 } from '../../runtime/journal-store.js'
 import { isoWithoutZone } from './async-apply.js'
 import { MigrateError } from './errors.js'
+import { abandonedError, statementState } from './statement-state.js'
 
 /** What --abandon reports, before and after it resets the journal state. */
 export interface AbandonReport {
@@ -17,8 +18,6 @@ export interface AbandonReport {
   /** The recorded per-statement progress, sorted by statement index. */
   operations: OperationState[]
 }
-
-const OPERATION_STATUSES: readonly OperationStatus[] = ['completed', 'failed', 'started']
 
 /** Read the in-progress state --abandon <migration> resets; throws when there is none. */
 export async function readAbandonableState(
@@ -71,7 +70,8 @@ export function abandonReport(state: MigrationRowState): AbandonReport {
  * before an abandon stays applied in ClickHouse.
  */
 export function statusBeforeAbandon(op: OperationState): OperationStatus {
-  return abandonedFrom(op) ?? op.status
+  const decoded = statementState(op)
+  return decoded.state === 'abandoned' ? decoded.was : op.status
 }
 
 // A statement an earlier --abandon already marked failed keeps that record,
@@ -82,7 +82,7 @@ function abandonedState(state: MigrationRowState, now: string): MigrationRowStat
     appliedAt: now,
     migrationCompleted: false,
     operations: state.operations.map((op) =>
-      abandonedFrom(op) !== undefined
+      statementState(op).state === 'abandoned'
         ? op
         : {
             ...op,
@@ -92,16 +92,6 @@ function abandonedState(state: MigrationRowState, now: string): MigrationRowStat
           },
     ),
   }
-}
-
-/** The status before an earlier --abandon, or undefined when no abandon marked this statement. */
-function abandonedFrom(op: OperationState): OperationStatus | undefined {
-  if (op.status !== 'failed') return undefined
-  return OPERATION_STATUSES.find((status) => op.lastError === abandonedError(status))
-}
-
-function abandonedError(previous: OperationStatus): string {
-  return `abandoned via chkit migrate --abandon (was ${previous})`
 }
 
 function alreadyAppliedError(migration: string): MigrateError {

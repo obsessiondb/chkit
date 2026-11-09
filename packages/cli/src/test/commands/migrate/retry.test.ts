@@ -48,6 +48,9 @@ function stateWith(input: Partial<MigrationRowState>): MigrationRowState {
 function fakeStore(state: MigrationRowState | null) {
   const reads: string[] = []
   const store: JournalStore = {
+    async readInProgress() {
+      return []
+    },
     databaseMissing: false,
     async readJournal() {
       return { version: 1, applied: [] }

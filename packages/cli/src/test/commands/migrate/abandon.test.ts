@@ -42,6 +42,9 @@ function fakeStore(state: MigrationRowState | null) {
   const reads: string[] = []
   const writes: MigrationRowState[] = []
   const store: JournalStore = {
+    async readInProgress() {
+      return []
+    },
     databaseMissing: false,
     async readJournal() {
       return { version: 1, applied: [] }

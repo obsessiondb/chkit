@@ -13,9 +13,12 @@ from pydantic import BaseModel, ConfigDict, Field
 
 from chkit.cli.commands.migrate_async_apply import iso_without_zone
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_statement_state import (
+    Abandoned,
+    abandoned_error,
+    statement_state,
+)
 from chkit.cli.journal_store import MigrationRowState, OperationState, OperationStatus
-
-_OPERATION_STATUSES: tuple[OperationStatus, ...] = ("completed", "failed", "started")
 
 
 class AbandonReport(BaseModel):
@@ -97,8 +100,8 @@ def status_before_abandon(op: OperationState) -> OperationStatus:
     Or its recorded status when no abandon touched it. A statement that
     completed before an abandon stays applied in ClickHouse.
     """
-    previous = _abandoned_from(op)
-    return previous if previous is not None else op.status
+    decoded = statement_state(op)
+    return decoded.was if isinstance(decoded, Abandoned) else op.status
 
 
 def _abandoned_state(state: MigrationRowState, now: str) -> MigrationRowState:
@@ -106,12 +109,12 @@ def _abandoned_state(state: MigrationRowState, now: str) -> MigrationRowState:
     # record, so abandoning again does not lose which statements completed.
     operations = [
         op
-        if _abandoned_from(op) is not None
+        if isinstance(statement_state(op), Abandoned)
         else op.model_copy(
             update={
                 "status": "failed",
                 "finished_at": op.finished_at if op.finished_at is not None else now,
-                "last_error": _abandoned_error(op.status),
+                "last_error": abandoned_error(op.status),
             }
         )
         for op in state.operations
@@ -120,19 +123,6 @@ def _abandoned_state(state: MigrationRowState, now: str) -> MigrationRowState:
         update={"applied_at": now, "migration_completed": False, "operations": operations}
     )
 
-
-def _abandoned_from(op: OperationState) -> OperationStatus | None:
-    """The status before an earlier --abandon, or None when none marked it."""
-    if op.status != "failed":
-        return None
-    return next(
-        (s for s in _OPERATION_STATUSES if op.last_error == _abandoned_error(s)),
-        None,
-    )
-
-
-def _abandoned_error(previous: OperationStatus) -> str:
-    return f"abandoned via chkit migrate --abandon (was {previous})"
 
 
 def _already_applied_error(migration: str) -> MigrateError:

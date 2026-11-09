@@ -45,6 +45,7 @@ import {
   verifyRetryEdit,
   type StatementIdentity,
 } from './recovery.js'
+import { PROPAGATION_WAIT_PENDING, statementState } from './statement-state.js'
 
 type JournalStore = ReturnType<typeof createJournalStore>
 
@@ -54,18 +55,9 @@ function operationIsCompleted(state: MigrationRowState | null, index: number): b
   )
 }
 
-/**
- * `lastError` of a completed sync statement whose DDL propagation wait has not
- * passed yet (#513). A statement is recorded completed before its wait, so a
- * re-run never replays it; while this marker is set, a re-run waits for it
- * again before it runs the next statement. A write after the wait passes
- * clears it. --abandon replaces it, and --retry keeps it with the record.
- */
-export const PROPAGATION_WAIT_PENDING = 'executed; waiting for the change to reach every replica'
-
 function propagationWaitPending(state: MigrationRowState, index: number): boolean {
   return state.operations.some(
-    (op) => op.operationIndex === index && op.status === 'completed' && op.lastError === PROPAGATION_WAIT_PENDING,
+    (op) => op.operationIndex === index && statementState(op).state === 'awaiting_replicas',
   )
 }
 
