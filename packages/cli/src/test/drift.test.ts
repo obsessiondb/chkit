@@ -1545,3 +1545,81 @@ describe('@chkit/cli drift comparer on what ClickHouse stores (#466)', () => {
     expect(compareTableShape(expected, actual)?.settingDiffs).toEqual(['index_granularity'])
   })
 })
+
+describe('@chkit/cli drift: text index expressions as ClickHouse stores them', () => {
+  // Stand-in for ClickHouse's formatter on the fragments under test. The real
+  // formatter runs over test/fixtures/text-index-expressions.json in
+  // text-index.e2e.test.ts.
+  const formatted = new Map([
+    ["if(NOT a AND b, s, '')", "if((NOT a) AND b, s, '')"],
+    ["if((NOT a) AND b, s, '')", "if((NOT a) AND b, s, '')"],
+  ])
+  const canonicalizer: SqlCanonicalizer = {
+    expression: (fragment) => formatted.get(fragment) ?? null,
+    query: () => null,
+  }
+  const columns: ColumnDefinition[] = [
+    { name: 'id', type: 'UInt64' },
+    { name: 's', type: 'String' },
+    { name: 'a', type: 'UInt8' },
+    { name: 'b', type: 'UInt8' },
+  ]
+  const textIndex = (expression: string, tokenizer = 'splitByNonAlpha') => ({
+    name: 'idx',
+    type: 'text' as const,
+    expression,
+    tokenizer,
+  })
+  const expected = (expression: string, tokenizer?: string) =>
+    table({
+      database: 'app',
+      name: 'docs',
+      engine: 'MergeTree()',
+      columns,
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      indexes: [textIndex(expression, tokenizer)],
+    })
+  // What ClickHouse stores: ObsessionDB keeps the outer parentheses (#512).
+  const actual = (expression: string) => ({
+    engine: 'MergeTree()',
+    primaryKey: '(id)',
+    orderBy: '(id)',
+    columns,
+    settings: {},
+    indexes: [{ ...textIndex(expression), granularity: 100000000 }],
+    projections: [],
+  })
+
+  test('the text index expression reaches the canonicalizer, outer parentheses peeled', () => {
+    const { expressions } = collectTableSqlFragments(
+      expected("if(NOT a AND b, s, '')"),
+      actual("(if((NOT a) AND b, s, ''))"),
+    )
+    expect(expressions).toContain("if(NOT a AND b, s, '')")
+    expect(expressions).toContain("if((NOT a) AND b, s, '')")
+  })
+
+  test('the spaces inside a string literal reach the canonicalizer intact', () => {
+    const { expressions } = collectTableSqlFragments(
+      expected("concat(s,  '  ')"),
+      actual("concat(s, '  ')"),
+    )
+    expect(expressions).toContain("concat(s, '  ')")
+  })
+
+  test('NOT a AND b reads clean against the parentheses ClickHouse adds', () => {
+    const live = actual("(if((NOT a) AND b, s, ''))")
+    expect(compareTableShape(expected("if(NOT a AND b, s, '')"), live)?.indexDiffs).toEqual(['idx'])
+    expect(compareTableShape(expected("if(NOT a AND b, s, '')"), live, canonicalizer)).toBeNull()
+  })
+
+  test('a different tokenizer still drifts when the expressions canonicalize equal', () => {
+    const detail = compareTableShape(
+      expected("if(NOT a AND b, s, '')", "splitByString([' '])"),
+      actual("if((NOT a) AND b, s, '')"),
+      canonicalizer,
+    )
+    expect(detail?.indexDiffs).toEqual(['idx'])
+  })
+})

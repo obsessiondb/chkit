@@ -12,23 +12,29 @@ Usage:
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 import typer
 
 from chkit.cli import command_lifecycle
 from chkit.cli.command_target import run_on_config_loaded_or_exit
 from chkit.cli.config_loader import load_config, loaded_config_path
-from chkit.cli.flag_errors import report_flag_error
-from chkit.cli.json_output import print_output
+from chkit.cli.flag_errors import report_flag_error, report_usage_error
+from chkit.cli.json_output import emit_json, print_output
 from chkit.cli.plugin_runtime import (
     PluginRuntime,
     load_plugin_runtime,
     make_plugin_context,
     null_plugin_context,
 )
-from chkit.cli.table_scope import TableScope
+from chkit.cli.schema_loader import load_schema
+from chkit.cli.table_scope import (
+    TableScope,
+    resolve_table_scope,
+    table_keys_from_definitions,
+)
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.flags import (
     FlagDef,
@@ -48,32 +54,77 @@ from chkit.plugins import (
     LoadedPlugin,
 )
 
+NO_PLUGINS_MESSAGE = "No plugins configured. Add entries to config.plugins first."
 
-def _list_all(loaded: list[LoadedPlugin]) -> None:
-    if not loaded:
-        typer.echo("No plugins configured.")
+class UnknownPluginError(LookupError):
+    """No configured plugin has the name. As in TS, a plain error of the
+    command: its message on stderr, exit 1 and the ``error`` envelope under
+    ``--json``."""
+
+
+def _unknown_plugin_error(plugin_name: str, loaded: list[LoadedPlugin]) -> UnknownPluginError:
+    known = sorted(entry.plugin.manifest.name for entry in loaded)
+    return UnknownPluginError(
+        f'Unknown plugin "{plugin_name}". Available: {", ".join(known) or "(none)"}.'
+    )
+
+
+def _fail_no_plugins(*, json_mode: bool) -> NoReturn:
+    """As TS: the message on stderr, or under ``--json`` a payload whose
+    ``error`` is the message; exit 1 either way."""
+    if json_mode:
+        emit_json("plugin", {"error": NO_PLUGINS_MESSAGE, "plugins": []})
+    else:
+        typer.echo(NO_PLUGINS_MESSAGE, err=True)
+    raise typer.Exit(code=1)
+
+
+def _command_entries(entry: LoadedPlugin) -> list[dict[str, str]]:
+    return [
+        {"name": command.name, "description": command.description or ""}
+        for command in entry.plugin.commands or []
+    ]
+
+
+def _list_all(loaded: list[LoadedPlugin], *, json_mode: bool) -> None:
+    if json_mode:
+        plugins = [
+            {
+                "name": entry.plugin.manifest.name,
+                "version": entry.plugin.manifest.version,
+                "commands": _command_entries(entry),
+            }
+            for entry in loaded
+        ]
+        emit_json("plugin", {"plugins": plugins})
         return
-    typer.echo(f"{len(loaded)} plugin(s) configured:")
+    typer.echo("Configured plugins:")
     for entry in loaded:
         manifest = entry.plugin.manifest
-        version = f" v{manifest.version}" if manifest.version else ""
+        version = f" (v{manifest.version})" if manifest.version else ""
         typer.echo(f"- {manifest.name}{version}")
-        for command in entry.plugin.commands or []:
-            description = (
-                f"  ({command.description})" if command.description else ""
-            )
-            typer.echo(f"    {manifest.name} {command.name}{description}")
+        commands = _command_entries(entry)
+        if not commands:
+            typer.echo("  (no commands)")
+            continue
+        for command in commands:
+            description = f": {command['description']}" if command["description"] else ""
+            typer.echo(f"  - {command['name']}{description}")
 
 
-def _list_one(entry: LoadedPlugin) -> None:
-    typer.echo(f"Plugin: {entry.plugin.manifest.name}")
-    commands = entry.plugin.commands or []
-    if not commands:
-        typer.echo("  (no commands registered)")
+def _list_one(entry: LoadedPlugin, *, json_mode: bool) -> None:
+    name = entry.plugin.manifest.name
+    commands = _command_entries(entry)
+    if json_mode:
+        emit_json("plugin", {"plugin": name, "commands": commands})
         return
+    if not commands:
+        typer.echo(f'Plugin "{name}" has no registered commands.')
+        return
+    typer.echo(f'Plugin commands for "{name}":')
     for command in commands:
-        description = f" — {command.description}" if command.description else ""
-        typer.echo(f"  {command.name}{description}")
+        description = f": {command['description']}" if command["description"] else ""
+        typer.echo(f"- {command['name']}{description}")
 
 
 def _split_positionals_and_flags(
@@ -175,15 +226,36 @@ def _forwarder_context_hooks(
         runtime.dispose_context(plugin_context)
 
 
-def dispatch_plugin_command(
+def _resolve_plugin_table_scope(
+    schema: list[str], selector: str | None
+) -> TableScope:
+    """The scope of a plugin command that declares ``--table`` (TS
+    ``resolvePluginTableScope``, #565).
+
+    Without a selector the scope is unfiltered whatever the schema holds, so
+    only a selector needs the schema. A plugin command that needs the schema
+    loads it and reports its load errors itself, so a load error here leaves
+    the selector resolved against no tables. An invalid selector raises.
+    """
+    if not selector:
+        return resolve_table_scope(None, [])
+    try:
+        definitions = load_schema(schema)
+    except Exception:
+        definitions = []
+    return resolve_table_scope(selector, table_keys_from_definitions(definitions))
+
+
+def dispatch_plugin_command(  # noqa: PLR0912
     *,
     plugin_name: str,
-    command_name: str,
+    command_name: str | None,
     tokens: list[str],
     config_path: Path | None,
     output_json: bool,
     invoking_command: str = "plugin",
     config_flag: str | None = None,
+    print_help: Callable[[], None] | None = None,
 ) -> None:
     """Load config + plugins, parse forwarded flags, run one plugin command.
 
@@ -192,7 +264,11 @@ def dispatch_plugin_command(
     As there, a flag error ends the command before any hook; then on_init
     runs, then on_config_loaded on a shortcut, then the command (with its
     on_before_plugin_command and get_context hooks). The CLI group runs
-    on_complete (#488).
+    on_complete (#488). An unknown plugin or command is reported after
+    on_init, as in TS; a shortcut given an unknown command runs
+    ``print_help`` after the error (not under ``--json``), as TS prints the
+    command's help; given no command (``command_name`` None), it runs
+    ``print_help`` alone.
 
     As in TS, the command's flags also hold the global flags given:
     ``--json`` on every path, and ``--config`` (``config_flag``, the raw
@@ -224,7 +300,7 @@ def dispatch_plugin_command(
     entry = next(
         (e for e in runtime.plugins if e.plugin.manifest.name == plugin_name), None
     )
-    found = runtime.get_command(plugin_name, command_name)
+    found = None if command_name is None else runtime.get_command(plugin_name, command_name)
     flags: ParsedFlags
     positionals: list[str] = []
     if found is None:
@@ -251,21 +327,48 @@ def dispatch_plugin_command(
         _forwarder_context_hooks(
             runtime, config, config_path=resolved_config_path, flags=own_flags
         )
+        if not runtime.plugins:
+            _fail_no_plugins(json_mode=output_json)
 
     if entry is None:
-        msg = (
-            f'No plugin named "{plugin_name}" is configured. '
-            f"Run `chkit plugin` to see registered plugins."
-        )
-        raise typer.BadParameter(msg)
+        if invoking_command == "codegen":
+            # As TS reports a well-known plugin command whose plugin is missing.
+            report_usage_error(
+                "codegen",
+                "Codegen plugin is not configured. Add it to config.plugins first.",
+                json_mode=output_json,
+                code="plugin_not_configured",
+            )
+        raise _unknown_plugin_error(plugin_name, list(runtime.plugins))
+    if command_name is None:
+        # A shortcut given no command shows its help after on_init (with
+        # no flags), as TS does, also under --json.
+        if print_help is not None:
+            print_help()
+        return
     if found is None:
-        msg = (
-            f'Plugin "{plugin_name}" has no command "{command_name}". '
-            f"Run `chkit plugin {plugin_name}` to see its commands."
+        known = [command.name for command in entry.plugin.commands or []]
+        message = (
+            f'Unknown {plugin_name} command "{command_name}". '
+            f'Available: {", ".join(known) or "(none)"}.'
         )
-        raise typer.BadParameter(msg)
+        if invoking_command == "plugin":
+            report_flag_error("plugin", message, json_mode=output_json)
+        report_usage_error(
+            invoking_command,
+            message,
+            json_mode=output_json,
+            code="unknown_subcommand",
+            on_text=print_help,
+        )
 
-    table_scope = TableScope(enabled=False)
+    # Set only when the command declares --table (#565). As in TS, the scope
+    # is resolved after on_init and before on_config_loaded, which gets it.
+    table_selector = flags.get("--table")
+    table_scope = _resolve_plugin_table_scope(
+        config.schema_,
+        table_selector if isinstance(table_selector, str) else None,
+    )
     if not is_forwarder:
         # TS runs on_config_loaded for a plugin command run by its own name,
         # not through `chkit plugin`.
@@ -399,19 +502,17 @@ def run(
             runtime, config, config_path=resolved_config_path, flags=own_flags
         )
         loaded = list(runtime.plugins)
+        if not loaded:
+            _fail_no_plugins(json_mode=output_json)
         if plugin_name is None:
-            _list_all(loaded)
+            _list_all(loaded, json_mode=output_json)
             return
         entry = next(
             (e for e in loaded if e.plugin.manifest.name == plugin_name), None
         )
         if entry is None:
-            msg = (
-                f'No plugin named "{plugin_name}" is configured. '
-                f"Run `chkit plugin` to see registered plugins."
-            )
-            raise typer.BadParameter(msg)
-        _list_one(entry)
+            raise _unknown_plugin_error(plugin_name, loaded)
+        _list_one(entry, json_mode=output_json)
         return
 
     dispatch_plugin_command(

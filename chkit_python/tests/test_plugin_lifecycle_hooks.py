@@ -18,8 +18,10 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+import typer
 from typer.testing import CliRunner
 
+from chkit.cli.commands import generate
 from chkit.cli.main import app
 
 # CI forces rich to colour usage errors.
@@ -48,6 +50,8 @@ class _Probe:
 
     def on_config_loaded(self, ctx):
         _record("on_config_loaded", ctx.command, ctx.flags)
+        if ctx.table_scope.enabled:
+            _record("table_scope", ctx.table_scope.selector)
 
     def get_context(self, ctx):
         _record("get_context", ctx.command, ctx.flags)
@@ -88,7 +92,10 @@ def probe():
             ChxPluginCommand(
                 name="greet",
                 run=_greet,
-                flags=[{"name": "--name", "type": "string", "description": "Name"}],
+                flags=[
+                    {"name": "--name", "type": "string", "description": "Name"},
+                    {"name": "--table", "type": "string", "description": "Table"},
+                ],
             ),
             ChxPluginCommand(name="boom", run=_boom),
             ChxPluginCommand(name="two", run=_two),
@@ -109,8 +116,12 @@ def obsessiondb():
             ChxPluginCommand(
                 name="hello",
                 run=_hello,
-                flags=[{"name": "--who", "type": "string", "description": "Who"}],
-            )
+                flags=[
+                    {"name": "--who", "type": "string", "description": "Who"},
+                    {"name": "--table", "type": "string", "description": "Table"},
+                ],
+            ),
+            ChxPluginCommand(name="other", run=_hello),
         ],
     )
 '''
@@ -243,12 +254,92 @@ def test_plugin_listing_runs_on_init_and_on_complete(project: Path) -> None:
 def test_unknown_plugin_runs_on_complete_with_the_exit_code(project: Path) -> None:
     result = _invoke(["plugin", "nope", "cmd"])
 
-    assert result.exit_code != 0
+    assert result.exit_code == 1, result.output
     assert _calls(project) == [
         ["on_init", "plugin", {}, False],
         ["get_context", "plugin", {}],
         ["on_complete", "plugin", result.exit_code, False],
     ]
+
+
+@pytest.mark.parametrize("json_mode", [False, True])
+def test_shortcut_without_a_command_runs_on_init_and_on_complete(
+    project: Path, *, json_mode: bool
+) -> None:
+    # TS runs on_init (with no flags) before it prints the command's help.
+    result = _invoke(["obsessiondb", *(["--json"] if json_mode else [])])
+
+    assert result.exit_code == 0, result.output
+    assert "chkit obsessiondb" in result.stdout
+    assert _calls(project) == [
+        ["on_init", "obsessiondb", {}, json_mode],
+        ["on_complete", "obsessiondb", 0, json_mode],
+    ]
+
+
+def test_unknown_shortcut_command_runs_on_complete(project: Path) -> None:
+    result = _invoke(["obsessiondb", "nope"])
+
+    assert result.exit_code == 1, result.output
+    assert _calls(project) == [
+        ["on_init", "obsessiondb", {}, False],
+        ["on_complete", "obsessiondb", 1, False],
+    ]
+
+
+def test_shortcut_table_scope_reaches_on_config_loaded(project: Path) -> None:
+    result = _invoke(["obsessiondb", "hello", "--table", "events"])
+
+    assert result.exit_code == 0, result.output
+    flags = {"--table": "events"}
+    assert _calls(project)[:3] == [
+        ["on_init", "obsessiondb", flags, False],
+        ["on_config_loaded", "obsessiondb", flags],
+        ["table_scope", "events"],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("args", "before_error"),
+    [
+        (
+            ["obsessiondb", "hello", "--table", "*"],
+            [["on_init", "obsessiondb", {"--table": "*"}, False]],
+        ),
+        (
+            ["plugin", "probe", "greet", "--table", "*"],
+            [["on_init", "plugin", {"--table": "*"}, False], ["get_context", "plugin", {}]],
+        ),
+    ],
+)
+def test_invalid_table_selector_runs_on_complete(
+    project: Path, args: list[str], before_error: list[list[Any]]
+) -> None:
+    # As in TS, the selector is resolved after on_init, before on_config_loaded.
+    result = _invoke(args)
+
+    assert result.exit_code == 1, result.output
+    assert 'Invalid --table selector "*"' in result.stderr
+    command = args[0]
+    assert _calls(project) == [*before_error, ["on_complete", command, 1, False]]
+
+
+def test_usage_error_after_on_init_runs_on_complete_with_exit_1(
+    project: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # A click usage error the command raises after on_init is reported as TS
+    # reports one (exit 1), and on_complete gets that exit code.
+    def _raise_usage_error(*_args: Any, **_kwargs: Any) -> Any:
+        msg = "late"
+        raise typer.BadParameter(msg)
+
+    monkeypatch.setattr(generate, "load_schema_definitions_with_hooks", _raise_usage_error)
+
+    result = _invoke(["generate", "--dryrun"])
+
+    assert result.exit_code == 1, result.output
+    assert result.stderr == "Invalid value: late\n"
+    assert _calls(project)[-1] == ["on_complete", "generate", 1, False]
 
 
 def test_core_command_runs_on_complete(project: Path) -> None:

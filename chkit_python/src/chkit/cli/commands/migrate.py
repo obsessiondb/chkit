@@ -74,6 +74,7 @@ from chkit.cli.commands.migrate_retry import (
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
@@ -158,35 +159,28 @@ def run(  # noqa: PLR0917
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
+    table_selector: Annotated[
+        str | None,
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
+    ] = None,
     apply: Annotated[
         bool,
         typer.Option(
             "--apply",
-            help="Apply pending migrations on ClickHouse (no prompt).",
+            help="Apply pending migrations on ClickHouse (no prompt)",
         ),
     ] = False,
     execute: Annotated[
         bool,
-        typer.Option("--execute", help="Alias for --apply."),
+        typer.Option("--execute", help="Alias for --apply"),
     ] = False,
     allow_destructive: Annotated[
         bool,
         typer.Option(
             "--allow-destructive",
-            help="Allow destructive migrations tagged with risk=danger.",
+            help="Allow destructive migrations tagged with risk=danger",
         ),
     ] = False,
-    table_selector: Annotated[
-        str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help=(
-                "Restrict migrations to those touching the matched tables. "
-                "Examples: events, events_*, analytics.events."
-            ),
-        ),
-    ] = None,
     retry: Annotated[
         str | None,
         typer.Option(
@@ -194,7 +188,7 @@ def run(  # noqa: PLR0917
             metavar="<migration>",
             help=(
                 "Resume a failed migration after editing its file "
-                "(skips completed statements)."
+                "(skips completed statements)"
             ),
         ),
     ] = None,
@@ -205,7 +199,7 @@ def run(  # noqa: PLR0917
             metavar="<migration>",
             help=(
                 "Reset a failed migration so the next apply runs it from "
-                "statement 1 (journal only; previews without --apply)."
+                "statement 1 (journal only; previews without --apply)"
             ),
         ),
     ] = None,
@@ -216,7 +210,7 @@ def run(  # noqa: PLR0917
             metavar="<name=value>",
             help=(
                 "ClickHouse query setting sent with each migration statement, "
-                "e.g. max_table_size_to_drop=0 (repeatable)."
+                "e.g. max_table_size_to_drop=0 (repeatable)"
             ),
         ),
     ] = None,

@@ -75,7 +75,12 @@ def run(  # noqa: PLR0917 - typer maps each option to a parameter
     ] = None,
     table_selector: Annotated[
         str | None,
-        typer.Option("--table", "-t", help="Not supported: rebuild rewrites the whole snapshot."),
+        typer.Option(
+            "--table",
+            "-t",
+            metavar="<selector>",
+            help="Not supported: rebuild rewrites the whole snapshot",
+        ),
     ] = None,
     dryrun: Annotated[
         bool,

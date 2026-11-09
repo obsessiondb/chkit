@@ -192,3 +192,98 @@ export default schema(
     await rm(dir, { recursive: true, force: true })
   }
 }, 240_000)
+
+// Names that need escapes in SQL: a table, its columns and key, a view and a
+// materialized view (whose TO target pull reads from the stored query), and a
+// dictionary whose source names the table. The views and the source spell the
+// names as ClickHouse stores them (#639).
+test('pull then generate plans nothing for objects whose names need escapes', async () => {
+  const env = getLiveEnv()
+  const executor = createLiveExecutor(env)
+  const database = `${createPrefix('pull_esc')}db`
+  const journalTable = createJournalTableName('pull_esc')
+  const dir = await mkdtemp(join(tmpdir(), 'chkit-pull-escapes-'))
+  const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable, XDG_CONFIG_HOME: join(dir, 'xdg'), CI: '1' }
+  const configPath = join(dir, 'clickhouse.config.ts')
+  const schemaPath = join(dir, 'schema.ts')
+  const pulledPath = join(dir, 'pulled.ts')
+  const outDir = join(dir, 'chkit')
+  const config = {
+    schema: schemaPath,
+    outDir,
+    migrationsDir: join(outDir, 'migrations'),
+    metaDir: join(outDir, 'meta'),
+    clickhouse: { url: env.clickhouseUrl, username: env.clickhouseUser, password: env.clickhousePassword, database },
+  }
+  await writeFile(
+    configPath,
+    `import { pull } from '${PULL_PLUGIN_ENTRY}'\nimport { obsessiondb } from '${OBSESSIONDB_PLUGIN_ENTRY}'\n\nexport default ${JSON.stringify(config, null, 2).replace(/\n}$/, ',\n  plugins: [pull(), obsessiondb()],\n}')}\n`,
+    'utf8'
+  )
+  const q = (value: string) => JSON.stringify(value)
+  await writeFile(
+    schemaPath,
+    `import { schema, table, view, materializedView, dictionary } from '${CORE_ENTRY}'
+
+const db = ${q(database)}
+
+export default schema(
+  table({
+    database: db, name: 'src', engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'],
+    columns: [{ name: 'id', type: 'UInt64' }],
+  }),
+  table({
+    database: db, name: ${q('raw\\q')}, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id', ${q('c\\q')}],
+    columns: [
+      { name: 'id', type: 'UInt64' },
+      { name: ${q('c\\q')}, type: 'String' },
+      { name: ${q('c`d')}, type: 'String' },
+      { name: ${q("c'e")}, type: 'String' },
+    ],
+  }),
+  materializedView({
+    database: db, name: ${q('mv\\q')}, to: { database: db, name: ${q('raw\\q')} },
+    as: ${q(`SELECT id, toString(id) AS \`c\\\\q\` FROM ${database}.src`)},
+  }),
+  view({ database: db, name: ${q('v\\q')}, as: ${q(`SELECT id FROM ${database}.\`raw\\\\q\``)} }),
+  view({ database: db, name: 'a_view', as: ${q(`SELECT id FROM ${database}.\`v\\\\q\``)} }),
+  dictionary({
+    database: db, name: ${q('d\\q')}, primaryKey: ['id'], layout: 'HASHED()', lifetime: 'MIN 0 MAX 300',
+    source: ${q(`CLICKHOUSE(DB '${database}' TABLE 'raw\\\\q')`)},
+    attributes: [{ name: 'id', type: 'UInt64' }, { name: 'v', type: 'String' }],
+  }),
+)
+`,
+    'utf8'
+  )
+
+  try {
+    const generated = runCli(dir, ['generate', '--config', configPath, '--name', 'escapes', '--json'], cliEnv)
+    expect(generated.exitCode, formatTestDiagnostic('generate', generated)).toBe(0)
+    const migrated = await runCliWithRetry(dir, ['migrate', '--config', configPath, '--execute', '--json'], { extraEnv: cliEnv })
+    expect(migrated.exitCode, formatTestDiagnostic('migrate --execute', migrated)).toBe(0)
+
+    const pull = () => runCli(dir, ['pull', '--config', configPath, '--database', database, '--out-file', pulledPath, '--force', '--json'], cliEnv)
+    const pulled = await pollUntil(
+      async () => pull(),
+      (result) => result.exitCode === 0 && (JSON.parse(result.stdout) as { definitionCount: number }).definitionCount === 6
+    )
+    expect(pulled.exitCode, formatTestDiagnostic('pull', pulled)).toBe(0)
+    expect((JSON.parse(pulled.stdout) as { definitionCount: number }).definitionCount).toBe(6)
+    const pulledContent = await readFile(pulledPath, 'utf8')
+    expect(pulledContent).toContain(`to: { database: ${q(database)}, name: ${q('raw\\q')} }`)
+
+    await writeFile(schemaPath, pulledContent.replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)), 'utf8')
+    const plan = runCli(dir, ['generate', '--config', configPath, '--dryrun', '--json'], cliEnv)
+    expect(plan.exitCode, formatTestDiagnostic('generate from the pulled schema', plan)).toBe(0)
+    expect((JSON.parse(plan.stdout) as { operations: unknown[] }).operations).toEqual([])
+
+    const drift = runCli(dir, ['drift', '--config', configPath, '--json'], cliEnv)
+    expect(drift.exitCode, formatTestDiagnostic('drift', drift)).toBe(0)
+    expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
+  } finally {
+    await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
+    await executor.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+}, 240_000)
