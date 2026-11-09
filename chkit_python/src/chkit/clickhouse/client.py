@@ -21,6 +21,7 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
+from urllib3 import Timeout
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.jsnum import js_math_round
@@ -33,6 +34,9 @@ from chkit.core.sql_lexer import js_trim
 logging.getLogger("clickhouse_connect").addHandler(logging.NullHandler())
 
 QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
+
+# TS's PROGRESS_SETTINGS (``@chkit/clickhouse``): a progress header every 30 s.
+PROGRESS_INTERVAL_MS = "30000"
 
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
 # integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
@@ -154,11 +158,13 @@ class ClickHouseClient:
                 username=username,
                 password=password,
                 secure=secure,
+                connect_timeout=None,
                 **options,
             )
         except Exception as error:
             wrap_connection_error(error, config.url, config.username)
         client.database = config.database
+        _use_ts_timeouts(client)
         return client
 
     def close(self) -> None:
@@ -415,6 +421,23 @@ class ClickHouseClient:
         )
 
         return list_table_details(self, databases)
+
+
+def _use_ts_timeouts(client: Any) -> None:
+    """Wait for a request as long as the TS client does, with its progress headers.
+
+    TS sets ``request_timeout: 0`` (no timeout at all, connect included) and
+    sends progress headers every 30 s, which keep a long query's connection
+    alive through a proxy with an idle timeout. clickhouse-connect defaults to
+    a 300 s read timeout and derives the progress interval from it (120 s), and
+    rejects ``send_receive_timeout=None`` while it derives it, so both are set
+    on the driver once it is open. The driver sends the interval only when the
+    user may change settings, as TS sends progress settings on reads, and a
+    setting passed with a query still wins, as in TS.
+    """
+    client.timeout = Timeout(connect=None, read=None)
+    if client._progress_interval is not None:
+        client._progress_interval = PROGRESS_INTERVAL_MS
 
 
 def _safe_int(value: object) -> int | None:  # noqa: PLR0911

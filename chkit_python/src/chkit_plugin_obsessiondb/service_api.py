@@ -130,7 +130,13 @@ class ServiceNotFoundError(RuntimeError):
         self.code: ServiceNotFoundCode = code
 
 
-def _rpc_post(creds: Credentials, procedure: str, payload: Any) -> Any:
+def _rpc_post(
+    creds: Credentials,
+    procedure: str,
+    payload: Any,
+    *,
+    timeout: httpx.Timeout | float = HTTP_TIMEOUT_SECONDS,
+) -> Any:
     """POST to ``{base_url}/rpc/{procedure}`` with bearer auth, oRPC RPC envelope.
 
     The oRPC RPC protocol (what TS's ``RPCLink`` speaks) wraps the input as
@@ -147,7 +153,7 @@ def _rpc_post(creds: Credentials, procedure: str, payload: Any) -> Any:
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
     }
-    with httpx.Client(timeout=HTTP_TIMEOUT_SECONDS) as http:
+    with httpx.Client(timeout=timeout) as http:
         res = http.post(url, json=body, headers=headers)
     if res.status_code == HTTP_401_UNAUTHORIZED:
         raise SessionExpiredError

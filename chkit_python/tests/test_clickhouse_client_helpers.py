@@ -15,6 +15,7 @@ from unittest.mock import MagicMock
 import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
+from urllib3 import Timeout
 
 from chkit.clickhouse import (
     ClickHouseClient,
@@ -171,6 +172,52 @@ def test_submit_runs_on_its_own_driver_without_a_session(
     with pytest.raises(RuntimeError, match="closed"):
         client.submit("INSERT INTO t SELECT 3", query_id="q3")
     assert submit_driver.command.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("driver_interval", "expected_interval"),
+    [
+        # The driver derives 120 s from its 300 s read timeout; TS sends 30 s.
+        ("120000", "30000"),
+        # A user who cannot change settings gets no interval, as in TS.
+        (None, None),
+    ],
+)
+def test_every_driver_waits_without_a_timeout_as_ts(
+    monkeypatch: pytest.MonkeyPatch,
+    driver_interval: str | None,
+    expected_interval: str | None,
+) -> None:
+    """TS's client has ``request_timeout: 0``: no connect or read timeout. The
+    session driver and the submit driver match it, with TS's 30 s progress
+    headers."""
+    drivers: list[tuple[MagicMock, dict[str, object]]] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        driver.timeout = Timeout(connect=10, read=300)
+        driver._progress_interval = driver_interval
+        drivers.append((driver, kwargs))
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123",
+            username="default",
+            password="pw",
+            database="analytics",
+            secure=False,
+        )
+    )
+    client.submit("INSERT INTO t SELECT 1", query_id="q1")
+
+    assert len(drivers) == 2
+    for driver, kwargs in drivers:
+        assert kwargs["connect_timeout"] is None
+        assert (driver.timeout.connect_timeout, driver.timeout.read_timeout) == (None, None)
+        assert driver._progress_interval == expected_interval
+    client.close()
 
 
 def test_submit_driver_still_opening_at_close_sends_nothing(
