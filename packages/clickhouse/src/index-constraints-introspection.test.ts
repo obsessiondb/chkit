@@ -132,6 +132,12 @@ describe('parsed names trim JavaScript whitespace', () => {
     expect(parseConstraintsFromCreateTableQuery(query).map((c) => c.name)).toEqual(['\x85c'])
   })
 
+  test('decodes escapes in a quoted projection name as ClickHouse does (#631, #639)', () => {
+    const query =
+      'CREATE TABLE d.t (`a` UInt8, PROJECTION `p\\x41` (SELECT a ORDER BY a)) ENGINE = MergeTree ORDER BY a'
+    expect(parseProjectionsFromCreateTableQuery(query).map((p) => p.name)).toEqual(['pA'])
+  })
+
   test('dictionary attribute and primary key names', () => {
     const query =
       'CREATE DICTIONARY app.d (`\x85k\ufeff` UInt64, `k2` UInt64) PRIMARY KEY k1\x85, \ufeffk2 SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)'

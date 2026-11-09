@@ -1173,6 +1173,16 @@ TO app.t AS SELECT 1`
     ])
   })
 
+  test('parseRefreshClause decodes escapes in quoted DEPENDS ON names as ClickHouse does (#631, #639)', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR DEPENDS ON d.`x\\ny`, d.`b\\x41` TO d.dst AS SELECT 1'
+    )
+    expect(refresh?.dependsOn).toEqual([
+      { database: 'd', name: 'x\ny' },
+      { database: 'd', name: 'bA' },
+    ])
+  })
+
   test('parseRefreshClause ignores DEPENDS ON text inside a string or the SELECT', () => {
     const refresh = __testUtils.parseRefreshClause(
       "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR TO d.dst AS SELECT 'DEPENDS ON d.x' AS c"

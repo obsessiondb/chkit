@@ -144,6 +144,20 @@ def test_parse_refresh_depends_on_reads_quoted_names() -> None:
     ]
 
 
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause decodes escapes in
+# quoted DEPENDS ON names as ClickHouse does".
+def test_parse_refresh_depends_on_decodes_escapes() -> None:
+    refresh = parse_refresh_clause(
+        "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR DEPENDS ON d.`x\\ny`, d.`b\\x41` "
+        "TO d.dst AS SELECT 1"
+    )
+    assert refresh is not None
+    assert refresh.depends_on == [
+        DependsOnEntry(database="d", name="x\ny"),
+        DependsOnEntry(database="d", name="bA"),
+    ]
+
+
 # TS packages/plugin-pull/src/index.test.ts "parseRefreshClause ignores DEPENDS
 # ON text inside a string or the SELECT".
 def test_parse_refresh_ignores_depends_on_inside_a_string() -> None:

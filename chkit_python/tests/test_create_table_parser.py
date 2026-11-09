@@ -190,6 +190,15 @@ def test_projections_extracts_both_quoted_and_bare_names() -> None:
     assert "daily_count" in names
 
 
+def test_projection_name_decodes_escapes_as_clickhouse_does() -> None:
+    # TS index-constraints-introspection.test.ts asserts the same (#631, #639).
+    ddl = (
+        "CREATE TABLE d.t (`a` UInt8, PROJECTION `p\\x41` (SELECT a ORDER BY a)) "
+        "ENGINE = MergeTree ORDER BY a"
+    )
+    assert [p.name for p in parse_projections_from_create_table_query(ddl)] == ["pA"]
+
+
 def test_projection_query_normalises_whitespace() -> None:
     projections = parse_projections_from_create_table_query(WITH_PROJECTIONS_DDL)
     by_country = next(p for p in projections if p.name == "by_country")
