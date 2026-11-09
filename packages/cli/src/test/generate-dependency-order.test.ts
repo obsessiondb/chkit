@@ -65,4 +65,28 @@ describe('@chkit/cli generate dependency order (#231)', () => {
       await rm(fixture.dir, { recursive: true, force: true })
     }
   }, 60_000)
+
+  // ClickHouse reads `z\x5fbase` as z_base and keeps the backslash of `z\q` (#639).
+  test('creates a view after the view it reads through an escaped quoted name', async () => {
+    const fixture = await createFixture(
+      `import { schema, table, view } from '${CORE_ENTRY}'\n\n` +
+        `export default schema(\n` +
+        `  table({ database: 'app', name: 'users', columns: [{ name: 'id', type: 'UInt64' }], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }),\n` +
+        `  view({ database: 'app', name: 'z_base', as: 'SELECT id FROM app.users' }),\n` +
+        `  view({ database: 'app', name: 'z\\\\q', as: 'SELECT id FROM app.users' }),\n` +
+        `  view({ database: 'app', name: 'a_top', as: 'SELECT id FROM app.\`z\\\\x5fbase\`' }),\n` +
+        `  view({ database: 'app', name: 'a_q', as: 'SELECT id FROM app.\`z\\\\q\`' }),\n` +
+        `)\n`
+    )
+    try {
+      const plan = runCli(['generate', '--config', fixture.configPath, '--dryrun', '--json'])
+      expect(plan.exitCode).toBe(0)
+      const keys = (JSON.parse(plan.stdout) as { operations: Array<{ key: string }> }).operations.map((op) => op.key)
+      expect(keys.indexOf('view:app.z_base')).toBeLessThan(keys.indexOf('view:app.a_top'))
+      expect(keys.indexOf('view:app.z\\q')).toBeLessThan(keys.indexOf('view:app.a_q'))
+      expect(keys).toHaveLength(6)
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 60_000)
 })
