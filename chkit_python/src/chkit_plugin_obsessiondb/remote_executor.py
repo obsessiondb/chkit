@@ -42,6 +42,7 @@ from chkit.clickhouse.introspect import (
     list_table_details,
 )
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.jsnum import js_math_round
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.workbench_api import (
     WorkbenchExecuteResult,
@@ -343,7 +344,7 @@ def _quote_string(value: str) -> str:
 
 def _elapsed_ms(value: Any) -> int | None:
     try:
-        return round(float(value) * 1000)
+        return int(js_math_round(float(value) * 1000))
     except (TypeError, ValueError):
         return None
 

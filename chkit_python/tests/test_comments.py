@@ -16,6 +16,7 @@ from chkit.cli.commands.pull_view_parser import parse_as_clause, parse_to_clause
 from chkit.clickhouse.alter_column_statement import ColumnIntent, parse_modify_column_intent
 from chkit.core.model import (
     ColumnDefinition,
+    ColumnInput,
     SchemaDefinition,
     TableDefinition,
     dictionary,
@@ -38,7 +39,7 @@ EDGE_COMMENTS: list[tuple[str, str]] = [
 
 
 def _events(
-    comment: str | None = None, columns: list[ColumnDefinition] | None = None
+    comment: str | None = None, columns: list[ColumnInput] | None = None
 ) -> TableDefinition:
     return table(
         database="app",
@@ -127,7 +128,7 @@ def test_adding_and_removing_an_object_comment_is_modify_comment_at_safe_risk() 
 
 
 def test_an_empty_comment_is_no_comment() -> None:
-    def column(comment: str | None) -> list[ColumnDefinition]:
+    def column(comment: str | None) -> list[ColumnInput]:
         return [ColumnDefinition(name="id", type="UInt64", comment=comment)]
 
     with_empty = [_events("", column("")), *_objects("")[1:]]
