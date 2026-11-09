@@ -46,6 +46,7 @@ from chkit.cli.journal_store import (
     resolve_journal_table_name,
 )
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus, clickhouse_error_message
+from chkit.core.jsnum import js_math_round, js_number_to_string, js_to_fixed
 
 POLL_INTERVAL_SECONDS = 5.0
 # query_status compares whole seconds, so the margin stays more than a second
@@ -141,13 +142,14 @@ def _first_line(value: str) -> str:
     return value.split("\n", 1)[0]
 
 
+# float(value): TS reads a count as a double before dividing it.
 def _format_rows(value: int | None) -> str:
     if value is None or value == 0:
         return "0 rows"
     if value >= _ROWS_M:
-        return f"{value / _ROWS_M:.2f}M rows"
+        return f"{js_to_fixed(float(value) / _ROWS_M, 2)}M rows"
     if value >= _ROWS_K:
-        return f"{value / _ROWS_K:.1f}K rows"
+        return f"{js_to_fixed(float(value) / _ROWS_K, 1)}K rows"
     return f"{value} rows"
 
 
@@ -155,11 +157,11 @@ def _format_bytes(value: int | None) -> str:
     if value is None or value == 0:
         return "0 B"
     if value >= _BYTES_GIB:
-        return f"{value / _BYTES_GIB:.2f} GiB"
+        return f"{js_to_fixed(float(value) / _BYTES_GIB, 2)} GiB"
     if value >= _BYTES_MIB:
-        return f"{value / _BYTES_MIB:.1f} MiB"
+        return f"{js_to_fixed(float(value) / _BYTES_MIB, 1)} MiB"
     if value >= _BYTES_KIB:
-        return f"{value / _BYTES_KIB:.1f} KiB"
+        return f"{js_to_fixed(float(value) / _BYTES_KIB, 1)} KiB"
     return f"{value} B"
 
 
@@ -354,7 +356,10 @@ def _poll_until_terminal(
                     iso_without_zone(datetime.now(tz=UTC)),
                 )
             )
-            finished_sec = round((status.duration_ms or 0) / 1000)
+            # TS reads the duration as a double and prints the result as String(n).
+            finished_sec = js_number_to_string(
+                js_math_round(float(status.duration_ms or 0) / 1000)
+            )
             input_.log(
                 f"  {input_.operation_type}: finished — "
                 f"written={_format_rows(status.written_rows)} "

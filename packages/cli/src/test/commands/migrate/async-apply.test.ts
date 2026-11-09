@@ -734,3 +734,75 @@ describe('applyAsyncStatement', () => {
     expect(writes.map((state) => state.checksum)).toEqual(['changed-checksum', 'changed-checksum'])
   })
 })
+
+// #556: chkit-py prints the same lines for the same statuses
+// (test_migrate_async_apply.py has this table). toFixed rounds the double's
+// exact value and takes the larger candidate on a tie; Math.round takes the
+// one closer to +∞. Exact ties: 1.25, 1.125, 2.5, 0.5. Just below a decimal
+// tie in binary: 1.15, 1.005, 2.675. Just above: 1.35.
+const ROUNDING_CASES: Array<{
+  rows: number
+  bytes: number
+  durationMs: number
+  progress: string
+  finished: string
+}> = [
+  { rows: 999, bytes: 1000, durationMs: 0, progress: '999 rows (1000 B)', finished: '999 rows (1000 B) in 0s' },
+  { rows: 1000, bytes: 1024, durationMs: 499, progress: '1.0K rows (1.0 KiB)', finished: '1.0K rows (1.0 KiB) in 0s' },
+  { rows: 1005, bytes: 1029, durationMs: 500, progress: '1.0K rows (1.0 KiB)', finished: '1.0K rows (1.0 KiB) in 1s' },
+  { rows: 1050, bytes: 1075, durationMs: 1499, progress: '1.1K rows (1.0 KiB)', finished: '1.1K rows (1.0 KiB) in 1s' },
+  { rows: 1150, bytes: 1177, durationMs: 1500, progress: '1.1K rows (1.1 KiB)', finished: '1.1K rows (1.1 KiB) in 2s' },
+  { rows: 1250, bytes: 1280, durationMs: 2500, progress: '1.3K rows (1.3 KiB)', finished: '1.3K rows (1.3 KiB) in 3s' },
+  { rows: 1350, bytes: 3584, durationMs: 3500, progress: '1.4K rows (3.5 KiB)', finished: '1.4K rows (3.5 KiB) in 4s' },
+  { rows: 999_950, bytes: 1_048_575, durationMs: 123_456_500, progress: '1000.0K rows (1024.0 KiB)', finished: '1000.0K rows (1024.0 KiB) in 123457s' },
+  { rows: 1_005_000, bytes: 1_310_720, durationMs: 4500, progress: '1.00M rows (1.3 MiB)', finished: '1.00M rows (1.3 MiB) in 5s' },
+  { rows: 1_125_000, bytes: 1_079_194_419, durationMs: 5500, progress: '1.13M rows (1.01 GiB)', finished: '1.13M rows (1.01 GiB) in 6s' },
+  { rows: 2_675_000, bytes: 1_207_959_552, durationMs: 6500, progress: '2.67M rows (1.13 GiB)', finished: '2.67M rows (1.13 GiB) in 7s' },
+  { rows: 1, bytes: 1, durationMs: 1_000_000_500, progress: '1 rows (1 B)', finished: '1 rows (1 B) in 1000001s' },
+  // UInt64 max: query_status reads it as the nearest double, and String()
+  // prints the rounded seconds in shortest form.
+  {
+    rows: Number('18446744073709551615'),
+    bytes: Number('18446744073709551615'),
+    durationMs: Number('18446744073709551615'),
+    progress: '18446744073709.55M rows (17179869184.00 GiB)',
+    finished: '18446744073709.55M rows (17179869184.00 GiB) in 18446744073709550s',
+  },
+  // A tie only after the exact integer division; as a double it is just below.
+  {
+    rows: 1,
+    bytes: 1,
+    durationMs: 36_028_797_018_964_500,
+    progress: '1 rows (1 B)',
+    finished: '1 rows (1 B) in 36028797018964s',
+  },
+]
+
+describe('applyAsyncStatement progress rounding', () => {
+  test.each(ROUNDING_CASES)(
+    'rows=$rows bytes=$bytes durationMs=$durationMs',
+    async ({ rows, bytes, durationMs, progress, finished }) => {
+      const { db } = createFakeExecutor([
+        { status: 'unknown' },
+        { status: 'running', writtenRows: rows, writtenBytes: bytes },
+        { status: 'finished', writtenRows: rows, writtenBytes: bytes, durationMs },
+      ])
+      const { store } = createFakeJournalStore(null)
+      const lines: string[] = []
+
+      await applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: (line) => lines.push(line),
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      })
+
+      expect(lines.filter((line) => line.includes('written='))).toEqual([
+        `  load_table_data: written=${progress}, elapsed 0s`,
+        `  load_table_data: finished — written=${finished}`,
+      ])
+    },
+  )
+})
