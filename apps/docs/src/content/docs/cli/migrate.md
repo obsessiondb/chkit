@@ -22,7 +22,7 @@ chkit migrate [flags]
 | `--allow-destructive` | boolean | `false` | Allow destructive operations (required in non-interactive mode) |
 | `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` or interactive confirmation |
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
-| `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
+| `-t`, `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
 | `--setting <name=value>` | string[] | — | Send a ClickHouse [query setting](#query-settings) with each migration statement. Repeatable, or comma-separated |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).

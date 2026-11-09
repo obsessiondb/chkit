@@ -422,6 +422,22 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('a plugin command without flags rejects an unknown short flag in both forms (#491)', async () => {
+    const fixture = await createHookProbeFixture()
+    try {
+      const shortcut = runCli(['probe', 'other', '-x', '--config', fixture.configPath])
+      expect(shortcut.exitCode).toBe(1)
+      expect(shortcut.stderr.trim()).toBe('Unknown flag: -x')
+
+      const forwarded = runCli(['plugin', 'probe', 'other', '-x', '--config', fixture.configPath])
+      expect(forwarded.exitCode).toBe(1)
+      expect(forwarded.stderr).toContain('Unknown flag: -x')
+      expect(forwarded.stderr).not.toContain('getContext other')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('chkit plugin backfill plan writes state artifact', async () => {
     const chEnv = getClickHouseEnv()
     const chConfig = clickhouseConfigBlock(chEnv)

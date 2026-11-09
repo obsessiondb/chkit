@@ -317,11 +317,13 @@ def test_finding_13_onboarding_default_runner_is_bare_chkit(
 # ---------- #4 + #10: alias set by service NAME + validation ----------
 
 
-def test_finding_4_10_alias_set_validation_rejects_dash_dash_prefix() -> None:
+def test_finding_4_10_alias_set_validation_rejects_dash_prefix() -> None:
 
     assert _validate_alias("") == "Alias is required."
     assert _validate_alias("  prod  ").startswith("Alias cannot start or end")
-    assert _validate_alias("--prod") == 'Alias cannot start with "--".'
+    # Any leading dash reads as a flag on the command line (#491).
+    for name in ("--prod", "-prod", "-"):
+        assert _validate_alias(name) == 'Alias cannot start with "-".'
     assert _validate_alias("prod") is None
 
 

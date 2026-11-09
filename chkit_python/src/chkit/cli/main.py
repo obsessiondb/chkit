@@ -6,7 +6,7 @@ import logging
 from typing import Any
 
 import typer
-from typer.core import TyperGroup
+from typer.core import TyperCommand, TyperGroup
 from typer.exceptions import TyperException
 
 from chkit import __version__
@@ -29,6 +29,110 @@ from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
 
 
+def _normalize_short_options(
+    ctx: Any, args: list[str], params: list[Any], *, leading_only: bool = False
+) -> list[str]:
+    """Read short options the way the TS CLI does (#491).
+
+    click takes ``-t=x`` as the value ``=x`` and accepts bundles such as
+    ``-fo x``; TS reads ``-t=x`` as ``--table=x`` and rejects a bundle as an
+    unknown flag. So ``-t=x`` becomes ``-t x`` and a short flag that takes no
+    value followed by more characters (``-fo``, ``-hx``) is a usage error. A
+    value, including one that looks like a short flag (``--name -t=x``),
+    unknown options and everything after ``--`` pass through unchanged.
+    ``leading_only`` stops at the first argument, for the top-level group,
+    whose remaining arguments belong to the subcommand.
+    """
+    takes_value: dict[str, bool] = {}
+    for param in params:
+        if param.param_type_name == "option":
+            for opt in [*param.opts, *param.secondary_opts]:
+                takes_value[opt] = not (param.is_flag or param.count)
+
+    normalized: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--" or (leading_only and not token.startswith("-")):
+            normalized.extend(args[i - 1 :])
+            break
+        name = token if token.startswith("--") else token[:2]
+        rest = "" if token.startswith("--") else token[2:]
+        if name not in takes_value:
+            normalized.append(token)
+            continue
+        if not takes_value[name]:
+            if rest:
+                ctx.fail(f"No such option: {token}")
+            normalized.append(token)
+            continue
+        if rest.startswith("="):
+            normalized.extend([name, rest[1:]])
+            continue
+        normalized.append(token)
+        if not rest and i < len(args):
+            normalized.append(args[i])
+            i += 1
+    return normalized
+
+
+def _split_forwarded_args(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
+    """Separate a plugin forwarder's own options from the plugin's arguments.
+
+    ``plugin``, ``codegen`` and ``obsessiondb`` pass unknown tokens to the
+    plugin command, but click would still read the letters of a token such as
+    ``-hmodels.py`` (a value of ``--out-file``) or ``-xh`` as its own short
+    options. As in TS, only the forwarder's options in their exact forms
+    (``-h``, ``--json``, ``-c x`` / ``-c=x`` / ``-cx``, ``--config x``) are
+    read here; every other token goes behind ``--``, in order, so click hands
+    it to the plugin untouched (#491).
+    """
+    takes_value: dict[str, bool] = {}
+    for param in params:
+        if param.param_type_name == "option":
+            for opt in [*param.opts, *param.secondary_opts]:
+                takes_value[opt] = not (param.is_flag or param.count)
+
+    own: list[str] = []
+    forwarded: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--":
+            forwarded.extend(args[i:])
+            break
+        long_name = token.split("=", 1)[0] if token.startswith("--") else None
+        short_name = token[:2] if long_name is None else None
+        if token in takes_value:
+            own.append(token)
+            if takes_value[token]:
+                # Without its value, click would take the `--` below as the value.
+                if i >= len(args):
+                    ctx.fail(f"Option '{token}' requires an argument.")
+                own.append(args[i])
+                i += 1
+        elif long_name is not None and takes_value.get(long_name):
+            own.append(token)
+        elif short_name is not None and takes_value.get(short_name):
+            value = token[2:]
+            own.extend([short_name, value[1:] if value.startswith("=") else value])
+        else:
+            forwarded.append(token)
+    return [*own, "--", *forwarded]
+
+
+class _ChkitCommand(TyperCommand):
+    """Every chkit command reads short options as TS does (#491)."""
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        params = self.get_params(ctx)
+        if ctx.ignore_unknown_options:
+            return super().parse_args(ctx, _split_forwarded_args(ctx, args, params))
+        return super().parse_args(ctx, _normalize_short_options(ctx, args, params))
+
+
 class _ChkitGroup(TyperGroup):
     """Port of the TS CLI's top-level catch (``packages/cli/src/bin/chkit.ts``):
     a command that fails under ``--json`` without having written JSON yet still
@@ -36,6 +140,14 @@ class _ChkitGroup(TyperGroup):
     its message as one line on stderr and exits 1; ``CHKIT_DEBUG=1`` also logs
     the traceback. Usage errors are re-raised, so click still reports them.
     """
+
+    def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        return super().parse_args(
+            ctx,
+            _normalize_short_options(
+                ctx, args, self.get_params(ctx), leading_only=True
+            ),
+        )
 
     # Any: typer vendors click privately (typer._click), and the public
     # typer.Context subclass would narrow the parameter (mypy [override]).
@@ -67,28 +179,35 @@ app = typer.Typer(
     help="ClickHouse schema and migration toolkit",
     add_completion=False,
     cls=_ChkitGroup,
+    # As in TS, -h is --help on every command (#491).
+    context_settings={"help_option_names": ["-h", "--help"]},
 )
 
-app.command("init", help="Create a starter clickhouse.config.py and example schema.")(init.run)
-app.command("generate", help="Generate a new migration from the current schema.")(generate.run)
-app.command("migrate", help="Apply pending migrations to the target database.")(migrate.run)
-app.command("status", help="Show migration status and pending operations.")(status.run)
-app.command("check", help="Run pre-flight checks (drift, checksums, pending).")(check.run)
-app.command("drift", help="Compare the live database against the schema snapshot.")(drift.run)
-app.command("snapshot", help=snapshot.SNAPSHOT_HELP)(snapshot.run)
-app.command("query", help="Run a SQL string against the configured ClickHouse target.")(query.run)
-app.command("pull", help="Introspect live ClickHouse and emit a Python schema file.")(pull.run)
-app.command(
+
+def _command(name: str, **kwargs: Any) -> Any:
+    return app.command(name, cls=_ChkitCommand, **kwargs)
+
+
+_command("init", help="Create a starter clickhouse.config.py and example schema.")(init.run)
+_command("generate", help="Generate a new migration from the current schema.")(generate.run)
+_command("migrate", help="Apply pending migrations to the target database.")(migrate.run)
+_command("status", help="Show migration status and pending operations.")(status.run)
+_command("check", help="Run pre-flight checks (drift, checksums, pending).")(check.run)
+_command("drift", help="Compare the live database against the schema snapshot.")(drift.run)
+_command("snapshot", help=snapshot.SNAPSHOT_HELP)(snapshot.run)
+_command("query", help="Run a SQL string against the configured ClickHouse target.")(query.run)
+_command("pull", help="Introspect live ClickHouse and emit a Python schema file.")(pull.run)
+_command(
     "plugin",
     help="List configured plugins or dispatch a plugin command.",
     context_settings={"ignore_unknown_options": True},
 )(plugin.run)
-app.command(
+_command(
     "codegen",
     help="Generate typed row models via the codegen plugin (shortcut).",
     context_settings={"ignore_unknown_options": True},
 )(codegen_shortcut.run)
-app.command(
+_command(
     "obsessiondb",
     help="Run ObsessionDB commands (login, signup, service, ...) via the plugin.",
     context_settings={"ignore_unknown_options": True},
@@ -102,6 +221,7 @@ def _root(
         False,  # noqa: FBT003 - typer positional default is part of its API
         "--version",
         "-V",
+        "-v",
         help="Show the chkit version and exit.",
     ),
 ) -> None:

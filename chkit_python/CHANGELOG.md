@@ -2,6 +2,22 @@
 
 ## Unreleased
 
+### Added
+- `-h` is `--help` on every command and `-v` is `--version`, as in TS (#491). TS now accepts
+  chkit-py's short flags too, so both CLIs take the same ones.
+
+### Changed
+- Short flags read as in TS (#491): `-t=x` is `--table x` (it was the table `=x`), and a
+  bundle such as `pull -fo out.py` is rejected as `No such option: -fo` instead of being
+  split. `-tx` keeps working.
+- `chkit obsessiondb service alias set` rejects an alias that starts with `-`, which the
+  command line would read as a flag (#491). An alias saved earlier still loads and is
+  listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
+
+### Fixed
+- `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
+  such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
+  plugin command as a positional argument (#491, fixed in TS too).
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement

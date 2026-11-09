@@ -30,6 +30,7 @@ from chkit.core.flags import (
     MissingFlagValueError,
     ParsedFlags,
     UnknownFlagError,
+    expand_short_flags,
     parse_flags,
 )
 from chkit.core.model import ChxConfigEnv
@@ -76,7 +77,7 @@ def _split_positionals_and_flags(
     command's declared flags (unknown ``--flags`` error out via
     ``UnknownFlagError``), everything else stays positional.
     """
-    allowed = {"name", "type", "description", "placeholder", "negation"}
+    allowed = {"name", "type", "description", "placeholder", "negation", "short"}
     defs = [
         cast("FlagDef", {k: v for k, v in entry.items() if k in allowed})
         for entry in flag_defs
@@ -85,6 +86,7 @@ def _split_positionals_and_flags(
 
     lookup = {d["name"]: d for d in defs}
     positionals: list[str] = []
+    tokens = expand_short_flags(tokens, defs)
     i = 0
     while i < len(tokens):
         token = tokens[i]

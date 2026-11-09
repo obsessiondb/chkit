@@ -126,22 +126,21 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 1
   }
   const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, pluginName, targetCommand)
-  let mergedFlags: ParsedFlags = { ...flags }
-  if (commandFlags.length > 0) {
-    try {
-      const parsed = parseFlags(commandArgs, commandFlags)
-      mergedFlags = { ...flags, ...parsed }
-    } catch (error) {
-      if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
-        if (jsonMode) {
-          emitJson('plugin', { ok: false, error: error.message })
-        } else {
-          console.error(error.message)
-        }
-        return 1
+  // Parse even when the command declares no flags, so an unknown flag is
+  // rejected as in `chkit <plugin> <command>` instead of reaching the args (#491).
+  let mergedFlags: ParsedFlags
+  try {
+    mergedFlags = { ...flags, ...parseFlags(commandArgs, commandFlags) }
+  } catch (error) {
+    if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
+      if (jsonMode) {
+        emitJson('plugin', { ok: false, error: error.message })
+      } else {
+        console.error(error.message)
       }
-      throw error
+      return 1
     }
+    throw error
   }
 
   const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {

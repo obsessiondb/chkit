@@ -26,6 +26,8 @@ chkit init [flags]
 
 See [global flags](/cli/overview/#global-flags).
 
+An unknown flag, long or short (`--bogus`, `-x`), or a flag missing its value stops `init` before it writes anything.
+
 ## Behavior
 
 `chkit init` runs three steps in order. Each is idempotent, so re-running on an existing project is safe.
@@ -86,7 +88,7 @@ For a fully scripted claim with no prompts, use the two-step OTP flow in [Gettin
 | Code | Meaning |
 |------|---------|
 | 0 | Success |
-| non-zero | An explicitly requested connect path could not complete |
+| non-zero | An unknown flag or missing flag value, or an explicitly requested connect path could not complete |
 
 ## Related commands
 
