@@ -5,6 +5,7 @@ rejects it. A bare trailing ``--`` is ignored."""
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -44,6 +45,12 @@ def _extra_args(args: str) -> str:
     return f"Got unexpected extra argument(s) ({args})"
 
 
+def _usage_message(output: str) -> str:
+    """The usage error's text, without click's colors, box drawing and line wrapping."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", plain).split())
+
+
 def test_a_trailing_dash_dash_is_ignored(project: Path) -> None:
     plain = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
     assert plain.exit_code == 0, plain.output
@@ -78,7 +85,7 @@ def test_what_follows_dash_dash_is_a_stray_argument(
     # The exit code and the form of click's report are #607.
     assert result.exit_code != 0, args
     assert result.stdout == "", args
-    assert _extra_args(rest) in result.stderr, args
+    assert _extra_args(rest) in _usage_message(result.stderr), args
 
 
 def test_a_flag_error_before_dash_dash_ignores_a_json_after_it(project: Path) -> None:
@@ -105,7 +112,7 @@ def test_init_rejects_what_follows_dash_dash_before_writing_anything(project: Pa
     ):
         result = CliRunner().invoke(app, args)
         assert result.exit_code != 0, args
-        assert _extra_args(rest) in result.stderr, args
+        assert _extra_args(rest) in _usage_message(result.stderr), args
     assert not (project / "clickhouse.config.py").exists()
 
     accepted = CliRunner().invoke(app, ["init", "-y", "--"])
