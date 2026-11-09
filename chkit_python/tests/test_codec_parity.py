@@ -260,8 +260,8 @@ def test_codecs_equal_single_step_vs_array_form_same_content() -> None:
 
 
 def test_codecs_equal_chain_order_matters() -> None:
-    a = [{"kind": "Delta", "size": 4}, {"kind": "ZSTD"}]
-    b = [{"kind": "ZSTD"}, {"kind": "Delta", "size": 4}]
+    a: CodecSpecInput = [{"kind": "Delta", "size": 4}, {"kind": "ZSTD"}]
+    b: CodecSpecInput = [{"kind": "ZSTD"}, {"kind": "Delta", "size": 4}]
     assert codecs_equal(a, b) is False
 
 

@@ -15,6 +15,8 @@ from chkit.clickhouse.ddl_propagation import wait_for_view
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     ChxResolvedClickHouseConfig,
+    ColumnInput,
+    SchemaDefinition,
     dictionary,
     materialized_view,
     table,
@@ -46,8 +48,11 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
         report, orders_mv = f"{prefix}report", f"{prefix}orders_mv"
         statuses = f"{prefix}statuses"
         mv_query = f"SELECT day, amount FROM {orders} WHERE status != 'Refunded'"
-        target_columns = [{"name": "day", "type": "Date"}, {"name": "amount", "type": "UInt64"}]
-        definitions = [
+        target_columns: list[ColumnInput] = [
+            {"name": "day", "type": "Date"},
+            {"name": "amount", "type": "UInt64"},
+        ]
+        definitions: list[SchemaDefinition] = [
             table(
                 database=database,
                 name=orders,
