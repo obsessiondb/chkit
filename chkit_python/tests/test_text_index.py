@@ -16,12 +16,16 @@ from chkit.core.text_index import (
     canonicalize_text_index,
     parse_text_index_params,
     render_text_index_type,
+    text_index_fingerprint,
 )
 from chkit.core.text_index_sql import normalize_text_index_sql
 from chkit.core.validate import validate_definitions
 
 CASES = json.loads(
     (Path(__file__).resolve().parents[2] / "test/fixtures/text-index.json").read_text()
+)
+FORMATS = json.loads(
+    (Path(__file__).resolve().parents[2] / "test/fixtures/text-index-format.json").read_text()
 )
 IDENTIFIERS = json.loads(
     (Path(__file__).resolve().parents[2] / "test/fixtures/text-index-identifiers.json").read_text()
@@ -81,6 +85,36 @@ def test_granularity_does_not_change_schema(granularity):
     changed = docs(index.model_copy(update={"granularity": granularity}))
     assert "GRANULARITY 100000000" in to_create_sql(changed)
     assert plan_diff([docs(index)], [changed]).operations == []
+
+
+# Operator keywords keep their space before `(`; function calls stay tight (#586).
+@pytest.mark.parametrize(
+    ("sql", "expected"), [(case["sql"], case["expected"]) for case in FORMATS], ids=str
+)
+def test_keyword_spacing(sql, expected):
+    assert normalize_text_index_sql(sql) == expected
+
+
+def test_indexes_written_before_keyword_spacing_fix_plan_no_migration():
+    # Snapshots and pulled files from before #586 hold `OR(` and `NOT(`.
+    before = SkipIndexText(
+        name="idx",
+        expression="if((s = '(') OR(t = ')'), s, t)",
+        tokenizer="splitByNonAlpha",
+        preprocessor="if(NOT(body = ''), lower(body), body)",
+    )
+    after = SkipIndexText(
+        name="idx",
+        expression="if((s = '(') OR (t = ')'), s, t)",
+        tokenizer="splitByNonAlpha",
+        preprocessor="if(NOT (body = ''), lower(body), body)",
+    )
+    assert (
+        "INDEX `idx` (if((s = '(') OR (t = ')'), s, t)) TYPE text(tokenizer = splitByNonAlpha, "
+        "preprocessor = if(NOT (body = ''), lower(body), body))"
+    ) in to_create_sql(docs(after))
+    assert text_index_fingerprint(before) == text_index_fingerprint(after)
+    assert plan_diff(canonicalize_definitions([docs(before)]), [docs(after)]).operations == []
 
 
 def test_equivalent_escapes():

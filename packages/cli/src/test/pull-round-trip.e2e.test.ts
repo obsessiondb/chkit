@@ -113,6 +113,14 @@ export default schema(
     database: db, name: 'daily', engine: 'MergeTree()', primaryKey: ['day'], orderBy: ['day'],
     columns: [{ name: 'day', type: 'Date' }, { name: 'c', type: 'UInt64' }],
   }),
+  // Key columns whose names hold a comma or a space read back quoted (#558).
+  table({
+    database: db, name: 'keyed', engine: 'MergeTree()', orderBy: ['id', 'a, b', 'a b', 'cityHash64(a,b)'],
+    columns: [
+      { name: 'id', type: 'UInt64' }, { name: 'a', type: 'String' }, { name: 'b', type: 'String' },
+      { name: 'a, b', type: 'String' }, { name: 'a b', type: 'String' }, { name: 'ab', type: 'String' },
+    ],
+  }),
   view({ database: db, name: 'recent', as: 'SELECT id, n FROM ${database}.events' }),
   materializedView({
     database: db, name: 'daily_mv', to: { database: db, name: 'daily' },
@@ -136,10 +144,10 @@ export default schema(
     const pull = () => runCli(dir, ['pull', '--config', configPath, '--database', database, '--out-file', pulledPath, '--force', '--json'], cliEnv)
     const pulled = await pollUntil(
       async () => pull(),
-      (result) => result.exitCode === 0 && (JSON.parse(result.stdout) as { definitionCount: number }).definitionCount === 10
+      (result) => result.exitCode === 0 && (JSON.parse(result.stdout) as { definitionCount: number }).definitionCount === 11
     )
     expect(pulled.exitCode, formatTestDiagnostic('pull', pulled)).toBe(0)
-    expect((JSON.parse(pulled.stdout) as { definitionCount: number }).definitionCount).toBe(10)
+    expect((JSON.parse(pulled.stdout) as { definitionCount: number }).definitionCount).toBe(11)
     const pulledContent = await readFile(pulledPath, 'utf8')
     expect(pulledContent).not.toContain(journalTable)
     expect(pulledContent).toContain('index_granularity')
@@ -158,6 +166,26 @@ export default schema(
     expect(pulledContent).toContain('expression: "s"')
     expect(pulledContent).toContain('expression: "lower(s)"')
     expect(pulledContent).toContain('expression: "(a + b) * c"')
+
+    // The pulled key names the column `a, b`; as columns a and b it is another
+    // key, which generate plans and drift reports (#558).
+    expect(pulledContent).toContain('orderBy: ["id", "`a, b`", "`a b`", "cityHash64(a, b)"]')
+    await writeFile(schemaPath, pulledContent.replace("'@chkit/core'", JSON.stringify(CORE_ENTRY)).replaceAll('"`a, b`"', '"a", "b"'), 'utf8')
+    const rekeyed = runCli(dir, ['generate', '--config', configPath, '--dryrun', '--json'], cliEnv)
+    expect(rekeyed.exitCode, formatTestDiagnostic('generate with columns a, b in the key', rekeyed)).toBe(0)
+    expect((JSON.parse(rekeyed.stdout) as { operations: Array<{ type: string; key: string }> }).operations).toEqual([
+      expect.objectContaining({ type: 'drop_table', key: `table:${database}.keyed` }),
+      expect.objectContaining({ type: 'create_table', key: `table:${database}.keyed` }),
+    ])
+    // Drift compares the snapshot, which generate writes, with the live table.
+    const regenerated = runCli(dir, ['generate', '--config', configPath, '--name', 'rekey', '--json'], cliEnv)
+    expect(regenerated.exitCode, formatTestDiagnostic('generate rekey', regenerated)).toBe(0)
+    const rekeyedDrift = runCli(dir, ['drift', '--config', configPath, '--json'], cliEnv)
+    expect(rekeyedDrift.exitCode, formatTestDiagnostic('drift with columns a, b in the key', rekeyedDrift)).toBe(0)
+    expect(JSON.parse(rekeyedDrift.stdout)).toMatchObject({
+      drifted: true,
+      tableDrift: [{ table: `${database}.keyed`, reasonCodes: ['primary_key_mismatch', 'order_by_mismatch'] }],
+    })
   } finally {
     await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
     await executor.close()

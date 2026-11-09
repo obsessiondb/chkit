@@ -273,3 +273,40 @@ def test_a_failing_query_prints_the_clickhouse_message_like_ts(
     assert as_json.exit_code == 1, format_test_diagnostic("query --json did not fail", as_json)
     payload = json.loads(as_json.stdout)
     assert payload["error"] == {"code": "395", "message": table.stderr.removesuffix("\n")}
+
+
+def test_query_runs_sql_that_starts_with_a_dash_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # #584: click read SQL that starts with a line comment as an unknown option.
+    env = resolve_live_env()
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": env.clickhouse_database,
+            },
+        })
+        + ")\n"
+    )
+
+    for args in (
+        ["SELECT -1 AS n", "--json"],
+        ["--json", "-- note\nSELECT -1 AS n WHERE n = -1"],
+        ["--note\nSELECT -1 AS n", "--json"],
+        ["--json", "--", "-- note\nSELECT -1 AS n"],
+    ):
+        result = CliRunner().invoke(app, ["query", *args])
+        assert result.exit_code == 0, format_test_diagnostic(f"query {args} failed", result)
+        assert json.loads(result.stdout)["data"] == [{"n": -1}], args
+
+    # After `--`, `-1` is SQL: ClickHouse rejects it, not the option parser.
+    terminated = CliRunner().invoke(app, ["query", "--", "-1"])
+    assert terminated.exit_code == 1, format_test_diagnostic("query -- -1", terminated)
+    assert "syntax error" in terminated.stderr.lower()

@@ -645,6 +645,8 @@ def test_table_shape_compares_a_literal_default_by_value_as_generate_does() -> N
         ("fn:9007199254740993.", "9007199254740992."),
         (2.0, "2."),
         ("it's", "'it\\'s'"),
+        # The `)` inside the heredoc is text, so the outer pair still wraps it (#587).
+        ("fn:($$a)$$)", "'a)'"),
     ]
     for declared, stored in same:
         expected = ColumnDefinition(name="value", type="Float64", default=declared)  # type: ignore[arg-type]

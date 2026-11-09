@@ -17,6 +17,7 @@ from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
 from chkit.core.identifier import quote_identifier, render_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint
+from chkit.core.key_clause import key_clause_fingerprint
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefaultValue,
@@ -64,6 +65,7 @@ from chkit.core.sql import (
     render_alter_remove_column_expression,
     render_alter_reset_setting,
     render_dictionary_sql,
+    render_key_clause_columns,
     to_create_sql,
 )
 from chkit.core.sql_normalizer import sql_expression_fingerprint
@@ -182,57 +184,26 @@ def _push_create_database(
     )
 
 
-# Mirrors the JS `\s` class exactly (TS uses /\s/.test(char)); Python's
-# str.isspace() differs on U+0085/U+001C-001F (included) and U+FEFF (excluded),
-# which would let a pathological key expression diff differently across ports.
-_JS_WHITESPACE_RE = re.compile(
-    r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
-)
+def _key_fingerprint(definition: TableDefinition, keys: list[str] | None) -> str:
+    """Keys compare by their tokens as chkit renders them.
 
-
-def _strip_insignificant_formatting(token: str) -> str:
-    """Drop whitespace and identifier backticks for key-clause comparison.
-
-    ClickHouse normalizes both when it stores a key: ``toStartOfHour( ts )``
-    comes back as ``toStartOfHour(ts)``, and a column written bare as
-    ``user-id`` in config is stored/introspected quoted as ``` `user-id` ```.
-    Single/double-quoted string literals are semantic and preserved.
-    Comparison-only — never used to render DDL, so keyword expressions like
-    ``INTERVAL 1 HOUR`` and real identifier quoting keep their form when
-    emitted.
+    Whitespace, identifier quoting and how the parts are split across entries
+    (``['cityHash64(a', 'b)']``) carry no meaning (#176, #178), while a declared
+    column named ``a, b`` stays one name rather than reading as columns ``a``
+    and ``b`` (#558).
     """
-    out: list[str] = []
-    quote: str | None = None
-    for i, char in enumerate(token):
-        if quote is not None:
-            out.append(char)
-            if char == quote and (i == 0 or token[i - 1] != "\\"):
-                quote = None
-            continue
-        if char in ("'", '"'):
-            quote = char
-            out.append(char)
-            continue
-        if char == "`":
-            continue
-        if _JS_WHITESPACE_RE.match(char) is not None:
-            continue
-        out.append(char)
-    return "".join(out)
-
-
-def _join_clause(values: list[str] | None) -> str:
-    return ",".join(_strip_insignificant_formatting(value) for value in values or [])
+    column_names = {column.name for column in definition.columns}
+    return key_clause_fingerprint(render_key_clause_columns(keys or [], column_names))
 
 
 def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool:
     return diff_clauses(
         [
             (old.engine, new.engine),
-            (_join_clause(old.primary_key), _join_clause(new.primary_key)),
-            (_join_clause(old.order_by), _join_clause(new.order_by)),
+            (_key_fingerprint(old, old.primary_key), _key_fingerprint(new, new.primary_key)),
+            (_key_fingerprint(old, old.order_by), _key_fingerprint(new, new.order_by)),
             (old.partition_by or "", new.partition_by or ""),
-            (_join_clause(old.unique_key), _join_clause(new.unique_key)),
+            (_key_fingerprint(old, old.unique_key), _key_fingerprint(new, new.unique_key)),
             # ClickHouse refuses to change or reset these on an existing table (#466).
             (
                 readonly_settings_fingerprint(old.settings),

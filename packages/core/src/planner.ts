@@ -38,8 +38,10 @@ import {
   renderDictionarySQL,
   columnTypeFingerprint,
   columnCodecFingerprint,
+  renderKeyClauseColumns,
   toCreateSQL,
 } from './sql.js'
+import { keyClauseFingerprint } from './key-clause.js'
 import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
 import { readonlySettingsFingerprint } from './table-settings.js'
@@ -154,56 +156,30 @@ function pushCreateDatabaseOperation(
   })
 }
 
-// Whitespace and identifier backtick-quoting carry no meaning in a key clause,
-// and ClickHouse normalizes both when it stores the key: `toStartOfHour( ts )`
-// comes back as `toStartOfHour(ts)`, and a column written bare as `user-id` in
-// config is stored/introspected quoted as `` `user-id` ``. Drop insignificant
-// whitespace and identifier backticks (but preserve single/double-quoted string
-// literals, which are semantic) so a config clause and the introspected clause
-// compare equal, avoiding a phantom table recreate. Comparison-only — never
-// used to render DDL, so keyword expressions like `INTERVAL 1 HOUR` and real
-// identifier quoting keep their form when emitted.
-function stripInsignificantFormatting(token: string): string {
-  let out = ''
-  let quote: "'" | '"' | null = null
-  for (let i = 0; i < token.length; i += 1) {
-    const char = token[i] ?? ''
-    if (quote) {
-      out += char
-      if (char === quote && token[i - 1] !== '\\') quote = null
-      continue
-    }
-    if (char === "'" || char === '"') {
-      quote = char
-      out += char
-      continue
-    }
-    if (char === '`') continue
-    if (/\s/.test(char)) continue
-    out += char
-  }
-  return out
-}
-
-function normalizeClauseList(value: string[] | undefined): string {
-  return (value ?? []).map(stripInsignificantFormatting).join(',')
+// Keys compare by their tokens as chkit renders them, so whitespace, identifier
+// quoting and how the parts are split across entries (`['cityHash64(a', 'b)']`)
+// carry no meaning (#176, #178), while a declared column named `a, b` stays one
+// name rather than reading as columns `a` and `b` (#558).
+function keyFingerprint(def: TableDefinition, keys: string[] | undefined): string {
+  const columnNames = new Set(def.columns.map((column) => column.name))
+  return keyClauseFingerprint(renderKeyClauseColumns(keys ?? [], columnNames))
 }
 
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {
   return diffClauses([
     { oldValue: oldDef.engine, newValue: newDef.engine },
     {
-      oldValue: normalizeClauseList(oldDef.primaryKey),
-      newValue: normalizeClauseList(newDef.primaryKey),
+      oldValue: keyFingerprint(oldDef, oldDef.primaryKey),
+      newValue: keyFingerprint(newDef, newDef.primaryKey),
     },
     {
-      oldValue: normalizeClauseList(oldDef.orderBy),
-      newValue: normalizeClauseList(newDef.orderBy),
+      oldValue: keyFingerprint(oldDef, oldDef.orderBy),
+      newValue: keyFingerprint(newDef, newDef.orderBy),
     },
     { oldValue: oldDef.partitionBy ?? '', newValue: newDef.partitionBy ?? '' },
     {
-      oldValue: normalizeClauseList(oldDef.uniqueKey),
-      newValue: normalizeClauseList(newDef.uniqueKey),
+      oldValue: keyFingerprint(oldDef, oldDef.uniqueKey),
+      newValue: keyFingerprint(newDef, newDef.uniqueKey),
     },
     // ClickHouse refuses to change or reset these on an existing table (#466).
     {

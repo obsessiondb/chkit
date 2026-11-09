@@ -534,7 +534,7 @@ def _engine_arguments(engine: str) -> list[str]:
 
 def _unquote(name: str) -> str:
     """A column name with its backtick or double-quote identifier quotes removed."""
-    name = name.strip()
+    name = js_trim(name)
     return name[1:-1] if len(name) > 1 and name[0] == name[-1] and name[0] in "`\"" else name
 
 

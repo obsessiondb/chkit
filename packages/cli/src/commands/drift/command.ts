@@ -5,7 +5,7 @@ import { configuredIndexGranularity } from '@chkit/core'
 
 import { typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { readSnapshot } from '../../runtime/migration-store.js'
 import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
@@ -14,10 +14,10 @@ import { buildDriftPayload, type DriftPayload } from './payload.js'
 export const driftCommand: ChxPluginCommand = {
   name: 'drift',
   description: 'Compare snapshot state with current ClickHouse objects',
-  flags: [],
+  flags: [TABLE_FLAG],
   async run(context): Promise<undefined | number> {
     const { flags, config, pluginContext } = context
-    const f = typedFlags(flags, GLOBAL_FLAGS)
+    const f = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)
     const tableSelector = f['--table']
     const jsonMode = f['--json'] === true
     const { metaDir } = resolveDirs(config)

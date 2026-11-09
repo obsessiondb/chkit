@@ -4,7 +4,6 @@ such as ``-fd`` is an unknown option, ``-h`` is help and ``-v`` the version."""
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +14,6 @@ from typer.testing import CliRunner
 from chkit import __version__
 from chkit.cli.commands import codegen_shortcut
 from chkit.cli.main import _normalize_short_options, app
-
-# CI forces rich to colour usage errors.
-ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
 
 CONFIG = (
     'from chkit import define_config\n\nconfig = define_config({"schema": "./schema.py", '
@@ -62,18 +58,17 @@ def test_a_bundle_of_short_flags_is_an_unknown_option(project: Path) -> None:
         (["pull", "-fd", "app"], "-fd"),
         (["init", "-yh"], "-yh"),
         (["status", "-hx"], "-hx"),
-        (["init", "-y=1"], "-y=1"),
+        (["init", "-y=1"], "--yes=1"),
     ):
         result = CliRunner().invoke(app, args)
-        assert result.exit_code == 2, (args, result.output)
-        assert f"No such option: {token}" in ANSI_STYLE.sub("", result.output), args
+        assert (result.exit_code, result.stderr) == (1, f"Unknown flag: {token}\n"), args
     assert not (project / "src").exists()
 
 
 def test_a_value_that_looks_like_a_short_flag_is_kept() -> None:
     params = get_command(app).commands["generate"].params  # type: ignore[attr-defined]
     assert _normalize_short_options(
-        None, ["--name", "-t=x", "-t=app.users", "--", "-c=y"], params
+        ["--name", "-t=x", "-t=app.users", "--", "-c=y"], params
     ) == ["--name", "-t=x", "-t", "app.users", "--", "-c=y"]
 
 
@@ -89,7 +84,7 @@ def test_a_forwarder_reads_only_its_own_options_and_passes_the_rest_on(
         (["--out-file", "-hmodels.py", "--json"], ["--out-file", "-hmodels.py"], None),
         # A bundle reaches the plugin, which rejects it as TS does, not click's help.
         (["-xh"], ["-xh"], None),
-        (["--check", "-c=cfg.py", "--", "-c", "x"], ["--check", "-c", "x"], "cfg.py"),
+        (["--check", "-c=cfg.py", "--", "-c", "x"], ["--check", "--", "-c", "x"], "cfg.py"),
         (["-ccfg.py", "--check"], ["--check"], "cfg.py"),
         (["--config", "cfg.py", "--check"], ["--check"], "cfg.py"),
     ):
@@ -110,11 +105,12 @@ def test_a_forwarder_option_without_its_value_is_a_usage_error() -> None:
         for option in ("--config", "-c"):
             args = [*command, "--out-file", "-hmodels.py", option]
             result = CliRunner().invoke(app, args)
-            output = ANSI_STYLE.sub("", result.output)
-            assert result.exit_code == 2, (args, output)
-            assert f"Option '{option}' requires an argument." in output, args
-            # A usage error, not the help that a forwarded -h would print.
-            assert "Options" not in output, args
+            # A usage error (#563), not the help that a forwarded -h would print.
+            assert (result.exit_code, result.stdout, result.stderr) == (
+                1,
+                "",
+                "Missing value for --config\n",
+            ), args
 
 
 def test_h_is_help_and_v_is_the_version() -> None:
@@ -125,3 +121,39 @@ def test_h_is_help_and_v_is_the_version() -> None:
     for flag in ("-v", "-V", "--version"):
         result = CliRunner().invoke(app, [flag])
         assert (result.exit_code, result.stdout) == (0, f"{__version__}\n")
+
+
+def test_the_last_config_flag_picks_the_config(project: Path) -> None:
+    """The last of several ``--config`` / ``-c`` wins in every form, as in TS (#574)."""
+    other = project / "other"
+    other.mkdir()
+    (other / "clickhouse.config.py").write_text(
+        CONFIG.replace("./schema.py", str(other / "schema.py"))
+    )
+    (other / "schema.py").write_text("from chkit import table\n\n" + SCHEMA.split("\n")[0] + "\n")
+    a = str(project / "clickhouse.config.py")
+    b = str(other / "clickhouse.config.py")
+
+    def plan(*args: str) -> Any:
+        result = CliRunner().invoke(app, ["generate", *args, "--dryrun", "--json"])
+        assert result.exit_code == 0, (args, result.output)
+        return json.loads(result.stdout)
+
+    expected = plan("--config", b)
+    assert plan("--config", a) != expected
+    for args in (
+        ["--config", a, "--config", b],
+        ["-c", a, "-c", b],
+        [f"-c={a}", f"-c={b}"],
+        [f"--config={a}", f"-c{b}"],
+        ["-c", a, "--config", b],
+        ["--config", a, "-c", b],
+    ):
+        assert plan(*args) == expected, args
+
+    calls: list[dict[str, Any]] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(codegen_shortcut, "dispatch_plugin_command", lambda **kw: calls.append(kw))
+        result = CliRunner().invoke(app, ["codegen", "-c", a, f"--config={b}", "--check"])
+    assert result.exit_code == 0, result.output
+    assert [call["config_path"] for call in calls] == [Path(b)]

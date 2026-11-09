@@ -93,6 +93,7 @@ from chkit.core.model import (
     table,
     view,
 )
+from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.plugins import ChxOnConfigLoadedContext, ChxOnPullIntrospectContext, ChxPlugin
 
@@ -611,7 +612,7 @@ def run(  # noqa: PLR0912, PLR0917
             typer.echo(f"Pull schema failed: {msg}")
         raise typer.Exit(code=2)
 
-    selected = sorted({d.strip() for d in (database or []) if d.strip()})
+    selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
 
     # Allow a registered plugin to bypass the SQL-based pull entirely
     # (e.g. ObsessionDB's metadata API). Plugins implement

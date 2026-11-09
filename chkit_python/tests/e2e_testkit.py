@@ -294,8 +294,11 @@ class _CliResultLike(Protocol):
     typer just to satisfy a type hint.
     """
 
-    exit_code: int
-    output: str
+    @property
+    def exit_code(self) -> int: ...
+
+    @property
+    def output(self) -> str: ...
 
 
 def format_test_diagnostic(

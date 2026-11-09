@@ -9,8 +9,10 @@ before every replica has the new schema. Migrations that follow up with
 fail. These helpers poll ``system.tables`` / ``system.columns`` until
 the operation is observable, then return.
 
-Retry strategy: 20 attempts x 500 ms delay (~10 s budget). Matches the TS
-``p-retry`` defaults (``factor: 1`` -> fixed delay, no exponential backoff).
+Retry strategy: one check plus 20 retries, 500 ms apart (21 checks, ~10 s
+budget), and no delay after the last check. Matches the TS ``p-retry`` options
+``{ retries: 20, minTimeout: 500, factor: 1 }`` (``factor: 1`` -> fixed delay,
+no exponential backoff).
 
 The polling client is passed in (any object with a ``query(sql) ->
 QueryResult`` method) so this module can be unit-tested without a live
@@ -33,7 +35,8 @@ from chkit.clickhouse.alter_column_statement import (
 )
 from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 
-MAX_ATTEMPTS = 20
+# Retries after the first check, like TS ``retries: 20``: 21 checks in all.
+MAX_RETRIES = 20
 RETRY_DELAY_SECONDS = 0.5
 # Upper bound on a column definition or rename wait.
 DEFINITION_WAIT_DEADLINE_SECONDS = 30.0
@@ -87,21 +90,23 @@ def _quote(value: str) -> str:
 def _poll(
     check_fn: Callable[[], bool],
     *,
-    attempts: int = MAX_ATTEMPTS,
+    retries: int = MAX_RETRIES,
     delay: float = RETRY_DELAY_SECONDS,
 ) -> None:
-    """Call ``check_fn`` until it returns truthy or ``attempts`` is exhausted.
+    """Call ``check_fn`` until it returns truthy, at most ``retries + 1`` times.
 
-    Raises the last error from ``check_fn`` if every attempt fails.
+    Sleeps ``delay`` between checks, not after the last one, like TS
+    ``p-retry``. Raises the last error from ``check_fn`` if every check fails.
     """
     last_error: BaseException | None = None
-    for _ in range(attempts):
+    for attempt in range(retries + 1):
         try:
             if check_fn():
                 return
         except Exception as error:
             last_error = error
-        time.sleep(delay)
+        if attempt < retries:
+            time.sleep(delay)
     if last_error is not None:
         raise last_error
     msg = "polling exhausted without success or error"
@@ -449,7 +454,7 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     detail = ""
     checks = 0
-    for attempt in range(MAX_ATTEMPTS + 1):
+    for attempt in range(MAX_RETRIES + 1):
         checks += 1
         try:
             mismatch = check()
@@ -458,7 +463,7 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
         if mismatch is None:
             return
         detail = mismatch
-        if attempt == MAX_ATTEMPTS or time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+        if attempt == MAX_RETRIES or time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
             break
         time.sleep(RETRY_DELAY_SECONDS)
     msg = (
