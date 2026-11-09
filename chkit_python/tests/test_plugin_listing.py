@@ -109,7 +109,9 @@ def test_lists_one_plugins_commands(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     )
 
 
-@pytest.mark.parametrize("args", [(), ("alpha",), ("alpha", "go")])
+@pytest.mark.parametrize(
+    "args", [(), ("alpha",), ("alpha", "go"), ("core", "status", "--bogus")]
+)
 def test_fails_with_exit_1_when_no_plugins_are_configured(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, args: tuple[str, ...]
 ) -> None:

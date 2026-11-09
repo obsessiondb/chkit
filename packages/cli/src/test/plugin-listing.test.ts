@@ -113,10 +113,13 @@ describe('chkit plugin listing', () => {
   test('a built-in plugin is not a plugin of chkit plugin', async () => {
     const fixture = await createListingFixture(true)
     try {
-      const result = fixture.run(['core'])
-      expect(result.stdout).toBe('')
-      expect(result.stderr).toBe('Unknown plugin "core". Available: alpha, empty.\n')
-      expect(result.exitCode).toBe(1)
+      // Not even to check the flags of its commands first.
+      for (const args of [['core'], ['core', 'status'], ['core', 'status', '--bogus']]) {
+        const result = fixture.run(args)
+        expect(result.stdout).toBe('')
+        expect(result.stderr).toBe('Unknown plugin "core". Available: alpha, empty.\n')
+        expect(result.exitCode).toBe(1)
+      }
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -125,7 +128,7 @@ describe('chkit plugin listing', () => {
   test('fails with exit 1 when no plugins are configured', async () => {
     const fixture = await createListingFixture(false)
     try {
-      for (const args of [[], ['alpha'], ['alpha', 'go']]) {
+      for (const args of [[], ['alpha'], ['alpha', 'go'], ['core', 'status', '--bogus']]) {
         const result = fixture.run(args)
         expect(result.stdout).toBe('')
         expect(result.stderr).toBe(`${NO_PLUGINS_MESSAGE}\n`)

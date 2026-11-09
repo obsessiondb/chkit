@@ -430,7 +430,7 @@ def test_cli_plugin_obsessiondb_runs_without_project_or_credentials(
 
     listed = CliRunner().invoke(app, ["plugin", "obsessiondb"])
     assert listed.exit_code == 0, listed.output
-    assert "Plugin: obsessiondb" in listed.stdout
+    assert 'Plugin commands for "obsessiondb":' in listed.stdout
 
     # Plain `chkit plugin` does not synthesize it, as in TS.
     listed_all = CliRunner().invoke(app, ["plugin"])
