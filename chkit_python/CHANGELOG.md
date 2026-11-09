@@ -3,6 +3,9 @@
 ## Unreleased
 
 ### Fixed
+- `migrate --apply` no longer prints `  Applying <file>` before each migration, so its text
+  output matches TS (#486): the migration's `-- log:` line, if any, then `Applied: <file>`.
+  `--json` output is unchanged.
 - Validation rejects empty names and names with a control character (`invalid_identifier`),
   as in TS (#490). This covers database, object, column, index, constraint, projection,
   attribute and materialized view target names.
