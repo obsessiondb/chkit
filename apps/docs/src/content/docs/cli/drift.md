@@ -67,6 +67,10 @@ The query of each view and materialized view in the snapshot is compared with th
 
 A changed query reports `query_mismatch` and a changed target `target_mismatch`, with the compared values in `expected` and `actual`. A materialized view recreated on the server with an inner table instead of its `TO` target reports `target_mismatch` with an empty `actual`.
 
+### Keys and partition
+
+`ORDER BY`, `PRIMARY KEY`, the unique key and `PARTITION BY` are compared token by token with the clauses ClickHouse stores, ignoring whitespace, comments, one pair of parentheses around the whole clause, and how a name is quoted (`` `a\x41` `` and `aA` are the same column; a bare `NULL` is the literal, not a column named `null`). A quoted name keeps its commas and spaces: a key on a column named `a, b` is not the key on columns `a` and `b`, and a column named `a b` is not `ab`.
+
 ### SQL comments
 
 ClickHouse does not store SQL comments. chkit removes them from TTL, partition, skip index, and projection expressions, and from expression column defaults, before comparing them with the live table, so a comment that whitespace separates from the rest of the clause, such as one at the end of a line, does not read as drift. Comment markers inside a literal column default (`default: 'a -- b'`) are part of the value. See [SQL fragments](/schema/dsl-reference/#sql-fragments).

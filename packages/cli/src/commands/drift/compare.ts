@@ -19,7 +19,7 @@ import {
   splitTopLevelComma,
   sqlExpressionFingerprint,
   isTrivia,
-  unquoteIdentifiers,
+  keyClauseFingerprint,
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
@@ -374,12 +374,12 @@ function normalizeProjectionShape(
 
 // Key and partition clauses are compared as SQL: the schema's keys as chkit
 // renders them, the live clauses as ClickHouse reports them. Comments are
-// removed while quoted names still carry their backticks. Then the names are
-// unquoted, since ClickHouse re-renders identifiers with its own quoting and
-// escaping, and one pair of parentheses around the whole clause is dropped.
-// From there on only whitespace is collapsed: unquoted, `user--id` would read
-// as `user` followed by a comment. For the same reason a canonicalizer sees each
-// element while its names are still quoted.
+// removed while quoted names still carry their backticks. Then each side is
+// compared by its tokens, where a name matches however ClickHouse re-quotes it
+// and keeps its commas and spaces: `` `a, b` `` is one column, not `a` and `b`
+// (#558). One pair of parentheses around the whole clause is dropped. A
+// canonicalizer sees each element while its names are still quoted, since
+// unquoted, `user--id` would read as `user` followed by a comment.
 function normalizeClause(value: string | undefined, canonicalizer?: SqlCanonicalizer): string {
   if (!value) return ''
   const sql = normalizeSQLFragment(value)
@@ -388,9 +388,9 @@ function normalizeClause(value: string | undefined, canonicalizer?: SqlCanonical
         .map((element) => canonicalizeExpression(element, canonicalizer))
         .join(', ')
     : sql
-  const unquoted = unquoteIdentifiers(canonical).replace(/\s+/g, ' ').trim()
-  const wrapped = unquoted.match(/^\((.*)\)$/)
-  return wrapped?.[1] ? wrapped[1].trim() : unquoted
+  const tokens = keyClauseFingerprint(canonical)
+  // Tokens are joined by single spaces, and only a `)` token ends in ` )`.
+  return tokens.match(/^\( (.+) \)$/)?.[1] ?? tokens
 }
 
 /** The elements of a key/partition clause, canonicalized one by one so a

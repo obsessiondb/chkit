@@ -1041,6 +1041,71 @@ describe('@chkit/cli drift comparer with quoted identifiers', () => {
   })
 })
 
+describe('@chkit/cli drift comparer: a quoted key column holding a comma or space (#558)', () => {
+  const columns = [
+    { name: 'id', type: 'UInt64' },
+    { name: 'a', type: 'String' },
+    { name: 'b', type: 'String' },
+    { name: 'a, b', type: 'String' },
+    { name: 'a b', type: 'String' },
+    { name: 'ab', type: 'String' },
+  ]
+  const expected = (orderBy: string[]) =>
+    table({ database: 'app', name: 'events', engine: 'MergeTree()', columns, orderBy })
+  // What system.tables reports; primary_key is the sorting key here.
+  const actual = (key: string) => ({
+    engine: 'MergeTree',
+    primaryKey: key,
+    orderBy: key,
+    columns,
+    settings: {},
+    indexes: [],
+    projections: [],
+  })
+
+  test('columns a, b against one column named `a, b` drift', () => {
+    expect(compareTableShape(expected(['id', 'a', 'b']), actual('id, `a, b`'))?.reasonCodes).toEqual([
+      'primary_key_mismatch',
+      'order_by_mismatch',
+    ])
+    expect(compareTableShape(expected(['id', 'a, b']), actual('id, a, b'))?.reasonCodes).toEqual([
+      'primary_key_mismatch',
+      'order_by_mismatch',
+    ])
+  })
+
+  test('a column named `a b` against a column named ab drifts', () => {
+    expect(compareTableShape(expected(['id', 'a b']), actual('id, ab'))?.reasonCodes).toEqual([
+      'primary_key_mismatch',
+      'order_by_mismatch',
+    ])
+  })
+
+  test('the key as ClickHouse reports it reads clean, with or without a canonicalizer', () => {
+    const schema = expected(['id', 'a, b', 'a b', 'cityHash64(a,b)'])
+    const live = actual('id, `a, b`, `a b`, cityHash64(a, b)')
+    expect(compareTableShape(schema, live)).toBeNull()
+    const canonicalizer: SqlCanonicalizer = { expression: (fragment) => fragment, query: () => null }
+    expect(compareTableShape(schema, live, canonicalizer)).toBeNull()
+  })
+
+  test('a column named null drifts against the NULL literal, a column named true does not', () => {
+    // ClickHouse always quotes a column named null, and writes one named true bare.
+    expect(compareTableShape(expected(['id', 'if(`null` = 1, id, 0)']), actual('id, if(NULL = 1, id, 0)'))?.reasonCodes).toEqual([
+      'primary_key_mismatch',
+      'order_by_mismatch',
+    ])
+    expect(compareTableShape(expected(['id', 'if(`true` = 1, id, 0)']), actual('id, if(true = 1, id, 0)'))).toBeNull()
+    // A null after a dot is the null map of a Nullable column, which ClickHouse quotes.
+    expect(compareTableShape(expected(['id', 'if(a.null, 0, 1)']), actual('id, if(a.`null`, 0, 1)'))).toBeNull()
+  })
+
+  test('an expression split across entries or spaced differently reads clean', () => {
+    expect(compareTableShape(expected(['id', 'cityHash64(a', 'b)']), actual('id, cityHash64(a, b)'))).toBeNull()
+    expect(compareTableShape(expected(['id', 'toStartOfHour( id )']), actual('(id, toStartOfHour(id))'))).toBeNull()
+  })
+})
+
 describe('@chkit/cli drift comparer with column expressions', () => {
   const compareColumn = (expected: ColumnDefinition, actual: ColumnDefinition) =>
     compareTableShape(

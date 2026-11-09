@@ -24,9 +24,8 @@ from chkit.cli.commands.drift_diff import (
 from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView, SchemaObjectKind
 from chkit.core.column_default import literal_default_fingerprint, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
-from chkit.core.identifier import unquote_identifiers
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
-from chkit.core.key_clause import split_top_level_comma
+from chkit.core.key_clause import key_clause_fingerprint, split_top_level_comma
 from chkit.core.model import (
     ColumnDefinition,
     MaterializedViewDefinition,
@@ -45,7 +44,6 @@ from chkit.core.sql import (
     render_key_clause_columns,
 )
 from chkit.core.sql_lexer import (
-    JS_WHITESPACE_RUN,
     identifier_name,
     is_trivia,
     js_trim,
@@ -455,16 +453,19 @@ def _normalize_projection_shape(
 
 
 _WRAPPED_RE = re.compile(r"^\((.*)\)$")
+# Tokens are joined by single spaces, and only a ``)`` token ends in `` )``.
+_WRAPPED_TOKENS_RE = re.compile(r"\( (.+) \)")
 
 
 def _normalize_clause(value: str | None, canonicalizer: SqlCanonicalizer | None = None) -> str:
     # Key and partition clauses are compared as SQL: comments are removed while
-    # quoted names still carry their backticks (#232), then the names are
-    # unquoted, since ClickHouse re-renders identifiers with its own quoting and
-    # escaping, and one pair of parentheses around the whole clause is dropped.
-    # From there on only whitespace is collapsed: unquoted, `user--id` would
-    # read as `user` followed by a comment. For the same reason a canonicalizer
-    # sees each element while its names are still quoted.
+    # quoted names still carry their backticks (#232). Then each side is
+    # compared by its tokens, where a name matches however ClickHouse re-quotes
+    # it and keeps its commas and spaces: `a, b` quoted is one column, not `a`
+    # and `b` (#558). One pair of parentheses around the whole clause is
+    # dropped. A canonicalizer sees each element while its names are still
+    # quoted, since unquoted, `user--id` would read as `user` followed by a
+    # comment.
     if not value:
         return ""
     sql = normalize_sql_fragment(value)
@@ -475,9 +476,9 @@ def _normalize_clause(value: str | None, canonicalizer: SqlCanonicalizer | None 
         if canonicalizer is not None
         else sql
     )
-    unquoted = js_trim(JS_WHITESPACE_RUN.sub(" ", unquote_identifiers(canonical)))
-    wrapped = _WRAPPED_RE.match(unquoted)
-    return js_trim(wrapped.group(1)) if wrapped is not None and wrapped.group(1) else unquoted
+    tokens = key_clause_fingerprint(canonical)
+    wrapped = _WRAPPED_TOKENS_RE.fullmatch(tokens)
+    return wrapped.group(1) if wrapped is not None else tokens
 
 
 def _clause_elements(sql: str) -> list[str]:
