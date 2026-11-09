@@ -95,6 +95,24 @@ def test_js_math_round_passes_non_finite_values_through() -> None:
     assert math.isnan(js_math_round(math.nan))
 
 
+@pytest.mark.parametrize(
+    ("value", "negative_zero"),
+    [(-0.0, True), (-0.1, True), (-5e-324, True), (-0.5, True), (0.3, False), (0.0, False)],
+)
+def test_js_math_round_keeps_the_sign_of_a_zero_result(value: float, negative_zero: bool) -> None:
+    rounded = js_math_round(value)
+    assert rounded == 0
+    assert (math.copysign(1.0, rounded) < 0) is negative_zero
+
+
+@pytest.mark.parametrize(
+    ("value", "expected"),
+    [(0.0, "0.0000000"), (1e-8, "0.0000000"), (-1e-8, "-0.0000000"), (0.00000015, "0.0000001")],
+)
+def test_js_to_fixed_prints_small_results_positionally(value: float, expected: str) -> None:
+    assert js_to_fixed(value, 7) == expected
+
+
 def test_elapsed_ms_rounds_negative_ties_toward_positive_infinity() -> None:
     assert _safe_round_ms("-0.0025") == -2
     assert _elapsed_ms("-0.0025") == -2

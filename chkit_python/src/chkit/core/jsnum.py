@@ -113,7 +113,8 @@ def js_to_fixed(value: float, digits: int) -> str:
         return js_number_to_string(value)
     exact = Decimal.from_float(value if value != 0 else 0.0)  # (-0).toFixed is "0..."
     step = Decimal((0, (1,), -digits))
-    return str(exact.quantize(step, rounding=ROUND_HALF_UP, context=_ROUNDING_CONTEXT))
+    # "f", not str(): str() switches to exponent form ("0E-7") for small results.
+    return format(exact.quantize(step, rounding=ROUND_HALF_UP, context=_ROUNDING_CONTEXT), "f")
 
 
 def js_math_round(value: float) -> float:
@@ -127,7 +128,9 @@ def js_math_round(value: float) -> float:
     # floor(value + 0.5). The sum may round in the 60-digit context (a tiny value
     # has hundreds of digits), but never across an integer.
     shifted = _ROUNDING_CONTEXT.add(Decimal.from_float(value), _HALF)
-    return float(shifted.to_integral_value(rounding=ROUND_FLOOR, context=_ROUNDING_CONTEXT))
+    rounded = float(shifted.to_integral_value(rounding=ROUND_FLOOR, context=_ROUNDING_CONTEXT))
+    # JS keeps the sign on a zero result: Math.round(-0.2) is -0.
+    return math.copysign(rounded, value) if rounded == 0 else rounded
 
 
 __all__ = ["js_math_round", "js_number_to_string", "js_to_fixed", "parse_js_number"]
