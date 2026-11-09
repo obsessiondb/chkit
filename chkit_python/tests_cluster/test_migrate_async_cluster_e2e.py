@@ -125,6 +125,7 @@ def test_rerun_through_another_replica_attaches_to_running_attempt() -> None:
                 migration_name=migration_name,
                 migration_checksum=_MIGRATION_CHECKSUM,
                 statement_index=0,
+                fingerprint="",
                 operation_type="load_table_data",
                 operation_key=operation_key,
                 before_retry=f"TRUNCATE TABLE {table} ON CLUSTER '{_CLUSTER}'",
