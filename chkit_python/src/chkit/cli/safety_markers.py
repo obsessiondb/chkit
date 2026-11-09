@@ -30,6 +30,7 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from chkit.core.sql_lexer import is_trivia, tokenize_sql
 from chkit.core.sql_splitter import extract_executable_statements
 
 __all__ = [
@@ -65,7 +66,11 @@ _OBJECT_KEY_RE = re.compile(
 
 # Destructive SQL keyword rules. Each requires the noun keyword that
 # follows the verb, so a `truncate(x)` function call is NOT mistaken for
-# `TRUNCATE TABLE`.
+# `TRUNCATE TABLE`. They match the statement as read through the lexer
+# (#642): every comment form ClickHouse reads (`--`, `//`, `# `, `#!`,
+# `/* */`) only separates tokens, and text inside a string or quoted name is
+# never a keyword. So a commented-out `DROP TABLE` is not flagged, while
+# `DROP /* x */ TABLE t` is.
 _DESTRUCTIVE_SQL_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("drop_database", re.compile(r"\bDROP\s+DATABASE\b", re.IGNORECASE)),
     (
@@ -313,14 +318,33 @@ def collect_destructive_operation_markers(
 
 
 def _classify_destructive_statement(statement: str) -> str | None:
+    code = _code_text(statement, blank_quoted=True)
     for type_, pattern in _DESTRUCTIVE_SQL_RULES:
-        if pattern.search(statement):
+        if pattern.search(code):
             return type_
     return None
 
 
+def _code_text(statement: str, *, blank_quoted: bool) -> str:
+    """The statement as ClickHouse reads it: each comment becomes one space.
+
+    A comment separates tokens (``DROP/**/TABLE`` is ``DROP TABLE``). With
+    ``blank_quoted``, every string literal and quoted name becomes ``''``, so
+    the text inside one is not read as a keyword.
+    """
+    parts: list[str] = []
+    for token in tokenize_sql(statement):
+        if is_trivia(token):
+            parts.append(" ")
+        elif blank_quoted and token.kind in {"string", "quoted_identifier"}:
+            parts.append("''")
+        else:
+            parts.append(token.text)
+    return "".join(parts)
+
+
 def _extract_object_key(statement: str) -> str:
-    match = _OBJECT_KEY_RE.search(statement)
+    match = _OBJECT_KEY_RE.search(_code_text(statement, blank_quoted=False))
     return match.group(1) if match is not None else "unknown"
 
 

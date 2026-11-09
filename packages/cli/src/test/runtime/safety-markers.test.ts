@@ -214,6 +214,50 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     expect(migrationContainsDestructiveSql(sql)).toBe(false)
   })
 
+  // #642: every comment form ClickHouse reads, plus string literals and quoted
+  // names, is text the scan must not read as SQL.
+  const ignored: Array<[string, string]> = [
+    ['a // comment', '// DROP TABLE default.events\nSELECT 1;'],
+    ['a # comment', '# DROP TABLE default.events\nSELECT 1;'],
+    ['a #! comment', '#! DROP TABLE default.events\nSELECT 1;'],
+    ['a block comment', '/* DROP TABLE default.events */ SELECT 1;'],
+    ['a nested block comment', '/* a /* b */ TRUNCATE TABLE default.events */ SELECT 1;'],
+    ['a // comment after code', 'SELECT 1 // DROP TABLE default.events\n;'],
+    ['a string literal', "INSERT INTO default.log VALUES ('DROP TABLE default.events');"],
+    ['a heredoc', 'SELECT $x$DETACH TABLE default.events$x$;'],
+    ['a backtick-quoted name', 'SELECT 1 AS `DROP TABLE default.events`;'],
+    ['a double-quoted name', 'SELECT 1 AS "ALTER TABLE t DROP COLUMN c";'],
+  ]
+  for (const [label, sql] of ignored) {
+    test(`does NOT flag a destructive statement inside ${label}`, () => {
+      expect(scanDestructiveSqlStatements(sql)).toEqual([])
+    })
+  }
+
+  const flagged: Array<[string, string, string, string]> = [
+    ['a block comment between the keywords', 'DROP /* hand-written */ TABLE default.events;', 'drop_table', 'default.events'],
+    ['an empty block comment between the keywords', 'DROP/**/TABLE default.events;', 'drop_table', 'default.events'],
+    ['a line comment between the keywords', 'ALTER TABLE default.events DROP // why\nCOLUMN email;', 'alter_table_drop_column', 'default.events'],
+    ['a # comment between the keywords', 'TRUNCATE # all of it\nTABLE default.events;', 'truncate_table', 'default.events'],
+    ['a comment before it', '// cleanup\nDROP TABLE default.events;', 'drop_table', 'default.events'],
+    ['a comment naming another table before it', '/* TABLE default.wrong */ DROP TABLE default.events;', 'drop_table', 'default.events'],
+    ['a comment and a string around it', "DROP TABLE default.events /* 'x */ -- y\n;", 'drop_table', 'default.events'],
+    ['a quoted name', 'DETACH TABLE `events`;', 'detach', 'events'],
+  ]
+  for (const [label, sql, type, key] of flagged) {
+    test(`flags a destructive statement with ${label}`, () => {
+      const markers = collectUnmarkedDestructiveStatements('20260101_handwritten.sql', sql)
+      expect(markers.map((marker) => [marker.type, marker.key])).toEqual([[type, key]])
+    })
+  }
+
+  test('flags only the real statement after a commented-out one', () => {
+    const sql = 'SELECT 1 /* DROP TABLE default.a */; # DROP TABLE default.b\nTRUNCATE TABLE default.events;'
+    const found = scanDestructiveSqlStatements(sql)
+    expect(found.map((f) => f.type)).toEqual(['truncate_table'])
+    expect(found[0]?.statement).toBe('# DROP TABLE default.b\nTRUNCATE TABLE default.events;')
+  })
+
   test('does NOT flag a non-destructive migration', () => {
     const sql = `CREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;\nINSERT INTO default.events SELECT * FROM s3('...');`
     expect(migrationContainsDestructiveSql(sql)).toBe(false)
