@@ -8,7 +8,8 @@ import { runLogin } from '../auth/login.js'
 import { runSignup } from '../auth/signup.js'
 import { runClaim } from '../service/claim.js'
 
-export type ConnectChoice = 'claim' | 'account' | 'clickhouse' | 'later'
+export const CONNECT_CHOICES = ['claim', 'account', 'clickhouse', 'later'] as const
+export type ConnectChoice = (typeof CONNECT_CHOICES)[number]
 
 export interface OnboardingOptions {
   /** Path to the project's clickhouse.config.ts. */
