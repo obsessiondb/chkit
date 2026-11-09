@@ -44,6 +44,14 @@ def test_is_not_fooled_by_an_escaped_backslash_before_a_closing_quote() -> None:
     assert strip_wrapping_parens("('a\\\\', ')')") == "'a\\\\', ')'"
 
 
+def test_reads_a_paren_inside_a_heredoc_as_text() -> None:
+    # #587
+    assert strip_wrapping_parens("($$a)$$)") == "$$a)$$"
+    assert strip_wrapping_parens("($t$(a$t$)") == "$t$(a$t$"
+    # The first `(` closes right after its heredoc, not at the end.
+    assert strip_wrapping_parens("($$($$) || ($$)$$)") == "($$($$) || ($$)$$)"
+
+
 # ---------- find_quote_end ----------
 
 
@@ -78,3 +86,17 @@ def test_ignores_parens_inside_quotes() -> None:
 
 def test_returns_none_when_unbalanced() -> None:
     assert find_matching_paren("(a, b", 0) is None
+
+
+def test_ignores_parens_inside_a_heredoc_or_a_comment() -> None:
+    # #587
+    assert find_matching_paren("($$a)$$) tail", 0) == 7
+    assert find_matching_paren("f($tag$)$tag$) tail", 1) == 13
+    assert find_matching_paren("(a /* ) */) tail", 0) == 10
+
+
+def test_reads_a_dollar_as_clickhouse_does_where_no_heredoc_closes() -> None:
+    # No second `$$`: the `$`s are punctuation and the parens are structure.
+    assert find_matching_paren("($$a) tail", 0) == 4
+    # `f$$` is a name, so the later `$$` opens no heredoc.
+    assert find_matching_paren("(f$$(x) || $$) tail", 0) == 13

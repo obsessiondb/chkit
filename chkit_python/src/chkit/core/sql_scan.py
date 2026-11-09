@@ -6,11 +6,15 @@ text, not structure: parens and commas there must be ignored.
 
 Every scanner skips quoted regions through ``find_quote_end``, so the escaping
 rule lives in exactly one place and the copies cannot drift apart again (#197).
+``find_matching_paren`` reads with the SQL lexer instead, which also knows
+heredocs and comments (#587).
 """
 
 from __future__ import annotations
 
 import re
+
+from chkit.core.sql_lexer import iter_sql_tokens
 
 _QUOTE_CHARS = frozenset({"'", '"', "`"})
 
@@ -51,20 +55,21 @@ def strip_wrapping_parens(text: str) -> str:
 
 
 def find_matching_paren(text: str, open_index: int) -> int | None:
-    """Index of the ``)`` matching the ``(`` at ``open_index``, or None when unbalanced."""
+    """Index of the ``)`` matching the ``(`` at ``open_index``, or None when unbalanced.
+
+    The input is read with the SQL lexer, so a paren in a string, quoted name,
+    heredoc (``$$)$$``) or comment is text (#587).
+    """
     depth = 0
-    i = open_index
-    while i < len(text):
-        char = text[i]
-        if char in _QUOTE_CHARS:
-            i = find_quote_end(text, i, char)
-        elif char == "(":
+    for token in iter_sql_tokens(text[open_index:]):
+        if token.kind != "punctuation":
+            continue
+        if token.text == "(":
             depth += 1
-        elif char == ")":
+        elif token.text == ")":
             depth -= 1
             if depth == 0:
-                return i
-        i += 1
+                return open_index + token.start
     return None
 
 

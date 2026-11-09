@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from typing import Literal
 
 from chkit.core.model import DictionaryDefinition, SchemaDefinition, TableDefinition
+from chkit.core.sql_lexer import js_trim
 
 _TWO_PARTS = 2
 _THREE_PARTS = 3
@@ -68,7 +69,7 @@ def parse_rename_table_mappings(values: list[str]) -> list[TableRenameMapping]:
     """
     result: list[TableRenameMapping] = []
     for mapping in values:
-        parts = [part.strip() for part in mapping.split("=")]
+        parts = [js_trim(part) for part in mapping.split("=")]
         if len(parts) != _TWO_PARTS or not all(parts):
             msg = (
                 f'Invalid --rename-table mapping "{mapping}". '
@@ -99,7 +100,7 @@ def parse_rename_dictionary_mappings(
     """
     result: list[DictionaryRenameMapping] = []
     for mapping in values:
-        parts = [part.strip() for part in mapping.split("=")]
+        parts = [js_trim(part) for part in mapping.split("=")]
         if len(parts) != _TWO_PARTS or not all(parts):
             msg = (
                 f'Invalid --rename-dictionary mapping "{mapping}". '
@@ -128,7 +129,7 @@ def parse_rename_column_mappings(values: list[str]) -> list[ColumnRenameMapping]
     """
     result: list[ColumnRenameMapping] = []
     for mapping in values:
-        parts = [part.strip() for part in mapping.split("=")]
+        parts = [js_trim(part) for part in mapping.split("=")]
         if len(parts) != _TWO_PARTS or not all(parts):
             msg = (
                 f'Invalid --rename-column mapping "{mapping}". '
@@ -136,7 +137,7 @@ def parse_rename_column_mappings(values: list[str]) -> list[ColumnRenameMapping]
             )
             raise ValueError(msg)
         from_raw, to_raw = parts
-        triple = [part.strip() for part in from_raw.split(".")]
+        triple = [js_trim(part) for part in from_raw.split(".")]
         if len(triple) != _THREE_PARTS or not all(triple):
             msg = (
                 f'Invalid --rename-column source "{from_raw}". '
@@ -551,7 +552,7 @@ def remap_old_definitions_for_table_renames(
 
 def _parse_qualified_table(input_: str) -> tuple[str, str]:
     # Shared by --rename-table and --rename-dictionary (TS parseQualifiedName).
-    parts = [part.strip() for part in input_.split(".")]
+    parts = [js_trim(part) for part in input_.split(".")]
     if len(parts) != _TWO_PARTS or not all(parts):
         msg = f'Invalid object reference "{input_}". Expected format: database.name'
         raise ValueError(msg)
