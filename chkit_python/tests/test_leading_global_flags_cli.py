@@ -170,6 +170,27 @@ def test_a_leading_value_flag_without_its_value_fails_as_in_ts(argv: list[str]) 
 
 
 @pytest.mark.parametrize(
+    ("argv", "command"),
+    [
+        (["--help", "--help-plugins", "--config"], None),
+        (["--help-plugins", "-h", "-c"], None),
+        (["--help", "--help-plugins", "--config", "--json"], "--help"),
+        (["--help-plugins", "-h", "--config", "--json"], "-h"),
+    ],
+)
+def test_the_global_help_with_plugins_reads_the_config_value_first(
+    argv: list[str], command: str | None
+) -> None:
+    # TS printGlobalHelp: --help-plugins reads --config before the help.
+    result = CliRunner().invoke(app, argv)
+    assert (result.exit_code, result.stderr) == (1, "Missing value for --config\n")
+    if command is None:
+        assert result.stdout == ""
+    else:
+        assert json.loads(result.stdout)["command"] == command
+
+
+@pytest.mark.parametrize(
     "argv", [["--json", "--config"], ["--config", "--json", "status"], ["-c", "--json"]]
 )
 def test_a_leading_value_flag_without_its_value_under_json_writes_the_ts_envelope(
@@ -202,6 +223,9 @@ def test_a_leading_value_flag_without_its_value_under_json_writes_the_ts_envelop
         (["--", "status"], "--"),
         # After the move, --json is behind the `--`, so it is not an option.
         (["--json", "--", "status"], "--"),
+        # TS reads the config path from the command on, and `--` ends it.
+        (["--json", "--", "-c"], "--"),
+        (["--help-plugins", "--", "--config"], "--"),
         (["--config", "x.py", "nope"], "nope"),
     ],
 )
@@ -240,8 +264,8 @@ def test_an_unknown_command_under_json_writes_the_ts_envelope(argv: list[str], t
         (["nope", "--help", "--config"], False),
         (["nope", "-t", "-c"], False),
         (["nope", "--json", "--config"], True),
-        # As TS reportUsageError: --json anywhere, also after the `--`.
-        (["nope", "-c", "--", "--json"], True),
+        # As TS: --json only before the `--` (`optionArgs`).
+        (["nope", "-c", "--", "--json"], False),
         (["--json", "nope", "--config", "--json"], True),
     ],
 )

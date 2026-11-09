@@ -28,6 +28,13 @@ from chkit.cli.commands import (
     status,
 )
 from chkit.cli.flag_errors import report_flag_error
+from chkit.cli.help import (
+    HELP_PLUGINS_META,
+    HELP_SUBCOMMAND_META,
+    PLUGIN_FLAG_NAMES,
+    command_help_text,
+    global_help_text,
+)
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
 from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
@@ -39,6 +46,14 @@ from chkit.core.flags import (
 )
 
 _HELP_OPTION_NAMES = ("-h", "--help")
+_HELP_PLUGINS_OPTION = "--help-plugins"
+# The commands of the TS CLI's internal registry
+# (packages/cli/src/internal-plugins/core/plugin.ts). TS shows their help before
+# reading --config; its plugin commands (codegen, obsessiondb, pull) read the
+# config first.
+_TS_BUILTIN_COMMANDS = frozenset(
+    {"generate", "migrate", "status", "drift", "check", "snapshot", "query", "plugin"}
+)
 # The top-level options, which TS reads only as the first token.
 _ROOT_OPTION_NAMES = (*_HELP_OPTION_NAMES, "-v", "-V", "--version")
 
@@ -139,7 +154,9 @@ def _after_dash_dash(rest: list[str], missing_names: int) -> list[str]:
     return [*rest[:missing], "--", *rest[missing:]]
 
 
-def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
+def _split_forwarded_args(
+    args: list[str], params: list[Any], *, config_first: bool = False
+) -> list[str]:
     """Separate a plugin forwarder's own options from the plugin's arguments.
 
     ``plugin``, ``codegen`` and ``obsessiondb`` pass unknown tokens to the
@@ -162,6 +179,10 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
 
     end = args.index("--") if "--" in args else len(args)
     help_requested = any(token in _HELP_OPTION_NAMES for token in args[:end])
+    # Where TS reads --config before the help (`config_first`), a --config
+    # without its value fails first, as in TS.
+    if help_requested and config_first:
+        _check_config_value(args, params)
 
     own: list[str] = []
     forwarded: list[str] = []
@@ -183,7 +204,14 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
             # Without a value (as parse_flags reads it), the plugin command
             # reports the missing value and the next flag, such as --json,
             # still counts.
-            if table_token == "--table" and i < len(args) and not args[i].startswith("--"):
+            # Under help, a -h / --help is the help, not the value (TS reads
+            # help from every token before `--`).
+            if (
+                table_token == "--table"
+                and i < len(args)
+                and not args[i].startswith("--")
+                and not (help_requested and args[i] in _HELP_OPTION_NAMES)
+            ):
                 leading_table.append(args[i])
                 i += 1
             continue
@@ -195,8 +223,16 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
                 # As TS `extractConfigPath`: last, or followed by a `--` token,
                 # the flag has no value. click would take that token (or the
                 # `--` below) as the value. A -h / --help before `--` still
-                # shows the help, as TS handles help first.
-                if i >= len(args) or (args[i].startswith("--") and not help_requested):
+                # shows the help (once the check above passed, where TS reads
+                # --config first): the flag is dropped, and a -h / --help
+                # after it is never its value, so `--config -h --config=x`
+                # shows the help instead of running the plugin command with
+                # `x` (#619).
+                missing = i >= len(args) or args[i].startswith("--")
+                if help_requested and (missing or args[i] in _HELP_OPTION_NAMES):
+                    own.pop()
+                    continue
+                if missing:
                     raise MissingFlagValueError(long_form[token])
                 own.append(args[i])
                 i += 1
@@ -268,18 +304,98 @@ def _query_sql_behind_terminator(args: list[str], params: list[Any]) -> list[str
     return [*options, "--", *positionals] if positionals else options
 
 
+def _check_config_value(args: list[str], params: list[Any]) -> None:
+    """As TS ``extractConfigPath`` after ``expandShortFlags``: a ``--config`` /
+    ``-c`` before ``--``, last or followed by a ``--`` token, has no value.
+    A value flag of ``params`` takes the next token unless it starts with
+    ``--``, so a ``-c`` that is a value (``--name -c``) is not the flag."""
+    takes_value, long_form = _option_forms(params)
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--":
+            return
+        if not takes_value.get(token):
+            continue
+        if i < len(args) and not args[i].startswith("--"):
+            i += 1
+        elif long_form[token] == "--config":
+            raise MissingFlagValueError("--config")
+
+
+def _first_plugin_positional(args: list[str]) -> str | None:
+    """Port of TS ``firstPluginPositional``, the subcommand whose help a
+    forwarder shows: the first token that is not a global flag (or ``--table``)
+    with its value, or the token after ``--``. TS expands only the global short
+    flags (``-c``) of a plugin command here, so ``-t`` and ``-h`` count as the
+    subcommand, and the forwarder's help is shown."""
+    argv = expand_short_flags(args, GLOBAL_FLAGS)
+    flags: dict[str, FlagDef] = {flag["name"]: flag for flag in [*GLOBAL_FLAGS, _TABLE_FLAG]}
+    i = 0
+    while i < len(argv):
+        token = argv[i]
+        if token == "--":
+            return argv[i + 1] if i + 1 < len(argv) else None
+        name, equal, _value = token.partition("=") if token.startswith("--") else (token, "", "")
+        flag = flags.get(name)
+        if flag is None:
+            return token
+        i += 2 if flag["type"] != "boolean" and not equal else 1
+    return None
+
+
+def _read_help_plugins(ctx: Any, args: list[str]) -> list[str]:
+    """As in TS, ``--help-plugins`` before any ``--`` is the help, with the
+    flags plugins add to the command (``chkit.cli.help``)."""
+    end = args.index("--") if "--" in args else len(args)
+    if _HELP_PLUGINS_OPTION not in args[:end]:
+        return args
+    ctx.meta[HELP_PLUGINS_META] = True
+    return [
+        "--help" if token == _HELP_PLUGINS_OPTION else token for token in args[:end]
+    ] + args[end:]
+
+
 class _ChkitCommand(TyperCommand):
     """Every chkit command reads its options as TS does (#491) and reports a
     flag error as TS does (#563)."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
+        if ctx.ignore_unknown_options:
+            # `chkit obsessiondb login -h` shows the help of `login`.
+            ctx.meta[HELP_SUBCOMMAND_META] = _first_plugin_positional(args)
+        args = _read_help_plugins(ctx, args)
+        # TS shows the help of a built-in command before reading --config,
+        # unless --help-plugins asks for it (that help loads the config). init
+        # reads no config.
+        config_first = self.name != "init" and (
+            bool(ctx.meta.get(HELP_PLUGINS_META)) or self.name not in _TS_BUILTIN_COMMANDS
+        )
         try:
             if ctx.ignore_unknown_options:
-                normalized = _split_forwarded_args(args, params)
+                normalized = _split_forwarded_args(args, params, config_first=config_first)
             elif any(token in _HELP_OPTION_NAMES for token in _option_args(args)):
                 # As in TS, -h / --help anywhere before `--` shows the help, even
-                # next to a flag error or where it would be a flag's value.
+                # next to a flag error or where it would be a flag's value. Where TS
+                # reads --config first, a --config without its value fails
+                # first. TS then knows only its internal registry's flags:
+                # not the plugins' (--service), and for pull, a plugin
+                # command in TS, none but --config.
+                if config_first:
+                    _check_config_value(
+                        args,
+                        [
+                            param
+                            for param in params
+                            if "--config" in param.opts
+                            or (
+                                self.name in _TS_BUILTIN_COMMANDS
+                                and not PLUGIN_FLAG_NAMES.intersection(param.opts)
+                            )
+                        ],
+                    )
                 normalized = ["--help"]
             else:
                 # query first moves its SQL arguments behind `--` (#584), so SQL
@@ -297,6 +413,9 @@ class _ChkitCommand(TyperCommand):
                 global_flag=ctx.ignore_unknown_options,
             )
         return super().parse_args(ctx, normalized)
+
+    def get_help(self, ctx: Any) -> str:
+        return command_help_text(self, ctx.meta)
 
 
 class _ChkitGroup(TyperGroup):
@@ -316,23 +435,32 @@ class _ChkitGroup(TyperGroup):
         does (#597): leading global flags move behind the command, help or the
         version first ignores the rest, and any other first token that is not
         a command is an unknown command."""
+        command = "chkit"
         try:
             normalized = normalize_global_args(args)
+            if normalized and normalized[0] in _HELP_OPTION_NAMES:
+                # TS `printGlobalHelp`: --help-plugins reads --config first.
+                command = normalized[0]
+                expanded = expand_short_flags(normalized[1:], GLOBAL_FLAGS)
+                if _HELP_PLUGINS_OPTION in _option_args(expanded):
+                    extract_config_path(expanded)
         except MissingFlagValueError as error:
-            # TS's top-level catch: command "chkit", the error's own JSON code.
+            # TS's top-level catch: the command read so far, the error's own JSON code.
             if "--json" in _option_args(args):
-                emit_json_error("chkit", {"code": json_error_code(error), "message": str(error)})
+                emit_json_error(command, {"code": json_error_code(error), "message": str(error)})
             typer.echo(str(error), err=True)
             raise typer.Exit(code=1) from error
         if normalized and normalized[0] in _ROOT_OPTION_NAMES:
             normalized = normalized[:1]
         elif normalized and self.get_command(ctx, normalized[0]) is None:
             command = normalized[0]
-            # As TS, which reads the config path before it finds the command unknown.
+            # As TS, which reads the config path before it finds the command
+            # unknown, from the command on (a `--` command ends the flags).
+            argv = [command, *expand_short_flags(normalized[1:], GLOBAL_FLAGS)]
             try:
-                extract_config_path(expand_short_flags(normalized[1:], GLOBAL_FLAGS))
+                extract_config_path(argv)
             except MissingFlagValueError as error:
-                report_flag_error(command, str(error), json_mode="--json" in normalized)
+                report_flag_error(command, str(error), json_mode="--json" in _option_args(argv))
             message = f"Unknown command: {command}"
             typer.echo(message, err=True)
             if "--json" in _option_args(normalized):
@@ -341,6 +469,9 @@ class _ChkitGroup(TyperGroup):
                 typer.echo(ctx.get_help())
             raise typer.Exit(code=1)
         return super().parse_args(ctx, normalized)
+
+    def get_help(self, ctx: Any) -> str:  # noqa: ARG002 - click's signature
+        return global_help_text(self.commands, __version__)
 
     # Any: typer vendors click privately (typer._click), and the public
     # typer.Context subclass would narrow the parameter (mypy [override]).
@@ -389,20 +520,23 @@ def _command(name: str, **kwargs: Any) -> Any:
     return app.command(name, cls=_ChkitCommand, **kwargs)
 
 
-_command("init", help="Create a starter clickhouse.config.py and example schema.")(init.run)
-_command("generate", help="Generate a new migration from the current schema.")(generate.run)
-_command("migrate", help="Apply pending migrations to the target database.")(migrate.run)
-_command("status", help="Show migration status and pending operations.")(status.run)
-_command("check", help="Run pre-flight checks (drift, checksums, pending).")(check.run)
-_command("drift", help="Compare the live database against the schema snapshot.")(drift.run)
+# In the TS order, with the TS descriptions, which the help prints.
+_command("init", help="Scaffold a new project with config and example schema")(init.run)
+_command("generate", help="Generate migration artifacts from schema definitions")(generate.run)
+_command("migrate", help="Review or execute pending migrations")(migrate.run)
+_command("status", help="Show migration status and checksum mismatch information")(status.run)
+_command("drift", help="Compare snapshot state with current ClickHouse objects")(drift.run)
+_command("check", help="Run policy checks for CI and release gates")(check.run)
 _command("snapshot", help=snapshot.SNAPSHOT_HELP)(snapshot.run)
-_command("query", help="Run a SQL string against the configured ClickHouse target.")(query.run)
-_command("pull", help="Introspect live ClickHouse and emit a Python schema file.")(pull.run)
+_command("query", help="Run a SQL query against the configured target")(query.run)
 _command(
     "plugin",
-    help="List configured plugins or dispatch a plugin command.",
+    help="List plugins and run plugin namespace commands",
     context_settings={"ignore_unknown_options": True},
 )(plugin.run)
+_command("pull", help="Introspect live ClickHouse and emit a Python schema file")(pull.run)
+# The help lists these two, which run a plugin's commands, as TS lists the
+# configured plugins' commands (see _PLUGIN_SHORTCUTS).
 _command(
     "codegen",
     help="Generate typed row models via the codegen plugin (shortcut).",

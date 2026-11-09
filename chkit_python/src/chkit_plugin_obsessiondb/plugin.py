@@ -306,36 +306,32 @@ def create_obsessiondb_plugin(
     return ChxPlugin(
         manifest=ChxPluginManifest(name="obsessiondb", api_version=1),
         hooks=_ObsessionDBHooks(),
-        # In TS's order, which `chkit plugin obsessiondb` lists and an unknown
-        # command's error names.
+        # In the TS order and wording, which `chkit obsessiondb -h` and
+        # `chkit plugin obsessiondb` print and an unknown command's error names.
         commands=[
             ChxPluginCommand(
                 name="login",
-                description="Authenticate with ObsessionDB via device-code flow.",
+                description="Authenticate with ObsessionDB",
                 run=_login_run,
             ),
             ChxPluginCommand(
                 name="signup",
-                description=(
-                    "Sign up or log in with a one-time email code (passwordless)."
-                ),
+                description="Sign up or log in with a one-time email code (passwordless)",
                 run=_signup_run,
             ),
             ChxPluginCommand(
                 name="logout",
-                description="Remove stored ObsessionDB credentials.",
+                description="Remove stored ObsessionDB credentials",
                 run=_logout_run,
             ),
             ChxPluginCommand(
                 name="whoami",
-                description="Show the current ObsessionDB user.",
+                description="Show current ObsessionDB user",
                 run=_whoami_run,
             ),
             ChxPluginCommand(
                 name="service",
-                description=(
-                    "Manage ObsessionDB services: list / select / claim / alias."
-                ),
+                description="Manage ObsessionDB services",
                 run=service_command_run,
             ),
         ],

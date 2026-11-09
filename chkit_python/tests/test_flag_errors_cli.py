@@ -83,6 +83,20 @@ CASES = [
     (["plugin", "--config", "--check"], "Missing value for --config"),
     (["plugin", "codegen", "codegen", "--config", "--check"], "Missing value for --config"),
     (["plugin", "codegen", "codegen", "-c", "--"], "Missing value for --config"),
+    # The --help-plugins help reads --config first in TS, as the config
+    # gives the plugins (#619).
+    (["generate", "--config", "--help-plugins"], "Missing value for --config"),
+    (["status", "--help-plugins", "-c"], "Missing value for --config"),
+    # TS shows the help of its built-in commands before reading --config, but
+    # reads it first for its plugin commands: the shortcuts and pull (#619).
+    (["codegen", "--help", "--config"], "Missing value for --config"),
+    (["obsessiondb", "logout", "-h", "-c"], "Missing value for --config"),
+    (["pull", "--help", "--config"], "Missing value for --config"),
+    # There TS knows only the global flags, so -c is no --out-file value.
+    (["pull", "--out-file", "-c", "--help"], "Missing value for --config"),
+    # Nor the flags plugins add to the built-in commands (--service).
+    (["generate", "--service", "-c", "--help-plugins"], "Missing value for --config"),
+    (["status", "--service", "x", "-c", "--help-plugins"], "Missing value for --config"),
 ]
 
 
@@ -166,14 +180,15 @@ def test_a_forwarder_config_takes_a_single_dash_value_as_in_ts(
         ["status", "--nope", "-h"],
         ["generate", "--name", "--help"],
         ["drift", "--table", "-h"],
-        # A forwarder's --config with no value still shows the help (#620 review).
+        # plugin's --config with no value still shows the help (#620 review);
+        # a shortcut's does not, as in TS (CASES above).
         ["plugin", "--help", "--config", "--check"],
         ["plugin", "-h", "-c", "--json"],
-        ["codegen", "--help", "--config", "--check"],
+        ["plugin", "codegen", "codegen", "--help", "--config", "--check"],
     ],
 )
 @pytest.mark.usefixtures("project")
 def test_help_wins_over_a_flag_error_as_in_ts(args: list[str]) -> None:
     result = CliRunner().invoke(app, args)
     assert (result.exit_code, result.stderr) == (0, ""), result.output
-    assert "Usage:" in result.stdout
+    assert "Global options:" in result.stdout

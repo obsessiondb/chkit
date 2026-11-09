@@ -32,6 +32,7 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json
@@ -63,31 +64,24 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
+    table_selector: Annotated[
+        str | None,
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
+    ] = None,
     strict: Annotated[
         bool,
-        typer.Option("--strict", help="Enable all policy checks."),
+        typer.Option("--strict", help="Enable all policy checks"),
     ] = False,
     live: Annotated[  # noqa: ARG001
         bool,
         typer.Option(
             "--live",
-            help="No-op, kept for existing scripts: check always reads the live server.",
+            help="No-op, kept for existing scripts: check always reads the live server",
         ),
     ] = False,
     output_json: Annotated[
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
-    table_selector: Annotated[
-        str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help=(
-                "Scope the drift and plugin checks to the matched tables; pending "
-                "and checksum checks still cover every migration."
-            ),
-        ),
-    ] = None,
     # As in TS, the ObsessionDB plugin's on_check reads these: a Distributed
     # table fails check when the target counts as ObsessionDB.
     force_shared_engines: ForceSharedEnginesOption = False,
