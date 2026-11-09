@@ -274,6 +274,10 @@ describe('unquoteIdentifiers', () => {
     )
   })
 
+  test('reads other escapes as ClickHouse does (#639)', () => {
+    expect(unquoteIdentifiers('(`a\\q`, `b\\x41`, `c\\Nd`, `e\\%`)')).toBe('(a\\q, bA, cd, e\\%)')
+  })
+
   test('leaves string literals untouched', () => {
     expect(unquoteIdentifiers("concat(`a b`, '`not an identifier`')")).toBe(
       "concat(a b, '`not an identifier`')"

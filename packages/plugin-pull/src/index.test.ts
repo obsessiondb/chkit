@@ -1156,10 +1156,45 @@ TO app.t AS SELECT 1`
     ])
   })
 
-  test('parseRefreshClause DEPENDS ON entries trim JavaScript whitespace', () => {
-    // chkit-py's test_name_trim.py asserts the same (#580).
+  test('parseRefreshClause reads quoted DEPENDS ON names as ClickHouse means them', () => {
+    // create_table_query as ClickHouse 26.3 returns it (#631); chkit-py's
+    // test_pull.py asserts the same.
     const refresh = __testUtils.parseRefreshClause(
-      'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR DEPENDS ON \ufeffapp.src\x85, \ufeffother TO app.t AS SELECT 1'
+      'CREATE MATERIALIZED VIEW d.mv2 REFRESH EVERY 1 HOUR DEPENDS ON d.r1, d.`we\\`ird`, d.`a.b`, d.`x\\``, d.`has AS kw`, d.`q"d`, `a, b`.`TO` TO d.dst (`a` UInt8) DEFINER = default SQL SECURITY DEFINER AS SELECT a FROM d.src'
+    )
+    expect(refresh?.dependsOn).toEqual([
+      { database: 'd', name: 'r1' },
+      { database: 'd', name: 'we`ird' },
+      { database: 'd', name: 'a.b' },
+      { database: 'd', name: 'x`' },
+      { database: 'd', name: 'has AS kw' },
+      { database: 'd', name: 'q"d' },
+      { database: 'a, b', name: 'TO' },
+    ])
+  })
+
+  test('parseRefreshClause decodes escapes in quoted DEPENDS ON names as ClickHouse does (#631, #639)', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR DEPENDS ON d.`x\\ny`, d.`b\\x41` TO d.dst AS SELECT 1'
+    )
+    expect(refresh?.dependsOn).toEqual([
+      { database: 'd', name: 'x\ny' },
+      { database: 'd', name: 'bA' },
+    ])
+  })
+
+  test('parseRefreshClause ignores DEPENDS ON text inside a string or the SELECT', () => {
+    const refresh = __testUtils.parseRefreshClause(
+      "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR TO d.dst AS SELECT 'DEPENDS ON d.x' AS c"
+    )
+    expect(refresh).toEqual({ every: '1 HOUR' })
+  })
+
+  test('parseRefreshClause DEPENDS ON entries trim JavaScript whitespace', () => {
+    // chkit-py's test_name_trim.py asserts the same (#580). ClickHouse quotes
+    // these names, so they are quoted here too (#631).
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR DEPENDS ON `\ufeffapp`.`src\x85`, `\ufeffother` TO app.t AS SELECT 1'
     )
     expect(refresh?.dependsOn).toEqual([
       { database: 'app', name: 'src\x85' },
