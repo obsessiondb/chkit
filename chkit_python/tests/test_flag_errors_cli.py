@@ -146,4 +146,4 @@ def test_a_value_flag_followed_by_a_double_dash_token_does_not_take_it(
 def test_help_wins_over_a_flag_error_as_in_ts(args: list[str]) -> None:
     result = CliRunner().invoke(app, args)
     assert (result.exit_code, result.stderr) == (0, ""), result.output
-    assert "Usage:" in result.stdout
+    assert "Global options:" in result.stdout

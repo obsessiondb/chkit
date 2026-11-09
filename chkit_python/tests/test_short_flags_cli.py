@@ -97,7 +97,7 @@ def test_a_forwarder_reads_only_its_own_options_and_passes_the_rest_on(
 
     help_result = CliRunner().invoke(app, ["codegen", "--check", "-h"])
     assert help_result.exit_code == 0
-    assert "Usage:" in help_result.output
+    assert "Global options:" in help_result.output
 
 
 def test_a_forwarder_option_without_its_value_is_a_usage_error() -> None:
@@ -117,7 +117,7 @@ def test_h_is_help_and_v_is_the_version() -> None:
     for args in (["-h"], ["status", "-h"], ["plugin", "-h"], ["obsessiondb", "-h"]):
         result = CliRunner().invoke(app, args)
         assert result.exit_code == 0, (args, result.output)
-        assert "Usage:" in result.output, args
+        assert "Global options:" in result.output, args
     for flag in ("-v", "-V", "--version"):
         result = CliRunner().invoke(app, [flag])
         assert (result.exit_code, result.stdout) == (0, f"{__version__}\n")

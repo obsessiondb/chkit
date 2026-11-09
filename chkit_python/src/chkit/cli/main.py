@@ -26,12 +26,19 @@ from chkit.cli.commands import (
     status,
 )
 from chkit.cli.flag_errors import report_flag_error
+from chkit.cli.help import (
+    HELP_PLUGINS_META,
+    HELP_SUBCOMMAND_META,
+    command_help_text,
+    global_help_text,
+)
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
 from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
 from chkit.core.flags import MissingFlagValueError, UnknownFlagError
 
 _HELP_OPTION_NAMES = ("-h", "--help")
+_HELP_PLUGINS_OPTION = "--help-plugins"
 
 
 def _option_forms(params: list[Any]) -> tuple[dict[str, bool], dict[str, str]]:
@@ -236,15 +243,50 @@ def _query_sql_behind_terminator(args: list[str], params: list[Any]) -> list[str
     return [*options, "--", *positionals] if positionals else options
 
 
+def _read_help_plugins(ctx: Any, args: list[str]) -> list[str]:
+    """As in TS, ``--help-plugins`` before any ``--`` is the help, with the
+    flags plugins add to the command (``chkit.cli.help``)."""
+    end = args.index("--") if "--" in args else len(args)
+    if _HELP_PLUGINS_OPTION not in args[:end]:
+        return args
+    ctx.meta[HELP_PLUGINS_META] = True
+    return [
+        "--help" if token == _HELP_PLUGINS_OPTION else token for token in args[:end]
+    ] + args[end:]
+
+
+def _group_help_plugins(ctx: Any, args: list[str]) -> list[str]:
+    """``chkit --help-plugins`` is the top-level help; ``chkit --help-plugins
+    generate`` is the help of ``generate``, as in TS."""
+    end = next(
+        (i for i, token in enumerate(args) if token == "--" or not token.startswith("-")),
+        len(args),
+    )
+    if _HELP_PLUGINS_OPTION not in args[:end]:
+        return args
+    ctx.meta[HELP_PLUGINS_META] = True
+    leading = [token for token in args[:end] if token != _HELP_PLUGINS_OPTION]
+    rest = args[end:]
+    if rest and rest[0] != "--":
+        return [*leading, rest[0], _HELP_PLUGINS_OPTION, *rest[1:]]
+    return [*leading, "--help"]
+
+
 class _ChkitCommand(TyperCommand):
     """Every chkit command reads its options as TS does (#491) and reports a
     flag error as TS does (#563)."""
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
+        args = _read_help_plugins(ctx, args)
         try:
             if ctx.ignore_unknown_options:
                 normalized = _split_forwarded_args(args, params)
+                # `chkit obsessiondb login -h` shows the help of `login` (TS
+                # `firstPluginPositional`): the first token that is not one
+                # of the forwarder's own options.
+                forwarded = normalized[normalized.index("--") + 1 :]
+                ctx.meta[HELP_SUBCOMMAND_META] = forwarded[0] if forwarded else None
             elif any(token in _HELP_OPTION_NAMES for token in args):
                 # As in TS, -h / --help anywhere shows the help, even next to a
                 # flag error or where it would be a flag's value.
@@ -259,6 +301,9 @@ class _ChkitCommand(TyperCommand):
             report_flag_error(ctx.info_name, str(error), json_mode="--json" in args)
         return super().parse_args(ctx, normalized)
 
+    def get_help(self, ctx: Any) -> str:
+        return command_help_text(self, ctx.meta)
+
 
 class _ChkitGroup(TyperGroup):
     """Port of the TS CLI's top-level catch (``packages/cli/src/bin/chkit.ts``):
@@ -269,7 +314,11 @@ class _ChkitGroup(TyperGroup):
     """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
+        args = _group_help_plugins(ctx, args)
         return super().parse_args(ctx, _reject_group_bundles(ctx, args, self.get_params(ctx)))
+
+    def get_help(self, ctx: Any) -> str:  # noqa: ARG002 - click's signature
+        return global_help_text(self.commands, __version__)
 
     # Any: typer vendors click privately (typer._click), and the public
     # typer.Context subclass would narrow the parameter (mypy [override]).
@@ -310,20 +359,23 @@ def _command(name: str, **kwargs: Any) -> Any:
     return app.command(name, cls=_ChkitCommand, **kwargs)
 
 
-_command("init", help="Create a starter clickhouse.config.py and example schema.")(init.run)
-_command("generate", help="Generate a new migration from the current schema.")(generate.run)
-_command("migrate", help="Apply pending migrations to the target database.")(migrate.run)
-_command("status", help="Show migration status and pending operations.")(status.run)
-_command("check", help="Run pre-flight checks (drift, checksums, pending).")(check.run)
-_command("drift", help="Compare the live database against the schema snapshot.")(drift.run)
+# In the TS order, with the TS descriptions, which the help prints.
+_command("init", help="Scaffold a new project with config and example schema")(init.run)
+_command("generate", help="Generate migration artifacts from schema definitions")(generate.run)
+_command("migrate", help="Review or execute pending migrations")(migrate.run)
+_command("status", help="Show migration status and checksum mismatch information")(status.run)
+_command("drift", help="Compare snapshot state with current ClickHouse objects")(drift.run)
+_command("check", help="Run policy checks for CI and release gates")(check.run)
 _command("snapshot", help=snapshot.SNAPSHOT_HELP)(snapshot.run)
-_command("query", help="Run a SQL string against the configured ClickHouse target.")(query.run)
-_command("pull", help="Introspect live ClickHouse and emit a Python schema file.")(pull.run)
+_command("query", help="Run a SQL query against the configured target")(query.run)
 _command(
     "plugin",
-    help="List configured plugins or dispatch a plugin command.",
+    help="List plugins and run plugin namespace commands",
     context_settings={"ignore_unknown_options": True},
 )(plugin.run)
+_command("pull", help="Introspect live ClickHouse and emit a Python schema file")(pull.run)
+# The help lists these two, which run a plugin's commands, as TS lists the
+# configured plugins' commands (see _PLUGIN_SHORTCUTS).
 _command(
     "codegen",
     help="Generate typed row models via the codegen plugin (shortcut).",
