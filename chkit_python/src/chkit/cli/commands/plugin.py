@@ -11,8 +11,9 @@ Usage:
 
 from __future__ import annotations
 
+import contextlib
 import sys
-from collections.abc import Callable
+from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, cast
 
@@ -208,11 +209,14 @@ def _init_hooks(
     )
 
 
-def _forwarder_context_hooks(
+@contextlib.contextmanager
+def _forwarder_context(
     runtime: PluginRuntime, config: ChxResolvedConfig, *, config_path: str, flags: ParsedFlags
-) -> None:
+) -> Iterator[None]:
     """``chkit plugin`` is itself a command, so its get_context hooks run with
-    its own flags, as in TS (where every command is a plugin command)."""
+    its own flags, as in TS (where every command is a plugin command). As in
+    TS ``runPluginCommand``, the context lives until the command (listing or
+    the target command) ends, then is disposed."""
     plugin_context = runtime.resolve_context(
         ChxGetContextInput(
             config=config,
@@ -222,8 +226,11 @@ def _forwarder_context_hooks(
             defaults=null_plugin_context(),
         )
     )
-    if plugin_context is not None:
-        runtime.dispose_context(plugin_context)
+    try:
+        yield
+    finally:
+        if plugin_context is not None:
+            runtime.dispose_context(plugin_context)
 
 
 def _resolve_plugin_table_scope(
@@ -315,89 +322,92 @@ def dispatch_plugin_command(  # noqa: PLR0912
             report_flag_error(invoking_command, str(error), json_mode=output_json)
         flags = {**own_flags, **parsed}
 
-    _init_hooks(
-        runtime,
-        config,
-        command=invoking_command,
-        config_path=resolved_config_path,
-        output_json=output_json,
-        flags=flags,
-    )
-    if is_forwarder:
-        _forwarder_context_hooks(
-            runtime, config, config_path=resolved_config_path, flags=own_flags
-        )
-        if not runtime.plugins:
-            _fail_no_plugins(json_mode=output_json)
-
-    if entry is None:
-        if invoking_command == "codegen":
-            # As TS reports a well-known plugin command whose plugin is missing.
-            report_usage_error(
-                "codegen",
-                "Codegen plugin is not configured. Add it to config.plugins first.",
-                json_mode=output_json,
-                code="plugin_not_configured",
-            )
-        raise _unknown_plugin_error(plugin_name, list(runtime.plugins))
-    if command_name is None:
-        # A shortcut given no command shows its help after on_init (with
-        # no flags), as TS does, also under --json.
-        if print_help is not None:
-            print_help()
-        return
-    if found is None:
-        known = [command.name for command in entry.plugin.commands or []]
-        message = (
-            f'Unknown {plugin_name} command "{command_name}". '
-            f'Available: {", ".join(known) or "(none)"}.'
-        )
-        if invoking_command == "plugin":
-            report_flag_error("plugin", message, json_mode=output_json)
-        report_usage_error(
-            invoking_command,
-            message,
-            json_mode=output_json,
-            code="unknown_subcommand",
-            on_text=print_help,
-        )
-
-    # Set only when the command declares --table (#565). As in TS, the scope
-    # is resolved after on_init and before on_config_loaded, which gets it.
-    table_selector = flags.get("--table")
-    table_scope = _resolve_plugin_table_scope(
-        config.schema_,
-        table_selector if isinstance(table_selector, str) else None,
-    )
-    if not is_forwarder:
-        # TS runs on_config_loaded for a plugin command run by its own name,
-        # not through `chkit plugin`.
-        run_on_config_loaded_or_exit(
+    with contextlib.ExitStack() as forwarder_scope:
+        _init_hooks(
             runtime,
-            ChxOnConfigLoadedContext(
-                command=invoking_command,
-                config=config,
-                table_scope=table_scope,
-                flags=dict(flags),
-                config_path=resolved_config_path,
-                options={},
-            ),
+            config,
+            command=invoking_command,
+            config_path=resolved_config_path,
             output_json=output_json,
+            flags=flags,
         )
+        if is_forwarder:
+            forwarder_scope.enter_context(
+                _forwarder_context(
+                    runtime, config, config_path=resolved_config_path, flags=own_flags
+                )
+            )
+            if not runtime.plugins:
+                _fail_no_plugins(json_mode=output_json)
 
-    exit_code = _run_command(
-        runtime,
-        config,
-        plugin_name=plugin_name,
-        command_name=command_name,
-        config_path=resolved_config_path,
-        output_json=output_json,
-        args=positionals,
-        flags=flags,
-        table_scope=table_scope,
-    )
-    if exit_code != 0:
-        raise typer.Exit(code=exit_code)
+        if entry is None:
+            if invoking_command == "codegen":
+                # As TS reports a well-known plugin command whose plugin is missing.
+                report_usage_error(
+                    "codegen",
+                    "Codegen plugin is not configured. Add it to config.plugins first.",
+                    json_mode=output_json,
+                    code="plugin_not_configured",
+                )
+            raise _unknown_plugin_error(plugin_name, list(runtime.plugins))
+        if command_name is None:
+            # A shortcut given no command shows its help after on_init (with
+            # no flags), as TS does, also under --json.
+            if print_help is not None:
+                print_help()
+            return
+        if found is None:
+            known = [command.name for command in entry.plugin.commands or []]
+            message = (
+                f'Unknown {plugin_name} command "{command_name}". '
+                f'Available: {", ".join(known) or "(none)"}.'
+            )
+            if invoking_command == "plugin":
+                report_flag_error("plugin", message, json_mode=output_json)
+            report_usage_error(
+                invoking_command,
+                message,
+                json_mode=output_json,
+                code="unknown_subcommand",
+                on_text=print_help,
+            )
+
+        # Set only when the command declares --table (#565). As in TS, the scope
+        # is resolved after on_init and before on_config_loaded, which gets it.
+        table_selector = flags.get("--table")
+        table_scope = _resolve_plugin_table_scope(
+            config.schema_,
+            table_selector if isinstance(table_selector, str) else None,
+        )
+        if not is_forwarder:
+            # TS runs on_config_loaded for a plugin command run by its own name,
+            # not through `chkit plugin`.
+            run_on_config_loaded_or_exit(
+                runtime,
+                ChxOnConfigLoadedContext(
+                    command=invoking_command,
+                    config=config,
+                    table_scope=table_scope,
+                    flags=dict(flags),
+                    config_path=resolved_config_path,
+                    options={},
+                ),
+                output_json=output_json,
+            )
+
+        exit_code = _run_command(
+            runtime,
+            config,
+            plugin_name=plugin_name,
+            command_name=command_name,
+            config_path=resolved_config_path,
+            output_json=output_json,
+            args=positionals,
+            flags=flags,
+            table_scope=table_scope,
+        )
+        if exit_code != 0:
+            raise typer.Exit(code=exit_code)
 
 
 def _run_command(
@@ -498,21 +508,21 @@ def run(
             output_json=output_json,
             flags=own_flags,
         )
-        _forwarder_context_hooks(
+        with _forwarder_context(
             runtime, config, config_path=resolved_config_path, flags=own_flags
-        )
-        loaded = list(runtime.plugins)
-        if not loaded:
-            _fail_no_plugins(json_mode=output_json)
-        if plugin_name is None:
-            _list_all(loaded, json_mode=output_json)
-            return
-        entry = next(
-            (e for e in loaded if e.plugin.manifest.name == plugin_name), None
-        )
-        if entry is None:
-            raise _unknown_plugin_error(plugin_name, loaded)
-        _list_one(entry, json_mode=output_json)
+        ):
+            loaded = list(runtime.plugins)
+            if not loaded:
+                _fail_no_plugins(json_mode=output_json)
+            if plugin_name is None:
+                _list_all(loaded, json_mode=output_json)
+                return
+            entry = next(
+                (e for e in loaded if e.plugin.manifest.name == plugin_name), None
+            )
+            if entry is None:
+                raise _unknown_plugin_error(plugin_name, loaded)
+            _list_one(entry, json_mode=output_json)
         return
 
     dispatch_plugin_command(

@@ -32,7 +32,7 @@ import json
 import os
 from pathlib import Path
 
-from chkit.plugins import ChxPlugin, ChxPluginCommand, ChxPluginManifest
+from chkit.plugins import ChxPlugin, ChxPluginCommand, ChxPluginManifest, PluginContext
 
 
 def _record(*call):
@@ -42,6 +42,14 @@ def _record(*call):
     path.write_text(json.dumps(calls))
     if os.environ.get("PROBE_FAIL") == call[0]:
         raise RuntimeError(call[0] + " failed")
+
+
+class _Closer:
+    def __init__(self, command):
+        self.command = command
+
+    def close(self):
+        _record("close", self.command)
 
 
 class _Probe:
@@ -55,6 +63,9 @@ class _Probe:
 
     def get_context(self, ctx):
         _record("get_context", ctx.command, ctx.flags)
+        if os.environ.get("PROBE_CONTEXT"):
+            return PluginContext(executor=_Closer(ctx.command), has_executor=True)
+        return None
 
     def on_complete(self, ctx):
         _record("on_complete", ctx.command, ctx.exit_code, ctx.json_mode)
@@ -146,6 +157,7 @@ def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     monkeypatch.chdir(tmp_path)
     monkeypatch.syspath_prepend(str(tmp_path))
     monkeypatch.delenv("PROBE_FAIL", raising=False)
+    monkeypatch.delenv("PROBE_CONTEXT", raising=False)
     # Its own module name: other tests import other probe modules.
     (tmp_path / "lifecycle_probe.py").write_text(PROBE_PLUGIN, encoding="utf-8")
     (tmp_path / "schema.py").write_text(
@@ -259,6 +271,40 @@ def test_unknown_plugin_runs_on_complete_with_the_exit_code(project: Path) -> No
         ["on_init", "plugin", {}, False],
         ["get_context", "plugin", {}],
         ["on_complete", "plugin", result.exit_code, False],
+    ]
+
+
+@pytest.mark.parametrize(
+    ("args", "inner"),
+    [
+        (
+            ["plugin", "probe", "greet"],
+            [
+                ["on_before_plugin_command", "probe:greet", {}],
+                ["get_context", "greet", {}],
+                ["run", "greet", {}],
+                ["close", "greet"],
+            ],
+        ),
+        (["plugin"], []),
+    ],
+)
+def test_forwarder_context_lives_until_the_command_ends(
+    project: Path, monkeypatch: pytest.MonkeyPatch, args: list[str], inner: list[list[Any]]
+) -> None:
+    # As TS runPluginCommand, `chkit plugin` disposes its own context only
+    # after the target command (or the listing) ran.
+    monkeypatch.setenv("PROBE_CONTEXT", "1")
+
+    result = _invoke(args)
+
+    assert result.exit_code == 0, result.output
+    assert _calls(project) == [
+        ["on_init", "plugin", {}, False],
+        ["get_context", "plugin", {}],
+        *inner,
+        ["close", "plugin"],
+        ["on_complete", "plugin", 0, False],
     ]
 
 
