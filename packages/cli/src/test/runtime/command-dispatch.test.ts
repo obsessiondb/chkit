@@ -194,7 +194,7 @@ describe('runResolvedCommand', () => {
 		expect(configLoadedCalls()).toBe(1)
 	})
 
-	test('passes positional args to plugin subcommands', async () => {
+	test('passes positional args to plugin subcommands, without the subcommand name (#624)', async () => {
 		const { runtime } = makeRuntime()
 		let received:
 			| { pluginName: string; commandName: string; args: readonly string[] }
@@ -232,7 +232,7 @@ describe('runResolvedCommand', () => {
 		expect(received).toEqual({
 			pluginName: 'obsessiondb',
 			commandName: 'service',
-			args: ['service', 'alias', 'set', 'prod', 'production'],
+			args: ['alias', 'set', 'prod', 'production'],
 		})
 	})
 
@@ -295,7 +295,49 @@ describe('runResolvedCommand', () => {
 		expect(received).toEqual({
 			pluginName: 'obsessiondb',
 			commandName: 'service',
-			args: ['service', 'alias', 'set', 'login', 'production'],
+			args: ['alias', 'set', 'login', 'production'],
+		})
+	})
+
+	test('keeps the first positional when the only subcommand runs without its name', async () => {
+		const { runtime } = makeRuntime()
+		let received:
+			| { pluginName: string; commandName: string; args: readonly string[] }
+			| undefined
+		runtime.runPluginCommand = async (pluginName, commandName, context) => {
+			received = { pluginName, commandName, args: context.args }
+			return 0
+		}
+
+		await runResolvedCommand({
+			argv: ['echoer', 'alpha', 'beta'],
+			commandName: 'echoer',
+			resolved: {
+				name: 'echoer',
+				description: '',
+				flags: [],
+				pluginFlags: [],
+				pluginName: 'echoer',
+				subcommands: [
+					{
+						name: 'echo',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'echoer',
+					},
+				],
+			},
+			registry: makeRegistry(),
+			config: TEST_CONFIG,
+			configPath: '/tmp/clickhouse.config.ts',
+			pluginRuntime: runtime,
+		})
+
+		expect(received).toEqual({
+			pluginName: 'echoer',
+			commandName: 'echo',
+			args: ['alpha', 'beta'],
 		})
 	})
 })

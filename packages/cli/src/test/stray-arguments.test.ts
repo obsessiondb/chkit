@@ -112,10 +112,10 @@ describe('stray arguments (#612)', () => {
         ])
       }
 
-      // `chkit <plugin> <command>` passes the command name too, as before (#568).
+      // Both plugin routes pass the args after the command name (#624).
       for (const [args, printed] of [
         [['plugin', 'probe', 'echo', 'a', 'b'], 'a,b'],
-        [['probe', 'echo', 'a', 'b'], 'echo,a,b'],
+        [['probe', 'echo', 'a', 'b'], 'a,b'],
       ] as const) {
         const result = fixture.run(args)
         expect([args, result.exitCode, result.stdout.trim()]).toEqual([args, 0, printed])

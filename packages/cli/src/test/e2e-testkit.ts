@@ -8,7 +8,7 @@
 import { join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { spawnWithTimeout } from './spawn-cli.js'
+import { createIsolatedCliEnv, spawnWithTimeout } from './spawn-cli.js'
 
 // Re-export all shared utilities so CLI tests only need one import
 export {
@@ -59,9 +59,10 @@ export function startCli(
   extraEnv: Record<string, string> = {},
   { timeoutMs = 120_000 }: { timeoutMs?: number } = {}
 ): { result: Promise<CliResult>; kill: () => void } {
+  const isolated = createIsolatedCliEnv(extraEnv)
   const proc = Bun.spawn(['bun', CLI_ENTRY, ...args], {
     cwd,
-    env: { ...process.env, ...extraEnv },
+    env: isolated.env,
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: timeoutMs,
@@ -71,7 +72,9 @@ export function startCli(
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
-  ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }))
+  ])
+    .then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }))
+    .finally(isolated.cleanup)
   return { result, kill: () => proc.kill('SIGKILL') }
 }
 
