@@ -1,4 +1,5 @@
-import { renderIdentifier, unescapeQuoted } from './identifier.js'
+import { renderIdentifier } from './identifier.js'
+import { unescapeQuoted } from './sql-lexer.js'
 import { findQuoteEnd } from './sql-scan.js'
 import { splitTopLevelComma } from './key-clause.js'
 import type { TableDefinition } from './model-types.js'
