@@ -5,7 +5,7 @@
  * object with what Tinybird created.
  *
  *   bun run --cwd packages/plugin-tinybird parity -- --project <dir> [--report-dir <dir>]
- *     [--no-build] [--keep] [--port 18123] [--tb <Tinybird Forward CLI, default $TB_BIN or tb>] [--record <oracle.json>]
+ *     [--no-build] [--keep] [--max-depth 3] [--port 18123] [--tb <Tinybird Forward CLI, default $TB_BIN or tb>] [--record <oracle.json>]
  *
  * Requires Docker with the `tinybird-local` container and a built chkit CLI
  * (`bun run build`). Nothing here talks to Tinybird Cloud.
@@ -33,11 +33,13 @@ async function main(): Promise<void> {
       port: { type: 'string', default: '18123' },
       tb: { type: 'string', default: process.env.TB_BIN ?? 'tb' },
       record: { type: 'string' },
+      'max-depth': { type: 'string', default: '3' },
     },
   })
   if (!values.project) throw new Error('--project <dir> is required')
   if (!existsSync(CLI)) throw new Error(`build the chkit CLI first (bun run build): ${CLI} is missing`)
   const projectDir = resolve(values.project)
+  const maxDepth = Number(values['max-depth'])
   const target = DEFAULT_TARGET
   const runId = `${Date.now().toString(36)}_${Math.random().toString(36).slice(2, 6)}`
   const database = `chkit_tb_parity_${runId}`
@@ -45,12 +47,12 @@ async function main(): Promise<void> {
 
   if (!values['no-build']) {
     log(`tb build in ${projectDir}`)
-    await tbBuild(projectDir, values.tb)
+    await tbBuild(projectDir, values.tb, maxDepth)
   }
   const workspace = await workspaceToken(target, projectDir)
   log(`workspace ${workspace.name}`)
 
-  const imported = await importTinybirdProject({ projectDir, database })
+  const imported = await importTinybirdProject({ projectDir, database, maxDepth })
   const endpointParams = new Map(imported.endpoints.map((endpoint) => [endpoint.pipe, endpoint.paramSets]))
   const oracle = await captureOracle(target, workspace.token, endpointParams)
   log(`oracle: ${oracle.objects.length} objects in ${oracle.workspaceDatabase} (ClickHouse ${oracle.clickhouseVersion}, ${oracle.serverTimezone})`)

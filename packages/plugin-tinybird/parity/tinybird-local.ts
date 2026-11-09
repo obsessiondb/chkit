@@ -54,8 +54,8 @@ export async function formatQuery(target: LocalTarget, sql: string): Promise<str
   return row?.q ?? ''
 }
 
-export async function tbBuild(projectDir: string, tbBin: string): Promise<string> {
-  return run(tbBin, ['build'], { cwd: projectDir })
+export async function tbBuild(projectDir: string, tbBin: string, maxDepth: number): Promise<string> {
+  return run(tbBin, ['--max-depth', String(maxDepth), 'build'], { cwd: projectDir })
 }
 
 /** The token of the Local workspace `tb build` used for this project folder. */
