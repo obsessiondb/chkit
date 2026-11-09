@@ -14,11 +14,15 @@ from __future__ import annotations
 import json
 from collections.abc import Iterator
 from pathlib import Path
+from typing import Any
 
 import pytest
+import typer
+from typer._click.exceptions import FileError
 from typer.testing import CliRunner
 
-from chkit.cli.json_output import _reset_for_testing
+from chkit.cli.commands import status
+from chkit.cli.json_output import _reset_for_testing, emit_json
 from chkit.cli.main import app
 
 CONFIG = """
@@ -208,3 +212,34 @@ def test_codegen_without_its_plugin_is_not_configured(
         }
     else:
         assert result.stdout == ""
+
+
+def _raise_after_emitting_json(*_args: Any, **_kwargs: Any) -> Any:
+    emit_json("status", {"ok": True})
+    msg = "late"
+    raise typer.BadParameter(msg)
+
+
+def _raise_file_error(*_args: Any, **_kwargs: Any) -> Any:
+    raise FileError("credentials.json", "Permission denied")
+
+
+@pytest.mark.usefixtures("project")
+def test_a_usage_error_after_json_output_adds_no_second_envelope(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(status, "load_config", _raise_after_emitting_json)
+    result = CliRunner().invoke(app, ["status", "--json"])
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout) == {"command": "status", "schemaVersion": 1, "ok": True}
+    assert result.stderr == "Invalid value: late\n"
+
+
+@pytest.mark.usefixtures("project")
+def test_a_click_error_that_is_not_a_usage_error_keeps_the_error_code(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr(status, "load_config", _raise_file_error)
+    result = CliRunner().invoke(app, ["status", "--json"])
+    assert result.exit_code == 1, result.output
+    assert json.loads(result.stdout)["error"]["code"] == "error"

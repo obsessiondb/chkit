@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import typer
+from typer._click.exceptions import UsageError  # click, which typer vendors privately
 from typer.core import TyperCommand, TyperGroup
 from typer.exceptions import TyperException
 
@@ -285,11 +286,13 @@ class _ChkitGroup(TyperGroup):
         except (typer.Exit, typer.Abort, BrokenPipeError):
             raise
         except Exception as error:
-            # click's UsageError or BadParameter (typer vendors click privately)
-            # from the resolved command: its arguments or its option values.
-            if isinstance(error, TyperException) and ctx.invoked_subcommand is not None:
+            # A usage error of the resolved command: its arguments or its
+            # option values. A command that already wrote JSON keeps it alone.
+            if isinstance(error, UsageError) and ctx.invoked_subcommand is not None:
                 report_flag_error(
-                    ctx.invoked_subcommand, error.format_message(), json_mode=json_mode
+                    ctx.invoked_subcommand,
+                    error.format_message(),
+                    json_mode=json_mode and not has_emitted_json(),
                 )
             if is_debug_enabled():
                 configure_cli_logging()
