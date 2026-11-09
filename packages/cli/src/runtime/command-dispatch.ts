@@ -105,19 +105,31 @@ function splitAtEndOfFlags(argv: string[]): { flagArgs: string[]; rest: string[]
 	return { flagArgs: argv.slice(0, end), rest: argv.slice(end + 1) }
 }
 
+/** A stray argument given to a command that takes none, in click's words as chkit-py reports it (#612). */
+export class UnexpectedArgumentsError extends Error {
+	constructor(args: readonly string[]) {
+		super(`Got unexpected extra argument(s) (${args.join(' ')})`)
+		this.name = 'UnexpectedArgumentsError'
+	}
+}
+
 /**
  * Parses a plugin command's arguments: its flags go to `flags`, the rest to
- * `positionals`, the `args` the command gets (#568). Throws on a flag error.
+ * `positionals`, the `args` the command gets (#568). Throws on a flag error,
+ * and with `rejectPositionals` on a positional after the flags parse.
  */
 export function parsePluginCommandArgs(
 	argv: string[],
 	flagDefs: readonly FlagDef[],
+	{ rejectPositionals = false }: { rejectPositionals?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } {
 	const { flagArgs, rest } = splitAtEndOfFlags(argv)
-	return {
-		flags: parseFlags(flagArgs, flagDefs),
-		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
+	const flags = parseFlags(flagArgs, flagDefs)
+	const positionals = [...extractPositionals(flagArgs, flagDefs), ...rest]
+	if (rejectPositionals && positionals.length > 0) {
+		throw new UnexpectedArgumentsError(positionals)
 	}
+	return { flags, positionals }
 }
 
 /**
@@ -157,10 +169,10 @@ export function parseCommandArgs(
 	if (!flags) return null
 	const positionals = [...extractPositionals(flagArgs, flagDefs), ...rest]
 	if (rejectPositionals && positionals.length > 0) {
-		// click's words in chkit-py; reported after any flag error, as click does (#612).
+		// Reported after any flag error, as click does in chkit-py (#612).
 		reportCommandUsageError(
 			commandName,
-			`Got unexpected extra argument(s) (${positionals.join(' ')})`,
+			new UnexpectedArgumentsError(positionals).message,
 			flags['--json'] === true,
 		)
 		return null
@@ -178,22 +190,20 @@ const CORE_COMMANDS_WITH_POSITIONALS = new Set(['query', 'snapshot', 'plugin'])
 
 /**
  * Every other core command takes none, so a stray argument is a usage error
- * instead of being ignored (#612). Plugin commands get theirs in `args`.
+ * instead of being ignored (#612), also through `chkit plugin core <command>`.
+ * Plugin commands get theirs in `args`.
  */
-function rejectsPositionals(
+export function rejectsPositionals(
+	pluginName: string | undefined,
 	commandName: string,
-	resolved: RegisteredCommand,
 ): boolean {
-	return (
-		resolved.pluginName === 'core' &&
-		!CORE_COMMANDS_WITH_POSITIONALS.has(commandName)
-	)
+	return pluginName === 'core' && !CORE_COMMANDS_WITH_POSITIONALS.has(commandName)
 }
 
 function commandArgsOptions(commandName: string, resolved: RegisteredCommand) {
 	return {
 		endOfFlags: isPluginCommand(resolved),
-		rejectPositionals: rejectsPositionals(commandName, resolved),
+		rejectPositionals: rejectsPositionals(resolved.pluginName, commandName),
 	}
 }
 
@@ -283,13 +293,17 @@ function parseForwardedInitFlags(
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)
 	try {
-		return { ...flags, ...parsePluginCommandArgs(commandArgs, defs).flags }
+		const parsed = parsePluginCommandArgs(commandArgs, defs, {
+			rejectPositionals: rejectsPositionals(pluginName, command.name),
+		})
+		return { ...flags, ...parsed.flags }
 	} catch (error) {
 		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
 		// does, in the format the plugin command uses for it.
 		if (
 			error instanceof UnknownFlagError ||
-			error instanceof MissingFlagValueError
+			error instanceof MissingFlagValueError ||
+			error instanceof UnexpectedArgumentsError
 		) {
 			if (flags['--json'] === true) {
 				emitJson('plugin', { ok: false, error: error.message })

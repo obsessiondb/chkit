@@ -1,5 +1,11 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
-import { forwardedCommandFlags, parsePluginCommandArgs, routeForwardedArgs } from '../runtime/command-dispatch.js'
+import {
+  forwardedCommandFlags,
+  parsePluginCommandArgs,
+  rejectsPositionals,
+  routeForwardedArgs,
+  UnexpectedArgumentsError,
+} from '../runtime/command-dispatch.js'
 import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
 import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
@@ -119,11 +125,18 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   let mergedFlags: ParsedFlags
   let positionals: string[]
   try {
-    const parsed = parsePluginCommandArgs(commandArgs, commandFlags)
+    // `chkit plugin core migrate prod` rejects `prod` as `chkit migrate prod` does (#612).
+    const parsed = parsePluginCommandArgs(commandArgs, commandFlags, {
+      rejectPositionals: rejectsPositionals(pluginName, commandName),
+    })
     mergedFlags = { ...flags, ...parsed.flags }
     positionals = parsed.positionals
   } catch (error) {
-    if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
+    if (
+      error instanceof UnknownFlagError ||
+      error instanceof MissingFlagValueError ||
+      error instanceof UnexpectedArgumentsError
+    ) {
       if (jsonMode) {
         emitJson('plugin', { ok: false, error: error.message })
       } else {

@@ -64,6 +64,20 @@ describe('stray arguments (#612)', () => {
       // A flag error comes first, as click reports it first in chkit-py.
       const flagError = fixture.run(['migrate', 'foo', '--bogus'])
       expect([flagError.exitCode, flagError.stderr.trim()]).toEqual([1, 'Unknown flag: --bogus'])
+
+      // `chkit plugin core <command>` rejects them too, before any hook runs, in the forwarder's format.
+      const forwarded = fixture.run(['plugin', 'core', 'migrate', 'prod', '--apply'])
+      expect([forwarded.exitCode, forwarded.stdout, forwarded.stderr.trim()]).toEqual([
+        1,
+        '',
+        'Got unexpected extra argument(s) (prod)',
+      ])
+      const forwardedJson = fixture.run(['plugin', 'core', 'status', 'foo', '--json'])
+      expect([forwardedJson.exitCode, forwardedJson.stderr, JSON.parse(forwardedJson.stdout)]).toEqual([
+        1,
+        '',
+        { command: 'plugin', schemaVersion: 1, ok: false, error: 'Got unexpected extra argument(s) (foo)' },
+      ])
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
@@ -78,14 +92,25 @@ describe('stray arguments (#612)', () => {
         1,
         expect.stringContaining('Unexpected argument "foo" for `chkit snapshot rebuild`.'),
       ])
-      const dryrun = fixture.run(['snapshot', 'rebuild', '--dryrun'])
-      expect(dryrun.exitCode).toBe(0)
+      for (const args of [
+        ['snapshot', 'rebuild', '--dryrun'],
+        ['plugin', 'core', 'snapshot', 'rebuild', '--dryrun'],
+      ]) {
+        const result = fixture.run(args)
+        expect([args, result.exitCode]).toEqual([args, 0])
+      }
 
-      const query = fixture.run(['query', 'SELECT 1', 'extra'])
-      expect([query.exitCode, query.stderr]).toEqual([
-        1,
-        expect.stringContaining('query accepts a single SQL string.'),
-      ])
+      for (const args of [
+        ['query', 'SELECT 1', 'extra'],
+        ['plugin', 'core', 'query', 'SELECT 1', 'extra'],
+      ]) {
+        const result = fixture.run(args)
+        expect([args, result.exitCode, result.stderr]).toEqual([
+          args,
+          1,
+          expect.stringContaining('query accepts a single SQL string.'),
+        ])
+      }
 
       // `chkit <plugin> <command>` passes the command name too, as before (#568).
       for (const [args, printed] of [
