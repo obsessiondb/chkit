@@ -18,6 +18,8 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- Waits for a created, dropped or altered table, view, column or dictionary check 21 times,
+  0.5 s apart, like TS (#578). They checked 20 times and slept 0.5 s after the last check.
 - `migrate --apply` no longer prints `submit raised (...) — polling for the server-side state`
   when an async statement's submit fails, as in TS (#561): a submit error that decides the
   outcome is the command's error, so it is no longer printed twice. When polling gives up
