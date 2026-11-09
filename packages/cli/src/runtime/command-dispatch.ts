@@ -14,7 +14,7 @@ import {
 } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
-import { GLOBAL_FLAGS } from './global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from './global-flags.js'
 import { emitJsonError, printOutput, writeStdout } from './json-output.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
@@ -184,10 +184,9 @@ function forwarderFlags(argsAfterCommand: string[]): {
 	flags: ParsedFlags
 	rest: string[]
 } {
-	const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
+	const { jsonMode, rest } = stripGlobalFlags(argsAfterCommand)
 	const flags: ParsedFlags = {}
 	if (jsonMode) flags['--json'] = true
-	if (tableSelector) flags['--table'] = tableSelector
 	return { flags, rest }
 }
 
@@ -211,14 +210,13 @@ function matchSubcommand(
 	return { ok: false, token: commandToken }
 }
 
+// `--table` is not global: it stays in the rest, for the target command to accept or reject (#565).
 function stripGlobalFlags(argv: string[]): {
 	jsonMode: boolean
-	tableSelector: string | undefined
 	rest: string[]
 } {
 	const rest: string[] = []
 	let jsonMode = false
-	let tableSelector: string | undefined
 
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i] as string
@@ -233,19 +231,10 @@ function stripGlobalFlags(argv: string[]): {
 		if (token.startsWith('--config=')) {
 			continue
 		}
-		if (token === '--table' && i + 1 < argv.length) {
-			tableSelector = argv[i + 1]
-			i++
-			continue
-		}
-		if (token.startsWith('--table=')) {
-			tableSelector = token.slice('--table='.length)
-			continue
-		}
 		rest.push(token)
 	}
 
-	return { jsonMode, tableSelector, rest }
+	return { jsonMode, rest }
 }
 
 export function parseFlagsOrReport(
@@ -348,8 +337,9 @@ export async function runResolvedCommand(input: {
 		}
 	}
 
-	const gf = typedFlags(flags, GLOBAL_FLAGS)
+	const gf = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)
 	const jsonMode = gf['--json'] === true
+	// Set only when the command declares --table (#565).
 	const tableScope = await resolvePluginTableScope({
 		schemaGlobs: input.config.schema,
 		tableSelector: gf['--table'],

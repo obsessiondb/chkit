@@ -1,6 +1,6 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
 import { forwardedCommandFlags } from '../runtime/command-dispatch.js'
-import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
+import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
 import { parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
@@ -100,18 +100,6 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 0
   }
 
-  const gf = typedFlags(flags, GLOBAL_FLAGS)
-  const tableSelector = gf['--table']
-  let tableScope: ReturnType<typeof resolveTableScope>
-  try {
-    // Without --table the scope is unfiltered, so only a selector needs the schema.
-    // A plugin command that needs it loads it and reports its load errors itself.
-    const definitions = tableSelector ? await loadSchemaDefinitions(ctx.config.schema) : []
-    tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
-  } catch {
-    tableScope = resolveTableScope(tableSelector, [])
-  }
-
   // Parse plugin-specific flags when the command declares them or another plugin
   // extends this plugin's namespace (the same flags `chkit <plugin> <command>` accepts).
   const targetCommand = (selectedPlugin.plugin.commands ?? []).find((cmd) => cmd.name === commandName)
@@ -141,6 +129,18 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
       return 1
     }
     throw error
+  }
+
+  // Set only when the target command declares --table (#565).
+  const tableSelector = typedFlags(mergedFlags, [TABLE_FLAG] as const)['--table']
+  let tableScope: ReturnType<typeof resolveTableScope>
+  try {
+    // Without --table the scope is unfiltered, so only a selector needs the schema.
+    // A plugin command that needs it loads it and reports its load errors itself.
+    const definitions = tableSelector ? await loadSchemaDefinitions(ctx.config.schema) : []
+    tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(definitions))
+  } catch {
+    tableScope = resolveTableScope(tableSelector, [])
   }
 
   const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {

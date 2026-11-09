@@ -6,7 +6,7 @@ import { collectDefinitionWarnings, configuredIndexGranularity } from '@chkit/co
 import { typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
 import { debug } from '../../runtime/debug.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { createJournalStore } from '../../runtime/journal-store.js'
 import { findChecksumMismatches, listMigrations, readSnapshot } from '../../runtime/migration-store.js'
@@ -25,10 +25,10 @@ const STRICT_FLAG = { name: '--strict', type: 'boolean', description: 'Enable al
 export const checkCommand: ChxPluginCommand = {
   name: 'check',
   description: 'Run policy checks for CI and release gates',
-  flags: [STRICT_FLAG],
+  flags: [TABLE_FLAG, STRICT_FLAG],
   async run(context): Promise<undefined | number> {
     const { flags, config, configPath, pluginRuntime, pluginContext } = context
-    const f = typedFlags(flags, [...GLOBAL_FLAGS, STRICT_FLAG] as const)
+    const f = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG, STRICT_FLAG] as const)
     const strict = f['--strict'] === true
     const jsonMode = f['--json'] === true
     const tableSelector = f['--table']

@@ -3,6 +3,8 @@ import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
 import { runSnapshotRebuild } from './rebuild.js'
 
 const SNAPSHOT_FLAGS = defineFlags([
+  // Declared so rebuild can explain why it rejects a scope, as chkit-py does.
+  { name: '--table', short: '-t', type: 'string', description: 'Not supported: rebuild rewrites the whole snapshot', placeholder: '<selector>' },
   { name: '--dryrun', type: 'boolean', description: 'Print the rebuild report without writing snapshot.json' },
 ] as const)
 

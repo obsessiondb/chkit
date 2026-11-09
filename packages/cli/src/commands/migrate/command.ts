@@ -16,7 +16,7 @@ import {
 } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
 import { debug } from '../../runtime/debug.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { createJournalStore } from '../../runtime/journal-store.js'
 import {
   findChecksumMismatches,
@@ -63,6 +63,7 @@ import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
 
 const MIGRATE_FLAGS = defineFlags([
+  TABLE_FLAG,
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
   { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
   { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
