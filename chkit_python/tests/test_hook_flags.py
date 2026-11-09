@@ -340,8 +340,8 @@ def test_migrate_hands_every_hook_the_parsed_flags(
     ("argv", "expected", "exit_code"),
     [
         (
-            ["status", "--json", "--table", "events", "--no-shared-engines", "--service", "probe"],
-            {"--json": True, "--table": "events", "--no-shared-engines": True, "--service": "probe"},
+            ["status", "--json", "--no-shared-engines", "--service", "probe"],
+            {"--json": True, "--no-shared-engines": True, "--service": "probe"},
             0,
         ),
         (

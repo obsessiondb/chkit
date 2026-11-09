@@ -17,6 +17,7 @@ from typing import Annotated, Any, cast
 import typer
 
 from chkit.cli.config_loader import load_config, loaded_config_path
+from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import (
     load_plugin_runtime,
@@ -175,7 +176,7 @@ def dispatch_plugin_command(
     try:
         positionals, flags = _split_positionals_and_flags(tokens, flag_defs)
     except (UnknownFlagError, MissingFlagValueError) as error:
-        raise typer.BadParameter(str(error)) from error
+        report_flag_error(invoking_command, str(error), json_mode=output_json)
     if extra_flags:
         flags.update(extra_flags)
 

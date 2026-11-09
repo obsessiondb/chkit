@@ -38,6 +38,13 @@ describe('stripWrappingParens', () => {
   test('is not fooled by an escaped backslash before a closing quote', () => {
     expect(stripWrappingParens("('a\\\\', ')')")).toBe("'a\\\\', ')'")
   })
+
+  test('reads a paren inside a heredoc as text (#587)', () => {
+    expect(stripWrappingParens('($$a)$$)')).toBe('$$a)$$')
+    expect(stripWrappingParens('($t$(a$t$)')).toBe('$t$(a$t$')
+    // The first `(` closes right after its heredoc, not at the end.
+    expect(stripWrappingParens('($$($$) || ($$)$$)')).toBe('($$($$) || ($$)$$)')
+  })
 })
 
 describe('findQuoteEnd', () => {
@@ -71,5 +78,18 @@ describe('findMatchingParen', () => {
 
   test('returns undefined when unbalanced', () => {
     expect(findMatchingParen('(a, b', 0)).toBeUndefined()
+  })
+
+  test('ignores parens inside a heredoc or a comment (#587)', () => {
+    expect(findMatchingParen('($$a)$$) tail', 0)).toBe(7)
+    expect(findMatchingParen('f($tag$)$tag$) tail', 1)).toBe(13)
+    expect(findMatchingParen('(a /* ) */) tail', 0)).toBe(10)
+  })
+
+  test('reads a `$` as ClickHouse does where no heredoc closes (#587)', () => {
+    // No second `$$`: the `$`s are punctuation and the parens are structure.
+    expect(findMatchingParen('($$a) tail', 0)).toBe(4)
+    // `f$$` is a name, so the later `$$` opens no heredoc.
+    expect(findMatchingParen('(f$$(x) || $$) tail', 0)).toBe(13)
   })
 })

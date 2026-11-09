@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from 'node:process'
 import { format } from 'node:util'
-import { expandShortFlags, type ParsedFlags } from '@chkit/core'
+import { expandShortFlags, type FlagDef, MissingFlagValueError, type ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
 import { cmdSkills } from '../commands/skills.js'
@@ -12,7 +12,7 @@ import { createCommandRegistry } from '../runtime/command-registry.js'
 import { loadConfig } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
 import { extractConfigPath } from '../runtime/extract-config-path.js'
-import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../runtime/global-flags.js'
 import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
 import {
   emitJsonError,
@@ -54,8 +54,9 @@ function optionArgs(argv: string[]): string[] {
 }
 
 function firstPluginPositional(argv: string[]): string | undefined {
-  const globalFlags = new Map<string, (typeof GLOBAL_FLAGS)[number]>(
-    GLOBAL_FLAGS.map((flag) => [flag.name, flag]),
+  // --table's value is never the plugin name, also where the target rejects the flag (#565).
+  const globalFlags = new Map<string, FlagDef>(
+    [...GLOBAL_FLAGS, TABLE_FLAG].map((flag) => [flag.name, flag]),
   )
   for (let i = 1; i < argv.length; i += 1) {
     const token = argv[i]
@@ -227,7 +228,14 @@ async function run(): Promise<void> {
     }
   }
 
-  const configPathArg = extractConfigPath(argv)
+  let configPathArg: string | undefined
+  try {
+    configPathArg = extractConfigPath(argv)
+  } catch (error) {
+    if (!(error instanceof MissingFlagValueError)) throw error
+    reportUsageError({ command: commandName, code: 'usage', message: error.message, jsonMode: argv.includes('--json') })
+    return
+  }
   const env = { command: commandName, mode: process.env.NODE_ENV }
   const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {
     command: commandName,

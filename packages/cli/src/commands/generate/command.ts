@@ -10,7 +10,7 @@ import {
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { readSnapshot } from '../../runtime/migration-store.js'
 import { loadSchemaDefinitionsWithHooks } from '../../runtime/schema-loader.js'
@@ -53,6 +53,7 @@ import { applyCutovers, carryRetainedDefinitions, resolveCutoverFlags, summarize
 import { debug } from '../../runtime/debug.js'
 
 const GENERATE_FLAGS = defineFlags([
+  TABLE_FLAG,
   { name: '--name', short: '-n', type: 'string', description: 'Migration name', placeholder: '<name>' },
   { name: '--migration-id', type: 'string', description: 'Override the default timestamp migration prefix', placeholder: '<id>' },
   { name: '--rename-table', type: 'string[]', description: 'Explicit table rename mapping', placeholder: '<mapping>' },

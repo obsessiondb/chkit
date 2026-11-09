@@ -34,12 +34,11 @@ from chkit.cli.migration_store import (
 )
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
-from chkit.cli.table_scope import resolve_table_scope
 from chkit.core.model import ChxConfigEnv
 from chkit.plugins import ChxPlugin
 
 
-def run(  # noqa: PLR0917
+def run(
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -47,17 +46,6 @@ def run(  # noqa: PLR0917
     output_json: Annotated[
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
-    table_selector: Annotated[
-        str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help=(
-                "Accepted and ignored, as in TS: status always reports every "
-                "migration."
-            ),
-        ),
-    ] = None,
     # Accepted so existing scripts keep working, and handed to on_init and
     # get_context; only generate and snapshot rebuild run the on_schema_loaded
     # hooks that act on them (as in TS).
@@ -78,7 +66,6 @@ def run(  # noqa: PLR0917
             {
                 "--config": str(config_path) if config_path is not None else None,
                 "--json": output_json,
-                "--table": table_selector,
                 "--force-shared-engines": force_shared_engines,
                 "--no-shared-engines": no_shared_engines,
                 "--service": service,
@@ -94,10 +81,6 @@ def run(  # noqa: PLR0917
     migrations_dir = Path(os.path.abspath(config.migrations_dir))
     migrations_dir.mkdir(parents=True, exist_ok=True)
     files = list_migration_filenames(migrations_dir)
-
-    # TS validates --table for every command and status then ignores it: the
-    # counts and the pending list always cover every migration.
-    resolve_table_scope(table_selector, [])
 
     with open_client(executor, config.clickhouse) as client:
         store = JournalStore(

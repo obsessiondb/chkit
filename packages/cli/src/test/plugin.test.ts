@@ -485,6 +485,35 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('chkit plugin flag error is reported before onInit, getContext and onComplete, like the shortcut', async () => {
+    const fixture = await createHookProbeFixture()
+    try {
+      const cases: Array<[string[], string]> = [
+        [['greet', '--bogus'], 'Unknown flag: --bogus'],
+        [['greet', '--name'], 'Missing value for --name'],
+        [['other', '-x'], 'Unknown flag: -x'],
+      ]
+      for (const [args, message] of cases) {
+        const shortcut = runCli(['probe', ...args, '--config', fixture.configPath])
+        const forwarded = runCli(['plugin', 'probe', ...args, '--config', fixture.configPath])
+        expect([shortcut.exitCode, shortcut.stderr.trim()]).toEqual([1, message])
+        expect([forwarded.exitCode, forwarded.stdout, forwarded.stderr.trim()]).toEqual([1, '', message])
+      }
+
+      const json = runCli(['plugin', 'probe', 'greet', '--bogus', '--json', '--config', fixture.configPath])
+      expect(json.exitCode).toBe(1)
+      expect(json.stderr).toBe('')
+      expect(JSON.parse(json.stdout)).toEqual({
+        command: 'plugin',
+        schemaVersion: 1,
+        ok: false,
+        error: 'Unknown flag: --bogus',
+      })
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('a plugin command without flags rejects an unknown short flag in both forms (#491)', async () => {
     const fixture = await createHookProbeFixture()
     try {

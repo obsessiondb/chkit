@@ -14,8 +14,13 @@ import {
 } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
-import { GLOBAL_FLAGS } from './global-flags.js'
-import { emitJsonError, printOutput, writeStdout } from './json-output.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from './global-flags.js'
+import {
+	emitJson,
+	emitJsonError,
+	printOutput,
+	writeStdout,
+} from './json-output.js'
 import { loadSchemaDefinitions } from './schema-loader.js'
 import { resolveTableScope, tableKeysFromDefinitions } from './table-scope.js'
 
@@ -70,7 +75,9 @@ function splitQueryArgs(
 		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
 		const def = byName.get(name)
 		if (!def) {
-			positionals.push(token)
+			// An unknown `-x` or `--bogus` goes to parseFlags, which rejects it (#584).
+			if (looksLikeFlag(token)) flagArgs.push(token)
+			else positionals.push(token)
 			continue
 		}
 
@@ -111,6 +118,20 @@ export function parsePluginCommandArgs(
 		flags: parseFlags(flagArgs, flagDefs),
 		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
 	}
+}
+
+/**
+ * A query argument that starts with `-` is a flag unless it holds a line
+ * break, or whitespace before any `=`: SQL that starts with a line comment,
+ * such as `-- note\nSELECT 1` or `--tag=x\nSELECT 1`, stays SQL. A lone `-`
+ * is SQL too.
+ */
+function looksLikeFlag(token: string): boolean {
+	if (!token.startsWith('-') || token === '-') return false
+	if (/[\r\n]/.test(token)) return false
+	const eqIdx = token.indexOf('=')
+	const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+	return !/\s/.test(name)
 }
 
 export function parseCommandArgs(
@@ -219,7 +240,7 @@ export function routeForwardedArgs(rest: string[]): {
 function parseForwardedInitFlags(
 	argsAfterCommand: string[],
 	plugins: PluginRuntime['plugins'],
-): ParsedFlags {
+): ParsedFlags | null {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
 	const { pluginName, commandName, commandArgs } = routeForwardedArgs(rest)
 	const command = plugins
@@ -227,16 +248,22 @@ function parseForwardedInitFlags(
 		?.plugin.commands?.find((cmd) => cmd.name === commandName)
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)
-	if (defs.length === 0) return flags
 	try {
 		return { ...flags, ...parsePluginCommandArgs(commandArgs, defs).flags }
 	} catch (error) {
-		// The plugin command reports this flag error after onInit, in its own format.
+		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
+		// does, in the format the plugin command uses for it.
 		if (
 			error instanceof UnknownFlagError ||
 			error instanceof MissingFlagValueError
 		) {
-			return flags
+			if (flags['--json'] === true) {
+				emitJson('plugin', { ok: false, error: error.message })
+			} else {
+				console.error(error.message)
+			}
+			process.exitCode = 1
+			return null
 		}
 		throw error
 	}
@@ -246,10 +273,9 @@ function forwarderFlags(argsAfterCommand: string[]): {
 	flags: ParsedFlags
 	rest: string[]
 } {
-	const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
+	const { jsonMode, rest } = stripGlobalFlags(argsAfterCommand)
 	const flags: ParsedFlags = {}
 	if (jsonMode) flags['--json'] = true
-	if (tableSelector) flags['--table'] = tableSelector
 	return { flags, rest }
 }
 
@@ -261,8 +287,11 @@ function matchSubcommand(
 	| { ok: true; name: string | undefined }
 	| { ok: false; token: string | undefined } {
 	if (!resolved.subcommands) return { ok: true, name: undefined }
+	// A subcommand may declare --table, so its value is never the subcommand name;
+	// the subcommand's own flag parsing then accepts or rejects it (#565).
 	const commandToken = extractPositionals(argsAfterCommand, [
 		...globalFlags,
+		TABLE_FLAG,
 		...resolved.flags,
 	])[0]
 	const matchedSub = resolved.subcommands.find((s) => s.name === commandToken)
@@ -273,14 +302,16 @@ function matchSubcommand(
 	return { ok: false, token: commandToken }
 }
 
+// `--table` is not global: it stays in the rest, for the target command to accept or
+// reject (#565). One given before the plugin and command names moves behind them, so
+// it is never read as either.
 function stripGlobalFlags(argv: string[]): {
 	jsonMode: boolean
-	tableSelector: string | undefined
 	rest: string[]
 } {
 	const rest: string[] = []
+	const leadingTable: string[] = []
 	let jsonMode = false
-	let tableSelector: string | undefined
 
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i] as string
@@ -300,19 +331,22 @@ function stripGlobalFlags(argv: string[]): {
 		if (token.startsWith('--config=')) {
 			continue
 		}
-		if (token === '--table' && i + 1 < argv.length) {
-			tableSelector = argv[i + 1]
-			i++
-			continue
-		}
-		if (token.startsWith('--table=')) {
-			tableSelector = token.slice('--table='.length)
+		const tableToken = expandShortFlags([token], [TABLE_FLAG])[0] as string
+		if (rest.length < 2 && (tableToken === '--table' || tableToken.startsWith('--table='))) {
+			leadingTable.push(tableToken)
+			// Without a value (as parseFlags reads it), the target reports the missing
+			// value and the next flag, such as --json, still counts.
+			const value = argv[i + 1]
+			if (tableToken === '--table' && value !== undefined && !value.startsWith('--')) {
+				leadingTable.push(value)
+				i++
+			}
 			continue
 		}
 		rest.push(token)
 	}
 
-	return { jsonMode, tableSelector, rest }
+	return { jsonMode, rest: [...rest.slice(0, 2), ...leadingTable, ...rest.slice(2)] }
 }
 
 export function parseFlagsOrReport(
@@ -408,8 +442,9 @@ export async function runResolvedCommand(input: {
 		positionals = parsed.positionals
 	}
 
-	const gf = typedFlags(flags, GLOBAL_FLAGS)
+	const gf = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)
 	const jsonMode = gf['--json'] === true
+	// Set only when the command declares --table (#565).
 	const tableScope = await resolvePluginTableScope({
 		schemaGlobs: input.config.schema,
 		tableSelector: gf['--table'],

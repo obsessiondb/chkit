@@ -101,14 +101,16 @@ def test_a_dash_dash_before_the_names_ends_the_flags_and_the_names_come_first() 
 @pytest.mark.usefixtures("project")
 def test_a_flag_never_takes_dash_dash_as_its_value() -> None:
     result = CliRunner().invoke(app, ["plugin", "echoer", "echo", "--name", "--", "beta"])
-    assert result.exit_code == 2, result.output
+    # Exit 1, as TS reports a flag error (#563).
+    assert result.exit_code == 1, result.output
     assert "Missing value for --name" in ANSI_STYLE.sub("", result.output)
 
 
 @pytest.mark.usefixtures("project")
 def test_an_unknown_flag_before_dash_dash_is_still_rejected() -> None:
     result = CliRunner().invoke(app, ["plugin", "echoer", "other", "-z", "--", "x"])
-    assert result.exit_code == 2, result.output
+    # Exit 1, as TS reports a flag error (#563).
+    assert result.exit_code == 1, result.output
     assert "Unknown flag: -z" in ANSI_STYLE.sub("", result.output)
 
 

@@ -13,6 +13,7 @@ import re
 from dataclasses import dataclass
 
 from chkit.core.key_clause import split_top_level_comma
+from chkit.core.sql_lexer import js_trim
 
 __all__ = [
     "ParsedDictionaryAttribute",
@@ -292,7 +293,7 @@ def parse_dictionary_attributes_from_create_dictionary_query(
         name_match = _ATTRIBUTE_NAME_RE.match(trimmed)
         if name_match is None:
             continue
-        name = (name_match.group(1) or name_match.group(2) or "").strip()
+        name = js_trim(name_match.group(1) or name_match.group(2) or "")
         rest = (name_match.group(3) or "").strip()
         if not name or not rest:
             continue
@@ -312,14 +313,14 @@ def parse_dictionary_primary_key_from_create_dictionary_query(
         return []
     options = _extract_dictionary_options(query)
     match = _PRIMARY_KEY_RE.search(options)
-    raw = match.group(1).strip() if match is not None else ""
+    raw = js_trim(match.group(1)) if match is not None else ""
     if not raw:
         return []
     out: list[str] = []
     for part in split_top_level_comma(raw):
         # At most one backtick per side (TS `.replace(/^`|`$/g, '')`), so a
         # doubly-quoted pathological token stays distinguishable.
-        token = part.strip()
+        token = js_trim(part)
         token = token.removeprefix("`").removesuffix("`")
         if token:
             out.append(token)
