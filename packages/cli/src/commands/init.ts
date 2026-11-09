@@ -2,13 +2,19 @@ import process from 'node:process'
 import { relative, resolve } from 'node:path'
 
 import { defineFlags, typedFlags } from '@chkit/core'
+import type { ConnectChoice } from '@chkit/plugin-obsessiondb'
 
 import { parseCommandArgs } from '../runtime/command-dispatch.js'
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 import { ensureProjectDependencies } from '../runtime/deps.js'
 
-const CONNECT_CHOICES = ['claim', 'account', 'clickhouse', 'later'] as const
-type ConnectChoice = (typeof CONNECT_CHOICES)[number]
+// @chkit/plugin-obsessiondb is an optional dependency, so its list is mirrored here rather than imported.
+const CONNECT_CHOICES = Object.keys({
+  claim: true,
+  account: true,
+  clickhouse: true,
+  later: true,
+} satisfies Record<ConnectChoice, true>) as ConnectChoice[]
 
 /** The example schema `init` writes to src/db/schema/example.ts. */
 export const INIT_SCHEMA_TEMPLATE = `import { schema, table } from '@chkit/core'\n\n// Offline generation still needs the real schema namespace.\nconst database = process.env.CLICKHOUSE_DB\nif (!database?.trim()) {\n  throw new Error('Set CLICKHOUSE_DB to the intended database before generating migrations.')\n}\n\nconst events = table({\n  database,\n  name: 'events',\n  engine: 'MergeTree',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },\n  ],\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  partitionBy: 'toYYYYMM(ingested_at)',\n})\n\nexport default schema(events)\n`

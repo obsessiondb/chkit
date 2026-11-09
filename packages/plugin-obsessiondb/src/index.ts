@@ -30,6 +30,7 @@ export {
 } from './auth/index.js'
 export { createJobsClient, type JobsClient } from './backfill/index.js'
 export {
+	CONNECT_CHOICES,
 	type ConnectChoice,
 	type OnboardingOptions,
 	runOnboarding,
