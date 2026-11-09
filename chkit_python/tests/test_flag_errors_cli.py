@@ -9,6 +9,7 @@ envelope with code ``usage`` (``parseFlagsOrReport`` in
 from __future__ import annotations
 
 import json
+import os
 from collections.abc import Iterator
 from pathlib import Path
 
@@ -165,7 +166,11 @@ def test_a_forwarder_config_takes_a_single_dash_value_as_in_ts(
     command: list[str],
 ) -> None:
     result = CliRunner().invoke(app, [*command, "--config", "-x"])
-    assert (result.exit_code, result.stderr) == (1, "Config file not found: -x\n")
+    # The config-not-found text and absolute path are TS's (#610).
+    assert (result.exit_code, result.stderr) == (
+        1,
+        f"Config not found at {os.path.abspath('-x')}.\n",
+    )
 
 
 @pytest.mark.parametrize(
