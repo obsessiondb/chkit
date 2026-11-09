@@ -115,4 +115,82 @@ describe('@chkit/cli quoted identifiers e2e', () => {
     },
     240_000
   )
+
+  test(
+    'generate -> migrate renames a table into a new database that needs quoting (#490)',
+    async () => {
+      const executor = createLiveExecutor(liveEnv)
+      const sourceDatabase = liveEnv.clickhouseDatabase
+      const prefix = createPrefix('quoted_rename')
+      // The hyphen makes ClickHouse reject the name unquoted.
+      const targetDatabase = `${prefix}db-old`
+      const tableName = `${prefix}t`
+      const journalTable = createJournalTableName('quoted_rename')
+      const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+      const dir = await mkdtemp(join(tmpdir(), 'chkit-cli-quoted-rename-e2e-'))
+      const schemaPath = join(dir, 'schema.ts')
+      const configPath = join(dir, 'clickhouse.config.ts')
+      const outDir = join(dir, 'chkit')
+      const writeSchema = (database: string, renamedFrom?: { database: string; name: string }) =>
+        writeFile(
+          schemaPath,
+          `import { schema, table } from '${CORE_ENTRY}'\n\nexport default schema(table(${JSON.stringify({
+            database,
+            name: tableName,
+            ...(renamedFrom ? { renamedFrom } : {}),
+            columns: [{ name: 'id', type: 'UInt64' }],
+            engine: 'MergeTree()',
+            primaryKey: ['id'],
+            orderBy: ['id'],
+          })}))\n`,
+          'utf8'
+        )
+      const generateAndExecute = async (name: string) => {
+        const generated = runCli(dir, ['generate', '--config', configPath, '--name', name, '--json'], cliEnv)
+        if (generated.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic(`generate ${name} failed`, generated))
+        }
+        const executed = await runCliWithRetry(dir, ['migrate', '--config', configPath, '--execute', '--json'], {
+          extraEnv: cliEnv,
+        })
+        if (executed.exitCode !== 0) {
+          throw new Error(formatTestDiagnostic(`migrate --execute ${name} failed`, executed))
+        }
+      }
+
+      await writeFile(
+        configPath,
+        `export default ${JSON.stringify({
+          schema: schemaPath,
+          outDir,
+          migrationsDir: join(outDir, 'migrations'),
+          metaDir: join(outDir, 'meta'),
+          clickhouse: {
+            url: liveEnv.clickhouseUrl,
+            username: liveEnv.clickhouseUser,
+            password: liveEnv.clickhousePassword,
+            database: sourceDatabase,
+          },
+        })}\n`,
+        'utf8'
+      )
+
+      try {
+        await writeSchema(sourceDatabase)
+        await generateAndExecute('init')
+        await waitForTable(executor, sourceDatabase, tableName)
+
+        await writeSchema(targetDatabase, { database: sourceDatabase, name: tableName })
+        await generateAndExecute('move')
+        await waitForTable(executor, targetDatabase, tableName)
+      } finally {
+        await rm(dir, { recursive: true, force: true })
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(sourceDatabase)}.${quoteIdent(tableName)}`)
+        await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(targetDatabase)} SYNC`)
+        await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(sourceDatabase)}.${quoteIdent(journalTable)}`)
+        await executor.close()
+      }
+    },
+    240_000
+  )
 })

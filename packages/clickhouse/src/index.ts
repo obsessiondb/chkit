@@ -1116,7 +1116,7 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND name NOT LIKE '_chkit_%'`,
+  AND NOT startsWith(name, '_chkit_')`,
 			)
 
 			const out: SchemaObjectRef[] = []

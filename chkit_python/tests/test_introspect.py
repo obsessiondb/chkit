@@ -401,7 +401,7 @@ def test_list_schema_objects_excludes_chkit_tables_via_sql_text() -> None:
     client = _FakeClient([[]])
     list_schema_objects(client)
     # The SQL should embed the exclusion clauses.
-    assert "name NOT LIKE '_chkit_%'" in client.queries[0]
+    assert "NOT startsWith(name, '_chkit_')" in client.queries[0]
     assert "system" in client.queries[0]
 
 
