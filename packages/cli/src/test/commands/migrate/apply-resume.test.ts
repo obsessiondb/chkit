@@ -893,6 +893,82 @@ describe('applyMigration mode=barrier', () => {
     expect(appended).toHaveLength(1)
     rmSync(dir, { recursive: true, force: true })
   }, 15_000)
+
+  // mode=barrier has no propagation wait, whatever the type (#577).
+  const EXCHANGE_BARRIER_SQL =
+    '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n' +
+    'EXCHANGE TABLES default.a AND default.b;\n'
+
+  // A two-replica target: the barrier read lists no running INSERT, and the
+  // replicas agree on both exchanged tables.
+  function twoReplicaDb() {
+    const queries: string[] = []
+    const commandCalls: string[] = []
+    const db = {
+      async command(statement: string) {
+        commandCalls.push(statement)
+      },
+      async query<T>(statement: string): Promise<T[]> {
+        queries.push(statement)
+        if (statement.includes('system.one')) return [{ replicas: 2 }] as T[]
+        if (statement.includes('uniqExact(uuid)')) {
+          return [
+            { database: 'default', name: 'a', replicas: 2, uuids: 1, sample_uuid: 'u1' },
+            { database: 'default', name: 'b', replicas: 2, uuids: 1, sample_uuid: 'u2' },
+          ] as T[]
+        }
+        return [] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    return { db, queries, commandCalls }
+  }
+
+  function applyExchangeBarrier(db: ClickHouseExecutor, dir: string, store: JournalStore) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    })
+  }
+
+  test('an exchange_tables statement marked mode=barrier has no propagation wait', async () => {
+    const dir = writeMigration(EXCHANGE_BARRIER_SQL)
+    const { db, queries, commandCalls } = twoReplicaDb()
+    const { store, appended, writes } = createFakeStore()
+    await applyExchangeBarrier(db, dir, store)
+    expect(commandCalls).toEqual([])
+    expect(queries.filter((sql) => sql.includes('system.tables'))).toEqual([])
+    expect(writes.flatMap((state) => state.operations.map((op) => op.lastError))).toEqual(['', ''])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('a resumed exchange_tables barrier with a pending marker clears it without waiting', async () => {
+    const dir = writeMigration(EXCHANGE_BARRIER_SQL)
+    const { db, queries, commandCalls } = twoReplicaDb()
+    const { store, appended, state } = createFakeStore(
+      inProgressState(checksumSQL(EXCHANGE_BARRIER_SQL), [
+        {
+          ...operation(0, 'completed', { type: 'exchange_tables', key: 'table:default.a' }),
+          lastError: PROPAGATION_WAIT_PENDING,
+        },
+      ]),
+    )
+    await applyExchangeBarrier(db, dir, store)
+    expect(commandCalls).toEqual([])
+    expect(queries).toEqual([])
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status, op.lastError])).toEqual([
+      [0, 'completed', ''],
+    ])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
 
 

@@ -1253,6 +1253,87 @@ def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
     assert events == ["command DROP TABLE IF EXISTS default.t;", "propagation-query", "append"]
 
 
+# ---------- mode=barrier has no propagation wait, whatever the type (#577) ----------
+
+_EXCHANGE_BARRIER_SQL = (
+    "-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n"
+    "EXCHANGE TABLES default.a AND default.b;\n"
+)
+
+
+class _TwoReplicaClient:
+    """A two-replica target: the barrier read lists no running INSERT, and the
+    replicas agree on both exchanged tables."""
+
+    def __init__(self) -> None:
+        self.queries: list[str] = []
+        self.commands: list[str] = []
+
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        self.commands.append(statement)
+
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        self.queries.append(sql)
+        if "uniqExact(uuid)" in sql:
+            rows = [
+                {"database": "default", "name": name, "replicas": 2, "uuids": 1, "sample_uuid": uuid}
+                for name, uuid in (("a", "u1"), ("b", "u2"))
+            ]
+            return QueryResult(column_names=list(rows[0]), rows=rows)
+        return QueryResult(column_names=[], rows=[])
+
+
+@pytest.fixture
+def _two_replicas(single_replica: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Depends on the module's single_replica pin so that it runs first and
+    # this fanout replaces it.
+    from chkit.clickhouse.replicas import ReplicaFanout  # noqa: PLC0415
+
+    fanout = ReplicaFanout(cluster="default", replicas=2)
+    for target in (
+        "chkit.clickhouse.ddl_propagation.resolve_replica_fanout",
+        "chkit.clickhouse.insert_barrier.resolve_replica_fanout",
+    ):
+        monkeypatch.setattr(target, lambda *_: fanout)
+
+
+@pytest.mark.usefixtures("_two_replicas")
+def test_apply_barrier_exchange_has_no_propagation_wait(tmp_path: Path) -> None:
+    client = _TwoReplicaClient()
+    store = FakeStore()
+    _apply(_write(tmp_path, _EXCHANGE_BARRIER_SQL), cast(Any, client), store)
+    # A barrier statement is read, never executed, and nothing waits for the
+    # exchanged tables to agree on every replica, as in TS.
+    assert client.commands == []
+    assert not any("system.tables" in sql for sql in client.queries)
+    assert [o.last_error for state in store.writes for o in state.operations] == ["", ""]
+    assert len(store.appended) == 1
+
+
+@pytest.mark.usefixtures("_two_replicas")
+def test_apply_resumed_barrier_exchange_with_pending_marker_does_not_wait(
+    tmp_path: Path,
+) -> None:
+    # A record an earlier chkit-py left pending: the resumed run clears it
+    # without waiting, as TS ``completePropagation`` does.
+    exchange = Marker(type="exchange_tables", key="table:default.a")
+    client = _TwoReplicaClient()
+    store = FakeStore(
+        in_progress(
+            [op(0, "completed", exchange, last_error=PROPAGATION_WAIT_PENDING)],
+            checksum=checksum_sql(_EXCHANGE_BARRIER_SQL),
+        )
+    )
+    _apply(_write(tmp_path, _EXCHANGE_BARRIER_SQL), cast(Any, client), store)
+    assert client.commands == []
+    assert client.queries == []
+    assert store.state is not None
+    assert [(o.operation_index, o.status, o.last_error) for o in store.state.operations] == [
+        (0, "completed", "")
+    ]
+    assert len(store.appended) == 1
+
+
 def test_apply_refuses_edited_file_with_completed_statement(tmp_path: Path) -> None:
     client = _RecordingClient()
     store = FakeStore(in_progress([op(0, "completed"), op(1, "failed")], checksum="old"))
