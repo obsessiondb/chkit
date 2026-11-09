@@ -26,6 +26,7 @@ from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectRef
 from chkit.core.codec import parse_codec
 from chkit.core.model import (
+    ColumnInput,
     MaterializedViewRefresh,
     SkipIndexBloomFilter,
     SkipIndexMinmax,
@@ -197,15 +198,15 @@ def test_render_pulls_stored_codecs_as_typed_atoms_without_filled_in_sizes() -> 
         "tu": ("Tuple(a UInt8, b UInt64)", "CODEC(Delta, LZ4)"),
         "df": ("UInt64", "CODEC(Delta(8), Default)"),
     }
+    stored_columns: list[ColumnInput] = [
+        {"name": name, "type": type_, "codec": parse_codec(codec)}
+        for name, (type_, codec) in stored.items()
+    ]
     t = table(
         database="db",
         name="t",
         engine="MergeTree",
-        columns=[{"name": "id", "type": "UInt64"}]
-        + [
-            {"name": name, "type": type_, "codec": parse_codec(codec)}
-            for name, (type_, codec) in stored.items()
-        ],
+        columns=[{"name": "id", "type": "UInt64"}, *stored_columns],
         primary_key=["id"],
         order_by=["id"],
     )

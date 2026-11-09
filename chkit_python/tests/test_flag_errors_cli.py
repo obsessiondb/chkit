@@ -73,6 +73,15 @@ CASES = [
     (["plugin", "codegen", "codegen", "--nope"], "Unknown flag: --nope"),
     (["plugin", "codegen", "codegen", "--out-file"], "Missing value for --out-file"),
     (["plugin", "codegen", "codegen", "-c"], "Missing value for --config"),
+    # A forwarder's --config followed by a `--` token has no value, as in TS
+    # (`extractConfigPath`): click would load the config path `--check`.
+    (["codegen", "--config", "--check"], "Missing value for --config"),
+    (["codegen", "-c", "--check"], "Missing value for --config"),
+    (["codegen", "--config", "--"], "Missing value for --config"),
+    (["obsessiondb", "--config", "--", "whoami"], "Missing value for --config"),
+    (["plugin", "--config", "--check"], "Missing value for --config"),
+    (["plugin", "codegen", "codegen", "--config", "--check"], "Missing value for --config"),
+    (["plugin", "codegen", "codegen", "-c", "--"], "Missing value for --config"),
 ]
 
 
@@ -97,7 +106,10 @@ def test_a_flag_error_under_json_writes_the_ts_envelope(
     result = CliRunner().invoke(app, [*args[:words], "--json", *args[words:]])
 
     assert result.exit_code == 1, result.output
-    if command == "plugin":
+    # TS reads --config before dispatching (`extractConfigPath` in
+    # `bin/chkit.ts`), so even `chkit plugin` reports its missing value with
+    # the usage envelope; only the plugin command's own flags keep the string.
+    if command == "plugin" and message != "Missing value for --config":
         assert result.stderr == ""
         assert json.loads(result.stdout) == {
             "command": "plugin",
@@ -133,6 +145,15 @@ def test_a_value_flag_followed_by_a_double_dash_token_does_not_take_it(
     assert not (project / "chkit").exists()
 
 
+@pytest.mark.parametrize("command", [["codegen"], ["plugin", "codegen", "codegen"]])
+@pytest.mark.usefixtures("project")
+def test_a_forwarder_config_takes_a_single_dash_value_as_in_ts(
+    command: list[str],
+) -> None:
+    result = CliRunner().invoke(app, [*command, "--config", "-x"])
+    assert (result.exit_code, result.stderr) == (1, "Config file not found: -x\n")
+
+
 @pytest.mark.parametrize(
     "args",
     [
@@ -140,6 +161,10 @@ def test_a_value_flag_followed_by_a_double_dash_token_does_not_take_it(
         ["status", "--nope", "-h"],
         ["generate", "--name", "--help"],
         ["drift", "--table", "-h"],
+        # A forwarder's --config with no value still shows the help (#620 review).
+        ["plugin", "--help", "--config", "--check"],
+        ["plugin", "-h", "-c", "--json"],
+        ["codegen", "--help", "--config", "--check"],
     ],
 )
 @pytest.mark.usefixtures("project")

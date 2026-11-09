@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
 
 import pytest
 
@@ -11,6 +12,7 @@ from chkit.cli.commands.drift_compare import (
     MapSqlCanonicalizer,
     ObjectDriftDetail,
     SchemaObjectShape,
+    TableDriftDetail,
     collect_table_sql_fragments,
     collect_view_sql_queries,
     compare_schema_objects,
@@ -27,8 +29,12 @@ from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView
 from chkit.core.codec import parse_codec
 from chkit.core.model import (
     ColumnDefinition,
+    ColumnInput,
     ProjectionDefinition,
+    ProjectionInput,
+    SettingValue,
     SkipIndexBloomFilter,
+    SkipIndexInput,
     SkipIndexMinmax,
     TableDefinition,
     materialized_view,
@@ -129,7 +135,7 @@ def test_compare_objects_identical_returns_empty_buckets() -> None:
 def test_summarize_drift_aggregates_object_and_table_codes() -> None:
     expected = [_so("table", "db", "a")]
     object_result = compare_schema_objects(expected, [])
-    table_drift = []
+    table_drift: list[TableDriftDetail] = []
     summary = summarize_drift_reasons(object_result.object_drift, table_drift)
     assert summary.object == 1
     assert summary.table == 0
@@ -142,13 +148,13 @@ def test_summarize_drift_aggregates_object_and_table_codes() -> None:
 def _t(
     *,
     name: str = "t",
-    columns: list[ColumnDefinition] | None = None,
+    columns: list[ColumnInput] | None = None,
     engine: str = "MergeTree",
     primary_key: list[str] | None = None,
     order_by: list[str] | None = None,
-    settings: dict[str, object] | None = None,
-    indexes: list[object] | None = None,
-    projections: list[ProjectionDefinition] | None = None,
+    settings: dict[str, SettingValue] | None = None,
+    indexes: list[SkipIndexInput] | None = None,
+    projections: list[ProjectionInput] | None = None,
     partition_by: str | None = None,
     ttl: str | None = None,
 ) -> TableDefinition:
@@ -467,7 +473,7 @@ _ORDERS_MV = materialized_view(
 
 
 def _live_view(query: str, to: tuple[str, str] | None = None) -> IntrospectedView:
-    kind = "view" if to is None else "materialized_view"
+    kind: Literal["view", "materialized_view"] = "view" if to is None else "materialized_view"
     return IntrospectedView(kind=kind, database="app", name="v", query=query, to=to)
 
 

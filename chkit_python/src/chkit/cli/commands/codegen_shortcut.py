@@ -26,8 +26,9 @@ def run(
             )
         ),
     ] = None,
+    # A str, not a Path: the command gets the raw value in its flags, as in TS.
     config_path: Annotated[
-        Path | None,
+        str | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
     output_json: Annotated[
@@ -39,7 +40,8 @@ def run(
         plugin_name="codegen",
         command_name="codegen",
         tokens=list(args or []),
-        config_path=config_path,
+        config_path=Path(config_path) if config_path is not None else None,
         output_json=output_json,
         invoking_command="codegen",
+        config_flag=config_path,
     )

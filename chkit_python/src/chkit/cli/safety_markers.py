@@ -70,7 +70,11 @@ _OBJECT_KEY_RE = re.compile(
 
 # Destructive SQL keyword rules. Each requires the noun keyword that
 # follows the verb, so a `truncate(x)` function call is NOT mistaken for
-# `TRUNCATE TABLE`.
+# `TRUNCATE TABLE`. They match the statement as read through the lexer
+# (#642): every comment form ClickHouse reads (`--`, `//`, `# `, `#!`,
+# `/* */`) only separates tokens, and text inside a string or quoted name is
+# never a keyword. So a commented-out `DROP TABLE` is not flagged, while
+# `DROP /* x */ TABLE t` is.
 _DESTRUCTIVE_SQL_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("drop_database", re.compile(r"\bDROP\s+DATABASE\b", re.IGNORECASE)),
     (
@@ -388,15 +392,43 @@ def collect_destructive_operation_markers(
     return markers
 
 
+# ClickHouse also quotes with U+2018/U+2019 (a string) and U+201C/U+201D (a
+# name), which the lexer does not know: it can read an ASCII quote or comment
+# opener inside one as live and so hide real SQL. Where one of these characters
+# appears, the raw text is matched too.
+_UNICODE_QUOTE = re.compile("[\u2018\u2019\u201c\u201d]")
+
+
 def _classify_destructive_statement(statement: str) -> str | None:
+    texts = [_code_text(statement, blank_quoted=True)]
+    if _UNICODE_QUOTE.search(statement):
+        texts.append(statement)
     for type_, pattern in _DESTRUCTIVE_SQL_RULES:
-        if pattern.search(statement):
+        if any(pattern.search(text) for text in texts):
             return type_
     return None
 
 
+def _code_text(statement: str, *, blank_quoted: bool) -> str:
+    """The statement as ClickHouse reads it: each comment becomes one space.
+
+    A comment separates tokens (``DROP/**/TABLE`` is ``DROP TABLE``). With
+    ``blank_quoted``, every string literal and quoted name becomes ``''``, so
+    the text inside one is not read as a keyword.
+    """
+    parts: list[str] = []
+    for token in tokenize_sql(statement):
+        if is_trivia(token):
+            parts.append(" ")
+        elif blank_quoted and token.kind in {"string", "quoted_identifier"}:
+            parts.append("''")
+        else:
+            parts.append(token.text)
+    return "".join(parts)
+
+
 def _extract_object_key(statement: str) -> str:
-    match = _OBJECT_KEY_RE.search(statement)
+    match = _OBJECT_KEY_RE.search(_code_text(statement, blank_quoted=False))
     return match.group(1) if match is not None else "unknown"
 
 

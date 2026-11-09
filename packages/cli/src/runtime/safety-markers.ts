@@ -264,8 +264,10 @@ export function collectDestructiveOperationMarkers(
 // Defense-in-depth (#2): planner-emitted `-- operation: risk=danger` markers only
 // exist on generated migrations. A hand-written or hand-edited migration can
 // contain destructive SQL with no marker — so we also scan the executable SQL
-// itself. Comments are stripped first, so a commented-out `-- DROP TABLE` is not
-// flagged, while a real statement is.
+// itself. The statement is read through the lexer (#642): every comment form
+// ClickHouse reads (`--`, `//`, `# `, `#!`, `/* */`) only separates tokens, and
+// text inside a string or quoted name is never a keyword. So a commented-out
+// `DROP TABLE` is not flagged, while `DROP /* x */ TABLE t` is.
 // Each rule requires the statement keyword that follows the verb, so a SQL
 // function such as `truncate(x)` (a ClickHouse math function) is NOT mistaken
 // for a `TRUNCATE TABLE` statement.
@@ -280,15 +282,37 @@ const DESTRUCTIVE_SQL_RULES: Array<{ type: string; re: RegExp }> = [
   { type: 'detach', re: /\bDETACH\s+(?:TABLE|VIEW|DICTIONARY|DATABASE|PARTITION|PART)\b/i },
 ]
 
+// ClickHouse also quotes with U+2018/U+2019 (a string) and U+201C/U+201D (a
+// name), which the lexer does not know: it can read an ASCII quote or comment
+// opener inside one as live and so hide real SQL. Where one of these characters
+// appears, the raw text is matched too.
+const UNICODE_QUOTE = /[\u2018\u2019\u201C\u201D]/
+
 function classifyDestructiveStatement(statement: string): string | null {
+  const texts = [codeText(statement, { blankQuoted: true })]
+  if (UNICODE_QUOTE.test(statement)) texts.push(statement)
   for (const rule of DESTRUCTIVE_SQL_RULES) {
-    if (rule.re.test(statement)) return rule.type
+    if (texts.some((text) => rule.re.test(text))) return rule.type
   }
   return null
 }
 
+// The statement as ClickHouse reads it: each comment becomes one space, since a
+// comment separates tokens (`DROP/**/TABLE` is `DROP TABLE`). With
+// `blankQuoted`, every string literal and quoted name becomes `''`, so the text
+// inside one is not read as a keyword.
+function codeText(statement: string, options: { blankQuoted: boolean }): string {
+  return tokenizeSQL(statement)
+    .map((token) => {
+      if (isTrivia(token)) return ' '
+      if (options.blankQuoted && (token.kind === 'string' || token.kind === 'quoted_identifier')) return "''"
+      return token.text
+    })
+    .join('')
+}
+
 function extractObjectKey(statement: string): string {
-  const match = statement.match(
+  const match = codeText(statement, { blankQuoted: false }).match(
     /\b(?:TABLE|VIEW|DATABASE|DICTIONARY)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?/i,
   )
   return match?.[1] ?? 'unknown'

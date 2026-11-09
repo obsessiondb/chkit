@@ -12,14 +12,13 @@ from typing import Any
 import pytest
 
 from chkit.cli.journal_store import JournalStore
-from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
 from chkit.clickhouse.replicas import ReplicaFanout, resolve_replica_fanout
 
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
 
 
 @dataclass

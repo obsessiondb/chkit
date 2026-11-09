@@ -33,7 +33,6 @@ from chkit.cli.migration_store import (
     checksum_sql,
 )
 from chkit.cli.safety_markers import extract_migration_operation_summaries
-from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import parse_exchange_tables, wait_for_exchange
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.clickhouse.replicas import ReplicaFanout
@@ -472,6 +471,40 @@ def test_refuses_an_engine_argument_only_change() -> None:
     assert "only the engine arguments change" in found[0]
 
 
+def test_refuses_keys_that_differ_only_in_spelling() -> None:
+    # As the planner compares keys; TS cutover.test.ts asserts the same.
+    old = events(["user_id", "id"], engine="ReplicatedMergeTree('/t/{uuid}', '{replica}')")
+    new = table(
+        database="app",
+        name="events",
+        engine="ReplicatedMergeTree('/t2/{uuid}', '{replica}')",
+        columns=COLUMNS,
+        primaryKey=["`user_id`,  id"],
+        orderBy=['"user_id"', "id"],
+    )
+    found = messages(old_def=old, new_def=new, cluster="c2")
+    assert len(found) == 1
+    assert "only the engine arguments change" in found[0]
+
+
+def test_cuts_over_a_key_on_a_column_named_with_a_comma() -> None:
+    # A key on column `a,b` to one on columns a and b, as the planner reads it;
+    # TS cutover.test.ts asserts the same.
+    named: list[Any] = [
+        {"name": "a,b", "type": "UInt64"},
+        {"name": "a", "type": "UInt64"},
+        {"name": "b", "type": "UInt64"},
+    ]
+    ops = plan(
+        old_def=events(["a,b"], columns=named),
+        new_def=events(["a", "b"], columns=named),
+        key=["a"],
+    ).operations
+    create = next(op for op in ops if op.type == "create_table")
+    assert "PRIMARY KEY (`a`, `b`)" in create.sql
+    assert any(op.type == "exchange_tables" for op in ops)
+
+
 def test_refuses_a_replication_path_without_a_macro() -> None:
     engine = "ReplicatedMergeTree('/clickhouse/tables/{shard}/app/events', '{replica}')"
     found = messages(
@@ -784,6 +817,40 @@ def test_barrier_times_out_with_the_running_query_ids() -> None:
         )
 
 
+def test_barrier_rounds_elapsed_seconds_half_up_like_js() -> None:
+    # TS prints Math.round(elapsed / 1000): a .5 tie rounds up, where Python's
+    # round() rounds to even (2.5 -> 2, 30.5 -> 30).
+    clock = [0.0]
+    lines: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    client = _ProcessesClient([["a"], ["a"], ["a"]])
+    with pytest.raises(RuntimeError, match=r"still running after 61s \(query_id a\)"):
+        wait_for_insert_barrier(
+            client,
+            _BARRIER,
+            sleep=sleep,
+            now=lambda: clock[0],
+            log=lines.append,
+            poll_interval_seconds=30.5,
+            timeout_seconds=61.0,
+        )
+    assert "  still waiting for 1 INSERT query (elapsed 31s)" in lines
+
+    clock[0] = 0.0
+    with pytest.raises(RuntimeError, match=r"still running after 3s \(query_id a\)"):
+        wait_for_insert_barrier(
+            _ProcessesClient([["a"], ["a"]]),
+            _BARRIER,
+            sleep=sleep,
+            now=lambda: clock[0],
+            poll_interval_seconds=2.5,
+            timeout_seconds=2.5,
+        )
+
+
 def test_parse_exchange_tables() -> None:
     assert parse_exchange_tables(
         "EXCHANGE TABLES app.events AND app.`events shadow` ON CLUSTER 'c';"
@@ -792,7 +859,7 @@ def test_parse_exchange_tables() -> None:
 
 
 def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
     answers = [
         [
             {"database": "app", "name": "a", "replicas": 2, "uuids": 2, "sample_uuid": "u1"},
@@ -986,10 +1053,9 @@ def test_apply_barrier_waits_instead_of_executing(
     )
     client = _RecordingClient(polls=[["q1"], ["q1"], []])
     store = _FakeStore()
-    barrier = migrate_apply.wait_for_insert_barrier
 
     def fast_barrier(*args: Any, **kwargs: Any) -> int:
-        return barrier(*args, **kwargs, sleep=lambda _s: None)
+        return wait_for_insert_barrier(*args, **kwargs, sleep=lambda _s: None)
 
     monkeypatch.setattr(migrate_apply, "wait_for_insert_barrier", fast_barrier)
     _run(tmp_path, sql, client, store)
@@ -1095,7 +1161,7 @@ def test_apply_stops_when_the_exchange_does_not_reach_every_replica(
         "chkit.clickhouse.ddl_propagation.resolve_replica_fanout",
         lambda *_: ReplicaFanout(cluster="default", replicas=2),
     )
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
     client = _QueryLogClient(lambda _sql: [])
     store = _FakeStore()
     with pytest.raises(

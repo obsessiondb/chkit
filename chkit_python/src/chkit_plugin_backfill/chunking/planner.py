@@ -16,6 +16,7 @@ from dataclasses import replace
 from threading import Timer
 
 from chkit.core.jsnum import (
+    js_math_round,
     js_number_to_string,
     parse_js_number,
 )
@@ -99,6 +100,11 @@ _logger = get_backfill_logger("chunking", "planner")
 _query_logger = get_backfill_logger("chunking", "clickhouse")
 
 
+def _ms_since(started_at: float) -> int:
+    """Milliseconds since ``started_at`` (``time.monotonic()``), rounded like JS ``Math.round``."""
+    return int(js_math_round((time.monotonic() - started_at) * 1000))
+
+
 def generate_chunk_plan(input_: GenerateChunkPlanInput) -> ChunkPlan:
     plan_started_at = time.monotonic()
     context = PlannerContext(
@@ -144,7 +150,7 @@ def generate_chunk_plan(input_: GenerateChunkPlanInput) -> ChunkPlan:
             if partition.bytes_uncompressed > context.target_chunk_bytes
         ),
         len(sort_keys),
-        round((time.monotonic() - introspection_started_at) * 1000),
+        _ms_since(introspection_started_at),
     )
 
     slices: list[PartitionSlice] = []
@@ -184,7 +190,7 @@ def generate_chunk_plan(input_: GenerateChunkPlanInput) -> ChunkPlan:
         len(chunks),
         len(partitions),
         format_bytes(sum(partition.bytes_uncompressed for partition in partitions)),
-        round((time.monotonic() - plan_started_at) * 1000),
+        _ms_since(plan_started_at),
     )
 
     return ChunkPlan(
@@ -235,7 +241,7 @@ def _plan_partition(
         _logger.info(
             "kept partition %s as a single chunk (%dms, %s)",
             partition.partition_id,
-            round((time.monotonic() - started_at) * 1000),
+            _ms_since(started_at),
             (
                 "within target size"
                 if partition.bytes_uncompressed <= context.target_chunk_bytes
@@ -282,7 +288,7 @@ def _plan_partition(
         "finished partition %s: %d chunks (%dms)",
         partition.partition_id,
         len(refined.slices),
-        round((time.monotonic() - started_at) * 1000),
+        _ms_since(started_at),
     )
 
     return refined
@@ -759,7 +765,7 @@ def _create_timed_planner_query(input_: GenerateChunkPlanInput) -> PlannerQuery:
 
         def schedule_repeat_warning() -> None:
             def repeat_warn() -> None:
-                elapsed_repeat_ms = round((time.monotonic() - started_at) * 1000)
+                elapsed_repeat_ms = _ms_since(started_at)
                 _query_logger.warning(
                     "clickhouse query still running for %s.%s after %dms: %s",
                     input_.database,
@@ -778,7 +784,7 @@ def _create_timed_planner_query(input_: GenerateChunkPlanInput) -> PlannerQuery:
             timer.start()
 
         def slow_warn() -> None:
-            elapsed_ms = round((time.monotonic() - started_at) * 1000)
+            elapsed_ms = _ms_since(started_at)
             _query_logger.warning(
                 "clickhouse query still running for %s.%s after %dms: %s | %s",
                 input_.database,
@@ -803,7 +809,7 @@ def _create_timed_planner_query(input_: GenerateChunkPlanInput) -> PlannerQuery:
 
         try:
             rows = input_.query(sql, settings)
-            duration_ms = round((time.monotonic() - started_at) * 1000)
+            duration_ms = _ms_since(started_at)
 
             if duration_ms >= SLOW_CLICKHOUSE_QUERY_MS:
                 _query_logger.debug(
@@ -830,7 +836,7 @@ def _create_timed_planner_query(input_: GenerateChunkPlanInput) -> PlannerQuery:
                 "clickhouse query failed for %s.%s after %dms: %s",
                 input_.database,
                 input_.table,
-                round((time.monotonic() - started_at) * 1000),
+                _ms_since(started_at),
                 sql_summary,
             )
             raise
