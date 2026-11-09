@@ -813,3 +813,28 @@ def test_run_onboarding_claim_path_signs_up_and_claims(
     # The plugin was auto-registered.
     updated = cfg.read_text(encoding="utf-8")
     assert "obsessiondb()" in updated
+
+
+def test_run_onboarding_claim_code_sent_never_uses_an_earlier_login(
+    isolated_home: Path,
+    tmp_path: Path,
+    httpx_mock: HTTPXMock,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A non-interactive claim for a new email only sends the code: the login of
+    another account already on disk must not claim or select a service."""
+    monkeypatch.setattr(
+        obsessiondb_onboarding, "resolve_base_url", lambda _stored=None: BASE
+    )
+    save_credentials(Credentials(access_token="token-a", base_url=BASE))
+    httpx_mock.add_response(
+        url=f"{BASE}/api/auth/email-otp/send-verification-otp", status_code=200
+    )
+    cfg = tmp_path / "project" / "config.py"
+
+    run_onboarding(config_path=cfg, connect=ConnectChoice.claim, email="b@example.com")
+
+    [request] = httpx_mock.get_requests()
+    assert request.url == f"{BASE}/api/auth/email-otp/send-verification-otp"
+    assert "authorization" not in request.headers
+    assert not (cfg.parent / ".chkit" / "obsessiondb.json").exists()
