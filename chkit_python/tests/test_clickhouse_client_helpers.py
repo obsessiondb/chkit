@@ -8,6 +8,8 @@ branching, ``wrap_connection_error``).
 
 from __future__ import annotations
 
+import threading
+import time
 from unittest.mock import MagicMock
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -166,6 +168,62 @@ def test_submit_runs_on_its_own_driver_without_a_session(
     client.close()
     main.close.assert_called_once()
     submit_driver.close.assert_called_once()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.submit("INSERT INTO t SELECT 3", query_id="q3")
+    assert submit_driver.command.call_count == 2
+
+
+def test_submit_driver_still_opening_at_close_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted async migrate closes the client while its submit thread
+    may still open the submit driver: that driver is closed, never used."""
+    opening = threading.Event()
+    release = threading.Event()
+    drivers: list[MagicMock] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        drivers.append(driver)
+        if kwargs.get("autogenerate_session_id") is False:
+            opening.set()
+            release.wait(timeout=5)
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123",
+            username="default",
+            password="",
+            database="default",
+            secure=False,
+        )
+    )
+    errors: list[Exception] = []
+
+    def submit() -> None:
+        try:
+            client.submit("INSERT INTO t SELECT 1", query_id="q1")
+        except RuntimeError as error:
+            errors.append(error)
+
+    submitter = threading.Thread(target=submit)
+    submitter.start()
+    assert opening.wait(timeout=5)
+    closer = threading.Thread(target=client.close)
+    closer.start()
+    # close() marks the client closed before it waits for the driver to open.
+    while not drivers[0].close.called:
+        time.sleep(0.01)
+    release.set()
+    submitter.join(timeout=5)
+    closer.join(timeout=5)
+
+    [_main, submit_driver] = drivers
+    submit_driver.command.assert_not_called()
+    submit_driver.close.assert_called_once()
+    assert [str(error) for error in errors] == ["ClickHouse client is closed."]
 
 
 # ---------- clickhouse_error_message ----------

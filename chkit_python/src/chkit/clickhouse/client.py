@@ -101,7 +101,7 @@ class QueryStatus(BaseModel):
 class ClickHouseClient:
     """Imperative client wrapper. Use as a context manager."""
 
-    __slots__ = ("_client", "_config", "_submit_client", "_submit_client_lock")
+    __slots__ = ("_client", "_closed", "_config", "_submit_client", "_submit_client_lock")
 
     def __init__(self, client: Any, config: ChxResolvedClickHouseConfig) -> None:
         self._client: Any = client
@@ -109,6 +109,7 @@ class ClickHouseClient:
         # The driver `submit` sends through, opened on first use.
         self._submit_client: Any = None
         self._submit_client_lock = threading.Lock()
+        self._closed = False
 
     @classmethod
     def connect(cls, config: ChxResolvedClickHouseConfig) -> Self:
@@ -159,9 +160,13 @@ class ClickHouseClient:
         return client
 
     def close(self) -> None:
+        # Set before taking the lock: a submit driver still opening (on the
+        # thread of an interrupted async migrate) sees it and sends nothing.
+        self._closed = True
         self._client.close()
-        if self._submit_client is not None:
-            self._submit_client.close()
+        with self._submit_client_lock:
+            if self._submit_client is not None:
+                self._submit_client.close()
 
     def __enter__(self) -> Self:
         return self
@@ -259,10 +264,15 @@ class ClickHouseClient:
 
     def _submit_driver(self) -> Any:
         with self._submit_client_lock:
-            if self._submit_client is None:
+            if self._submit_client is None and not self._closed:
                 self._submit_client = self._open_driver(
                     self._config, autogenerate_session_id=False
                 )
+            # close() may have started while the driver opened; it closes the
+            # driver once this lock is free.
+            if self._closed:
+                msg = "ClickHouse client is closed."
+                raise RuntimeError(msg)
             return self._submit_client
 
     def insert(
