@@ -168,13 +168,15 @@ class ClickHouseClient:
         return client
 
     def close(self) -> None:
-        # Set before taking the lock: a submit driver still opening (on the
-        # thread of an interrupted async migrate) sees it and sends nothing.
+        # Does not wait for a submit driver still opening (on the thread of an
+        # interrupted async migrate), which has no connect timeout: that
+        # thread sees ``_closed``, closes its driver and sends nothing.
         self._closed = True
         self._client.close()
         with self._submit_client_lock:
-            if self._submit_client is not None:
-                self._submit_client.close()
+            submit_client, self._submit_client = self._submit_client, None
+        if submit_client is not None:
+            submit_client.close()
 
     def __enter__(self) -> Self:
         return self
@@ -272,16 +274,21 @@ class ClickHouseClient:
 
     def _submit_driver(self) -> Any:
         with self._submit_client_lock:
-            if self._submit_client is None and not self._closed:
-                self._submit_client = self._open_driver(
-                    self._config, autogenerate_session_id=False
-                )
-            # close() may have started while the driver opened; it closes the
-            # driver once this lock is free.
-            if self._closed:
-                msg = "ClickHouse client is closed."
-                raise RuntimeError(msg)
-            return self._submit_client
+            submit_client = self._submit_client
+        if submit_client is None and not self._closed:
+            # Opened outside the lock, so close() does not wait for it.
+            opened = self._open_driver(self._config, autogenerate_session_id=False)
+            with self._submit_client_lock:
+                if self._submit_client is None and not self._closed:
+                    self._submit_client = opened
+                submit_client = self._submit_client
+            if submit_client is not opened:
+                opened.close()
+        # close() may have run while the driver opened.
+        if self._closed or submit_client is None:
+            msg = "ClickHouse client is closed."
+            raise RuntimeError(msg)
+        return submit_client
 
     def insert(
         self,

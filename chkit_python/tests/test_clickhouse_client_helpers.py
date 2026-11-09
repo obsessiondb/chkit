@@ -9,7 +9,6 @@ branching, ``wrap_connection_error``).
 from __future__ import annotations
 
 import threading
-import time
 from unittest.mock import MagicMock
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -234,7 +233,7 @@ def test_submit_driver_still_opening_at_close_sends_nothing(
         drivers.append(driver)
         if kwargs.get("autogenerate_session_id") is False:
             opening.set()
-            release.wait(timeout=5)
+            release.wait(timeout=30)
         return driver
 
     monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
@@ -260,9 +259,11 @@ def test_submit_driver_still_opening_at_close_sends_nothing(
     assert opening.wait(timeout=5)
     closer = threading.Thread(target=client.close)
     closer.start()
-    # close() marks the client closed before it waits for the driver to open.
-    while not drivers[0].close.called:
-        time.sleep(0.01)
+    # close() returns without waiting for the driver to open: it has no
+    # connect timeout, so the wait could be unbounded (#661).
+    closer.join(timeout=2)
+    assert not closer.is_alive()
+    assert drivers[0].close.called
     release.set()
     submitter.join(timeout=5)
     closer.join(timeout=5)
