@@ -67,3 +67,31 @@ def test_creates_a_view_after_the_view_it_reads_including_with_a_rename(
         "create_view view:app.z_base",
         "create_view view:app.a_top",
     ]
+
+
+def test_creates_a_view_after_the_view_it_reads_through_an_escaped_quoted_name(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # ClickHouse reads `z\x5fbase` as z_base and keeps the backslash of `z\q` (#639).
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "clickhouse.config.py").write_text(
+        'from chkit import define_config\n\nconfig = define_config({"schema": "./schema.py", '
+        '"outDir": "./chkit", "migrationsDir": "./chkit/migrations", "metaDir": "./chkit/meta"})\n'
+    )
+    (tmp_path / "schema.py").write_text(
+        "from chkit import schema, table, view\n\n"
+        "definitions = schema(\n"
+        "    table(database='app', name='users', columns=[{'name': 'id', 'type': 'UInt64'}],\n"
+        "          engine='MergeTree()', primary_key=['id'], order_by=['id']),\n"
+        "    view(database='app', name='z_base', as_='SELECT id FROM app.users'),\n"
+        "    view(database='app', name='z\\\\q', as_='SELECT id FROM app.users'),\n"
+        "    view(database='app', name='a_top', as_='SELECT id FROM app.`z\\\\x5fbase`'),\n"
+        "    view(database='app', name='a_q', as_='SELECT id FROM app.`z\\\\q`'),\n"
+        ")\n"
+    )
+    plan = CliRunner().invoke(app, ["generate", "--dryrun", "--json"])
+    assert plan.exit_code == 0, plan.output
+    keys = [op["key"] for op in json.loads(plan.stdout)["operations"]]
+    assert keys.index("view:app.z_base") < keys.index("view:app.a_top")
+    assert keys.index("view:app.z\\q") < keys.index("view:app.a_q")
+    assert len(keys) == 6

@@ -2,10 +2,12 @@
 
 from __future__ import annotations
 
+import json
 import random
 import re
 import time
 from collections.abc import Callable
+from pathlib import Path
 
 import pytest
 
@@ -226,3 +228,29 @@ def test_string_literal_value_unescapes_literals_and_heredocs() -> None:
     assert string_literal_value(a) == "it's"
     assert string_literal_value(b) == "a'b"
     assert string_literal_value(c) == "x'y"
+
+
+# test/fixtures/quoted-escapes.json is shared with sql-lexer.test.ts and
+# checked against the server by test_quoted_escapes_e2e.py (#639).
+QUOTED_ESCAPES: list[dict[str, str]] = json.loads(
+    (Path(__file__).resolve().parents[2] / "test/fixtures/quoted-escapes.json").read_text(
+        encoding="utf-8"
+    )
+)["cases"]
+
+
+def test_reads_escapes_in_quoted_names_and_strings_as_clickhouse_does() -> None:
+    read = []
+    for case in QUOTED_ESCAPES:
+        tokens = tokenize_sql(case["sql"])
+        assert len(tokens) == 1
+        token = tokens[0]
+        value = string_literal_value(token) if token.kind == "string" else identifier_name(token)
+        read.append({"sql": case["sql"], "value": value})
+    assert read == [{"sql": case["sql"], "value": case["value"]} for case in QUOTED_ESCAPES]
+
+
+def test_keeps_an_invalid_x_escape_as_written() -> None:
+    name, _, string = tokenize_sql("`a\\xZZ` 'a\\x4'")
+    assert identifier_name(name) == "a\\xZZ"
+    assert string_literal_value(string) == "a\\x4"
