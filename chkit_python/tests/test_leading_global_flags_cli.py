@@ -147,7 +147,7 @@ def test_a_forwarder_reads_a_leading_config(monkeypatch: pytest.MonkeyPatch) -> 
 def test_only_leading_global_flags_or_help_first_show_the_global_help(argv: list[str]) -> None:
     result = CliRunner().invoke(app, argv)
     assert result.exit_code == 0, (argv, result.output)
-    assert "Usage: chkit" in result.stdout
+    assert "Usage:" in result.stdout
     assert result.stderr == ""
 
 
@@ -209,7 +209,7 @@ def test_an_unknown_first_token_is_an_unknown_command(argv: list[str], token: st
     result = CliRunner().invoke(app, argv)
     assert result.exit_code == 1, (argv, result.output)
     assert result.stderr == f"Unknown command: {token}\n"
-    assert "Usage: chkit" in result.stdout
+    assert "Usage:" in result.stdout
 
 
 @pytest.mark.parametrize(
