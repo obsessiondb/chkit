@@ -49,7 +49,7 @@ export {
   renderConstraint,
   type ConstraintKind,
 } from './constraint.js'
-export { splitTopLevelComma } from './key-clause.js'
+export { keyClauseFingerprint, splitTopLevelComma } from './key-clause.js'
 export { insertColumnList, insertableColumnNames } from './insert-columns.js'
 export {
   quoteIdentifier,

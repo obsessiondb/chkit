@@ -18,6 +18,9 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- `generate` plans a table recreate, and `drift` reports `order_by_mismatch` /
+  `primary_key_mismatch`, when a key moves between columns `a` and `b` and one column named
+  `a, b` (or between `a b` and `ab`); both read the key as unchanged (#558, fixed in TS too).
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement

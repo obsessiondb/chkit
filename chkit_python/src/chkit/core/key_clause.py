@@ -6,10 +6,11 @@ import re
 from collections.abc import Set
 from typing import Final
 
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import identifier_name, is_js_space, is_trivia, iter_sql_tokens, js_trim
 from chkit.core.sql_scan import find_quote_end, is_quote_char
 
 _PLAIN_COLUMN_REFERENCE: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+_BACKSLASH_OR_BACKTICK: Final[re.Pattern[str]] = re.compile(r"[\\`]")
 
 
 def is_plain_column_reference(token: str) -> bool:
@@ -75,3 +76,30 @@ def normalize_key_columns(
         else:
             out.extend(split_top_level_comma(trimmed))
     return out
+
+
+def key_clause_fingerprint(sql: str) -> str:
+    """A key clause reduced to what it means, for comparing two clauses only.
+
+    Never rendered. It keeps one entry per token: whitespace and comments go,
+    every identifier compares by its name whether written bare, in backticks or
+    in double quotes (ClickHouse re-quotes names when it stores a key), and a
+    quoted name keeps its commas and spaces. So ``` `a, b` ``` differs from
+    ``` `a`, `b` ``` and ``` `a b` ``` from ``ab`` (#558), while
+    ``toStartOfHour( ts )`` matches ``toStartOfHour(ts)`` and ``` `user-id` ```
+    matches ``"user-id"``. Pass the clause as rendered
+    (``render_key_clause_columns``): a declared column such as ``user-id`` must
+    already be quoted, or it reads as ``user - id``.
+    """
+    parts: list[str] = []
+    for token in iter_sql_tokens(sql):
+        # The lexer reads Unicode whitespace (a no-break space) as punctuation.
+        if is_trivia(token) or (token.kind == "punctuation" and is_js_space(token.text)):
+            continue
+        name = identifier_name(token)
+        if name is None:
+            parts.append(token.text)
+        else:
+            escaped = _BACKSLASH_OR_BACKTICK.sub(r"\\\g<0>", name)
+            parts.append(f"`{escaped}`")
+    return " ".join(parts)

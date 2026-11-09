@@ -1,3 +1,4 @@
+import { identifierName, isTrivia, sqlTokens } from './sql-lexer.js'
 import { findQuoteEnd, isQuoteChar } from './sql-scan.js'
 
 export function splitTopLevelComma(input: string): string[] {
@@ -67,4 +68,26 @@ const PLAIN_COLUMN_REFERENCE = /^[A-Za-z_][A-Za-z0-9_]*$/
  */
 export function isPlainColumnReference(token: string): boolean {
   return PLAIN_COLUMN_REFERENCE.test(token)
+}
+
+/**
+ * A key clause reduced to what it means, for comparing two clauses only (never
+ * rendered). It keeps one entry per token: whitespace and comments go, every
+ * identifier compares by its name whether written bare, in backticks or in
+ * double quotes (ClickHouse re-quotes names when it stores a key), and a quoted
+ * name keeps its commas and spaces. So `` `a, b` `` differs from `` `a`, `b` ``
+ * and `` `a b` `` from `ab` (#558), while `toStartOfHour( ts )` matches
+ * `toStartOfHour(ts)` and `` `user-id` `` matches `"user-id"`. Pass
+ * the clause as rendered (`renderKeyClauseColumns`): a declared column such as
+ * `user-id` must already be quoted, or it reads as `user - id`.
+ */
+export function keyClauseFingerprint(sql: string): string {
+  const parts: string[] = []
+  for (const token of sqlTokens(sql)) {
+    // The lexer reads Unicode whitespace (a no-break space) as punctuation.
+    if (isTrivia(token) || (token.kind === 'punctuation' && /^\s$/.test(token.text))) continue
+    const name = identifierName(token)
+    parts.push(name === undefined ? token.text : `\`${name.replace(/[\\`]/g, '\\$&')}\``)
+  }
+  return parts.join(' ')
 }

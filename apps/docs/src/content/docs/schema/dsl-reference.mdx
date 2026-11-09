@@ -1335,6 +1335,7 @@ What `chkit pull` reads back plans nothing against the schema it came from:
 - A column type compares in the spacing ClickHouse stores: `Decimal(10,2)` and `Decimal(10, 2)` are the same type. Text in quotes, such as an `Enum` label or a time zone, compares as written. chkit writes the type as you declared it.
 - A default that is one number or string literal compares by value: `2.0` and `2.`, `1e21` and `1e+21`, `'it\'s'` and `"it's"` are the same default. A string escape whose meaning chkit does not know for certain (such as `\N` or `\u0041`) compares as text, so it can show a change that is not one, but never hides one.
 - Indexes, projections, constraints and columns compare whatever order their keys are written in.
+- A key (`orderBy`, `primaryKey`, `uniqueKey`) compares token by token as chkit renders it: whitespace, how a name is quoted, and how an expression is split across entries (`['cityHash64(a', 'b)']`) don't matter. A quoted name keeps its commas and spaces, so a key on a column named `a, b` is not the key on columns `a` and `b`.
 
 The `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings are not part of the schema.
 
