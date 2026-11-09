@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import decimal
 from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -679,12 +680,16 @@ _ROUNDING_CASES = [
         2_675_000, 1_207_959_552, 6500,
         "2.67M rows (1.13 GiB)", "2.67M rows (1.13 GiB) in 7s",
     ),
-    # UInt64 max: TS reads it as the nearest double.
+    (1, 1, 1_000_000_500, "1 rows (1 B)", "1 rows (1 B) in 1000001s"),
+    # UInt64 max: TS reads it as the nearest double, and String() prints the
+    # rounded seconds in shortest form.
     (
-        18_446_744_073_709_551_615, 18_446_744_073_709_551_615, 1_000_000_500,
+        18_446_744_073_709_551_615, 18_446_744_073_709_551_615, 18_446_744_073_709_551_615,
         "18446744073709.55M rows (17179869184.00 GiB)",
-        "18446744073709.55M rows (17179869184.00 GiB) in 1000001s",
+        "18446744073709.55M rows (17179869184.00 GiB) in 18446744073709550s",
     ),
+    # A tie only after the exact integer division; as a double it is just below.
+    (1, 1, 36_028_797_018_964_500, "1 rows (1 B)", "1 rows (1 B) in 36028797018964s"),
 ]
 
 
@@ -718,4 +723,34 @@ def test_apply_async_progress_rounds_like_ts(
     assert [line for line in lines if "written=" in line] == [
         f"  load_table_data: written={progress}, elapsed 0s",
         f"  load_table_data: finished — written={finished}",
+    ]
+
+
+def test_apply_async_progress_ignores_the_ambient_decimal_context() -> None:
+    """User code may lower the precision or trap float conversions."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=1_125_000, written_bytes=1280),
+            QueryStatus(
+                status="finished", written_rows=1_125_000, written_bytes=1280, duration_ms=2500
+            ),
+        ]
+    )
+    lines: list[str] = []
+    with decimal.localcontext() as context:
+        context.prec = 2
+        context.traps[decimal.FloatOperation] = True
+        context.traps[decimal.Inexact] = True
+        apply_async_statement(
+            _input(
+                client=client,
+                journal=_FakeJournalStore(),
+                operation_type="load_table_data",
+                log=lines.append,
+            )
+        )
+    assert [line for line in lines if "written=" in line] == [
+        "  load_table_data: written=1.13M rows (1.3 KiB), elapsed 0s",
+        "  load_table_data: finished — written=1.13M rows (1.3 KiB) in 3s",
     ]

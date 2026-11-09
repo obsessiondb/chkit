@@ -35,7 +35,6 @@ import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from decimal import ROUND_HALF_UP, Decimal
 from typing import Literal
 
 from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
@@ -47,6 +46,7 @@ from chkit.cli.journal_store import (
     resolve_journal_table_name,
 )
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus, clickhouse_error_message
+from chkit.core.jsnum import js_math_round, js_number_to_string, js_to_fixed
 
 POLL_INTERVAL_SECONDS = 5.0
 # query_status compares whole seconds, so the margin stays more than a second
@@ -142,13 +142,14 @@ def _first_line(value: str) -> str:
     return value.split("\n", 1)[0]
 
 
+# float(value): TS reads a count as a double before dividing it.
 def _format_rows(value: int | None) -> str:
     if value is None or value == 0:
         return "0 rows"
     if value >= _ROWS_M:
-        return f"{_js_to_fixed(float(value) / _ROWS_M, 2)}M rows"
+        return f"{js_to_fixed(float(value) / _ROWS_M, 2)}M rows"
     if value >= _ROWS_K:
-        return f"{_js_to_fixed(float(value) / _ROWS_K, 1)}K rows"
+        return f"{js_to_fixed(float(value) / _ROWS_K, 1)}K rows"
     return f"{value} rows"
 
 
@@ -156,30 +157,12 @@ def _format_bytes(value: int | None) -> str:
     if value is None or value == 0:
         return "0 B"
     if value >= _BYTES_GIB:
-        return f"{_js_to_fixed(float(value) / _BYTES_GIB, 2)} GiB"
+        return f"{js_to_fixed(float(value) / _BYTES_GIB, 2)} GiB"
     if value >= _BYTES_MIB:
-        return f"{_js_to_fixed(float(value) / _BYTES_MIB, 1)} MiB"
+        return f"{js_to_fixed(float(value) / _BYTES_MIB, 1)} MiB"
     if value >= _BYTES_KIB:
-        return f"{_js_to_fixed(float(value) / _BYTES_KIB, 1)} KiB"
+        return f"{js_to_fixed(float(value) / _BYTES_KIB, 1)} KiB"
     return f"{value} B"
-
-
-def _js_to_fixed(value: float, digits: int) -> str:
-    """JS ``value.toFixed(digits)`` for a non-negative ``value`` below 1e21.
-
-    JS rounds the double's exact value and takes the larger candidate on a
-    tie: ``(1.25).toFixed(1)`` is ``1.3``, where ``f"{1.25:.1f}"`` rounds
-    half to even and gives ``1.2``. ``Decimal(value)`` is that exact value,
-    so a double just below a decimal tie (1.005 is 1.00499...) still rounds
-    down, as in JS. ``float(value)`` above mirrors TS reading the count as a
-    double before dividing.
-    """
-    return str(Decimal(value).quantize(Decimal(1).scaleb(-digits), rounding=ROUND_HALF_UP))
-
-
-def _js_math_round(value: float) -> int:
-    """JS ``Math.round`` for a non-negative ``value``: ties round up, not to even."""
-    return int(Decimal(value).to_integral_value(rounding=ROUND_HALF_UP))
 
 
 def _progress_line(label: str, status: QueryStatus, elapsed_sec: int) -> str:
@@ -373,7 +356,10 @@ def _poll_until_terminal(
                     iso_without_zone(datetime.now(tz=UTC)),
                 )
             )
-            finished_sec = _js_math_round((status.duration_ms or 0) / 1000)
+            # TS reads the duration as a double and prints the result as String(n).
+            finished_sec = js_number_to_string(
+                js_math_round(float(status.duration_ms or 0) / 1000)
+            )
             input_.log(
                 f"  {input_.operation_type}: finished — "
                 f"written={_format_rows(status.written_rows)} "
