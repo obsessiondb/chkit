@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import importlib.util
+import os
 import sys
 from pathlib import Path
 from typing import Any
@@ -116,8 +117,11 @@ def load_config(
             user_config = merge_user_config(profile, user_config)
         return resolve_config(user_config)
 
+    # The absolute path, as TS (Node ``path.resolve``: ``..`` collapsed,
+    # symlinks kept) names it in the errors below.
+    shown_path = os.path.abspath(path)
     if config_path is not None:
-        msg = f"Config file not found: {path}"
+        msg = f"Config not found at {shown_path}."
         raise FileNotFoundError(msg)
 
     command = env.command if env is not None else None
@@ -125,13 +129,14 @@ def load_config(
     if profile is None:
         if command == "query":
             msg = (
-                f"No project config found at {path}, and no ObsessionDB profile is available.\n"
+                f"No project config found at {shown_path}, "
+                "and no ObsessionDB profile is available.\n"
                 "Run 'chkit obsessiondb login' to query ObsessionDB from any directory, "
                 "or run 'chkit init' in a project."
             )
         else:
             msg = (
-                f"Config file not found: {path}\n"
+                f"Config not found at {shown_path}.\n"
                 "Either run 'chkit init' in your project, or run "
                 "'chkit obsessiondb login' to use chkit from any directory."
             )
