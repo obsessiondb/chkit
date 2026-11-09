@@ -60,6 +60,20 @@ describe('@chkit/cli -- ends a core command\'s flags (#614)', () => {
       expect([missing.exitCode, missing.stderr.trim()]).toEqual([1, 'Missing value for --name'])
       const unknown = runCli(['status', ...c, '--bogus', '--', 'x'])
       expect([unknown.exitCode, unknown.stderr.trim()]).toEqual([1, 'Unknown flag: --bogus'])
+      // --config followed by -- has no value (#620); the --json after it is no option.
+      for (const args of [
+        ['generate', '--config', '--', '--json'],
+        ['codegen', '--config', '--', '--json'],
+        ['plugin', 'codegen', 'codegen', '--config', '--', '--json'],
+      ]) {
+        const result = runCli(args)
+        expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([
+          args,
+          1,
+          '',
+          'Missing value for --config',
+        ])
+      }
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }

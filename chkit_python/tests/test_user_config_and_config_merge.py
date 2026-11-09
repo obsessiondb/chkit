@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import sys
 from pathlib import Path
 
@@ -403,10 +404,21 @@ def test_load_config_without_project_or_profile_fails(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
     monkeypatch.chdir(tmp_path)
 
-    with pytest.raises(FileNotFoundError, match="no ObsessionDB profile is available"):
+    default_path = os.path.join(os.getcwd(), "clickhouse.config.py")
+    with pytest.raises(FileNotFoundError) as query_error:
         load_config(None, ChxConfigEnv(command="query"))
-    with pytest.raises(FileNotFoundError, match="Config file not found"):
+    assert str(query_error.value) == (
+        f"No project config found at {default_path}, and no ObsessionDB profile is available.\n"
+        "Run 'chkit obsessiondb login' to query ObsessionDB from any directory, "
+        "or run 'chkit init' in a project."
+    )
+    with pytest.raises(FileNotFoundError) as plugin_error:
         load_config(None, ChxConfigEnv(command="plugin"))
+    assert str(plugin_error.value) == (
+        f"Config not found at {default_path}.\n"
+        "Either run 'chkit init' in your project, or run "
+        "'chkit obsessiondb login' to use chkit from any directory."
+    )
 
 
 def test_load_config_explicit_missing_path_does_not_fall_back(
@@ -416,8 +428,50 @@ def test_load_config_explicit_missing_path_does_not_fall_back(
     monkeypatch.setenv("XDG_CONFIG_HOME", str(xdg))
     _write_credentials(xdg)
 
-    with pytest.raises(FileNotFoundError, match="Config file not found"):
-        load_config(tmp_path / "missing.config.py", ChxConfigEnv(command="query"))
+    missing = tmp_path / "missing.config.py"
+    with pytest.raises(FileNotFoundError) as error:
+        load_config(missing, ChxConfigEnv(command="query"))
+    assert str(error.value) == f"Config not found at {missing}."
+
+
+def test_cli_missing_config_reports_the_absolute_path_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """TS resolves the config path against the working directory (Node
+    ``path.resolve``: ``..`` collapsed, symlinks kept) before naming it."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    (tmp_path / "proj").mkdir()
+    monkeypatch.chdir(tmp_path / "proj")
+    cwd = os.getcwd()
+    _reset_for_testing()
+
+    explicit = CliRunner().invoke(app, ["status", "--config", "sub/../missing.config.py"])
+    assert explicit.exit_code == 1
+    assert explicit.stderr == f"Config not found at {cwd}/missing.config.py.\n"
+
+    as_json = CliRunner().invoke(app, ["generate", "--json"])
+    _reset_for_testing()
+    assert as_json.exit_code == 1
+    assert json.loads(as_json.stdout)["error"] == {
+        "code": "error",
+        "message": (
+            f"Config not found at {cwd}/clickhouse.config.py.\n"
+            "Either run 'chkit init' in your project, or run "
+            "'chkit obsessiondb login' to use chkit from any directory."
+        ),
+    }
+
+
+def test_load_config_collapses_a_double_leading_slash_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    missing = f"/{tmp_path}/missing.config.py"
+    assert missing.startswith("//")
+
+    with pytest.raises(FileNotFoundError) as error:
+        load_config(Path(missing))
+    assert str(error.value) == f"Config not found at {tmp_path}/missing.config.py."
 
 
 def test_cli_plugin_obsessiondb_runs_without_project_or_credentials(
@@ -435,7 +489,9 @@ def test_cli_plugin_obsessiondb_runs_without_project_or_credentials(
     # Plain `chkit plugin` does not synthesize it, as in TS.
     listed_all = CliRunner().invoke(app, ["plugin"])
     assert listed_all.exit_code == 1
-    assert listed_all.stderr.startswith("Config file not found: clickhouse.config.py\n")
+    assert listed_all.stderr.startswith(
+        f"Config not found at {os.path.join(os.getcwd(), 'clickhouse.config.py')}.\n"
+    )
 
 
 def test_loaded_config_path_reports_the_source_like_ts(

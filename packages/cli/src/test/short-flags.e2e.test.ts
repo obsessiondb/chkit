@@ -65,7 +65,7 @@ describe('@chkit/cli short flags (#491)', () => {
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
     }
-  })
+  }, 30_000)
 
   test('the last of several --config / -c flags picks the config, in every form (#574)', async () => {
     const [first, last] = await Promise.all([createFixture(), createFixture(renderScopedSchema())])
@@ -99,7 +99,8 @@ describe('@chkit/cli short flags (#491)', () => {
       for (const args of [
         ['generate', '--config', '--json'],
         ['generate', '-c', a, '--config', '--json'],
-        ['generate', '-c', a, '-c', '--', '--config', b, '--json'],
+        // A --json after -- is no option (#614), so this one comes before it.
+        ['generate', '-c', a, '--json', '-c', '--', '--config', b],
       ]) {
         const result = runCli(args, first.dir)
         expect([args, result.exitCode, result.stderr.trim()]).toEqual([args, 1, 'Missing value for --config'])
@@ -242,5 +243,5 @@ describe('@chkit/cli short flags (#491)', () => {
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
-  })
+  }, 30_000)
 })

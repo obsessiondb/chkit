@@ -15,6 +15,7 @@ Hard-fails (never skips) when the cluster is unreachable.
 
 from __future__ import annotations
 
+import functools
 import os
 import threading
 import time
@@ -82,7 +83,7 @@ def test_rerun_through_another_replica_attaches_to_running_attempt() -> None:
         )
         for url in _NODES:
             with _connect(url, cluster=None) as node:
-                _poll_until(lambda node=node: _count(node, tables_sql), lambda n: n == 1)
+                _poll_until(functools.partial(_count, node, tables_sql), lambda n: n == 1)
         worker.start()
         processes_sql = f"SELECT count() FROM system.processes WHERE query_id = '{query_id}'"
         _poll_until(lambda: _count(submitter, processes_sql), lambda n: n == 1, interval=0.1)

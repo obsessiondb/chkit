@@ -96,6 +96,22 @@ def test_a_flag_error_before_dash_dash_ignores_a_json_after_it(project: Path) ->
     assert (missing.exit_code, missing.stderr) == (1, "Missing value for --name\n")
 
 
+@pytest.mark.parametrize(
+    "command",
+    [["generate"], ["codegen"], ["plugin", "codegen", "codegen"]],
+)
+def test_a_config_without_value_ignores_a_json_after_dash_dash(
+    project: Path, command: list[str]
+) -> None:
+    # --config followed by -- has no value (#620); the --json after it is no option.
+    result = CliRunner().invoke(app, [*command, "--config", "--", "--json"])
+    assert (result.exit_code, result.stdout, result.stderr) == (
+        1,
+        "",
+        "Missing value for --config\n",
+    ), command
+
+
 def test_snapshot_gets_what_follows_dash_dash_as_its_arguments(project: Path) -> None:
     after = CliRunner().invoke(app, ["snapshot", "--", "rebuild", "--dryrun", "--json"])
     assert after.exit_code == 1

@@ -38,10 +38,9 @@ import {
   renderDictionarySQL,
   columnTypeFingerprint,
   columnCodecFingerprint,
-  renderKeyClauseColumns,
+  keyFingerprint,
   toCreateSQL,
 } from './sql.js'
-import { keyClauseFingerprint } from './key-clause.js'
 import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
 import { readonlySettingsFingerprint } from './table-settings.js'
@@ -154,15 +153,6 @@ function pushCreateDatabaseOperation(
     risk,
     sql: `CREATE DATABASE IF NOT EXISTS ${renderIdentifier(database)};`,
   })
-}
-
-// Keys compare by their tokens as chkit renders them, so whitespace, identifier
-// quoting and how the parts are split across entries (`['cityHash64(a', 'b)']`)
-// carry no meaning (#176, #178), while a declared column named `a, b` stays one
-// name rather than reading as columns `a` and `b` (#558).
-function keyFingerprint(def: TableDefinition, keys: string[] | undefined): string {
-  const columnNames = new Set(def.columns.map((column) => column.name))
-  return keyClauseFingerprint(renderKeyClauseColumns(keys ?? [], columnNames))
 }
 
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {

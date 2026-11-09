@@ -17,7 +17,7 @@ import { constraintExpression, constraintKind, renderConstraint } from './constr
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import { isMergeTreeEngine, supportsSortOrder } from './engine.js'
 import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
-import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
+import { isPlainColumnReference, keyClauseFingerprint, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
 import { normalizeSQLFragment, sqlExpressionFingerprint } from './sql-normalizer.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
@@ -74,6 +74,19 @@ export function renderKeyClauseColumns(
       columnNames.has(column) || isPlainColumnReference(column) ? quoteIdentifier(column) : column
     )
     .join(', ')
+}
+
+/**
+ * A key (`orderBy`, `primaryKey`, `uniqueKey`) in comparison form: its tokens
+ * as chkit renders them, so whitespace, identifier quoting and how the parts
+ * are split across entries (`['cityHash64(a', 'b)']`) carry no meaning (#176,
+ * #178), while a declared column named `a, b` stays one name rather than
+ * reading as columns `a` and `b` (#558). The planner and the cutover compare
+ * keys through it, so they agree on whether a key changed.
+ */
+export function keyFingerprint(def: TableDefinition, keys: string[] | undefined): string {
+  const columnNames = new Set(def.columns.map((column) => column.name))
+  return keyClauseFingerprint(renderKeyClauseColumns(keys ?? [], columnNames))
 }
 
 function renderIndexType(idx: SkipIndexDefinition): string {
