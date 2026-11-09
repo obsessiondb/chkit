@@ -435,23 +435,32 @@ class _ChkitGroup(TyperGroup):
         does (#597): leading global flags move behind the command, help or the
         version first ignores the rest, and any other first token that is not
         a command is an unknown command."""
+        command = "chkit"
         try:
             normalized = normalize_global_args(args)
+            if normalized and normalized[0] in _HELP_OPTION_NAMES:
+                # TS `printGlobalHelp`: --help-plugins reads --config first.
+                command = normalized[0]
+                expanded = expand_short_flags(normalized[1:], GLOBAL_FLAGS)
+                if _HELP_PLUGINS_OPTION in _option_args(expanded):
+                    extract_config_path(expanded)
         except MissingFlagValueError as error:
-            # TS's top-level catch: command "chkit", the error's own JSON code.
+            # TS's top-level catch: the command read so far, the error's own JSON code.
             if "--json" in _option_args(args):
-                emit_json_error("chkit", {"code": json_error_code(error), "message": str(error)})
+                emit_json_error(command, {"code": json_error_code(error), "message": str(error)})
             typer.echo(str(error), err=True)
             raise typer.Exit(code=1) from error
         if normalized and normalized[0] in _ROOT_OPTION_NAMES:
             normalized = normalized[:1]
         elif normalized and self.get_command(ctx, normalized[0]) is None:
             command = normalized[0]
-            # As TS, which reads the config path before it finds the command unknown.
+            # As TS, which reads the config path before it finds the command
+            # unknown, from the command on (a `--` command ends the flags).
+            argv = [command, *expand_short_flags(normalized[1:], GLOBAL_FLAGS)]
             try:
-                extract_config_path(expand_short_flags(normalized[1:], GLOBAL_FLAGS))
+                extract_config_path(argv)
             except MissingFlagValueError as error:
-                report_flag_error(command, str(error), json_mode="--json" in normalized)
+                report_flag_error(command, str(error), json_mode="--json" in _option_args(argv))
             message = f"Unknown command: {command}"
             typer.echo(message, err=True)
             if "--json" in _option_args(normalized):
