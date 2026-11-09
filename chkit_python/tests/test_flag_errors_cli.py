@@ -82,6 +82,10 @@ CASES = [
     (["plugin", "--config", "--check"], "Missing value for --config"),
     (["plugin", "codegen", "codegen", "--config", "--check"], "Missing value for --config"),
     (["plugin", "codegen", "codegen", "-c", "--"], "Missing value for --config"),
+    # The --help-plugins help reads --config first in TS, as the config
+    # gives the plugins (#619).
+    (["generate", "--config", "--help-plugins"], "Missing value for --config"),
+    (["status", "--help-plugins", "-c"], "Missing value for --config"),
 ]
 
 
