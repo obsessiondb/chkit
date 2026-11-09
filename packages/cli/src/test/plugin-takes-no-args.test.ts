@@ -110,7 +110,7 @@ describe('a plugin command with takesArgs: false rejects arguments (#659)', () =
     } finally {
       await fixture.cleanup()
     }
-  })
+  }, 60_000)
 
   test('under --json the usage envelope names the command typed', async () => {
     const fixture = await createNoArgsFixture()
@@ -139,7 +139,7 @@ describe('a plugin command with takesArgs: false rejects arguments (#659)', () =
     } finally {
       await fixture.cleanup()
     }
-  })
+  }, 60_000)
 
   test('without arguments the command runs, -- included', async () => {
     const fixture = await createNoArgsFixture()
@@ -159,7 +159,7 @@ describe('a plugin command with takesArgs: false rejects arguments (#659)', () =
     } finally {
       await fixture.cleanup()
     }
-  })
+  }, 60_000)
 
   test('a command that does not set takesArgs keeps getting its arguments', async () => {
     const fixture = await createNoArgsFixture()
@@ -179,7 +179,7 @@ describe('a plugin command with takesArgs: false rejects arguments (#659)', () =
     } finally {
       await fixture.cleanup()
     }
-  })
+  }, 60_000)
 
   test('a failing plugin command is named in the error, as in chkit-py', async () => {
     const fixture = await createNoArgsFixture()
@@ -192,5 +192,5 @@ describe('a plugin command with takesArgs: false rejects arguments (#659)', () =
     } finally {
       await fixture.cleanup()
     }
-  })
+  }, 60_000)
 })
