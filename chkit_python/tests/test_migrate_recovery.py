@@ -1102,8 +1102,8 @@ _CREATE_T = "CREATE TABLE IF NOT EXISTS default.t (id UInt64) ENGINE = MergeTree
 _INSERT_T = "INSERT INTO default.t VALUES (1)"
 _CREATE_MARKER = "-- operation: create_table key=table:default.t risk=safe\n"
 _WAIT_SQL = f"{_CREATE_MARKER}{_CREATE_T};\n{_INSERT_T};\n"
-# The statement as sent: the splitter keeps the marker comment in front of it.
-_CREATE_SENT = f"{_CREATE_MARKER}{_CREATE_T}"
+# The statement as sent: comments stripped and the `;` kept, as in TS (#486).
+_CREATE_SENT = f"{_CREATE_T};"
 
 
 class _PropagationClient:
@@ -1162,7 +1162,7 @@ def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: 
     client.visible = True
     events.clear()
     _apply(tmp_path, cast(Any, client), store)
-    assert events == ["propagation-query", f"command {_INSERT_T}", "append"]
+    assert events == ["propagation-query", f"command {_INSERT_T};", "append"]
     assert [(o.operation_index, o.status, o.last_error) for o in store.state.operations] == [
         (0, "completed", ""),
         (1, "completed", ""),
@@ -1200,7 +1200,7 @@ def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Pat
     client.visible = True
     events.clear()
     _apply(tmp_path, cast(Any, client), store)
-    assert events == ["propagation-query", f"command {_INSERT_T}", "append"]
+    assert events == ["propagation-query", f"command {_INSERT_T};", "append"]
 
 
 @pytest.mark.usefixtures("_fast_waits")
@@ -1250,7 +1250,7 @@ def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
     )
 
     _apply(_write(tmp_path, sql), cast(Any, _PropagationClient(events, visible=False)), store)
-    assert events == [f"command {drop}", "propagation-query", "append"]
+    assert events == ["command DROP TABLE IF EXISTS default.t;", "propagation-query", "append"]
 
 
 def test_apply_refuses_edited_file_with_completed_statement(tmp_path: Path) -> None:
