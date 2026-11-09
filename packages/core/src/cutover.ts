@@ -9,7 +9,7 @@ import {
   type SchemaDefinition,
   type TableDefinition,
 } from './model.js'
-import { columnTypeFingerprint, renderColumnType, toCreateSQL } from './sql.js'
+import { columnTypeFingerprint, keyFingerprint, renderColumnType, toCreateSQL } from './sql.js'
 import {
   DEFAULT_INDEX_GRANULARITY,
   declaredReadonlySettings,
@@ -663,8 +663,8 @@ function assertCutoverSupported(input: {
   const readonlySettings = (def: TableDefinition) => readonlySettingsFingerprint(def.settings)
   const layoutChanged =
     engineName(oldDef.engine) !== engineName(newDef.engine) ||
-    oldDef.orderBy.join(',') !== newDef.orderBy.join(',') ||
-    oldDef.primaryKey.join(',') !== newDef.primaryKey.join(',') ||
+    keyFingerprint(oldDef, oldDef.orderBy) !== keyFingerprint(newDef, newDef.orderBy) ||
+    keyFingerprint(oldDef, oldDef.primaryKey) !== keyFingerprint(newDef, newDef.primaryKey) ||
     (oldDef.partitionBy ?? '') !== (newDef.partitionBy ?? '') ||
     readonlySettings(oldDef) !== readonlySettings(newDef)
   if (!layoutChanged) {
