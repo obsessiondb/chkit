@@ -7,12 +7,16 @@ and ``chkit plugin <plugin> <command>``. A probe plugin records each hook call.
 from __future__ import annotations
 
 import json
+import re
 from pathlib import Path
 
 import pytest
 from typer.testing import CliRunner
 
 from chkit.cli.main import app
+
+# CI forces rich to colour usage errors.
+ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
 
 PROBE_PLUGIN = '''
 import json
@@ -105,7 +109,7 @@ def test_a_flag_error_is_reported_before_any_hook(
 ) -> None:
     result = CliRunner().invoke(app, ["plugin", "probe", *args])
     assert result.exit_code != 0
-    assert message in result.output
+    assert message in ANSI_STYLE.sub("", result.output)
     assert _calls(project) == []
 
 
