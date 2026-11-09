@@ -30,17 +30,21 @@ import re
 from dataclasses import dataclass
 from typing import Literal
 
+from chkit.core.sql_lexer import SQLToken, is_trivia, tokenize_sql
 from chkit.core.sql_splitter import extract_executable_statements
 
 __all__ = [
     "DestructiveOperationMarker",
     "MigrationOperationMode",
     "MigrationOperationSummary",
+    "NonSelectBarrier",
     "ScannedDestructiveStatement",
     "collect_destructive_operation_markers",
     "collect_unmarked_destructive_statements",
     "extract_executable_statements",
     "extract_migration_operation_summaries",
+    "find_non_select_barriers",
+    "is_select_statement",
     "migration_contains_danger_operation",
     "migration_contains_destructive_sql",
     "scan_destructive_sql_statements",
@@ -192,6 +196,73 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
         if parsed is not None:
             summaries.append(parsed)
     return summaries
+
+
+@dataclass(frozen=True, slots=True)
+class NonSelectBarrier:
+    # 0-based position among the executable statements.
+    index: int
+    total: int
+    statement: str
+    # The ``-- operation:`` marker text after the prefix.
+    summary: str
+
+
+def find_non_select_barriers(sql: str) -> list[NonSelectBarrier]:
+    """The statements marked ``mode=barrier`` that are not a SELECT (#634).
+
+    The barrier read runs its statement as a query, once and then every
+    second, and nothing waits for a change it makes to reach the other
+    replicas, so migrate refuses any other statement there.
+    """
+    statements = extract_executable_statements(sql)
+    operations = extract_migration_operation_summaries(sql)
+    found: list[NonSelectBarrier] = []
+    for index, statement in enumerate(statements):
+        operation = operations[index] if index < len(operations) else None
+        if operation is None or operation.mode != "barrier" or is_select_statement(statement):
+            continue
+        found.append(
+            NonSelectBarrier(
+                index=index, total=len(statements), statement=statement, summary=operation.summary
+            )
+        )
+    return found
+
+
+def is_select_statement(statement: str) -> bool:
+    """A SELECT, possibly in parentheses, or a ``WITH ... SELECT``.
+
+    ClickHouse also reads ``WITH ... INSERT INTO``, so a WITH statement with an
+    INSERT outside parentheses is not one; a column or alias named ``insert``
+    there has to be quoted.
+    """
+    tokens = [token for token in tokenize_sql(statement) if not is_trivia(token)]
+    start = 0
+    while start < len(tokens) and _is_punctuation(tokens[start], "("):
+        start += 1
+    first = _keyword(tokens[start]) if start < len(tokens) else None
+    if first == "SELECT":
+        return True
+    if first != "WITH":
+        return False
+    depth = 0
+    for token in tokens[start:]:
+        if _is_punctuation(token, "("):
+            depth += 1
+        elif _is_punctuation(token, ")"):
+            depth -= 1
+        elif depth == 0 and _keyword(token) == "INSERT":
+            return False
+    return True
+
+
+def _is_punctuation(token: SQLToken, text: str) -> bool:
+    return token.kind == "punctuation" and token.text == text
+
+
+def _keyword(token: SQLToken) -> str | None:
+    return token.text.upper() if token.kind == "identifier" else None
 
 
 def _describe_destructive_operation(

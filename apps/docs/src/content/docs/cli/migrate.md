@@ -241,7 +241,7 @@ The annotation is opt-in and forward-compatible: statements without `mode=async`
 
 ### Insert barriers (`mode=barrier`)
 
-A statement marked `mode=barrier` is a `SELECT` over `system.processes` that returns a `query_id` column. chkit runs it once, then again every second until none of the query ids of the first run is listed: it waits for the `INSERT`s that were running when the step started, not for the ones that start later. On a [multi-replica target](#multi-replica-targets) it reads every replica through `clusterAllReplicas`. After 10 minutes it stops with an error that lists the query ids still running; `chkit migrate --apply` then runs the barrier again from a fresh read. A barrier changes no object, so `migrate` does not wait for DDL propagation after it. chkit does not check that the statement is a `SELECT`, though: an `exchange_tables` statement marked `mode=barrier` that runs an `EXCHANGE TABLES` still gets the [replica wait](#multi-replica-targets) that follows every `EXCHANGE TABLES`. A [cutover](/guides/data-preserving-migrations/) uses two barriers: an `INSERT` builds its pipeline, including the materialized views it writes to, when it starts.
+A statement marked `mode=barrier` is a `SELECT` over `system.processes` that returns a `query_id` column. chkit runs it once, then again every second until none of the query ids of the first run is listed: it waits for the `INSERT`s that were running when the step started, not for the ones that start later. On a [multi-replica target](#multi-replica-targets) it reads every replica through `clusterAllReplicas`. After 10 minutes it stops with an error that lists the query ids still running; `chkit migrate --apply` then runs the barrier again from a fresh read. A barrier changes no object, so `migrate` does not wait for DDL propagation after it. `migrate --apply` therefore refuses, before it runs any pending migration, a statement marked `mode=barrier` that is not a `SELECT` or a `WITH ... SELECT` (ClickHouse also reads `WITH ... INSERT INTO`, which is not one), and exits with code 1 (`barrier_not_select` in `--json` mode). The error names the file, the statement and its marker. A [cutover](/guides/data-preserving-migrations/) uses two barriers: an `INSERT` builds its pipeline, including the materialized views it writes to, when it starts.
 
 Before every `exchange_tables` statement, and at a cutover's first step, `migrate` reads `system.query_log` on every replica and stops when asynchronous inserts with `wait_for_async_insert = 0` reached one of the tables in the last 10 minutes: ClickHouse drops the buffered rows of such an insert when its table is swapped, and the writer is never told. A user who cannot read `system.query_log` gets a warning instead.
 
@@ -294,7 +294,7 @@ chkit migrate --abandon 20260929001110_funnel-model.sql --apply
 | Code | Meaning |
 |------|---------|
 | 0 | Success (or no pending migrations) |
-| 1 | Error: checksum mismatch on applied migrations, a pending migration without executable statements, a failed statement, or a rejected `--retry` / `--abandon` request |
+| 1 | Error: checksum mismatch on applied migrations, a pending migration without executable statements or with a `mode=barrier` statement that is not a `SELECT`, a failed statement, or a rejected `--retry` / `--abandon` request |
 | 3 | Destructive operations blocked |
 
 ## JSON output
@@ -446,6 +446,7 @@ A failure that stops the command prints the standard error envelope:
 |------|------|
 | `in_progress_checksum_mismatch` | The file of an in-progress migration changed after some of its statements ran, and `--retry` was not given for it |
 | `statement_split_changed` | Another chkit release applied part of the migration, and the statements it recorded are not the same in the current split (a `;`, quote or `/*` inside a `//` or `#` comment, [#562](https://github.com/obsessiondb/chkit/issues/562)) |
+| `barrier_not_select` | A pending migration marks a statement `mode=barrier` that is not a `SELECT` ([insert barriers](#insert-barriers-modebarrier)); nothing was applied |
 | `retry_mismatch` | `--retry`: a statement that completed, or an async statement that may still be running, no longer matches the edited file, or the edit left fewer statements with a marker that a completed statement shares |
 | `migration_not_found` | `--retry` names a file that is not in the migrations directory |
 | `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |

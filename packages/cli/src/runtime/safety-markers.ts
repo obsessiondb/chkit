@@ -1,4 +1,4 @@
-import { extractExecutableStatements } from '@chkit/core'
+import { extractExecutableStatements, isTrivia, tokenizeSQL, type SQLToken } from '@chkit/core'
 
 export { extractExecutableStatements }
 
@@ -100,6 +100,63 @@ export function extractMigrationOperationSummaries(sql: string): MigrationOperat
     if (parsed !== null) summaries.push(parsed)
   }
   return summaries
+}
+
+export interface NonSelectBarrier {
+  /** 0-based position among the executable statements. */
+  index: number
+  total: number
+  statement: string
+  /** The `-- operation:` marker text after the prefix. */
+  summary: string
+}
+
+/**
+ * The statements marked `mode=barrier` that are not a SELECT (#634). The
+ * barrier read runs its statement as a query, once and then every second,
+ * and nothing waits for a change it makes to reach the other replicas, so
+ * migrate refuses any other statement there.
+ */
+export function findNonSelectBarriers(sql: string): NonSelectBarrier[] {
+  const statements = extractExecutableStatements(sql)
+  const operations = extractMigrationOperationSummaries(sql)
+  const found: NonSelectBarrier[] = []
+  for (const [index, statement] of statements.entries()) {
+    const operation = operations[index]
+    if (operation?.mode !== 'barrier' || isSelectStatement(statement)) continue
+    found.push({ index, total: statements.length, statement, summary: operation.summary })
+  }
+  return found
+}
+
+/**
+ * A SELECT, possibly in parentheses, or a `WITH ... SELECT`. ClickHouse also
+ * reads `WITH ... INSERT INTO`, so a WITH statement with an INSERT outside
+ * parentheses is not one; a column or alias named `insert` there has to be
+ * quoted.
+ */
+export function isSelectStatement(statement: string): boolean {
+  const tokens = tokenizeSQL(statement).filter((token) => !isTrivia(token))
+  let start = 0
+  while (isPunctuation(tokens[start], '(')) start++
+  const first = keyword(tokens[start])
+  if (first === 'SELECT') return true
+  if (first !== 'WITH') return false
+  let depth = 0
+  for (const token of tokens.slice(start)) {
+    if (isPunctuation(token, '(')) depth++
+    else if (isPunctuation(token, ')')) depth--
+    else if (depth === 0 && keyword(token) === 'INSERT') return false
+  }
+  return true
+}
+
+function isPunctuation(token: SQLToken | undefined, text: string): boolean {
+  return token?.kind === 'punctuation' && token.text === text
+}
+
+function keyword(token: SQLToken | undefined): string | undefined {
+  return token?.kind === 'identifier' ? token.text.toUpperCase() : undefined
 }
 
 function describeDestructiveOperation(
