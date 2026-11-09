@@ -275,7 +275,9 @@ class _ChkitGroup(TyperGroup):
     # typer.Context subclass would narrow the parameter (mypy [override]).
     def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
-        json_mode = "--json" in ctx.args
+        # As TS optionArgs(): after `--`, `--json` is an argument (#568).
+        args = list(ctx.args)
+        json_mode = "--json" in (args[: args.index("--")] if "--" in args else args)
         try:
             return super().invoke(ctx)
         except (typer.Exit, typer.Abort, BrokenPipeError):

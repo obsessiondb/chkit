@@ -3,4 +3,5 @@ Available: ...` or `Unknown <plugin> command "<command>". Available: ...` on std
 code 1 (it was 2, with click's usage banner), and the TS `--json` output. `chkit codegen`
 without the codegen plugin reports `Codegen plugin is not configured` (`--json` code
 `plugin_not_configured`), and an unknown `chkit obsessiondb` command uses code
-`unknown_subcommand`.
+`unknown_subcommand`. A failing command no longer prints a `--json` error envelope when
+`--json` comes only after `--`, as in TS.

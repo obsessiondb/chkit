@@ -73,6 +73,10 @@ def test_an_unknown_plugin_under_json_prints_the_error_envelope(args: list[str])
     }
 
 
+def test_a_json_flag_after_dash_dash_is_an_argument_not_json_mode() -> None:
+    assert _run("plugin", "x", "--", "--json") == (1, "", UNKNOWN_PLUGIN + "\n")
+
+
 def test_an_unknown_command_lists_the_plugin_commands_in_their_order() -> None:
     assert _run("plugin", "echoer", "nope") == (
         1,
