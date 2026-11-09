@@ -17,6 +17,7 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from chkit.core.identifier import unquote_identifiers
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import TableConstraintDefinition
 from chkit.core.projection import normalize_projection_index
@@ -100,14 +101,14 @@ _UNIQUE_KEY_STOP = re.compile(
 
 _PROJECTION_RE = re.compile(
     js_regex(
-        r"^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s*\((.*)\)\s*$"
+        r"^\s*PROJECTION\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)\s*\((.*)\)\s*$"
     ),
     re.IGNORECASE | re.DOTALL,
 )
 
 _CONSTRAINT_RE = re.compile(
     js_regex(
-        r"^\s*CONSTRAINT\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))\s+(CHECK|ASSUME)\s+(.+?)\s*$"
+        r"^\s*CONSTRAINT\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)\s+(CHECK|ASSUME)\s+(.+?)\s*$"
     ),
     re.IGNORECASE | re.DOTALL,
 )
@@ -116,7 +117,7 @@ _CONSTRAINT_RE = re.compile(
 # the parenthesized SELECT form.
 _INDEX_PROJECTION_RE = re.compile(
     js_regex(
-        r"^\s*PROJECTION\s+(?:`([^`]+)`|([A-Za-z_][A-Za-z0-9_]*))"
+        r"^\s*PROJECTION\s+(`(?:[^`\\]|\\.|``)+`|[A-Za-z_][A-Za-z0-9_]*)"
         r"\s+INDEX\s+(.+?)\s+TYPE\s+([A-Za-z_][A-Za-z0-9_]*)\s*$"
     ),
     re.IGNORECASE | re.DOTALL,
@@ -270,9 +271,9 @@ def parse_projections_from_create_table_query(
     for part in split_top_level_comma(body):
         index_match = _INDEX_PROJECTION_RE.match(part)
         if index_match is not None:
-            name = js_trim(index_match.group(1) or index_match.group(2) or "")
-            index = normalize_projection_index(index_match.group(3) or "")
-            type_text = js_trim(index_match.group(4) or "")
+            name = js_trim(unquote_identifiers(index_match.group(1) or ""))
+            index = normalize_projection_index(index_match.group(2) or "")
+            type_text = js_trim(index_match.group(3) or "")
             if not name or not index or not type_text:
                 continue
             projections.append(
@@ -283,8 +284,8 @@ def parse_projections_from_create_table_query(
         match = _PROJECTION_RE.match(part)
         if match is None:
             continue
-        name = js_trim(match.group(1) or match.group(2) or "")
-        query_text = normalize_sql_fragment(js_trim(match.group(3) or ""))
+        name = js_trim(unquote_identifiers(match.group(1) or ""))
+        query_text = normalize_sql_fragment(js_trim(match.group(2) or ""))
         if not name or not query_text:
             continue
         projections.append(ProjectionDefinitionShape(name=name, query=query_text))
@@ -303,11 +304,11 @@ def parse_constraints_from_create_table_query(
         match = _CONSTRAINT_RE.match(part)
         if match is None:
             continue
-        name = js_trim(match.group(1) or match.group(2) or "")
-        expression = normalize_sql_fragment(match.group(4) or "")
+        name = js_trim(unquote_identifiers(match.group(1) or ""))
+        expression = normalize_sql_fragment(match.group(3) or "")
         if not name or not expression:
             continue
-        if (match.group(3) or "").upper() == "CHECK":
+        if (match.group(2) or "").upper() == "CHECK":
             constraints.append(TableConstraintDefinition(name=name, check=expression))
         else:
             constraints.append(TableConstraintDefinition(name=name, assume=expression))

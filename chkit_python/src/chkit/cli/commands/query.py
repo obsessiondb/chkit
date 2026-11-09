@@ -43,6 +43,11 @@ _INJECTED_FORMAT_RE = re.compile(
 _EXPECTED_ONE_OF_RE = re.compile(r"Expected one of: ([^.]*)\.")
 
 
+class QueryArgumentError(ValueError):
+    """Missing or extra SQL. As in TS, a plain error of the command: its
+    message on stderr, exit 1 and the ``error`` envelope under ``--json``."""
+
+
 def clean_query_error(error: BaseException) -> BaseException:
     """Strip injected FORMAT JSON + truncate "Expected one of" lists."""
     if not isinstance(error, Exception):
@@ -198,12 +203,12 @@ def run(
             'query requires a SQL string as the first positional argument '
             '(e.g. `chkit query "SELECT 1"`)'
         )
-        raise typer.BadParameter(msg)
+        raise QueryArgumentError(msg)
     if len(sql) > 1:
         msg = (
             "query accepts a single SQL string. Wrap it in quotes if it contains spaces."
         )
-        raise typer.BadParameter(msg)
+        raise QueryArgumentError(msg)
 
     config = load_config(config_path, ChxConfigEnv(command="query"))
     executor = resolve_plugin_executor(

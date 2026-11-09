@@ -14,7 +14,14 @@ import re
 from dataclasses import dataclass
 
 from chkit.clickhouse.introspect import parse_materialized_view_target
-from chkit.core.sql_lexer import JS_WHITESPACE_RUN, is_trivia, js_regex, js_trim, tokenize_sql
+from chkit.core.sql_lexer import (
+    JS_WHITESPACE_RUN,
+    identifier_name,
+    is_trivia,
+    js_regex,
+    js_trim,
+    tokenize_sql,
+)
 
 __all__ = [
     "MaterializedViewRefreshShape",
@@ -68,12 +75,6 @@ _OFFSET_RE = re.compile(js_regex(rf"\bOFFSET\s+({_INTERVAL_TOKEN})"), re.IGNOREC
 _RANDOMIZE_RE = re.compile(
     js_regex(rf"\bRANDOMIZE\s+FOR\s+({_INTERVAL_TOKEN})"), re.IGNORECASE
 )
-_DEPENDS_RE = re.compile(
-    js_regex(
-        r"\bDEPENDS\s+ON\s+(.*?)(?=\bSETTINGS\b|\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)"
-    ),
-    re.IGNORECASE | re.DOTALL,
-)
 _SETTINGS_RE = re.compile(
     js_regex(r"\bSETTINGS\s+(.*?)(?=\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)"),
     re.IGNORECASE | re.DOTALL,
@@ -86,7 +87,6 @@ _UNIT_RE = re.compile(
 )
 
 
-_QUALIFIED_TWO_PARTS = 2
 _MIN_QUOTED_LEN = 2
 
 
@@ -133,18 +133,58 @@ def parse_to_clause(query: str | None, fallback_database: str) -> ToClauseShape 
     return None if target is None else ToClauseShape(database=target[0], name=target[1])
 
 
-def _parse_depends_on(segment: str) -> list[DependsOnEntry]:
-    out: list[DependsOnEntry] = []
-    for entry in segment.split(","):
-        trimmed = js_trim(entry)
-        if not trimmed:
+def _parse_depends_on(query: str) -> list[DependsOnEntry]:
+    """The ``DEPENDS ON [db.]name, ...`` list.
+
+    Read with the SQL lexer so a quoted name is unescaped and the commas, dots
+    and keywords inside it stay part of the name. Only the part before the
+    first top-level ``AS`` is searched.
+    """
+    tokens = [token for token in tokenize_sql(query) if not is_trivia(token)]
+
+    def is_word(i: int, word: str) -> bool:
+        return (
+            i < len(tokens)
+            and tokens[i].kind == "identifier"
+            and tokens[i].text.upper() == word
+        )
+
+    def name_at(i: int) -> str | None:
+        name = identifier_name(tokens[i]) if i < len(tokens) else None
+        return None if name is None else js_trim(name)
+
+    def text_at(i: int) -> str | None:
+        return tokens[i].text if i < len(tokens) else None
+
+    depth = 0
+    for i, token in enumerate(tokens):
+        if token.text == "(":
+            depth += 1
+        elif token.text == ")":
+            depth -= 1
+        if depth != 0:
             continue
-        parts = [js_trim(p).lstrip("`\"").rstrip("`\"") for p in trimmed.split(".")]
-        if len(parts) == 1 and parts[0]:
-            out.append(DependsOnEntry(database="default", name=parts[0]))
-        elif len(parts) == _QUALIFIED_TWO_PARTS and parts[0] and parts[1]:
-            out.append(DependsOnEntry(database=parts[0], name=parts[1]))
-    return out
+        if is_word(i, "AS"):
+            break
+        if not is_word(i, "DEPENDS") or not is_word(i + 1, "ON"):
+            continue
+        out: list[DependsOnEntry] = []
+        j = i + 2
+        while True:
+            first = name_at(j)
+            if text_at(j + 1) == ".":
+                name = name_at(j + 2)
+                if first and name:
+                    out.append(DependsOnEntry(database=first, name=name))
+                j += 3
+            else:
+                if first:
+                    out.append(DependsOnEntry(database="default", name=first))
+                j += 1
+            if text_at(j) != ",":
+                return out
+            j += 1
+    return []
 
 
 def _parse_refresh_settings(segment: str) -> dict[str, str | int | float]:
@@ -194,12 +234,7 @@ def parse_refresh_clause(query: str | None) -> MaterializedViewRefreshShape | No
         _normalize_interval(randomize_match.group(1)) if randomize_match else None
     )
 
-    depends_on: list[DependsOnEntry] | None = None
-    depends_match = _DEPENDS_RE.search(cleaned)
-    if depends_match is not None:
-        parsed = _parse_depends_on(depends_match.group(1))
-        if parsed:
-            depends_on = parsed
+    depends_on = _parse_depends_on(cleaned) or None
 
     settings: dict[str, str | int | float] | None = None
     settings_match = _SETTINGS_RE.search(cleaned)

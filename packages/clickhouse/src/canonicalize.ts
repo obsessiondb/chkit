@@ -44,6 +44,8 @@ function batchFragments(fragments: readonly string[]): string[][] {
  * batched into a single query using `formatQuerySingleLineOrNull`, which yields
  * NULL for a fragment it can't parse rather than failing the whole batch — those
  * are simply left out of the map so the caller falls back to string comparison.
+ * So is a result that is not valid UTF-8 (a literal such as '\xff'): the client
+ * would decode its bytes to U+FFFD, and two different literals would match.
  *
  * Returns a map from the input fragment to its ClickHouse-canonical form. A
  * fragment missing from the map (unparseable, or an empty input) has no entry.
@@ -64,7 +66,7 @@ export async function canonicalizeSqlFragments(
   for (const batch of batchFragments(unique)) {
     const arrayLiteral = batch.map(quoteLiteral).join(', ')
     const rows = await executor.query<{ formatted: Array<string | null> }>(
-      `SELECT arrayMap(fragment -> ${formatCall}, [${arrayLiteral}]) AS formatted`
+      `SELECT arrayMap(f -> if(isValidUTF8(f), f, NULL), arrayMap(fragment -> ${formatCall}, [${arrayLiteral}])) AS formatted`
     )
     const formatted = rows[0]?.formatted ?? []
     for (let i = 0; i < batch.length; i += 1) {

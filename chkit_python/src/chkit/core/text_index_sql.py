@@ -181,6 +181,9 @@ def format_text_sql(tokens: list[str]) -> str:
             or token in (")", "]", "}", ",", ".")
             or previous in ("(", "[", "{", ".")
             or (token == "(" and _is_call(tokens, i))
+            # `[` after an operand subscripts it, as ClickHouse writes `lower(s)[1]`;
+            # after an operator or keyword it opens an array: `x IN [1]`, `NOT [1]`.
+            or (token == "[" and _ends_operand(previous) and previous.lower() != "not")
         )
         parts.append(("" if tight else " ") + token)
     return "".join(parts)

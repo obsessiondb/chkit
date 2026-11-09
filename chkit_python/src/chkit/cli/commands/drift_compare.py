@@ -32,6 +32,7 @@ from chkit.core.model import (
     ProjectionDefinition,
     SkipIndexDefinition,
     SkipIndexRaw,
+    SkipIndexText,
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
     TableDefinition,
@@ -56,7 +57,11 @@ from chkit.core.sql_normalizer import (
     sql_expression_fingerprint,
 )
 from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY, with_default_index_granularity
-from chkit.core.text_index import render_text_index_type, text_index_fingerprint
+from chkit.core.text_index import (
+    canonicalize_text_index,
+    render_text_index_type,
+    text_index_fingerprint,
+)
 from chkit.core.vector_index import render_vector_index_type
 
 ObjectDriftReasonCode: TypeAlias = Literal[
@@ -405,11 +410,30 @@ def _index_expression_base(index: SkipIndexDefinition) -> str:
         expression = js_trim(expression[tokens[0].end : tokens[-1].start])
 
 
+def _text_index_expression_base(index: SkipIndexText) -> str:
+    """The text index expression as the canonicalizer looks it up.
+
+    ClickHouse re-formats a text index expression when it stores it, e.g.
+    ``NOT a AND b`` comes back as ``(NOT a) AND b``, so the expression goes
+    through the canonicalizer like any other index expression. It is read with
+    the text index lexer rather than ``normalize_sql_fragment``, which would
+    collapse the spaces inside its string literals.
+    """
+    return canonicalize_text_index(index).expression
+
+
 def _normalize_index_shape(
     index: SkipIndexDefinition, canonicalizer: SqlCanonicalizer | None = None
 ) -> str:
-    if index.type == "text":
-        return text_index_fingerprint(index)
+    if isinstance(index, SkipIndexText):
+        canonical = (
+            None
+            if canonicalizer is None
+            else canonicalizer.expression(_text_index_expression_base(index))
+        )
+        return text_index_fingerprint(
+            index if canonical is None else index.model_copy(update={"expression": canonical})
+        )
     expression = _canonicalize_expression(_index_expression_base(index), canonicalizer)
     return "|".join(
         [
@@ -533,9 +557,10 @@ def collect_table_sql_fragments(
     formats them in one round-trip, and hands back a map-backed canonicalizer.
     """
     expressions = [
-        _index_expression_base(index)
+        _text_index_expression_base(index)
+        if isinstance(index, SkipIndexText)
+        else _index_expression_base(index)
         for index in [*(expected.indexes or []), *actual.indexes]
-        if index.type != "text"
     ]
     expressions.extend(
         _render_index_type_fingerprint(index)

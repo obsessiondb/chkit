@@ -67,6 +67,7 @@ from chkit.cli.commands.generate_rename_mappings import (
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import (
@@ -280,61 +281,45 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
+    table_selector: Annotated[
+        str | None,
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
+    ] = None,
     migration_name: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Migration name (sanitized)."),
+        typer.Option("--name", "-n", metavar="<name>", help="Migration name"),
     ] = None,
     migration_id: Annotated[
         str | None,
         typer.Option(
             "--migration-id",
-            help="Override the default timestamp prefix in the migration filename.",
-        ),
-    ] = None,
-    table_selector: Annotated[
-        str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help=(
-                "Restrict migration to a single table or trailing-wildcard prefix. "
-                "Examples: events, events_*, analytics.events."
-            ),
+            metavar="<id>",
+            help="Override the default timestamp migration prefix",
         ),
     ] = None,
     rename_table: Annotated[
         list[str] | None,
         typer.Option(
-            "--rename-table",
-            help=(
-                "Explicit table rename mapping old_db.old_table=new_db.new_table. "
-                "Repeatable."
-            ),
+            "--rename-table", metavar="<mapping>", help="Explicit table rename mapping"
         ),
     ] = None,
     rename_column: Annotated[
         list[str] | None,
         typer.Option(
-            "--rename-column",
-            help=(
-                "Explicit column rename mapping db.table.old_column=new_column. "
-                "Repeatable."
-            ),
+            "--rename-column", metavar="<mapping>", help="Explicit column rename mapping"
         ),
     ] = None,
     rename_dictionary: Annotated[
         list[str] | None,
         typer.Option(
             "--rename-dictionary",
-            help=(
-                "Explicit dictionary rename mapping old_db.old_dict=new_db.new_dict. "
-                "Repeatable."
-            ),
+            metavar="<mapping>",
+            help="Explicit dictionary rename mapping",
         ),
     ] = None,
     dryrun: Annotated[
         bool,
-        typer.Option("--dryrun", help="Print plan without writing artifacts."),
+        typer.Option("--dryrun", help="Print plan without writing artifacts"),
     ] = False,
     output_json: Annotated[
         bool,
@@ -344,33 +329,33 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         bool,
         typer.Option(
             "--empty",
-            help="Scaffold a blank manual migration (no schema diff, snapshot untouched).",
+            help="Scaffold a blank manual migration (no schema diff, snapshot untouched)",
         ),
     ] = False,
     cutover: Annotated[
         list[str] | None,
         typer.Option(
             "--cutover",
-            help=(
-                "Cut a structural table change over without downtime, keyed by a unique "
-                "key: database.table=key[,key]. Repeatable."
-            ),
+            metavar="<database.table=key>",
+            help="Cut a structural table change over without downtime, keyed by a unique key",
         ),
     ] = None,
     cutover_copy: Annotated[
         str | None,
         typer.Option(
             "--cutover-copy",
-            help="Where the cutover copies existing rows: migration (default) or backfill.",
+            metavar="<mode>",
+            help="Where the cutover copies existing rows: migration (default) or backfill",
         ),
     ] = None,
     cutover_old: Annotated[
         str | None,
         typer.Option(
             "--cutover-old",
+            metavar="<mode>",
             help=(
                 "What happens to the pre-cutover table: keep (default, as <table>_previous) "
-                "or drop."
+                "or drop"
             ),
         ),
     ] = None,
@@ -378,7 +363,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         list[str] | None,
         typer.Option(
             "--drop-retained",
-            help="Drop a table a cutover retained (database.table). Repeatable.",
+            metavar="<database.table>",
+            help="Drop a table a cutover retained",
         ),
     ] = None,
     force_shared_engines: ForceSharedEnginesOption = False,
