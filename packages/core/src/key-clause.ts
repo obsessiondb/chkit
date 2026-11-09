@@ -1,42 +1,28 @@
 import { isTrivia, type SQLToken, sqlTokens } from './sql-lexer.js'
 import { stringLiteral } from './text-index-sql.js'
-import { findQuoteEnd, isQuoteChar } from './sql-scan.js'
 
+/**
+ * Split on commas outside parentheses. The input is read with the SQL lexer, so
+ * a comma or paren in a string, quoted name, heredoc (`$$a, b$$`) or comment is
+ * text (#596). Comments stay in the part they belong to.
+ */
 export function splitTopLevelComma(input: string): string[] {
   const out: string[] = []
   let current = ''
   let depth = 0
 
-  for (let i = 0; i < input.length; i += 1) {
-    const char = input[i] ?? ''
-
-    if (isQuoteChar(char)) {
-      const end = findQuoteEnd(input, i, char)
-      current += input.slice(i, end + 1)
-      i = end
-      continue
+  for (const token of sqlTokens(input)) {
+    if (token.kind === 'punctuation') {
+      if (token.text === '(') depth += 1
+      else if (token.text === ')') depth = Math.max(0, depth - 1)
+      else if (token.text === ',' && depth === 0) {
+        const part = current.trim()
+        if (part.length > 0) out.push(part)
+        current = ''
+        continue
+      }
     }
-
-    if (char === '(') {
-      depth += 1
-      current += char
-      continue
-    }
-
-    if (char === ')') {
-      depth = Math.max(0, depth - 1)
-      current += char
-      continue
-    }
-
-    if (char === ',' && depth === 0) {
-      const token = current.trim()
-      if (token.length > 0) out.push(token)
-      current = ''
-      continue
-    }
-
-    current += char
+    current += token.text
   }
 
   const tail = current.trim()

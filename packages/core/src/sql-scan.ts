@@ -2,12 +2,12 @@
 // string, a double-quoted identifier, or a backtick-quoted identifier are
 // literal text, not structure — parens and commas there must be ignored.
 //
-// Every scanner skips quoted regions through `findQuoteEnd`, so the escaping
-// rule lives in exactly one place and the copies cannot drift apart again
-// (#197). `findMatchingParen` reads with the SQL lexer instead, which also
-// knows heredocs and comments (#587).
+// A scanner that skips only quoted regions does so through `findQuoteEnd`, so
+// the escaping rule lives in exactly one place (#197). `findMatchingParen`,
+// `findTopLevelSQLPattern` and `splitTopLevelComma` read with the SQL lexer
+// instead, which also knows heredocs and comments (#587, #596).
 
-import { sqlTokens } from './sql-lexer.js'
+import { type SQLToken, sqlTokens } from './sql-lexer.js'
 
 type QuoteChar = "'" | '"' | '`'
 
@@ -56,33 +56,42 @@ export function findMatchingParen(input: string, openIndex: number): number | un
   return undefined
 }
 
-/** Find a clause/delimiter outside quoted strings, identifiers and parentheses. */
+/**
+ * Find a clause/delimiter outside parentheses, strings, quoted identifiers,
+ * heredocs and comments. The input is read with the SQL lexer (#596); the
+ * pattern is tried at every position of the other tokens that does not start
+ * inside a word, and may run on past the token it starts in.
+ */
 export function findTopLevelSQLPattern(
   sql: string,
   pattern: RegExp,
 ): { index: number; length: number } | undefined {
   let depth = 0
-  for (let i = 0; i < sql.length; i += 1) {
-    const char = sql[i]
-    if (isQuoteChar(char)) {
-      i = findQuoteEnd(sql, i, char)
-      continue
-    }
-    if (char === '(') {
+  for (const token of sqlTokens(sql)) {
+    if (token.kind === 'punctuation' && token.text === '(') {
       depth += 1
       continue
     }
-    if (char === ')') {
+    if (token.kind === 'punctuation' && token.text === ')') {
       depth -= 1
       continue
     }
-    if (
-      depth !== 0 ||
-      (/[A-Za-z_]/.test(char ?? '') && i > 0 && /[A-Za-z0-9_]/.test(sql[i - 1] ?? ''))
-    )
-      continue
-    const match = sql.slice(i).match(pattern)
-    if (match?.index === 0) return { index: i, length: match[0].length }
+    if (depth !== 0 || isTextToken(token)) continue
+    for (let i = token.start; i < token.end; i += 1) {
+      if (/[A-Za-z_]/.test(sql[i] ?? '') && i > 0 && /[A-Za-z0-9_]/.test(sql[i - 1] ?? '')) continue
+      const match = sql.slice(i).match(pattern)
+      if (match?.index === 0) return { index: i, length: match[0].length }
+    }
   }
   return undefined
+}
+
+// A string, heredoc, quoted name or comment: its characters are never structure.
+function isTextToken(token: SQLToken): boolean {
+  return (
+    token.kind === 'string' ||
+    token.kind === 'quoted_identifier' ||
+    token.kind === 'line_comment' ||
+    token.kind === 'block_comment'
+  )
 }

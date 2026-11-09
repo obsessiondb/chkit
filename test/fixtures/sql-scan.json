@@ -1,0 +1,30 @@
+{
+  "splitTopLevelComma": [
+    { "name": "a comma inside a heredoc is text", "input": "$$a, b$$, c", "expected": ["$$a, b$$", "c"] },
+    { "name": "a tagged heredoc hides a comma and a paren", "input": "$t$x,(y$t$, z", "expected": ["$t$x,(y$t$", "z"] },
+    { "name": "a quote inside a heredoc opens no string", "input": "$$it's$$, b, 'c'", "expected": ["$$it's$$", "b", "'c'"] },
+    { "name": "a line comment hides a comma", "input": "a -- x, y\n, c", "expected": ["a -- x, y", "c"] },
+    { "name": "a // comment hides a comma", "input": "a // x, y\n, c", "expected": ["a // x, y", "c"] },
+    { "name": "a # comment hides a comma", "input": "a # x, y\n, c", "expected": ["a # x, y", "c"] },
+    { "name": "a block comment hides a comma and a paren", "input": "a /* x, ( */, b", "expected": ["a /* x, ( */", "b"] },
+    { "name": "heredoc markers inside a string are text", "input": "'$$', b, '$$'", "expected": ["'$$'", "b", "'$$'"] },
+    { "name": "a $$ that no $$ closes opens no heredoc", "input": "$$a, b", "expected": ["$$a", "b"] },
+    { "name": "a #x is not a comment", "input": "a #x, b", "expected": ["a #x", "b"] }
+  ],
+  "findTopLevelSQLPattern": [
+    { "name": "skips a keyword inside a heredoc", "sql": "x ORDER BY $$ SETTINGS $$ SETTINGS a=1", "pattern": "\\bSETTINGS\\b", "expected": { "index": 26, "length": 8 } },
+    { "name": "skips a keyword inside a block comment", "sql": "MergeTree ORDER BY id /* SETTINGS */ SETTINGS x=1", "pattern": "\\bSETTINGS\\b", "expected": { "index": 37, "length": 8 } },
+    { "name": "skips a keyword inside a line comment", "sql": "ORDER BY id -- SETTINGS a=1\nSETTINGS b=2", "pattern": "\\bSETTINGS\\b", "expected": { "index": 28, "length": 8 } },
+    { "name": "skips a delimiter inside a # comment", "sql": "a=1 # x; y\nCOMMENT 'c'", "pattern": "\\bCOMMENT\\b|;", "expected": { "index": 11, "length": 7 } },
+    { "name": "a quote inside a heredoc opens no string", "sql": "x COMMENT $$it's$$ SETTINGS a=1", "pattern": "\\bSETTINGS\\b", "expected": { "index": 19, "length": 8 } },
+    { "name": "a paren inside a heredoc is text", "sql": "ORDER BY $$($$ SETTINGS a=1", "pattern": "\\bSETTINGS\\b", "expected": { "index": 15, "length": 8 } },
+    { "name": "a keyword inside a string is still skipped", "sql": "COMMENT 'SETTINGS' SETTINGS a=1", "pattern": "\\bSETTINGS\\b", "expected": { "index": 19, "length": 8 } },
+    { "name": "no match outside heredocs and comments", "sql": "ORDER BY $$SETTINGS$$ /* SETTINGS */", "pattern": "\\bSETTINGS\\b", "expected": null }
+  ],
+  "normalizeProjectionIndex": [
+    { "name": "a heredoc with a comma and a comment marker stays one element", "input": "($$a, -- b$$ || s)", "expected": "$$a, -- b$$ || s" },
+    { "name": "a comma inside a heredoc gets no space", "input": "($$a,b$$, s)", "expected": "($$a,b$$, s)" },
+    { "name": "a lone heredoc element keeps its literal", "input": "concat($$a,b$$,s)", "expected": "concat($$a,b$$, s)" },
+    { "name": "commas outside heredocs still get a space", "input": "(a,b)", "expected": "(a, b)" }
+  ]
+}
