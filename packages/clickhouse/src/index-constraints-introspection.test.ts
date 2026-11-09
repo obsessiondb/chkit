@@ -2,7 +2,13 @@ import { describe, expect, test } from 'bun:test'
 
 import { normalizeTextIndexSQL } from '@chkit/core'
 
-import { normalizeIndexFromSystemRow, parseConstraintsFromCreateTableQuery } from './index.js'
+import {
+  normalizeIndexFromSystemRow,
+  parseConstraintsFromCreateTableQuery,
+  parseDictionaryAttributesFromCreateDictionaryQuery,
+  parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseProjectionsFromCreateTableQuery,
+} from './index.js'
 
 function indexRow(type: string, granularity = 1) {
   return { database: 'app', table: 'vectors', name: 'idx', expr: 'embedding', type, granularity }
@@ -97,5 +103,22 @@ describe('constraint introspection', () => {
   test('a table without constraints has none', () => {
     expect(parseConstraintsFromCreateTableQuery('CREATE TABLE app.t (`id` UInt64) ENGINE = MergeTree ORDER BY id')).toEqual([])
     expect(parseConstraintsFromCreateTableQuery(undefined)).toEqual([])
+  })
+})
+
+describe('parsed names trim JavaScript whitespace', () => {
+  // chkit-py's test_name_trim.py asserts the same (#580).
+  test('projection and constraint names', () => {
+    const query =
+      'CREATE TABLE app.t (`id` UInt64, PROJECTION `\x85p\ufeff` (SELECT id ORDER BY id), PROJECTION `\x85ip\ufeff` INDEX id TYPE basic, CONSTRAINT `\x85c\ufeff` CHECK id > 0) ENGINE = MergeTree ORDER BY id'
+    expect(parseProjectionsFromCreateTableQuery(query).map((p) => p.name)).toEqual(['\x85p', '\x85ip'])
+    expect(parseConstraintsFromCreateTableQuery(query).map((c) => c.name)).toEqual(['\x85c'])
+  })
+
+  test('dictionary attribute and primary key names', () => {
+    const query =
+      'CREATE DICTIONARY app.d (`\x85k\ufeff` UInt64, `k2` UInt64) PRIMARY KEY k1\x85, \ufeffk2 SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)'
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(query).map((a) => a.name)).toEqual(['\x85k', 'k2'])
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query)).toEqual(['k1\x85', 'k2'])
   })
 })

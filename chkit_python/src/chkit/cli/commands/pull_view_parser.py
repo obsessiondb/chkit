@@ -132,10 +132,10 @@ def parse_to_clause(query: str | None, fallback_database: str) -> ToClauseShape 
 def _parse_depends_on(segment: str) -> list[DependsOnEntry]:
     out: list[DependsOnEntry] = []
     for entry in segment.split(","):
-        trimmed = entry.strip()
+        trimmed = js_trim(entry)
         if not trimmed:
             continue
-        parts = [p.strip().lstrip("`\"").rstrip("`\"") for p in trimmed.split(".")]
+        parts = [js_trim(p).lstrip("`\"").rstrip("`\"") for p in trimmed.split(".")]
         if len(parts) == 1 and parts[0]:
             out.append(DependsOnEntry(database="default", name=parts[0]))
         elif len(parts) == _QUALIFIED_TWO_PARTS and parts[0] and parts[1]:
