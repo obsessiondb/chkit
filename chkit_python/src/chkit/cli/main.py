@@ -149,6 +149,9 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         1 for param in params if param.param_type_name == "argument" and param.nargs == 1
     )
 
+    end = args.index("--") if "--" in args else len(args)
+    help_requested = any(token in _HELP_OPTION_NAMES for token in args[:end])
+
     own: list[str] = []
     forwarded: list[str] = []
     i = 0
@@ -165,8 +168,9 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
             if takes_value[token]:
                 # As TS `extractConfigPath`: last, or followed by a `--` token,
                 # the flag has no value. click would take that token (or the
-                # `--` below) as the value.
-                if i >= len(args) or args[i].startswith("--"):
+                # `--` below) as the value. A -h / --help before `--` still
+                # shows the help, as TS handles help first.
+                if i >= len(args) or (args[i].startswith("--") and not help_requested):
                     raise MissingFlagValueError(long_form[token])
                 own.append(args[i])
                 i += 1

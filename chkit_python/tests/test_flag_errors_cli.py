@@ -161,6 +161,10 @@ def test_a_forwarder_config_takes_a_single_dash_value_as_in_ts(
         ["status", "--nope", "-h"],
         ["generate", "--name", "--help"],
         ["drift", "--table", "-h"],
+        # A forwarder's --config with no value still shows the help (#620 review).
+        ["plugin", "--help", "--config", "--check"],
+        ["plugin", "-h", "-c", "--json"],
+        ["codegen", "--help", "--config", "--check"],
     ],
 )
 @pytest.mark.usefixtures("project")
