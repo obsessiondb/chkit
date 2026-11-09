@@ -149,4 +149,23 @@ describe('@chkit/cli short flags (#491)', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('init rejects an unknown --connect value before writing anything', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-init-connect-'))
+    try {
+      await mkdir(join(dir, 'node_modules/@chkit'), { recursive: true })
+      await symlink(join(WORKSPACE_ROOT, 'packages/core'), join(dir, 'node_modules/@chkit/core'))
+      await writeFile(join(dir, 'package.json'), '{"name":"init-connect","private":true,"type":"module"}\n')
+
+      const result = runCli(['init', '--connect', 'clickhose'], dir)
+      expect(result.exitCode).toBe(1)
+      expect(result.stderr.trim()).toBe(
+        'Invalid value for --connect: clickhose. Expected one of: claim, account, clickhouse, later',
+      )
+      expect(existsSync(join(dir, 'clickhouse.config.ts'))).toBe(false)
+      expect(existsSync(join(dir, 'src'))).toBe(false)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
