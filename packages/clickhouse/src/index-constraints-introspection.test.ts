@@ -64,7 +64,8 @@ describe('skip index introspection', () => {
   ])('reads the expression %s back as %s', (expr, expected) => {
     expect(normalizeIndexFromSystemRow({ ...indexRow('minmax'), expr }).expression).toBe(expected)
     const text = normalizeIndexFromSystemRow({ ...indexRow("text(tokenizer = 'splitByNonAlpha')"), expr })
-    expect(text.expression).toBe(normalizeTextIndexSQL(expected))
+    expect(text.expression).toBe(expected)
+    expect(normalizeTextIndexSQL(expected)).toBe(expected)
   })
 
   test('still reads the structured types', () => {
