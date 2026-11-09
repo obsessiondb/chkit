@@ -140,7 +140,7 @@ def _extended_flag_defs(
     return extended
 
 
-def dispatch_plugin_command(
+def dispatch_plugin_command(  # noqa: PLR0912
     *,
     plugin_name: str,
     command_name: str,
@@ -148,7 +148,7 @@ def dispatch_plugin_command(
     config_path: Path | None,
     output_json: bool,
     invoking_command: str = "plugin",
-    extra_flags: ParsedFlags | None = None,
+    config_flag: str | None = None,
     print_help: Callable[[], None] | None = None,
 ) -> None:
     """Load config + plugins, parse forwarded flags, run one plugin command.
@@ -157,6 +157,11 @@ def dispatch_plugin_command(
     (``chkit codegen``, ``chkit obsessiondb ...``), mirroring the TS CLI.
     A shortcut given an unknown command runs ``print_help`` after the error
     (not under ``--json``), as TS prints the command's help.
+
+    As in TS, the command's flags also hold the global flags given:
+    ``--json`` on every path, and ``--config`` (``config_flag``, the raw
+    value) only from the shortcuts, which parse it with the command's flags;
+    ``chkit plugin`` strips it first. A flag not given has no key.
     """
     # As in TS, `obsessiondb` / `plugin obsessiondb` may load the ObsessionDB
     # profile without a project config or credentials (to run `login`).
@@ -207,8 +212,12 @@ def dispatch_plugin_command(
         positionals, flags = _split_positionals_and_flags(tokens, flag_defs)
     except (UnknownFlagError, MissingFlagValueError) as error:
         report_flag_error(invoking_command, str(error), json_mode=output_json)
-    if extra_flags:
-        flags.update(extra_flags)
+    global_flags: ParsedFlags = {}
+    if config_flag is not None:
+        global_flags["--config"] = config_flag
+    if output_json:
+        global_flags["--json"] = True
+    flags = {**global_flags, **flags}
 
     # Connect opportunistically — some plugin commands don't need a DB
     # (codegen, backfill status, ...). Mirroring TS, an unreachable

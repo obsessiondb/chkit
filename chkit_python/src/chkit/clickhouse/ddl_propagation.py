@@ -97,12 +97,17 @@ def _poll(
 
     Sleeps ``delay`` between checks, not after the last one, like TS
     ``p-retry``. Raises the last error from ``check_fn`` if every check fails.
+    A ``TypeError`` or ``AttributeError`` is a bug in the check, not lag, and is
+    raised at once: p-retry does not retry a ``TypeError`` that is not a fetch
+    network failure, and these are its Python equivalents (#627).
     """
     last_error: BaseException | None = None
     for attempt in range(retries + 1):
         try:
             if check_fn():
                 return
+        except (TypeError, AttributeError):
+            raise
         except Exception as error:
             last_error = error
         if attempt < retries:

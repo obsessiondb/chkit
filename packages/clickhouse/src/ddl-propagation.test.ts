@@ -236,6 +236,41 @@ describe('waitForDDLPropagation: catalog waits check 21 times', () => {
     expect(polled('system.tables')).toHaveLength(21)
   })
 
+  // p-retry gives up at once on a TypeError that is not a fetch network
+  // failure; chkit-py's _poll does the same for TypeError and AttributeError (#627).
+  function failingTarget(error: () => Error) {
+    let checks = 0
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('system.one')) return [{ replicas: 1 }] as T[]
+        checks += 1
+        throw error()
+      },
+    } as unknown as ClickHouseExecutor
+    return { db, checks: () => checks }
+  }
+
+  test('a programming error in the check fails the wait after one check', async () => {
+    const { db, checks } = failingTarget(() => new TypeError("Cannot read properties of undefined (reading 'rows')"))
+
+    await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)).rejects.toThrow(TypeError)
+    expect(checks()).toBe(1)
+  })
+
+  test('a server error in the check is retried: 21 checks', async () => {
+    const { db, checks } = failingTarget(() => new Error('Code: 210. DB::NetException: Connection refused'))
+
+    await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)).rejects.toThrow('Connection refused')
+    expect(checks()).toBe(21)
+  })
+
+  test('a fetch network failure, a TypeError, is retried: 21 checks', async () => {
+    const { db, checks } = failingTarget(() => new TypeError('fetch failed'))
+
+    await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)).rejects.toThrow('fetch failed')
+    expect(checks()).toBe(21)
+  })
+
   test('a dictionary that never appears is checked 21 times', async () => {
     const { db, polled } = fakeTarget([[]], { replicas: 1 })
 

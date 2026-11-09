@@ -18,6 +18,7 @@ from chkit.core.model import (
     ChxResolvedConfig,
     ChxResolvedSafetyConfig,
     ChxValidationError,
+    ColumnInput,
     TableDefinition,
 )
 from chkit.core.planner import plan_diff
@@ -27,7 +28,7 @@ from chkit.core.validate import validate_definitions
 from chkit.plugins import ChxOnCheckContext, ChxOnSchemaLoadedContext
 from chkit_plugin_obsessiondb import obsessiondb
 
-COLUMNS = [{"name": "id", "type": "UInt64"}, {"name": "ts", "type": "DateTime"}]
+COLUMNS: list[ColumnInput] = [{"name": "id", "type": "UInt64"}, {"name": "ts", "type": "DateTime"}]
 DISTRIBUTED_MESSAGE = (
     "Table app.events uses the Distributed engine, which ObsessionDB does not support: "
     "ObsessionDB has no shards, so every replica already reads the same shared storage. "
@@ -36,7 +37,7 @@ DISTRIBUTED_MESSAGE = (
 )
 
 
-def local(columns: list[dict[str, str]] = COLUMNS) -> TableDefinition:
+def local(columns: list[ColumnInput] = COLUMNS) -> TableDefinition:
     return table(
         database="app",
         name="events_local",
@@ -50,7 +51,7 @@ def local(columns: list[dict[str, str]] = COLUMNS) -> TableDefinition:
 
 def distributed(
     engine: str = "Distributed(cluster, app, events_local, rand())",
-    columns: list[dict[str, str]] = COLUMNS,
+    columns: list[ColumnInput] = COLUMNS,
     settings: dict[str, str | int | float | bool] | None = None,
 ) -> TableDefinition:
     return table(
@@ -179,7 +180,7 @@ def test_normalizes_distributed_identifier_arguments() -> None:
 
 
 def test_adds_a_column_to_local_and_distributed_tables_separately() -> None:
-    added = [*COLUMNS, {"name": "country", "type": "String"}]
+    added: list[ColumnInput] = [*COLUMNS, {"name": "country", "type": "String"}]
     before = canonicalize_definitions([local(), distributed()])
     after = canonicalize_definitions([local(added), distributed(columns=added)])
     # Codepoint key order (TS uses localeCompare and lists events_local first;
@@ -291,7 +292,7 @@ def test_obsessiondb_on_check_reports_distributed_tables(tmp_path: Path) -> None
     hooks = obsessiondb().hooks
 
     def check(url: str) -> object:
-        return hooks.on_check(  # type: ignore[union-attr]
+        return hooks.on_check(
             ChxOnCheckContext(
                 command="check",
                 config=_config(url, "schema.py"),
