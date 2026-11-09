@@ -42,6 +42,30 @@ describe('parseCommandArgs', () => {
 		expect(parsed?.positionals).toEqual(['-- inspect\nSELECT 1'])
 	})
 
+	test('keeps query SQL that starts with a dash and holds whitespace as SQL (#584)', () => {
+		for (const sql of ['-- note\nSELECT a = 1', '--note\nSELECT 1', '-']) {
+			const parsed = parseCommandArgs(
+				'query',
+				[sql, '--json'],
+				[...GLOBAL_FLAGS, SERVICE_FLAG],
+			)
+			expect(parsed).toEqual({ flags: { '--json': true }, positionals: [sql] })
+		}
+	})
+
+	test('keeps a dash-leading query flag value as the value (#584)', () => {
+		const parsed = parseCommandArgs(
+			'query',
+			['--service', '-prod', 'SELECT 1', '--', '-1'],
+			[...GLOBAL_FLAGS, SERVICE_FLAG],
+		)
+
+		expect(parsed).toEqual({
+			flags: { '--service': '-prod' },
+			positionals: ['SELECT 1', '-1'],
+		})
+	})
+
 	test('supports query flags after SQL', () => {
 		const parsed = parseCommandArgs(
 			'query',

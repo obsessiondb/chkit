@@ -70,7 +70,9 @@ function splitQueryArgs(
 		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
 		const def = byName.get(name)
 		if (!def) {
-			positionals.push(token)
+			// An unknown `-x` or `--bogus` goes to parseFlags, which rejects it (#584).
+			if (looksLikeFlag(token)) flagArgs.push(token)
+			else positionals.push(token)
 			continue
 		}
 
@@ -85,6 +87,18 @@ function splitQueryArgs(
 	}
 
 	return { flagArgs, positionals }
+}
+
+/**
+ * A query argument that starts with `-` is a flag unless its name (the part
+ * before any `=`) holds whitespace: SQL that starts with a line comment, such
+ * as `-- note\nSELECT 1`, stays SQL. A lone `-` is SQL too.
+ */
+function looksLikeFlag(token: string): boolean {
+	if (!token.startsWith('-') || token === '-') return false
+	const eqIdx = token.indexOf('=')
+	const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+	return !/\s/.test(name)
 }
 
 export function parseCommandArgs(

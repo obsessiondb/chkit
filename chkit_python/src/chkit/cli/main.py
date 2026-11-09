@@ -123,6 +123,52 @@ def _split_forwarded_args(ctx: Any, args: list[str], params: list[Any]) -> list[
     return [*own, "--", *forwarded]
 
 
+def _looks_like_flag(token: str) -> bool:
+    """As TS ``looksLikeFlag``: a ``-`` token is a flag unless its name (the
+    part before any ``=``) holds whitespace, as SQL that starts with a line
+    comment does (``-- note\\nSELECT 1``). A lone ``-`` is not a flag."""
+    if not token.startswith("-") or token == "-":
+        return False
+    return not any(char.isspace() for char in token.split("=", 1)[0])
+
+
+def _query_sql_behind_terminator(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
+    """Port of TS ``splitQueryArgs`` for ``chkit query`` (#584).
+
+    click reads every argument that starts with ``-`` as an option, so SQL
+    that starts with a line comment would be an unknown option. The SQL
+    arguments go behind ``--``, in order; option values stay with their
+    option, and a token that looks like a flag stays in front, so click
+    still rejects an unknown one such as ``-x`` or ``--bogus``.
+    """
+    takes_value: dict[str, bool] = {}
+    for param in params:
+        if param.param_type_name == "option":
+            for opt in [*param.opts, *param.secondary_opts]:
+                takes_value[opt] = not (param.is_flag or param.count)
+
+    options: list[str] = []
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--":
+            positionals.extend(args[i:])
+            break
+        if not _looks_like_flag(token):
+            positionals.append(token)
+            continue
+        options.append(token)
+        if takes_value.get(token):
+            # Without its value, click would take the `--` below as the value.
+            if i >= len(args):
+                ctx.fail(f"Option '{token}' requires an argument.")
+            options.append(args[i])
+            i += 1
+    return [*options, "--", *positionals] if positionals else options
+
+
 class _ChkitCommand(TyperCommand):
     """Every chkit command reads short options as TS does (#491)."""
 
@@ -130,7 +176,10 @@ class _ChkitCommand(TyperCommand):
         params = self.get_params(ctx)
         if ctx.ignore_unknown_options:
             return super().parse_args(ctx, _split_forwarded_args(ctx, args, params))
-        return super().parse_args(ctx, _normalize_short_options(ctx, args, params))
+        normalized = _normalize_short_options(ctx, args, params)
+        if self.name == "query":
+            normalized = _query_sql_behind_terminator(ctx, normalized, params)
+        return super().parse_args(ctx, normalized)
 
 
 class _ChkitGroup(TyperGroup):

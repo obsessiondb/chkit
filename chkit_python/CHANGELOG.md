@@ -18,6 +18,8 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- `chkit query` runs SQL passed as one argument that starts with a line comment, such as
+  `"-- note\nSELECT 1"`, instead of rejecting it as an unknown option, as TS does (#584).
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement
