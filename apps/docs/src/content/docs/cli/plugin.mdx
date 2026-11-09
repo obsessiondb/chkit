@@ -39,6 +39,10 @@ With both a plugin name and command name, executes the command. The remaining ar
 chkit plugin my-plugin echo --name ada -- --not-a-flag
 ```
 
+### Errors
+
+An unknown plugin fails with exit code 1 and `Unknown plugin "<name>". Available: <plugins>.` on stderr; with `--json`, stdout holds the error envelope with code `error`. An unknown command of a configured plugin prints `Unknown <plugin> command "<command>". Available: <commands>.` on stderr and exits 1; with `--json`, stdout holds `{"command": "plugin", "schemaVersion": 1, "ok": false, "error": "<message>"}` instead. The TypeScript list of plugins also names its built-in plugins (`core`, `@chkit/internal-skill-hint`).
+
 ### CLI shortcuts
 
 Some plugins have top-level CLI shortcuts:

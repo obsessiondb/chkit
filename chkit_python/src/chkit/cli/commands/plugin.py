@@ -11,14 +11,15 @@ Usage:
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 import typer
 
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.flag_errors import report_flag_error
-from chkit.cli.json_output import print_output
+from chkit.cli.json_output import emit_json, print_output
 from chkit.cli.plugin_runtime import (
     load_plugin_runtime,
     make_plugin_context,
@@ -40,6 +41,57 @@ from chkit.plugins import (
     ChxPluginCommandContext,
     LoadedPlugin,
 )
+
+# The shortcuts TS names in its "plugin is not configured" message
+# (WELL_KNOWN_PLUGIN_COMMANDS in packages/cli/src/bin/chkit.ts).
+_SHORTCUT_PLUGIN_LABELS = {"codegen": "Codegen"}
+
+
+class PluginUsageError(RuntimeError):
+    """An unknown plugin or plugin command. The top-level handler prints the
+    message on stderr, exits 1 and, under ``--json``, emits the error envelope
+    with ``code``, as the TS CLI does (#606)."""
+
+    def __init__(self, message: str, code: str = "error") -> None:
+        super().__init__(message)
+        self.code = code
+
+
+def _unknown_plugin_error(
+    plugin_name: str, loaded: Sequence[LoadedPlugin], invoking_command: str
+) -> PluginUsageError:
+    """TS: ``chkit plugin <name>`` throws in ``commands/plugin.ts``; a
+    shortcut whose plugin is missing is a usage error in ``bin/chkit.ts``."""
+    if invoking_command == "plugin":
+        names = sorted(entry.plugin.manifest.name for entry in loaded)
+        known = ", ".join(names) if names else "(none)"
+        return PluginUsageError(f'Unknown plugin "{plugin_name}". Available: {known}.')
+    label = _SHORTCUT_PLUGIN_LABELS.get(invoking_command)
+    if label is not None:
+        return PluginUsageError(
+            f"{label} plugin is not configured. Add it to config.plugins first.",
+            "plugin_not_configured",
+        )
+    return PluginUsageError(f"Unknown command: {invoking_command}", "unknown_command")
+
+
+def _report_unknown_command(
+    entry: LoadedPlugin, command_name: str, invoking_command: str, *, json_mode: bool
+) -> NoReturn:
+    """``chkit plugin <name> <command>`` reports it as ``commands/plugin.ts``
+    does: under ``--json`` the string ``error`` replaces the stderr line. A
+    shortcut reports an ``unknown_subcommand`` usage error, as ``bin/chkit.ts``."""
+    plugin_name = entry.plugin.manifest.name
+    names = [command.name for command in entry.plugin.commands or []]
+    known = ", ".join(names) if names else "(none)"
+    message = f'Unknown {plugin_name} command "{command_name}". Available: {known}.'
+    if invoking_command != "plugin":
+        raise PluginUsageError(message, "unknown_subcommand")
+    if json_mode:
+        emit_json("plugin", {"ok": False, "error": message})
+    else:
+        typer.echo(message, err=True)
+    raise typer.Exit(code=1)
 
 
 def _list_all(loaded: list[LoadedPlugin]) -> None:
@@ -156,19 +208,11 @@ def dispatch_plugin_command(
         (e for e in runtime.plugins if e.plugin.manifest.name == plugin_name), None
     )
     if entry is None:
-        msg = (
-            f'No plugin named "{plugin_name}" is configured. '
-            f"Run `chkit plugin` to see registered plugins."
-        )
-        raise typer.BadParameter(msg)
+        raise _unknown_plugin_error(plugin_name, runtime.plugins, invoking_command)
 
     found = runtime.get_command(plugin_name, command_name)
     if found is None:
-        msg = (
-            f'Plugin "{plugin_name}" has no command "{command_name}". '
-            f"Run `chkit plugin {plugin_name}` to see its commands."
-        )
-        raise typer.BadParameter(msg)
+        _report_unknown_command(entry, command_name, invoking_command, json_mode=output_json)
 
     command_def, _command_owner = found
     flag_defs = list(command_def.flags or [])
@@ -266,11 +310,7 @@ def run(
             (e for e in loaded if e.plugin.manifest.name == plugin_name), None
         )
         if entry is None:
-            msg = (
-                f'No plugin named "{plugin_name}" is configured. '
-                f"Run `chkit plugin` to see registered plugins."
-            )
-            raise typer.BadParameter(msg)
+            raise _unknown_plugin_error(plugin_name, loaded, "plugin")
         _list_one(entry)
         return
 
