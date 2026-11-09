@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+import pytest
+
 from chkit.cli.safety_markers import (
     DestructiveOperationMarker,
     ScannedDestructiveStatement,
@@ -205,6 +207,67 @@ def test_scan_flags_extra_unmarked_statement() -> None:
 def test_scan_ignores_commented_destructive() -> None:
     sql = "-- DROP TABLE t;\nCREATE TABLE u (id UInt64);"
     assert scan_destructive_sql_statements(sql) == []
+
+
+# #642: every comment form ClickHouse reads, plus string literals and quoted
+# names, is text the scan must not read as SQL.
+@pytest.mark.parametrize(
+    "sql",
+    [
+        "// DROP TABLE default.events\nSELECT 1;",
+        "# DROP TABLE default.events\nSELECT 1;",
+        "#! DROP TABLE default.events\nSELECT 1;",
+        "/* DROP TABLE default.events */ SELECT 1;",
+        "/* a /* b */ TRUNCATE TABLE default.events */ SELECT 1;",
+        "SELECT 1 // DROP TABLE default.events\n;",
+        "INSERT INTO default.log VALUES ('DROP TABLE default.events');",
+        "SELECT $x$DETACH TABLE default.events$x$;",
+        "SELECT 1 AS `DROP TABLE default.events`;",
+        'SELECT 1 AS "ALTER TABLE t DROP COLUMN c";',
+    ],
+)
+def test_scan_ignores_destructive_text_in_comments_strings_and_names(sql: str) -> None:
+    assert scan_destructive_sql_statements(sql) == []
+
+
+@pytest.mark.parametrize(
+    ("sql", "type_", "key"),
+    [
+        ("DROP /* hand-written */ TABLE default.events;", "drop_table", "default.events"),
+        ("DROP/**/TABLE default.events;", "drop_table", "default.events"),
+        (
+            "ALTER TABLE default.events DROP // why\nCOLUMN email;",
+            "alter_table_drop_column",
+            "default.events",
+        ),
+        ("TRUNCATE # all of it\nTABLE default.events;", "truncate_table", "default.events"),
+        ("// cleanup\nDROP TABLE default.events;", "drop_table", "default.events"),
+        ("/* TABLE default.wrong */ DROP TABLE default.events;", "drop_table", "default.events"),
+        ("DROP TABLE default.events /* 'x */ -- y\n;", "drop_table", "default.events"),
+        ("DETACH TABLE `events`;", "detach", "events"),
+        # ClickHouse reads U+2018...U+2019 as a string, so the ASCII quotes inside
+        # are text; the chkit lexer does not, and pairs them across the DROP.
+        (
+            "ALTER TABLE t COMMENT COLUMN x \u2018it's\u2019, DROP COLUMN y, COMMENT COLUMN z \u2018it's\u2019;",
+            "alter_table_drop_column",
+            "t",
+        ),
+        ("ALTER TABLE t COMMENT COLUMN x \u2018/*\u2019, DROP COLUMN y;", "alter_table_drop_column", "t"),
+    ],
+)
+def test_scan_flags_destructive_statement_around_comments(sql: str, type_: str, key: str) -> None:
+    markers = collect_unmarked_destructive_statements("20260101_handwritten.sql", sql)
+    assert [(m.type, m.key) for m in markers] == [(type_, key)]
+
+
+def test_scan_flags_only_the_real_statement_after_a_commented_out_one() -> None:
+    sql = (
+        "SELECT 1 /* DROP TABLE default.a */; # DROP TABLE default.b\n"
+        "TRUNCATE TABLE default.events;"
+    )
+    found = scan_destructive_sql_statements(sql)
+    assert [f.type for f in found] == ["truncate_table"]
+    assert found[0].statement == "# DROP TABLE default.b\nTRUNCATE TABLE default.events;"
 
 
 def test_migration_contains_destructive_sql_helper() -> None:

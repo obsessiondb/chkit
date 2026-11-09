@@ -28,8 +28,9 @@ def run(
             help="Arguments and flags forwarded to the ObsessionDB command."
         ),
     ] = None,
+    # A str, not a Path: the command gets the raw value in its flags, as in TS.
     config_path: Annotated[
-        Path | None,
+        str | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
     output_json: Annotated[
@@ -41,7 +42,8 @@ def run(
         plugin_name="obsessiondb",
         command_name=command_name,
         tokens=list(args or []),
-        config_path=config_path,
+        config_path=Path(config_path) if config_path is not None else None,
         output_json=output_json,
         invoking_command="obsessiondb",
+        config_flag=config_path,
     )
