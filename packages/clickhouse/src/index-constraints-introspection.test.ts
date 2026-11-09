@@ -96,6 +96,22 @@ describe('constraint introspection', () => {
     ])
   })
 
+  test('unescapes a backtick in a quoted projection or constraint name', () => {
+    // create_table_query as ClickHouse 26.3 returns it (#631); chkit-py's
+    // test_create_table_parser.py asserts the same.
+    const query =
+      'CREATE TABLE d.t (`a` UInt8, `b` UInt8, CONSTRAINT `c\\`k` CHECK a > 0, CONSTRAINT `c k2` ASSUME b > 0, PROJECTION `p\\`x` (SELECT a ORDER BY b), PROJECTION `p y` (SELECT b ORDER BY a), PROJECTION `i\\`p` INDEX b TYPE basic) ENGINE = MergeTree ORDER BY a SETTINGS index_granularity = 8192'
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p`x', query: 'SELECT a ORDER BY b' },
+      { name: 'p y', query: 'SELECT b ORDER BY a' },
+      { name: 'i`p', index: 'b', type: 'basic' },
+    ])
+    expect(parseConstraintsFromCreateTableQuery(query)).toEqual([
+      { name: 'c`k', check: 'a > 0' },
+      { name: 'c k2', assume: 'b > 0' },
+    ])
+  })
+
   test('reads the multi-line SHOW CREATE form', () => {
     const query = 'CREATE TABLE app.t\n(\n    `id` UInt64,\n    `s` String,\n    CONSTRAINT c CHECK length(s) > 0\n)\nENGINE = MergeTree\nORDER BY id'
     expect(parseConstraintsFromCreateTableQuery(query)).toEqual([{ name: 'c', check: 'length(s) > 0' }])
