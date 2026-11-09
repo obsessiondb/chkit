@@ -135,6 +135,18 @@ describe('translateEndpoint', () => {
     expect(translated.ok && translated.value.params).toEqual([{ name: 't', type: 'String', required: false, default: 'a' }])
   })
 
+  test('a node shadowed by a CTE of the same name is not rendered', () => {
+    const file = parseDatafile(
+      'endpoints/ep.pipe',
+      [
+        'NODE base', 'SQL >', '    %', '    SELECT 1 {% if defined(y) %} WHERE {{ Int32(y) }} > 0 {% end %}', '',
+        'NODE out', 'SQL >', '    WITH base AS (SELECT user_id FROM events) SELECT count() FROM base', '', 'TYPE endpoint',
+      ].join('\n')
+    )
+    const translated = translateEndpoint(file, file.nodes[1], scope)
+    expect(translated.ok && translated.value.sql).toBe('WITH base AS (SELECT user_id FROM analytics.events AS events) SELECT count() FROM base')
+  })
+
   test('required= at one site and not at another is the same param', () => {
     const translated = endpoint(['%', "SELECT 1 FROM events WHERE {{ String(t, 'a', required=True) }} = 'a' OR {{ String(t, 'a') }} = 'a'"])
     expect(translated.ok && translated.value.params).toEqual([{ name: 't', type: 'String', required: true, default: 'a' }])

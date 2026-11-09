@@ -346,7 +346,8 @@ function reachableNodes(nodes: readonly DatafileNode[], output: string): Set<str
     if (reached.has(name) || !byName.has(name)) continue
     reached.add(name)
     for (const ref of tableReferences(tokenizeSQL(byName.get(name) ?? ''), names)) {
-      if (ref.database === undefined && names.has(ref.name)) queue.push(ref.name)
+      // A CTE of the same name shadows the node, as in the resolver.
+      if (ref.database === undefined && !ref.cte && names.has(ref.name)) queue.push(ref.name)
     }
   }
   return reached

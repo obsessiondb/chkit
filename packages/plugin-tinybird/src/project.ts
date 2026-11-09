@@ -1,4 +1,5 @@
-import { readdir, readFile } from 'node:fs/promises'
+import type { Dirent } from 'node:fs'
+import { readdir, readFile, realpath, stat } from 'node:fs/promises'
 import { join, relative, resolve, sep } from 'node:path'
 
 import { type Datafile, type DatafileNode, parseDatafile } from './datafile.js'
@@ -44,16 +45,26 @@ export async function readProject(projectDir: string, options: { maxDepth?: numb
   if (!Number.isInteger(maxDepth) || maxDepth < 1) throw new Error(`maxDepth must be a positive integer, got ${maxDepth}`)
   const base = resolve(projectDir)
   const dir = resolve(base, await configuredFolder(base))
-  const paths = (await walk(dir)).sort()
+  const walked: Walk = { files: [], unreadable: [], visited: new Set() }
+  await walk(dir, walked)
+  const paths = walked.files.sort()
   const datasources: Datafile[] = []
   const pipes: TinybirdProject['pipes'] = []
   const otherFiles: string[] = []
-  const ignoredFiles: TinybirdProject['ignoredFiles'] = []
+  const ignoredFiles: TinybirdProject['ignoredFiles'] = walked.unreadable.map((path) => ({
+    path: relative(dir, path),
+    reason: 'not readable: the importer could not list this folder (Tinybird skips it too), so datafiles in it are not imported',
+  }))
   const names = new Map<string, string>()
 
   for (const path of paths) {
     const relativePath = relative(dir, path)
     const segments = relativePath.split(sep)
+    // Connection and include files are listed first: INCLUDE reads its file by path, whatever its depth.
+    if (!path.endsWith('.datasource') && !path.endsWith('.pipe')) {
+      otherFiles.push(relativePath)
+      continue
+    }
     if (segments.some((segment) => segment.startsWith('.'))) {
       ignoredFiles.push({ path: relativePath, reason: 'hidden: Tinybird does not read hidden files or folders' })
       continue
@@ -67,10 +78,6 @@ export async function readProject(projectDir: string, options: { maxDepth?: numb
         path: relativePath,
         reason: `deeper than the scan depth ${maxDepth} (tb --max-depth ${maxDepth}), so Tinybird does not build it; raise maxDepth if the project is built with a higher --max-depth`,
       })
-      continue
-    }
-    if (!path.endsWith('.datasource') && !path.endsWith('.pipe')) {
-      otherFiles.push(relativePath)
       continue
     }
     const file = parseDatafile(relativePath, await readFile(path, 'utf8'))
@@ -98,14 +105,43 @@ async function configuredFolder(base: string): Promise<string> {
   return typeof folder === 'string' && folder.trim() ? folder : '.'
 }
 
-async function walk(dir: string): Promise<string[]> {
-  const entries = await readdir(dir, { withFileTypes: true })
-  const nested = await Promise.all(
+interface Walk {
+  files: string[]
+  /** Folders the walk could not list (EACCES, EPERM). */
+  unreadable: string[]
+  /** Real paths of the folders walked, so a symlink loop is walked once. */
+  visited: Set<string>
+}
+
+const DATAFILE = /\.(datasource|pipe|connection|incl)$/
+
+/**
+ * Every datafile under `dir`, following symlinks to folders as Python's glob
+ * does. A folder that cannot be listed is recorded, not fatal: Tinybird's glob
+ * skips it too. Only `.git` is not walked.
+ */
+async function walk(dir: string, into: Walk): Promise<void> {
+  const real = await realpath(dir).catch(() => dir)
+  if (into.visited.has(real)) return
+  into.visited.add(real)
+  let entries: Dirent[]
+  try {
+    entries = await readdir(dir, { withFileTypes: true })
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code
+    if (code === 'EACCES' || code === 'EPERM') {
+      into.unreadable.push(dir)
+      return
+    }
+    throw error
+  }
+  await Promise.all(
     entries.map(async (entry) => {
       const path = join(dir, entry.name)
-      if (entry.isDirectory()) return entry.name === '.git' ? [] : walk(path)
-      return /\.(datasource|pipe|connection|incl)$/.test(entry.name) ? [path] : []
+      const isDirectory = entry.isDirectory() || (entry.isSymbolicLink() && (await stat(path).then((target) => target.isDirectory(), () => false)))
+      if (isDirectory) {
+        if (entry.name !== '.git') await walk(path, into)
+      } else if (DATAFILE.test(entry.name)) into.files.push(path)
     })
   )
-  return nested.flat()
 }

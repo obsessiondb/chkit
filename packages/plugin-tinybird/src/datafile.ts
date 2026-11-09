@@ -241,7 +241,7 @@ const ENV_SUBSTITUTION = /\$(?:\{[A-Za-z_][A-Za-z0-9_]*\}|[A-Za-z_][A-Za-z0-9_]*
  * each command that uses it is reported.
  */
 export function envSubstitutions(file: Datafile): string[] {
-  // TAGS and SHARED_WITH have their own handlers in the Tinybird CLI, which do not substitute.
+  // TAGS and SHARED_WITH never affect the DDL (Tinybird substitutes key=value tags, not SHARED_WITH).
   const vars = [...file.vars, ...file.nodes.flatMap((node) => [...node.vars])].filter(([key]) => key !== 'TAGS' && key !== 'SHARED_WITH')
   return vars.flatMap(([key, value]) => {
     const match = ENV_SUBSTITUTION.exec(value.replace(/\$\$/g, ''))

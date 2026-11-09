@@ -1,5 +1,5 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { access, mkdir, mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { access, chmod, mkdir, mkdtemp, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join, sep } from 'node:path'
 
@@ -164,6 +164,32 @@ describe('tinybird import command', () => {
     })
     const deeper = await importTinybirdProject({ projectDir: dir, database: 'analytics', maxDepth: 4 })
     expect(deeper.definitions.map((definition) => definition.name).sort()).toEqual(['deep3', 'deep4', 'ev', 'nm', 'root'])
+  })
+
+  test('follows symlinked folders, survives loops and unreadable folders, and lists them', async () => {
+    const dir = await tempDir()
+    const shared = await tempDir()
+    const datasource = 'SCHEMA >\n    `id` UInt64\n\nENGINE "MergeTree"\nENGINE_SORTING_KEY "id"\n'
+    await writeFile(join(shared, 'sym.datasource'), datasource)
+    await mkdir(join(dir, 'datasources'), { recursive: true })
+    await symlink(shared, join(dir, 'datasources', 'linkdir'))
+    await symlink(join(dir, 'datasources'), join(dir, 'datasources', 'loop'))
+    await mkdir(join(dir, 'locked'))
+    await writeFile(join(dir, 'locked', 'hidden_away.datasource'), datasource)
+    await mkdir(join(dir, 'includes', 'a', 'b'), { recursive: true })
+    await writeFile(join(dir, 'includes', 'a', 'b', 'node.incl'), 'NODE n\n')
+    await chmod(join(dir, 'locked'), 0o000)
+    try {
+      const { report, definitions } = await importTinybirdProject({ projectDir: dir, database: 'analytics' })
+      expect(definitions.map((definition) => definition.name)).toEqual(['sym'])
+      const reasons = Object.fromEntries(report.entries.filter((entry) => entry.status === 'skipped').map((entry) => [entry.name.split(sep).join('/'), entry.reasons[0]?.split(':')[0]]))
+      expect(reasons).toEqual({
+        locked: 'not readable',
+        'includes/a/b/node.incl': 'connection and include files are not translated (ingestion and connectors are out of scope)',
+      })
+    } finally {
+      await chmod(join(dir, 'locked'), 0o755)
+    }
   })
 
   test('--max-depth sets the scan depth', async () => {
