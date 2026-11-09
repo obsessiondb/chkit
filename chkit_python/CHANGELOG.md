@@ -24,6 +24,12 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- `migrate` reads `//`, `# ` and `#!` comments as ClickHouse does, so a `;` inside one no
+  longer runs the commented-out text after it as a statement, and a quote or `/*` inside one
+  no longer joins statements (#562, fixed in TS too). A partly applied migration whose
+  recorded statements another release split differently stops with `statement_split_changed`
+  instead of resuming at the wrong statement; in-progress journal rows now record the
+  chkit-py version, as TS does.
 - Splitting and normalizing SQL with many unclosed `$tag$` openers takes linear time instead
   of quadratic (#585, fixed in TS too).
 - Text index SQL in generated migrations, snapshots and `chkit pull` output keeps the space

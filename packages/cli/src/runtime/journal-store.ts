@@ -423,7 +423,11 @@ SETTINGS index_granularity = 1`
       return state
     },
 
-    async writeMigrationState(state: MigrationRowState): Promise<void> {
+    async writeMigrationState(input: MigrationRowState): Promise<void> {
+      // The release that wrote the state last. migrate checks a state another
+      // release wrote before it resumes it, so the statement positions in a
+      // state this release wrote are always this release's split (#562).
+      const state = { ...input, chkitVersion: CLI_VERSION }
       if (_databaseMissing) {
         debug('journal', 'resetting databaseMissing flag — migration may have created the database')
         _databaseMissing = false
@@ -436,7 +440,7 @@ SETTINGS index_granularity = 1`
         debug('journal', 'database still missing — skipping journal write')
         return
       }
-      const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion || CLI_VERSION)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)})`
+      const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)})`
       await pRetry(() => db.command(insertSql), {
         retries: 4,
         minTimeout: 0,

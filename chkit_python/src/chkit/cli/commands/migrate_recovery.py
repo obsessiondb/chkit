@@ -302,6 +302,43 @@ def rebase_in_progress_state(
     )
 
 
+def split_changed_statements(
+    operations: Sequence[OperationState],
+    *,
+    legacy: Sequence[str],
+    current: Sequence[str],
+    positions_kept: bool,
+) -> list[int]:
+    """The statements (1-based) of an in-progress state that completed or
+    started at a position where the split before #562 and the current split of
+    the file give different statements.
+
+    A state recorded with the old split would resume at the wrong statements
+    there: skip one that never ran, or run one again.
+
+    The journal indexes the statements ``on_before_apply`` returns. They keep
+    the positions of the split only when the plugins returned them unchanged;
+    when a plugin added, removed, moved or rewrote any, the positions cannot be
+    matched, so every recorded statement counts as changed once the two splits
+    differ.
+    """
+    if list(legacy) == list(current):
+        return []
+
+    def at(items: Sequence[str], index: int) -> str | None:
+        return items[index] if 0 <= index < len(items) else None
+
+    return sorted(
+        op.operation_index + 1
+        for op in operations
+        if op.status in {"completed", "started"}
+        and (
+            not positions_kept
+            or at(legacy, op.operation_index) != at(current, op.operation_index)
+        )
+    )
+
+
 def has_statement_progress(state: MigrationRowState) -> bool:
     """Whether any statement of an in-progress state completed or may have run."""
     return any(op.status in {"completed", "started"} for op in state.operations)

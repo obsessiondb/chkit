@@ -951,13 +951,12 @@ def test_split_sql_statements_keeps_comment_only_piece() -> None:
         # `#x` is not a comment (ClickHouse needs `# ` or `#!`).
         ("#x;", ["#x;"]),
         ("SELECT 1;\n/* never closed", ["SELECT 1;", "/* never closed;"]),
-        # ClickHouse reads the whole line as one comment; the splitter cuts it at
-        # the `;`, so the file keeps its old split.
+        # ClickHouse reads the whole line as one comment, and so does the splitter (#562).
         (
             "// DROP TABLE a; DROP TABLE b;\nSELECT 1;",
-            ["// DROP TABLE a;", "DROP TABLE b;", "SELECT 1;"],
+            ["// DROP TABLE a; DROP TABLE b;\nSELECT 1;"],
         ),
-        ("# old: DROP TABLE a; DROP TABLE b;\n", ["# old: DROP TABLE a;", "DROP TABLE b;"]),
+        ("# old: DROP TABLE a; DROP TABLE b;\n", []),
         (
             "-- chkit-migration-format: v1\n-- generated-at: 2026-01-01T00:00:00.000Z\n\n"
             "-- Empty migration scaffold. Write your SQL statements below.\n",
@@ -1579,3 +1578,142 @@ def test_cli_abandon_text_mode_prints_usage_error(usage_project: Path) -> None:
     result = CliRunner().invoke(app, ["migrate", "--abandon", "x", "--table", "t"])
     assert result.exit_code == 1
     assert "--abandon cannot be combined with --table" in result.stderr
+
+
+# ---------- apply_migration with a state another release split differently (#562) ----------
+
+# Releases before #562 cut at a `;` inside a `//` comment: this file was
+# [a, DROP z, b, c] for them, and is [a…b, c] now.
+SPLIT_SQL = (
+    "ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+    "ALTER TABLE t ADD COLUMN b UInt64;\n"
+    "ALTER TABLE t ADD COLUMN c UInt64;\n"
+)
+
+
+def test_apply_refuses_a_state_whose_recorded_statements_changed_split(tmp_path: Path) -> None:
+    client = _RecordingClient()
+    # The old release ran a and DROP z, then b failed. Resuming by position
+    # would skip c, which never ran.
+    store = FakeStore(
+        state=in_progress(
+            [op(0, "completed"), op(1, "completed"), op(2, "failed")],
+            checksum=checksum_sql(SPLIT_SQL),
+        )
+    )
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    assert info.value.code == "statement_split_changed"
+    message = str(info.value)
+    assert message.startswith(
+        "Cannot resume m.sql: chkit 0.2.0-test recorded its partial run, and this chkit "
+        "(0.0.0-test) splits the file into different statements."
+    )
+    assert "The journal recorded statements 1, 2 as completed or started" in message
+    assert "chkit migrate --apply --abandon m.sql" in message
+    assert client.calls == []
+    assert store.writes == []
+    assert store.appended == []
+
+
+def test_apply_refuses_a_started_statement_and_names_a_state_without_a_release(
+    tmp_path: Path,
+) -> None:
+    client = _RecordingClient()
+    state = in_progress(
+        [op(0, "completed"), op(1, "started")], checksum=checksum_sql(SPLIT_SQL)
+    ).model_copy(update={"chkit_version": ""})
+    store = FakeStore(state=state)
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    message = str(info.value)
+    assert message.startswith(
+        "Cannot resume m.sql: an earlier chkit release recorded its partial run"
+    )
+    assert "The journal recorded statements 1, 2 as completed or started" in message
+    assert client.calls == []
+
+
+def test_apply_resumes_a_state_this_release_recorded(tmp_path: Path) -> None:
+    client = _RecordingClient()
+    state = in_progress(
+        [op(0, "completed"), op(1, "failed")], checksum=checksum_sql(SPLIT_SQL)
+    ).model_copy(update={"chkit_version": "0.0.0-test"})
+    store = FakeStore(state=state)
+    _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    assert client.calls == ["ALTER TABLE t ADD COLUMN c UInt64;"]
+    assert len(store.appended) == 1
+
+
+def test_apply_resumes_when_recorded_statements_are_the_same_in_both_splits(
+    tmp_path: Path,
+) -> None:
+    sql = (
+        "ALTER TABLE t ADD COLUMN a UInt64;\n"
+        "ALTER TABLE t ADD COLUMN b UInt64;\n"
+        "ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+        "ALTER TABLE t ADD COLUMN d UInt64;\n"
+    )
+    client = _RecordingClient()
+    store = FakeStore(
+        state=in_progress([op(0, "completed"), op(1, "failed")], checksum=checksum_sql(sql))
+    )
+    _apply(_write(tmp_path, sql), client, store)
+    assert client.calls == [
+        "ALTER TABLE t ADD COLUMN b UInt64;",
+        "ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+        "ALTER TABLE t ADD COLUMN d UInt64;",
+    ]
+    assert len(store.appended) == 1
+
+
+def test_apply_runs_an_abandoned_state_from_statement_1(tmp_path: Path) -> None:
+    client = _RecordingClient()
+    store = FakeStore(
+        state=in_progress(
+            [
+                op(0, "failed", last_error="abandoned via chkit migrate --abandon (was completed)"),
+                op(1, "failed", last_error="abandoned via chkit migrate --abandon (was completed)"),
+                op(2, "failed", last_error="abandoned via chkit migrate --abandon (was failed)"),
+            ],
+            checksum=checksum_sql(SPLIT_SQL),
+        )
+    )
+    _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    assert client.calls == [
+        "ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+        "ALTER TABLE t ADD COLUMN b UInt64;",
+        "ALTER TABLE t ADD COLUMN c UInt64;",
+    ]
+    assert len(store.appended) == 1
+
+
+def test_apply_refuses_when_on_before_apply_removed_statements_of_a_file_the_splits_differ_on(
+    tmp_path: Path,
+) -> None:
+    """The journal indexes the statements on_before_apply returns: once a
+    plugin removes one, the old and new positions cannot be matched."""
+    sql = f"SET allow_experimental_x = 1;\n{SPLIT_SQL}"
+    client = _RecordingClient()
+    store = FakeStore(state=in_progress([op(0, "completed")], checksum=checksum_sql(sql)))
+    runtime = _FakeRuntime(lambda statements: [s for s in statements if not s.startswith("SET ")])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert "The journal recorded statement 1 as completed or started, which is not" in str(
+        info.value
+    )
+    assert client.calls == []
+
+
+def test_apply_refuses_when_on_before_apply_moved_statements_without_changing_their_count(
+    tmp_path: Path,
+) -> None:
+    sql = f"SET allow_experimental_x = 1;\n{SPLIT_SQL}"
+    client = _RecordingClient()
+    store = FakeStore(state=in_progress([op(0, "completed")], checksum=checksum_sql(sql)))
+    runtime = _FakeRuntime(lambda statements: [statements[1], statements[0], *statements[2:]])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert client.calls == []
