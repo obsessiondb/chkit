@@ -12,13 +12,13 @@ Usage:
 from __future__ import annotations
 
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 import typer
 
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.flag_errors import report_flag_error
-from chkit.cli.json_output import print_output
+from chkit.cli.json_output import emit_json, print_output
 from chkit.cli.plugin_runtime import (
     load_plugin_runtime,
     make_plugin_context,
@@ -41,32 +41,65 @@ from chkit.plugins import (
     LoadedPlugin,
 )
 
+NO_PLUGINS_MESSAGE = "No plugins configured. Add entries to config.plugins first."
 
-def _list_all(loaded: list[LoadedPlugin]) -> None:
-    if not loaded:
-        typer.echo("No plugins configured.")
+
+def _fail_no_plugins(*, json_mode: bool) -> NoReturn:
+    """As TS: the message on stderr, or under ``--json`` a payload whose
+    ``error`` is the message; exit 1 either way."""
+    if json_mode:
+        emit_json("plugin", {"error": NO_PLUGINS_MESSAGE, "plugins": []})
+    else:
+        typer.echo(NO_PLUGINS_MESSAGE, err=True)
+    raise typer.Exit(code=1)
+
+
+def _command_entries(entry: LoadedPlugin) -> list[dict[str, str]]:
+    return [
+        {"name": command.name, "description": command.description or ""}
+        for command in entry.plugin.commands or []
+    ]
+
+
+def _list_all(loaded: list[LoadedPlugin], *, json_mode: bool) -> None:
+    if json_mode:
+        plugins = [
+            {
+                "name": entry.plugin.manifest.name,
+                "version": entry.plugin.manifest.version,
+                "commands": _command_entries(entry),
+            }
+            for entry in loaded
+        ]
+        emit_json("plugin", {"plugins": plugins})
         return
-    typer.echo(f"{len(loaded)} plugin(s) configured:")
+    typer.echo("Configured plugins:")
     for entry in loaded:
         manifest = entry.plugin.manifest
-        version = f" v{manifest.version}" if manifest.version else ""
+        version = f" (v{manifest.version})" if manifest.version else ""
         typer.echo(f"- {manifest.name}{version}")
-        for command in entry.plugin.commands or []:
-            description = (
-                f"  ({command.description})" if command.description else ""
-            )
-            typer.echo(f"    {manifest.name} {command.name}{description}")
+        commands = _command_entries(entry)
+        if not commands:
+            typer.echo("  (no commands)")
+            continue
+        for command in commands:
+            description = f": {command['description']}" if command["description"] else ""
+            typer.echo(f"  - {command['name']}{description}")
 
 
-def _list_one(entry: LoadedPlugin) -> None:
-    typer.echo(f"Plugin: {entry.plugin.manifest.name}")
-    commands = entry.plugin.commands or []
-    if not commands:
-        typer.echo("  (no commands registered)")
+def _list_one(entry: LoadedPlugin, *, json_mode: bool) -> None:
+    name = entry.plugin.manifest.name
+    commands = _command_entries(entry)
+    if json_mode:
+        emit_json("plugin", {"plugin": name, "commands": commands})
         return
+    if not commands:
+        typer.echo(f'Plugin "{name}" has no registered commands.')
+        return
+    typer.echo(f'Plugin commands for "{name}":')
     for command in commands:
-        description = f" — {command.description}" if command.description else ""
-        typer.echo(f"  {command.name}{description}")
+        description = f": {command['description']}" if command["description"] else ""
+        typer.echo(f"- {command['name']}{description}")
 
 
 def _split_positionals_and_flags(
@@ -151,6 +184,8 @@ def dispatch_plugin_command(
     runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    if invoking_command == "plugin" and not runtime.plugins:
+        _fail_no_plugins(json_mode=output_json)
 
     entry = next(
         (e for e in runtime.plugins if e.plugin.manifest.name == plugin_name), None
@@ -259,8 +294,10 @@ def run(
             [p for p in config.plugins if isinstance(p, ChxPlugin)]
         )
         loaded = list(runtime.plugins)
+        if not loaded:
+            _fail_no_plugins(json_mode=output_json)
         if plugin_name is None:
-            _list_all(loaded)
+            _list_all(loaded, json_mode=output_json)
             return
         entry = next(
             (e for e in loaded if e.plugin.manifest.name == plugin_name), None
@@ -271,7 +308,7 @@ def run(
                 f"Run `chkit plugin` to see registered plugins."
             )
             raise typer.BadParameter(msg)
-        _list_one(entry)
+        _list_one(entry, json_mode=output_json)
         return
 
     dispatch_plugin_command(
