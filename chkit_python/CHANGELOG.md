@@ -25,9 +25,10 @@
 
 ### Fixed
 - `generate` renders a projection `INDEX` whose expression holds a heredoc with a comma, such
-  as `($$a, -- b$$ || s)`, as written instead of as broken SQL, and no longer adds a space after
-  a comma inside the heredoc: commas, parentheses and keywords inside a heredoc or a comment no
-  longer count as structure (#596, fixed in TS too).
+  as `($$a, -- b$$ || s)`, as written instead of as broken SQL, and drops a `--` comment inside
+  engine arguments such as `Distributed(c -- note` + newline + `, db, t)` instead of letting it
+  swallow the rest of the engine: commas, parentheses and keywords inside a heredoc or a
+  comment no longer count as structure (#596, fixed in TS too).
 - `migrate` reads `//`, `# ` and `#!` comments as ClickHouse does, so a `;` inside one no
   longer runs the commented-out text after it as a statement, and a quote or `/*` inside one
   no longer joins statements (#562, fixed in TS too). A partly applied migration whose
