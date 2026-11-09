@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from chkit import __version__
 from chkit.plugins import (
+    ChxGetContextInput,
     ChxOnAfterApplyContext,
     ChxOnBeforeApplyContext,
     ChxOnBeforePluginCommandContext,
@@ -408,6 +409,22 @@ class PluginRuntime:
         if isinstance(before_result, ChxOnBeforePluginCommandHandled):
             return before_result.exit_code
 
+        # As TS runPluginCommand: the get_context hooks run right before the
+        # command, which gets a plugin's executor in place of its default one.
+        defaults = context.plugin_context
+        plugin_context = self.resolve_context(
+            ChxGetContextInput(
+                config=context.config,
+                config_path=context.config_path,
+                command=command_name,
+                flags=dict(context.flags),
+                defaults=defaults,
+            )
+        )
+        if plugin_context is defaults:
+            plugin_context = None
+        if plugin_context is not None:
+            context = replace(context, plugin_context=plugin_context)
         try:
             result = command.run(context)
         except Exception as cause:
@@ -417,6 +434,10 @@ class PluginRuntime:
             raise PluginExecutionError(
                 plugin_name, f"command:{command_name}", cause
             ) from cause
+        finally:
+            # The caller owns the default context; this closes only a plugin's own.
+            if plugin_context is not None:
+                self.dispose_context(plugin_context)
         return 0 if result is None else int(result)
 
     # ---------- helpers ----------

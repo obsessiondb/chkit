@@ -21,6 +21,7 @@ from chkit.cli.main import app
 CONFIG = """
 import dataclasses
 import json
+import sys
 
 from chkit import define_config
 from chkit.plugins import ChxPlugin, ChxPluginCommand, ChxPluginManifest
@@ -35,9 +36,17 @@ def _stub(name):
     return run
 
 
-def _stubbed(real):
+class _Hooks:
+    def on_init(self, ctx):
+        print("onInit " + ctx.command, file=sys.stderr)
+
+    def on_complete(self, ctx):
+        print("onComplete " + ctx.command, file=sys.stderr)
+
+
+def _stubbed(real, hooks):
     commands = [dataclasses.replace(c, run=_stub(c.name)) for c in real.commands]
-    return dataclasses.replace(real, hooks=None, commands=commands)
+    return dataclasses.replace(real, hooks=hooks, commands=commands)
 
 
 def _boom(_ctx):
@@ -55,7 +64,7 @@ echoer = ChxPlugin(
 config = define_config({
     "schema": "./schema.py",
     "outDir": "./chkit",
-    "plugins": [_stubbed(obsessiondb()), _stubbed(codegen()), echoer],
+    "plugins": [_stubbed(obsessiondb(), _Hooks()), _stubbed(codegen(), None), echoer],
 })
 """
 
@@ -117,7 +126,7 @@ def test_a_command_that_takes_no_arguments_rejects_them_before_it_runs(
     args: list[str], rest: str
 ) -> None:
     result = CliRunner().invoke(app, args)
-    # Nothing on stdout: the command never ran.
+    # Nothing on stdout and no hook on stderr: neither the command nor on_init ran.
     assert (result.exit_code, result.stdout, result.stderr.strip()) == (
         1,
         "",
@@ -154,18 +163,21 @@ def test_under_json_the_usage_envelope_names_the_command_typed(
 
 @pytest.mark.usefixtures("project")
 @pytest.mark.parametrize(
-    ("args", "stdout"),
+    ("args", "command", "stdout"),
     [
-        (["obsessiondb", "--", "login"], "RAN login []"),
-        (["obsessiondb", "login", "--"], "RAN login []"),
-        (["plugin", "obsessiondb", "--", "login"], "RAN login []"),
-        (["plugin", "--", "obsessiondb", "whoami"], "RAN whoami []"),
-        (["codegen"], "RAN codegen []"),
+        (["obsessiondb", "--", "login"], "obsessiondb", "RAN login []"),
+        (["obsessiondb", "login", "--"], "obsessiondb", "RAN login []"),
+        (["plugin", "obsessiondb", "--", "login"], "plugin", "RAN login []"),
+        (["plugin", "--", "obsessiondb", "whoami"], "plugin", "RAN whoami []"),
+        (["codegen"], "codegen", "RAN codegen []"),
     ],
 )
-def test_without_arguments_the_command_runs(args: list[str], stdout: str) -> None:
+def test_without_arguments_the_command_runs(
+    args: list[str], command: str, stdout: str
+) -> None:
     result = CliRunner().invoke(app, args)
     assert (result.exit_code, result.stdout.strip()) == (0, stdout), result.output
+    assert result.stderr.strip().splitlines() == [f"onInit {command}", f"onComplete {command}"]
 
 
 @pytest.mark.usefixtures("project")
