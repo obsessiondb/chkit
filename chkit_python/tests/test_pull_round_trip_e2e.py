@@ -301,3 +301,133 @@ def test_pull_uses_order_by_as_the_primary_key_a_table_does_not_declare(
             )
         finally:
             client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+
+
+def test_pull_then_generate_plans_nothing_for_objects_whose_names_need_escapes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Names that need escapes in SQL round-trip through pull (#639).
+
+    A table, its columns and key, a view and a materialized view (whose TO
+    target pull reads from the stored query), and a dictionary whose source
+    names the table. The views and the source spell the names as ClickHouse
+    stores them.
+    """
+    env = resolve_live_env()
+    database = f"{create_prefix('pull_esc_py')}db"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", create_journal_table_name("pull_esc_py"))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("CI", "1")
+    clickhouse = json.dumps({
+        "url": env.clickhouse_url,
+        "username": env.clickhouse_user,
+        "password": env.clickhouse_password,
+        "database": database,
+    })
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n"
+        "from chkit_plugin_obsessiondb import obsessiondb\n\n"
+        "config = define_config({\n"
+        '    "schema": "./schema.py",\n'
+        '    "outDir": "./chkit",\n'
+        '    "migrationsDir": "./chkit/migrations",\n'
+        '    "metaDir": "./chkit/meta",\n'
+        f'    "clickhouse": {clickhouse},\n'
+        '    "plugins": [obsessiondb()],\n'
+        "})\n"
+    )
+    # Python source for each value, so no backslash sits inside the f-string below.
+    q = {
+        "db": json.dumps(database),
+        "raw": json.dumps("raw\\q"),
+        "col": json.dumps("c\\q"),
+        "tick": json.dumps("c`d"),
+        "apos": json.dumps("c'e"),
+        "mv": json.dumps("mv\\q"),
+        "mv_as": json.dumps(f"SELECT id, toString(id) AS `c\\\\q` FROM {database}.src"),
+        "view": json.dumps("v\\q"),
+        "view_as": json.dumps(f"SELECT id FROM {database}.`raw\\\\q`"),
+        "a_view_as": json.dumps(f"SELECT id FROM {database}.`v\\\\q`"),
+        "dict": json.dumps("d\\q"),
+        "source": json.dumps(f"CLICKHOUSE(DB '{database}' TABLE 'raw\\\\q')"),
+    }
+    (tmp_path / "schema.py").write_text(f"""from chkit import dictionary, materialized_view, schema, table, view
+
+db = {q["db"]}
+
+definitions = schema(
+    table(
+        database=db, name="src", engine="MergeTree()", primary_key=["id"], order_by=["id"],
+        columns=[{{"name": "id", "type": "UInt64"}}],
+    ),
+    table(
+        database=db, name={q["raw"]}, engine="MergeTree()", primary_key=["id"],
+        order_by=["id", {q["col"]}],
+        columns=[
+            {{"name": "id", "type": "UInt64"}},
+            {{"name": {q["col"]}, "type": "String"}},
+            {{"name": {q["tick"]}, "type": "String"}},
+            {{"name": {q["apos"]}, "type": "String"}},
+        ],
+    ),
+    materialized_view(
+        database=db, name={q["mv"]}, to={{"database": db, "name": {q["raw"]}}},
+        as_={q["mv_as"]},
+    ),
+    view(database=db, name={q["view"]}, as_={q["view_as"]}),
+    view(database=db, name="a_view", as_={q["a_view_as"]}),
+    dictionary(
+        database=db, name={q["dict"]}, primary_key=["id"], layout="HASHED()",
+        lifetime="MIN 0 MAX 300",
+        source={q["source"]},
+        attributes=[{{"name": "id", "type": "UInt64"}}, {{"name": "v", "type": "String"}}],
+    ),
+)
+""")
+    runner = CliRunner()
+
+    def chkit(*args: str) -> Any:
+        return runner.invoke(app, list(args))
+
+    try:
+        generated = chkit("generate", "--name", "escapes", "--json")
+        assert generated.exit_code == 0, format_test_diagnostic("chkit generate", generated)
+        migrated = chkit("migrate", "--apply", "--json")
+        assert migrated.exit_code == 0, format_test_diagnostic("chkit migrate --apply", migrated)
+
+        def pull() -> Any:
+            return chkit(
+                "pull", "--database", database, "--out-file", "pulled.py", "--force", "--json"
+            )
+
+        pulled = poll_until(
+            pull,
+            lambda result: result.exit_code == 0
+            and json.loads(result.stdout)["definitionCount"] == 6,
+        )
+        assert pulled.exit_code == 0, format_test_diagnostic("chkit pull", pulled)
+        assert json.loads(pulled.stdout)["definitionCount"] == 6
+        pulled_content = (tmp_path / "pulled.py").read_text()
+
+        (tmp_path / "schema.py").write_text(pulled_content)
+        plan = chkit("generate", "--dryrun", "--json")
+        assert plan.exit_code == 0, format_test_diagnostic("chkit generate --dryrun", plan)
+        assert json.loads(plan.stdout)["operations"] == []
+
+        drift = chkit("drift", "--json")
+        assert drift.exit_code == 0, format_test_diagnostic("chkit drift", drift)
+        payload = json.loads(drift.stdout)
+        assert payload["tableDrift"] == []
+        assert payload["drifted"] is False
+    finally:
+        with ClickHouseClient.connect(
+            ChxResolvedClickHouseConfig(
+                url=env.clickhouse_url,
+                username=env.clickhouse_user,
+                password=env.clickhouse_password,
+                database=env.clickhouse_database,
+                secure=env.clickhouse_url.startswith("https:"),
+            )
+        ) as client:
+            client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")

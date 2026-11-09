@@ -45,6 +45,24 @@ const HEX_DIGIT = /[0-9A-Fa-f]/
 const HEREDOC_TAG = /[A-Za-z0-9_]/
 const EXPONENT = /^[eE][+-]?[0-9]/
 const HEX_EXPONENT = /^[pP][+-]?[0-9]/
+const HEX_BYTE = /^[0-9A-Fa-f]{2}$/
+const LAST_CONTROL_ASCII = 0x1f
+// ClickHouse's parseEscapeSequence: the escapes that stand for a control byte.
+const CONTROL_ESCAPES: Readonly<Record<string, string>> = {
+  '0': '\0',
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+}
+// Escaped characters that lose their backslash; any other escape keeps it, so
+// a LIKE pattern's `\%` stays `\%` (parseComplexEscapeSequence).
+const PLAIN_ESCAPES = new Set(['\\', "'", '"', '`', '/', '='])
+const UTF8 = new TextDecoder()
 
 export function tokenizeSQL(sql: string): SQLToken[] {
   const tokens: SQLToken[] = []
@@ -84,7 +102,7 @@ export function isTrivia(token: SQLToken): boolean {
 export function identifierName(token: SQLToken): string | undefined {
   if (token.kind === 'identifier') return token.text
   if (token.kind !== 'quoted_identifier' || !token.terminated) return undefined
-  return unescapeQuoted(token.text)
+  return unescapeQuoted(token.text.slice(1, -1), token.text[0])
 }
 
 /** The value of a terminated string literal (`'…'` or a `$tag$…$tag$` heredoc). */
@@ -94,7 +112,49 @@ export function stringLiteralValue(token: SQLToken): string | undefined {
     const tagLength = token.text.indexOf('$', 1) + 1
     return token.text.slice(tagLength, token.text.length - tagLength)
   }
-  return unescapeQuoted(token.text)
+  return unescapeQuoted(token.text.slice(1, -1), "'")
+}
+
+/**
+ * The value ClickHouse reads from the body of a quoted name or string literal
+ * (readQuotedString): a doubled `quote` is one quote, `\xHH` is a byte, `\N` is
+ * nothing, `\n` and the other control escapes are their byte, `\\`, `\'`, `\"`,
+ * `` \` ``, `\/` and `\=` drop the backslash, and any other escape keeps it
+ * (`\q` is `\q`). The bytes read as UTF-8. An invalid `\x` (`\xZZ`) stays as
+ * written, where ClickHouse reads an arbitrary byte.
+ */
+export function unescapeQuoted(body: string, quote = '`'): string {
+  let out = ''
+  let bytes: number[] = []
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i] ?? ''
+    const next = body[i + 1] ?? ''
+    if (char === '\\' && next === 'x' && HEX_BYTE.test(body.slice(i + 2, i + 4))) {
+      bytes.push(Number.parseInt(body.slice(i + 2, i + 4), 16))
+      i += 3
+      continue
+    }
+    if (bytes.length > 0) {
+      out += UTF8.decode(Uint8Array.from(bytes))
+      bytes = []
+    }
+    if (char === '\\' && next !== '') {
+      i += 1
+      if (next === 'N') continue
+      const decoded = CONTROL_ESCAPES[next] ?? next
+      // A raw control character after a backslash drops it too (isControlASCII).
+      if (!PLAIN_ESCAPES.has(decoded) && decoded.charCodeAt(0) > LAST_CONTROL_ASCII) out += '\\'
+      out += decoded
+      continue
+    }
+    if (char === quote && next === quote) {
+      out += quote
+      i += 1
+      continue
+    }
+    out += char
+  }
+  return bytes.length > 0 ? out + UTF8.decode(Uint8Array.from(bytes)) : out
 }
 
 // `previous` is the last token that is not trivia; ClickHouse uses it to tell
@@ -267,29 +327,6 @@ function firstAtOrAfter(offsets: number[], from: number): number | undefined {
     else high = middle
   }
   return offsets[low]
-}
-
-// Resolves a doubled delimiter and backslash escapes to the escaped character,
-// which is exact for the quotes and backslashes names and literals contain.
-function unescapeQuoted(text: string): string {
-  const quote = text[0] ?? ''
-  const body = text.slice(1, -1)
-  let out = ''
-  for (let i = 0; i < body.length; i += 1) {
-    const char = body[i] ?? ''
-    if (char === '\\' && i + 1 < body.length) {
-      out += body[i + 1]
-      i += 1
-      continue
-    }
-    if (char === quote && body[i + 1] === quote) {
-      out += quote
-      i += 1
-      continue
-    }
-    out += char
-  }
-  return out
 }
 
 function complete(kind: SQLTokenKind, end: number): TokenEnd {
