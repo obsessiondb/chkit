@@ -22,6 +22,7 @@ from chkit.core.column_default import (
 )
 from chkit.core.constraint import constraint_problem
 from chkit.core.engine import engine_name, supports_sort_order
+from chkit.core.identifier import describe_invalid_identifier
 from chkit.core.kafka import is_kafka_engine
 from chkit.core.key_clause import (
     is_plain_column_reference,
@@ -823,6 +824,41 @@ def _validate_dictionary(  # noqa: PLR0912
                 )
 
 
+def _collect_identifiers(definition: SchemaDefinition) -> list[tuple[str, str]]:
+    identifiers = [("database name", definition.database), ("name", definition.name)]
+    if isinstance(definition, TableDefinition):
+        identifiers += [("column name", column.name) for column in definition.columns]
+        identifiers += [("index name", index.name) for index in definition.indexes or []]
+        identifiers += [
+            ("constraint name", constraint.name) for constraint in definition.constraints or []
+        ]
+        identifiers += [
+            ("projection name", projection.name) for projection in definition.projections or []
+        ]
+    elif isinstance(definition, DictionaryDefinition):
+        identifiers += [("attribute name", attribute.name) for attribute in definition.attributes]
+    elif isinstance(definition, MaterializedViewDefinition):
+        identifiers.append(("target database name", definition.to.database))
+        identifiers.append(("target name", definition.to.name))
+    return identifiers
+
+
+# Names are quoted and escaped when rendered, so any character is safe except
+# those ClickHouse cannot store in a name. Catching them here gives a clear
+# error instead of a server-side failure (e.g. names from a CDC source catalog).
+def _validate_identifiers(definition: SchemaDefinition, issues: list[ValidationIssue]) -> None:
+    for label, name in _collect_identifiers(definition):
+        problem = describe_invalid_identifier(name)
+        if problem:
+            _push(
+                issues,
+                definition,
+                "invalid_identifier",
+                f"{definition.kind} {_js_string(definition.database)}."
+                f"{_js_string(definition.name)} {label} {_js_string(name)} {problem}",
+            )
+
+
 def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     object_keys: set[str] = set()
@@ -840,6 +876,7 @@ def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[Valida
             continue
         object_keys.add(key)
 
+        _validate_identifiers(definition, issues)
         if isinstance(definition, TableDefinition):
             _validate_table(definition, issues)
         elif isinstance(definition, MaterializedViewDefinition):

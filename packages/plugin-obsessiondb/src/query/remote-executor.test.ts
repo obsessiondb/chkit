@@ -249,6 +249,7 @@ describe('createRemoteExecutor introspection', () => {
 				{ kind: 'view', database: 'app', name: 'events_v', comment: '' },
 			])
 			expect(workbench.queries[0]).toContain('SELECT database, name, engine, comment')
+			expect(workbench.queries[0]).toContain("NOT startsWith(name, '_chkit_')")
 		} finally {
 			workbench.stop()
 		}

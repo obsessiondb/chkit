@@ -200,6 +200,31 @@ def test_explicit_renames_quote_names() -> None:
     ]
 
 
+def test_cross_database_renames_quote_the_new_database() -> None:
+    table_plan = apply_explicit_table_renames(
+        _plan(),
+        [TableRenameMapping(
+            old_database="repro", old_name="t", new_database="repro-old", new_name="t",
+            source="cli",
+        )],
+    )
+    assert [op.sql for op in table_plan.operations] == [
+        "CREATE DATABASE IF NOT EXISTS `repro-old`;",
+        "RENAME TABLE IF EXISTS repro.t TO `repro-old`.t;",
+    ]
+    dictionary_plan = apply_explicit_dictionary_renames(
+        _plan(),
+        [DictionaryRenameMapping(
+            old_database="repro", old_name="d", new_database="repro-old", new_name="d",
+            source="cli",
+        )],
+    )
+    assert [op.sql for op in dictionary_plan.operations] == [
+        "CREATE DATABASE IF NOT EXISTS `repro-old`;",
+        "RENAME DICTIONARY IF EXISTS repro.d TO `repro-old`.d;",
+    ]
+
+
 def test_on_cluster_lands_after_quoted_object_references() -> None:
     plan = _plan(
         MigrationOperation(
@@ -243,3 +268,42 @@ def test_a_comma_separated_expression_entry_is_still_split() -> None:
         order_by=["id, toDate(ts)"],
     )
     assert "ORDER BY (`id`, toDate(ts))" in to_create_sql(definition)
+
+
+def test_validate_definitions_rejects_unusable_identifiers() -> None:
+    issues = validate_definitions([
+        _events_table(
+            name="",
+            columns=[{"name": "id", "type": "UInt64"}, {"name": "a\x01", "type": "String"}],
+        )
+    ])
+    assert [(issue.code, issue.message) for issue in issues] == [
+        ("invalid_identifier", 'table "app"."" name "" is empty'),
+        (
+            "invalid_identifier",
+            'table "app"."" column name "a\\u0001" contains a control character',
+        ),
+    ]
+    assert [issue.code for issue in validate_definitions([_events_table(database="")])] == [
+        "invalid_identifier"
+    ]
+    issues = validate_definitions([
+        _events_table(
+            indexes=[{"name": "i\tx", "expression": "id", "type": "minmax", "granularity": 1}],
+            projections=[{"name": "p\rx", "query": "SELECT id ORDER BY id"}],
+        )
+    ])
+    assert [issue.code for issue in issues] == ["invalid_identifier", "invalid_identifier"]
+
+
+def test_validate_definitions_accepts_names_that_only_need_quoting() -> None:
+    definition = _events_table(
+        database="my-db",
+        name="a.b c`d",
+        columns=[
+            {"name": "id", "type": "UInt64"},
+            {"name": "weird`name", "type": "String"},
+            {"name": "ünïcødé", "type": "String"},
+        ],
+    )
+    assert validate_definitions([definition]) == []

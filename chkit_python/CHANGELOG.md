@@ -6,6 +6,16 @@
 - A `primary_key`, `order_by` or `unique_key` entry that names a column containing a comma
   (`"e,f)"`) is kept whole, as in TS, instead of failing validation; key entries are trimmed
   like TS (#523).
+- Validation rejects empty names and names with a control character (`invalid_identifier`),
+  as in TS (#490). This covers database, object, column, index, constraint, projection,
+  attribute and materialized view target names.
+- A table or dictionary rename into another database quotes that database in its
+  `CREATE DATABASE` statement (#490). A name such as `repro-old` no longer fails with a
+  syntax error.
+- `drift`, `check` and `pull` no longer skip tables such as `xchkit_events` (#490). They
+  skip only names that start with `_chkit_`. `drift` lists such a table as an extra
+  object, and `check` counts it. `pull` with no `--database` finds a database that holds
+  only such tables.
 
 ## 0.3.0 — 2026-11-06
 

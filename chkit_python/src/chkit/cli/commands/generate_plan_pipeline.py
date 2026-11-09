@@ -18,7 +18,7 @@ from chkit.cli.commands.generate_rename_mappings import (
     DictionaryRenameMapping,
     TableRenameMapping,
 )
-from chkit.core.identifier import quote_identifier, render_qualified_name
+from chkit.core.identifier import quote_identifier, render_identifier, render_qualified_name
 from chkit.core.model import (
     ColumnRenameSuggestion,
     MigrationOperation,
@@ -111,7 +111,10 @@ def apply_explicit_table_renames(
                         type="create_database",
                         key=db_key,
                         risk="safe",
-                        sql=f"CREATE DATABASE IF NOT EXISTS {mapping.new_database};",
+                        sql=(
+                            f"CREATE DATABASE IF NOT EXISTS "
+                            f"{render_identifier(mapping.new_database)};"
+                        ),
                     )
                 )
                 create_database_keys.add(db_key)
@@ -165,7 +168,10 @@ def apply_explicit_dictionary_renames(
                         type="create_database",
                         key=db_key,
                         risk="safe",
-                        sql=f"CREATE DATABASE IF NOT EXISTS {mapping.new_database};",
+                        sql=(
+                            f"CREATE DATABASE IF NOT EXISTS "
+                            f"{render_identifier(mapping.new_database)};"
+                        ),
                     )
                 )
                 create_database_keys.add(db_key)
