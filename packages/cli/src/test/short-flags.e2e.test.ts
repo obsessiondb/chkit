@@ -67,6 +67,38 @@ describe('@chkit/cli short flags (#491)', () => {
     }
   })
 
+  test('the last of several --config / -c flags picks the config, in every form (#574)', async () => {
+    const [first, last] = await Promise.all([createFixture(), createFixture(renderScopedSchema())])
+    try {
+      const plan = (configPath: string) => {
+        const result = runCli(['generate', '--config', configPath, '--dryrun', '--json'])
+        expect(result.exitCode).toBe(0)
+        return JSON.parse(result.stdout) as unknown
+      }
+      const expected = plan(last.configPath)
+      expect(plan(first.configPath)).not.toEqual(expected)
+
+      const a = first.configPath
+      const b = last.configPath
+      for (const args of [
+        ['generate', '--config', a, '--config', b],
+        ['generate', '-c', a, '-c', b],
+        ['generate', `-c=${a}`, `-c=${b}`],
+        ['generate', `--config=${a}`, `-c${b}`],
+        ['generate', '-c', a, '--config', b],
+        ['generate', '--config', a, '-c', b],
+        ['--config', a, 'generate', '-c', b],
+        ['-c', a, 'generate', `--config=${b}`],
+      ]) {
+        const result = runCli([...args, '--dryrun', '--json'])
+        expect([args, result.exitCode, result.stderr]).toEqual([args, 0, ''])
+        expect([args, JSON.parse(result.stdout)]).toEqual([args, expected])
+      }
+    } finally {
+      await Promise.all([first, last].map((fixture) => rm(fixture.dir, { recursive: true, force: true })))
+    }
+  }, 30_000)
+
   test('generate -n names the migration', async () => {
     const fixture = await createFixture()
     try {

@@ -23,8 +23,19 @@ describe('extractConfigPath', () => {
     expect(extractConfigPath(['query', '--', '--config', 'a.ts'])).toBeUndefined()
   })
 
-  test('first --config wins when multiple are present', () => {
-    expect(extractConfigPath(['--config', 'first.ts', '--config', 'second.ts'])).toBe('first.ts')
+  test('last --config wins when multiple are present, as parseFlags and chkit-py keep (#574)', () => {
+    expect(extractConfigPath(['--config', 'first.ts', '--config', 'second.ts'])).toBe('second.ts')
+    expect(extractConfigPath(['generate', '--config=first.ts', '--config=second.ts'])).toBe('second.ts')
+    expect(extractConfigPath(['generate', '--config', 'first.ts', '--config=second.ts'])).toBe('second.ts')
+    expect(extractConfigPath(['generate', '--config=first.ts', '--json', '--config', 'second.ts'])).toBe('second.ts')
+  })
+
+  test('a --config after "--" does not override an earlier one', () => {
+    expect(extractConfigPath(['query', '--config', 'a.ts', '--', '--config', 'b.ts'])).toBe('a.ts')
+  })
+
+  test('the value of --config is never read as another --config', () => {
+    expect(extractConfigPath(['--config', '--config=b.ts'])).toBe('--config=b.ts')
   })
 
   test('returns empty string when --config=  (empty value) is given', () => {
