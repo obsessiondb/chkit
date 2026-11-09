@@ -69,7 +69,7 @@ A changed query reports `query_mismatch` and a changed target `target_mismatch`,
 
 ### Keys and partition
 
-`ORDER BY`, `PRIMARY KEY`, the unique key and `PARTITION BY` are compared token by token with the clauses ClickHouse stores, ignoring whitespace, comments, one pair of parentheses around the whole clause, and how a name is quoted. A quoted name keeps its commas and spaces: a key on a column named `a, b` is not the key on columns `a` and `b`, and a column named `a b` is not `ab`.
+`ORDER BY`, `PRIMARY KEY`, the unique key and `PARTITION BY` are compared token by token with the clauses ClickHouse stores, ignoring whitespace, comments, one pair of parentheses around the whole clause, and how a name is quoted (`` `a\x41` `` and `aA` are the same column; a bare `NULL` is the literal, not a column named `null`). A quoted name keeps its commas and spaces: a key on a column named `a, b` is not the key on columns `a` and `b`, and a column named `a b` is not `ab`.
 
 ### SQL comments
 

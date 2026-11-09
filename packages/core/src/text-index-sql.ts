@@ -33,7 +33,8 @@ const QUOTED_IDENTIFIERS = new Set([
   'values',
 ])
 
-function stringLiteral(body: string): string {
+/** A string literal's body as the canonical literal of the bytes ClickHouse reads from it. */
+export function stringLiteral(body: string): string {
   const bytes: number[] = []
   for (let i = 0; i < body.length; ) {
     const char = body[i] ?? ''

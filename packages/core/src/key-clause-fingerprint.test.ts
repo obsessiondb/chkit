@@ -46,6 +46,31 @@ describe('@chkit/core key clause fingerprint', () => {
     expect(keyClauseFingerprint('`c\\`d`')).toBe(keyClauseFingerprint('`c``d`'))
     expect(keyClauseFingerprint('`c\\`d`')).not.toBe(keyClauseFingerprint('`c`, `d`'))
     expect(keyClauseFingerprint('`x\\\\`')).not.toBe(keyClauseFingerprint('`x`'))
+    expect(keyClauseFingerprint("`a''b`")).not.toBe(keyClauseFingerprint("`a'b`"))
+  })
+
+  test('a quoted name decodes its escapes as ClickHouse does', () => {
+    // ClickHouse reads `a\x41` as aA and `a\nb` with a newline, but keeps the
+    // backslash of an unknown escape: `a\q` names the column a\q, not aq.
+    expect(keyClauseFingerprint('`a\\x41`')).toBe(keyClauseFingerprint('aA'))
+    expect(keyClauseFingerprint('`a\\nb`')).toBe(keyClauseFingerprint('`a\nb`'))
+    expect(keyClauseFingerprint('`a\\q`')).toBe(keyClauseFingerprint('`a\\\\q`'))
+    expect(keyClauseFingerprint('`a\\q`')).not.toBe(keyClauseFingerprint('aq'))
+  })
+
+  test('a bare NULL is the literal, not a column named null', () => {
+    expect(keyClauseFingerprint('if(`null` = 1, a, b)')).not.toBe(keyClauseFingerprint('if(NULL = 1, a, b)'))
+    expect(keyClauseFingerprint('if(null = 1, a, b)')).not.toBe(keyClauseFingerprint('if("null" = 1, a, b)'))
+  })
+
+  test('the same strings as chkit-py', () => {
+    // tests/test_key_clause_fingerprint.py expects these exact strings.
+    expect(keyClauseFingerprint('`id`, `a, b`, `x\\`y`, "q\\\\z", toStartOfHour( ts ) -- c')).toBe(
+      "`'id' , `'a, b' , `'x`y' , `'q\\\\z' , `'toStartOfHour' ( `'ts' )"
+    )
+    expect(keyClauseFingerprint("if(NULL, `a\\x41`, '\\x41'), `\\xC3\\xA9`, `a\\xZZ`")).toBe(
+      "`'if' ( NULL , `'aA' , '\\x41' ) , `'\\xc3\\xa9' , `a\\xZZ`"
+    )
   })
 })
 
@@ -73,6 +98,40 @@ describe('@chkit/core planner: key parts that collide when joined (#558)', () =>
   test('whitespace and identifier quoting plan nothing', () => {
     expect(planTypes(['id', 'a, b', 'toStartOfHour(  id )'], ['`id`', '`a, b`', 'toStartOfHour(`id`)'])).toEqual([])
     expect(planTypes(['id', 'a b'], ['"id"', '"a b"'])).toEqual([])
+  })
+
+  test('a name spelled with or without escapes compares as the column ClickHouse reads', () => {
+    const escaped = (orderBy: string[]) =>
+      table({
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'a\\q', type: 'String' },
+          { name: 'aq', type: 'String' },
+          { name: 'eA', type: 'String' },
+        ],
+        orderBy,
+      })
+    const types = (from: string[], to: string[]) => planDiff([escaped(from)], [escaped(to)]).operations.map((op) => op.type)
+    expect(types(['id', 'a\\q'], ['id', '`a\\q`'])).toEqual([])
+    expect(types(['id', '`a\\q`'], ['id', 'aq'])).toEqual(['drop_table', 'create_table'])
+    expect(types(['id', 'eA'], ['id', '`e\\x41`'])).toEqual([])
+  })
+
+  test('a column named true compares equal however it is quoted, as ClickHouse writes it bare', () => {
+    const withTrue = (orderBy: string[]) =>
+      table({
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'true', type: 'UInt8' }],
+        orderBy,
+      })
+    // system.tables.sorting_key for ORDER BY (`id`, `true`) is `id, true`.
+    expect(planDiff([withTrue(['id', 'true'])], [withTrue(splitTopLevelComma('id, true'))]).operations).toEqual([])
+    expect(planDiff([withTrue(['id', '`true`'])], [withTrue(['id', 'true'])]).operations).toEqual([])
   })
 
   test('the key ClickHouse reports, split as pull splits it, plans nothing', () => {

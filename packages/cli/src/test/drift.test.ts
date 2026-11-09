@@ -1089,6 +1089,15 @@ describe('@chkit/cli drift comparer: a quoted key column holding a comma or spac
     expect(compareTableShape(schema, live, canonicalizer)).toBeNull()
   })
 
+  test('a column named null drifts against the NULL literal, a column named true does not', () => {
+    // ClickHouse always quotes a column named null, and writes one named true bare.
+    expect(compareTableShape(expected(['id', 'if(`null` = 1, id, 0)']), actual('id, if(NULL = 1, id, 0)'))?.reasonCodes).toEqual([
+      'primary_key_mismatch',
+      'order_by_mismatch',
+    ])
+    expect(compareTableShape(expected(['id', 'if(`true` = 1, id, 0)']), actual('id, if(true = 1, id, 0)'))).toBeNull()
+  })
+
   test('an expression split across entries or spaced differently reads clean', () => {
     expect(compareTableShape(expected(['id', 'cityHash64(a', 'b)']), actual('id, cityHash64(a, b)'))).toBeNull()
     expect(compareTableShape(expected(['id', 'toStartOfHour( id )']), actual('(id, toStartOfHour(id))'))).toBeNull()

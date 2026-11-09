@@ -28,7 +28,8 @@ _QUOTED_IDENTIFIERS = {
 }
 
 
-def _string_literal(body: str) -> str:
+def string_literal(body: str) -> str:
+    """A string literal's body as the canonical literal of the bytes ClickHouse reads from it."""
     data = bytearray()
     i = 0
     while i < len(body):
@@ -113,7 +114,7 @@ def text_sql_tokens(sql: str) -> list[str]:
             if not closed:
                 raise ValueError("Unterminated SQL quote")
             raw = sql[start:i]
-            tokens.append(_string_literal(raw[1:-1]) if char == "'" else raw)
+            tokens.append(string_literal(raw[1:-1]) if char == "'" else raw)
             continue
         if char == "$":
             # ClickHouse reads $tag$...$tag$ as a raw string and stores it as '...'.

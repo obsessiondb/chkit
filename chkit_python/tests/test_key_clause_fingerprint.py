@@ -87,13 +87,36 @@ def test_escaped_quotes_and_backslashes_in_a_name_stay_unambiguous() -> None:
     assert key_clause_fingerprint("`c\\`d`") == key_clause_fingerprint("`c``d`")
     assert key_clause_fingerprint("`c\\`d`") != key_clause_fingerprint("`c`, `d`")
     assert key_clause_fingerprint("`x\\\\`") != key_clause_fingerprint("`x`")
+    assert key_clause_fingerprint("`a''b`") != key_clause_fingerprint("`a'b`")
+
+
+def test_a_quoted_name_decodes_its_escapes_as_clickhouse_does() -> None:
+    # ClickHouse reads `a\x41` as aA and `a\nb` with a newline, but keeps the
+    # backslash of an unknown escape: `a\q` names the column a\q, not aq.
+    assert key_clause_fingerprint("`a\\x41`") == key_clause_fingerprint("aA")
+    assert key_clause_fingerprint("`a\\nb`") == key_clause_fingerprint("`a\nb`")
+    assert key_clause_fingerprint("`a\\q`") == key_clause_fingerprint("`a\\\\q`")
+    assert key_clause_fingerprint("`a\\q`") != key_clause_fingerprint("aq")
+
+
+def test_a_bare_null_is_the_literal_not_a_column_named_null() -> None:
+    assert key_clause_fingerprint("if(`null` = 1, a, b)") != key_clause_fingerprint(
+        "if(NULL = 1, a, b)"
+    )
+    assert key_clause_fingerprint("if(null = 1, a, b)") != key_clause_fingerprint(
+        'if("null" = 1, a, b)'
+    )
 
 
 def test_fingerprint_matches_the_ts_port() -> None:
-    # The exact string the TS keyClauseFingerprint returns for this input.
+    # packages/core/src/key-clause-fingerprint.test.ts expects these exact strings.
     assert (
         key_clause_fingerprint('`id`, `a, b`, `x\\`y`, "q\\\\z", toStartOfHour( ts ) -- c')
-        == "`id` , `a, b` , `x\\`y` , `q\\\\z` , `toStartOfHour` ( `ts` )"
+        == "`'id' , `'a, b' , `'x`y' , `'q\\\\z' , `'toStartOfHour' ( `'ts' )"
+    )
+    assert (
+        key_clause_fingerprint("if(NULL, `a\\x41`, '\\x41'), `\\xC3\\xA9`, `a\\xZZ`")
+        == "`'if' ( NULL , `'aA' , '\\x41' ) , `'\\xc3\\xa9' , `a\\xZZ`"
     )
 
 
@@ -133,6 +156,45 @@ def test_whitespace_and_identifier_quoting_plan_nothing() -> None:
     assert _plan_types(["id", "a b"], ['"id"', '"a b"']) == []
 
 
+def test_a_name_with_or_without_escapes_compares_as_the_column_clickhouse_reads() -> None:
+    def escaped(order_by: list[str]) -> TableDefinition:
+        return table(
+            database="app",
+            name="events",
+            engine="MergeTree()",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "a\\q", "type": "String"},
+                {"name": "aq", "type": "String"},
+                {"name": "eA", "type": "String"},
+            ],
+            order_by=order_by,
+        )
+
+    def types(old: list[str], new: list[str]) -> list[str]:
+        return [op.type for op in plan_diff([escaped(old)], [escaped(new)]).operations]
+
+    assert types(["id", "a\\q"], ["id", "`a\\q`"]) == []
+    assert types(["id", "`a\\q`"], ["id", "aq"]) == _RECREATE
+    assert types(["id", "eA"], ["id", "`e\\x41`"]) == []
+
+
+def test_a_column_named_true_compares_equal_however_it_is_quoted() -> None:
+    # ClickHouse writes it bare: sorting_key for ORDER BY (`id`, `true`) is `id, true`.
+    def with_true(order_by: list[str]) -> TableDefinition:
+        return table(
+            database="app",
+            name="events",
+            engine="MergeTree()",
+            columns=[{"name": "id", "type": "UInt64"}, {"name": "true", "type": "UInt8"}],
+            order_by=order_by,
+        )
+
+    pulled = split_top_level_comma("id, true")
+    assert plan_diff([with_true(["id", "true"])], [with_true(pulled)]).operations == []
+    assert plan_diff([with_true(["id", "`true`"])], [with_true(["id", "true"])]).operations == []
+
+
 def test_the_key_clickhouse_reports_split_as_pull_splits_it_plans_nothing() -> None:
     # system.tables.sorting_key for ORDER BY (`id`, `a, b`, `a b`, cityHash64(a,b)).
     pulled = split_top_level_comma("id, `a, b`, `a b`, cityHash64(a, b)")
@@ -169,6 +231,15 @@ def test_drift_the_key_as_clickhouse_reports_it_reads_clean() -> None:
             return None
 
     assert compare_table_shape(schema, live, _Identity()) is None
+
+
+def test_drift_a_column_named_null_against_the_null_literal() -> None:
+    # ClickHouse always quotes a column named null, and writes one named true bare.
+    assert _drift_codes(["id", "if(`null` = 1, id, 0)"], "id, if(NULL = 1, id, 0)") == [
+        "primary_key_mismatch",
+        "order_by_mismatch",
+    ]
+    assert _drift_codes(["id", "if(`true` = 1, id, 0)"], "id, if(true = 1, id, 0)") is None
 
 
 def test_drift_an_expression_split_or_spaced_differently_reads_clean() -> None:
