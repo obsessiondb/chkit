@@ -240,8 +240,11 @@ function stripGlobalFlags(argv: string[]): {
 		const tableToken = expandShortFlags([token], [TABLE_FLAG])[0] as string
 		if (rest.length < 2 && (tableToken === '--table' || tableToken.startsWith('--table='))) {
 			leadingTable.push(tableToken)
-			if (tableToken === '--table' && i + 1 < argv.length) {
-				leadingTable.push(argv[i + 1] as string)
+			// Without a value (as parseFlags reads it), the target reports the missing
+			// value and the next flag, such as --json, still counts.
+			const value = argv[i + 1]
+			if (tableToken === '--table' && value !== undefined && !value.startsWith('--')) {
+				leadingTable.push(value)
 				i++
 			}
 			continue

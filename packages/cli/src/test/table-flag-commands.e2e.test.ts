@@ -131,6 +131,11 @@ describe('@chkit/cli --table only where it scopes the command (#565)', () => {
       const named = runCli(['archive', '--table', 'restore', 'backup', ...config], fixture.dir)
       expect([named.exitCode, named.stdout.trim()]).toEqual([0, 'backup restore'])
 
+      // A leading --table without a value does not take the next flag as its value.
+      const missing = runCli(['plugin', '--table', '--json', 'archive', 'backup', ...config], fixture.dir)
+      expect(missing.exitCode).toBe(1)
+      expect(JSON.parse(missing.stdout)).toMatchObject({ ok: false, error: 'Missing value for --table' })
+
       for (const args of [
         ['archive', '--table', 'app.users', 'restore', ...config],
         ['plugin', '--table', 'app.users', 'archive', 'restore', ...config],
