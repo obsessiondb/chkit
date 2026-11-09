@@ -58,7 +58,7 @@ Operations run in groups. Without a rename, the order is drops, then `ALTER` sta
 - the column expressions (`DEFAULT`, `MATERIALIZED`, `ALIAS`, and `EPHEMERAL`) of a table that is created or dropped, such as a default that calls `dictGet`
 - a dictionary's `CLICKHOUSE` source, as `TABLE`/`DB` or `QUERY`
 
-Apart from those name arguments and source parameters, names inside string literals and comments are ignored. Objects with no dependency inside the migration keep the kind-then-name order, and objects that reference each other in a cycle keep that order among themselves. Only dependencies inside the migration count: a refreshable materialized view whose `DEPENDS ON` target already exists is ordered like any other object.
+Apart from those name arguments and source parameters, names inside string literals and comments are ignored. A quoted name or string is read as ClickHouse reads it: `` `events\x5fraw` `` is `events_raw`, while `` `raw\q` `` keeps its backslash. Objects with no dependency inside the migration keep the kind-then-name order, and objects that reference each other in a cycle keep that order among themselves. Only dependencies inside the migration count: a refreshable materialized view whose `DEPENDS ON` target already exists is ordered like any other object.
 
 `ALTER` statements are not reordered. A migration that adds or modifies a column whose expression calls `dictGet` on a dictionary created in the same migration fails, because the `ALTER` runs before the dictionary exists. A migration that drops a dictionary and also drops or changes the column expression that calls it fails too, because the dictionary drop runs first. Split such a change into two migrations: create the dictionary first, or change the column first.
 
