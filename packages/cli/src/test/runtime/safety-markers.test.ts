@@ -243,6 +243,15 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     ['a comment naming another table before it', '/* TABLE default.wrong */ DROP TABLE default.events;', 'drop_table', 'default.events'],
     ['a comment and a string around it', "DROP TABLE default.events /* 'x */ -- y\n;", 'drop_table', 'default.events'],
     ['a quoted name', 'DETACH TABLE `events`;', 'detach', 'events'],
+    // ClickHouse reads U+2018...U+2019 as a string, so the ASCII quotes inside are text;
+    // the chkit lexer does not, and pairs them across the DROP.
+    [
+      'Unicode-quoted strings holding ASCII quotes around it',
+      "ALTER TABLE t COMMENT COLUMN x ‘it's’, DROP COLUMN y, COMMENT COLUMN z ‘it's’;",
+      'alter_table_drop_column',
+      't',
+    ],
+    ['a Unicode-quoted string holding a comment opener before it', 'ALTER TABLE t COMMENT COLUMN x ‘/*’, DROP COLUMN y;', 'alter_table_drop_column', 't'],
   ]
   for (const [label, sql, type, key] of flagged) {
     test(`flags a destructive statement with ${label}`, () => {

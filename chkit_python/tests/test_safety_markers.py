@@ -245,6 +245,14 @@ def test_scan_ignores_destructive_text_in_comments_strings_and_names(sql: str) -
         ("/* TABLE default.wrong */ DROP TABLE default.events;", "drop_table", "default.events"),
         ("DROP TABLE default.events /* 'x */ -- y\n;", "drop_table", "default.events"),
         ("DETACH TABLE `events`;", "detach", "events"),
+        # ClickHouse reads U+2018...U+2019 as a string, so the ASCII quotes inside
+        # are text; the chkit lexer does not, and pairs them across the DROP.
+        (
+            "ALTER TABLE t COMMENT COLUMN x \u2018it's\u2019, DROP COLUMN y, COMMENT COLUMN z \u2018it's\u2019;",
+            "alter_table_drop_column",
+            "t",
+        ),
+        ("ALTER TABLE t COMMENT COLUMN x \u2018/*\u2019, DROP COLUMN y;", "alter_table_drop_column", "t"),
     ],
 )
 def test_scan_flags_destructive_statement_around_comments(sql: str, type_: str, key: str) -> None:

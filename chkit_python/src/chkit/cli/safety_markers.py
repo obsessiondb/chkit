@@ -317,10 +317,19 @@ def collect_destructive_operation_markers(
     return markers
 
 
+# ClickHouse also quotes with U+2018/U+2019 (a string) and U+201C/U+201D (a
+# name), which the lexer does not know: it can read an ASCII quote or comment
+# opener inside one as live and so hide real SQL. Where one of these characters
+# appears, the raw text is matched too.
+_UNICODE_QUOTE = re.compile("[\u2018\u2019\u201c\u201d]")
+
+
 def _classify_destructive_statement(statement: str) -> str | None:
-    code = _code_text(statement, blank_quoted=True)
+    texts = [_code_text(statement, blank_quoted=True)]
+    if _UNICODE_QUOTE.search(statement):
+        texts.append(statement)
     for type_, pattern in _DESTRUCTIVE_SQL_RULES:
-        if pattern.search(code):
+        if any(pattern.search(text) for text in texts):
             return type_
     return None
 

@@ -218,10 +218,17 @@ const DESTRUCTIVE_SQL_RULES: Array<{ type: string; re: RegExp }> = [
   { type: 'detach', re: /\bDETACH\s+(?:TABLE|VIEW|DICTIONARY|DATABASE|PARTITION|PART)\b/i },
 ]
 
+// ClickHouse also quotes with U+2018/U+2019 (a string) and U+201C/U+201D (a
+// name), which the lexer does not know: it can read an ASCII quote or comment
+// opener inside one as live and so hide real SQL. Where one of these characters
+// appears, the raw text is matched too.
+const UNICODE_QUOTE = /[\u2018\u2019\u201C\u201D]/
+
 function classifyDestructiveStatement(statement: string): string | null {
-  const code = codeText(statement, { blankQuoted: true })
+  const texts = [codeText(statement, { blankQuoted: true })]
+  if (UNICODE_QUOTE.test(statement)) texts.push(statement)
   for (const rule of DESTRUCTIVE_SQL_RULES) {
-    if (rule.re.test(code)) return rule.type
+    if (texts.some((text) => rule.re.test(text))) return rule.type
   }
   return null
 }
