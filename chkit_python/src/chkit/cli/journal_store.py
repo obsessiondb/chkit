@@ -427,11 +427,7 @@ class JournalStore:
             try:
                 self._client.query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
             except Exception as exc:
-                # A table this replica does not show yet has no rows to read either.
-                if not (
-                    _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER)
-                    or _is_clickhouse_error(exc, _UNKNOWN_TABLE)
-                ):
+                if not _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
                     raise
                 return False
             return True

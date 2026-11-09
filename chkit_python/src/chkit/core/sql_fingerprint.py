@@ -43,11 +43,17 @@ def statement_fingerprint(statement: str) -> str:
     return f"v1:{digest.hexdigest()}"
 
 
+_ROWS_START = frozenset({"SELECT", "WITH", "VALUES"})
+
+
 def _inline_data_start(tokens: Sequence[SQLToken]) -> int | None:
     """Where the inline data of ``INSERT … FORMAT <name>`` starts.
 
-    Right after the format name of the first ``FORMAT`` outside parentheses;
-    None for any other statement.
+    Right after the format name. The clause is a ``FORMAT`` outside
+    parentheses, followed by a name, that is neither the table name nor after
+    the ``SELECT``, ``WITH`` or ``VALUES`` that starts the rows another way.
+    None for any other statement. A misreading only makes the fingerprint
+    stricter.
     """
     if not tokens or tokens[0].text.upper() != "INSERT":
         return None
@@ -57,6 +63,18 @@ def _inline_data_start(tokens: Sequence[SQLToken]) -> int | None:
             depth += 1
         elif token.text == ")":
             depth -= 1
-        elif depth == 0 and token.kind == "identifier" and token.text.upper() == "FORMAT":
-            return tokens[index + 1].end if index + 1 < len(tokens) else None
+        if depth != 0 or token.kind != "identifier":
+            continue
+        word = token.text.upper()
+        if word in _ROWS_START:
+            return None
+        previous = tokens[index - 1].text.upper() if index > 0 else None
+        name = tokens[index + 1] if index + 1 < len(tokens) else None
+        if (
+            word == "FORMAT"
+            and previous not in ("INTO", "TABLE")
+            and name is not None
+            and name.kind == "identifier"
+        ):
+            return name.end
     return None

@@ -379,8 +379,7 @@ SETTINGS index_granularity = 1`
         await db.query(`SELECT ${FINGERPRINTS_COLUMN} FROM ${journalTable} LIMIT 0`)
         return true
       } catch (error) {
-        // A table this replica does not show yet has no rows to read either.
-        if (!isClickHouseError(error, UNKNOWN_IDENTIFIER) && !isClickHouseError(error, UNKNOWN_TABLE)) throw error
+        if (!isClickHouseError(error, UNKNOWN_IDENTIFIER)) throw error
         debug('journal', `journal table has no ${FINGERPRINTS_COLUMN} column`)
         return false
       }

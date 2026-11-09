@@ -36,8 +36,10 @@ export function statementFingerprint(statement: string): string {
 
 /**
  * Where the inline data of `INSERT … FORMAT <name>` starts: right after the
- * format name of the first `FORMAT` outside parentheses. Undefined for any
- * other statement.
+ * format name. The clause is a `FORMAT` outside parentheses, followed by a
+ * name, that is neither the table name nor after the `SELECT`, `WITH` or
+ * `VALUES` that starts the rows another way. Undefined for any other
+ * statement. A misreading only makes the fingerprint stricter.
  */
 function inlineDataStart(tokens: readonly SQLToken[]): number | undefined {
   if (tokens[0]?.text.toUpperCase() !== 'INSERT') return undefined
@@ -45,10 +47,16 @@ function inlineDataStart(tokens: readonly SQLToken[]): number | undefined {
   for (const [index, token] of tokens.entries()) {
     if (token.text === '(') depth += 1
     else if (token.text === ')') depth -= 1
-    else if (depth === 0 && token.kind === 'identifier' && token.text.toUpperCase() === 'FORMAT') {
-      const name = tokens[index + 1]
-      return name === undefined ? undefined : name.end
+    if (depth !== 0 || token.kind !== 'identifier') continue
+    const word = token.text.toUpperCase()
+    if (ROWS_START.has(word)) return undefined
+    const previous = tokens[index - 1]?.text.toUpperCase()
+    const name = tokens[index + 1]
+    if (word === 'FORMAT' && previous !== 'INTO' && previous !== 'TABLE' && name?.kind === 'identifier') {
+      return name.end
     }
   }
   return undefined
 }
+
+const ROWS_START = new Set(['SELECT', 'WITH', 'VALUES'])

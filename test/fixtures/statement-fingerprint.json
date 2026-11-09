@@ -86,6 +86,20 @@
         "INSERT INTO t FORMAT CSV\n1,2\n;",
         "INSERT /* c */ INTO  t -- c\nFORMAT CSV\n1,2\n;"
       ]
+    },
+    {
+      "name": "format() and names called format in an INSERT are SQL, not a FORMAT clause",
+      "sql": [
+        "INSERT INTO t SELECT format('{}', 'x') AS format FROM s;",
+        "INSERT INTO t SELECT format( '{}' , 'x' ) AS format -- c\nFROM s"
+      ]
+    },
+    {
+      "name": "a table named format is not a FORMAT clause",
+      "sql": [
+        "INSERT INTO format VALUES (1);",
+        "INSERT INTO format VALUES ( 1 ) ;"
+      ]
     }
   ],
   "different": [
@@ -144,6 +158,13 @@
         "INSERT INTO t FORMAT TabSeparated\nalpha beta -- x\n;",
         "INSERT INTO t FORMAT TabSeparated\nalpha beta\n",
         "INSERT INTO t FORMAT TSV\nalpha beta\n;"
+      ]
+    },
+    {
+      "name": "the inline data after FORMAT on a table named format still counts byte for byte",
+      "sql": [
+        "INSERT INTO format FORMAT CSV\n1,2\n;",
+        "INSERT INTO format FORMAT CSV\n1, 2\n;"
       ]
     }
   ]
