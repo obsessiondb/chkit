@@ -195,4 +195,52 @@ describe('@chkit/cli short flags (#491)', () => {
       await rm(dir, { recursive: true, force: true })
     }
   })
+
+  test('init rejects stray arguments and an invalid --connect with chkit-py messages (#569)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-init-args-'))
+    try {
+      // Resolvable @chkit/core, so init does not install dependencies.
+      await mkdir(join(dir, 'node_modules/@chkit'), { recursive: true })
+      await symlink(join(WORKSPACE_ROOT, 'packages/core'), join(dir, 'node_modules/@chkit/core'))
+      await writeFile(join(dir, 'package.json'), '{"name":"init-args","private":true,"type":"module"}\n')
+
+      const invalidConnect = (value: string) =>
+        `Invalid value for '--connect': '${value}' is not one of 'claim', 'account', 'clickhouse', 'later'.`
+      for (const [args, message] of [
+        [['init', 'foo', '-y'], 'Got unexpected extra argument(s) (foo)'],
+        [['init', '-y', 'foo', 'bar'], 'Got unexpected extra argument(s) (foo bar)'],
+        [['init', '--connect', 'claim', '-', '-y'], 'Got unexpected extra argument(s) (-)'],
+        [['init', '--connect', 'bogus', '-y'], invalidConnect('bogus')],
+        [['init', '--connect=CLAIM', '-y'], invalidConnect('CLAIM')],
+        [['init', '--connect='], invalidConnect('')],
+        // Without -y, a typo used to fall through onboarding into the claim flow.
+        [['init', '--connect', 'clam'], invalidConnect('clam')],
+        // --connect is checked first, as click does.
+        [['init', '--connect', 'bogus', 'foo'], invalidConnect('bogus')],
+      ] as const) {
+        const result = runCli([...args], dir)
+        expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([args, 1, '', message])
+      }
+      expect(existsSync(join(dir, 'clickhouse.config.ts'))).toBe(false)
+      expect(existsSync(join(dir, 'src'))).toBe(false)
+
+      // init takes no --json, so the usage envelope names that flag first, as before.
+      const json = runCli(['init', 'foo', '--connect', 'bogus', '--json'], dir)
+      expect(json.exitCode).toBe(1)
+      expect(JSON.parse(json.stdout)).toEqual({
+        command: 'init',
+        schemaVersion: 1,
+        ok: false,
+        error: { code: 'usage', message: 'Unknown flag: --json' },
+      })
+
+      for (const choice of ['claim', 'account', 'clickhouse', 'later']) {
+        const accepted = runCli(['init', '--connect', choice, '-y'], dir)
+        expect([choice, accepted.exitCode]).toEqual([choice, 0])
+      }
+      expect(existsSync(join(dir, 'clickhouse.config.ts'))).toBe(true)
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
 })
