@@ -4,7 +4,6 @@ such as ``-fd`` is an unknown option, ``-h`` is help and ``-v`` the version."""
 from __future__ import annotations
 
 import json
-import re
 from pathlib import Path
 from typing import Any
 
@@ -15,9 +14,6 @@ from typer.testing import CliRunner
 from chkit import __version__
 from chkit.cli.commands import codegen_shortcut
 from chkit.cli.main import _normalize_short_options, app
-
-# CI forces rich to colour usage errors.
-ANSI_STYLE = re.compile(r"\x1b\[[0-9;]*m")
 
 CONFIG = (
     'from chkit import define_config\n\nconfig = define_config({"schema": "./schema.py", '
@@ -62,18 +58,17 @@ def test_a_bundle_of_short_flags_is_an_unknown_option(project: Path) -> None:
         (["pull", "-fd", "app"], "-fd"),
         (["init", "-yh"], "-yh"),
         (["status", "-hx"], "-hx"),
-        (["init", "-y=1"], "-y=1"),
+        (["init", "-y=1"], "--yes=1"),
     ):
         result = CliRunner().invoke(app, args)
-        assert result.exit_code == 2, (args, result.output)
-        assert f"No such option: {token}" in ANSI_STYLE.sub("", result.output), args
+        assert (result.exit_code, result.stderr) == (1, f"Unknown flag: {token}\n"), args
     assert not (project / "src").exists()
 
 
 def test_a_value_that_looks_like_a_short_flag_is_kept() -> None:
     params = get_command(app).commands["generate"].params  # type: ignore[attr-defined]
     assert _normalize_short_options(
-        None, ["--name", "-t=x", "-t=app.users", "--", "-c=y"], params
+        ["--name", "-t=x", "-t=app.users", "--", "-c=y"], params
     ) == ["--name", "-t=x", "-t", "app.users", "--", "-c=y"]
 
 
@@ -110,11 +105,12 @@ def test_a_forwarder_option_without_its_value_is_a_usage_error() -> None:
         for option in ("--config", "-c"):
             args = [*command, "--out-file", "-hmodels.py", option]
             result = CliRunner().invoke(app, args)
-            output = ANSI_STYLE.sub("", result.output)
-            assert result.exit_code == 2, (args, output)
-            assert f"Option '{option}' requires an argument." in output, args
-            # A usage error, not the help that a forwarded -h would print.
-            assert "Options" not in output, args
+            # A usage error (#563), not the help that a forwarded -h would print.
+            assert (result.exit_code, result.stdout, result.stderr) == (
+                1,
+                "",
+                "Missing value for --config\n",
+            ), args
 
 
 def test_h_is_help_and_v_is_the_version() -> None:
