@@ -14,7 +14,7 @@ import {
 } from '../plugins.js'
 import type { CommandRegistry, RegisteredCommand } from './command-registry.js'
 import { debug } from './debug.js'
-import { GLOBAL_FLAGS } from './global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from './global-flags.js'
 import {
 	emitJson,
 	emitJsonError,
@@ -211,10 +211,9 @@ function forwarderFlags(argsAfterCommand: string[]): {
 	flags: ParsedFlags
 	rest: string[]
 } {
-	const { jsonMode, tableSelector, rest } = stripGlobalFlags(argsAfterCommand)
+	const { jsonMode, rest } = stripGlobalFlags(argsAfterCommand)
 	const flags: ParsedFlags = {}
 	if (jsonMode) flags['--json'] = true
-	if (tableSelector) flags['--table'] = tableSelector
 	return { flags, rest }
 }
 
@@ -226,8 +225,11 @@ function matchSubcommand(
 	| { ok: true; name: string | undefined }
 	| { ok: false; token: string | undefined } {
 	if (!resolved.subcommands) return { ok: true, name: undefined }
+	// A subcommand may declare --table, so its value is never the subcommand name;
+	// the subcommand's own flag parsing then accepts or rejects it (#565).
 	const commandToken = extractPositionals(argsAfterCommand, [
 		...globalFlags,
+		TABLE_FLAG,
 		...resolved.flags,
 	])[0]
 	const matchedSub = resolved.subcommands.find((s) => s.name === commandToken)
@@ -238,14 +240,16 @@ function matchSubcommand(
 	return { ok: false, token: commandToken }
 }
 
+// `--table` is not global: it stays in the rest, for the target command to accept or
+// reject (#565). One given before the plugin and command names moves behind them, so
+// it is never read as either.
 function stripGlobalFlags(argv: string[]): {
 	jsonMode: boolean
-	tableSelector: string | undefined
 	rest: string[]
 } {
 	const rest: string[] = []
+	const leadingTable: string[] = []
 	let jsonMode = false
-	let tableSelector: string | undefined
 
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i] as string
@@ -260,19 +264,22 @@ function stripGlobalFlags(argv: string[]): {
 		if (token.startsWith('--config=')) {
 			continue
 		}
-		if (token === '--table' && i + 1 < argv.length) {
-			tableSelector = argv[i + 1]
-			i++
-			continue
-		}
-		if (token.startsWith('--table=')) {
-			tableSelector = token.slice('--table='.length)
+		const tableToken = expandShortFlags([token], [TABLE_FLAG])[0] as string
+		if (rest.length < 2 && (tableToken === '--table' || tableToken.startsWith('--table='))) {
+			leadingTable.push(tableToken)
+			// Without a value (as parseFlags reads it), the target reports the missing
+			// value and the next flag, such as --json, still counts.
+			const value = argv[i + 1]
+			if (tableToken === '--table' && value !== undefined && !value.startsWith('--')) {
+				leadingTable.push(value)
+				i++
+			}
 			continue
 		}
 		rest.push(token)
 	}
 
-	return { jsonMode, tableSelector, rest }
+	return { jsonMode, rest: [...rest.slice(0, 2), ...leadingTable, ...rest.slice(2)] }
 }
 
 export function parseFlagsOrReport(
@@ -375,8 +382,9 @@ export async function runResolvedCommand(input: {
 		}
 	}
 
-	const gf = typedFlags(flags, GLOBAL_FLAGS)
+	const gf = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)
 	const jsonMode = gf['--json'] === true
+	// Set only when the command declares --table (#565).
 	const tableScope = await resolvePluginTableScope({
 		schemaGlobs: input.config.schema,
 		tableSelector: gf['--table'],

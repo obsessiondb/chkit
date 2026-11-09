@@ -58,7 +58,7 @@ CASES = [
     (["init", "-yx"], "Unknown flag: -yx"),
     (["init", "-y=1"], "Unknown flag: --yes=1"),
     (["drift", "--table"], "Missing value for --table"),
-    (["status", "-t"], "Missing value for --table"),
+    (["check", "-t"], "Missing value for --table"),
     (["generate", "-n"], "Missing value for --name"),
     # A value flag followed by a `--` token has no value, as in TS.
     (["generate", "--name", "--dryrun"], "Missing value for --name"),

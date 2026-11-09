@@ -160,12 +160,12 @@ describe('@chkit/cli short flags (#491)', () => {
     const help = runCli(['-h'])
     expect(help.exitCode).toBe(0)
     expect(help.stdout).toContain('-c, --config <path>')
-    expect(help.stdout).toContain('-t, --table <selector>')
     expect(help.stdout).toContain('-v, -V, --version')
 
     const generateHelp = runCli(['generate', '-h'])
     expect(generateHelp.exitCode).toBe(0)
     expect(generateHelp.stdout).toContain('-n, --name <name>')
+    expect(generateHelp.stdout).toContain('-t, --table <selector>')
   })
 
   test('init rejects unknown flags before writing anything and accepts -y', async () => {

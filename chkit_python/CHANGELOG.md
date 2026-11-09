@@ -7,6 +7,9 @@
   chkit-py's short flags too, so both CLIs take the same ones.
 
 ### Changed
+- `status` rejects `--table`/`-t` as `No such option` instead of accepting and ignoring it
+  (#565). As in TS, only `generate`, `migrate`, `check` and `drift` take it, and
+  `snapshot rebuild` rejects it with its own message.
 - Short flags read as in TS (#491): `-t=x` is `--table x` (it was the table `=x`), and a
   bundle such as `pull -fo out.py` is rejected as `Unknown flag: -fo` instead of being
   split. `-tx` keeps working.

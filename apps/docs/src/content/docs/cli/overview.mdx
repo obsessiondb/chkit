@@ -57,21 +57,21 @@ These flags are available on every command that loads a config file:
 |------|------|---------|-------------|
 | `-c`, `--config <path>` | string | `clickhouse.config.ts` / `clickhouse.config.py` | Path to the chkit config file |
 | `--json` | boolean | `false` | Emit machine-readable JSON output |
-| `-t`, `--table <selector>` | string | n/a | Narrow some commands to matching tables (exact name or trailing wildcard prefix, e.g. `events_*`). Effect varies per command: see note below |
 | `-h`, `--help` | boolean | n/a | Show built-in help without evaluating project config |
 | `--help-plugins` | boolean | n/a | Include configured plugin flags; evaluates config/plugin registration but skips lifecycle hooks |
 | `-v`, `-V`, `--version` | boolean | n/a | Print CLI version |
 
-Both CLIs accept the same short forms: the ones in these tables, `generate -n`, `pull -o`/`-d`/`-f` and `init -y`. A short flag takes its value as `-t events`, `-t=events` or `-tevents`. Short flags cannot be bundled: `-fo out.ts` is an unknown flag. `-v`/`-V` work only before a command. Any other short flag, such as `-x`, is rejected as an unknown flag, the same as an unknown long flag. Before the config is loaded, chkit does not know which flags its plugins add, so a plugin flag value that starts with `-c` or `-t` (`--tag -critical`) reads as `--config` or `--table`; write it with `=` (`--tag=-critical`). Given more than once, `--config` keeps the last path: `-c a.ts --config b.ts` loads `b.ts`.
+Both CLIs accept the same short forms: the ones in these tables, `-t` for `--table`, `generate -n`, `pull -o`/`-d`/`-f` and `init -y`. A short flag takes its value as `-t events`, `-t=events` or `-tevents`. Short flags cannot be bundled: `-fo out.ts` is an unknown flag. `-v`/`-V` work only before a command. Any other short flag, such as `-x`, is rejected as an unknown flag, the same as an unknown long flag. Before the config is loaded, chkit does not know which flags its plugins add, so a plugin flag value that starts with `-c` (`--tag -critical`) reads as `--config`, and on the commands that take `--table` one that starts with `-t` reads as `--table`; write it with `=` (`--tag=-critical`). Given more than once, `--config` keeps the last path: `-c a.ts --config b.ts` loads `b.ts`.
 
-The effect of `--table` depends on the command:
+### Table scope
+
+`-t`, `--table <selector>` narrows a command to matching tables: an exact name or a trailing wildcard prefix, such as `events_*`. Only the commands it scopes take it:
 
 - `generate`, `migrate`, and `drift` use it to narrow the schema/migration operations they plan or evaluate.
 - `check` applies it only to its drift and plugin checks; the pending-migration and checksum checks still run across **all** tables, so `chkit check --table app.users` can still fail on an unrelated pending migration.
-- `status`, `codegen`, and `pull` accept the flag but ignore it, so `chkit status --table app.users` still reports unscoped totals.
 - `snapshot rebuild` rejects it: a rebuild always rewrites the whole snapshot.
 
-Check the command reference before relying on table filtering.
+Every other command, including `status`, `query`, `codegen`, `pull` and `chkit plugin <name> <command>`, rejects it as an unknown flag instead of running unscoped. A plugin command takes it only when the plugin declares a `--table` flag.
 
 ## Environment variables
 
