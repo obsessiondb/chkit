@@ -52,6 +52,9 @@ class _MissingDatabaseJournalStore:
     def read_journal(self, **_kwargs: Any) -> MigrationJournal:
         return MigrationJournal(applied=[])
 
+    def read_in_progress(self) -> list[Any]:
+        return []
+
 
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
