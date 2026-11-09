@@ -100,7 +100,7 @@ export function nonSelectBarrierError(barriers: readonly PendingNonSelectBarrier
     'Cannot apply: a statement marked mode=barrier is not a SELECT:\n' +
       `${lines.join('\n')}\n` +
       'chkit runs a barrier statement as a read of the running INSERTs, once and then every second, and waits for no change it makes to reach every replica.\n' +
-      'Make each statement a SELECT (or WITH ... SELECT) that returns a query_id column, or remove mode=barrier from its -- operation: marker, then re-run chkit migrate --apply. Nothing was applied.',
+      'Make each statement a SELECT (or WITH ... SELECT) that returns a query_id column, or remove mode=barrier from its -- operation: marker, then re-run chkit migrate --apply. No statement of these migrations ran.',
   )
 }
 

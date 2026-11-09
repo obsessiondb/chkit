@@ -25,6 +25,7 @@ import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  findNonSelectBarriers,
   type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
@@ -34,7 +35,12 @@ import {
   isoWithoutZone,
   upsertOperation,
 } from './async-apply.js'
-import { inProgressChecksumMismatchError, statementSplitChangedError } from './errors.js'
+import {
+  inProgressChecksumMismatchError,
+  nonSelectBarrierError,
+  statementSplitChangedError,
+  type PendingNonSelectBarrier,
+} from './errors.js'
 import {
   hasStatementProgress,
   rebaseInProgressState,
@@ -110,6 +116,21 @@ function errorMessage(error: unknown): string {
 export function previewStatement(sql: string, max = 120): string {
   const oneLine = sql.replace(/\s+/g, ' ').trim()
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
+}
+
+/** A migration's statements marked `mode=barrier` that are not a SELECT (#634). */
+export function nonSelectBarriers(
+  migration: string,
+  statements: readonly string[],
+  operations: readonly MigrationOperationSummary[],
+): PendingNonSelectBarrier[] {
+  return findNonSelectBarriers(statements, operations).map((barrier) => ({
+    migration,
+    statement: barrier.index + 1,
+    total: statements.length,
+    operation: barrier.summary,
+    preview: previewStatement(barrier.statement),
+  }))
 }
 
 /**
@@ -188,6 +209,11 @@ export async function applyMigration(input: {
     sql,
     statements: parsedStatements,
   })
+
+  // migrate refused a file's non-SELECT barrier before the run; a plugin may
+  // have rewritten the statements since (#634).
+  const barriers = nonSelectBarriers(file, statements, operationSummaries)
+  if (barriers.length > 0) throw nonSelectBarrierError(barriers)
 
   const migrationChecksum = checksumSQL(sql)
 

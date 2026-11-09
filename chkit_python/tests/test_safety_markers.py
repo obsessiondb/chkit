@@ -10,6 +10,7 @@ from chkit.cli.safety_markers import (
     ScannedDestructiveStatement,
     collect_destructive_operation_markers,
     collect_unmarked_destructive_statements,
+    extract_executable_statements,
     extract_migration_operation_summaries,
     find_non_select_barriers,
     is_select_statement,
@@ -257,6 +258,7 @@ def test_unmarked_key_extracts_db_table() -> None:
         "(WITH 1 AS x SELECT x);",
         "WITH 1 AS x SELECT `insert` FROM t",
         "SELECT * FROM (SELECT 1 AS insert, 2 AS parallel)",
+        "FROM system.processes SELECT query_id WHERE query_kind = 'Insert';",
     ],
 )
 def test_is_select_statement(statement: str) -> None:
@@ -278,6 +280,7 @@ def test_is_select_statement(statement: str) -> None:
         "`SELECT` 1",
         "'SELECT'",
         "EXPLAIN SELECT 1",
+        "FROM default.t SELECT 1 PARALLEL WITH DROP TABLE default.t",
         "SHOW PROCESSLIST",
         "/* SELECT */ DROP TABLE default.t",
         "",
@@ -300,16 +303,16 @@ def test_find_non_select_barriers_lists_them_by_position() -> None:
         "EXCHANGE TABLES default.a AND default.b;",
         "",
     ])
-    assert find_non_select_barriers(sql) == [
+    assert find_non_select_barriers(
+        extract_executable_statements(sql), extract_migration_operation_summaries(sql)
+    ) == [
         NonSelectBarrier(
             index=2,
-            total=4,
             statement="CREATE TABLE default.b (id UInt64) ENGINE = MergeTree ORDER BY id;",
             summary="create_table key=table:default.b risk=safe mode=barrier",
         ),
         NonSelectBarrier(
             index=3,
-            total=4,
             statement="EXCHANGE TABLES default.a AND default.b;",
             summary="exchange_tables key=table:default.a risk=caution mode=barrier",
         ),
@@ -322,4 +325,6 @@ def test_find_non_select_barriers_ignores_other_modes() -> None:
         "CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;\n"
         "DROP TABLE default.b;\n"
     )
-    assert find_non_select_barriers(sql) == []
+    assert find_non_select_barriers(
+        extract_executable_statements(sql), extract_migration_operation_summaries(sql)
+    ) == []

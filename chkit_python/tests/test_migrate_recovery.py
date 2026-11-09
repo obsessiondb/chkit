@@ -1302,6 +1302,32 @@ def test_apply_select_barrier_has_no_propagation_wait(tmp_path: Path) -> None:
     assert len(store.appended) == 1
 
 
+@pytest.mark.usefixtures("_two_replicas")
+def test_apply_refuses_a_barrier_a_plugin_rewrote(tmp_path: Path) -> None:
+    sql = (
+        "-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n"
+        "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n"
+        "-- operation: drop_table key=table:default.b risk=danger\n"
+        "DROP TABLE IF EXISTS default.b SYNC;\n"
+    )
+    client = _TwoReplicaClient()
+    store = FakeStore()
+    rewrite = _FakeRuntime(
+        lambda statements: ["EXCHANGE TABLES default.a AND default.b;", *statements[1:]]
+    )
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store, runtime=rewrite)
+    assert info.value.code == "barrier_not_select"
+    assert (
+        "  - m.sql, statement 1 of 2 (-- operation: exchange_tables key=table:default.a "
+        "risk=caution mode=barrier):\n"
+        "      EXCHANGE TABLES default.a AND default.b;"
+    ) in info.value.message
+    assert client.events == []
+    assert store.writes == []
+    assert store.appended == []
+
+
 def test_apply_refuses_edited_file_with_completed_statement(tmp_path: Path) -> None:
     client = _RecordingClient()
     store = FakeStore(in_progress([op(0, "completed"), op(1, "failed")], checksum="old"))

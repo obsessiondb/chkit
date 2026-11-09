@@ -7,6 +7,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
+import { MigrateError } from '../../../commands/migrate/errors.js'
 import type {
   JournalStore,
   MigrationRowState,
@@ -1112,6 +1113,42 @@ describe('applyMigration mode=barrier', () => {
       ['completed', ''],
     ])
     expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('refuses a barrier a plugin rewrote into another statement before anything runs (#634)', async () => {
+    const sql =
+      '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n' +
+      "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n" +
+      '-- operation: drop_table key=table:default.b risk=danger\n' +
+      'DROP TABLE IF EXISTS default.b SYNC;\n'
+    const dir = writeMigration(sql)
+    const { db, events } = twoReplicaDb()
+    const { store, appended, writes } = createFakeStore()
+    const rewrite = fakePluginRuntime((statements) => [
+      'EXCHANGE TABLES default.a AND default.b;',
+      ...statements.slice(1),
+    ])
+    const error = await applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: rewrite,
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(MigrateError)
+    expect(error).toMatchObject({ code: 'barrier_not_select' })
+    expect(String(error)).toContain(
+      '  - m.sql, statement 1 of 2 (-- operation: exchange_tables key=table:default.a risk=caution mode=barrier):\n' +
+        '      EXCHANGE TABLES default.a AND default.b;',
+    )
+    expect(events).toEqual([])
+    expect(writes).toEqual([])
+    expect(appended).toEqual([])
     rmSync(dir, { recursive: true, force: true })
   })
 })

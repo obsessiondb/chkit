@@ -8,9 +8,10 @@ from __future__ import annotations
 from collections.abc import Sequence
 from pathlib import Path
 
-from chkit.cli.commands.migrate_apply import preview_statement
+from chkit.cli.commands.migrate_apply import non_select_barriers
 from chkit.cli.commands.migrate_errors import PendingNonSelectBarrier
-from chkit.cli.safety_markers import find_non_select_barriers
+from chkit.cli.safety_markers import extract_migration_operation_summaries
+from chkit.core.sql_splitter import extract_executable_statements
 
 
 def find_pending_non_select_barriers(
@@ -18,17 +19,15 @@ def find_pending_non_select_barriers(
 ) -> list[PendingNonSelectBarrier]:
     """The statements of pending migration files marked ``mode=barrier`` that
     are not a SELECT (#634). Measured on the file, like the empty-migration
-    check."""
-    return [
-        PendingNonSelectBarrier(
-            migration=migration,
-            statement=barrier.index + 1,
-            total=barrier.total,
-            operation=barrier.summary,
-            preview=preview_statement(barrier.statement),
+    check; apply checks the statements again after the plugins."""
+    found: list[PendingNonSelectBarrier] = []
+    for migration in pending:
+        sql = (migrations_dir / migration).read_text(encoding="utf-8")
+        found.extend(
+            non_select_barriers(
+                migration,
+                extract_executable_statements(sql),
+                extract_migration_operation_summaries(sql),
+            )
         )
-        for migration in pending
-        for barrier in find_non_select_barriers(
-            (migrations_dir / migration).read_text(encoding="utf-8")
-        )
-    ]
+    return found

@@ -12,7 +12,7 @@ no statement is recorded as completed or started (#233).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +27,9 @@ from chkit.cli.commands.migrate_async_apply import (
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import (
+    PendingNonSelectBarrier,
     in_progress_checksum_mismatch_error,
+    non_select_barrier_error,
     statement_split_changed_error,
 )
 from chkit.cli.commands.migrate_recovery import (
@@ -53,6 +55,7 @@ from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
     extract_migration_operation_summaries,
+    find_non_select_barriers,
 )
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.async_insert_guard import assert_no_fire_and_forget_async_inserts
@@ -126,6 +129,12 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             )
         )
     )
+    # migrate refused a file's non-SELECT barrier before the run; a plugin may
+    # have rewritten the statements since (#634).
+    barriers = non_select_barriers(file, statements, operation_summaries)
+    if barriers:
+        raise non_select_barrier_error(barriers)
+
     migration_checksum = checksum_sql(sql)
 
     initial_state = journal_store.read_migration_state(file)
@@ -339,6 +348,24 @@ def preview_statement(sql: str, max_length: int = 120) -> str:
     """One-line, length-capped preview of a SQL statement for error messages."""
     one_line = _WHITESPACE_RE.sub(" ", sql).strip()
     return f"{one_line[:max_length]}…" if len(one_line) > max_length else one_line
+
+
+def non_select_barriers(
+    migration: str,
+    statements: Sequence[str],
+    operations: Sequence[MigrationOperationSummary],
+) -> list[PendingNonSelectBarrier]:
+    """A migration's statements marked ``mode=barrier`` that are not a SELECT (#634)."""
+    return [
+        PendingNonSelectBarrier(
+            migration=migration,
+            statement=barrier.index + 1,
+            total=len(statements),
+            operation=barrier.summary,
+            preview=preview_statement(barrier.statement),
+        )
+        for barrier in find_non_select_barriers(statements, operations)
+    ]
 
 
 def statement_error(

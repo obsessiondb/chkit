@@ -27,6 +27,7 @@ the parser and the splitter together.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
@@ -200,38 +201,35 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
 
 @dataclass(frozen=True, slots=True)
 class NonSelectBarrier:
-    # 0-based position among the executable statements.
+    # 0-based position among the statements.
     index: int
-    total: int
     statement: str
     # The ``-- operation:`` marker text after the prefix.
     summary: str
 
 
-def find_non_select_barriers(sql: str) -> list[NonSelectBarrier]:
-    """The statements marked ``mode=barrier`` that are not a SELECT (#634).
+def find_non_select_barriers(
+    statements: Sequence[str], operations: Sequence[MigrationOperationSummary]
+) -> list[NonSelectBarrier]:
+    """The statements marked ``mode=barrier`` that are not a SELECT (#634); the
+    n-th operation marker belongs to the n-th statement.
 
     The barrier read runs its statement as a query, once and then every
     second, and nothing waits for a change it makes to reach the other
     replicas, so migrate refuses any other statement there.
     """
-    statements = extract_executable_statements(sql)
-    operations = extract_migration_operation_summaries(sql)
     found: list[NonSelectBarrier] = []
     for index, statement in enumerate(statements):
         operation = operations[index] if index < len(operations) else None
         if operation is None or operation.mode != "barrier" or is_select_statement(statement):
             continue
-        found.append(
-            NonSelectBarrier(
-                index=index, total=len(statements), statement=statement, summary=operation.summary
-            )
-        )
+        found.append(NonSelectBarrier(index=index, statement=statement, summary=operation.summary))
     return found
 
 
 def is_select_statement(statement: str) -> bool:
-    """A SELECT, possibly in parentheses, or a ``WITH ... SELECT``.
+    """A SELECT, possibly in parentheses, a ``WITH ... SELECT`` or a FROM-first
+    ``FROM ... SELECT``.
 
     ClickHouse also reads ``WITH ... INSERT INTO``, and runs the statements
     joined by ``PARALLEL WITH`` even when it then rejects a SELECT among them,
@@ -244,7 +242,7 @@ def is_select_statement(statement: str) -> bool:
     while start < len(tokens) and _is_punctuation(tokens[start], "("):
         start += 1
     first = _keyword(tokens[start]) if start < len(tokens) else None
-    if first not in ("SELECT", "WITH"):
+    if first not in ("SELECT", "WITH", "FROM"):
         return False
     depth = 0
     for index, token in enumerate(tokens):

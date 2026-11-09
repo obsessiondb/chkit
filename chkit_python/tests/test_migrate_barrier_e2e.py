@@ -89,7 +89,7 @@ def test_migrate_refuses_a_barrier_that_is_not_a_select(
         "every second, and waits for no change it makes to reach every replica.\n"
         "Make each statement a SELECT (or WITH ... SELECT) that returns a query_id column, "
         "or remove mode=barrier from its -- operation: marker, then re-run chkit migrate "
-        "--apply. Nothing was applied."
+        "--apply. No statement of these migrations ran."
     )
 
     def table_count() -> int:

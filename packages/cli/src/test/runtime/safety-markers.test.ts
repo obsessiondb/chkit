@@ -320,6 +320,7 @@ describe('isSelectStatement (#634)', () => {
     '(WITH 1 AS x SELECT x);',
     'WITH 1 AS x SELECT `insert` FROM t',
     'SELECT * FROM (SELECT 1 AS insert, 2 AS parallel)',
+    "FROM system.processes SELECT query_id WHERE query_kind = 'Insert';",
   ]
   const others = [
     'CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;',
@@ -334,6 +335,7 @@ describe('isSelectStatement (#634)', () => {
     '`SELECT` 1',
     "'SELECT'",
     'EXPLAIN SELECT 1',
+    'FROM default.t SELECT 1 PARALLEL WITH DROP TABLE default.t',
     'SHOW PROCESSLIST',
     '/* SELECT */ DROP TABLE default.t',
     '',
@@ -365,16 +367,14 @@ describe('findNonSelectBarriers (#634)', () => {
       '',
     ].join('\n')
 
-    expect(findNonSelectBarriers(sql)).toEqual([
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([
       {
         index: 2,
-        total: 4,
         statement: 'CREATE TABLE default.b (id UInt64) ENGINE = MergeTree ORDER BY id;',
         summary: 'create_table key=table:default.b risk=safe mode=barrier',
       },
       {
         index: 3,
-        total: 4,
         statement: 'EXCHANGE TABLES default.a AND default.b;',
         summary: 'exchange_tables key=table:default.a risk=caution mode=barrier',
       },
@@ -386,6 +386,6 @@ describe('findNonSelectBarriers (#634)', () => {
       '-- operation: create_table key=table:default.a risk=safe mode=async\n' +
       'CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;\n' +
       'DROP TABLE default.b;\n'
-    expect(findNonSelectBarriers(sql)).toEqual([])
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([])
   })
 })

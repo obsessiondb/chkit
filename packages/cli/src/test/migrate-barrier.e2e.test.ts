@@ -73,7 +73,7 @@ describe('@chkit/cli migrate refuses a mode=barrier statement that is not a SELE
         `  - 20990101000001_second.sql, statement 1 of 1 (-- operation: create_table key=table:${second} risk=safe mode=barrier):\n` +
         `      ${createSecond}\n` +
         'chkit runs a barrier statement as a read of the running INSERTs, once and then every second, and waits for no change it makes to reach every replica.\n' +
-        'Make each statement a SELECT (or WITH ... SELECT) that returns a query_id column, or remove mode=barrier from its -- operation: marker, then re-run chkit migrate --apply. Nothing was applied.'
+        'Make each statement a SELECT (or WITH ... SELECT) that returns a query_id column, or remove mode=barrier from its -- operation: marker, then re-run chkit migrate --apply. No statement of these migrations ran.'
 
       const text = migrate(false)
       expect(text.exitCode, formatTestDiagnostic('text run was not refused', text)).toBe(1)
