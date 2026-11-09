@@ -207,7 +207,7 @@ def test_on_check_reports_submitted_jobs_for_a_non_obsessiondb_check_target_too(
     hooks = obsessiondb().hooks
     assert hooks is not None
 
-    result = hooks.on_check(  # type: ignore[union-attr]
+    result = hooks.on_check(
         ChxOnCheckContext(
             command="check",
             config=_config("http://localhost:8123"),
@@ -249,7 +249,7 @@ def test_on_check_reads_submissions_from_the_backfill_plugin_state_dir(
     hooks = obsessiondb().hooks
     assert hooks is not None
 
-    result = hooks.on_check(  # type: ignore[union-attr]
+    result = hooks.on_check(
         ChxOnCheckContext(
             command="check",
             config=_config().model_copy(

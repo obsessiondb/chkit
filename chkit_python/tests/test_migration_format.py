@@ -14,11 +14,11 @@ from chkit.cli.migration_store import (
     write_migration,
 )
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import table
+from chkit.core.model import SchemaDefinition, table
 from chkit.core.planner import plan_diff
 
 
-def _events() -> list:
+def _events() -> list[SchemaDefinition]:
     return canonicalize_definitions(
         [
             table(

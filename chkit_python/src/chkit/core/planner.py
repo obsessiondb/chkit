@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -926,8 +927,8 @@ def _diff_dictionary(
 
 
 def plan_diff(
-    old_definitions: list[SchemaDefinition],
-    new_definitions: list[SchemaDefinition],
+    old_definitions: Sequence[SchemaDefinition],
+    new_definitions: Sequence[SchemaDefinition],
     *,
     index_granularity: int | None = None,
 ) -> MigrationPlan:

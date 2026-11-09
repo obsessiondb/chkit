@@ -6,12 +6,10 @@ and a monkey-patched ``time.sleep`` so the retry loop runs at zero cost.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
-from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import (
     MAX_RETRIES,
     wait_for_column,
@@ -26,9 +24,8 @@ pytestmark = pytest.mark.usefixtures("single_replica")
 
 
 @pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
-    return
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
 
 
 class _FakeResult:
@@ -208,7 +205,7 @@ def test_dispatch_malformed_key_returns_immediately() -> None:
 
 def _record_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
     sleeps: list[float] = []
-    monkeypatch.setattr(ddl_propagation.time, "sleep", sleeps.append)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", sleeps.append)
     return sleeps
 
 
