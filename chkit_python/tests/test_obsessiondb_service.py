@@ -26,6 +26,7 @@ from chkit_plugin_obsessiondb import (
     Service,
     ServiceChoice,
     ServiceOrganization,
+    SessionExpiredError,
     claim_instance,
     instance_claim_status,
     list_service_organizations,
@@ -43,7 +44,6 @@ from chkit_plugin_obsessiondb.service_api import (
     InstanceClaimStatusEligible,
     InstanceClaimStatusIneligible,
     ServiceNotFoundError,
-    SessionExpiredError,
     get_service,
 )
 from chkit_plugin_obsessiondb.storage import SelectedService

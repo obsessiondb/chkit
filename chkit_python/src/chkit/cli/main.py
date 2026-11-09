@@ -135,7 +135,9 @@ def _reject_group_bundles(ctx: Any, args: list[str], params: list[Any]) -> list[
     return args
 
 
-def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
+def _split_forwarded_args(
+    args: list[str], params: list[Any], *, help_plugins: bool = False
+) -> list[str]:
     """Separate a plugin forwarder's own options from the plugin's arguments.
 
     ``plugin``, ``codegen`` and ``obsessiondb`` pass unknown tokens to the
@@ -156,6 +158,14 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         1 for param in params if param.param_type_name == "argument" and param.nargs == 1
     )
 
+    end = args.index("--") if "--" in args else len(args)
+    # TS shows the help before reading --config, unless --help-plugins asks
+    # for it (that help loads the config), so `help_plugins` (its `--help`
+    # here) does not count.
+    help_requested = not help_plugins and any(
+        token in _HELP_OPTION_NAMES for token in args[:end]
+    )
+
     own: list[str] = []
     forwarded: list[str] = []
     i = 0
@@ -170,11 +180,17 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         if token in takes_value:
             own.append(token)
             if takes_value[token]:
-                # Without its value, click would take the `--` below as the value.
-                # As TS `extractConfigPath`, a `--` token is not a value either:
-                # `--config --help` lacks its value (#619).
+                # As TS `extractConfigPath`: last, or followed by a `--` token,
+                # the flag has no value. click would take that token (or the
+                # `--` below) as the value. A -h / --help before `--` still
+                # shows the help, as TS handles help first: the flag is
+                # dropped, so `--config --help --config=x` shows the help
+                # instead of running the plugin command with `x` (#619).
                 if i >= len(args) or args[i].startswith("--"):
-                    raise MissingFlagValueError(long_form[token])
+                    if i >= len(args) or not help_requested:
+                        raise MissingFlagValueError(long_form[token])
+                    own.pop()
+                    continue
                 own.append(args[i])
                 i += 1
         elif long_name is not None and takes_value.get(long_name):
@@ -283,7 +299,9 @@ class _ChkitCommand(TyperCommand):
         args = _read_help_plugins(ctx, args)
         try:
             if ctx.ignore_unknown_options:
-                normalized = _split_forwarded_args(args, params)
+                normalized = _split_forwarded_args(
+                    args, params, help_plugins=bool(ctx.meta.get(HELP_PLUGINS_META))
+                )
                 # `chkit obsessiondb login -h` shows the help of `login` (TS
                 # `firstPluginPositional`): the first token that is not one
                 # of the forwarder's own options.
@@ -300,7 +318,14 @@ class _ChkitCommand(TyperCommand):
                     args = _query_sql_behind_terminator(args, params)
                 normalized = _normalize_short_options(args, params)
         except (UnknownFlagError, MissingFlagValueError) as error:
-            report_flag_error(ctx.info_name, str(error), json_mode="--json" in args)
+            # A forwarder's own flag error here is a missing --config, which TS
+            # reports before dispatching, so `plugin` gets the usage envelope.
+            report_flag_error(
+                ctx.info_name,
+                str(error),
+                json_mode="--json" in args,
+                global_flag=ctx.ignore_unknown_options,
+            )
         return super().parse_args(ctx, normalized)
 
     def get_help(self, ctx: Any) -> str:
