@@ -18,6 +18,8 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- When async `migrate --apply` gives up polling a statement, the error says `polling failed 21×`
+  like TS, not `21x` (#555).
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement

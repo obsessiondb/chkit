@@ -74,4 +74,12 @@ describe('applyAsyncStatement — transient poll errors', () => {
       applyAsyncStatement({ ...base, db, journalStore: makeJournalStore() }),
     ).rejects.toThrow('re-attach')
   })
+
+  test('the give-up message says "polling failed 21×", matching chkit-py', async () => {
+    const db = makeDb([{ status: 'unknown' }, 'throw524'])
+
+    await expect(
+      applyAsyncStatement({ ...base, db, journalStore: makeJournalStore() }),
+    ).rejects.toThrow('polling failed 21× (ClickHouse request failed: error code: 524).')
+  })
 })
