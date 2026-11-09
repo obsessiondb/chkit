@@ -9,7 +9,8 @@ names from numbers; it is not a parser.
 from __future__ import annotations
 
 import re
-from collections.abc import Iterator
+from bisect import bisect_left
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
@@ -66,10 +67,11 @@ _BIN_PREFIX: Final[re.Pattern[str]] = re.compile(r"0[bB][01]")
 
 def tokenize_sql(sql: str) -> list[SQLToken]:
     tokens: list[SQLToken] = []
+    heredoc_end = _heredoc_reader(sql)
     previous: SQLToken | None = None
     i = 0
     while i < len(sql):
-        kind, end, terminated = _read_token(sql, i, previous)
+        kind, end, terminated = _read_token(sql, i, previous, heredoc_end)
         token = SQLToken(kind=kind, text=sql[i:end], start=i, end=end, terminated=terminated)
         tokens.append(token)
         if not is_trivia(token):
@@ -80,10 +82,11 @@ def tokenize_sql(sql: str) -> list[SQLToken]:
 
 def iter_sql_tokens(sql: str) -> Iterator[SQLToken]:
     """The tokens of `tokenize_sql`, one at a time, for a caller that keeps few of them."""
+    heredoc_end = _heredoc_reader(sql)
     previous: SQLToken | None = None
     i = 0
     while i < len(sql):
-        kind, end, terminated = _read_token(sql, i, previous)
+        kind, end, terminated = _read_token(sql, i, previous, heredoc_end)
         token = SQLToken(kind=kind, text=sql[i:end], start=i, end=end, terminated=terminated)
         yield token
         if not is_trivia(token):
@@ -126,9 +129,13 @@ def js_trim(value: str) -> str:
 
 
 _TokenEnd: TypeAlias = tuple[SQLTokenKind, int, bool]
+# The end of the heredoc that opens at an offset, or None when none does.
+_HeredocReader: TypeAlias = Callable[[int], int | None]
 
 
-def _read_token(sql: str, i: int, previous: SQLToken | None) -> _TokenEnd:  # noqa: PLR0911
+def _read_token(  # noqa: PLR0911
+    sql: str, i: int, previous: SQLToken | None, read_heredoc: _HeredocReader
+) -> _TokenEnd:
     # ``previous`` is the last token that is not trivia; ClickHouse uses it to
     # tell a qualifier dot from the start of a number.
     char = _at(sql, i)
@@ -151,7 +158,7 @@ def _read_token(sql: str, i: int, previous: SQLToken | None) -> _TokenEnd:  # no
         end, terminated = _read_quoted(sql, i, char)
         return ("quoted_identifier", end, terminated)
     if char == "$":
-        heredoc_end = _read_heredoc(sql, i)
+        heredoc_end = read_heredoc(i)
         if heredoc_end is not None:
             return ("string", heredoc_end, True)
         if nxt in _WORD_CHAR:
@@ -253,16 +260,42 @@ def _read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
     return (len(sql), False)
 
 
-def _read_heredoc(sql: str, i: int) -> int | None:
+def _heredoc_reader(sql: str) -> _HeredocReader:
     # `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
     # is only a literal when the same tag closes it later; otherwise ClickHouse
-    # reads the `$` as part of an identifier or as punctuation.
-    tag_end = _skip_while(sql, i + 1, _HEREDOC_TAG)
-    if _at(sql, tag_end) != "$":
-        return None
-    tag = sql[i : tag_end + 1]
-    close = sql.find(tag, tag_end + 1)
-    return None if close == -1 else close + len(tag)
+    # reads the `$` as part of an identifier or as punctuation. The closer is
+    # the first later occurrence of the opener's text. Searching the rest of the
+    # input once per opener is quadratic on many unclosed openers (#585), so the
+    # first opener indexes every `$tag$` in the input and each one is a lookup.
+    tag_starts: dict[str, list[int]] | None = None
+
+    def read(i: int) -> int | None:
+        nonlocal tag_starts
+        tag_end = _skip_while(sql, i + 1, _HEREDOC_TAG)
+        if _at(sql, tag_end) != "$":
+            return None
+        if tag_starts is None:
+            tag_starts = _index_heredoc_tags(sql)
+        offsets = tag_starts.get(sql[i + 1 : tag_end], [])
+        k = bisect_left(offsets, tag_end + 1)
+        return None if k == len(offsets) else offsets[k] + tag_end + 1 - i
+
+    return read
+
+
+def _index_heredoc_tags(sql: str) -> dict[str, list[int]]:
+    # Every offset where `$tag$` occurs, in order, by tag. An occurrence is a
+    # `$`, the longest run of tag characters after it, then a `$` (a tag
+    # character is never `$`), so each `$` starts at most one and the scan is
+    # linear.
+    starts: dict[str, list[int]] = {}
+    i = sql.find("$")
+    while i != -1:
+        tag_end = _skip_while(sql, i + 1, _HEREDOC_TAG)
+        if _at(sql, tag_end) == "$":
+            starts.setdefault(sql[i + 1 : tag_end], []).append(i)
+        i = sql.find("$", i + 1)
+    return starts
 
 
 def _unescape_quoted(text: str) -> str:
