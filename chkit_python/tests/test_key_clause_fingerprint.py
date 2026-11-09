@@ -108,6 +108,12 @@ def test_a_bare_null_is_the_literal_not_a_column_named_null() -> None:
     )
 
 
+def test_null_after_a_dot_is_a_name_the_null_map_of_a_nullable_column() -> None:
+    # ClickHouse writes c.null back as c.`null`.
+    assert key_clause_fingerprint("c.null") == key_clause_fingerprint("c.`null`")
+    assert key_clause_fingerprint("`c` . null") == key_clause_fingerprint("c.`null`")
+
+
 def test_fingerprint_matches_the_ts_port() -> None:
     # packages/core/src/key-clause-fingerprint.test.ts expects these exact strings.
     assert (
@@ -195,6 +201,14 @@ def test_a_column_named_true_compares_equal_however_it_is_quoted() -> None:
     assert plan_diff([with_true(["id", "`true`"])], [with_true(["id", "true"])]).operations == []
 
 
+def test_a_qualified_null_spelled_bare_or_quoted_plans_nothing() -> None:
+    assert _plan_types(["id", "if(a.null, 0, 1)"], ["id", "if(a.`null`, 0, 1)"]) == []
+    assert (
+        _plan_types(["id", "if(isNull(a), 0, 1)"], ["id", "if(isNull(`null`), 0, 1)"])
+        == _RECREATE
+    )
+
+
 def test_the_key_clickhouse_reports_split_as_pull_splits_it_plans_nothing() -> None:
     # system.tables.sorting_key for ORDER BY (`id`, `a, b`, `a b`, cityHash64(a,b)).
     pulled = split_top_level_comma("id, `a, b`, `a b`, cityHash64(a, b)")
@@ -240,6 +254,8 @@ def test_drift_a_column_named_null_against_the_null_literal() -> None:
         "order_by_mismatch",
     ]
     assert _drift_codes(["id", "if(`true` = 1, id, 0)"], "id, if(true = 1, id, 0)") is None
+    # A null after a dot is the null map of a Nullable column, which ClickHouse quotes.
+    assert _drift_codes(["id", "if(a.null, 0, 1)"], "id, if(a.`null`, 0, 1)") is None
 
 
 def test_drift_an_expression_split_or_spaced_differently_reads_clean() -> None:

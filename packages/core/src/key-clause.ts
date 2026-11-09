@@ -87,7 +87,7 @@ export function keyClauseFingerprint(sql: string): string {
   for (const token of sqlTokens(sql)) {
     // The lexer reads Unicode whitespace (a no-break space) as punctuation.
     if (isTrivia(token) || (token.kind === 'punctuation' && /^\s$/.test(token.text))) continue
-    parts.push(nameFingerprint(token) ?? token.text)
+    parts.push(nameFingerprint(token, parts.at(-1) === '.') ?? token.text)
   }
   return parts.join(' ')
 }
@@ -95,12 +95,13 @@ export function keyClauseFingerprint(sql: string): string {
 // A name as the bytes ClickHouse reads from it, in one canonical spelling, so
 // `` `a\x41` `` matches `aA` while `` `a\q` `` keeps its backslash (ClickHouse
 // decodes escapes in a quoted name as in a string literal). A bare NULL is the
-// literal and stays as written: ClickHouse always quotes a column named
-// `null`. It does not quote one named `true`, `false`, `inf` or `nan`, so those
-// compare as names however they are written.
-function nameFingerprint(token: SQLToken): string | undefined {
+// literal and stays as written, unless a dot qualifies it (`c.null`, the null
+// map of a Nullable column): ClickHouse always quotes a column named `null`.
+// It does not quote one named `true`, `false`, `inf` or `nan`, so those compare
+// as names however they are written.
+function nameFingerprint(token: SQLToken, qualified: boolean): string | undefined {
   if (token.kind === 'identifier') {
-    return token.text.toLowerCase() === 'null' ? undefined : `\`${stringLiteral(token.text)}`
+    return token.text.toLowerCase() === 'null' && !qualified ? undefined : `\`${stringLiteral(token.text)}`
   }
   if (token.kind !== 'quoted_identifier' || !token.terminated) return undefined
   const quote = token.text[0] ?? ''

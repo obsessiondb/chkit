@@ -63,6 +63,12 @@ describe('@chkit/core key clause fingerprint', () => {
     expect(keyClauseFingerprint('if(null = 1, a, b)')).not.toBe(keyClauseFingerprint('if("null" = 1, a, b)'))
   })
 
+  test('null after a dot is a name, the null map of a Nullable column', () => {
+    // ClickHouse writes c.null back as c.`null`.
+    expect(keyClauseFingerprint('c.null')).toBe(keyClauseFingerprint('c.`null`'))
+    expect(keyClauseFingerprint('`c` . null')).toBe(keyClauseFingerprint('c.`null`'))
+  })
+
   test('the same strings as chkit-py', () => {
     // tests/test_key_clause_fingerprint.py expects these exact strings.
     expect(keyClauseFingerprint('`id`, `a, b`, `x\\`y`, "q\\\\z", toStartOfHour( ts ) -- c')).toBe(
@@ -132,6 +138,11 @@ describe('@chkit/core planner: key parts that collide when joined (#558)', () =>
     // system.tables.sorting_key for ORDER BY (`id`, `true`) is `id, true`.
     expect(planDiff([withTrue(['id', 'true'])], [withTrue(splitTopLevelComma('id, true'))]).operations).toEqual([])
     expect(planDiff([withTrue(['id', '`true`'])], [withTrue(['id', 'true'])]).operations).toEqual([])
+  })
+
+  test('a qualified null spelled bare or quoted plans nothing', () => {
+    expect(planTypes(['id', 'if(a.null, 0, 1)'], ['id', 'if(a.`null`, 0, 1)'])).toEqual([])
+    expect(planTypes(['id', 'if(isNull(a), 0, 1)'], ['id', 'if(isNull(`null`), 0, 1)'])).toEqual(['drop_table', 'create_table'])
   })
 
   test('the key ClickHouse reports, split as pull splits it, plans nothing', () => {

@@ -96,22 +96,25 @@ def key_clause_fingerprint(sql: str) -> str:
         # The lexer reads Unicode whitespace (a no-break space) as punctuation.
         if is_trivia(token) or (token.kind == "punctuation" and is_js_space(token.text)):
             continue
-        name = _name_fingerprint(token)
+        name = _name_fingerprint(token, qualified=bool(parts) and parts[-1] == ".")
         parts.append(token.text if name is None else name)
     return " ".join(parts)
 
 
-def _name_fingerprint(token: SQLToken) -> str | None:
+def _name_fingerprint(token: SQLToken, *, qualified: bool) -> str | None:
     r"""A name as the bytes ClickHouse reads from it, in one canonical spelling.
 
     So ``` `a\x41` ``` matches ``aA`` while ``` `a\q` ``` keeps its backslash
     (ClickHouse decodes escapes in a quoted name as in a string literal). A bare
-    NULL is the literal and stays as written: ClickHouse always quotes a column
-    named ``null``. It does not quote one named ``true``, ``false``, ``inf`` or
-    ``nan``, so those compare as names however they are written.
+    NULL is the literal and stays as written, unless a dot qualifies it
+    (``c.null``, the null map of a Nullable column): ClickHouse always quotes a
+    column named ``null``. It does not quote one named ``true``, ``false``,
+    ``inf`` or ``nan``, so those compare as names however they are written.
     """
     if token.kind == "identifier":
-        return None if token.text.lower() == "null" else "`" + string_literal(token.text)
+        if token.text.lower() == "null" and not qualified:
+            return None
+        return "`" + string_literal(token.text)
     if token.kind != "quoted_identifier" or not token.terminated:
         return None
     quote = token.text[0]

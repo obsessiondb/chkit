@@ -1096,6 +1096,8 @@ describe('@chkit/cli drift comparer: a quoted key column holding a comma or spac
       'order_by_mismatch',
     ])
     expect(compareTableShape(expected(['id', 'if(`true` = 1, id, 0)']), actual('id, if(true = 1, id, 0)'))).toBeNull()
+    // A null after a dot is the null map of a Nullable column, which ClickHouse quotes.
+    expect(compareTableShape(expected(['id', 'if(a.null, 0, 1)']), actual('id, if(a.`null`, 0, 1)'))).toBeNull()
   })
 
   test('an expression split across entries or spaced differently reads clean', () => {
