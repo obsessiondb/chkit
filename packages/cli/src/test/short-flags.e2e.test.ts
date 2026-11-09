@@ -94,6 +94,20 @@ describe('@chkit/cli short flags (#491)', () => {
         expect([args, result.exitCode, result.stderr]).toEqual([args, 0, ''])
         expect([args, JSON.parse(result.stdout)]).toEqual([args, expected])
       }
+
+      // A --config without a value is a usage error before any config loads.
+      for (const args of [
+        ['generate', '--config', '--json'],
+        ['generate', '-c', a, '--config', '--json'],
+        ['generate', '-c', a, '-c', '--', '--config', b, '--json'],
+      ]) {
+        const result = runCli(args, first.dir)
+        expect([args, result.exitCode, result.stderr.trim()]).toEqual([args, 1, 'Missing value for --config'])
+        expect([args, JSON.parse(result.stdout)]).toEqual([
+          args,
+          expect.objectContaining({ ok: false, error: { code: 'usage', message: 'Missing value for --config' } }),
+        ])
+      }
     } finally {
       await Promise.all([first, last].map((fixture) => rm(fixture.dir, { recursive: true, force: true })))
     }

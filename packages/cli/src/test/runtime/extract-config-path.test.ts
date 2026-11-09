@@ -1,4 +1,5 @@
 import { describe, expect, test } from 'bun:test'
+import { MissingFlagValueError } from '@chkit/core'
 
 import { extractConfigPath } from '../../runtime/extract-config-path.js'
 
@@ -34,8 +35,16 @@ describe('extractConfigPath', () => {
     expect(extractConfigPath(['query', '--config', 'a.ts', '--', '--config', 'b.ts'])).toBe('a.ts')
   })
 
-  test('the value of --config is never read as another --config', () => {
-    expect(extractConfigPath(['--config', '--config=b.ts'])).toBe('--config=b.ts')
+  test('a --config without a value throws before any config is loaded, as parseFlags would', () => {
+    for (const argv of [
+      ['status', '--config'],
+      ['status', '--config', '--json'],
+      ['status', '--config', 'a.ts', '--config'],
+      ['status', '--config', 'a.ts', '--config', '--json'],
+      ['status', '--config', 'a.ts', '--config', '--', '--config', 'b.ts'],
+    ]) {
+      expect(() => extractConfigPath(argv)).toThrow(new MissingFlagValueError('--config'))
+    }
   })
 
   test('returns empty string when --config=  (empty value) is given', () => {
