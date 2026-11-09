@@ -11,6 +11,7 @@ from typer.core import TyperCommand, TyperGroup
 from typer.exceptions import TyperException
 
 from chkit import __version__
+from chkit.cli.argv import normalize_global_args
 from chkit.cli.commands import (
     check,
     codegen_shortcut,
@@ -32,6 +33,14 @@ from chkit.clickhouse.client import clickhouse_error_message
 from chkit.core.flags import MissingFlagValueError, UnknownFlagError
 
 _HELP_OPTION_NAMES = ("-h", "--help")
+# The top-level options, which TS reads only as the first token.
+_ROOT_OPTION_NAMES = (*_HELP_OPTION_NAMES, "-v", "-V", "--version")
+
+
+def _option_args(args: list[str]) -> list[str]:
+    """The tokens before the first ``--`` (TS ``optionArgs``): after it,
+    ``--json`` is an argument, not an option (#568)."""
+    return args[: args.index("--")] if "--" in args else args
 
 
 def _option_forms(params: list[Any]) -> tuple[dict[str, bool], dict[str, str]]:
@@ -113,19 +122,6 @@ def _after_dash_dash(rest: list[str], missing_names: int) -> list[str]:
     if len(rest) < missing:
         return rest
     return [*rest[:missing], "--", *rest[missing:]]
-
-
-def _reject_group_bundles(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
-    """The top-level options (``-h``, ``-v`` / ``-V`` / ``--version``) take no
-    value, so a token such as ``-vx`` before the command is a bundle, which TS
-    rejects (#491). The arguments from the command on belong to the command."""
-    takes_value, _long_form = _option_forms(params)
-    for token in args:
-        if token == "--" or not token.startswith("-"):
-            break
-        if not token.startswith("--") and token[:2] in takes_value and token[2:]:
-            ctx.fail(f"No such option: {token}")
-    return args
 
 
 def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
@@ -269,7 +265,30 @@ class _ChkitGroup(TyperGroup):
     """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
-        return super().parse_args(ctx, _reject_group_bundles(ctx, args, self.get_params(ctx)))
+        """Read the tokens before the command as ``run`` in ``packages/cli/src/bin/chkit.ts``
+        does (#597): leading global flags move behind the command, help or the
+        version first ignores the rest, and any other first token that is not
+        a command is an unknown command."""
+        try:
+            normalized = normalize_global_args(args)
+        except MissingFlagValueError as error:
+            # TS's top-level catch: command "chkit", the error's own JSON code.
+            if "--json" in _option_args(args):
+                emit_json_error("chkit", {"code": json_error_code(error), "message": str(error)})
+            typer.echo(str(error), err=True)
+            raise typer.Exit(code=1) from error
+        if normalized and normalized[0] in _ROOT_OPTION_NAMES:
+            normalized = normalized[:1]
+        elif normalized and self.get_command(ctx, normalized[0]) is None:
+            command = normalized[0]
+            message = f"Unknown command: {command}"
+            typer.echo(message, err=True)
+            if "--json" in _option_args(normalized):
+                emit_json_error(command, {"code": "unknown_command", "message": message})
+            else:
+                typer.echo(ctx.get_help())
+            raise typer.Exit(code=1)
+        return super().parse_args(ctx, normalized)
 
     # Any: typer vendors click privately (typer._click), and the public
     # typer.Context subclass would narrow the parameter (mypy [override]).
