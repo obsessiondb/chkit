@@ -22,6 +22,7 @@ from collections.abc import Callable
 from typing import Any
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.jsnum import js_math_round
 from chkit.core.sql_lexer import js_regex
 
 DEFAULT_TIMEOUT_SECONDS = 10 * 60.0
@@ -76,6 +77,7 @@ def wait_for_insert_barrier(
         if not remaining:
             return len(initial)
         elapsed = now() - started
+        elapsed_s = int(js_math_round(elapsed))  # TS: Math.round, a .5 tie rounds up
         if elapsed >= timeout_seconds:
             one = len(remaining) == 1
             listed = ", ".join(remaining[:_MAX_LISTED_IDS]) + (
@@ -83,7 +85,7 @@ def wait_for_insert_barrier(
             )
             msg = (
                 f"{len(remaining)} INSERT {'query' if one else 'queries'} that started before "
-                f"this step {'is' if one else 'are'} still running after {round(elapsed)}s "
+                f"this step {'is' if one else 'are'} still running after {elapsed_s}s "
                 f"(query_id {listed}). Their rows may not be mirrored or snapshotted yet. "
                 "Let them finish, then run chkit migrate --apply again: this step reads the "
                 "running INSERTs anew. A killed INSERT may have committed part of its rows, so "
@@ -95,5 +97,5 @@ def wait_for_insert_barrier(
             noun = "query" if len(remaining) == 1 else "queries"
             emit(
                 f"  still waiting for {len(remaining)} INSERT {noun} "
-                f"(elapsed {round(elapsed)}s)"
+                f"(elapsed {elapsed_s}s)"
             )

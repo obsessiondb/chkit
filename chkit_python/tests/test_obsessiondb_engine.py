@@ -10,6 +10,8 @@ from chkit.core.model import (
     ChxResolvedClickHouseConfig,
     ChxResolvedConfig,
     ChxResolvedSafetyConfig,
+    SettingValue,
+    TableDefinition,
 )
 from chkit_plugin_obsessiondb.engine import (
     is_obsessiondb_host,
@@ -41,7 +43,9 @@ def _resolved(*, url: str | None = None) -> ChxResolvedConfig:
     )
 
 
-def _t(*, name: str, engine: str, settings: dict[str, object] | None = None):
+def _t(
+    *, name: str, engine: str, settings: dict[str, SettingValue] | None = None
+) -> TableDefinition:
     return table(
         database="db",
         name=name,
@@ -113,7 +117,7 @@ def test_strip_cloud_settings_returns_none_when_only_cloud_key() -> None:
 
 
 def test_strip_cloud_settings_passes_through_when_no_cloud_keys() -> None:
-    original = {"index_granularity": 8192}
+    original: dict[str, SettingValue] = {"index_granularity": 8192}
     out = strip_cloud_settings(original)
     assert out.stripped == []
     assert out.settings is original

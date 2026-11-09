@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -17,7 +18,6 @@ from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
 from chkit.core.identifier import quote_identifier, render_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint
-from chkit.core.key_clause import key_clause_fingerprint
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefaultValue,
@@ -46,6 +46,7 @@ from chkit.core.object_dependencies import (
 from chkit.core.sql import (
     column_codec_fingerprint,
     column_type_fingerprint,
+    key_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
     render_alter_add_index,
@@ -65,7 +66,6 @@ from chkit.core.sql import (
     render_alter_remove_column_expression,
     render_alter_reset_setting,
     render_dictionary_sql,
-    render_key_clause_columns,
     to_create_sql,
 )
 from chkit.core.sql_lexer import js_regex, js_trim
@@ -185,26 +185,14 @@ def _push_create_database(
     )
 
 
-def _key_fingerprint(definition: TableDefinition, keys: list[str] | None) -> str:
-    """Keys compare by their tokens as chkit renders them.
-
-    Whitespace, identifier quoting and how the parts are split across entries
-    (``['cityHash64(a', 'b)']``) carry no meaning (#176, #178), while a declared
-    column named ``a, b`` stays one name rather than reading as columns ``a``
-    and ``b`` (#558).
-    """
-    column_names = {column.name for column in definition.columns}
-    return key_clause_fingerprint(render_key_clause_columns(keys or [], column_names))
-
-
 def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool:
     return diff_clauses(
         [
             (old.engine, new.engine),
-            (_key_fingerprint(old, old.primary_key), _key_fingerprint(new, new.primary_key)),
-            (_key_fingerprint(old, old.order_by), _key_fingerprint(new, new.order_by)),
+            (key_fingerprint(old, old.primary_key), key_fingerprint(new, new.primary_key)),
+            (key_fingerprint(old, old.order_by), key_fingerprint(new, new.order_by)),
             (old.partition_by or "", new.partition_by or ""),
-            (_key_fingerprint(old, old.unique_key), _key_fingerprint(new, new.unique_key)),
+            (key_fingerprint(old, old.unique_key), key_fingerprint(new, new.unique_key)),
             # ClickHouse refuses to change or reset these on an existing table (#466).
             (
                 readonly_settings_fingerprint(old.settings),
@@ -927,8 +915,8 @@ def _diff_dictionary(
 
 
 def plan_diff(
-    old_definitions: list[SchemaDefinition],
-    new_definitions: list[SchemaDefinition],
+    old_definitions: Sequence[SchemaDefinition],
+    new_definitions: Sequence[SchemaDefinition],
     *,
     index_granularity: int | None = None,
 ) -> MigrationPlan:

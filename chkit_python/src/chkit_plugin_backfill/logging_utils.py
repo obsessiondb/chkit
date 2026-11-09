@@ -11,6 +11,7 @@ from __future__ import annotations
 import logging
 import re
 
+from chkit.core.jsnum import js_to_fixed
 from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
 
 CHKIT_LOGGER_CATEGORY = ("chkit",)
@@ -30,13 +31,13 @@ def get_backfill_logger(*segments: str) -> logging.Logger:
 
 def format_bytes(bytes_: float) -> str:
     if bytes_ >= 1024**4:
-        return f"{bytes_ / 1024**4:.1f} TiB"
+        return f"{js_to_fixed(bytes_ / 1024**4, 1)} TiB"
     if bytes_ >= 1024**3:
-        return f"{bytes_ / 1024**3:.1f} GiB"
+        return f"{js_to_fixed(bytes_ / 1024**3, 1)} GiB"
     if bytes_ >= 1024**2:
-        return f"{bytes_ / 1024**2:.1f} MiB"
+        return f"{js_to_fixed(bytes_ / 1024**2, 1)} MiB"
     if bytes_ >= 1024:  # noqa: PLR2004 — KiB threshold
-        return f"{bytes_ / 1024:.1f} KiB"
+        return f"{js_to_fixed(bytes_ / 1024, 1)} KiB"
     return f"{_format_byte_count(bytes_)} B"
 
 

@@ -45,6 +45,9 @@ Some plugins have top-level CLI shortcuts:
 
 - `chkit codegen` is equivalent to `chkit plugin codegen codegen`
 - `chkit pull` is equivalent to `chkit plugin pull schema` (TypeScript; in Python `pull` is a built-in command with no plugin behind it)
+- `chkit obsessiondb <command>` is equivalent to `chkit plugin obsessiondb <command>`
+
+In the TypeScript CLI, a plugin's commands can also be called as `chkit <plugin-name> <command> [args...]`. A shortcut gives the command the same `args` as its `chkit plugin` form: the positionals after the command name, without the name itself.
 
 ### Plugin registration
 
