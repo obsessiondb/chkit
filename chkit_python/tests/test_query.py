@@ -372,10 +372,10 @@ def test_cli_rejects_missing_clickhouse_config(
 def test_cli_rejects_an_unknown_flag_instead_of_reading_it_as_sql(
     runner: CliRunner, project: Path, args: list[str], flag: str
 ) -> None:
-    # #584: as TS, an unknown flag is a usage error, not SQL.
+    # #584: as TS, an unknown flag is a usage error, not SQL; reported as TS does (#563).
     result = runner.invoke(app, ["query", *args])
-    assert result.exit_code == 2, result.output
-    assert f"No such option: {flag}" in ANSI_STYLE.sub("", result.output)
+    assert result.exit_code == 1, result.output
+    assert f"Unknown flag: {flag}" in ANSI_STYLE.sub("", result.output)
 
 
 @pytest.mark.parametrize(
@@ -411,17 +411,16 @@ def test_cli_reads_sql_that_starts_with_a_dash_as_sql(
 def test_query_sql_goes_behind_the_terminator_and_option_values_stay() -> None:
     params = get_command(app).commands["query"].params  # type: ignore[attr-defined]
     assert _query_sql_behind_terminator(
-        None,
         ["-- c\nSELECT 1", "--service", "-- not sql", "-x", "SELECT 2", "--", "-1"],
         params,
     ) == ["--service", "-- not sql", "-x", "--", "-- c\nSELECT 1", "SELECT 2", "-1"]
-    assert _query_sql_behind_terminator(None, ["--json", "-c=x"], params) == [
+    assert _query_sql_behind_terminator(["--json", "-c=x"], params) == [
         "--json",
         "-c=x",
     ]
     # A declared option's attached value may hold spaces.
     assert _query_sql_behind_terminator(
-        None, ["-c/my dir/c.py", "--config=/my dir/c.py", "SELECT 1"], params
+        ["-c/my dir/c.py", "--config=/my dir/c.py", "SELECT 1"], params
     ) == ["-c/my dir/c.py", "--config=/my dir/c.py", "--", "SELECT 1"]
 
 
