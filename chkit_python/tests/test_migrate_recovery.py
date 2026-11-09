@@ -1253,28 +1253,33 @@ def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
     assert events == ["command DROP TABLE IF EXISTS default.t;", "propagation-query", "append"]
 
 
-# ---------- mode=barrier has no propagation wait, whatever the type (#577) ----------
+# ---------- an EXCHANGE TABLES marked mode=barrier keeps its replica wait (#577) ----------
 
+# The barrier read runs an EXCHANGE TABLES as ClickHouse would.
 _EXCHANGE_BARRIER_SQL = (
     "-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n"
     "EXCHANGE TABLES default.a AND default.b;\n"
+    "-- operation: drop_table key=table:default.b risk=danger\n"
+    "DROP TABLE IF EXISTS default.b SYNC;\n"
 )
+_DROP_B_SENT = "DROP TABLE IF EXISTS default.b SYNC;"
 
 
 class _TwoReplicaClient:
-    """A two-replica target: the barrier read lists no running INSERT, and the
-    replicas agree on both exchanged tables."""
+    """A two-replica target: no INSERT is running, the replicas agree on both
+    exchanged tables, and the dropped table is gone everywhere."""
 
     def __init__(self) -> None:
-        self.queries: list[str] = []
-        self.commands: list[str] = []
+        self.events: list[str] = []
 
     def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
-        self.commands.append(statement)
+        self.events.append(f"command {statement}")
 
     def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
-        self.queries.append(sql)
+        if "EXCHANGE TABLES" in sql or "system.processes" in sql:
+            self.events.append("barrier read")
         if "uniqExact(uuid)" in sql:
+            self.events.append("exchange wait")
             rows = [
                 {"database": "default", "name": name, "replicas": 2, "uuids": 1, "sample_uuid": uuid}
                 for name, uuid in (("a", "u1"), ("b", "u2"))
@@ -1298,24 +1303,29 @@ def _two_replicas(single_replica: None, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.usefixtures("_two_replicas")
-def test_apply_barrier_exchange_has_no_propagation_wait(tmp_path: Path) -> None:
+def test_apply_exchange_barrier_waits_for_every_replica_before_next_statement(
+    tmp_path: Path,
+) -> None:
     client = _TwoReplicaClient()
     store = FakeStore()
     _apply(_write(tmp_path, _EXCHANGE_BARRIER_SQL), cast(Any, client), store)
-    # A barrier statement is read, never executed, and nothing waits for the
-    # exchanged tables to agree on every replica, as in TS.
-    assert client.commands == []
-    assert not any("system.tables" in sql for sql in client.queries)
-    assert [o.last_error for state in store.writes for o in state.operations] == ["", ""]
+    assert client.events == ["barrier read", "exchange wait", f"command {_DROP_B_SENT}"]
+    exchange_records = [
+        (o.status, o.last_error)
+        for state in store.writes
+        for o in state.operations
+        if o.operation_index == 0
+    ]
+    assert exchange_records[:3] == [
+        ("started", ""),
+        ("completed", PROPAGATION_WAIT_PENDING),
+        ("completed", ""),
+    ]
     assert len(store.appended) == 1
 
 
 @pytest.mark.usefixtures("_two_replicas")
-def test_apply_resumed_barrier_exchange_with_pending_marker_does_not_wait(
-    tmp_path: Path,
-) -> None:
-    # A record an earlier chkit-py left pending: the resumed run clears it
-    # without waiting, as TS ``completePropagation`` does.
+def test_apply_resumed_exchange_barrier_with_pending_marker_waits_again(tmp_path: Path) -> None:
     exchange = Marker(type="exchange_tables", key="table:default.a")
     client = _TwoReplicaClient()
     store = FakeStore(
@@ -1325,11 +1335,29 @@ def test_apply_resumed_barrier_exchange_with_pending_marker_does_not_wait(
         )
     )
     _apply(_write(tmp_path, _EXCHANGE_BARRIER_SQL), cast(Any, client), store)
-    assert client.commands == []
-    assert client.queries == []
+    assert client.events == ["exchange wait", f"command {_DROP_B_SENT}"]
     assert store.state is not None
     assert [(o.operation_index, o.status, o.last_error) for o in store.state.operations] == [
-        (0, "completed", "")
+        (0, "completed", ""),
+        (1, "completed", ""),
+    ]
+    assert len(store.appended) == 1
+
+
+@pytest.mark.usefixtures("_two_replicas")
+def test_apply_select_barrier_has_no_propagation_wait(tmp_path: Path) -> None:
+    sql = (
+        "-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier "
+        "risk=safe mode=barrier\n"
+        "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n"
+    )
+    client = _TwoReplicaClient()
+    store = FakeStore()
+    _apply(_write(tmp_path, sql), cast(Any, client), store)
+    assert client.events == ["barrier read"]
+    assert [(o.status, o.last_error) for state in store.writes for o in state.operations] == [
+        ("started", ""),
+        ("completed", ""),
     ]
     assert len(store.appended) == 1
 

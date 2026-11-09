@@ -28,9 +28,6 @@
   wait timed out (#513, fixed in TS too): the re-run waits again for that statement before it
   runs the next one, and stops with the same error if the change has still not reached every
   replica.
-- `migrate` no longer waits for DDL propagation after an `exchange_tables` statement marked
-  `mode=barrier`: a barrier statement gets no propagation wait, whatever its operation type,
-  as in TS (#577).
 - `generate` no longer drops and re-adds a skip index whose expression differs only by
   enclosing parentheses, such as the `(s)` ObsessionDB stores for `s`; `pull` writes `s` on
   every server, and `drift` ignores those parentheses too, as in TS (#512).

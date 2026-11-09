@@ -336,10 +336,9 @@ def _propagation_wait_pending(state: MigrationRowState, index: int) -> bool:
 
 
 def _has_propagation_wait(operation: MigrationOperationSummary | None) -> bool:
-    """A ``mode=barrier`` statement reads ``system.processes`` and changes no
-    object, whatever its type, so it has no propagation wait (TS
-    ``hasPropagationWait``, #577)."""
-    return operation is not None and operation.mode != "barrier"
+    return operation is not None and (
+        operation.type == "exchange_tables" or operation.mode != "barrier"
+    )
 
 
 def _complete_propagation(
@@ -374,14 +373,14 @@ def _wait_for_propagation(
 ) -> None:
     """Wait until a sync statement's DDL reaches every replica. A wait that
     times out stops the migration, as in TS."""
-    if operation is None or not _has_propagation_wait(operation):
+    if operation is None:
         return
     if operation.type == "exchange_tables":
         # A swap that has not reached every replica stops the migration (as
         # in TS): the cutover steps after it would read a replica that
         # still has the old names.
         wait_for_exchange(client, statement, cluster=cluster)
-    else:
+    elif operation.mode != "barrier":
         # Poll system.tables / system.columns until the DDL is visible.
         # Critical for Replicated / ObsessionDB Shared engines.
         wait_for_ddl_propagation(
