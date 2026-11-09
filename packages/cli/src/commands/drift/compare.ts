@@ -1,4 +1,15 @@
 import {
+  parseAttributeListTextFromCreateDictionaryQuery,
+  parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseDictionaryRangeFromCreateDictionaryQuery,
+  parseDictionarySettingsFromCreateDictionaryQuery,
+  parseLayoutFromCreateDictionaryQuery,
+  parseLifetimeFromCreateDictionaryQuery,
+  parseSourceFromCreateDictionaryQuery,
+  replaceSourceInCreateDictionaryQuery,
+  stringLiteral,
+} from '@chkit/clickhouse'
+import {
   columnCodecFingerprint,
   columnTypeFingerprint,
   DEFAULT_INDEX_GRANULARITY,
@@ -15,14 +26,19 @@ import {
   normalizeProjectionIndex,
   normalizeSQLFragment,
   renderDefault,
+  renderDictionarySQL,
   renderKeyClauseColumns,
   splitTopLevelComma,
   sqlExpressionFingerprint,
+  findMatchingParen,
   isTrivia,
   keyClauseFingerprint,
+  stringLiteralValue,
   type ColumnDefinition,
+  type DictionaryDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
+  type SQLToken,
   textIndexFingerprint,
   tokenizeSQL,
   renderVectorIndexType,
@@ -33,6 +49,7 @@ import {
   type ViewDefinition,
   withDefaultIndexGranularity,
 } from '@chkit/core'
+import { debug } from '../../runtime/debug.js'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
 
 /**
@@ -75,6 +92,11 @@ type ObjectDriftReasonCode =
   | 'query_mismatch'
   | 'target_mismatch'
   | 'comment_mismatch'
+  | 'source_mismatch'
+  | 'structure_mismatch'
+  | 'layout_mismatch'
+  | 'lifetime_mismatch'
+  | 'dictionary_setting_mismatch'
 type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
 
 interface SchemaObjectShape {
@@ -89,17 +111,22 @@ export interface ObjectDriftDetail {
   object: string
   expectedKind?: SchemaObjectShape['kind']
   actualKind?: SchemaObjectShape['kind']
-  /** query_mismatch / target_mismatch / comment_mismatch: the compared query, `TO` target or comment. */
+  /** Any code that compares two values: the schema's value and the live one. */
   expected?: string
   actual?: string
 }
 
-/** What ClickHouse stores in place of a secret in a view's query. */
+/** What ClickHouse stores in place of a secret in a view's query or a dictionary's source. */
 const HIDDEN_SECRET = "'[HIDDEN]'"
 
 interface ActualViewShape {
   query: string
   to?: { database: string; name: string }
+}
+
+interface ActualDictionaryShape {
+  /** The `CREATE DICTIONARY` statement as ClickHouse stores it. */
+  createQuery: string
 }
 
 interface ActualTableShape {
@@ -672,4 +699,322 @@ function stripDatabaseQualifier(sql: string, database: string): string {
     out += token.text
   }
   return out
+}
+
+/** The clauses `compareDictionaryShape` reads from both formatted statements, by drift code. */
+const DICTIONARY_CLAUSES: ReadonlyArray<[ObjectDriftReasonCode, (query: string) => string]> = [
+  ['structure_mismatch', dictionaryStructure],
+  ['layout_mismatch', (query) => parseLayoutFromCreateDictionaryQuery(query) ?? ''],
+  ['lifetime_mismatch', (query) => parseLifetimeFromCreateDictionaryQuery(query) ?? ''],
+  ['dictionary_setting_mismatch', dictionarySettings],
+]
+
+/**
+ * Source keys whose whole value is a secret: the keys ClickHouse hides, and the
+ * keys newer ClickHouse versions hide but 26.3 stores in clear. Drift hides
+ * them on both sides, so `expected` never shows one.
+ */
+const SECRET_SOURCE_KEYS = new Set([
+  'PASSWORD',
+  'HEADERS',
+  'HEADER',
+  'CONNECTION_STRING',
+  'DATASOURCE',
+  'OAUTH_TOKEN',
+  'SSL_CA_PEM',
+  'SSL_CERT_PEM',
+  'SSL_KEY_PEM',
+  'SSL_KEY_PASSPHRASE',
+  'SSLROOTCERT_PEM',
+  'SSLCERT_PEM',
+  'SSLKEY_PEM',
+])
+
+/**
+ * The user info of a URL. ClickHouse 26.3 hides only the password of a MongoDB
+ * `URI` and stores an HTTP `URL` in clear; drift hides the user info of every
+ * URL on both sides.
+ */
+const URL_USERINFO = /^([a-zA-Z][a-zA-Z0-9+.-]*:\/\/)[^/?#]+@/
+const URL_SCHEME = /^[a-zA-Z][a-zA-Z0-9+.-]*:\/\//
+
+/**
+ * Query parameters whose value is a secret, as ClickHouse after 26.3 hides
+ * them in a URL: the name, percent-decoded and in lower case, contains one of
+ * these words, or is `sig`. ClickHouse 26.3 stores them in clear.
+ */
+const SECRET_PARAMETER_WORDS = ['secret', 'password', 'passwd', 'token', 'credential', 'signature', 'key']
+
+/** The C escapes ClickHouse reads in a quoted string, by the letter after the backslash. */
+const QUOTED_STRING_ESCAPES: Record<string, string> = {
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+  0: '\0',
+}
+
+/** ClickHouse drops the backslash before a control character (code 0-31). */
+const LAST_CONTROL_CHAR = 31
+
+/** The characters ClickHouse escapes when it writes a quoted string, and the letter it writes after the backslash. */
+const QUOTED_STRING_LETTERS: Record<string, string> = {
+  '\b': 'b',
+  '\f': 'f',
+  '\n': 'n',
+  '\r': 'r',
+  '\t': 't',
+  '\0': '0',
+  '\\': '\\',
+  "'": "'",
+}
+
+/** The two statements `compareDictionaryShape` formats, and the live `SOURCE` body it compares. */
+export interface DictionarySqlQueries {
+  /** The schema's statement, with `SOURCE(NULL())` and no comment. */
+  expected: string
+  /** The live statement, with `SOURCE(NULL())` and no comment. */
+  actual: string
+  actualSource: string
+}
+
+/** A `SOURCE` key and its value: a literal, or a group of pairs in parentheses. */
+interface SourcePair {
+  key: string
+  value: string | SourcePair[]
+}
+
+/**
+ * The dictionary statements `compareDictionaryShape` formats, or undefined when
+ * the live `SOURCE` can't be parsed.
+ */
+export function collectDictionarySqlQueries(
+  expected: DictionaryDefinition,
+  actual: ActualDictionaryShape
+): DictionarySqlQueries | undefined {
+  const actualSource = parseSourceFromCreateDictionaryQuery(actual.createQuery)
+  const actualQuery = replaceSourceInCreateDictionaryQuery(actual.createQuery, 'NULL()')
+  if (actualSource === undefined || actualQuery === undefined) return undefined
+  const { comment: _comment, ...definition } = expected
+  return {
+    expected: renderDictionarySQL({ ...definition, source: 'NULL()' }).replace(/;$/, ''),
+    actual: withoutComment(actualQuery),
+    actualSource,
+  }
+}
+
+/**
+ * Compares a dictionary with the live one, clause by clause. `queries` is what
+ * `collectDictionarySqlQueries` returned for the pair.
+ *
+ * The attributes, primary key and `RANGE` (together the structure), `LAYOUT`,
+ * `LIFETIME` and `SETTINGS` are compared as ClickHouse's formatter renders
+ * them, as view queries are: when either statement can't be formatted, they
+ * are not compared. Both statements reach the formatter with `SOURCE(NULL())`,
+ * because the formatter shows secrets and logs its input in `system.query_log`.
+ *
+ * `SOURCE` is compared locally, with its keys in any order. Both sides are
+ * rendered as ClickHouse stores a source, with secret values replaced by
+ * `[HIDDEN]`, so `expected` never shows a schema secret and a change to a
+ * secret alone is not drift. `SOURCE` is not compared when ClickHouse hid a
+ * value that drift does not hide, or when a value is a function call, which
+ * ClickHouse stores evaluated. When the live `SOURCE` can't be parsed, the
+ * dictionary is not compared.
+ */
+export function compareDictionaryShape(
+  expected: DictionaryDefinition,
+  queries: DictionarySqlQueries | undefined,
+  canonicalizer?: SqlCanonicalizer
+): ObjectDriftDetail[] {
+  const object = `${expected.database}.${expected.name}`
+  if (queries === undefined) {
+    debug('drift', `${object}: live SOURCE not parsed, dictionary not compared`)
+    return []
+  }
+  const { actualSource } = queries
+  const drift: ObjectDriftDetail[] = []
+  const expectedSource = normalizeDictionarySource(expected.source)
+  const actualSourceShape = normalizeDictionarySource(actualSource)
+  const unhiddenMasks = normalizeDictionarySource(actualSource.replaceAll('[HIDDEN]', 'x'))
+  if (!expectedSource || !actualSourceShape) {
+    debug('drift', `${object}: SOURCE not compared, it holds a function call or another shape`)
+  } else if (actualSourceShape.sorted !== unhiddenMasks?.sorted) {
+    debug('drift', `${object}: SOURCE not compared, ClickHouse hid a value drift does not hide`)
+  } else if (expectedSource.sorted !== actualSourceShape.sorted) {
+    drift.push({ code: 'source_mismatch', object, expected: expectedSource.text, actual: actualSourceShape.text })
+  }
+  const expectedFormatted = canonicalizer?.query(queries.expected)
+  const actualFormatted = canonicalizer?.query(queries.actual)
+  if (!expectedFormatted || !actualFormatted) {
+    debug('drift', `${object}: dictionary clauses not compared, the server could not format them`)
+    return drift
+  }
+  for (const [code, read] of DICTIONARY_CLAUSES) {
+    const expectedClause = read(expectedFormatted)
+    const actualClause = read(actualFormatted)
+    if (expectedClause !== actualClause) drift.push({ code, object, expected: expectedClause, actual: actualClause })
+  }
+  return drift
+}
+
+function dictionaryStructure(query: string): string {
+  const attributes = parseAttributeListTextFromCreateDictionaryQuery(query) ?? ''
+  const primaryKey = parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query).join(', ')
+  const range = parseDictionaryRangeFromCreateDictionaryQuery(query)
+  return `(${attributes}) PRIMARY KEY ${primaryKey}${range ? ` RANGE(MIN ${range.min} MAX ${range.max})` : ''}`
+}
+
+/** Sorted by name: the snapshot sorts dictionary settings, ClickHouse keeps them as written. */
+function dictionarySettings(query: string): string {
+  const settings = parseDictionarySettingsFromCreateDictionaryQuery(query) ?? {}
+  return Object.keys(settings)
+    .sort()
+    .map((key) => {
+      const value = settings[key] ?? ''
+      return `${key} = ${typeof value === 'string' ? stringLiteral(value) : value}`
+    })
+    .join(', ')
+}
+
+/**
+ * A dictionary `SOURCE` body as ClickHouse stores it (`text`): keys and the
+ * source name in upper case, strings quoted with backslashes, and secret values
+ * replaced by `[HIDDEN]`. `sorted` is the same with the pairs of each group in
+ * sorted order, for comparing: ClickHouse keeps the order as written.
+ * Undefined when the source is not a list of `KEY value` pairs, or a value is a
+ * function call.
+ */
+function normalizeDictionarySource(source: string): { text: string; sorted: string } | undefined {
+  const tokens = tokenizeSQL(source).filter((token) => !isTrivia(token))
+  const parsed = parseSourcePairs(source, tokens, 0)
+  if (!parsed || parsed.end !== tokens.length) return undefined
+  return { text: renderSourcePairs(parsed.pairs, false), sorted: renderSourcePairs(parsed.pairs, true) }
+}
+
+/** The pairs from `tokens[start]` up to the `)` that closes their group, or the end. */
+function parseSourcePairs(
+  source: string,
+  tokens: SQLToken[],
+  start: number
+): { pairs: SourcePair[]; end: number } | undefined {
+  const pairs: SourcePair[] = []
+  let i = start
+  while (i < tokens.length && tokens[i]?.text !== ')') {
+    const keyToken = tokens[i]
+    const valueToken = tokens[i + 1]
+    if (keyToken?.kind !== 'identifier' || !valueToken || valueToken.text === ')') return undefined
+    const key = keyToken.text.toUpperCase()
+    if (valueToken.text === '(') {
+      const closeAt = findMatchingParen(source, valueToken.start)
+      const close = tokens.findIndex((token) => token.start === closeAt)
+      if (close === -1) return undefined
+      if (SECRET_SOURCE_KEYS.has(key)) {
+        pairs.push({ key, value: "('[HIDDEN]')" })
+      } else {
+        const group = parseSourcePairs(source, tokens, i + 2)
+        if (!group || group.end !== close) return undefined
+        pairs.push({ key, value: group.pairs })
+      }
+      i = close + 1
+      continue
+    }
+    // A signed number, such as `PRIORITY -1`, stored without the space.
+    const signed = (valueToken.text === '-' || valueToken.text === '+') && tokens[i + 2]?.kind === 'number'
+    const valueEnd = signed ? i + 2 : i + 1
+    // A function call, such as `DB currentDatabase()`: ClickHouse stores its result.
+    if (tokens[valueEnd + 1]?.text === '(') return undefined
+    const value = signed ? `${valueToken.text === '-' ? '-' : ''}${tokens[i + 2]?.text ?? ''}` : sourceValueText(valueToken)
+    pairs.push({ key, value: SECRET_SOURCE_KEYS.has(key) ? HIDDEN_SECRET : value })
+    i = valueEnd + 1
+  }
+  return { pairs, end: i }
+}
+
+/** `NAME(` for the source name, `KEY (` for a nested group, as ClickHouse prints them. */
+function renderSourcePairs(pairs: SourcePair[], sorted: boolean, nested = false): string {
+  const rendered = pairs.map(({ key, value }) =>
+    typeof value === 'string'
+      ? `${key} ${value}`
+      : `${key}${nested ? ' ' : ''}(${renderSourcePairs(value, sorted, true)})`
+  )
+  return (sorted ? rendered.sort() : rendered).join(' ')
+}
+
+function sourceValueText(token: SQLToken): string {
+  if (token.kind !== 'string' || !token.terminated) return token.text
+  const value = token.text.startsWith("'") ? readQuotedString(token.text) : stringLiteralValue(token)
+  return value === undefined ? token.text : writeQuotedString(maskUrlCredentials(value))
+}
+
+/**
+ * The value of a `'...'` literal, decoded as ClickHouse reads it: `\n`, `\t`
+ * and the other C escapes, `\xHH`, and a doubled quote. A backslash before a
+ * character that needs no escape stays, so `'a\%'` is `a\%`.
+ */
+function readQuotedString(text: string): string {
+  const body = text.slice(1, -1)
+  let out = ''
+  for (let i = 0; i < body.length; i++) {
+    const char = body[i] ?? ''
+    if (char === "'" && body[i + 1] === "'") {
+      out += "'"
+      i += 1
+    } else if (char !== '\\' || i + 1 === body.length) {
+      out += char
+    } else if (body[i + 1] === 'x' && /^[0-9a-fA-F]{2}$/.test(body.slice(i + 2, i + 4))) {
+      out += String.fromCharCode(Number.parseInt(body.slice(i + 2, i + 4), 16))
+      i += 3
+    } else {
+      const next = body[i + 1] ?? ''
+      const decoded = QUOTED_STRING_ESCAPES[next] ?? next
+      const kept = !'\\\'"`/='.includes(decoded) && decoded.charCodeAt(0) > LAST_CONTROL_CHAR
+      // `\N` reads as nothing.
+      if (next !== 'N') out += kept ? `\\${decoded}` : decoded
+      i += 1
+    }
+  }
+  return out
+}
+
+/** A `'...'` literal as ClickHouse writes it. */
+function writeQuotedString(value: string): string {
+  return `'${value.replace(/[\b\f\n\r\t\0\\']/g, (char) => `\\${QUOTED_STRING_LETTERS[char] ?? char}`)}'`
+}
+
+/** A URL with its user info and its secret query parameter values replaced by `[HIDDEN]`. */
+function maskUrlCredentials(value: string): string {
+  if (!URL_SCHEME.test(value)) return value
+  const url = value.replace(URL_USERINFO, '$1[HIDDEN]@')
+  const question = url.indexOf('?')
+  if (question === -1) return url
+  const parameters = url
+    .slice(question + 1)
+    .split('&')
+    .map((parameter) => {
+      const equals = parameter.indexOf('=')
+      if (equals === -1 || !isSecretParameterName(parameter.slice(0, equals))) return parameter
+      return `${parameter.slice(0, equals)}=[HIDDEN]`
+    })
+  return `${url.slice(0, question + 1)}${parameters.join('&')}`
+}
+
+function isSecretParameterName(rawName: string): boolean {
+  const name = rawName
+    .replace(/\+/g, ' ')
+    .replace(/%([0-9a-fA-F]{2})/g, (_match, hex: string) => String.fromCharCode(Number.parseInt(hex, 16)))
+    .toLowerCase()
+  return name === 'sig' || SECRET_PARAMETER_WORDS.some((word) => name.includes(word))
+}
+
+/** The statement without its trailing `COMMENT '...'`: its text could look like a clause to the parsers. */
+function withoutComment(query: string): string {
+  const tokens = tokenizeSQL(query).filter((token) => !isTrivia(token))
+  const keyword = tokens.at(-2)
+  const comment = tokens.at(-1)
+  const hasComment = keyword?.kind === 'identifier' && keyword.text.toUpperCase() === 'COMMENT' && comment?.kind === 'string'
+  return hasComment ? query.slice(0, keyword.start).trimEnd() : query
 }

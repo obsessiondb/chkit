@@ -197,7 +197,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 )
                 continue
             typer.echo(f"- {d.code} {d.object}")
-            if d.code in ("query_mismatch", "target_mismatch", "comment_mismatch"):
+            if d.expected is not None or d.actual is not None:
                 typer.echo(f"  expected={d.expected or ''}")
                 typer.echo(f"  actual={d.actual or ''}")
     if payload_obj.table_drift:

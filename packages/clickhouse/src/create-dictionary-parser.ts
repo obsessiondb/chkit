@@ -28,12 +28,16 @@ function extractBalancedParenGroup(
   if (openIndex === -1) return undefined
   let depth = 0
   let inString = false
+  let escaped = false
   let stringQuote = "'"
   for (let i = openIndex; i < text.length; i += 1) {
     const char = text[i]
     if (!char) continue
     if (inString) {
-      if (char === stringQuote && text[i - 1] !== '\\') inString = false
+      // A backslash escapes the next character, so in `'C:\\'` the quote ends the string.
+      if (escaped) escaped = false
+      else if (char === '\\') escaped = true
+      else if (char === stringQuote) inString = false
       continue
     }
     if (char === "'" || char === '"') {
@@ -71,7 +75,8 @@ function findAttributeListBounds(query: string): { open: number; close: number }
   return group ? { open: openIndex, close: group.endIndex - 1 } : undefined
 }
 
-function extractCreateDictionaryBody(query: string | undefined): string | undefined {
+/** The attribute list as written, without its parentheses: `` `id` UInt64, `name` String ``. */
+export function parseAttributeListTextFromCreateDictionaryQuery(query: string | undefined): string | undefined {
   if (!query) return undefined
   const bounds = findAttributeListBounds(query)
   if (!bounds) return undefined
@@ -94,12 +99,19 @@ function extractDictionaryOptions(query: string): string {
 }
 
 function extractKeywordParenBody(query: string, keyword: string): string | undefined {
+  const group = findKeywordParenGroup(query, keyword)
+  return group ? query.slice(group.open + 1, group.close).trim() : undefined
+}
+
+/** Positions of the parens of the dictionary-level `<keyword>(...)` clause. */
+function findKeywordParenGroup(query: string, keyword: string): { open: number; close: number } | undefined {
   const options = extractDictionaryOptions(query)
+  const optionsStart = query.length - options.length
   const match = new RegExp(`\\b${keyword}\\s*\\(`, 'i').exec(options)
   if (!match || match.index === undefined) return undefined
-  const openIndex = match.index + match[0].length - 1
-  const group = extractBalancedParenGroup(options, openIndex)
-  return group ? group.content.trim() : undefined
+  const open = optionsStart + match.index + match[0].length - 1
+  const group = extractBalancedParenGroup(query, open)
+  return group ? { open, close: group.endIndex - 1 } : undefined
 }
 
 // Scans a single attribute's trailing text (everything after `name type`) for the
@@ -219,7 +231,7 @@ function applyAttributeModifiers(attribute: ParsedDictionaryAttribute, tail: str
 export function parseDictionaryAttributesFromCreateDictionaryQuery(
   query: string | undefined
 ): ParsedDictionaryAttribute[] {
-  const body = extractCreateDictionaryBody(query)
+  const body = parseAttributeListTextFromCreateDictionaryQuery(query)
   if (!body) return []
   const attributes: ParsedDictionaryAttribute[] = []
   for (const part of splitTopLevelComma(body)) {
@@ -257,6 +269,15 @@ export function parseDictionaryPrimaryKeyFromCreateDictionaryQuery(
 export function parseSourceFromCreateDictionaryQuery(query: string | undefined): string | undefined {
   if (!query) return undefined
   return extractKeywordParenBody(query, 'SOURCE')
+}
+
+/**
+ * The query with the body of its `SOURCE(...)` clause replaced by `body`, or
+ * undefined when the query has no `SOURCE` clause.
+ */
+export function replaceSourceInCreateDictionaryQuery(query: string, body: string): string | undefined {
+  const group = findKeywordParenGroup(query, 'SOURCE')
+  return group ? `${query.slice(0, group.open + 1)}${body}${query.slice(group.close)}` : undefined
 }
 
 export function parseLayoutFromCreateDictionaryQuery(query: string | undefined): string | undefined {

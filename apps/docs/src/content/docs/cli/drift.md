@@ -27,7 +27,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 2. Requires `clickhouse` config. If missing, fails with: _"clickhouse config is required for drift checks."_
 3. Connects to ClickHouse. If the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default), fails with a message that names the value to set.
 4. Introspects the live schema
-5. Compares expected (snapshot) vs actual (live) objects, table shapes, and view and materialized view queries
+5. Compares expected (snapshot) vs actual (live) objects, table shapes, view and materialized view queries, and dictionary definitions
 6. Reports drift at both the object level and the table level
 
 ### What drift compares
@@ -35,6 +35,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 - **Objects:** every table, view, materialized view and dictionary in the snapshot exists in ClickHouse with the same kind. An object in the schema's databases that the snapshot does not list reports `extra_object`.
 - **Tables:** columns matched by name, with their type, default, default kind, comment and codec; the engine, `ORDER BY`, `PRIMARY KEY`, `PARTITION BY`, unique key and `TTL`; skip indexes, projections and constraints; and the settings the schema declares.
 - **Views and materialized views:** the query, and a materialized view's `TO` target; see [View and materialized view queries](#view-and-materialized-view-queries).
+- **Dictionaries:** the attributes, primary key, `RANGE`, `SOURCE`, `LAYOUT`, `LIFETIME` and settings; see [Dictionary definitions](#dictionary-definitions).
 - **Comments:** the comment of every table, view, materialized view and dictionary, compared with `system.tables.comment`. A changed comment reports `comment_mismatch` with the schema's comment in `expected` and the live one in `actual`. A changed column comment reports `changed_column`.
 
 ### What drift does not compare
@@ -44,7 +45,8 @@ A server-side change to any of these reports no drift, so neither `chkit drift` 
 - A view or materialized view query in which ClickHouse hid a secret as `'[HIDDEN]'`, or that the server can't format.
 - The `REFRESH` clause of a refreshable materialized view.
 - Column order: columns are matched by name.
-- Dictionary definitions: attributes, primary key, `SOURCE`, `LAYOUT`, `LIFETIME`, `RANGE` and settings.
+- The secrets in a dictionary's `SOURCE` (see [Dictionary definitions](#dictionary-definitions)): `drift` hides them on both sides, so a change to them alone reports no drift.
+- The `SOURCE` of a dictionary in which ClickHouse hid another value or that holds a function call, and a dictionary's other clauses when the server can't format the dictionary.
 - Table settings the schema does not declare.
 
 Check these properties against `SHOW CREATE` output.
@@ -71,6 +73,14 @@ A changed query reports `query_mismatch` and a changed target `target_mismatch`,
 
 `ORDER BY`, `PRIMARY KEY`, the unique key and `PARTITION BY` are compared token by token with the clauses ClickHouse stores, ignoring whitespace, comments, one pair of parentheses around the whole clause, and how a name is quoted (`` `a\x41` `` and `aA` are the same column; a bare `NULL` is the literal, not a column named `null`). A quoted name keeps its commas and spaces: a key on a column named `a, b` is not the key on columns `a` and `b`, and a column named `a b` is not `ab`.
 
+### Dictionary definitions
+
+Each dictionary in the snapshot is compared with the statement ClickHouse stores for it (`create_table_query` in `system.tables`). The attributes, primary key, `RANGE`, `LAYOUT`, `LIFETIME` and settings go through ClickHouse's own formatter first, so `Decimal(10,2)` matches the stored `Decimal(10, 2)`, `LIFETIME(300)` matches `LIFETIME(MIN 0 MAX 300)`, and `hashed(shards 4)` matches `HASHED(SHARDS 4)`. Settings are compared without regard to their order. When the server can't format the dictionary, these clauses are not compared.
+
+The `SOURCE` is compared without the formatter, which would log the schema's credentials in `system.query_log`. Keys and the source name are compared without regard to case, keys without regard to order, and strings by value. `drift` hides the secrets on both sides, so `expected` never shows a schema secret, and a change to a secret alone reports no drift: the values of `password`, `headers`, `connection_string` (ODBC), `datasource` (JDBC), `oauth_token`, and the MySQL and PostgreSQL SSL keys and passphrase; the user info in any URL; and the values of the URL query parameters that ClickHouse treats as secret (a name that contains `secret`, `password`, `passwd`, `token`, `credential`, `signature` or `key`, or is `sig`). ClickHouse 26.3 itself stores some of these in clear, such as an ODBC `connection_string` or an HTTP `URL 'http://host/?password=…'`. A source in which ClickHouse hid any other value is not compared, nor is a source with a function call such as `db currentDatabase()`, which ClickHouse stores evaluated.
+
+A changed clause reports `structure_mismatch` (attributes, primary key and `RANGE`), `source_mismatch`, `layout_mismatch`, `lifetime_mismatch` or `dictionary_setting_mismatch`. `expected` holds the schema's clause and `actual` the live one: the source as ClickHouse stores it with credentials hidden, and the other clauses as the formatter prints them.
+
 ### SQL comments
 
 ClickHouse does not store SQL comments. chkit removes them from TTL, partition, skip index, and projection expressions, and from expression column defaults, before comparing them with the live table, so a comment that whitespace separates from the rest of the clause, such as one at the end of a line, does not read as drift. Comment markers inside a literal column default (`default: 'a -- b'`) are part of the value. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
@@ -95,6 +105,11 @@ Column codecs are compared with `compression_codec` in `system.columns`. ClickHo
 | `query_mismatch` | A view or materialized view query differs from the snapshot |
 | `target_mismatch` | A materialized view writes to a different `TO` table than the snapshot |
 | `comment_mismatch` | A table, view, materialized view or dictionary comment differs from the snapshot |
+| `structure_mismatch` | A dictionary's attributes, primary key or `RANGE` differ from the snapshot |
+| `source_mismatch` | A dictionary's `SOURCE` differs from the snapshot |
+| `layout_mismatch` | A dictionary's `LAYOUT` differs from the snapshot |
+| `lifetime_mismatch` | A dictionary's `LIFETIME` differs from the snapshot |
+| `dictionary_setting_mismatch` | A dictionary's `SETTINGS` differ from the snapshot |
 
 **Table-level drift:**
 

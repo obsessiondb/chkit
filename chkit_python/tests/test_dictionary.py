@@ -322,6 +322,15 @@ def test_parses_source_layout_lifetime() -> None:
     assert parse_lifetime_from_create_dictionary_query(_PARSER_QUERY) == "MIN 0 MAX 300"
 
 
+def test_parses_a_source_whose_string_ends_in_an_escaped_backslash() -> None:
+    query = (
+        "CREATE DICTIONARY default.files (`id` UInt64) PRIMARY KEY id "
+        "SOURCE(FILE(PATH '/data/C:\\\\' FORMAT 'TSV')) LIFETIME(MIN 0 MAX 300) LAYOUT(FLAT())"
+    )
+    assert parse_source_from_create_dictionary_query(query) == "FILE(PATH '/data/C:\\\\' FORMAT 'TSV')"
+    assert parse_layout_from_create_dictionary_query(query) == "FLAT()"
+
+
 def test_returns_empty_results_for_none_query() -> None:
     assert parse_dictionary_attributes_from_create_dictionary_query(None) == []
     assert parse_dictionary_primary_key_from_create_dictionary_query(None) == []

@@ -74,13 +74,19 @@ def _extract_balanced_paren_group(
         return None
     depth = 0
     in_string = False
+    escaped = False
     string_quote = "'"
     for i in range(open_index, len(text)):
         char = text[i]
         if not char:
             continue
         if in_string:
-            if char == string_quote and (i == 0 or text[i - 1] != "\\"):
+            # A backslash escapes the next character, so in ``'C:\\'`` the quote ends the string.
+            if escaped:
+                escaped = False
+            elif char == "\\":
+                escaped = True
+            elif char == string_quote:
                 in_string = False
             continue
         if char in ("'", '"'):
@@ -116,7 +122,8 @@ def _find_attribute_list_bounds(query: str) -> tuple[int, int] | None:
     return (open_index, group[1] - 1)
 
 
-def _extract_create_dictionary_body(query: str | None) -> str | None:
+def parse_attribute_list_text_from_create_dictionary_query(query: str | None) -> str | None:
+    """The attribute list as written, without its parentheses."""
     if not query:
         return None
     bounds = _find_attribute_list_bounds(query)
@@ -141,13 +148,20 @@ def _extract_dictionary_options(query: str) -> str:
 
 
 def _extract_keyword_paren_body(query: str, keyword: str) -> str | None:
+    group = _find_keyword_paren_group(query, keyword)
+    return query[group[0] + 1 : group[1]].strip() if group is not None else None
+
+
+def _find_keyword_paren_group(query: str, keyword: str) -> tuple[int, int] | None:
+    """Positions of the parens of the dictionary-level ``<keyword>(...)`` clause."""
     options = _extract_dictionary_options(query)
+    options_start = len(query) - len(options)
     match = re.search(rf"\b{keyword}\s*\(", options, re.IGNORECASE)
     if match is None:
         return None
-    open_index = match.end() - 1
-    group = _extract_balanced_paren_group(options, open_index)
-    return group[0].strip() if group is not None else None
+    open_index = options_start + match.end() - 1
+    group = _extract_balanced_paren_group(query, open_index)
+    return (open_index, group[1] - 1) if group is not None else None
 
 
 def _split_attribute_type_and_modifiers(rest: str) -> tuple[str, str]:
@@ -282,7 +296,7 @@ def _apply_attribute_modifiers(attribute: ParsedDictionaryAttribute, tail: str) 
 def parse_dictionary_attributes_from_create_dictionary_query(
     query: str | None,
 ) -> list[ParsedDictionaryAttribute]:
-    body = _extract_create_dictionary_body(query)
+    body = parse_attribute_list_text_from_create_dictionary_query(query)
     if body is None:
         return []
     attributes: list[ParsedDictionaryAttribute] = []
@@ -331,6 +345,17 @@ def parse_source_from_create_dictionary_query(query: str | None) -> str | None:
     if not query:
         return None
     return _extract_keyword_paren_body(query, "SOURCE")
+
+
+def replace_source_in_create_dictionary_query(query: str, body: str) -> str | None:
+    """The query with the body of its ``SOURCE(...)`` clause replaced by ``body``.
+
+    ``None`` when the query has no ``SOURCE`` clause.
+    """
+    group = _find_keyword_paren_group(query, "SOURCE")
+    if group is None:
+        return None
+    return f"{query[: group[0] + 1]}{body}{query[group[1] :]}"
 
 
 def parse_layout_from_create_dictionary_query(query: str | None) -> str | None:

@@ -2,9 +2,11 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   type ColumnDefinition,
+  type DictionaryDefinition,
   type SkipIndexDefinition,
   type TableConstraintDefinition,
   type TableInput,
+  dictionary,
   materializedView,
   parseCodec,
   table,
@@ -13,7 +15,9 @@ import {
 
 import {
   collectTableSqlFragments,
+  collectDictionarySqlQueries,
   collectViewSqlQueries,
+  compareDictionaryShape,
   compareObjectComments,
   compareSchemaObjects,
   compareTableShape,
@@ -1493,6 +1497,128 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
     expect(compareViewShape(expected, live, 'app', canonicalizer)).toEqual([])
     const elsewhere = { query: "SELECT id, dictGet('other.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM t" }
     expect(compareViewShape(expected, elsewhere, 'app', canonicalizer)).toMatchObject([{ code: 'query_mismatch' }])
+  })
+})
+
+describe('@chkit/cli drift: dictionary SOURCE (#492)', () => {
+  // Without a canonicalizer, compareDictionaryShape compares only SOURCE.
+  const compare = (expected: DictionaryDefinition, actual: { createQuery: string }) =>
+    compareDictionaryShape(expected, collectDictionarySqlQueries(expected, actual))
+  const withSource = (source: string) =>
+    dictionary({
+      database: 'app',
+      name: 'rates',
+      attributes: [{ name: 'id', type: 'UInt64' }],
+      primaryKey: ['id'],
+      source,
+      layout: 'FLAT()',
+      lifetime: '0',
+    })
+  const live = (source: string) => ({
+    createQuery: `CREATE DICTIONARY app.rates (\`id\` UInt64) PRIMARY KEY id SOURCE(${source}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())`,
+  })
+  const http = withSource(
+    "http(url 'https://u:url-secret@example.com/a.tsv' format 'TSV' credentials(user 'u' password 'pw-secret') headers(header(name 'X-Token' value 'tok-secret')))"
+  )
+  const mongo = withSource("mongodb(uri 'mongodb://u:uri-secret@h:27017/db' collection 'c')")
+
+  test('values that ClickHouse 26.3 and later versions hide read clean, in any case and spacing', () => {
+    const stored26 =
+      "HTTP(URL 'https://u:url-secret@example.com/a.tsv' FORMAT 'TSV' CREDENTIALS (USER 'u' PASSWORD '[HIDDEN]') HEADERS ('[HIDDEN]'))"
+    const storedLater =
+      "HTTP(URL 'https://[HIDDEN]@example.com/a.tsv' FORMAT 'TSV' CREDENTIALS (USER 'u' PASSWORD '[HIDDEN]') HEADERS ('[HIDDEN]'))"
+    expect(compare(http, live(stored26))).toEqual([])
+    expect(compare(http, live(storedLater))).toEqual([])
+    expect(compare(mongo, live("MONGODB(URI 'mongodb://u:[HIDDEN]@h:27017/db' COLLECTION 'c')"))).toEqual([])
+    expect(compare(mongo, live("MONGODB(URI 'mongodb://[HIDDEN]@h:27017/db' COLLECTION 'c')"))).toEqual([])
+  })
+
+  test('a changed URL drifts, and expected shows no schema secret', () => {
+    const changed = live(
+      "HTTP(URL 'https://u:url-secret@example.com/b.tsv' FORMAT 'TSV' CREDENTIALS (USER 'u' PASSWORD '[HIDDEN]') HEADERS ('[HIDDEN]'))"
+    )
+    expect(compare(http, changed)).toEqual([
+      {
+        code: 'source_mismatch',
+        object: 'app.rates',
+        expected:
+          "HTTP(URL 'https://[HIDDEN]@example.com/a.tsv' FORMAT 'TSV' CREDENTIALS (USER 'u' PASSWORD '[HIDDEN]') HEADERS ('[HIDDEN]'))",
+        actual:
+          "HTTP(URL 'https://[HIDDEN]@example.com/b.tsv' FORMAT 'TSV' CREDENTIALS (USER 'u' PASSWORD '[HIDDEN]') HEADERS ('[HIDDEN]'))",
+      },
+    ])
+  })
+
+  test('a source in which ClickHouse hid a value no rule explains is not compared', () => {
+    const clickhouse = withSource("CLICKHOUSE(TABLE 'users' NAMED_SECRET 'x')")
+    expect(compare(clickhouse, live("CLICKHOUSE(TABLE 'users_v2' NAMED_SECRET '[HIDDEN]')"))).toEqual([])
+  })
+
+  test('the values of every secret key are hidden, also those ClickHouse 26.3 stores in clear', () => {
+    const odbc = withSource("odbc(connection_string 'DSN=x;UID=u;PWD=odbc-secret' table 't')")
+    expect(compare(odbc, live("ODBC(CONNECTION_STRING 'DSN=x;UID=u;PWD=odbc-secret' TABLE 't2')"))).toEqual([
+      {
+        code: 'source_mismatch',
+        object: 'app.rates',
+        expected: "ODBC(CONNECTION_STRING '[HIDDEN]' TABLE 't')",
+        actual: "ODBC(CONNECTION_STRING '[HIDDEN]' TABLE 't2')",
+      },
+    ])
+    const mysql = withSource("mysql(user 'u' password 'pw' ssl_key_passphrase 'kp-secret' table 't')")
+    const stored = "MYSQL(USER 'u' PASSWORD '[HIDDEN]' SSL_KEY_PASSPHRASE 'kp-secret' TABLE 't')"
+    expect(compare(mysql, live(stored))).toEqual([])
+  })
+
+  test('a value that is a function call is not compared, because ClickHouse stores its result', () => {
+    const current = withSource("clickhouse(db currentDatabase() table 'users' user 'default' password 'pw-secret')")
+    const stored = "CLICKHOUSE(DB 'default' TABLE 'users_v2' USER 'default' PASSWORD '[HIDDEN]')"
+    expect(compare(current, live(stored))).toEqual([])
+  })
+
+  test('keys in another order read clean', () => {
+    const prices = withSource("clickhouse(table 'prices' db 'v492')")
+    expect(compare(prices, live("CLICKHOUSE(DB 'v492' TABLE 'prices')"))).toEqual([])
+    expect(compare(prices, live("CLICKHOUSE(DB 'v492' TABLE 'prices_v2')"))).toMatchObject([{ code: 'source_mismatch' }])
+  })
+
+  test('the values of secret URL query parameters are hidden', () => {
+    const query = '?user=u&password=pw-secret&access_token=tok-secret&%73ig=sig-secret&design=a'
+    const hidden = '?user=u&password=[HIDDEN]&access_token=[HIDDEN]&%73ig=[HIDDEN]&design=a'
+    const urlSource = withSource(`http(url 'http://h/data${query}' format 'TSV')`)
+    expect(compare(urlSource, live(`HTTP(URL 'http://h/data${hidden}' FORMAT 'TSV')`))).toEqual([])
+    expect(compare(urlSource, live(`HTTP(URL 'http://h/data2${query}' FORMAT 'TSV')`))).toEqual([
+      {
+        code: 'source_mismatch',
+        object: 'app.rates',
+        expected: `HTTP(URL 'http://h/data${hidden}' FORMAT 'TSV')`,
+        actual: `HTTP(URL 'http://h/data2${hidden}' FORMAT 'TSV')`,
+      },
+    ])
+  })
+
+  test('a newline, a tab and other escapes in a string compare as ClickHouse stores them', () => {
+    const query = withSource("clickhouse(query 'SELECT 1 AS id, ''x'' AS v\nFROM\tsystem.one WHERE s LIKE ''a\\%''')")
+    const stored = "CLICKHOUSE(QUERY 'SELECT 1 AS id, \\'x\\' AS v\\nFROM\\tsystem.one WHERE s LIKE \\'a\\\\%\\'')"
+    expect(compare(query, live(stored))).toEqual([])
+    expect(compare(query, live(stored.replace('system.one', 'system.two')))).toEqual([
+      {
+        code: 'source_mismatch',
+        object: 'app.rates',
+        expected: stored,
+        actual: stored.replace('system.one', 'system.two'),
+      },
+    ])
+  })
+
+  test('a signed number is a value', () => {
+    const replica = withSource("clickhouse(table 'a' priority -1)")
+    expect(compare(replica, live("CLICKHOUSE(TABLE 'a' PRIORITY -1)"))).toEqual([])
+    expect(compare(replica, live("CLICKHOUSE(TABLE 'b' PRIORITY -1)"))).toMatchObject([{ code: 'source_mismatch' }])
+  })
+
+  test('a source with unbalanced parentheses is not compared', () => {
+    const extraParen = withSource("CLICKHOUSE(TABLE 'users'))")
+    expect(compare(extraParen, live("CLICKHOUSE(TABLE 'users_v2')"))).toEqual([])
   })
 })
 
