@@ -117,6 +117,28 @@ def test_indexes_written_before_keyword_spacing_fix_plan_no_migration():
     assert plan_diff(canonicalize_definitions([docs(before)]), [docs(after)]).operations == []
 
 
+def test_indexes_written_before_subscript_spacing_fix_plan_no_migration():
+    # Snapshots and pulled files from before #645 hold `lower(s) [1]`.
+    before = SkipIndexText(
+        name="idx",
+        expression="splitByChar(',', lower(body)) [1]",
+        tokenizer="splitByNonAlpha",
+        preprocessor="m ['k']",
+    )
+    after = SkipIndexText(
+        name="idx",
+        expression="splitByChar(',', lower(body))[1]",
+        tokenizer="splitByNonAlpha",
+        preprocessor="m['k']",
+    )
+    assert (
+        "INDEX `idx` (splitByChar(',', lower(body))[1]) TYPE text(tokenizer = splitByNonAlpha, "
+        "preprocessor = m['k'])"
+    ) in to_create_sql(docs(after))
+    assert text_index_fingerprint(before) == text_index_fingerprint(after)
+    assert plan_diff(canonicalize_definitions([docs(before)]), [docs(after)]).operations == []
+
+
 def test_equivalent_escapes():
     assert normalize_text_index_sql("splitByString(['\t', 'é', ''''])") == normalize_text_index_sql(
         r"splitByString(['\x09', '\xc3\xa9', '\''])"
