@@ -123,14 +123,14 @@ def test_failing_command_logs_the_traceback_under_chkit_debug(tmp_path: Path) ->
     assert debug.stderr.endswith("RuntimeError: boom\nboom\n")
 
 
-def test_usage_error_prints_the_envelope_and_keeps_exit_code_2(
+def test_missing_sql_prints_the_envelope_and_exits_1_as_in_ts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.chdir(tmp_path)
 
     result = CliRunner().invoke(app, ["query", "--json"])
 
-    assert result.exit_code == 2
+    assert result.exit_code == 1
     envelope = json.loads(result.stdout)
     assert envelope["command"] == "query"
     assert envelope["error"]["code"] == "error"

@@ -7,6 +7,7 @@ import re
 from typing import Any
 
 import typer
+from typer._click.exceptions import UsageError  # click, which typer vendors privately
 from typer.core import TyperCommand, TyperGroup
 from typer.exceptions import TyperException
 
@@ -278,7 +279,11 @@ class _ChkitGroup(TyperGroup):
     a command that fails under ``--json`` without having written JSON yet still
     leaves stdout a parseable error envelope. An unhandled error then prints
     its message as one line on stderr and exits 1; ``CHKIT_DEBUG=1`` also logs
-    the traceback. Usage errors are re-raised, so click still reports them.
+    the traceback. A usage error of the command (an unexpected argument, a
+    value that is not one of the choices) is reported as TS reports one: one
+    line on stderr, exit 1 and, under ``--json``, a ``usage`` error envelope.
+    A usage error before the command is resolved is re-raised, so click
+    still reports it.
     """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
@@ -294,6 +299,14 @@ class _ChkitGroup(TyperGroup):
         except (typer.Exit, typer.Abort, BrokenPipeError):
             raise
         except Exception as error:
+            # A usage error of the resolved command: its arguments or its
+            # option values. A command that already wrote JSON keeps it alone.
+            if isinstance(error, UsageError) and ctx.invoked_subcommand is not None:
+                report_flag_error(
+                    ctx.invoked_subcommand,
+                    error.format_message(),
+                    json_mode=json_mode and not has_emitted_json(),
+                )
             if is_debug_enabled():
                 configure_cli_logging()
                 logging.getLogger("chkit.cli").debug("fatal error", exc_info=error)
