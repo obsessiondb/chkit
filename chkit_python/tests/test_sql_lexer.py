@@ -2,6 +2,11 @@
 
 from __future__ import annotations
 
+import random
+import re
+import time
+from collections.abc import Callable
+
 import pytest
 
 from chkit.core.sql_lexer import (
@@ -14,6 +19,23 @@ from chkit.core.sql_lexer import (
 
 def kinds(sql: str) -> list[tuple[str, str]]:
     return [(token.kind, token.text) for token in tokenize_sql(sql)]
+
+
+def searched_heredoc_end(sql: str, i: int) -> int | None:
+    # Where a `$tag$` opener at `i` ends: the first later occurrence of the
+    # same `$tag$`, found by searching the rest of the input (the lexer before
+    # #585).
+    opener = re.match(r"\$[A-Za-z0-9_]*\$", sql[i:])
+    if opener is None:
+        return None
+    close = sql.find(opener.group(0), i + len(opener.group(0)))
+    return None if close == -1 else close + len(opener.group(0))
+
+
+def elapsed_ms(run: Callable[[], object]) -> float:
+    start = time.perf_counter()
+    run()
+    return (time.perf_counter() - start) * 1000
 
 
 @pytest.mark.parametrize(
@@ -104,6 +126,37 @@ def test_reads_heredocs_as_strings_only_when_closed() -> None:
     assert kinds("a$$b$$") == [("identifier", "a$$b$$")]
     assert kinds("$$abc") == [("punctuation", "$"), ("identifier", "$abc")]
     assert kinds("$ x") == [("punctuation", "$"), ("whitespace", " "), ("identifier", "x")]
+
+
+def test_ends_each_heredoc_at_the_first_later_occurrence_of_its_tag() -> None:
+    # #585
+    pieces = ["$", "$$", "$a$", "$b$", "$a_1$", "a", "_", "1", " ", "\n"]
+    pieces += ["'", "`", "/*", "*/", "--", ";", "é", "\U0001d538"]
+    rng = random.Random(585)
+    for _ in range(3000):
+        sql = "".join(rng.choice(pieces) for _ in range(rng.randrange(40)))
+        for token in tokenize_sql(sql):
+            if sql[token.start] != "$":
+                continue
+            heredoc_end = token.end if token.kind == "string" else None
+            assert (sql, token.start, heredoc_end) == (
+                sql,
+                token.start,
+                searched_heredoc_end(sql, token.start),
+            )
+
+
+def test_lexes_many_distinct_unclosed_tag_openers_in_linear_time() -> None:
+    # #585
+    count = 32_000
+    # Same shape and length; only the openers make the lexer look for a closer.
+    openers = " ".join(f"$t{k}$" for k in range(count))
+    names = " ".join(f"_t{k}_" for k in range(count))
+    # The fastest of three runs, so a pause in one does not set the bound.
+    baseline = min(elapsed_ms(lambda: tokenize_sql(names)) for _ in range(3))
+    with_openers = elapsed_ms(lambda: tokenize_sql(openers))
+    # A search per opener to the end of the input makes this about 60x the baseline.
+    assert with_openers < 10 * baseline + 250
 
 
 def test_reads_digit_led_run_as_name_when_word_characters_continue() -> None:

@@ -67,8 +67,15 @@ function propagationWaitPending(state: MigrationRowState, index: number): boolea
   )
 }
 
+/**
+ * A barrier is meant to be a SELECT and changes no object, so it has no wait.
+ * An `exchange_tables` statement keeps its wait even when marked barrier:
+ * nothing stops the barrier read from running an EXCHANGE TABLES, and the
+ * statements after a swap must not run on a replica that still has the old
+ * names. The wait only acts on a statement that is an EXCHANGE TABLES (#577).
+ */
 function hasPropagationWait(operation: MigrationOperationSummary | undefined): operation is MigrationOperationSummary {
-  return operation !== undefined && operation.mode !== 'barrier'
+  return operation !== undefined && (operation.type === 'exchange_tables' || operation.mode !== 'barrier')
 }
 
 /**

@@ -68,8 +68,8 @@ def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
     return column.model_copy(
         update={
             "default_kind": None if column.default_kind == "DEFAULT" else column.default_kind,
-            "name": column.name.strip(),
-            "renamed_from": column.renamed_from.strip()
+            "name": js_trim(column.name),
+            "renamed_from": js_trim(column.renamed_from)
             if column.renamed_from is not None
             else None,
             "type": canon_type,
@@ -142,10 +142,10 @@ def _canonicalize_table(
     renamed_from: TableRenamedFrom | None = None
     if definition.renamed_from is not None:
         renamed_from = TableRenamedFrom(
-            database=definition.renamed_from.database.strip()
+            database=js_trim(definition.renamed_from.database)
             if definition.renamed_from.database is not None
             else None,
-            name=definition.renamed_from.name.strip(),
+            name=js_trim(definition.renamed_from.name),
         )
 
     column_names = {js_trim(column.name) for column in definition.columns}
@@ -158,8 +158,8 @@ def _canonicalize_table(
         normalized_primary_key = list(normalized_order_by)
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "renamed_from": renamed_from,
             "engine": normalize_engine(definition.engine),
             "columns": [_canonicalize_column(c) for c in definition.columns],
@@ -182,8 +182,8 @@ def _canonicalize_table(
 def _canonicalize_view(definition: ViewDefinition) -> ViewDefinition:
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "as_": normalize_sql_fragment(definition.as_),
             "comment": _canonicalize_comment(definition.comment),
         }
@@ -217,7 +217,7 @@ def _canonicalize_refresh(
     if refresh.depends_on is not None:
         depends_on = sorted(
             (
-                TableRef(database=dep.database.strip(), name=dep.name.strip())
+                TableRef(database=js_trim(dep.database), name=js_trim(dep.name))
                 for dep in refresh.depends_on
             ),
             key=lambda ref: f"{ref.database}.{ref.name}",
@@ -265,11 +265,11 @@ def _canonicalize_materialized_view(
     canonical_refresh = _canonicalize_refresh(definition.refresh)
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "to": TableRef(
-                database=definition.to.database.strip(),
-                name=definition.to.name.strip(),
+                database=js_trim(definition.to.database),
+                name=js_trim(definition.to.name),
             ),
             "as_": normalize_sql_fragment(definition.as_),
             "comment": _canonicalize_comment(definition.comment),
@@ -284,7 +284,7 @@ def _canonicalize_dictionary_attribute(
     type_value = attribute.type
     canon_type = js_trim(type_value) if isinstance(type_value, str) else type_value
     return attribute.model_copy(
-        update={"name": attribute.name.strip(), "type": canon_type}
+        update={"name": js_trim(attribute.name), "type": canon_type}
     )
 
 
@@ -298,16 +298,16 @@ def _canonicalize_dictionary(definition: DictionaryDefinition) -> DictionaryDefi
     renamed_from: TableRenamedFrom | None = None
     if definition.renamed_from is not None:
         renamed_from = TableRenamedFrom(
-            database=definition.renamed_from.database.strip()
+            database=js_trim(definition.renamed_from.database)
             if definition.renamed_from.database is not None
             else None,
-            name=definition.renamed_from.name.strip(),
+            name=js_trim(definition.renamed_from.name),
         )
 
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "renamed_from": renamed_from,
             "attributes": [
                 _canonicalize_dictionary_attribute(a) for a in definition.attributes
@@ -320,7 +320,7 @@ def _canonicalize_dictionary(definition: DictionaryDefinition) -> DictionaryDefi
             "layout": normalize_sql_fragment(definition.layout),
             "lifetime": normalize_sql_fragment(definition.lifetime),
             "range": DictionaryRange(
-                min=definition.range.min.strip(), max=definition.range.max.strip()
+                min=js_trim(definition.range.min), max=js_trim(definition.range.max)
             )
             if definition.range is not None
             else None,
