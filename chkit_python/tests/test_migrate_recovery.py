@@ -1595,3 +1595,16 @@ def test_apply_refuses_when_on_before_apply_removed_statements_of_a_file_the_spl
         info.value
     )
     assert client.calls == []
+
+
+def test_apply_refuses_when_on_before_apply_moved_statements_without_changing_their_count(
+    tmp_path: Path,
+) -> None:
+    sql = f"SET allow_experimental_x = 1;\n{SPLIT_SQL}"
+    client = _RecordingClient()
+    store = FakeStore(state=in_progress([op(0, "completed")], checksum=checksum_sql(sql)))
+    runtime = _FakeRuntime(lambda statements: [statements[1], statements[0], *statements[2:]])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert client.calls == []

@@ -203,7 +203,9 @@ export async function applyMigration(input: {
     const changed = splitChangedStatements(initialState.operations, {
       legacy: extractLegacyExecutableStatements(sql),
       current: parsedStatements,
-      positionsKept: statements.length === parsedStatements.length,
+      positionsKept:
+        statements.length === parsedStatements.length &&
+        statements.every((statement, index) => statement === parsedStatements[index]),
     })
     if (changed.length > 0) {
       throw statementSplitChangedError({

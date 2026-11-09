@@ -922,6 +922,30 @@ describe('applyMigration with a state another release split differently (#562)',
     expect(commandCalls).toEqual([])
   })
 
+  test('refuses when onBeforeApply moved statements without changing their count', async () => {
+    const sql = `SET allow_experimental_x = 1;\n${SPLIT_SQL}`
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(inProgressState(checksumSQL(sql), [operation(0, 'completed')]))
+
+    const attempt = applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(([first, second, ...rest]) =>
+        first !== undefined && second !== undefined ? [second, first, ...rest] : [],
+      ),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
   test('runs an abandoned state from statement 1', async () => {
     const dir = writeMigration(SPLIT_SQL)
     const { db, commandCalls } = recordingDb()

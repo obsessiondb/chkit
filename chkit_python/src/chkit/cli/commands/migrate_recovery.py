@@ -316,9 +316,9 @@ def split_changed_statements(
     A state recorded with the old split would resume at the wrong statements
     there: skip one that never ran, or run one again.
 
-    The journal indexes the statements ``on_before_apply`` returns. When the
-    plugins returned as many statements as they got, those keep the positions
-    of the split; when they added or removed some, the positions cannot be
+    The journal indexes the statements ``on_before_apply`` returns. They keep
+    the positions of the split only when the plugins returned them unchanged;
+    when a plugin added, removed, moved or rewrote any, the positions cannot be
     matched, so every recorded statement counts as changed once the two splits
     differ.
     """
