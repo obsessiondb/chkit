@@ -156,13 +156,15 @@ def unescape_quoted(body: str, quote: str = "`") -> str:
             pending.append(int(hex_byte, 16))
             i += 4
             continue
+        # ``\N`` adds no byte, so ``\xC3\N\xA9`` is still ``é``.
+        if char == "\\" and nxt == "N":
+            i += 2
+            continue
         if pending:
             out.append(pending.decode("utf-8", "replace"))
             pending.clear()
         if char == "\\" and nxt:
             i += 2
-            if nxt == "N":
-                continue
             decoded = _CONTROL_ESCAPES.get(nxt, nxt)
             # A raw control character after a backslash drops it too (isControlASCII).
             if decoded not in _PLAIN_ESCAPES and ord(decoded) > _LAST_CONTROL_ASCII:

@@ -62,7 +62,8 @@ const CONTROL_ESCAPES: Readonly<Record<string, string>> = {
 // Escaped characters that lose their backslash; any other escape keeps it, so
 // a LIKE pattern's `\%` stays `\%` (parseComplexEscapeSequence).
 const PLAIN_ESCAPES = new Set(['\\', "'", '"', '`', '/', '='])
-const UTF8 = new TextDecoder()
+// A name may start with U+FEFF (`\xEF\xBB\xBF`); it is a character, not a BOM.
+const UTF8 = new TextDecoder('utf-8', { ignoreBOM: true })
 
 export function tokenizeSQL(sql: string): SQLToken[] {
   const tokens: SQLToken[] = []
@@ -134,13 +135,17 @@ export function unescapeQuoted(body: string, quote = '`'): string {
       i += 3
       continue
     }
+    // `\N` adds no byte, so `\xC3\N\xA9` is still `é`.
+    if (char === '\\' && next === 'N') {
+      i += 1
+      continue
+    }
     if (bytes.length > 0) {
       out += UTF8.decode(Uint8Array.from(bytes))
       bytes = []
     }
     if (char === '\\' && next !== '') {
       i += 1
-      if (next === 'N') continue
       const decoded = CONTROL_ESCAPES[next] ?? next
       // A raw control character after a backslash drops it too (isControlASCII).
       if (!PLAIN_ESCAPES.has(decoded) && decoded.charCodeAt(0) > LAST_CONTROL_ASCII) out += '\\'
