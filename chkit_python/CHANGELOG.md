@@ -8,6 +8,9 @@
   message see the SQL without the migration's header and marker comments.
 
 ### Fixed
+- `generate` no longer drops and re-adds a skip index whose expression differs only by
+  enclosing parentheses, such as the `(s)` ObsessionDB stores for `s`; `pull` writes `s` on
+  every server, and `drift` ignores those parentheses too, as in TS (#512).
 - A `primary_key`, `order_by` or `unique_key` entry that names a column containing a comma
   (`"e,f)"`) is kept whole, as in TS, instead of failing validation; key entries are trimmed
   like TS (#523).

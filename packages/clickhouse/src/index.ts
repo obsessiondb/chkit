@@ -14,6 +14,7 @@ import {
 	parseVectorIndexArgs,
 	normalizeTextIndexSQL,
 	parseJsonEachRow,
+	stripWrappingParens,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
@@ -365,9 +366,12 @@ export function normalizeIndexFromSystemRow(
 	row: SystemSkippingIndexRow,
 ): SkipIndexDefinition {
 	const parsed = parseIndexType(row.type)
+	const expression = parsed.type === 'text' ? normalizeTextIndexSQL(row.expr) : normalizeSQLFragment(row.expr)
 	return {
 		name: row.name,
-		expression: parsed.type === 'text' ? normalizeTextIndexSQL(row.expr) : normalizeSQLFragment(row.expr),
+		// ObsessionDB keeps the parentheses chkit renders around the expression
+		// (`(s)`), stock ClickHouse stores `s`; read back the stock form (#512).
+		expression: stripWrappingParens(expression),
 		// UInt64 arrives as a JSON string when the server quotes 64-bit integers.
 		granularity: Number(row.granularity),
 		...parsed,
