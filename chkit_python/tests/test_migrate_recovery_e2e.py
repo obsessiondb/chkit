@@ -18,6 +18,7 @@ from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
+from unittest.mock import ANY
 
 import pytest
 from typer.testing import CliRunner
@@ -141,6 +142,10 @@ def _migrate(args: list[str]) -> Any:
     return CliRunner().invoke(app, ["migrate", *args])
 
 
+def _status(args: list[str]) -> Any:
+    return CliRunner().invoke(app, ["status", *args])
+
+
 def _parse(result: Any) -> dict[str, Any]:
     assert result.exit_code == 0, format_test_diagnostic("expected a successful --json run", result)
     payload: dict[str, Any] = json.loads(result.stdout)
@@ -256,6 +261,33 @@ def test_retry_resumes_edited_migration_and_later_failure_resumes_without_retry(
         assert run1.exit_code == 1
         assert f"Migration {m} failed at statement 2 of 3" in _error_of(run1)["message"]
         wait_for_column(project.client, db, a, "c1")
+        _wait_journal(project, m, lambda r: r.statuses == "completed,failed")
+
+        failed_statement = {
+            "statement": 2,
+            "type": "create_view",
+            "key": f"view:{db}.{v}",
+            "state": "failed",
+            "error": ANY,
+        }
+        failed = _parse(_status(["--json"]))
+        assert (failed["pending"], failed["pendingMigrations"]) == (1, [m])
+        assert failed["inProgressMigrations"] == [
+            {
+                "name": m,
+                "fileChanged": False,
+                "completedStatements": 1,
+                "statements": [failed_statement],
+                "nextSteps": ["chkit migrate --apply"],
+            }
+        ]
+        failed_text = _status([])
+        assert failed_text.exit_code == 0, format_test_diagnostic("status text", failed_text)
+        assert (
+            f"In progress (failed part-way, still pending):\n- {m}: 1 statement completed\n"
+            "  Statement 2 failed: "
+        ) in failed_text.stdout
+        assert "  Next: chkit migrate --apply\n" in failed_text.stdout
 
         typo = _migrate(["--execute", "--json", "--retry", "nope"])
         assert typo.exit_code == 1
@@ -267,6 +299,15 @@ def test_retry_resumes_edited_migration_and_later_failure_resumes_without_retry(
         assert _error_of(refused)["code"] == "in_progress_checksum_mismatch"
         assert f"chkit migrate --apply --retry {m}" in _error_of(refused)["message"]
         assert f"chkit migrate --apply --abandon {m}" in _error_of(refused)["message"]
+        assert _parse(_status(["--json"]))["inProgressMigrations"] == [
+            {
+                "name": m,
+                "fileChanged": True,
+                "completedStatements": 1,
+                "statements": [failed_statement],
+                "nextSteps": [f"chkit migrate --apply --retry {m}"],
+            }
+        ]
 
         preview = _parse(_migrate(["--json", "--retry", m]))
         assert preview["mode"] == "plan"
@@ -307,6 +348,8 @@ def test_retry_resumes_edited_migration_and_later_failure_resumes_without_retry(
             and r.checksum == checksum_sql(v2)
             and r.statuses == "completed,completed,completed",
         )
+        completed = _parse(_status(["--json"]))
+        assert (completed["pending"], completed["inProgressMigrations"]) == (0, [])
 
         # The same --retry command in an environment where nothing is pending.
         done = _parse(_migrate(["--execute", "--json", "--retry", m]))
@@ -384,6 +427,32 @@ def test_abandon_previews_then_resets_so_edited_file_runs_from_statement_1(  # n
             and r.completed == 0
             and r.statuses == "failed,failed",
         )
+        # The edited file has no statement recorded as completed, so a plain
+        # apply runs it from statement 1.
+        assert _parse(_status(["--json"]))["inProgressMigrations"] == [
+            {
+                "name": m,
+                "fileChanged": True,
+                "completedStatements": 0,
+                "statements": [
+                    {
+                        "statement": 1,
+                        "type": "alter_table_add_column",
+                        "key": f"table:{db}.{a}",
+                        "state": "abandoned",
+                        "was": "completed",
+                    },
+                    {
+                        "statement": 2,
+                        "type": "create_view",
+                        "key": f"view:{db}.{v}",
+                        "state": "abandoned",
+                        "was": "failed",
+                    },
+                ],
+                "nextSteps": ["chkit migrate --apply"],
+            }
+        ]
 
         # Abandoning again keeps the record that statement 1 completed.
         was_completed = "abandoned via chkit migrate --abandon (was completed)"

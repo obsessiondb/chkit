@@ -24,11 +24,21 @@ from chkit.cli.command_target import (
     open_client,
     resolve_plugin_executor,
 )
+from chkit.cli.commands.migrate_apply import preview_statement
+from chkit.cli.commands.migrate_recovery import InProgressMigration, describe_in_progress
+from chkit.cli.commands.migrate_statement_state import (
+    Abandoned,
+    AwaitingReplicas,
+    Failed,
+    Interrupted,
+    Running,
+)
 from chkit.cli.config_loader import load_config
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json
 from chkit.cli.migration_store import (
+    checksum_sql,
     find_checksum_mismatches,
     list_migration_filenames,
 )
@@ -97,6 +107,15 @@ def run(
         applied = [f for f in files if f in applied_names]
         pending = [f for f in files if f not in applied_names]
         mismatches = find_checksum_mismatches(migrations_dir, journal)
+        # A migration that failed part-way stays pending; scoped to this
+        # project's files like Applied.
+        in_progress = [
+            describe_in_progress(
+                state, checksum_sql((migrations_dir / state.name).read_text(encoding="utf-8"))
+            )
+            for state in store.read_in_progress()
+            if state.name in pending
+        ]
 
     payload: dict[str, object] = {
         "migrationsDir": str(migrations_dir),
@@ -104,6 +123,7 @@ def run(
         "applied": len(applied),
         "pending": len(pending),
         "pendingMigrations": pending,
+        "inProgressMigrations": [m.to_payload() for m in in_progress],
         "checksumMismatchCount": len(mismatches),
         "checksumMismatches": [m.model_dump() for m in mismatches],
     }
@@ -134,8 +154,43 @@ def run(
         typer.echo("Pending migrations:")
         for filename in pending:
             typer.echo(f"- {filename}")
+    if in_progress:
+        typer.echo("")
+        typer.echo("In progress (failed part-way, still pending):")
+        for migration in in_progress:
+            for line in _format_in_progress(migration):
+                typer.echo(line)
     if mismatches:
         typer.echo("")
         typer.echo("Checksum mismatches on applied migrations:")
         for m in mismatches:
             typer.echo(f"- {m.name}")
+
+
+def _format_in_progress(migration: InProgressMigration) -> list[str]:
+    count = migration.completed_statements
+    lines = [f"- {migration.name}: {count} statement{'' if count == 1 else 's'} completed"]
+    for entry in migration.statements:
+        statement = f"Statement {entry.statement}"
+        match entry.state:
+            case Failed(error=error):
+                reason = error.split("\n")[0].strip()
+                lines.append(
+                    f"  {statement} failed: {preview_statement(reason, 200)}"
+                    if reason
+                    else f"  {statement} failed."
+                )
+            case Interrupted():
+                lines.append(f"  {statement} was interrupted while it ran.")
+            case Running(query_id=query_id):
+                lines.append(
+                    f"  {statement} may still be running on the server (query_id {query_id})."
+                )
+            case AwaitingReplicas():
+                lines.append(f"  {statement} ran; it has not reached every replica yet.")
+            case Abandoned(was=was):
+                lines.append(f"  {statement} was abandoned (it had {was}).")
+    if migration.file_changed:
+        lines.append("  The file changed since its last failed attempt.")
+    lines.append(f"  Next: {', then '.join(migration.next_steps)}")
+    return lines

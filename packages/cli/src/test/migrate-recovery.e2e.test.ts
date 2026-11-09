@@ -50,6 +50,8 @@ type ErrorEnvelope = { ok: false; error: { code: string; message: string } }
 
 type AbandonPayload = { abandon: { completedStatements: number; operations: Array<{ lastError: string }> } }
 
+type StatusPayload = { pending: number; pendingMigrations: string[]; inProgressMigrations: unknown[] }
+
 const TIMEOUT_MS = 240_000
 
 describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
@@ -72,6 +74,18 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
       expect(run1.exitCode).toBe(1)
       expect(errorOf(run1).message).toContain(`Migration ${M} failed at statement 2 of 3`)
       await waitForColumn(executor, db, a, 'c1')
+      await waitForJournal(project, M, (row) => row.statuses === 'completed,failed')
+
+      const failedStatement = { statement: 2, type: 'create_view', key: `view:${db}.${v}`, state: 'failed', error: expect.any(String) }
+      const failed = parseJson<StatusPayload>(status(project, ['--json']))
+      expect(failed).toMatchObject({ pending: 1, pendingMigrations: [M] })
+      expect(failed.inProgressMigrations).toEqual([
+        { name: M, fileChanged: false, completedStatements: 1, statements: [failedStatement], nextSteps: ['chkit migrate --apply'] },
+      ])
+      const failedText = status(project, [])
+      expect(failedText.exitCode, formatTestDiagnostic('status text', failedText)).toBe(0)
+      expect(failedText.stdout).toContain(`In progress (failed part-way, still pending):\n- ${M}: 1 statement completed\n  Statement 2 failed: `)
+      expect(failedText.stdout).toContain('  Next: chkit migrate --apply\n')
 
       const typo = migrate(project, ['--execute', '--json', '--retry', 'nope'])
       expect(typo.exitCode).toBe(1)
@@ -83,6 +97,15 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
       expect(errorOf(refused).code).toBe('in_progress_checksum_mismatch')
       expect(errorOf(refused).message).toContain(`chkit migrate --apply --retry ${M}`)
       expect(errorOf(refused).message).toContain(`chkit migrate --apply --abandon ${M}`)
+      expect(parseJson<StatusPayload>(status(project, ['--json'])).inProgressMigrations).toEqual([
+        {
+          name: M,
+          fileChanged: true,
+          completedStatements: 1,
+          statements: [failedStatement],
+          nextSteps: [`chkit migrate --apply --retry ${M}`],
+        },
+      ])
 
       const preview = parseJson<{ mode: string; retry: unknown }>(migrate(project, ['--json', '--retry', M]))
       expect(preview.mode).toBe('plan')
@@ -123,6 +146,7 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
         M,
         (row) => row.completed === 1 && row.checksum === checksumSQL(v2) && row.statuses === 'completed,completed,completed',
       )
+      expect(parseJson<StatusPayload>(status(project, ['--json']))).toMatchObject({ pending: 0, inProgressMigrations: [] })
 
       // The same --retry command in an environment where nothing is pending.
       const done = parseJson<{ mode: string; pending: string[]; applied: unknown[]; retry: unknown }>(
@@ -196,6 +220,19 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
         M,
         (row) => row.checksum === checksumSQL(v1) && row.completed === 0 && row.statuses === 'failed,failed',
       )
+      // The edited file has no statement recorded as completed, so a plain apply runs it from statement 1.
+      expect(parseJson<StatusPayload>(status(project, ['--json'])).inProgressMigrations).toEqual([
+        {
+          name: M,
+          fileChanged: true,
+          completedStatements: 0,
+          statements: [
+            { statement: 1, type: 'alter_table_add_column', key: `table:${db}.${a}`, state: 'abandoned', was: 'completed' },
+            { statement: 2, type: 'create_view', key: `view:${db}.${v}`, state: 'abandoned', was: 'failed' },
+          ],
+          nextSteps: ['chkit migrate --apply'],
+        },
+      ])
 
       // Abandoning again keeps the record that statement 1 completed: its
       // ALTER stays applied in ClickHouse.
@@ -542,6 +579,10 @@ async function dropProject(project: Project, objects: { views: string[]; tables:
 
 function migrate(project: Project, args: string[]): CliResult {
   return runCli(project.dir, ['migrate', '--config', project.configPath, ...args], project.cliEnv)
+}
+
+function status(project: Project, args: string[]): CliResult {
+  return runCli(project.dir, ['status', '--config', project.configPath, ...args], project.cliEnv)
 }
 
 // Statement 1 is not idempotent, so a replay fails with "already exists";

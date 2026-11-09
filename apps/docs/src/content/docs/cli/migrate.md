@@ -89,7 +89,7 @@ Before applying, the CLI verifies SHA-256 checksums of all previously-applied mi
 
 ### Failed migrations
 
-chkit records the progress of each statement in the journal while a migration runs. When a statement fails, the migration stays **in progress**: the statements before it remain applied in ClickHouse, and the migration is not recorded as applied. Re-running `chkit migrate --apply` resumes it: completed statements are skipped and the failed statement runs again. That fixes a failure whose cause is outside the file, such as a missing table, a permission, or a transient error.
+chkit records the progress of each statement in the journal while a migration runs. When a statement fails, the migration stays **in progress**: the statements before it remain applied in ClickHouse, and the migration is not recorded as applied. Re-running `chkit migrate --apply` resumes it: completed statements are skipped and the failed statement runs again. That fixes a failure whose cause is outside the file, such as a missing table, a permission, or a transient error. [`chkit status`](/cli/status/) lists an in-progress migration with the state of each statement that did not complete and the command that continues it.
 
 When the file itself is wrong, edit it. What the next `chkit migrate --apply` does depends on how far the migration got:
 

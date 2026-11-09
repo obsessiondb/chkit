@@ -92,6 +92,9 @@ describe('runAbandon', () => {
 function fakeStore() {
   const writes: MigrationRowState[] = []
   const store: JournalStore = {
+    async readInProgress() {
+      return []
+    },
     databaseMissing: false,
     async readJournal() {
       return { version: 1, applied: [] }

@@ -184,7 +184,7 @@ chkit migrate --abandon <file> --apply      # Reset a failed migration so the ne
 
 Verifies checksums before applying. Destructive operations require explicit `--allow-destructive` in CI.
 
-A migration that fails part-way stays in progress, and `--apply` resumes it, skipping completed statements. With chkit newer than 0.2.0-beta.8, after an edit to its file `--apply` runs it from statement 1 if no statement is recorded as completed; otherwise use `--retry` or `--abandon`, which preview with `--json` and without `--apply`. Never edit the `_chkit_migrations` journal by hand. These versions also refuse to apply pending files without executable statements, such as an unfilled `generate --empty` stub.
+A migration that fails part-way stays in progress, and `--apply` resumes it, skipping completed statements. `chkit status --json` lists it under `inProgressMigrations`, with each unfinished statement's `state` and the command to run next in `nextSteps`. With chkit newer than 0.2.0-beta.8, after an edit to its file `--apply` runs it from statement 1 if no statement is recorded as completed; otherwise use `--retry` or `--abandon`, which preview with `--json` and without `--apply`. Never edit the `_chkit_migrations` journal by hand. These versions also refuse to apply pending files without executable statements, such as an unfilled `generate --empty` stub.
 
 ### status: Migration state
 

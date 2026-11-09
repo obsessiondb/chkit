@@ -168,6 +168,17 @@ def _parse_operations(value: Any) -> list[OperationState]:
     return out
 
 
+def _row_state(row: dict[str, Any]) -> MigrationRowState:
+    return MigrationRowState(
+        name=str(row["name"]),
+        applied_at=str(row["applied_at"]),
+        checksum=str(row["checksum"]),
+        chkit_version=str(row["chkit_version"]),
+        migration_completed=_parse_bool(row.get("migration_completed")),
+        operations=_parse_operations(row.get("operations")),
+    )
+
+
 def _operation_to_tuple_literal(op: OperationState) -> str:
     parts = [
         str(op.operation_index),
@@ -486,15 +497,7 @@ class JournalStore:
         written = self._last_written.get(migration_name)
         if not rows:
             return written
-        row = rows[0]
-        state = MigrationRowState(
-            name=str(row["name"]),
-            applied_at=str(row["applied_at"]),
-            checksum=str(row["checksum"]),
-            chkit_version=str(row["chkit_version"]),
-            migration_completed=_parse_bool(row.get("migration_completed")),
-            operations=_parse_operations(row.get("operations")),
-        )
+        state = _row_state(rows[0])
         # Each request can land on a different replica, and SYSTEM SYNC REPLICA
         # on one request does not make the next one read our write. Never hand a
         # read-modify-write caller a version older than the one we just wrote,
@@ -504,6 +507,14 @@ class JournalStore:
         ):
             return written
         return state
+
+    def read_in_progress(self) -> list[MigrationRowState]:
+        """Every migration that failed part-way: its latest row is not completed."""
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return []
+        self._try_sync_replica()
+        return [_row_state(row) for row in self._journal_rows("migration_completed = false")]
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         """Upsert one migration row with INSERT race retry (5 x backoff)."""

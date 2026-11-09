@@ -33,6 +33,8 @@ export interface MigrationRowState {
 export interface JournalStore {
   readJournal(): Promise<MigrationJournal>
   readMigrationState(migrationName: string): Promise<MigrationRowState | null>
+  /** Every migration that failed part-way: its latest row is not completed. */
+  readInProgress(): Promise<MigrationRowState[]>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
   readonly databaseMissing: boolean
@@ -169,6 +171,17 @@ function parseOperations(value: unknown): OperationState[] {
   }
   if (!Array.isArray(decoded)) return []
   return decoded.map((row) => operationFromTuple(row as OperationTupleRow))
+}
+
+function rowState(row: MigrationRow): MigrationRowState {
+  return {
+    name: row.name,
+    appliedAt: row.applied_at,
+    checksum: row.checksum,
+    chkitVersion: row.chkit_version,
+    migrationCompleted: parseBool(row.migration_completed),
+    operations: parseOperations(row.operations),
+  }
 }
 
 /**
@@ -404,14 +417,7 @@ SETTINGS index_granularity = 1`
       const written = lastWritten.get(migrationName)
       const row = rows[0]
       if (!row) return written ?? null
-      const state: MigrationRowState = {
-        name: row.name,
-        appliedAt: row.applied_at,
-        checksum: row.checksum,
-        chkitVersion: row.chkit_version,
-        migrationCompleted: parseBool(row.migration_completed),
-        operations: parseOperations(row.operations),
-      }
+      const state = rowState(row)
       // Each request can land on a different replica, and SYSTEM SYNC REPLICA
       // on one request does not make the next one read our write. Never hand a
       // read-modify-write caller a version older than the one we just wrote, or
@@ -421,6 +427,14 @@ SETTINGS index_granularity = 1`
         return written
       }
       return state
+    },
+
+    async readInProgress(): Promise<MigrationRowState[]> {
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return []
+      await trySyncReplica()
+      const rows = await journalRows('migration_completed = false')
+      return rows.map(rowState)
     },
 
     async writeMigrationState(input: MigrationRowState): Promise<void> {

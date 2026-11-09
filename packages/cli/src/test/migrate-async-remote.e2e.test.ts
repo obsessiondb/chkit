@@ -262,6 +262,9 @@ function createMemoryJournal(initial: MigrationRowState | null) {
   let state = initial
   const writes: MigrationRowState[] = []
   const store: JournalStore = {
+    async readInProgress() {
+      return []
+    },
     databaseMissing: false,
     async readJournal() {
       return { version: 1, applied: [] }

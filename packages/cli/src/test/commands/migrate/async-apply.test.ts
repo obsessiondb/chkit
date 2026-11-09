@@ -85,6 +85,9 @@ function createFakeJournalStore(initial: MigrationRowState | null = null): FakeS
   let current: MigrationRowState | null = initial
   const writes: MigrationRowState[] = []
   const store: JournalStore = {
+    async readInProgress() {
+      return []
+    },
     databaseMissing: false,
     async readJournal() {
       return { version: 1, applied: [] }

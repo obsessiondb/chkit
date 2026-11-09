@@ -28,11 +28,7 @@ from chkit.cli.commands.migrate_abandon import (
     read_abandonable_state,
     status_before_abandon,
 )
-from chkit.cli.commands.migrate_apply import (
-    PROPAGATION_WAIT_PENDING,
-    ApplyMigrationInput,
-    apply_migration,
-)
+from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migration
 from chkit.cli.commands.migrate_empty import find_empty_migrations
 from chkit.cli.commands.migrate_errors import (
     MigrateError,
@@ -58,6 +54,7 @@ from chkit.cli.commands.migrate_recovery import (
     verify_retry_edit,
 )
 from chkit.cli.commands.migrate_retry import RetryNoop, RetryResume, resolve_retry
+from chkit.cli.commands.migrate_statement_state import PROPAGATION_WAIT_PENDING
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.cli.main import app
 from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql

@@ -6,6 +6,7 @@ import type {
 } from '../../runtime/journal-store.js'
 import type { MigrationOperationSummary } from '../../runtime/safety-markers.js'
 import { MigrateError } from './errors.js'
+import { statementState, type StatementState } from './statement-state.js'
 
 export interface RecoveryTargets {
   /** `--retry <migration>` as a file name. */
@@ -54,6 +55,19 @@ export type RetryEditCheck =
       resumeIndex: number | null
     }
   | { ok: false; mismatches: OperationMismatch[]; sharedMarkers: SharedMarkerMismatch[] }
+
+/** A migration that failed part-way, as `chkit status` reports it. */
+export interface InProgressMigration {
+  name: string
+  /** The file changed after some of its statements ran. */
+  fileChanged: boolean
+  /** Statements the next apply skips. */
+  completedStatements: number
+  /** The other recorded statements, by 1-based number. */
+  statements: Array<{ statement: number; type: string; key: string } & StatementState>
+  /** The command that continues the migration, as apply would decide it. */
+  nextSteps: string[]
+}
 
 /** Flags that mean nothing next to --abandon, which only changes the journal. */
 const ABANDON_CONFLICTING_FLAGS = ['--retry', '--table', '--allow-destructive'] as const
@@ -239,6 +253,28 @@ export function splitChangedStatements(
 /** Whether any statement of an in-progress state completed or may have run. */
 export function hasStatementProgress(state: MigrationRowState): boolean {
   return state.operations.some((op) => op.status === 'completed' || op.status === 'started')
+}
+
+/**
+ * Where an in-progress migration stands and how it continues. An edited file
+ * whose statements already ran needs --retry, because apply refuses it
+ * (`in_progress_checksum_mismatch`); otherwise apply resumes it, or runs it
+ * from statement 1 when nothing ran.
+ */
+export function describeInProgress(state: MigrationRowState, fileChecksum: string): InProgressMigration {
+  const fileChanged = state.checksum !== fileChecksum
+  const statements = [...state.operations]
+    .sort((a, b) => a.operationIndex - b.operationIndex)
+    .map((op) => ({ statement: op.operationIndex + 1, type: op.operationType, key: op.operationKey, ...statementState(op) }))
+  return {
+    name: state.name,
+    fileChanged,
+    completedStatements: state.operations.filter((op) => op.status === 'completed').length,
+    statements: statements.filter((statement) => statement.state !== 'completed'),
+    nextSteps: [
+      fileChanged && hasStatementProgress(state) ? `chkit migrate --apply --retry ${state.name}` : 'chkit migrate --apply',
+    ],
+  }
 }
 
 /**
