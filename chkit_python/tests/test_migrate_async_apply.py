@@ -569,14 +569,21 @@ def test_apply_async_accepts_changed_checksum_without_progress() -> None:
     assert [w.checksum for w in journal.writes] == ["NEW", "NEW"]
 
 
+# The id a statement with no journal row gets on SERVER_DATABASE.
+_QUERY_ID = make_deterministic_query_id(
+    SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
+)
+
+
 def test_apply_async_submit_rejected_before_start_is_recorded_failed() -> None:
     client = _ScriptedClient(
         statuses=[QueryStatus(status="unknown")] * 3,
         submit_raises=RuntimeError("Syntax error: failed at position 1"),
     )
     journal = _FakeJournalStore()
+    lines: list[str] = []
     with pytest.raises(RuntimeError, match="Syntax error"):
-        apply_async_statement(_input(client=client, journal=journal))
+        apply_async_statement(_input(client=client, journal=journal, log=lines.append))
     # The query never started, so the attempt is recorded as failed (#233):
     # an edited file can then run again without --retry.
     assert journal.writes is not None
@@ -584,6 +591,63 @@ def test_apply_async_submit_rejected_before_start_is_recorded_failed() -> None:
     assert journal.writes[1].operations[0].last_error == (
         "Syntax error: failed at position 1"
     )
+    # The submit error is the command's error; no progress line repeats it (#561).
+    assert lines == [f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})"]
+
+
+@pytest.mark.parametrize("submit_fails", [True, False])
+def test_apply_async_poll_budget_exhausted_names_submit_error(submit_fails: bool) -> None:
+    """When polling gives up, the submit error is the only trace of e.g. a
+    rejected statement, so the error names it (#561)."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            *[RuntimeError("HTTP 502: bad gateway") for _ in range(21)],
+        ],
+        submit_raises=RuntimeError("Authentication failed") if submit_fails else None,
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_async_statement(_input(client=client, journal=journal))
+    submit_tail = (
+        " The submit request failed too (Authentication failed)." if submit_fails else ""
+    )
+    assert str(excinfo.value) == (
+        f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
+        f"polling failed 21\u00d7 (HTTP 502: bad gateway).{submit_tail} The load may still "
+        "be running server-side — re-run `chkit migrate --apply` to re-attach."
+    )
+    # The outcome is unknown, so the attempt stays started for a re-run to re-attach.
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started"]
+
+
+def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() -> None:
+    """A gateway can fail the submit (e.g. HTTP 524) while the query keeps running.
+
+    The poller decides the outcome, and the progress lines are the poller's
+    only, as in TS (#561).
+    """
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
+        ],
+        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+    )
+    journal = _FakeJournalStore()
+    lines: list[str] = []
+    result = apply_async_statement(_input(client=client, journal=journal, log=lines.append))
+    assert result.kind == "completed"
+    assert len(client.submitted) == 1
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert lines == [
+        f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})",
+        "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
+        "  alter_table_modify_column: finished — written=16 rows (128 B) in 8s",
+    ]
 
 
 def _whole_seconds(after_time: str | None) -> int:

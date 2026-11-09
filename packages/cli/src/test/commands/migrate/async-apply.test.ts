@@ -39,7 +39,8 @@ const ATTACH_BOUND = '2023-11-14T22:14:28.000Z'
 function createFakeExecutor(
   // An Error is thrown by the queryStatus call it answers.
   statuses: Array<QueryStatus | Error>,
-  options: { failSubmit?: () => Error } = {},
+  // deferSubmit settles the submit only after the polls of a no-sleep test ran.
+  options: { failSubmit?: () => Error; deferSubmit?: boolean } = {},
 ): FakeExecutor {
   const statusCalls: StatusCall[] = []
   const submitCalls: SubmitCall[] = []
@@ -54,6 +55,7 @@ function createFakeExecutor(
     async submit(sql: string, queryId?: string, settings?: ClickHouseSettings) {
       events.push('submit')
       submitCalls.push({ sql, queryId, ...(settings ? { settings } : {}) })
+      if (options.deferSubmit) await new Promise((resolve) => setTimeout(resolve, 10))
       if (options.failSubmit) throw options.failSubmit()
       return queryId ?? 'fallback-id'
     },
@@ -620,6 +622,7 @@ describe('applyAsyncStatement', () => {
       { failSubmit: () => new Error('Syntax error: failed at position 1') },
     )
     const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
 
     await expect(
       applyAsyncStatement({
@@ -627,7 +630,7 @@ describe('applyAsyncStatement', () => {
         sql: 'NOT VALID SQL',
         db,
         journalStore: store,
-        log: () => {},
+        log: (line) => lines.push(line),
         sleep: NO_SLEEP,
         now: FIXED_NOW,
       }),
@@ -637,6 +640,78 @@ describe('applyAsyncStatement', () => {
     // an edited file can then run again without --retry.
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
     expect(writes[1]?.operations[0]?.lastError).toBe('Syntax error: failed at position 1')
+    // The submit error is the command's error; no progress line repeats it (#561).
+    expect(lines).toEqual([`  load_table_data: submitting async (query_id=${QUERY_ID})`])
+  })
+
+  // When polling gives up, the submit error is the only trace of e.g. a rejected
+  // statement, so the error names it (#561).
+  // A deferred submit is still pending when the budget runs out.
+  for (const [submitFails, deferSubmit] of [
+    [true, false],
+    [true, true],
+    [false, false],
+  ] as const) {
+    test(`polling that exhausts its budget names the submit error (submit fails: ${submitFails}, deferred: ${deferSubmit})`, async () => {
+      const { db } = createFakeExecutor(
+        [
+          { status: 'unknown' }, // initial in-flight check
+          ...Array.from({ length: 21 }, () => new Error('HTTP 502: bad gateway')),
+        ],
+        submitFails ? { failSubmit: () => new Error('Authentication failed'), deferSubmit } : {},
+      )
+      const { store, writes } = createFakeJournalStore(null)
+
+      const submitTail = submitFails ? ' The submit request failed too (Authentication failed).' : ''
+      await expect(
+        applyAsyncStatement({
+          ...BASE_INPUT,
+          db,
+          journalStore: store,
+          log: () => {},
+          sleep: NO_SLEEP,
+          now: FIXED_NOW,
+        }),
+      ).rejects.toThrow(
+        `Async migration step load_table_data (query_id ${QUERY_ID}): polling failed 21× (HTTP 502: bad gateway).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+      )
+      // The outcome is unknown, so the attempt stays started for a re-run to re-attach.
+      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+    })
+  }
+
+  // A gateway can fail the submit request (e.g. HTTP 524) while the query keeps
+  // running on the server. The poller decides the outcome, and the progress
+  // lines are the poller's only (#561).
+  test('a submit that fails while the query runs completes with the poller lines only', async () => {
+    const { db, submitCalls } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+      ],
+      { failSubmit: () => new Error('HTTP 524: error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: (line) => lines.push(line),
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(submitCalls).toHaveLength(1)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    expect(lines).toEqual([
+      `  load_table_data: submitting async (query_id=${QUERY_ID})`,
+      '  load_table_data: written=9 rows (72 B), elapsed 0s',
+      '  load_table_data: finished — written=16 rows (128 B) in 8s',
+    ])
   })
   // The query id is deterministic, so query_log still holds the earlier
   // attempt's QueryFinish after `migrate --abandon` (#233). A submission that

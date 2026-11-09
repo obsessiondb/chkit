@@ -278,15 +278,13 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     state_after_start = journal_store.read_migration_state(input_.migration_name)
 
     poll_after_time = _query_log_lower_bound(_read_server_state(client)[0], 0)
+    # Polling decides the outcome, as in TS: the submit error is raised only
+    # when the server never saw the query, so it is not logged here (#561).
     submit_error: Exception | None = None
     try:
         client.submit(input_.sql, query_id=query_id, settings=input_.settings)
     except Exception as error:
         submit_error = error
-        input_.log(
-            f"  {input_.operation_type}: submit raised "
-            f"({_describe_error(error)}) — polling for the server-side state"
-        )
 
     return _poll_until_terminal(
         input_=input_,
@@ -319,10 +317,16 @@ def _poll_until_terminal(
             transient_errors += 1
             elapsed_sec = int(time.monotonic() - poll_started_at)
             if transient_errors > MAX_TRANSIENT_POLL_ERRORS:
+                # A submit error is the only trace of e.g. a rejected statement (#561).
+                submit_tail = (
+                    f" The submit request failed too ({_describe_error(submit_error)})."
+                    if submit_error is not None
+                    else ""
+                )
                 msg = (
                     f"Async migration step {input_.operation_type} "
                     f"(query_id {query_id}): polling failed {transient_errors}\u00d7 "
-                    f"({_describe_error(poll_error)}). The load may still be "
+                    f"({_describe_error(poll_error)}).{submit_tail} The load may still be "
                     f"running server-side — re-run `chkit migrate --apply` to re-attach."
                 )
                 raise RuntimeError(msg) from poll_error
