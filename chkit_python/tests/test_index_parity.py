@@ -19,6 +19,7 @@ from chkit.core.codec import codec_raw
 from chkit.core.model import (
     ChxValidationError,
     MaterializedViewDefinition,
+    SchemaDefinition,
     TableDefinition,
     collect_definitions_from_module,
     materialized_view,
@@ -725,7 +726,7 @@ def test_detects_index_change_when_structured_args_differ() -> None:
 
 
 def test_creates_tables_before_views_and_materialized_views() -> None:
-    new = [
+    new: list[SchemaDefinition] = [
         materialized_view(
             database="app",
             name="mv_events",
@@ -953,7 +954,7 @@ def test_plan_drop_codec_plus_other_change_emits_remove_codec_then_modify() -> N
     ]
 
 
-def _codec_events(columns: list[dict[str, Any]]) -> Any:
+def _codec_events(columns: list[dict[str, Any]]) -> TableDefinition:
     return table(
         database="app",
         name="events",
@@ -1459,7 +1460,7 @@ def test_diff_equivalent_refresh_yields_no_ops() -> None:
 
 
 def test_MODIFY_REFRESH_ranks_with_other_alters() -> None:
-    old = [
+    old: list[SchemaDefinition] = [
         table(
             database="analytics",
             name="daily_rollup",
@@ -1470,7 +1471,7 @@ def test_MODIFY_REFRESH_ranks_with_other_alters() -> None:
         ),
         _mv(refresh={"every": "1 HOUR"}),
     ]
-    new = [
+    new: list[SchemaDefinition] = [
         table(
             database="analytics",
             name="daily_rollup",
