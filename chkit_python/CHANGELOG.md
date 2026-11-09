@@ -24,6 +24,11 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- `migrate --retry` refuses an edit that changed the SQL of a statement that already completed,
+  instead of skipping the statement now at that position, which may never have run (#599, fixed
+  in TS too). The journal records a fingerprint of each statement (a new
+  `operation_fingerprints` column, added on the first write); comment and whitespace edits
+  still resume.
 - `migrate` reads `//`, `# ` and `#!` comments as ClickHouse does, so a `;` inside one no
   longer runs the commented-out text after it as a statement, and a quote or `/*` inside one
   no longer joins statements (#562, fixed in TS too). A partly applied migration whose

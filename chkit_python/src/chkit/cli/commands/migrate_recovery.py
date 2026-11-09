@@ -30,6 +30,9 @@ class StatementIdentity:
     key: str
     # False for a statement without an ``-- operation:`` marker, matched by position only.
     marked: bool
+    # The ``statement_fingerprint`` of the statement; None when its SQL cannot
+    # be checked yet, because a plugin's on_before_apply may still rewrite it.
+    fingerprint: str | None = None
 
 
 class Marker(BaseModel):
@@ -50,6 +53,8 @@ class OperationMismatch(BaseModel):
     recorded: Marker
     # None when the edited file has no statement at that position.
     current: Marker | None
+    # The marker matches, but the statement's SQL is not the one that ran (#599).
+    sql_changed: bool = Field(..., serialization_alias="sqlChanged")
 
 
 class RecordedStatement(BaseModel):
@@ -145,9 +150,19 @@ def statement_identity(
 
 
 def statement_identities(
-    operations: Sequence[MigrationOperationSummary], statement_count: int
+    operations: Sequence[MigrationOperationSummary],
+    fingerprints: Sequence[str | None],
 ) -> list[StatementIdentity]:
-    return [statement_identity(operations, index) for index in range(statement_count)]
+    """One identity per statement; ``fingerprints`` has one entry per statement."""
+    out: list[StatementIdentity] = []
+    for index, fingerprint in enumerate(fingerprints):
+        marker = statement_identity(operations, index)
+        out.append(
+            StatementIdentity(
+                type=marker.type, key=marker.key, marked=marker.marked, fingerprint=fingerprint
+            )
+        )
+    return out
 
 
 def verify_retry_edit(
@@ -157,9 +172,10 @@ def verify_retry_edit(
     """Whether --retry may resume an in-progress migration with an edited file.
 
     apply skips completed statements and re-attaches a running async
-    statement by position, so each of them must keep its position and
-    operation marker. The journal records only type and key per statement,
-    not its SQL.
+    statement by position, so each of them must keep its position, operation
+    marker and, where the journal recorded its fingerprint, its SQL (#599). A
+    record from an older release has no fingerprint and is matched by position
+    and marker.
     """
     bound = sorted(
         (op for op in operations if _is_bound_to_position(op)),
@@ -174,7 +190,7 @@ def verify_retry_edit(
             if op.operation_index < len(identities)
             else None
         )
-        if current is None or not _same_identity(current, op):
+        if current is None or not _same_identity(current, op) or not _same_sql(current, op):
             mismatches.append(
                 OperationMismatch(
                     statement=op.operation_index + 1,
@@ -186,6 +202,7 @@ def verify_retry_edit(
                         if current is None
                         else Marker(type=current.type, key=current.key)
                     ),
+                    sql_changed=current is not None and _same_identity(current, op),
                 )
             )
             continue
@@ -225,11 +242,12 @@ def retry_mismatch_error(
                 f"(async query_id {mismatch.query_id})"
             )
         )
-        found = (
-            f"the edited file has no statement {statement}"
-            if current is None
-            else f"the edited file has {current.type} {current.key} there"
-        )
+        if current is None:
+            found = f"the edited file has no statement {statement}"
+        elif mismatch.sql_changed:
+            found = "the edited file has different SQL there"
+        else:
+            found = f"the edited file has {current.type} {current.key} there"
         lines.append(f"  statement {statement}: {label}, but {found}")
     for shared in check.shared_markers:
         statements = _join_with_and(
@@ -264,7 +282,8 @@ def retry_mismatch_error(
         "running no longer match the edited file.\n"
         f"{joined}\n"
         "chkit skips completed statements and re-attaches running async statements "
-        "by position, so they must keep their position and operation marker."
+        "by position, so they must keep their position, operation marker and SQL "
+        "(comments and whitespace may change)."
         f"{shared_hint}{running_hint}"
         "\nRestore them, or discard the partial run so the next apply starts the "
         f"file over: chkit migrate --apply --abandon {migration}",
@@ -320,7 +339,8 @@ def split_changed_statements(
     the positions of the split only when the plugins returned them unchanged;
     when a plugin added, removed, moved or rewrote any, the positions cannot be
     matched, so every recorded statement counts as changed once the two splits
-    differ.
+    differ. A statement recorded with its fingerprint is checked by
+    ``recorded_statement_mismatches`` instead (#599).
     """
     if list(legacy) == list(current):
         return []
@@ -332,10 +352,36 @@ def split_changed_statements(
         op.operation_index + 1
         for op in operations
         if op.status in {"completed", "started"}
+        and op.fingerprint == ""
         and (
             not positions_kept
             or at(legacy, op.operation_index) != at(current, op.operation_index)
         )
+    )
+
+
+def recorded_statement_mismatches(
+    operations: Sequence[OperationState], fingerprints: Sequence[str]
+) -> list[int]:
+    """Statements (1-based) recorded with a fingerprint they no longer have.
+
+    Those an in-progress state records as completed, or as a running async
+    statement, where the statement at that position of this run (one entry of
+    ``fingerprints`` per statement) has another fingerprint (#599). apply would
+    skip or re-attach them by position, though they are not the statements
+    that ran.
+    """
+    return sorted(
+        op.operation_index + 1
+        for op in operations
+        if _is_bound_to_position(op)
+        and op.fingerprint != ""
+        and (
+            fingerprints[op.operation_index]
+            if 0 <= op.operation_index < len(fingerprints)
+            else None
+        )
+        != op.fingerprint
     )
 
 
@@ -398,6 +444,16 @@ def _is_bound_to_position(op: OperationState) -> bool:
 
 def _same_identity(identity: StatementIdentity, op: OperationState) -> bool:
     return identity.type == op.operation_type and identity.key == op.operation_key
+
+
+def _same_sql(identity: StatementIdentity, op: OperationState) -> bool:
+    """A record without a fingerprint, or a statement that cannot be checked
+    yet, is matched by position and marker only."""
+    return (
+        op.fingerprint == ""
+        or identity.fingerprint is None
+        or identity.fingerprint == op.fingerprint
+    )
 
 
 def _marker_of(op: OperationState) -> Marker:

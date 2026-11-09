@@ -323,14 +323,22 @@ async function runChecksumGate(ctx: MigrateContext): Promise<number | undefined>
  * nothing is pending, so every run reports what it did.
  */
 async function resolvePendingPlan(ctx: MigrateContext): Promise<PendingPlan> {
-  const { migrationsDir, retryTarget, journalStore, appliedNames } = ctx
+  const { migrationsDir, retryTarget, journalStore, appliedNames, pluginRuntime } = ctx
   const scope = await resolvePendingScope(ctx)
   const emptyMigrations = await findEmptyMigrations(migrationsDir, scope.pending)
+  const pluginsRewriteStatements = pluginRuntime.plugins.some((item) => item.plugin.hooks?.onBeforeApply !== undefined)
   const retry =
     retryTarget === undefined
       ? undefined
       : await resolveRetry(
-          { migration: retryTarget, migrationsDir, pending: scope.pending, emptyMigrations, appliedNames },
+          {
+            migration: retryTarget,
+            migrationsDir,
+            pending: scope.pending,
+            emptyMigrations,
+            appliedNames,
+            pluginsRewriteStatements,
+          },
           { journalStore },
         )
   return { ...scope, emptyMigrations, retry }

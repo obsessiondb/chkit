@@ -230,6 +230,7 @@ describe('createJournalStore', () => {
           startedAt: '2026-05-26 12:00:00.000',
           finishedAt: null,
           lastError: '',
+          fingerprint: '',
         },
       ],
     })
@@ -287,6 +288,7 @@ describe('createJournalStore', () => {
           startedAt: '2026-05-26 12:00:00.000',
           finishedAt: '2026-05-26 12:01:00.000',
           lastError: "It's broken: 'unterminated",
+          fingerprint: '',
         },
       ],
     })
@@ -358,6 +360,7 @@ describe('createJournalStore', () => {
             startedAt: '2026-10-09T12:00:00.000',
             finishedAt: '2026-10-09T12:00:00.200',
             lastError: '',
+            fingerprint: '',
           },
         ],
       }
@@ -451,6 +454,8 @@ describe('createJournalStore', () => {
           journalPolls += 1
           return [{ replicas: seen }] as T[]
         }
+        // Every replica has the fingerprint column.
+        if (sql.includes('system.columns') && sql.includes('AS replicas')) return [{ replicas }] as T[]
         return scripted<T>(sql)
       }
       const queries: string[] = []
@@ -469,7 +474,9 @@ describe('createJournalStore', () => {
 
       const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
       expect(read).toContain("clusterAllReplicas('default', currentDatabase(), '_chkit_migrations')")
-      expect(read).toContain('argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at)')
+      expect(read).toContain(
+        'argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations), toJSONString(operation_fingerprints)), applied_at)',
+      )
       expect(read).not.toContain('FINAL')
     })
 
@@ -587,7 +594,9 @@ describe('createJournalStore', () => {
 
       await store.readJournal()
 
-      expect(commands.filter((sql) => sql.startsWith('ALTER TABLE'))).toHaveLength(2)
+      const alters = commands.filter((sql) => sql.startsWith('ALTER TABLE'))
+      expect(alters).toHaveLength(3)
+      expect(alters[2]).toContain('ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []')
     })
 
     test('a read fails on an error other than a missing journal', async () => {
@@ -606,6 +615,193 @@ describe('createJournalStore', () => {
       const reads = queries.filter((sql) => sql.includes('migration_completed = true'))
       expect(reads).toHaveLength(2)
       expect(reads[1]).not.toContain('SETTINGS')
+    })
+  })
+
+  // Fingerprints live in a column of their own, which older releases never
+  // name: their writes leave it [] (#599).
+  describe('statement fingerprints (#599)', () => {
+    const FINGERPRINT_PROBE = /^SELECT operation_fingerprints FROM _chkit_migrations LIMIT 0$/
+
+    function clickHouseError(code: string, type: string): Error {
+      return Object.assign(new Error(`${type} error`), { code, type })
+    }
+
+    function storeWith(input: {
+      rows?: unknown[]
+      queryError?: (sql: string) => Error | undefined
+      commandError?: (sql: string) => Error | undefined
+    }) {
+      const commands: string[] = []
+      const queries: string[] = []
+      const db = {
+        async command(sql: string) {
+          commands.push(sql)
+          const error = input.commandError?.(sql)
+          if (error) throw error
+        },
+        async query<T>(sql: string): Promise<T[]> {
+          queries.push(sql)
+          const error = input.queryError?.(sql)
+          if (error) throw error
+          if (!sql.includes("WHERE name = 'm.sql'")) return []
+          // A read that does not select the column does not get it.
+          const rows = (input.rows ?? []) as Array<Record<string, unknown>>
+          return (sql.includes('operation_fingerprints')
+            ? rows
+            : rows.map(({ operation_fingerprints: _, ...rest }) => rest)) as T[]
+        },
+      } as unknown as ClickHouseExecutor
+      return { store: createJournalStore(db), commands, queries }
+    }
+
+    function row(operations: unknown[], fingerprints: unknown) {
+      return {
+        name: 'm.sql',
+        applied_at: '2026-11-09 12:00:00.000',
+        checksum: 'abc',
+        chkit_version: '0.0.0',
+        migration_completed: false,
+        operations: JSON.stringify(operations),
+        operation_fingerprints: JSON.stringify(fingerprints),
+      }
+    }
+
+    const tuple = (index: number) => ({
+      operation_index: index,
+      operation_key: `statement:${index}`,
+      operation_type: 'sql_statement',
+      query_id: '',
+      status: 'completed',
+      started_at: '2026-11-09 12:00:00.000',
+      finished_at: '2026-11-09 12:00:00.000',
+      last_error: '',
+    })
+
+    function state(fingerprints: string[]): MigrationRowState {
+      return {
+        name: 'm.sql',
+        appliedAt: '2026-11-09T12:00:01.000',
+        checksum: 'abc',
+        chkitVersion: '0.0.0',
+        migrationCompleted: false,
+        operations: fingerprints.map((fingerprint, index) => ({
+          operationIndex: index,
+          operationKey: `statement:${index}`,
+          operationType: 'sql_statement',
+          queryId: '',
+          status: 'completed',
+          startedAt: '2026-11-09T12:00:00.000',
+          finishedAt: '2026-11-09T12:00:00.000',
+          lastError: '',
+          fingerprint,
+        })),
+      }
+    }
+
+    test('reads one fingerprint per operation, in order', async () => {
+      const { store, queries } = storeWith({ rows: [row([tuple(0), tuple(1)], ['v1:a', 'v1:b'])] })
+
+      const read = await store.readMigrationState('m.sql')
+
+      expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a', 'v1:b'])
+      expect(queries.find((sql) => sql.includes("name = 'm.sql'"))).toContain(
+        'toJSONString(operation_fingerprints) AS operation_fingerprints',
+      )
+    })
+
+    test('a row an older release wrote has no fingerprints', async () => {
+      const { store } = storeWith({ rows: [row([tuple(0), tuple(1)], [])] })
+
+      const read = await store.readMigrationState('m.sql')
+
+      expect(read?.operations.map((op) => op.fingerprint)).toEqual(['', ''])
+    })
+
+    test('writes the fingerprints next to the operations', async () => {
+      const { store, commands } = storeWith({})
+
+      await store.writeMigrationState(state(['v1:a', "v1:'b"]))
+
+      const insert = commands.find((sql) => sql.startsWith('INSERT INTO'))
+      expect(insert).toContain('migration_completed, operations, operation_fingerprints) VALUES')
+      expect(insert).toEndWith(", ['v1:a','v1:\\'b'])")
+      expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(false)
+    })
+
+    test('a journal without the column is read without fingerprints and never altered by a read', async () => {
+      const { store, commands, queries } = storeWith({
+        rows: [row([tuple(0)], ['v1:a'])],
+        queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+      })
+
+      const read = await store.readMigrationState('m.sql')
+
+      expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
+      expect(queries.find((sql) => sql.includes("name = 'm.sql'"))).not.toContain('operation_fingerprints')
+      expect(commands.filter((sql) => !sql.startsWith('SYSTEM SYNC REPLICA'))).toEqual([])
+    })
+
+    test('the first write adds the column to a journal an older release created', async () => {
+      const { store, commands } = storeWith({
+        queryError: (sql) =>
+          FINGERPRINT_PROBE.test(sql) && !commands.some((command) => command.startsWith('ALTER TABLE'))
+            ? clickHouseError('47', 'UNKNOWN_IDENTIFIER')
+            : undefined,
+      })
+      await store.readJournal()
+
+      await store.writeMigrationState(state(['v1:a']))
+
+      const writes = commands.filter((sql) => !sql.startsWith('SYSTEM SYNC REPLICA'))
+      expect(writes[0]).toBe(
+        'ALTER TABLE _chkit_migrations ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []',
+      )
+      expect(writes[1]).toContain(", ['v1:a'])")
+    })
+
+    test('a user that cannot alter the journal still writes, without fingerprints', async () => {
+      const { store, commands } = storeWith({
+        queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+        commandError: (sql) => (sql.startsWith('ALTER TABLE') ? clickHouseError('497', 'ACCESS_DENIED') : undefined),
+      })
+
+      await store.writeMigrationState(state(['v1:a']))
+      await store.writeMigrationState(state(['v1:a']))
+
+      const inserts = commands.filter((sql) => sql.startsWith('INSERT INTO'))
+      expect(inserts).toHaveLength(2)
+      expect(inserts.every((sql) => !sql.includes('operation_fingerprints'))).toBe(true)
+      // The ALTER is tried once per run.
+      expect(commands.filter((sql) => sql.startsWith('ALTER TABLE'))).toHaveLength(1)
+    })
+
+    test('an INSERT that lands on a replica without the column is written again without fingerprints', async () => {
+      const { store, commands } = storeWith({
+        commandError: (sql) =>
+          sql.includes('operation_fingerprints) VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
+      })
+
+      await store.writeMigrationState(state(['v1:a']))
+
+      const inserts = commands.filter((sql) => sql.startsWith('INSERT INTO'))
+      expect(inserts).toHaveLength(2)
+      expect(inserts[1]).not.toContain('operation_fingerprints')
+    })
+
+    test('a read that lands on a replica without the column reads again without fingerprints', async () => {
+      const { store, queries } = storeWith({
+        rows: [row([tuple(0)], ['v1:a'])],
+        queryError: (sql) =>
+          sql.includes("name = 'm.sql'") && sql.includes('operation_fingerprints')
+            ? clickHouseError('47', 'UNKNOWN_IDENTIFIER')
+            : undefined,
+      })
+
+      const read = await store.readMigrationState('m.sql')
+
+      expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
+      expect(queries.filter((sql) => sql.includes("name = 'm.sql'"))).toHaveLength(2)
     })
   })
 })

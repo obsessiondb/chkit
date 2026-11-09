@@ -499,6 +499,7 @@ def _resolve_pending_plan(ctx: _MigrateContext) -> _PendingPlan:
             empty_migrations=plan.empty_migrations,
             applied_names=ctx.applied_names,
             journal_store=ctx.journal_store,
+            plugins_rewrite_statements=ctx.plugin_runtime.rewrites_statements(),
         )
     return plan
 

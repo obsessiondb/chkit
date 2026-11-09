@@ -235,6 +235,12 @@ class PluginRuntime:
                 plan = result
         return plan
 
+    def rewrites_statements(self) -> bool:
+        """Whether a plugin has an on_before_apply hook, which may rewrite statements."""
+        return any(
+            _get_hook(entry.plugin, "on_before_apply") is not None for entry in self._plugins
+        )
+
     def run_on_before_apply(self, context: ChxOnBeforeApplyContext) -> list[str]:
         statements = list(context.statements)
         for entry in self._plugins:

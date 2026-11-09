@@ -87,6 +87,7 @@ def test_upsert_operation_replaces_existing_index() -> None:
                 started_at="x",
                 finished_at=None,
                 last_error="",
+                fingerprint="",
             )
         ],
     )
@@ -99,6 +100,7 @@ def test_upsert_operation_replaces_existing_index() -> None:
         started_at="x",
         finished_at="y",
         last_error="",
+        fingerprint="",
     )
     out = upsert_operation(state, replacement, "now")
     assert len(out.operations) == 1
@@ -116,6 +118,7 @@ def test_upsert_operation_inserts_new_index() -> None:
         started_at="x",
         finished_at=None,
         last_error="",
+        fingerprint="",
     )
     out = upsert_operation(state, new, "now")
     assert out.operations == [new]
@@ -134,6 +137,7 @@ def test_upsert_operation_sorts_by_index() -> None:
             started_at="x",
             finished_at=None,
             last_error="",
+            fingerprint="",
         ),
         "now",
     )
@@ -148,6 +152,7 @@ def test_upsert_operation_sorts_by_index() -> None:
             started_at="x",
             finished_at=None,
             last_error="",
+            fingerprint="",
         ),
         "now",
     )
@@ -252,6 +257,7 @@ def _input(
         "statement_index": 0,
         "operation_type": "alter_table_modify_column",
         "operation_key": "table:db.t:column:x",
+        "fingerprint": "",
         "before_retry": None,
         "log": lambda _msg: None,
         "poll_interval_seconds": 0.0,
@@ -338,6 +344,7 @@ def test_apply_async_already_completed_skips_entirely() -> None:
         started_at="2026-01-01T00:00:00.000",
         finished_at="2026-01-01T00:00:10.000",
         last_error="",
+        fingerprint="",
     )
     state = MigrationRowState(
         name="20260101_000000_async.sql",
@@ -431,6 +438,7 @@ def test_apply_async_resubmit_runs_before_retry() -> None:
         started_at="2026-01-01T00:00:00.000",
         finished_at="2026-01-01T00:00:01.000",
         last_error="connection lost",
+        fingerprint="",
     )
     state = MigrationRowState(
         name="20260101_000000_async.sql",
@@ -511,6 +519,7 @@ def _op(status: str, *, last_error: str = "", index: int = 0) -> OperationState:
         started_at="2023-11-14 22:14:00.000",
         finished_at=None if status == "started" else "2023-11-14 22:14:01.000",
         last_error=last_error,
+        fingerprint="",
     )
 
 

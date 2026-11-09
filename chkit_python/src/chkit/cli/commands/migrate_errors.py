@@ -94,6 +94,40 @@ def statement_split_changed_error(
     )
 
 
+def recorded_statements_changed_error(
+    *,
+    migration: str,
+    statements: Sequence[int],
+    recorded_by: str,
+    cli_version: str,
+) -> MigrateError:
+    """An in-progress migration whose file is unchanged, but whose statements
+    as this run gets them differ from those the journal recorded as completed
+    or running (#599).
+
+    The release that recorded the state split the file differently, or a
+    plugin's on_before_apply now returns other statements. ``statements`` are
+    1-based; ``recorded_by`` is empty when the state has no release.
+    """
+    recorder = "an earlier chkit release" if recorded_by == "" else f"chkit {recorded_by}"
+    label = "statement" if len(statements) == 1 else "statements"
+    where = "that position" if len(statements) == 1 else "those positions"
+    numbers = ", ".join(str(statement) for statement in statements)
+    return MigrateError(
+        "statement_split_changed",
+        f"Cannot resume {migration}: the journal recorded {label} {numbers} as completed "
+        f"or started, but this run gets different SQL from the file at {where}. "
+        f"{recorder} recorded the partial run and this chkit is {cli_version}; a change "
+        "in how chkit splits the file, or in what a plugin's onBeforeApply returns, moves "
+        "statements. Resuming by position could skip a statement that never ran or run "
+        "one again.\n"
+        "  Finish the partial run with the chkit release and plugins that recorded it, "
+        "then upgrade.\n"
+        "  Or discard the partial run, so the next apply starts the file over (statements "
+        f"that ran stay applied and run again): chkit migrate --apply --abandon {migration}",
+    )
+
+
 def empty_migrations_error(files: Sequence[str]) -> RuntimeError:
     """Text-mode refusal of pending files without executable statements."""
     listed = "\n".join(f"  - {file}" for file in files)

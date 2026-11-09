@@ -105,6 +105,8 @@ Migration 20260929001110_funnel-model.sql has in-progress journal state for chec
 
 chkit reads `//`, `# ` and `#!` comments as ClickHouse does, up to the end of the line, so a `;`, quote or `/*` inside one does not end a statement or open a string. Releases before [#562](https://github.com/obsessiondb/chkit/issues/562) cut a statement at a `;` inside such a comment. When another chkit release applied part of a migration whose file has such a comment, and the statements it recorded as completed (or started) are not the same statements in the current split, `migrate` stops with the code `statement_split_changed` instead of resuming by position. Finish that migration with the release that recorded it, or [abandon](#abandoning-a-failed-migration) the partial run.
 
+The journal also records a fingerprint of each statement it runs ([#599](https://github.com/obsessiondb/chkit/issues/599)). Before `migrate` resumes, it checks that each statement recorded as completed (or an async statement that may still be running) still has the same SQL at its position, comments and whitespace aside. When the file is unchanged but the statements differ, because a chkit release split the file differently or a plugin's `onBeforeApply` now returns other statements, `migrate` stops with `statement_split_changed` too. Statements recorded by a release before #599 have no fingerprint and are matched by position as before.
+
 :::caution
 Edit a failed migration only if no other environment that runs the same files has applied it, because checksum verification fails there. If the migration succeeded elsewhere, fix the cause in the failing environment and re-run `chkit migrate --apply` with the unchanged file.
 :::
@@ -115,12 +117,13 @@ Edit a failed migration only if no other environment that runs the same files ha
 chkit migrate --apply --retry 20260929001110_funnel-model.sql
 ```
 
-`--retry` accepts the edited file for the named migration when every statement that completed still sits at the same position with the same `-- operation:` marker (operation type and key). chkit then records the new checksum and continues from the first statement that did not complete, so a later failure resumes with a plain `chkit migrate --apply`. The name may be the file name with or without `.sql`, or a path to the file.
+`--retry` accepts the edited file for the named migration when every statement that completed still sits at the same position with the same `-- operation:` marker (operation type and key) and the same SQL. Comments and whitespace outside strings may change; any other change to a completed statement's SQL is refused. chkit then records the new checksum and continues from the first statement that did not complete, so a later failure resumes with a plain `chkit migrate --apply`. The name may be the file name with or without `.sql`, or a path to the file.
 
-- Completed statements are skipped by position and never run again. Edits to them have no effect; correct an applied statement with a new migration.
-- Statements without an `-- operation:` marker are matched by position only. Do not add, remove, or reorder statements above the one that failed.
+- Completed statements are skipped and never run again. Correct an applied statement with a new migration, not by editing it.
+- Statements without an `-- operation:` marker are matched by position and SQL. Do not add, remove, or reorder statements above the one that failed.
+- A statement that a chkit release before [#599](https://github.com/obsessiondb/chkit/issues/599) recorded has no fingerprint, so `--retry` checks only its position and marker.
 - An [async statement](#async-operations-modeasync) that may still be running must also keep its position and marker.
-- If a completed statement moved or its marker changed, `--retry` refuses and lists the statements. Restore them, or [abandon](#abandoning-a-failed-migration) the partial run.
+- If a completed statement moved, or its marker or SQL changed, `--retry` refuses and lists the statements. Restore them, or [abandon](#abandoning-a-failed-migration) the partial run.
 - Statements can share a marker: a column's generated `REMOVE DEFAULT` or `REMOVE MATERIALIZED` carries the marker of the `MODIFY COLUMN` after it. Keep both in the file and edit only the one that failed. `--retry` cannot tell them apart, so it also refuses an edit that leaves fewer statements with a completed statement's marker than the failed run recorded, such as one that deletes the completed `REMOVE`.
 - The retry takes effect when `--apply` or interactive confirmation applies migrations. Add `--json` without `--apply` to preview where the migration will resume.
 - When the named migration has no in-progress state, did not change since it failed, is already applied, has no executable statements, or is outside the `--table` scope, `--retry` has no effect and the output says so, also when nothing is pending, so the same command can run against every environment. A name that matches no migration file is an error.
@@ -172,6 +175,9 @@ Each migration has one row in the `_chkit_migrations` journal table in ClickHous
 - `chkit_version` — the CLI version that wrote the row
 - `migration_completed` — `true` once every statement has run
 - `operations` — the progress of each statement (`completed`, `failed`, or `started`) while the migration runs
+- `operation_fingerprints` — one fingerprint per entry of `operations`: a hash of the statement's SQL without comments and whitespace, which resumes and `--retry` check ([#599](https://github.com/obsessiondb/chkit/issues/599))
+
+The first journal write of a release with #599 adds `operation_fingerprints` (`ALTER TABLE … ADD COLUMN IF NOT EXISTS`, `ON CLUSTER` in cluster mode) to a journal an older release created; reads never alter the journal. A user that cannot `ALTER` the journal still migrates, without fingerprints. Older releases read and write the journal as before: they name their columns, so a row they write has no fingerprints, and its statements are matched by position again.
 
 The journal is written as each statement runs, not batched. The table is created in the database configured in `clickhouse.database` (it is not qualified with a database name, so on a shared/default-database setup it lives in `default._chkit_migrations`). The table name can be overridden with the `CHKIT_JOURNAL_TABLE` environment variable.
 
@@ -445,8 +451,8 @@ A failure that stops the command prints the standard error envelope:
 | Code | When |
 |------|------|
 | `in_progress_checksum_mismatch` | The file of an in-progress migration changed after some of its statements ran, and `--retry` was not given for it |
-| `statement_split_changed` | Another chkit release applied part of the migration, and the statements it recorded are not the same in the current split (a `;`, quote or `/*` inside a `//` or `#` comment, [#562](https://github.com/obsessiondb/chkit/issues/562)) |
-| `retry_mismatch` | `--retry`: a statement that completed, or an async statement that may still be running, no longer matches the edited file, or the edit left fewer statements with a marker that a completed statement shares |
+| `statement_split_changed` | Another chkit release applied part of the migration, and the statements it recorded are not the same in the current split (a `;`, quote or `/*` inside a `//` or `#` comment, [#562](https://github.com/obsessiondb/chkit/issues/562)), or the file is unchanged but a statement recorded as completed or running no longer has the SQL it ran with ([#599](https://github.com/obsessiondb/chkit/issues/599)) |
+| `retry_mismatch` | `--retry`: a statement that completed, or an async statement that may still be running, no longer matches the edited file (position, marker or SQL), or the edit left fewer statements with a marker that a completed statement shares |
 | `migration_not_found` | `--retry` names a file that is not in the migrations directory |
 | `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |
 | `migration_already_applied` | `--abandon`: the migration is already applied |

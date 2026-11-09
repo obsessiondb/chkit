@@ -64,7 +64,13 @@ def test_unknown_table_probe_creates_the_journal_and_inserts() -> None:
 
     assert store.database_missing is False
     assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS _chkit_migrations")
-    assert client.executed[1].startswith("INSERT INTO _chkit_migrations")
+    # Every query of this fake fails, the fingerprint column probe too, so the
+    # write first tries to add the column (#599).
+    assert [sql.split(" (")[0] for sql in client.executed[1:]] == [
+        "ALTER TABLE _chkit_migrations ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []",
+        "INSERT INTO _chkit_migrations",
+        "SYSTEM SYNC REPLICA _chkit_migrations",
+    ]
 
 
 def test_unknown_database_skips_the_insert() -> None:

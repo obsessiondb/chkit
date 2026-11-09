@@ -1,0 +1,114 @@
+{
+  "cases": [
+    {
+      "name": "plain statement",
+      "sql": "CREATE TABLE app.events (id UInt64) ENGINE = MergeTree ORDER BY id;",
+      "fingerprint": "v1:b6e2ecc325e9db1ed7f11625cfceb33040dd307c701142b54ad2c657f5f2b2c0"
+    },
+    {
+      "name": "empty",
+      "sql": "",
+      "fingerprint": "v1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "only comments and whitespace",
+      "sql": "-- a\n/* b */ // c\n# d\n  ;",
+      "fingerprint": "v1:e3b0c44298fc1c149afbf4c8996fb92427ae41e4649b934ca495991b7852b855"
+    },
+    {
+      "name": "non-ASCII string literal",
+      "sql": "SELECT 'ünïcødé 😀' AS s;",
+      "fingerprint": "v1:5d53c5ab1ae481e561f35022d80414788f19351d50b6926b4100f52316aacbcf"
+    },
+    {
+      "name": "heredoc and quoted names",
+      "sql": "SELECT $tag$ a -- b; c $tag$, `odd\\`name`, \"q\" FROM t;",
+      "fingerprint": "v1:86fdfd72a49655bfe8bec0fd29980ebf685caddd3935d1d1e45569299883419b"
+    },
+    {
+      "name": "numbers and tuple access",
+      "sql": "SELECT t.1.2, 1_000, 0x1F, 1.5e+3, .5 FROM db.t;",
+      "fingerprint": "v1:d6b132a0cc60f569ba323a645e0b56aecca8ac9b8bf03c41d7e551af1161c44e"
+    }
+  ],
+  "same": [
+    {
+      "name": "comments, whitespace and the trailing semicolon do not count",
+      "sql": [
+        "ALTER TABLE app.events ADD COLUMN extra String DEFAULT 'x';",
+        "ALTER TABLE app.events ADD COLUMN extra String DEFAULT 'x'",
+        "ALTER TABLE app.events ADD COLUMN extra String DEFAULT 'x';;",
+        "ALTER  TABLE\n\tapp.events\r\n  ADD COLUMN extra String DEFAULT 'x' ;",
+        "ALTER TABLE app.events /* a block; -- comment */ ADD COLUMN extra String DEFAULT 'x' -- trailing\n;",
+        "ALTER TABLE app.events // a comment\nADD COLUMN extra String # another\nDEFAULT 'x' #! and another\n;",
+        "-- operation: alter_table_add_column key=table:app.events:column:extra risk=safe\nALTER TABLE app.events ADD COLUMN extra String DEFAULT 'x';",
+        "ALTER TABLE app . events ADD COLUMN extra String DEFAULT 'x';"
+      ]
+    },
+    {
+      "name": "a comment can stand between two tokens",
+      "sql": [
+        "SELECT a,b FROM t;",
+        "SELECT a/* c */,/* d */b FROM t;",
+        "SELECT a , b FROM t;"
+      ]
+    },
+    {
+      "name": "a comment separates two tokens as whitespace does",
+      "sql": [
+        "SELECT a b;",
+        "SELECT a/**/b;",
+        "SELECT a -- c\nb;"
+      ]
+    }
+  ],
+  "different": [
+    {
+      "name": "a string literal keeps its whitespace and comment-like text",
+      "sql": [
+        "SELECT 'a  b';",
+        "SELECT 'a b';",
+        "SELECT 'a -- b';",
+        "SELECT 'a';"
+      ]
+    },
+    {
+      "name": "a name change",
+      "sql": [
+        "CREATE TABLE app.a (id UInt64) ENGINE = Memory;",
+        "CREATE TABLE app.b (id UInt64) ENGINE = Memory;"
+      ]
+    },
+    {
+      "name": "keyword case is SQL text",
+      "sql": [
+        "SELECT 1;",
+        "select 1;"
+      ]
+    },
+    {
+      "name": "token boundaries count",
+      "sql": [
+        "SELECT ab;",
+        "SELECT a b;",
+        "SELECT 1 2;",
+        "SELECT 12;"
+      ]
+    },
+    {
+      "name": "a quoted name is not the bare name",
+      "sql": [
+        "SELECT `a` FROM t;",
+        "SELECT a FROM t;",
+        "SELECT \"a\" FROM t;"
+      ]
+    },
+    {
+      "name": "text a // comment hid becomes SQL once the comment ends earlier",
+      "sql": [
+        "SELECT 1 // x, 2\n;",
+        "SELECT 1 // x\n, 2;"
+      ]
+    }
+  ]
+}

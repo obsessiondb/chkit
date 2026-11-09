@@ -82,6 +82,8 @@ class AsyncApplyInput:
     statement_index: int
     operation_type: str
     operation_key: str
+    # ``statement_fingerprint(sql)``, recorded with every write of this statement (#599).
+    fingerprint: str
     before_retry: str | None
     log: Callable[[str], None]
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
@@ -270,6 +272,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
                 started_at=started_at,
                 finished_at=None,
                 last_error="",
+                fingerprint=input_.fingerprint,
             ),
             iso_without_zone(datetime.now(tz=UTC)),
         )
@@ -352,6 +355,7 @@ def _poll_until_terminal(
                 started_at=started_at,
                 finished_at=iso_without_zone(datetime.now(tz=UTC)),
                 last_error="",
+                fingerprint=input_.fingerprint,
             )
             input_.journal_store.write_migration_state(
                 upsert_operation(
@@ -381,6 +385,7 @@ def _poll_until_terminal(
                 started_at=started_at,
                 finished_at=iso_without_zone(datetime.now(tz=UTC)),
                 last_error=status.error or "<unknown>",
+                fingerprint=input_.fingerprint,
             )
             input_.journal_store.write_migration_state(
                 upsert_operation(
@@ -416,6 +421,7 @@ def _poll_until_terminal(
                             "startedAt": started_at,
                             "finishedAt": iso_without_zone(datetime.now(tz=UTC)),
                             "lastError": _describe_error(submit_error),
+                            "fingerprint": input_.fingerprint,
                         }
                     ),
                     iso_without_zone(datetime.now(tz=UTC)),

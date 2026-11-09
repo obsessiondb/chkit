@@ -39,7 +39,7 @@ from chkit.cli.migration_store import (
     checksum_sql,
 )
 from chkit.clickhouse.client import ClickHouseClient, is_unknown_database_error
-from chkit.clickhouse.ddl_propagation import wait_for_table
+from chkit.clickhouse.ddl_propagation import wait_for_column, wait_for_table
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
 
@@ -62,6 +62,11 @@ class OperationState(BaseModel):
     started_at: str = Field(..., alias="startedAt")
     finished_at: str | None = Field(..., alias="finishedAt")
     last_error: str = Field(..., alias="lastError")
+    # The ``statement_fingerprint`` of the statement this record is about, so a
+    # resume can tell it is still that statement (#599). Empty when it was not
+    # recorded: an older chkit wrote the row, or the journal has no column for
+    # it. Never part of a report.
+    fingerprint: str = Field(..., exclude=True)
 
 
 class MigrationRowState(BaseModel):
@@ -91,6 +96,14 @@ _OPERATIONS_TUPLE_TYPE: Final[str] = (
     "last_error String"
     "))"
 )
+
+# One fingerprint per entry of ``operations``, in the same order (#599). A
+# separate column, so the ``operations`` type older releases write stays the
+# same. Older releases name their INSERT columns, so a row they write gets
+# ``[]`` here: a fingerprint is only ever read from a row whose writer recorded
+# it for that very record.
+_FINGERPRINTS_COLUMN: Final[str] = "operation_fingerprints"
+_FINGERPRINTS_COLUMN_DEFINITION: Final[str] = f"{_FINGERPRINTS_COLUMN} Array(String) DEFAULT []"
 
 
 class _UnknownDatabaseError(Exception):
@@ -133,8 +146,7 @@ def _parse_bool(value: Any) -> bool:
     return False
 
 
-def _parse_operations(value: Any) -> list[OperationState]:
-    """Decode the ``toJSONString(operations)`` cell into OperationState objects."""
+def _parse_json_list(value: Any) -> list[Any]:
     if value is None or value == "":
         return []
     decoded: Any = value
@@ -143,10 +155,24 @@ def _parse_operations(value: Any) -> list[OperationState]:
             decoded = json.loads(value)
         except json.JSONDecodeError:
             return []
-    if not isinstance(decoded, list):
+    return decoded if isinstance(decoded, list) else []
+
+
+def _parse_fingerprints(value: Any, operation_count: int) -> list[str]:
+    """The fingerprints count only when there is one per operation: a row an
+    older release wrote has ``[]``, and its operations then have none."""
+    decoded = _parse_json_list(value)
+    if len(decoded) != operation_count or not all(isinstance(item, str) for item in decoded):
         return []
+    return [str(item) for item in decoded]
+
+
+def _parse_operations(value: Any, fingerprints_value: Any = None) -> list[OperationState]:
+    """Decode the ``toJSONString(operations)`` cell into OperationState objects."""
+    decoded = _parse_json_list(value)
+    fingerprints = _parse_fingerprints(fingerprints_value, len(decoded))
     out: list[OperationState] = []
-    for raw in decoded:
+    for index, raw in enumerate(decoded):
         if not isinstance(raw, dict):
             continue
         out.append(
@@ -163,6 +189,7 @@ def _parse_operations(value: Any) -> list[OperationState]:
                     else str(raw["finished_at"])
                 ),
                 last_error=str(raw.get("last_error", "")),
+                fingerprint=fingerprints[index] if index < len(fingerprints) else "",
             )
         )
     return out
@@ -188,6 +215,11 @@ def _operations_array_literal(operations: list[OperationState]) -> str:
     return f"[{','.join(_operation_to_tuple_literal(op) for op in operations)}]"
 
 
+def _fingerprints_array_literal(operations: list[OperationState]) -> str:
+    quoted = ["'" + _escape_sql_string(op.fingerprint) + "'" for op in operations]
+    return f"[{','.join(quoted)}]"
+
+
 # ClickHouse errors by code, name and message. clickhouse-connect gives the code
 # and the name in the message; the ObsessionDB console API only the message.
 # Same as TS ``isClickHouseError``.
@@ -202,6 +234,7 @@ _UNKNOWN_IDENTIFIER = (
     re.compile(r"Unknown expression identifier|Missing columns"),
 )
 _READONLY = (164, "READONLY", re.compile(r"in readonly mode"))
+_NO_SUCH_COLUMN = (16, "NO_SUCH_COLUMN_IN_TABLE", re.compile(r"No such column"))
 
 
 def _is_clickhouse_error(error: BaseException, kind: tuple[int, str, re.Pattern[str]]) -> bool:
@@ -230,6 +263,8 @@ class JournalStore:
         "_client",
         "_cluster",
         "_database_missing",
+        "_fingerprint_column",
+        "_fingerprint_column_added",
         "_last_written",
         "_on_cluster",
         "_table",
@@ -248,6 +283,11 @@ class JournalStore:
         # The database exists but the journal does not: reads see no rows, and
         # the first write creates it.
         self._table_missing: bool = False
+        # Whether the journal has the operation_fingerprints column (#599).
+        # Without it chkit reads and writes no fingerprints, as an older
+        # release does.
+        self._fingerprint_column: bool = False
+        self._fingerprint_column_added: bool = False
         # Read-your-writes: the last row version this store wrote per migration.
         self._last_written: dict[str, MigrationRowState] = {}
 
@@ -286,7 +326,8 @@ class JournalStore:
             f"    checksum String,\n"
             f"    chkit_version String,\n"
             f"    migration_completed Bool DEFAULT true,\n"
-            f"    operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []\n"
+            f"    operations {_OPERATIONS_TUPLE_TYPE} DEFAULT [],\n"
+            f"    {_FINGERPRINTS_COLUMN_DEFINITION}\n"
             f") ENGINE = {engine}\n"
             f"ORDER BY (name)\n"
             f"SETTINGS index_granularity = 1"
@@ -304,6 +345,7 @@ class JournalStore:
             self._client.query(
                 f"SELECT name, migration_completed, operations FROM {self._table} LIMIT 0"
             )
+            self._fingerprint_column = self._has_fingerprint_column()
             self._wait_for_every_replica()
             self._bootstrapped = True
             self._table_missing = False
@@ -316,6 +358,7 @@ class JournalStore:
             if _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
                 # The journal predates per-operation tracking.
                 self._ensure_schema_upgraded()
+                self._fingerprint_column = True
                 self._wait_for_every_replica()
                 self._bootstrapped = True
                 return
@@ -323,6 +366,7 @@ class JournalStore:
                 if not _is_clickhouse_error(exc, _UNKNOWN_TABLE):
                     raise
                 if self._exists_on_another_replica():
+                    self._fingerprint_column = self._has_fingerprint_column()
                     self._wait_for_every_replica()
                     self._bootstrapped = True
                     return
@@ -336,6 +380,8 @@ class JournalStore:
                 self._bootstrapped = True
                 return
             raise
+        # Another process, maybe an older release, may have created it first.
+        self._fingerprint_column = self._has_fingerprint_column()
         self._wait_for_every_replica()
         self._bootstrapped = True
         self._table_missing = False
@@ -361,9 +407,56 @@ class JournalStore:
         """
         if resolve_replica_fanout(self._client, self._cluster) is None:
             return
-        rows = self._client.query("SELECT currentDatabase() AS database").rows
-        database = str(rows[0]["database"]) if rows else "default"
+        database = self._current_database()
         wait_for_table(self._client, database, self._table, cluster=self._cluster)
+        # Reads and writes name operation_fingerprints, so every replica needs
+        # it; when one never gets it, this run records no fingerprints.
+        if self._fingerprint_column and not self._fingerprint_column_on_every_replica(database):
+            self._fingerprint_column = False
+
+    def _current_database(self) -> str:
+        rows = self._client.query("SELECT currentDatabase() AS database").rows
+        return str(rows[0]["database"]) if rows else "default"
+
+    def _fingerprint_column_on_every_replica(self, database: str) -> bool:
+        try:
+            wait_for_column(
+                self._client, database, self._table, _FINGERPRINTS_COLUMN, cluster=self._cluster
+            )
+        except Exception:
+            return False
+        return True
+
+    def _has_fingerprint_column(self) -> bool:
+        """Any failure reads as no column: a journal without fingerprints is
+        what every older release reads and writes."""
+        try:
+            self._client.query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
+        except Exception:
+            return False
+        return True
+
+    def _ensure_fingerprint_column(self) -> None:
+        """Add the fingerprint column to a journal an older release created.
+
+        On the first write of a run. A user that cannot ALTER the journal
+        still migrates, without fingerprints, as before (#599).
+        """
+        if self._fingerprint_column or self._fingerprint_column_added:
+            return
+        self._fingerprint_column_added = True
+        try:
+            self._client.execute(
+                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS {_FINGERPRINTS_COLUMN_DEFINITION}"
+            )
+        except Exception:
+            return
+        self._fingerprint_column = True
+        if resolve_replica_fanout(self._client, self._cluster) is not None:
+            self._fingerprint_column = self._fingerprint_column_on_every_replica(
+                self._current_database()
+            )
 
     def _ensure_schema_upgraded(self) -> None:
         # Old journal tables predate per-operation tracking. Add the columns
@@ -379,6 +472,10 @@ class JournalStore:
                 f"ALTER TABLE {self._table}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
             )
+            self._client.execute(
+                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ADD COLUMN IF NOT EXISTS {_FINGERPRINTS_COLUMN_DEFINITION}"
+            )
         except Exception as exc:
             # A read-only user cannot run the ALTER (#402). Same message as TS.
             raise RuntimeError(
@@ -388,6 +485,20 @@ class JournalStore:
             ) from exc
 
     def _journal_rows(self, where: str, *, limit: str = "") -> list[dict[str, Any]]:
+        if not self._fingerprint_column:
+            return self._select_journal_rows(where, limit=limit, fingerprints=False)
+        try:
+            return self._select_journal_rows(where, limit=limit, fingerprints=True)
+        except Exception as exc:
+            # A replica that has not applied another process's ALTER yet.
+            if not _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
+                raise
+            self._fingerprint_column = False
+            return self._select_journal_rows(where, limit=limit, fingerprints=False)
+
+    def _select_journal_rows(
+        self, where: str, *, limit: str, fingerprints: bool
+    ) -> list[dict[str, Any]]:
         """The rows to read the journal from.
 
         A single replica reads the table with FINAL. With several replicas
@@ -398,10 +509,14 @@ class JournalStore:
         ``ReplacingMergeTree(applied_at)`` keeps too.
         """
         fanout = resolve_replica_fanout(self._client, self._cluster)
+        fingerprint_select = f"toJSONString({_FINGERPRINTS_COLUMN})"
         if fanout is None:
+            fingerprint_column = (
+                f", {fingerprint_select} AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
+            )
             sql = (
                 f"SELECT name, applied_at, checksum, chkit_version, "
-                f"migration_completed, toJSONString(operations) AS operations "
+                f"migration_completed, toJSONString(operations) AS operations{fingerprint_column} "
                 f"FROM {self._table} FINAL WHERE {where} ORDER BY name{limit}"
             )
             try:
@@ -414,11 +529,14 @@ class JournalStore:
                 if not _is_clickhouse_error(exc, _READONLY):
                     raise
                 return self._client.query(sql).rows
+        # The fingerprints come from the same row version as the operations.
+        latest = f", latest.6 AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
+        versioned = f", {fingerprint_select}" if fingerprints else ""
         return self._client.query(
             "SELECT name, latest.1 AS applied_at, latest.2 AS checksum, "
             "latest.3 AS chkit_version, latest.4 AS migration_completed, "
-            "latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, "
-            "checksum, chkit_version, migration_completed, toJSONString(operations)), "
+            f"latest.5 AS operations{latest} FROM (SELECT name, argMax(tuple(applied_at, "
+            f"checksum, chkit_version, migration_completed, toJSONString(operations){versioned}), "
             "applied_at) AS latest FROM clusterAllReplicas("
             f"'{_escape_sql_string(fanout.cluster)}', currentDatabase(), '{self._table}') "
             f"GROUP BY name) WHERE {where} ORDER BY name{limit}"
@@ -493,7 +611,9 @@ class JournalStore:
             checksum=str(row["checksum"]),
             chkit_version=str(row["chkit_version"]),
             migration_completed=_parse_bool(row.get("migration_completed")),
-            operations=_parse_operations(row.get("operations")),
+            operations=_parse_operations(
+                row.get("operations"), row.get(_FINGERPRINTS_COLUMN)
+            ),
         )
         # Each request can land on a different replica, and SYSTEM SYNC REPLICA
         # on one request does not make the next one read our write. Never hand a
@@ -520,16 +640,34 @@ class JournalStore:
             # Nothing to journal until the migration creates the database; the
             # INSERT would otherwise fall back to the server's default database.
             return
+        self._ensure_fingerprint_column()
+        try:
+            self._insert_state(state, fingerprints=self._fingerprint_column)
+        except Exception as exc:
+            # A replica that has not applied another process's ALTER yet.
+            if not self._fingerprint_column or not _is_clickhouse_error(exc, _NO_SUCH_COLUMN):
+                raise
+            self._fingerprint_column = False
+            self._insert_state(state, fingerprints=False)
+        self._last_written[state.name] = state
+        self._try_sync_replica()
+
+    def _insert_state(self, state: MigrationRowState, *, fingerprints: bool) -> None:
+        fingerprint_column = f", {_FINGERPRINTS_COLUMN}" if fingerprints else ""
+        fingerprint_value = (
+            f", {_fingerprints_array_literal(state.operations)}" if fingerprints else ""
+        )
         sql = (
             f"INSERT INTO {self._table} "
             f"(name, applied_at, checksum, chkit_version, "
-            f"migration_completed, operations) VALUES ("
+            f"migration_completed, operations{fingerprint_column}) VALUES ("
             f"'{_escape_sql_string(state.name)}', "
             f"'{_escape_sql_string(state.applied_at)}', "
             f"'{_escape_sql_string(state.checksum)}', "
             f"'{_escape_sql_string(state.chkit_version)}', "
             f"{'true' if state.migration_completed else 'false'}, "
             f"{_operations_array_literal(state.operations)}"
+            f"{fingerprint_value}"
             f")"
         )
         for attempt in range(1, _INSERT_RACE_MAX_ATTEMPTS + 1):
@@ -543,8 +681,6 @@ class JournalStore:
                 ):
                     raise
                 time.sleep(attempt * _INSERT_RACE_BASE_DELAY_MS / 1000)
-        self._last_written[state.name] = state
-        self._try_sync_replica()
 
 
 def find_checksum_mismatches_against_disk(

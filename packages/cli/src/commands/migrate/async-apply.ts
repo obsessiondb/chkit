@@ -46,6 +46,8 @@ export interface AsyncApplyInput {
   statementIndex: number
   operationType: string
   operationKey: string
+  /** `statementFingerprint(sql)`, recorded with every write of this statement (#599). */
+  fingerprint: string
   beforeRetry: string | null
   /** --setting values, sent with the submitted statement and its before-retry SQL. */
   settings?: ClickHouseSettings
@@ -69,6 +71,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     statementIndex,
     operationType,
     operationKey,
+    fingerprint,
     beforeRetry,
     settings,
     log,
@@ -122,6 +125,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       statementIndex,
       operationType,
       operationKey,
+      fingerprint,
       queryId,
       pollAfterTime: attachLowerBound(serverNowMs, inFlight.elapsedMs),
       log,
@@ -170,6 +174,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
         startedAt,
         finishedAt: null,
         lastError: '',
+        fingerprint,
       },
       now,
     ),
@@ -191,6 +196,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     statementIndex,
     operationType,
     operationKey,
+    fingerprint,
     queryId,
     pollAfterTime,
     log,
@@ -211,6 +217,7 @@ interface PollUntilTerminalInput {
   statementIndex: number
   operationType: string
   operationKey: string
+  fingerprint: string
   queryId: string
   /** Only query_log entries of queries started at or after this time count. */
   pollAfterTime: string
@@ -232,6 +239,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
     statementIndex,
     operationType,
     operationKey,
+    fingerprint,
     queryId,
     pollAfterTime,
     log,
@@ -297,6 +305,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
           startedAt,
           finishedAt: isoWithoutZone(new Date(now())),
           lastError: '',
+          fingerprint,
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
@@ -319,6 +328,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
           startedAt,
           finishedAt: isoWithoutZone(new Date(now())),
           lastError: status.error ?? '<unknown>',
+          fingerprint,
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
@@ -349,6 +359,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
           startedAt,
           finishedAt: isoWithoutZone(new Date(now())),
           lastError: describeError(submitError),
+          fingerprint,
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)

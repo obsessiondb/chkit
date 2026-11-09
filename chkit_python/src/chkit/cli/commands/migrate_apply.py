@@ -28,6 +28,7 @@ from chkit.cli.commands.migrate_async_apply import (
 )
 from chkit.cli.commands.migrate_errors import (
     in_progress_checksum_mismatch_error,
+    recorded_statements_changed_error,
     statement_split_changed_error,
 )
 from chkit.cli.commands.migrate_recovery import (
@@ -35,6 +36,7 @@ from chkit.cli.commands.migrate_recovery import (
     StatementIdentity,
     has_statement_progress,
     rebase_in_progress_state,
+    recorded_statement_mismatches,
     retry_mismatch_error,
     split_changed_statements,
     statement_identities,
@@ -64,6 +66,7 @@ from chkit.clickhouse.ddl_propagation import (
 )
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.core.model import ChxResolvedConfig
+from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_splitter import (
     extract_executable_statements,
     extract_legacy_executable_statements,
@@ -127,6 +130,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         )
     )
     migration_checksum = checksum_sql(sql)
+    # What the journal records for each statement run, and checks against (#599).
+    fingerprints = [statement_fingerprint(statement) for statement in statements]
 
     initial_state = journal_store.read_migration_state(file)
     # Releases before #562 did not know `//` and `#` comments, so the statement
@@ -150,6 +155,23 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 recorded_by=initial_state.chkit_version,
                 cli_version=__version__,
             )
+    # The file is unchanged, so the statements this run gets should be those
+    # the journal recorded. They are not when the split or a plugin's
+    # on_before_apply changed since: then positions do not hold (#599). An
+    # edited file is checked by --retry below.
+    if (
+        initial_state is not None
+        and not initial_state.migration_completed
+        and initial_state.checksum == migration_checksum
+    ):
+        mismatched = recorded_statement_mismatches(initial_state.operations, fingerprints)
+        if mismatched:
+            raise recorded_statements_changed_error(
+                migration=file,
+                statements=mismatched,
+                recorded_by=initial_state.chkit_version,
+                cli_version=__version__,
+            )
     if (
         initial_state is not None
         and not initial_state.migration_completed
@@ -159,7 +181,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             file=file,
             state=initial_state,
             checksum=migration_checksum,
-            identities=statement_identities(operation_summaries, len(statements)),
+            identities=statement_identities(operation_summaries, fingerprints),
             retry=input_.retry,
             journal_store=journal_store,
             log=input_.log,
@@ -180,6 +202,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         statement_index=index,
                         operation_type=operation.type,
                         operation_key=operation.key,
+                        fingerprint=fingerprints[index],
                         before_retry=operation.before_retry,
                         log=input_.log,
                         settings=input_.settings,
@@ -196,6 +219,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         state_before = journal_store.read_migration_state(file)
         cluster = input_.config.clickhouse.cluster if input_.config.clickhouse else None
         identity = statement_identity(operation_summaries, index)
+        fingerprint = fingerprints[index]
         if state_before is not None and _operation_is_completed(state_before, index):
             if _propagation_wait_pending(state_before, index):
                 # The run that completed it stopped before its propagation
@@ -205,6 +229,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     fallback_state=state_before,
                     index=index,
                     identity=identity,
+                    fingerprint=fingerprint,
                     operation=operation,
                     statement=statement,
                     cluster=cluster,
@@ -249,7 +274,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         journal_store.write_migration_state(
             upsert_operation(
                 base_state,
-                _sync_operation_state(index, identity.type, identity.key, "started"),
+                _sync_operation_state(index, identity, fingerprint, "started"),
                 iso_without_zone(datetime.now(tz=UTC)),
             )
         )
@@ -271,8 +296,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     state_on_error,
                     _sync_operation_state(
                         index,
-                        identity.type,
-                        identity.key,
+                        identity,
+                        fingerprint,
                         "failed",
                         clickhouse_error_message(error),
                     ),
@@ -294,8 +319,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 state_after,
                 _sync_operation_state(
                     index,
-                    identity.type,
-                    identity.key,
+                    identity,
+                    fingerprint,
                     "completed",
                     PROPAGATION_WAIT_PENDING if waits else "",
                 ),
@@ -308,6 +333,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 fallback_state=state_after,
                 index=index,
                 identity=identity,
+                fingerprint=fingerprint,
                 operation=operation,
                 statement=statement,
                 cluster=cluster,
@@ -375,6 +401,7 @@ def _complete_propagation(
     fallback_state: MigrationRowState,
     index: int,
     identity: StatementIdentity,
+    fingerprint: str,
     operation: MigrationOperationSummary | None,
     statement: str,
     cluster: str | None,
@@ -387,7 +414,7 @@ def _complete_propagation(
     input_.journal_store.write_migration_state(
         upsert_operation(
             state,
-            _sync_operation_state(index, identity.type, identity.key, "completed"),
+            _sync_operation_state(index, identity, fingerprint, "completed"),
             iso_without_zone(datetime.now(tz=UTC)),
         )
     )
@@ -525,8 +552,8 @@ def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool
 
 def _sync_operation_state(
     index: int,
-    operation_type: str,
-    operation_key: str,
+    identity: StatementIdentity,
+    fingerprint: str,
     status: OperationStatus,
     last_error: str = "",
 ) -> OperationState:
@@ -534,12 +561,13 @@ def _sync_operation_state(
     return OperationState.model_validate(
         {
             "operationIndex": index,
-            "operationKey": operation_key,
-            "operationType": operation_type,
+            "operationKey": identity.key,
+            "operationType": identity.type,
             "queryId": "",
             "status": status,
             "startedAt": timestamp,
             "finishedAt": None if status == "started" else timestamp,
             "lastError": last_error,
+            "fingerprint": fingerprint,
         }
     )

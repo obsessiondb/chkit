@@ -4,6 +4,8 @@ import { join } from 'node:path'
 
 import { describe, expect, test } from 'bun:test'
 
+import { statementFingerprint } from '@chkit/core'
+
 import { resolveRetry } from '../../../commands/migrate/retry.js'
 import type { JournalStore, MigrationRowState, OperationState } from '../../../runtime/journal-store.js'
 import { checksumSQL } from '../../../runtime/migration-store.js'
@@ -30,6 +32,7 @@ function op(index: number, status: OperationState['status'], type: string, key: 
     startedAt: '2026-09-29 00:11:10.000',
     finishedAt: '2026-09-29 00:11:11.000',
     lastError: status === 'failed' ? 'Code: 60. Unknown table' : '',
+    fingerprint: '',
   }
 }
 
@@ -72,7 +75,13 @@ async function withMigration<T>(run: (migrationsDir: string) => Promise<T>): Pro
   return run(migrationsDir).finally(() => rm(migrationsDir, { recursive: true, force: true }))
 }
 
-const BASE = { migration: 'm.sql', pending: ['m.sql'], emptyMigrations: [], appliedNames: new Set<string>() }
+const BASE = {
+  migration: 'm.sql',
+  pending: ['m.sql'],
+  emptyMigrations: [],
+  appliedNames: new Set<string>(),
+  pluginsRewriteStatements: false,
+}
 
 describe('resolveRetry', () => {
   test('is a no-op for an applied migration, without reading its state', async () => {
@@ -172,5 +181,40 @@ describe('resolveRetry', () => {
     await expect(attempt).rejects.toThrow(
       'statements 1 (completed) and 2 (failed) share alter_table_add_column table:db.a, but the edited file has 1 statement with that marker',
     )
+  })
+
+  // The edited file still has `ALTER TABLE db.a ADD COLUMN c1` at statement 1.
+  describe('with recorded fingerprints (#599)', () => {
+    const completedAs = (sql: string): OperationState => ({
+      ...op(0, 'completed', 'alter_table_add_column', 'table:db.a'),
+      fingerprint: statementFingerprint(sql),
+    })
+
+    test('resumes when the completed statement only changed in comments and whitespace', async () => {
+      const state = stateWith({ operations: [completedAs('ALTER  TABLE db.a /* x */ ADD COLUMN c1 UInt64')] })
+      const result = await withMigration((migrationsDir) =>
+        resolveRetry({ ...BASE, migrationsDir }, { journalStore: fakeStore(state).store }),
+      )
+      expect(result).toMatchObject({ action: 'resume', completedStatements: 1, resumeAtStatement: 2 })
+    })
+
+    test('refuses when the SQL of the completed statement changed', async () => {
+      const state = stateWith({ operations: [completedAs('ALTER TABLE db.a ADD COLUMN c0 UInt64;')] })
+      const result = withMigration((migrationsDir) =>
+        resolveRetry({ ...BASE, migrationsDir }, { journalStore: fakeStore(state).store }),
+      )
+      await expect(result).rejects.toMatchObject({ code: 'retry_mismatch' })
+      await expect(result).rejects.toThrow(
+        'statement 1: completed as alter_table_add_column table:db.a, but the edited file has different SQL there',
+      )
+    })
+
+    test('leaves the SQL check to apply when a plugin may rewrite the statements', async () => {
+      const state = stateWith({ operations: [completedAs('ALTER TABLE db.a ADD COLUMN c0 UInt64;')] })
+      const result = await withMigration((migrationsDir) =>
+        resolveRetry({ ...BASE, migrationsDir, pluginsRewriteStatements: true }, { journalStore: fakeStore(state).store }),
+      )
+      expect(result).toMatchObject({ action: 'resume', completedStatements: 1 })
+    })
   })
 })

@@ -11,7 +11,7 @@ import {
   type ClickHouseSettings,
   type QualifiedTable,
 } from '@chkit/clickhouse'
-import { extractLegacyExecutableStatements, type ResolvedChxConfig } from '@chkit/core'
+import { extractLegacyExecutableStatements, statementFingerprint, type ResolvedChxConfig } from '@chkit/core'
 
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../plugins.js'
 import { debug } from '../../runtime/debug.js'
@@ -34,10 +34,15 @@ import {
   isoWithoutZone,
   upsertOperation,
 } from './async-apply.js'
-import { inProgressChecksumMismatchError, statementSplitChangedError } from './errors.js'
+import {
+  inProgressChecksumMismatchError,
+  recordedStatementsChangedError,
+  statementSplitChangedError,
+} from './errors.js'
 import {
   hasStatementProgress,
   rebaseInProgressState,
+  recordedStatementMismatches,
   retryMismatchError,
   splitChangedStatements,
   statementIdentities,
@@ -90,7 +95,7 @@ async function completePropagation(input: {
   file: string
   fallbackState: MigrationRowState
   index: number
-  identity: { type: string; key: string }
+  identity: RecordedIdentity
   operation: MigrationOperationSummary | undefined
   statement: string
   cluster: string | undefined
@@ -101,7 +106,7 @@ async function completePropagation(input: {
   }
   const state = (await journalStore.readMigrationState(file)) ?? input.fallbackState
   await journalStore.writeMigrationState(
-    upsertOperation(state, syncOperationState(index, identity.type, identity.key, 'completed'), Date.now),
+    upsertOperation(state, syncOperationState(index, identity, 'completed'), Date.now),
   )
 }
 
@@ -137,23 +142,30 @@ export function statementError(input: {
   return wrapped
 }
 
+/** What the journal records about a statement besides its progress. */
+interface RecordedIdentity {
+  type: string
+  key: string
+  fingerprint: string
+}
+
 function syncOperationState(
   index: number,
-  operationType: string,
-  operationKey: string,
+  identity: RecordedIdentity,
   status: OperationStatus,
   lastError = '',
 ): OperationState {
   const timestamp = isoWithoutZone(new Date())
   return {
     operationIndex: index,
-    operationKey,
-    operationType,
+    operationKey: identity.key,
+    operationType: identity.type,
     queryId: '',
     status,
     startedAt: timestamp,
     finishedAt: status === 'started' ? null : timestamp,
     lastError,
+    fingerprint: identity.fingerprint,
   }
 }
 
@@ -193,6 +205,8 @@ export async function applyMigration(input: {
   })
 
   const migrationChecksum = checksumSQL(sql)
+  // What the journal records for each statement run, and checks against (#599).
+  const fingerprints = statements.map(statementFingerprint)
 
   // Resume support (#6): if a prior run left per-statement journal state for
   // this migration, statements already marked completed are skipped instead of
@@ -223,6 +237,25 @@ export async function applyMigration(input: {
       })
     }
   }
+  // The file is unchanged, so the statements this run gets should be those the
+  // journal recorded. They are not when the split or a plugin's onBeforeApply
+  // changed since: then positions do not hold (#599). An edited file is
+  // checked by --retry below.
+  if (
+    initialState !== null &&
+    !initialState.migrationCompleted &&
+    initialState.checksum === migrationChecksum
+  ) {
+    const changed = recordedStatementMismatches(initialState.operations, fingerprints)
+    if (changed.length > 0) {
+      throw recordedStatementsChangedError({
+        migration: file,
+        statements: changed,
+        recordedBy: initialState.chkitVersion,
+        cliVersion: CLI_VERSION,
+      })
+    }
+  }
   if (
     initialState !== null &&
     !initialState.migrationCompleted &&
@@ -232,7 +265,7 @@ export async function applyMigration(input: {
       file,
       state: initialState,
       checksum: migrationChecksum,
-      identities: statementIdentities(operationSummaries, statements.length),
+      identities: statementIdentities(operationSummaries, fingerprints),
       retry,
       journalStore,
       log,
@@ -253,6 +286,7 @@ export async function applyMigration(input: {
           statementIndex: i,
           operationType: operation.type,
           operationKey: operation.key,
+          fingerprint: fingerprints[i] ?? '',
           beforeRetry: operation.beforeRetry,
           settings,
           log,
@@ -266,7 +300,7 @@ export async function applyMigration(input: {
     // Sync DDL path with per-statement journaling + resume. Re-read state each
     // iteration so async ops written above (or in a prior run) are preserved.
     const stateBefore = await journalStore.readMigrationState(file)
-    const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
+    const identity: RecordedIdentity = { ...statementIdentity(operationSummaries, i), fingerprint: fingerprints[i] ?? '' }
     if (stateBefore !== null && operationIsCompleted(stateBefore, i)) {
       if (propagationWaitPending(stateBefore, i)) {
         // The run that completed it stopped before its propagation wait
@@ -278,7 +312,7 @@ export async function applyMigration(input: {
           file,
           fallbackState: stateBefore,
           index: i,
-          identity: { type: opType, key: opKey },
+          identity,
           operation,
           statement,
           cluster: config.clickhouse?.cluster,
@@ -311,7 +345,7 @@ export async function applyMigration(input: {
     }
     const baseState = stateBefore ?? freshMigrationState(file, migrationChecksum)
     await journalStore.writeMigrationState(
-      upsertOperation(baseState, syncOperationState(i, opType, opKey, 'started'), Date.now),
+      upsertOperation(baseState, syncOperationState(i, identity, 'started'), Date.now),
     )
     try {
       if (operation?.mode === 'barrier') {
@@ -324,7 +358,7 @@ export async function applyMigration(input: {
       await journalStore.writeMigrationState(
         upsertOperation(
           stateOnError,
-          syncOperationState(i, opType, opKey, 'failed', errorMessage(error)),
+          syncOperationState(i, identity, 'failed', errorMessage(error)),
           Date.now,
         ),
       )
@@ -341,7 +375,7 @@ export async function applyMigration(input: {
     await journalStore.writeMigrationState(
       upsertOperation(
         stateAfter,
-        syncOperationState(i, opType, opKey, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
+        syncOperationState(i, identity, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
         Date.now,
       ),
     )
@@ -352,7 +386,7 @@ export async function applyMigration(input: {
         file,
         fallbackState: stateAfter,
         index: i,
-        identity: { type: opType, key: opKey },
+        identity,
         operation,
         statement,
         cluster: config.clickhouse?.cluster,

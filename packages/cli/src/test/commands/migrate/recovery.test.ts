@@ -9,8 +9,10 @@ import {
   hasStatementProgress,
   normalizeMigrationName,
   rebaseInProgressState,
+  recordedStatementMismatches,
   resolveRecoveryTargets,
   retryMismatchError,
+  splitChangedStatements,
   statementIdentities,
   statementIdentity,
   verifyRetryEdit,
@@ -38,6 +40,7 @@ function op(
     startedAt: '2026-09-29 00:11:10.000',
     finishedAt: status === 'started' ? null : '2026-09-29 00:11:11.000',
     lastError: status === 'failed' ? 'Code: 60. Unknown table' : '',
+    fingerprint: '',
   }
 }
 
@@ -48,7 +51,7 @@ const LOAD = { type: 'load_table_data', key: 'table:db.a' }
 const MODIFY_F = { type: 'alter_table_modify_column', key: 'table:db.t:column:f' }
 
 function identities(...items: Array<{ type: string; key: string }>): StatementIdentity[] {
-  return items.map((item) => ({ ...item, marked: true }))
+  return items.map((item) => ({ ...item, marked: true, fingerprint: undefined }))
 }
 
 describe('normalizeMigrationName', () => {
@@ -108,7 +111,7 @@ describe('statementIdentity', () => {
     const operations = [summary('create_table', 'table:db.a')]
     expect(statementIdentity(operations, 0)).toEqual({ type: 'create_table', key: 'table:db.a', marked: true })
     expect(statementIdentity(operations, 1)).toEqual({ type: 'sql_statement', key: 'statement:1', marked: false })
-    expect(statementIdentities(operations, 2)).toHaveLength(2)
+    expect(statementIdentities(operations, [undefined, undefined])).toHaveLength(2)
   })
 })
 
@@ -125,7 +128,7 @@ describe('verifyRetryEdit', () => {
     const result = verifyRetryEdit([op(0, 'completed', A), op(1, 'failed', V)], identities(B, V))
     expect(result).toEqual({
       ok: false,
-      mismatches: [{ statement: 1, status: 'completed', queryId: '', recorded: A, current: B }],
+      mismatches: [{ statement: 1, status: 'completed', queryId: '', recorded: A, current: B, sqlChanged: false }],
       sharedMarkers: [],
     })
   })
@@ -134,12 +137,12 @@ describe('verifyRetryEdit', () => {
     const result = verifyRetryEdit([op(3, 'completed', A)], identities(A, B, V))
     expect(result.ok).toBe(false)
     expect(result.ok ? [] : result.mismatches).toEqual([
-      { statement: 4, status: 'completed', queryId: '', recorded: A, current: null },
+      { statement: 4, status: 'completed', queryId: '', recorded: A, current: null, sqlChanged: false },
     ])
   })
 
   test('matches unmarked statements by position and counts them', () => {
-    const unmarked = statementIdentities([], 3)
+    const unmarked = statementIdentities([], [undefined, undefined, undefined])
     const result = verifyRetryEdit(
       [
         op(0, 'completed', { type: 'sql_statement', key: 'statement:0' }),
@@ -177,7 +180,7 @@ describe('verifyRetryEdit', () => {
     const result = verifyRetryEdit([op(0, 'completed', A), op(1, 'started', LOAD, 'q-1')], identities(A, V))
     expect(result).toEqual({
       ok: false,
-      mismatches: [{ statement: 2, status: 'started', queryId: 'q-1', recorded: LOAD, current: V }],
+      mismatches: [{ statement: 2, status: 'started', queryId: 'q-1', recorded: LOAD, current: V, sqlChanged: false }],
       sharedMarkers: [],
     })
     expect(verifyRetryEdit([op(1, 'started', LOAD, 'q-1')], identities(A, LOAD))).toEqual({
@@ -242,7 +245,7 @@ describe('verifyRetryEdit', () => {
       )
       expect(result).toEqual({
         ok: false,
-        mismatches: [{ statement: 2, status: 'completed', queryId: '', recorded: MODIFY_F, current: V }],
+        mismatches: [{ statement: 2, status: 'completed', queryId: '', recorded: MODIFY_F, current: V, sqlChanged: false }],
         sharedMarkers: [],
       })
     })
@@ -255,12 +258,81 @@ describe('verifyRetryEdit', () => {
   })
 })
 
+// A record with a fingerprint is matched by its SQL too (#599).
+describe('verifyRetryEdit with fingerprints', () => {
+  const withFingerprint = (record: OperationState, fingerprint: string): OperationState => ({ ...record, fingerprint })
+  const current = (marker: { type: string; key: string }, fingerprint: string | undefined): StatementIdentity => ({
+    ...marker,
+    marked: true,
+    fingerprint,
+  })
+
+  test('accepts a completed statement with the same SQL', () => {
+    const result = verifyRetryEdit([withFingerprint(op(0, 'completed', A), 'v1:a')], [current(A, 'v1:a'), current(B, 'v1:b')])
+    expect(result).toEqual({ ok: true, completed: 1, unmarkedCompleted: 0, resumeIndex: 1 })
+  })
+
+  test('rejects a completed statement whose SQL changed under the same marker', () => {
+    const result = verifyRetryEdit([withFingerprint(op(0, 'completed', A), 'v1:a')], [current(A, 'v1:x')])
+    expect(result).toEqual({
+      ok: false,
+      mismatches: [{ statement: 1, status: 'completed', queryId: '', recorded: A, current: A, sqlChanged: true }],
+      sharedMarkers: [],
+    })
+  })
+
+  test('rejects a running async statement whose SQL changed', () => {
+    const result = verifyRetryEdit([withFingerprint(op(0, 'started', LOAD, 'q-1'), 'v1:a')], [current(LOAD, 'v1:x')])
+    expect(result.ok ? [] : result.mismatches.map((mismatch) => mismatch.sqlChanged)).toEqual([true])
+  })
+
+  test('does not check a failed statement, the one --retry runs again', () => {
+    const result = verifyRetryEdit([withFingerprint(op(0, 'failed', A), 'v1:a')], [current(A, 'v1:x')])
+    expect(result).toEqual({ ok: true, completed: 0, unmarkedCompleted: 0, resumeIndex: 0 })
+  })
+
+  test('matches by marker only when the record or the statement has no fingerprint', () => {
+    expect(verifyRetryEdit([op(0, 'completed', A)], [current(A, 'v1:x')]).ok).toBe(true)
+    expect(verifyRetryEdit([withFingerprint(op(0, 'completed', A), 'v1:a')], [current(A, undefined)]).ok).toBe(true)
+  })
+})
+
+describe('recordedStatementMismatches', () => {
+  test('lists completed and running async statements whose fingerprint differs, in order', () => {
+    const operations = [
+      { ...op(3, 'completed', B), fingerprint: 'v1:b' },
+      { ...op(0, 'completed', A), fingerprint: 'v1:a' },
+      { ...op(1, 'started', LOAD, 'q-1'), fingerprint: 'v1:load' },
+      { ...op(2, 'failed', V), fingerprint: 'v1:v' },
+      { ...op(4, 'started', V), fingerprint: 'v1:sync' },
+      op(5, 'completed', A),
+    ]
+    expect(recordedStatementMismatches(operations, ['v1:x', 'v1:y', 'v1:z', 'v1:b', 'v1:w', 'v1:a'])).toEqual([1, 2])
+  })
+
+  test('is empty when every fingerprint matches', () => {
+    expect(recordedStatementMismatches([{ ...op(0, 'completed', A), fingerprint: 'v1:a' }], ['v1:a'])).toEqual([])
+  })
+
+  test('a statement past the end of the file is a mismatch', () => {
+    expect(recordedStatementMismatches([{ ...op(2, 'completed', A), fingerprint: 'v1:a' }], ['v1:a'])).toEqual([3])
+  })
+})
+
+describe('splitChangedStatements', () => {
+  test('leaves statements recorded with a fingerprint to recordedStatementMismatches', () => {
+    const operations = [{ ...op(0, 'completed', A), fingerprint: 'v1:a' }, op(1, 'completed', B)]
+    const splits = { legacy: ['a;', 'x;', 'b;'], current: ['a; x;', 'b;'], positionsKept: true }
+    expect(splitChangedStatements(operations, splits)).toEqual([2])
+  })
+})
+
 describe('retryMismatchError', () => {
   test('names each mismatch and the abandon command, with a KILL QUERY hint for a running query', () => {
     const error = retryMismatchError('m.sql', {
       mismatches: [
-        { statement: 1, status: 'completed', queryId: '', recorded: A, current: B },
-        { statement: 2, status: 'started', queryId: 'q-1', recorded: LOAD, current: null },
+        { statement: 1, status: 'completed', queryId: '', recorded: A, current: B, sqlChanged: false },
+        { statement: 2, status: 'started', queryId: 'q-1', recorded: LOAD, current: null, sqlChanged: false },
       ],
       sharedMarkers: [],
     })

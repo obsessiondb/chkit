@@ -1,6 +1,13 @@
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { allReplicas, isUnknownDatabaseError, resolveReplicaFanout, waitForTable, type ClickHouseExecutor } from '@chkit/clickhouse'
+import {
+  allReplicas,
+  isUnknownDatabaseError,
+  resolveReplicaFanout,
+  waitForColumn,
+  waitForTable,
+  type ClickHouseExecutor,
+} from '@chkit/clickhouse'
 import { onClusterClause } from '@chkit/core'
 import pRetry from 'p-retry'
 
@@ -19,6 +26,12 @@ export interface OperationState {
   startedAt: string
   finishedAt: string | null
   lastError: string
+  /**
+   * The `statementFingerprint` of the statement this record is about, so a
+   * resume can tell it is still that statement (#599). Empty when it was not
+   * recorded: an older chkit wrote the row, or the journal has no column for it.
+   */
+  fingerprint: string
 }
 
 export interface MigrationRowState {
@@ -63,6 +76,9 @@ interface MigrationRow extends Record<string, unknown> {
   // serializing to JSON in SQL makes the read identical across both. `parseOperations`
   // still tolerates an already-decoded array for mocks/back-compat.
   operations?: string | OperationTupleRow[]
+  // `toJSONString(operation_fingerprints)`, parallel to `operations`; only
+  // selected when the journal has the column.
+  operation_fingerprints?: string | string[]
 }
 
 interface OperationTupleRow {
@@ -78,6 +94,16 @@ interface OperationTupleRow {
 
 const OPERATIONS_TUPLE_TYPE =
   'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, \'UTC\'), finished_at Nullable(DateTime64(3, \'UTC\')), last_error String))'
+
+/**
+ * One fingerprint per entry of `operations`, in the same order (#599). A
+ * separate column, so the `operations` type older releases write stays the
+ * same. Older releases name their INSERT columns, so a row they write gets
+ * `[]` here: a fingerprint is only ever read from a row whose writer recorded
+ * it for that very record.
+ */
+const FINGERPRINTS_COLUMN = 'operation_fingerprints'
+const FINGERPRINTS_COLUMN_DEFINITION = `${FINGERPRINTS_COLUMN} Array(String) DEFAULT []`
 
 interface ClickHouseErrorKind {
   code: string
@@ -97,12 +123,21 @@ const UNKNOWN_IDENTIFIER: ClickHouseErrorKind = {
   message: /Unknown expression identifier|Missing columns/,
 }
 const READONLY: ClickHouseErrorKind = { code: '164', name: 'READONLY', message: /in readonly mode/ }
+const NO_SUCH_COLUMN: ClickHouseErrorKind = {
+  code: '16',
+  name: 'NO_SUCH_COLUMN_IN_TABLE',
+  message: /No such column/,
+}
 
 /** Whether `error` is the ClickHouse error `kind`. The native client sets `code`. */
 function isClickHouseError(error: unknown, kind: ClickHouseErrorKind): boolean {
   if (!(error instanceof Error)) return false
   if ('code' in error && String(error.code) === kind.code) return true
   return error.message.includes(kind.name) || kind.message.test(error.message)
+}
+
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 function isRetryableInsertRace(error: unknown): boolean {
@@ -134,7 +169,11 @@ function operationsArrayLiteral(operations: OperationState[]): string {
   return `[${operations.map(operationToTupleLiteral).join(',')}]`
 }
 
-function operationFromTuple(row: OperationTupleRow): OperationState {
+function fingerprintsArrayLiteral(operations: OperationState[]): string {
+  return `[${operations.map((op) => `'${escapeSqlString(op.fingerprint)}'`).join(',')}]`
+}
+
+function operationFromTuple(row: OperationTupleRow, fingerprint: string): OperationState {
   return {
     operationIndex: Number(row.operation_index),
     operationKey: row.operation_key,
@@ -144,6 +183,7 @@ function operationFromTuple(row: OperationTupleRow): OperationState {
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     lastError: row.last_error,
+    fingerprint,
   }
 }
 
@@ -157,7 +197,21 @@ function parseBool(value: unknown): boolean {
 // `operations` is selected via `toJSONString(...)`, so it arrives as a JSON
 // string from every executor. Tolerate an already-decoded array too (mocks /
 // any future typed executor) and degrade to [] on anything unparseable.
-function parseOperations(value: unknown): OperationState[] {
+function parseOperations(value: unknown, fingerprintsValue: unknown): OperationState[] {
+  const decoded = parseJsonArray(value)
+  const fingerprints = parseFingerprints(fingerprintsValue, decoded.length)
+  return decoded.map((row, index) => operationFromTuple(row as OperationTupleRow, fingerprints[index] ?? ''))
+}
+
+// The fingerprints count only when there is one per operation: a row an older
+// release wrote has `[]`, and its operations then have none.
+function parseFingerprints(value: unknown, operationCount: number): string[] {
+  const decoded = parseJsonArray(value)
+  if (decoded.length !== operationCount || !decoded.every((item) => typeof item === 'string')) return []
+  return decoded
+}
+
+function parseJsonArray(value: unknown): unknown[] {
   if (value == null || value === '') return []
   let decoded: unknown = value
   if (typeof value === 'string') {
@@ -167,8 +221,7 @@ function parseOperations(value: unknown): OperationState[] {
       return []
     }
   }
-  if (!Array.isArray(decoded)) return []
-  return decoded.map((row) => operationFromTuple(row as OperationTupleRow))
+  return Array.isArray(decoded) ? decoded : []
 }
 
 /**
@@ -204,7 +257,8 @@ export function createJournalStore(db: ClickHouseExecutor, cluster?: string): Jo
     checksum String,
     chkit_version String,
     migration_completed Bool DEFAULT true,
-    operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []
+    operations ${OPERATIONS_TUPLE_TYPE} DEFAULT [],
+    ${FINGERPRINTS_COLUMN_DEFINITION}
 ) ENGINE = ${journalEngine}
 ORDER BY (name)
 SETTINGS index_granularity = 1`
@@ -215,6 +269,10 @@ SETTINGS index_granularity = 1`
   // first write creates it.
   let tableMissing = false
   let replicaSyncSupported: boolean | undefined
+  // Whether the journal has the operation_fingerprints column (#599). Without
+  // it chkit reads and writes no fingerprints, as an older release does.
+  let fingerprintColumn = false
+  let fingerprintColumnAdded = false
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
 
@@ -229,6 +287,7 @@ SETTINGS index_granularity = 1`
     try {
       await db.query(`SELECT name, migration_completed, operations FROM ${journalTable} LIMIT 0`)
       debug('journal', 'journal table exists')
+      fingerprintColumn = await hasFingerprintColumn()
       await waitForEveryReplica()
       bootstrapped = true
       tableMissing = false
@@ -243,6 +302,7 @@ SETTINGS index_granularity = 1`
       if (isClickHouseError(error, UNKNOWN_IDENTIFIER)) {
         debug('journal', 'journal table predates per-operation tracking — upgrading')
         await ensureSchemaUpgraded()
+        fingerprintColumn = true
         await waitForEveryReplica()
         bootstrapped = true
         return
@@ -250,6 +310,7 @@ SETTINGS index_granularity = 1`
       if (!create) {
         if (!isClickHouseError(error, UNKNOWN_TABLE)) throw error
         if (await existsOnAnotherReplica()) {
+          fingerprintColumn = await hasFingerprintColumn()
           await waitForEveryReplica()
           bootstrapped = true
           return
@@ -275,6 +336,8 @@ SETTINGS index_granularity = 1`
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
     }, { retries: 9, minTimeout: 250, factor: 1 }).catch(() => undefined)
+    // Another process, maybe an older release, may have created it first.
+    fingerprintColumn = await hasFingerprintColumn()
     await waitForEveryReplica()
     bootstrapped = true
     tableMissing = false
@@ -296,8 +359,58 @@ SETTINGS index_granularity = 1`
   // CREATE above or another process's. A single replica needs no wait.
   async function waitForEveryReplica(): Promise<void> {
     if (!(await resolveReplicaFanout(db, cluster))) return
+    const database = await currentDatabase()
+    await waitForTable(db, database, journalTable, { cluster })
+    // Reads and writes name operation_fingerprints, so every replica needs it;
+    // when one never gets it, this run records no fingerprints.
+    if (fingerprintColumn && !(await fingerprintColumnOnEveryReplica(database))) fingerprintColumn = false
+  }
+
+  async function currentDatabase(): Promise<string> {
     const [row] = await db.query<{ database: string }>('SELECT currentDatabase() AS database')
-    await waitForTable(db, row?.database ?? 'default', journalTable, { cluster })
+    return row?.database ?? 'default'
+  }
+
+  async function fingerprintColumnOnEveryReplica(database: string): Promise<boolean> {
+    try {
+      await waitForColumn(db, database, journalTable, FINGERPRINTS_COLUMN, { cluster })
+      return true
+    } catch (error) {
+      debug('journal', `${FINGERPRINTS_COLUMN} is not on every replica — recording no fingerprints: ${errorText(error)}`)
+      return false
+    }
+  }
+
+  // Any failure reads as no column: a journal without fingerprints is what
+  // every older release reads and writes.
+  async function hasFingerprintColumn(): Promise<boolean> {
+    try {
+      await db.query(`SELECT ${FINGERPRINTS_COLUMN} FROM ${journalTable} LIMIT 0`)
+      return true
+    } catch (error) {
+      debug('journal', `journal table has no ${FINGERPRINTS_COLUMN} column: ${errorText(error)}`)
+      return false
+    }
+  }
+
+  /**
+   * Adds the fingerprint column to a journal that an older release created,
+   * on the first write of a run. A user that cannot ALTER the journal still
+   * migrates, without fingerprints, as before (#599).
+   */
+  async function ensureFingerprintColumn(): Promise<void> {
+    if (fingerprintColumn || fingerprintColumnAdded) return
+    fingerprintColumnAdded = true
+    try {
+      await db.command(`ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS ${FINGERPRINTS_COLUMN_DEFINITION}`)
+    } catch (error) {
+      debug('journal', `could not add ${FINGERPRINTS_COLUMN} — recording no fingerprints: ${errorText(error)}`)
+      return
+    }
+    fingerprintColumn = true
+    if (await resolveReplicaFanout(db, cluster)) {
+      fingerprintColumn = await fingerprintColumnOnEveryReplica(await currentDatabase())
+    }
   }
 
   async function ensureSchemaUpgraded(): Promise<void> {
@@ -311,6 +424,9 @@ SETTINGS index_granularity = 1`
       )
       await db.command(
         `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
+      )
+      await db.command(
+        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS ${FINGERPRINTS_COLUMN_DEFINITION}`,
       )
     } catch (error) {
       // A read-only user cannot run the ALTER (#402).
@@ -330,8 +446,22 @@ SETTINGS index_granularity = 1`
    * ReplacingMergeTree(applied_at) keeps too.
    */
   async function journalRows(where: string, limit = ''): Promise<MigrationRow[]> {
+    if (!fingerprintColumn) return await selectJournalRows(where, limit, false)
+    try {
+      return await selectJournalRows(where, limit, true)
+    } catch (error) {
+      // A replica that has not applied another process's ALTER yet.
+      if (!isClickHouseError(error, UNKNOWN_IDENTIFIER)) throw error
+      debug('journal', `a replica has no ${FINGERPRINTS_COLUMN} column yet — reading without fingerprints`)
+      fingerprintColumn = false
+      return await selectJournalRows(where, limit, false)
+    }
+  }
+
+  async function selectJournalRows(where: string, limit: string, fingerprints: boolean): Promise<MigrationRow[]> {
     const fanout = await resolveReplicaFanout(db, cluster)
-    const columns = 'name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations'
+    const fingerprintSelect = `toJSONString(${FINGERPRINTS_COLUMN})`
+    const columns = `name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations${fingerprints ? `, ${fingerprintSelect} AS ${FINGERPRINTS_COLUMN}` : ''}`
     if (!fanout) {
       const sql = `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit}`
       try {
@@ -345,9 +475,28 @@ SETTINGS index_granularity = 1`
       }
     }
     debug('journal', `reading the journal across ${fanout.replicas} replicas of cluster ${fanout.cluster}`)
+    // The fingerprints come from the same row version as the operations.
+    const latest = fingerprints ? `, latest.6 AS ${FINGERPRINTS_COLUMN}` : ''
+    const versioned = fingerprints ? `, ${fingerprintSelect}` : ''
     return await db.query<MigrationRow>(
-      `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
+      `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations${latest} FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)${versioned}), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
     )
+  }
+
+  async function insertState(state: MigrationRowState, fingerprints: boolean): Promise<void> {
+    const fingerprintColumnName = fingerprints ? `, ${FINGERPRINTS_COLUMN}` : ''
+    const fingerprintValue = fingerprints ? `, ${fingerprintsArrayLiteral(state.operations)}` : ''
+    const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations${fingerprintColumnName}) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)}${fingerprintValue})`
+    await pRetry(() => db.command(insertSql), {
+      retries: 4,
+      minTimeout: 0,
+      shouldRetry: async ({ error, attemptNumber }) => {
+        if (!isRetryableInsertRace(error)) return false
+        debug('journal', `insert race detected — retrying (attempt ${attemptNumber}/5)`)
+        await sleep(attemptNumber * 150)
+        return true
+      },
+    })
   }
 
   async function trySyncReplica(): Promise<void> {
@@ -410,7 +559,7 @@ SETTINGS index_granularity = 1`
         checksum: row.checksum,
         chkitVersion: row.chkit_version,
         migrationCompleted: parseBool(row.migration_completed),
-        operations: parseOperations(row.operations),
+        operations: parseOperations(row.operations, row.operation_fingerprints),
       }
       // Each request can land on a different replica, and SYSTEM SYNC REPLICA
       // on one request does not make the next one read our write. Never hand a
@@ -440,17 +589,16 @@ SETTINGS index_granularity = 1`
         debug('journal', 'database still missing — skipping journal write')
         return
       }
-      const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)})`
-      await pRetry(() => db.command(insertSql), {
-        retries: 4,
-        minTimeout: 0,
-        shouldRetry: async ({ error, attemptNumber }) => {
-          if (!isRetryableInsertRace(error)) return false
-          debug('journal', `insert race detected — retrying (attempt ${attemptNumber}/5)`)
-          await sleep(attemptNumber * 150)
-          return true
-        },
-      })
+      await ensureFingerprintColumn()
+      try {
+        await insertState(state, fingerprintColumn)
+      } catch (error) {
+        // A replica that has not applied another process's ALTER yet.
+        if (!fingerprintColumn || !isClickHouseError(error, NO_SUCH_COLUMN)) throw error
+        debug('journal', `a replica has no ${FINGERPRINTS_COLUMN} column yet — writing without fingerprints`)
+        fingerprintColumn = false
+        await insertState(state, false)
+      }
       lastWritten.set(state.name, state)
       await trySyncReplica()
     },

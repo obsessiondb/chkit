@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { statementFingerprint } from '@chkit/core'
+
 import type { JournalStore } from '../../runtime/journal-store.js'
 import { checksumSQL } from '../../runtime/migration-store.js'
 import {
@@ -51,6 +53,12 @@ export async function resolveRetry(
     /** Pending files without executable statements, which apply refuses. */
     emptyMigrations: readonly string[]
     appliedNames: ReadonlySet<string>
+    /**
+     * Whether a plugin's onBeforeApply may rewrite the statements. The SQL of
+     * the statements that ran is then checked by apply, against what the
+     * plugins return, instead of here (#599).
+     */
+    pluginsRewriteStatements: boolean
   },
   deps: { journalStore: JournalStore },
 ): Promise<RetryResolution> {
@@ -66,9 +74,10 @@ export async function resolveRetry(
   if (state.checksum === checksum) return { action: 'none', migration, reason: 'checksum_unchanged' }
   // The file's statements before onBeforeApply; apply checks again against the
   // statements the plugins return.
+  const statements = extractExecutableStatements(sql)
   const identities = statementIdentities(
     extractMigrationOperationSummaries(sql),
-    extractExecutableStatements(sql).length,
+    statements.map((statement) => (input.pluginsRewriteStatements ? undefined : statementFingerprint(statement))),
   )
   const check = verifyRetryEdit(state.operations, identities)
   if (!check.ok) throw retryMismatchError(migration, check)

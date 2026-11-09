@@ -761,3 +761,187 @@ def test_refuses_to_resume_a_partial_run_another_release_split_differently(
         )
     finally:
         _drop(project, views=[], tables=[a, b])
+
+
+# ---------- statement fingerprints (#599) ----------
+
+_OLD_OPERATIONS_TYPE = (
+    "Array(Tuple(operation_index Int32, operation_key String, operation_type String, "
+    "query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), "
+    "finished_at Nullable(DateTime64(3, 'UTC')), last_error String))"
+)
+
+
+@dataclass(frozen=True)
+class FingerprintRow:
+    completed: int
+    statuses: str
+    fingerprints: int
+
+
+def _wait_fingerprints(
+    project: Project, migration: str, predicate: Callable[[FingerprintRow], bool]
+) -> None:
+    """The journal row with how many of its operations carry a fingerprint."""
+    sql = (
+        "SELECT toString(toUInt8(migration_completed)) AS completed, "
+        "arrayStringConcat(arrayMap(o -> o.status, operations), ',') AS statuses, "
+        "toString(if(length(operation_fingerprints) = length(operations), "
+        "arrayCount(f -> f != '', operation_fingerprints), 0)) AS fingerprints "
+        f"FROM {quote_ident(project.database)}.{quote_ident(project.journal_table)} FINAL "
+        f"WHERE name = '{migration}' SETTINGS select_sequential_consistency = 1"
+    )
+
+    def matches(rows: list[dict[str, Any]]) -> bool:
+        if not rows:
+            return False
+        row = rows[0]
+        return predicate(
+            FingerprintRow(
+                completed=int(row["completed"]),
+                statuses=str(row["statuses"]),
+                fingerprints=int(row["fingerprints"]),
+            )
+        )
+
+    _wait_rows(project, sql, matches, f"fingerprints of {migration}")
+
+
+def _create(db: str, table: str, order: str = "id") -> str:
+    return f"CREATE TABLE {db}.{table} (id UInt64) ENGINE = MergeTree ORDER BY {order};"
+
+
+def test_retry_resumes_a_comment_only_edit_and_refuses_an_sql_edit_to_a_completed_statement(
+    make_project: Callable[[str], Project],
+) -> None:
+    """The journal records each statement's fingerprint, so --retry checks that
+    a statement it skips as completed is the one that ran (#599)."""
+    project = make_project("fingerprint")
+    db, prefix = project.database, project.prefix
+    a, b, c, d = (f"{prefix}{x}" for x in "abcd")
+    m = "20990101000000_fingerprint.sql"
+    v1 = "\n".join([_create(db, a), _create(db, b), _create(db, c, "missing_col"), _create(db, d)])
+    try:
+        _write(project, m, v1)
+        run1 = _migrate(["--execute", "--json"])
+        assert run1.exit_code == 1
+        assert f"Migration {m} failed at statement 3 of 4" in _error_of(run1)["message"]
+        _wait_fingerprints(
+            project,
+            m,
+            lambda r: r.statuses == "completed,completed,failed" and r.fingerprints == 3,
+        )
+
+        # The completed statement 2 was removed and statement 3 fixed: by
+        # position, the fixed statement would be skipped as completed.
+        _write(project, m, "\n".join([_create(db, a), _create(db, c), _create(db, d)]))
+        refused = _migrate(["--execute", "--json", "--retry", m])
+        assert refused.exit_code == 1
+        error = _error_of(refused)
+        assert error["code"] == "retry_mismatch"
+        assert (
+            "statement 2: completed as sql_statement statement:1, but the edited file has "
+            "different SQL there"
+        ) in error["message"]
+        _wait_journal(project, m, lambda r: r.checksum == checksum_sql(v1) and r.completed == 0)
+
+        # Comments and whitespace changed, and the failed statement was fixed.
+        # Statements 1 and 2 are not idempotent: running them again would fail.
+        v3 = "\n".join(
+            [
+                "-- the first table",
+                _create(db, a).replace("ENGINE", "/* the engine */ ENGINE"),
+                "  " + _create(db, b).replace(";", " // b; still the comment\n;"),
+                _create(db, c),
+                _create(db, d),
+            ]
+        )
+        _write(project, m, v3)
+        resumed = _migrate(["--execute", "--json", "--retry", m])
+        assert resumed.exit_code == 0, format_test_diagnostic(
+            "--retry after a comment-only edit", resumed
+        )
+        retry = _parse(resumed)["retry"]
+        assert retry["action"] == "resume"
+        assert retry["completedStatements"] == 2
+        assert retry["resumeAtStatement"] == 3
+        wait_for_table(project.client, db, c)
+        wait_for_table(project.client, db, d)
+        _wait_fingerprints(
+            project,
+            m,
+            lambda r: r.completed == 1
+            and r.statuses == "completed,completed,completed,completed"
+            and r.fingerprints == 4,
+        )
+    finally:
+        _drop(project, views=[], tables=[a, b, c, d])
+
+
+def test_old_release_journal_gets_the_column_and_old_state_resumes_by_position(
+    make_project: Callable[[str], Project],
+) -> None:
+    """A journal an older release created gets the fingerprint column; a state
+    an older release wrote has no fingerprints and resumes by position (#599)."""
+    project = make_project("fp_old")
+    db, prefix = project.database, project.prefix
+    a, b, c, d = (f"{prefix}{x}" for x in "abcd")
+    m = "20990101000000_fp_old.sql"
+    journal = f"{quote_ident(db)}.{quote_ident(project.journal_table)}"
+    try:
+        # The journal as releases before #599 create it.
+        project.client.execute(f"DROP TABLE {journal}")
+        project.client.execute(
+            f"CREATE TABLE {journal} (name String, applied_at DateTime64(3, 'UTC'), "
+            "checksum String, chkit_version String, migration_completed Bool DEFAULT true, "
+            f"operations {_OLD_OPERATIONS_TYPE} DEFAULT []) ENGINE = ReplacingMergeTree(applied_at) "
+            "ORDER BY (name) SETTINGS index_granularity = 1"
+        )
+        wait_for_table_on_every_replica(project.client, db, project.journal_table)
+        _write(
+            project,
+            m,
+            "\n".join(
+                [_create(db, a), _create(db, b), _create(db, c, "missing_col"), _create(db, d)]
+            ),
+        )
+        run1 = _migrate(["--execute", "--json"])
+        assert run1.exit_code == 1
+        assert f"Migration {m} failed at statement 3 of 4" in _error_of(run1)["message"]
+        wait_for_column(project.client, db, project.journal_table, "operation_fingerprints")
+        _wait_fingerprints(
+            project,
+            m,
+            lambda r: r.statuses == "completed,completed,failed" and r.fingerprints == 3,
+        )
+
+        # An older release writes the row without the column: no fingerprints.
+        _record_old_release_state(project, m, ["completed", "completed", "failed"])
+        _wait_fingerprints(
+            project,
+            m,
+            lambda r: r.statuses == "completed,completed,failed" and r.fingerprints == 0,
+        )
+
+        _write(
+            project,
+            m,
+            "\n".join(
+                [
+                    "-- edited",
+                    _create(db, a),
+                    f"{_create(db, b)} -- b",
+                    _create(db, c),
+                    _create(db, d),
+                ]
+            ),
+        )
+        resumed = _migrate(["--execute", "--json", "--retry", m])
+        assert resumed.exit_code == 0, format_test_diagnostic(
+            "--retry of an older release state", resumed
+        )
+        wait_for_table(project.client, db, c)
+        wait_for_table(project.client, db, d)
+        _wait_journal(project, m, lambda r: r.completed == 1)
+    finally:
+        _drop(project, views=[], tables=[a, b, c, d])
