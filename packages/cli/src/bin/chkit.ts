@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from 'node:process'
 import { format } from 'node:util'
-import { expandShortFlags, type ParsedFlags } from '@chkit/core'
+import { expandShortFlags, MissingFlagValueError, type ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
 import { cmdSkills } from '../commands/skills.js'
@@ -218,7 +218,14 @@ async function run(): Promise<void> {
     }
   }
 
-  const configPathArg = extractConfigPath(argv)
+  let configPathArg: string | undefined
+  try {
+    configPathArg = extractConfigPath(argv)
+  } catch (error) {
+    if (!(error instanceof MissingFlagValueError)) throw error
+    reportUsageError({ command: commandName, code: 'usage', message: error.message, jsonMode: argv.includes('--json') })
+    return
+  }
   const env = { command: commandName, mode: process.env.NODE_ENV }
   const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {
     command: commandName,

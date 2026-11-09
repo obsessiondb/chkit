@@ -21,9 +21,34 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- Splitting and normalizing SQL with many unclosed `$tag$` openers takes linear time instead
+  of quadratic (#585, fixed in TS too).
+- Text index SQL in generated migrations, snapshots and `chkit pull` output keeps the space
+  between a keyword and `(` (`a OR (b)`, `NOT (x)`), as ClickHouse writes it, instead of
+  `OR(` (#586, fixed in TS too). Existing indexes and snapshots plan no migration.
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- `chkit query` runs SQL passed as one argument that starts with a line comment, such as
+  `"-- note\nSELECT 1"`, instead of rejecting it as an unknown option, as TS does (#584).
+- `drift` no longer reports a column as changed when its default wraps a heredoc that holds a
+  parenthesis, such as `($$a)$$)`, which ClickHouse stores as `'a)'`: parentheses inside a
+  heredoc or a comment no longer count as structure (#587, fixed in TS too).
+- Schema names (databases, tables, views, dictionaries, columns, attributes, `renamed_from`)
+  and the names in `--table`, `--cutover`, `--rename-*` and `pull --database` are trimmed
+  with the same whitespace as TS (#580): a BOM (`﻿`) at either end is removed and
+  `\x1c`-`\x1f` and `\x85` are kept, so both CLIs canonicalize and render a name the same way.
+- Waits for a created, dropped or altered table, view, column or dictionary check 21 times,
+  0.5 s apart, like TS (#578). They checked 20 times and slept 0.5 s after the last check.
+- `migrate --apply` no longer prints `submit raised (...) — polling for the server-side state`
+  when an async statement's submit fails, as in TS (#561): a submit error that decides the
+  outcome is the command's error, so it is no longer printed twice. When polling gives up
+  after repeated failures, its error names the submit error instead (fixed in TS too) and
+  reads `polling failed N×` as in TS.
+- Async `migrate` progress and finish lines round as in TS (#556): a value on a tie rounds
+  up, so 1250 rows print `1.3K rows` (was `1.2K`) and a 2.5 s load `in 3s` (was `2s`).
+- When async `migrate --apply` gives up polling a statement, the error says `polling failed 21×`
+  like TS, not `21x` (#555).
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement

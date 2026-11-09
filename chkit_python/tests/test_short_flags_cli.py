@@ -121,3 +121,39 @@ def test_h_is_help_and_v_is_the_version() -> None:
     for flag in ("-v", "-V", "--version"):
         result = CliRunner().invoke(app, [flag])
         assert (result.exit_code, result.stdout) == (0, f"{__version__}\n")
+
+
+def test_the_last_config_flag_picks_the_config(project: Path) -> None:
+    """The last of several ``--config`` / ``-c`` wins in every form, as in TS (#574)."""
+    other = project / "other"
+    other.mkdir()
+    (other / "clickhouse.config.py").write_text(
+        CONFIG.replace("./schema.py", str(other / "schema.py"))
+    )
+    (other / "schema.py").write_text("from chkit import table\n\n" + SCHEMA.split("\n")[0] + "\n")
+    a = str(project / "clickhouse.config.py")
+    b = str(other / "clickhouse.config.py")
+
+    def plan(*args: str) -> Any:
+        result = CliRunner().invoke(app, ["generate", *args, "--dryrun", "--json"])
+        assert result.exit_code == 0, (args, result.output)
+        return json.loads(result.stdout)
+
+    expected = plan("--config", b)
+    assert plan("--config", a) != expected
+    for args in (
+        ["--config", a, "--config", b],
+        ["-c", a, "-c", b],
+        [f"-c={a}", f"-c={b}"],
+        [f"--config={a}", f"-c{b}"],
+        ["-c", a, "--config", b],
+        ["--config", a, "-c", b],
+    ):
+        assert plan(*args) == expected, args
+
+    calls: list[dict[str, Any]] = []
+    with pytest.MonkeyPatch.context() as patch:
+        patch.setattr(codegen_shortcut, "dispatch_plugin_command", lambda **kw: calls.append(kw))
+        result = CliRunner().invoke(app, ["codegen", "-c", a, f"--config={b}", "--check"])
+    assert result.exit_code == 0, result.output
+    assert [call["config_path"] for call in calls] == [Path(b)]

@@ -4,7 +4,10 @@
 //
 // Every scanner skips quoted regions through `findQuoteEnd`, so the escaping
 // rule lives in exactly one place and the copies cannot drift apart again
-// (#197).
+// (#197). `findMatchingParen` reads with the SQL lexer instead, which also
+// knows heredocs and comments (#587).
+
+import { sqlTokens } from './sql-lexer.js'
 
 type QuoteChar = "'" | '"' | '`'
 
@@ -37,17 +40,17 @@ export function stripWrappingParens(input: string): string {
 
 /**
  * Index of the `)` that matches the `(` at `openIndex`, or undefined when the
- * parens are unbalanced.
+ * parens are unbalanced. The input is read with the SQL lexer, so a paren in a
+ * string, quoted name, heredoc (`$$)$$`) or comment is text (#587).
  */
 export function findMatchingParen(input: string, openIndex: number): number | undefined {
   let depth = 0
-  for (let i = openIndex; i < input.length; i += 1) {
-    const char = input[i]
-    if (isQuoteChar(char)) i = findQuoteEnd(input, i, char)
-    else if (char === '(') depth += 1
-    else if (char === ')') {
+  for (const token of sqlTokens(input.slice(openIndex))) {
+    if (token.kind !== 'punctuation') continue
+    if (token.text === '(') depth += 1
+    else if (token.text === ')') {
       depth -= 1
-      if (depth === 0) return i
+      if (depth === 0) return openIndex + token.start
     }
   }
   return undefined

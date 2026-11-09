@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import fixtures from '../../../test/fixtures/text-index.json'
+import formats from '../../../test/fixtures/text-index-format.json'
 import identifiers from '../../../test/fixtures/text-index-identifiers.json'
 import {
   canonicalizeDefinitions,
@@ -102,6 +103,28 @@ describe('text indexes', () => {
     expect(textIndexFingerprint({ ...original, expression: "concat(body, ') (')" })).not.toBe(
       textIndexFingerprint(original),
     )
+  })
+
+  // Operator keywords keep their space before `(`; function calls stay tight (#586).
+  test.each(formats.map(({ sql, expected }) => [sql, expected]))('formats %s as %s', (sql, expected) => {
+    expect(normalizeTextIndexSQL(sql)).toBe(expected)
+  })
+
+  test('indexes written before the keyword spacing fix plan no migration', () => {
+    // Snapshots and pulled files from before #586 hold `OR(` and `NOT(`.
+    const before = index({
+      expression: "if((s = '(') OR(t = ')'), s, t)",
+      preprocessor: "if(NOT(body = ''), lower(body), body)",
+    })
+    const after = index({
+      expression: "if((s = '(') OR (t = ')'), s, t)",
+      preprocessor: "if(NOT (body = ''), lower(body), body)",
+    })
+    expect(toCreateSQL(docs(after))).toContain(
+      "INDEX `idx` (if((s = '(') OR (t = ')'), s, t)) TYPE text(tokenizer = splitByNonAlpha, preprocessor = if(NOT (body = ''), lower(body), body))",
+    )
+    expect(textIndexFingerprint(before)).toBe(textIndexFingerprint(after))
+    expect(planDiff(canonicalizeDefinitions([docs(before)]), [docs(after)]).operations).toEqual([])
   })
 
   test('equivalent string escape spellings compare equally', () => {

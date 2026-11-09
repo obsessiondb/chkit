@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import logging
+import re
 from typing import Any
 
 import typer
@@ -156,6 +157,64 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
     return [*own, "--", *forwarded]
 
 
+# JavaScript's `\s`, so both ports split SQL from flags on the same characters.
+_JS_WHITESPACE = re.compile(
+    "[\\t\\n\\v\\f\\r \\u00a0\\u1680\\u2000-\\u200a\\u2028\\u2029\\u202f\\u205f\\u3000\\ufeff]"
+)
+
+
+def _looks_like_flag(token: str) -> bool:
+    """As TS ``looksLikeFlag``: a ``-`` token is a flag unless it holds a line
+    break, or whitespace before any ``=``, as SQL that starts with a line
+    comment does (``-- note\\nSELECT 1``, ``--tag=x\\nSELECT 1``). A lone
+    ``-`` is not a flag."""
+    if not token.startswith("-") or token == "-":
+        return False
+    if "\n" in token or "\r" in token:
+        return False
+    return _JS_WHITESPACE.search(token.split("=", 1)[0]) is None
+
+
+def _query_sql_behind_terminator(args: list[str], params: list[Any]) -> list[str]:
+    """Port of TS ``splitQueryArgs`` for ``chkit query`` (#584).
+
+    click reads every argument that starts with ``-`` as an option, so SQL
+    that starts with a line comment would be an unknown option. The SQL
+    arguments go behind ``--``, in order; option values stay with their
+    option, and a token that looks like a flag stays in front, so click
+    still rejects an unknown one such as ``-x`` or ``--bogus``.
+    """
+    takes_value: dict[str, bool] = {}
+    for param in params:
+        if param.param_type_name == "option":
+            for opt in [*param.opts, *param.secondary_opts]:
+                takes_value[opt] = not (param.is_flag or param.count)
+
+    options: list[str] = []
+    positionals: list[str] = []
+    i = 0
+    while i < len(args):
+        token = args[i]
+        i += 1
+        if token == "--":
+            positionals.extend(args[i:])
+            break
+        # A declared option, with its value attached (`-c/my dir/c.py`,
+        # `--config=/my dir/c.py`) or not, is an option whatever it holds.
+        name = token.split("=", 1)[0] if token.startswith("--") else token[:2]
+        if name not in takes_value and not _looks_like_flag(token):
+            positionals.append(token)
+            continue
+        options.append(token)
+        if takes_value.get(token):
+            # Without its value, click would take the `--` below as the value.
+            if i >= len(args):
+                raise MissingFlagValueError(token)
+            options.append(args[i])
+            i += 1
+    return [*options, "--", *positionals] if positionals else options
+
+
 class _ChkitCommand(TyperCommand):
     """Every chkit command reads its options as TS does (#491) and reports a
     flag error as TS does (#563)."""
@@ -170,6 +229,10 @@ class _ChkitCommand(TyperCommand):
                 # flag error or where it would be a flag's value.
                 normalized = ["--help"]
             else:
+                # query first moves its SQL arguments behind `--` (#584), so SQL
+                # that starts with a dash is not read as a flag here.
+                if self.name == "query":
+                    args = _query_sql_behind_terminator(args, params)
                 normalized = _normalize_short_options(args, params)
         except (UnknownFlagError, MissingFlagValueError) as error:
             report_flag_error(ctx.info_name, str(error), json_mode="--json" in args)
@@ -185,9 +248,7 @@ class _ChkitGroup(TyperGroup):
     """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
-        return super().parse_args(
-            ctx, _reject_group_bundles(ctx, args, self.get_params(ctx))
-        )
+        return super().parse_args(ctx, _reject_group_bundles(ctx, args, self.get_params(ctx)))
 
     # Any: typer vendors click privately (typer._click), and the public
     # typer.Context subclass would narrow the parameter (mypy [override]).

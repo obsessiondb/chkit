@@ -42,6 +42,49 @@ describe('parseCommandArgs', () => {
 		expect(parsed?.positionals).toEqual(['-- inspect\nSELECT 1'])
 	})
 
+	test('keeps query SQL that starts with a dash and holds whitespace as SQL (#584)', () => {
+		for (const sql of [
+			'-- note\nSELECT a = 1',
+			'--note\nSELECT 1',
+			'--====\nSELECT 1',
+			'--tag=a b\nSELECT 1',
+			'-',
+		]) {
+			const parsed = parseCommandArgs(
+				'query',
+				[sql, '--json'],
+				[...GLOBAL_FLAGS, SERVICE_FLAG],
+			)
+			expect(parsed).toEqual({ flags: { '--json': true }, positionals: [sql] })
+		}
+	})
+
+	test('keeps a dash-leading query flag value as the value (#584)', () => {
+		const parsed = parseCommandArgs(
+			'query',
+			['--service', '-prod', 'SELECT 1', '--', '-1'],
+			[...GLOBAL_FLAGS, SERVICE_FLAG],
+		)
+
+		expect(parsed).toEqual({
+			flags: { '--service': '-prod' },
+			positionals: ['SELECT 1', '-1'],
+		})
+	})
+
+	test('keeps an attached value with spaces on a declared query flag (#584)', () => {
+		const parsed = parseCommandArgs(
+			'query',
+			['-c/my dir/c.py', 'SELECT 1', '--service=a b'],
+			[...GLOBAL_FLAGS, SERVICE_FLAG],
+		)
+
+		expect(parsed).toEqual({
+			flags: { '--config': '/my dir/c.py', '--service': 'a b' },
+			positionals: ['SELECT 1'],
+		})
+	})
+
 	test('supports query flags after SQL', () => {
 		const parsed = parseCommandArgs(
 			'query',
