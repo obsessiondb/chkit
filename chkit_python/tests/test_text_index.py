@@ -4,10 +4,11 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
+from typing import Any
 
 import pytest
 
-from chkit import SkipIndexText, table
+from chkit import SkipIndexText, TableDefinition, table
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.planner import plan_diff
@@ -32,7 +33,7 @@ IDENTIFIERS = json.loads(
 )
 
 
-def docs(index, name="docs", database="app"):
+def docs(index: SkipIndexText, name: str = "docs", database: str = "app") -> TableDefinition:
     return table(
         database=database,
         name=name,
@@ -45,21 +46,21 @@ def docs(index, name="docs", database="app"):
 
 
 @pytest.mark.parametrize("case", CASES, ids=lambda case: case["name"])
-def test_text_round_trip(case):
+def test_text_round_trip(case: dict[str, Any]) -> None:
     params = {key: value for key, value in case.items() if key != "name"}
     index = SkipIndexText.model_validate({"name": "idx", "expression": "body", **params})
     sql = render_text_index_type(index)
     parsed = index.model_copy(update=parse_text_index_params(sql[5:-1]))
     assert render_text_index_type(parsed) == sql
     assert canonicalize_text_index(canonicalize_text_index(index)) == canonicalize_text_index(index)
-    namespace = {}
+    namespace: dict[str, Any] = {}
     exec(compile(render_schema_file([docs(index)]), "schema.py", "exec"), namespace)
     assert canonicalize_definitions(namespace["definitions"]) == canonicalize_definitions(
         [docs(index)]
     )
 
 
-def test_literal_whitespace_changes_require_migrations():
+def test_literal_whitespace_changes_require_migrations() -> None:
     index = SkipIndexText(
         name="idx",
         expression="body",
@@ -80,7 +81,7 @@ def test_literal_whitespace_changes_require_migrations():
 
 
 @pytest.mark.parametrize("granularity", [1, 64, 100000000])
-def test_granularity_does_not_change_schema(granularity):
+def test_granularity_does_not_change_schema(granularity: int) -> None:
     index = SkipIndexText(name="idx", expression="body", tokenizer="splitByNonAlpha")
     changed = docs(index.model_copy(update={"granularity": granularity}))
     assert "GRANULARITY 100000000" in to_create_sql(changed)
@@ -91,11 +92,11 @@ def test_granularity_does_not_change_schema(granularity):
 @pytest.mark.parametrize(
     ("sql", "expected"), [(case["sql"], case["expected"]) for case in FORMATS], ids=str
 )
-def test_keyword_spacing(sql, expected):
+def test_keyword_spacing(sql: str, expected: str) -> None:
     assert normalize_text_index_sql(sql) == expected
 
 
-def test_indexes_written_before_keyword_spacing_fix_plan_no_migration():
+def test_indexes_written_before_keyword_spacing_fix_plan_no_migration() -> None:
     # Snapshots and pulled files from before #586 hold `OR(` and `NOT(`.
     before = SkipIndexText(
         name="idx",
@@ -117,7 +118,7 @@ def test_indexes_written_before_keyword_spacing_fix_plan_no_migration():
     assert plan_diff(canonicalize_definitions([docs(before)]), [docs(after)]).operations == []
 
 
-def test_equivalent_escapes():
+def test_equivalent_escapes() -> None:
     assert normalize_text_index_sql("splitByString(['\t', 'é', ''''])") == normalize_text_index_sql(
         r"splitByString(['\x09', '\xc3\xa9', '\''])"
     )
@@ -143,7 +144,7 @@ def test_equivalent_escapes():
         "tokenizer = /* unclosed",
     ],
 )
-def test_rejects_lossy_or_malformed_metadata(args):
+def test_rejects_lossy_or_malformed_metadata(args: str) -> None:
     with pytest.raises(ValueError, match=r".+"):
         parse_text_index_params(args)
 
@@ -158,7 +159,7 @@ def test_rejects_lossy_or_malformed_metadata(args):
         {"preprocessor": ""},
     ],
 )
-def test_validation_reports_invalid_parameters(params):
+def test_validation_reports_invalid_parameters(params: dict[str, Any]) -> None:
     index = SkipIndexText.model_validate(
         {"name": "idx", "expression": "body", "tokenizer": "splitByNonAlpha", **params}
     )
@@ -167,7 +168,7 @@ def test_validation_reports_invalid_parameters(params):
     ]
 
 
-def test_all_options_and_parameter_order():
+def test_all_options_and_parameter_order() -> None:
     index = SkipIndexText(
         name="idx",
         expression="concat(body, ')  (')",
@@ -185,7 +186,7 @@ def test_all_options_and_parameter_order():
     assert pulled == index
 
 
-def test_identifier_quotes_do_not_rebuild_or_conflate_string_literals():
+def test_identifier_quotes_do_not_rebuild_or_conflate_string_literals() -> None:
     index = SkipIndexText(
         name="idx", expression="body", tokenizer="splitByNonAlpha", preprocessor="lower(`body`)"
     )
@@ -196,7 +197,7 @@ def test_identifier_quotes_do_not_rebuild_or_conflate_string_literals():
 
 
 @pytest.mark.parametrize("word", IDENTIFIERS)
-def test_meaningful_identifier_quotes(word):
+def test_meaningful_identifier_quotes(word: str) -> None:
     index = SkipIndexText(name="idx", expression="body", tokenizer="splitByNonAlpha")
     for name in (word, word.upper(), word.capitalize()):
         for field in ("expression", "preprocessor", "postprocessor"):

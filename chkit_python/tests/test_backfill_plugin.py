@@ -396,11 +396,11 @@ def test_read_plan_raises_on_legacy_layout(tmp_path: Path) -> None:
 def test_summarize_run_status_counts_done_and_pending(tmp_path: Path) -> None:
     plan = _make_plan(chunk_ids=["c1", "c2", "c3"])
     run = BackfillRunState(
-        planId="0123456789abcdef",
+        plan_id="0123456789abcdef",
         target="events.actions",
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T01:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T01:00:00.000Z",
         progress={
             "c1": {"status": "done", "writtenRows": 100},  # type: ignore[dict-item]
             "c2": {"status": "submitted"},  # type: ignore[dict-item]
@@ -419,11 +419,11 @@ def test_plan_status_for_returns_run_status_verbatim() -> None:
     ``run.status``; chunk-based ``completed`` derivation is the engine's job.
     """
     run = BackfillRunState(
-        planId="x" * 16,
+        plan_id="x" * 16,
         target="t",
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T00:01:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T00:01:00.000Z",
     )
     counters = {"pending": 0, "submitted": 0, "running": 0, "done": 5, "failed": 0}
     # Even with all chunks done, the helper now returns the persisted status —
@@ -587,11 +587,11 @@ def test_status_command_prints_summary_on_existing_run(tmp_path: Path) -> None:
     )
     write_json(paths.plan_path, plan)
     run = BackfillRunState(
-        planId=plan.plan_id,
+        plan_id=plan.plan_id,
         target=plan.target,
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T01:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T01:00:00.000Z",
     )
     write_json(paths.run_path, run)
     plugin = backfill()
@@ -622,11 +622,11 @@ def test_cancel_command_marks_run_cancelled(tmp_path: Path) -> None:
     )
     write_json(paths.plan_path, plan)
     run = BackfillRunState(
-        planId=plan.plan_id,
+        plan_id=plan.plan_id,
         target=plan.target,
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T01:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T01:00:00.000Z",
     )
     write_json(paths.run_path, run)
     plugin = backfill()
