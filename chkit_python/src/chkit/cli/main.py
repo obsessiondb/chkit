@@ -171,7 +171,9 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
             own.append(token)
             if takes_value[token]:
                 # Without its value, click would take the `--` below as the value.
-                if i >= len(args):
+                # As TS `extractConfigPath`, a `--` token is not a value either:
+                # `--config --help` lacks its value (#619).
+                if i >= len(args) or args[i].startswith("--"):
                     raise MissingFlagValueError(long_form[token])
                 own.append(args[i])
                 i += 1

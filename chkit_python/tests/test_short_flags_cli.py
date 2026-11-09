@@ -12,7 +12,8 @@ from typer.main import get_command
 from typer.testing import CliRunner
 
 from chkit import __version__
-from chkit.cli.commands import codegen_shortcut
+from chkit.cli.commands import codegen_shortcut, obsessiondb_shortcut
+from chkit.cli.commands import plugin as plugin_command
 from chkit.cli.main import _normalize_short_options, app
 
 CONFIG = (
@@ -111,6 +112,37 @@ def test_a_forwarder_option_without_its_value_is_a_usage_error() -> None:
                 "",
                 "Missing value for --config\n",
             ), args
+
+
+@pytest.mark.parametrize(
+    "tail",
+    [
+        ["--config", "--help", "--config=other.py"],
+        ["--config", "--help-plugins", "--config=other.py"],
+        ["-c", "--check"],
+        ["--config", "--check"],
+    ],
+)
+@pytest.mark.parametrize(
+    "command", [["codegen"], ["plugin", "codegen", "codegen"], ["obsessiondb", "logout"]]
+)
+def test_a_forwarder_config_never_takes_a_double_dash_token_as_its_value(
+    command: list[str], tail: list[str], monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """As TS ``extractConfigPath``: ``--config --help`` lacks its value, so a
+    later ``--config`` cannot let the plugin command run (#619)."""
+    calls: list[dict[str, object]] = []
+    for module in (codegen_shortcut, obsessiondb_shortcut, plugin_command):
+        monkeypatch.setattr(
+            module, "dispatch_plugin_command", lambda **kwargs: calls.append(kwargs)
+        )
+    result = CliRunner().invoke(app, [*command, *tail])
+    assert (result.exit_code, result.stdout, result.stderr) == (
+        1,
+        "",
+        "Missing value for --config\n",
+    )
+    assert calls == []
 
 
 def test_h_is_help_and_v_is_the_version() -> None:
