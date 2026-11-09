@@ -15,6 +15,9 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- Text index SQL in generated migrations, snapshots and `chkit pull` output keeps the space
+  between a keyword and `(` (`a OR (b)`, `NOT (x)`), as ClickHouse writes it, instead of
+  `OR(` (#586, fixed in TS too). Existing indexes and snapshots plan no migration.
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
