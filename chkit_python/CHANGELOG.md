@@ -24,6 +24,9 @@
   listed, but `alias remove` cannot name it; delete it from `.chkit/obsessiondb.json`.
 
 ### Fixed
+- `drift` no longer reports `index_mismatch` on a text index right after `migrate` when
+  ClickHouse stores its expression with added parentheses, such as `NOT a AND b` as
+  `(NOT a) AND b` (#602, fixed in TS too).
 - `migrate` reads `//`, `# ` and `#!` comments as ClickHouse does, so a `;` inside one no
   longer runs the commented-out text after it as a statement, and a quote or `/*` inside one
   no longer joins statements (#562, fixed in TS too). A partly applied migration whose
