@@ -20,6 +20,7 @@ from dataclasses import dataclass
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import TableConstraintDefinition
 from chkit.core.projection import normalize_projection_index
+from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import find_quote_end, find_top_level_sql_pattern, is_quote_char
 
@@ -253,7 +254,7 @@ def parse_projections_from_create_table_query(
     for part in split_top_level_comma(body):
         index_match = _INDEX_PROJECTION_RE.match(part)
         if index_match is not None:
-            name = (index_match.group(1) or index_match.group(2) or "").strip()
+            name = js_trim(index_match.group(1) or index_match.group(2) or "")
             index = normalize_projection_index(index_match.group(3) or "")
             type_text = (index_match.group(4) or "").strip()
             if not name or not index or not type_text:
@@ -266,7 +267,7 @@ def parse_projections_from_create_table_query(
         match = _PROJECTION_RE.match(part)
         if match is None:
             continue
-        name = (match.group(1) or match.group(2) or "").strip()
+        name = js_trim(match.group(1) or match.group(2) or "")
         query_text = normalize_sql_fragment((match.group(3) or "").strip())
         if not name or not query_text:
             continue
@@ -286,7 +287,7 @@ def parse_constraints_from_create_table_query(
         match = _CONSTRAINT_RE.match(part)
         if match is None:
             continue
-        name = (match.group(1) or match.group(2) or "").strip()
+        name = js_trim(match.group(1) or match.group(2) or "")
         expression = normalize_sql_fragment(match.group(4) or "")
         if not name or not expression:
             continue

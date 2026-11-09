@@ -29,6 +29,7 @@ from chkit.core.model import (
     TableDefinition,
     _RiskSummary,
 )
+from chkit.core.sql_lexer import js_trim
 
 # Module-private "magic" constants kept named so the comparisons in
 # parse_table_selector read clearly.
@@ -100,7 +101,7 @@ def parse_table_selector(input_: str) -> _ParsedTableSelector:
     Raises ``ValueError`` for empty input, bare ``*``, mid-string ``*``,
     multiple ``*``, or an empty database qualifier.
     """
-    selector = input_.strip()
+    selector = js_trim(input_)
     if not selector:
         msg = (
             'Invalid --table selector "". Expected <table>, <table_prefix*>, '
@@ -113,8 +114,8 @@ def parse_table_selector(input_: str) -> _ParsedTableSelector:
         database: str | None = None
         table_token = selector
     else:
-        database = selector[:dot].strip()
-        table_token = selector[dot + 1 :].strip()
+        database = js_trim(selector[:dot])
+        table_token = js_trim(selector[dot + 1 :])
 
     if database is not None and (not database or "*" in database):
         msg = (
