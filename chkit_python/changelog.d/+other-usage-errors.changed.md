@@ -1,4 +1,4 @@
-The other usage errors fail as in TS too: an unexpected argument, an invalid `init --connect`
+The other usage errors fail as in TS too (#607): an unexpected argument, an invalid `init --connect`
 choice, `query` without one SQL string, an unknown plugin or plugin command, and `codegen`
 without its plugin print one line on stderr and exit 1 (it was 2, with click's usage banner),
 with TS's messages and `--json` envelopes. `chkit obsessiondb` without a command shows its
