@@ -2,7 +2,6 @@ import { describe, expect, test } from 'bun:test'
 
 import { canonicalizeDefinitions } from './canonical.js'
 import { parseCodec } from './codec.js'
-import { readsTable } from './cutover.js'
 import { engineName } from './engine.js'
 import { parseFlags } from './flags.js'
 import { isKafkaEngine } from './kafka.js'
@@ -54,8 +53,6 @@ describe('whitespace outside names is JavaScript whitespace', () => {
     expect(sqlExpressionFingerprint(`a${FS}+b`)).not.toBe(sqlExpressionFingerprint('a + b'))
     expect(parseCodec(`CODEC${BOM}(ZSTD(1))`)).toEqual(parseCodec('CODEC(ZSTD(1))'))
     expect(parseCodec(`CODEC${NEL}(ZSTD(1))`)).not.toEqual(parseCodec('CODEC(ZSTD(1))'))
-    expect(readsTable(`SELECT * FROM app${BOM}.${BOM}t`, { database: 'app', name: 't' }, 'default')).toBe(true)
-    expect(readsTable(`SELECT * FROM app${FS}.t`, { database: 'app', name: 't' }, 'default')).toBe(false)
   })
 
   test('validation', () => {

@@ -125,8 +125,14 @@ def test_expressions() -> None:
     assert sql_expression_fingerprint(f"a{FS}+b") != sql_expression_fingerprint("a + b")
     assert parse_codec(f"CODEC{BOM}(ZSTD(1))") == parse_codec("CODEC(ZSTD(1))")
     assert parse_codec(f"CODEC{NEL}(ZSTD(1))") != parse_codec("CODEC(ZSTD(1))")
-    assert reads_table(f"SELECT * FROM app{BOM}.{BOM}t", ("app", "t"), "default")
-    assert not reads_table(f"SELECT * FROM app{FS}.t", ("app", "t"), "default")
+
+
+# chkit-py only: the cutover dependency guard keeps Python's whitespace, which,
+# like ClickHouse's lexer, reads NEL as a space. JavaScript whitespace would
+# miss `FROM<NEL>t` and let a cutover recreate a view that reads the table.
+def test_cutover_dependency_guard_keeps_reading_nel_as_whitespace() -> None:
+    assert reads_table(f"SELECT * FROM{NEL}t", ("default", "t"), "default")
+    assert reads_table(f"SELECT * FROM app{NEL}.{NEL}t", ("app", "t"), "default")
 
 
 # TS packages/core/src/js-whitespace.test.ts "validation".

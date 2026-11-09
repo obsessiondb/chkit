@@ -52,7 +52,7 @@ from chkit.core.model import (
     ValidationIssue,
 )
 from chkit.core.sql import column_type_fingerprint, render_column_type, to_create_sql
-from chkit.core.sql_lexer import js_regex, js_trim
+from chkit.core.sql_lexer import js_trim
 from chkit.core.table_settings import (
     DEFAULT_INDEX_GRANULARITY,
     declared_readonly_settings,
@@ -86,8 +86,8 @@ _STREAMING_ENGINES: Final = frozenset(
     }
 )
 _COMMENT_PREFIX: Final = "chkit cutover "
-_REPLICATED_PATH: Final = re.compile(js_regex(r"^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'"))
-_NULLABLE: Final = re.compile(js_regex(r"^\s*Nullable\s*\("))
+_REPLICATED_PATH: Final = re.compile(r"^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'")
+_NULLABLE: Final = re.compile(r"^\s*Nullable\s*\(")
 
 @dataclass(frozen=True)
 class CutoverRequest:
@@ -1116,9 +1116,9 @@ def reads_table(query: str, table: tuple[str, str], default_database: str) -> bo
     """Whether a view's query reads ``table`` (database, name), qualified or (in its
     own database) bare."""
     database, name = table
-    qualified = re.compile(js_regex(rf"\b{re.escape(database)}\s*\.\s*`?{re.escape(name)}\b"))
+    qualified = re.compile(rf"\b{re.escape(database)}\s*\.\s*`?{re.escape(name)}\b")
     bare = (
-        re.compile(js_regex(rf"\bFROM\s+`?{re.escape(name)}\b"), re.IGNORECASE)
+        re.compile(rf"\bFROM\s+`?{re.escape(name)}\b", re.IGNORECASE)
         if database == default_database
         else None
     )
