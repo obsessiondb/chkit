@@ -5,6 +5,7 @@ from __future__ import annotations
 import re
 
 from chkit.core.key_clause import is_plain_column_reference
+from chkit.core.sql_lexer import unescape_quoted
 from chkit.core.sql_scan import find_quote_end
 
 # ASCII control characters (incl. NUL). ClickHouse cannot round-trip them in a
@@ -66,13 +67,3 @@ def unquote_identifiers(sql: str) -> str:
         out.append(char)
         i += 1
     return "".join(out)
-
-
-def unescape_quoted(body: str, quote: str = "`") -> str:
-    """Resolve backslash escapes and doubled quotes inside a quoted body."""
-    escaped_quote = re.escape(quote)
-    return re.sub(
-        rf"\\(.)|{escaped_quote}{escaped_quote}",
-        lambda match: match.group(1) if match.group(1) is not None else quote,
-        body,
-    )

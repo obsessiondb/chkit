@@ -1,4 +1,5 @@
 import { isPlainColumnReference } from './key-clause.js'
+import { unescapeQuoted } from './sql-lexer.js'
 import { findQuoteEnd } from './sql-scan.js'
 
 // ASCII control characters (incl. NUL). ClickHouse cannot round-trip them in a
@@ -65,8 +66,4 @@ export function unquoteIdentifiers(sql: string): string {
     i += 1
   }
   return out
-}
-
-export function unescapeQuoted(body: string, quote = '`'): string {
-  return body.replace(new RegExp(`\\\\(.)|${quote}${quote}`, 'g'), (_match, escaped: string | undefined) => escaped ?? quote)
 }
