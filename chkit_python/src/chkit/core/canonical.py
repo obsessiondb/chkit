@@ -148,8 +148,9 @@ def _canonicalize_table(
             name=definition.renamed_from.name.strip(),
         )
 
-    normalized_order_by = normalize_key_columns(definition.order_by)
-    normalized_primary_key = normalize_key_columns(definition.primary_key)
+    column_names = {js_trim(column.name) for column in definition.columns}
+    normalized_order_by = normalize_key_columns(definition.order_by, column_names)
+    normalized_primary_key = normalize_key_columns(definition.primary_key, column_names)
     # TS canonical.ts: when primary_key is empty, fall back to order_by.
     # Without this, a snapshot written by TS (where omitted PK == order_by)
     # would never match a Python snapshot (where omitted PK == []).
@@ -164,7 +165,7 @@ def _canonicalize_table(
             "columns": [_canonicalize_column(c) for c in definition.columns],
             "primary_key": normalized_primary_key,
             "order_by": normalized_order_by,
-            "unique_key": normalize_key_columns(definition.unique_key)
+            "unique_key": normalize_key_columns(definition.unique_key, column_names)
             if definition.unique_key is not None
             else None,
             "partition_by": _normalize_optional_clause(definition.partition_by),
@@ -311,7 +312,10 @@ def _canonicalize_dictionary(definition: DictionaryDefinition) -> DictionaryDefi
             "attributes": [
                 _canonicalize_dictionary_attribute(a) for a in definition.attributes
             ],
-            "primary_key": normalize_key_columns(definition.primary_key),
+            "primary_key": normalize_key_columns(
+                definition.primary_key,
+                {js_trim(attribute.name) for attribute in definition.attributes},
+            ),
             "source": normalize_sql_fragment(definition.source),
             "layout": normalize_sql_fragment(definition.layout),
             "lifetime": normalize_sql_fragment(definition.lifetime),

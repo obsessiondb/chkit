@@ -119,7 +119,7 @@ def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str
     # (e.g. `toStartOfHour(ts)`) are emitted verbatim.
     return ", ".join(
         quote_identifier(c) if c in column_names or is_plain_column_reference(c) else c
-        for c in normalize_key_columns(columns)
+        for c in normalize_key_columns(columns, column_names)
     )
 
 

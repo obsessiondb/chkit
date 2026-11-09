@@ -8,6 +8,9 @@
   message see the SQL without the migration's header and marker comments.
 
 ### Fixed
+- A `primary_key`, `order_by` or `unique_key` entry that names a column containing a comma
+  (`"e,f)"`) is kept whole, as in TS, instead of failing validation; key entries are trimmed
+  like TS (#523).
 - `migrate --apply` no longer prints `  Applying <file>` before each migration, so its text
   output matches TS (#486): the migration's `-- log:` line, if any, then `Applied: <file>`.
   `--json` output is unchanged.
