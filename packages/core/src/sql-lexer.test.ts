@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
+import fixture from '../../../test/fixtures/quoted-escapes.json'
 import { identifierName, isTrivia, stringLiteralValue, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 
 function kinds(sql: string): Array<[SQLToken['kind'], string]> {
@@ -251,5 +252,23 @@ describe('identifierName / stringLiteralValue', () => {
     expect(a && stringLiteralValue(a)).toBe("it's")
     expect(b && stringLiteralValue(b)).toBe("a'b")
     expect(c && stringLiteralValue(c)).toBe("x'y")
+  })
+
+  // test/fixtures/quoted-escapes.json is shared with chkit-py and checked
+  // against the server by quoted-escapes.e2e.test.ts (#639).
+  test('reads escapes in quoted names and strings as ClickHouse does', () => {
+    const read = fixture.cases.map(({ sql }) => {
+      const tokens = tokenizeSQL(sql)
+      const token = tokens[0] as SQLToken
+      expect(tokens).toHaveLength(1)
+      return { sql, value: token.kind === 'string' ? stringLiteralValue(token) : identifierName(token) }
+    })
+    expect(read).toEqual(fixture.cases.map(({ sql, value }) => ({ sql, value })))
+  })
+
+  test('keeps an invalid \\x escape as written', () => {
+    const [name, , str] = tokenizeSQL("`a\\xZZ` 'a\\x4'")
+    expect(name && identifierName(name)).toBe('a\\xZZ')
+    expect(str && stringLiteralValue(str)).toBe('a\\x4')
   })
 })

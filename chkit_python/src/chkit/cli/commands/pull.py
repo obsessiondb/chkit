@@ -517,40 +517,28 @@ def run(  # noqa: PLR0912, PLR0917
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
-    out_file: Annotated[
-        Path | None,
-        typer.Option(
-            "--out-file",
-            "-o",
-            help="Where to write the pulled Python schema [default: src/db/schema/pulled.py].",
-        ),
-    ] = None,
-    database: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--database",
-            "-d",
-            help="Restrict pull to these database names. Repeatable.",
-        ),
-    ] = None,
+    dryrun: Annotated[
+        bool,
+        typer.Option("--dryrun", help="Preview without writing files"),
+    ] = False,
     force: Annotated[
         bool,
-        typer.Option(
-            "--force",
-            "-f",
-            help="Overwrite the output file if it already exists.",
-        ),
+        typer.Option("--force", "-f", help="Overwrite existing output file"),
     ] = False,
     overwrite: Annotated[
         bool,
-        typer.Option("--overwrite", help="Alias for --force."),
-    ] = False,
-    dryrun: Annotated[
-        bool,
         typer.Option(
-            "--dryrun", help="Print the rendered schema instead of writing it."
+            "--overwrite", help="Overwrite existing output file (alias for --force)"
         ),
     ] = False,
+    out_file: Annotated[
+        Path | None,
+        typer.Option("--out-file", "-o", metavar="<path>", help="Output file path"),
+    ] = None,
+    database: Annotated[
+        list[str] | None,
+        typer.Option("--database", "-d", metavar="<name>", help="Database names to pull"),
+    ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,

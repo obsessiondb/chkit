@@ -28,6 +28,8 @@ async function withDeveloperConfigDir<T>(fn: (configHome: string) => Promise<T> 
   }
 }
 
+const NO_PLUGINS = 'No plugins configured. Add entries to config.plugins first.'
+
 describe('CLI test runners keep the developer user config dir out', () => {
   test('runCli runs the CLI with an empty user config dir', async () => {
     const fixture = await createFixture()
@@ -37,7 +39,8 @@ describe('CLI test runners keep the developer user config dir out', () => {
     rmSync(fixture.dir, { recursive: true, force: true })
 
     expect(result.stderr).not.toContain(PROFILE_ERROR)
-    expect(result.exitCode).toBe(0)
+    // No profile plugin leaked in: the fixture's empty plugin list is reported (#613).
+    expect([result.exitCode, JSON.parse(result.stdout).error]).toEqual([1, NO_PLUGINS])
   })
 
   test('the e2e runCli runs the CLI with an empty user config dir', async () => {
@@ -48,7 +51,8 @@ describe('CLI test runners keep the developer user config dir out', () => {
     rmSync(fixture.dir, { recursive: true, force: true })
 
     expect(result.stderr).not.toContain(PROFILE_ERROR)
-    expect(result.exitCode).toBe(0)
+    // No profile plugin leaked in: the fixture's empty plugin list is reported (#613).
+    expect([result.exitCode, JSON.parse(result.stdout).error]).toEqual([1, NO_PLUGINS])
   })
 
   test('startCli runs the CLI with an empty user config dir', async () => {
@@ -59,7 +63,8 @@ describe('CLI test runners keep the developer user config dir out', () => {
     rmSync(fixture.dir, { recursive: true, force: true })
 
     expect(result.stderr).not.toContain(PROFILE_ERROR)
-    expect(result.exitCode).toBe(0)
+    // No profile plugin leaked in: the fixture's empty plugin list is reported (#613).
+    expect([result.exitCode, JSON.parse(result.stdout).error]).toEqual([1, NO_PLUGINS])
   })
 
   test('an XDG_CONFIG_HOME the test passes still reaches the CLI', async () => {

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import type { FlagDef, ResolvedChxConfig } from '@chkit/core'
 import type { PluginRuntime } from '../../plugins.js'
@@ -83,6 +83,30 @@ describe('parseCommandArgs', () => {
 			flags: { '--config': '/my dir/c.py', '--service': 'a b' },
 			positionals: ['SELECT 1'],
 		})
+	})
+
+	test('a query value flag never takes -- as its value, and --json after -- is not a flag (#614)', () => {
+		const errors = spyOn(console, 'error').mockImplementation(() => {})
+		const writes = spyOn(process.stdout, 'write').mockImplementation(() => true)
+		const previousExitCode = process.exitCode
+		const parsed = parseCommandArgs(
+			'query',
+			['--service', '--', '--json'],
+			[...GLOBAL_FLAGS, SERVICE_FLAG],
+		)
+		const stdout = writes.mock.calls.map((call) => String(call[0])).join('')
+		const stderr = errors.mock.calls.map((call) => String(call[0]))
+		const exitCode = process.exitCode
+		errors.mockRestore()
+		writes.mockRestore()
+		process.exitCode = previousExitCode
+
+		expect([parsed, exitCode, stderr, stdout]).toEqual([
+			null,
+			1,
+			['Missing value for --service'],
+			'',
+		])
 	})
 
 	test('supports query flags after SQL', () => {
