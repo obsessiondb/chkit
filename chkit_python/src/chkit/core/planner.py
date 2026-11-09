@@ -68,6 +68,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
+from chkit.core.sql_lexer import js_regex, js_trim
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
@@ -421,7 +422,7 @@ def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
     if not is_distributed_engine(old.engine):
         return "danger"
     flush_on_detach = (old.settings or {}).get("flush_on_detach")
-    disabled = flush_on_detach is not None and str(flush_on_detach).strip().lower() in (
+    disabled = flush_on_detach is not None and js_trim(str(flush_on_detach)).lower() in (
         "0",
         "false",
     )
@@ -872,7 +873,7 @@ def _dictionary_comparison_shape(
 
 
 _LIFETIME_RANGE_RE = re.compile(
-    r"^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$", re.IGNORECASE
+    js_regex(r"^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$"), re.IGNORECASE
 )
 
 
@@ -883,7 +884,7 @@ def _dictionary_lifetime_fingerprint(lifetime: str) -> str:
     ``LIFETIME(MAX 300 MIN 10)`` as ``LIFETIME(MIN 10 MAX 300)``, so a
     dictionary pulled back compares by that stored form.
     """
-    trimmed = lifetime.strip()
+    trimmed = js_trim(lifetime)
     if re.fullmatch(r"\d+", trimmed, re.ASCII):
         return f"MIN 0 MAX {trimmed}"
     match = _LIFETIME_RANGE_RE.match(trimmed)

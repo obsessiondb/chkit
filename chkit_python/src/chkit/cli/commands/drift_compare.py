@@ -351,7 +351,7 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         f"type={column_type_fingerprint(column)}",
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
-        f"comment={(column.comment or '').strip()}",
+        f"comment={js_trim(column.comment or '')}",
         f"codec={column_codec_fingerprint(column)}",
     ]
     return "|".join(parts)

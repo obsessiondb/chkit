@@ -24,6 +24,7 @@ from pydantic import BaseModel, ConfigDict
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.jsnum import js_math_round
 from chkit.core.model import ChxResolvedClickHouseConfig
+from chkit.core.sql_lexer import js_trim
 
 # chkit prints its own one-line error, as TS silences @clickhouse/client's
 # logger: without a handler, the driver's warnings (``Unexpected Http Driver
@@ -210,7 +211,7 @@ class ClickHouseClient:
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            statement.strip().rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
         )
         return ClickHouseJsonQueryResult.model_validate(
             {**parse_json_result(body), "query_id": query_id}

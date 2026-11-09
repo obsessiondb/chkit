@@ -4,6 +4,8 @@ from __future__ import annotations
 
 import re
 
+from chkit.core.sql_lexer import is_js_space
+
 _ESCAPES = {"0": 0, "a": 7, "b": 8, "t": 9, "n": 10, "v": 11, "f": 12, "r": 13, "e": 27}
 _WORD = re.compile(r"(?:\d+(?:\.\d*)?(?:[eE][+-]?\d+)?|[\w$]+|->|<=|>=|!=|<>|\|\||::|==)")
 _CLOSE = {")": "(", "]": "[", "}": "{"}
@@ -82,7 +84,7 @@ def text_sql_tokens(sql: str) -> list[str]:
     i = 0
     while i < len(sql):
         char = sql[i]
-        if char.isspace():
+        if is_js_space(char):
             i += 1
             continue
         if sql.startswith("--", i):
