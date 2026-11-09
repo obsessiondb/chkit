@@ -13,19 +13,24 @@ from __future__ import annotations
 
 from collections.abc import Callable
 from pathlib import Path
-from typing import Annotated, Any, cast
+from typing import Annotated, Any, NoReturn, cast
 
 import typer
 
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.flag_errors import report_flag_error, report_usage_error
-from chkit.cli.json_output import print_output
+from chkit.cli.json_output import emit_json, print_output
 from chkit.cli.plugin_runtime import (
     load_plugin_runtime,
     make_plugin_context,
     null_plugin_context,
 )
-from chkit.cli.table_scope import TableScope
+from chkit.cli.schema_loader import load_schema
+from chkit.cli.table_scope import (
+    TableScope,
+    resolve_table_scope,
+    table_keys_from_definitions,
+)
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.flags import (
     FlagDef,
@@ -42,6 +47,7 @@ from chkit.plugins import (
     LoadedPlugin,
 )
 
+NO_PLUGINS_MESSAGE = "No plugins configured. Add entries to config.plugins first."
 
 class UnknownPluginError(LookupError):
     """No configured plugin has the name. As in TS, a plain error of the
@@ -56,31 +62,62 @@ def _unknown_plugin_error(plugin_name: str, loaded: list[LoadedPlugin]) -> Unkno
     )
 
 
-def _list_all(loaded: list[LoadedPlugin]) -> None:
-    if not loaded:
-        typer.echo("No plugins configured.")
+def _fail_no_plugins(*, json_mode: bool) -> NoReturn:
+    """As TS: the message on stderr, or under ``--json`` a payload whose
+    ``error`` is the message; exit 1 either way."""
+    if json_mode:
+        emit_json("plugin", {"error": NO_PLUGINS_MESSAGE, "plugins": []})
+    else:
+        typer.echo(NO_PLUGINS_MESSAGE, err=True)
+    raise typer.Exit(code=1)
+
+
+def _command_entries(entry: LoadedPlugin) -> list[dict[str, str]]:
+    return [
+        {"name": command.name, "description": command.description or ""}
+        for command in entry.plugin.commands or []
+    ]
+
+
+def _list_all(loaded: list[LoadedPlugin], *, json_mode: bool) -> None:
+    if json_mode:
+        plugins = [
+            {
+                "name": entry.plugin.manifest.name,
+                "version": entry.plugin.manifest.version,
+                "commands": _command_entries(entry),
+            }
+            for entry in loaded
+        ]
+        emit_json("plugin", {"plugins": plugins})
         return
-    typer.echo(f"{len(loaded)} plugin(s) configured:")
+    typer.echo("Configured plugins:")
     for entry in loaded:
         manifest = entry.plugin.manifest
-        version = f" v{manifest.version}" if manifest.version else ""
+        version = f" (v{manifest.version})" if manifest.version else ""
         typer.echo(f"- {manifest.name}{version}")
-        for command in entry.plugin.commands or []:
-            description = (
-                f"  ({command.description})" if command.description else ""
-            )
-            typer.echo(f"    {manifest.name} {command.name}{description}")
+        commands = _command_entries(entry)
+        if not commands:
+            typer.echo("  (no commands)")
+            continue
+        for command in commands:
+            description = f": {command['description']}" if command["description"] else ""
+            typer.echo(f"  - {command['name']}{description}")
 
 
-def _list_one(entry: LoadedPlugin) -> None:
-    typer.echo(f"Plugin: {entry.plugin.manifest.name}")
-    commands = entry.plugin.commands or []
-    if not commands:
-        typer.echo("  (no commands registered)")
+def _list_one(entry: LoadedPlugin, *, json_mode: bool) -> None:
+    name = entry.plugin.manifest.name
+    commands = _command_entries(entry)
+    if json_mode:
+        emit_json("plugin", {"plugin": name, "commands": commands})
         return
+    if not commands:
+        typer.echo(f'Plugin "{name}" has no registered commands.')
+        return
+    typer.echo(f'Plugin commands for "{name}":')
     for command in commands:
-        description = f" — {command.description}" if command.description else ""
-        typer.echo(f"  {command.name}{description}")
+        description = f": {command['description']}" if command["description"] else ""
+        typer.echo(f"- {command['name']}{description}")
 
 
 def _split_positionals_and_flags(
@@ -140,6 +177,26 @@ def _extended_flag_defs(
     return extended
 
 
+def _resolve_plugin_table_scope(
+    schema: list[str], selector: str | None
+) -> TableScope:
+    """The scope of a plugin command that declares ``--table`` (TS
+    ``resolvePluginTableScope``, #565).
+
+    Without a selector the scope is unfiltered whatever the schema holds, so
+    only a selector needs the schema. A plugin command that needs the schema
+    loads it and reports its load errors itself, so a load error here leaves
+    the selector resolved against no tables. An invalid selector raises.
+    """
+    if not selector:
+        return resolve_table_scope(None, [])
+    try:
+        definitions = load_schema(schema)
+    except Exception:
+        definitions = []
+    return resolve_table_scope(selector, table_keys_from_definitions(definitions))
+
+
 def dispatch_plugin_command(  # noqa: PLR0912
     *,
     plugin_name: str,
@@ -173,6 +230,8 @@ def dispatch_plugin_command(  # noqa: PLR0912
     runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    if invoking_command == "plugin" and not runtime.plugins:
+        _fail_no_plugins(json_mode=output_json)
 
     entry = next(
         (e for e in runtime.plugins if e.plugin.manifest.name == plugin_name), None
@@ -218,6 +277,12 @@ def dispatch_plugin_command(  # noqa: PLR0912
     if output_json:
         global_flags["--json"] = True
     flags = {**global_flags, **flags}
+    # Set only when the command declares --table (#565).
+    table_selector = flags.get("--table")
+    table_scope = _resolve_plugin_table_scope(
+        config.schema_,
+        table_selector if isinstance(table_selector, str) else None,
+    )
 
     # Connect opportunistically — some plugin commands don't need a DB
     # (codegen, backfill status, ...). Mirroring TS, an unreachable
@@ -242,7 +307,7 @@ def dispatch_plugin_command(  # noqa: PLR0912
             flags=dict(flags),
             options={},
             raw_options={},
-            table_scope=TableScope(enabled=False),
+            table_scope=table_scope,
             # TS routes plugin prints through printOutput: --json emits real
             # JSON (bare strings wrapped in {schemaVersion, message}); plain
             # mode prints strings only.
@@ -298,15 +363,17 @@ def run(
             [p for p in config.plugins if isinstance(p, ChxPlugin)]
         )
         loaded = list(runtime.plugins)
+        if not loaded:
+            _fail_no_plugins(json_mode=output_json)
         if plugin_name is None:
-            _list_all(loaded)
+            _list_all(loaded, json_mode=output_json)
             return
         entry = next(
             (e for e in loaded if e.plugin.manifest.name == plugin_name), None
         )
         if entry is None:
             raise _unknown_plugin_error(plugin_name, loaded)
-        _list_one(entry)
+        _list_one(entry, json_mode=output_json)
         return
 
     dispatch_plugin_command(

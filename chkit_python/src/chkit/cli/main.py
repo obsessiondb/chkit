@@ -31,7 +31,12 @@ from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
 from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
-from chkit.core.flags import MissingFlagValueError, UnknownFlagError, expand_short_flags
+from chkit.core.flags import (
+    FlagDef,
+    MissingFlagValueError,
+    UnknownFlagError,
+    expand_short_flags,
+)
 
 _HELP_OPTION_NAMES = ("-h", "--help")
 # The top-level options, which TS reads only as the first token.
@@ -42,6 +47,15 @@ def _option_args(args: list[str]) -> list[str]:
     """The tokens before the first ``--`` (TS ``optionArgs``): after it,
     ``--json`` is an argument, not an option (#568)."""
     return args[: args.index("--")] if "--" in args else args
+
+
+# TS TABLE_FLAG: only its forms matter here, to move a leading --table (#565).
+_TABLE_FLAG: FlagDef = {
+    "name": "--table",
+    "short": "-t",
+    "type": "string",
+    "description": "Limit command scope to tables by exact name or trailing wildcard prefix",
+}
 
 
 def _option_forms(params: list[Any]) -> tuple[dict[str, bool], dict[str, str]]:
@@ -151,6 +165,9 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
 
     own: list[str] = []
     forwarded: list[str] = []
+    # A --table given before the names moves behind them, as in TS, so it is
+    # never read as a name; the plugin command accepts or rejects it (#565).
+    leading_table: list[str] = []
     i = 0
     while i < len(args):
         token = args[i]
@@ -158,6 +175,18 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         if token == "--":
             forwarded.extend(_after_dash_dash(args[i:], names - len(forwarded)))
             break
+        table_token = expand_short_flags([token], [_TABLE_FLAG])[0]
+        if len(forwarded) < names and (
+            table_token == "--table" or table_token.startswith("--table=")
+        ):
+            leading_table.append(table_token)
+            # Without a value (as parse_flags reads it), the plugin command
+            # reports the missing value and the next flag, such as --json,
+            # still counts.
+            if table_token == "--table" and i < len(args) and not args[i].startswith("--"):
+                leading_table.append(args[i])
+                i += 1
+            continue
         long_name = token.split("=", 1)[0] if token.startswith("--") else None
         short_name = token[:2] if long_name is None else None
         if token in takes_value:
@@ -178,7 +207,7 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
             own.extend([short_name, value[1:] if value.startswith("=") else value])
         else:
             forwarded.append(token)
-    return [*own, "--", *forwarded]
+    return [*own, "--", *forwarded[:names], *leading_table, *forwarded[names:]]
 
 
 # JavaScript's `\s`, so both ports split SQL from flags on the same characters.
@@ -248,9 +277,9 @@ class _ChkitCommand(TyperCommand):
         try:
             if ctx.ignore_unknown_options:
                 normalized = _split_forwarded_args(args, params)
-            elif any(token in _HELP_OPTION_NAMES for token in args):
-                # As in TS, -h / --help anywhere shows the help, even next to a
-                # flag error or where it would be a flag's value.
+            elif any(token in _HELP_OPTION_NAMES for token in _option_args(args)):
+                # As in TS, -h / --help anywhere before `--` shows the help, even
+                # next to a flag error or where it would be a flag's value.
                 normalized = ["--help"]
             else:
                 # query first moves its SQL arguments behind `--` (#584), so SQL
@@ -264,7 +293,7 @@ class _ChkitCommand(TyperCommand):
             report_flag_error(
                 ctx.info_name,
                 str(error),
-                json_mode="--json" in args,
+                json_mode="--json" in _option_args(args),
                 global_flag=ctx.ignore_unknown_options,
             )
         return super().parse_args(ctx, normalized)
@@ -317,12 +346,7 @@ class _ChkitGroup(TyperGroup):
     # typer.Context subclass would narrow the parameter (mypy [override]).
     def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
-        # A failure is JSON only with `--json` before `--`, as TS's top-level
-        # catch reads optionArgs() (#568). A usage error reads every argument,
-        # as TS's reportUsageError for a command's flags reads argv.
-        args = list(ctx.args)
-        json_mode = "--json" in (args[: args.index("--")] if "--" in args else args)
-        usage_json_mode = "--json" in args
+        json_mode = "--json" in _option_args(ctx.args)
         try:
             return super().invoke(ctx)
         except (typer.Exit, typer.Abort, BrokenPipeError):
@@ -334,7 +358,7 @@ class _ChkitGroup(TyperGroup):
                 report_flag_error(
                     ctx.invoked_subcommand,
                     error.format_message(),
-                    json_mode=usage_json_mode and not has_emitted_json(),
+                    json_mode=json_mode and not has_emitted_json(),
                 )
             if is_debug_enabled():
                 configure_cli_logging()

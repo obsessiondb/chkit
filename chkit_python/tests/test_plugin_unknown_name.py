@@ -77,13 +77,13 @@ def test_a_json_flag_after_dash_dash_is_an_argument_not_json_mode() -> None:
     assert _run("plugin", "x", "--", "--json") == (1, "", UNKNOWN_PLUGIN + "\n")
 
 
-def test_a_usage_error_with_json_after_dash_dash_still_prints_the_usage_envelope() -> None:
-    # TS reports a core command's flag error under --json read from all of
-    # argv: `status -- --json` prints a `usage` envelope.
-    exit_code, stdout, _stderr = _run("status", "--", "--json")
+def test_a_usage_error_with_json_after_dash_dash_prints_no_envelope() -> None:
+    # Since #614, TS reads --json only before `--` here too: `status -- --json`
+    # reports the stray argument on stderr, with no JSON envelope.
+    exit_code, stdout, stderr = _run("status", "--", "--json")
 
-    assert exit_code == 1
-    assert json.loads(stdout)["error"]["code"] == "usage"
+    assert (exit_code, stdout) == (1, "")
+    assert "Got unexpected extra argument(s) (--json)" in stderr
 
 
 def test_an_unknown_command_lists_the_plugin_commands_in_their_order() -> None:

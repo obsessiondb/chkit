@@ -25,11 +25,23 @@ No command-specific flags. See [global flags](/cli/overview/#global-flags).
 
 ### List all plugins
 
-With no arguments, lists every registered plugin with its name, version, and available commands.
+With no arguments, lists every plugin registered in your config (and the ObsessionDB plugin a login adds), in config order, with its name, version, and available commands. chkit's built-in commands are not plugins and are not listed. With no plugin registered, it fails with exit code 1.
+
+```
+Configured plugins:
+- codegen (v1.0.0)
+  - codegen: Generate TypeScript types
+```
 
 ### List plugin commands
 
 With a plugin name, lists the commands available for that plugin with their descriptions.
+
+```
+Plugin commands for "backfill":
+- plan: Create a backfill plan
+- run: Execute a backfill plan
+```
 
 ### Run a plugin command
 
@@ -147,6 +159,19 @@ chkit plugin backfill plan --target analytics.events --from 2025-01-01 --to 2025
     { "name": "plan", "description": "Create a backfill plan" },
     { "name": "run", "description": "Execute a backfill plan" }
   ]
+}
+```
+
+### No plugins configured
+
+Exit code 1. Text mode prints `No plugins configured. Add entries to config.plugins first.` on stderr; `--json` prints:
+
+```json
+{
+  "command": "plugin",
+  "schemaVersion": 1,
+  "error": "No plugins configured. Add entries to config.plugins first.",
+  "plugins": []
 }
 ```
 

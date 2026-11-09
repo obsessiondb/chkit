@@ -193,7 +193,7 @@ def test_create_dictionary_parser_names_trim_javascript_whitespace() -> None:
 def test_refresh_depends_on_trims_javascript_whitespace() -> None:
     refresh = parse_refresh_clause(
         "CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR "
-        "DEPENDS ON ﻿app.src\x85, ﻿other TO app.t AS SELECT 1"
+        "DEPENDS ON `﻿app`.`src\x85`, `﻿other` TO app.t AS SELECT 1"
     )
     assert refresh is not None
     assert refresh.depends_on == [
