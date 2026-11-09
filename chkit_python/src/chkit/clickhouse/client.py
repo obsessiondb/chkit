@@ -23,6 +23,7 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
 from pydantic import BaseModel, ConfigDict
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.jsnum import js_math_round
 from chkit.core.model import ChxResolvedClickHouseConfig
 
 # chkit prints its own one-line error, as TS silences @clickhouse/client's
@@ -437,10 +438,10 @@ def _safe_round_ms(value: object) -> int | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return round(float(value) * 1000)
+        return int(js_math_round(float(value) * 1000))
     if isinstance(value, str):
         try:
-            return round(float(value) * 1000)
+            return int(js_math_round(float(value) * 1000))
         except ValueError:
             return None
     return None

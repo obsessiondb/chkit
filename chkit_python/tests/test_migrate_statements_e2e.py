@@ -16,7 +16,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
-from clickhouse_connect.driver.httpclient import HttpClient
+
+# clickhouse-connect ships no py.typed marker or stubs.
+from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
 from typer.testing import CliRunner
 
 from chkit.cli.main import app
@@ -111,7 +113,7 @@ def test_on_before_apply_gets_the_fixture_statements_and_they_keep_their_meaning
     sent: list[Any] = []
     raw_request = HttpClient._raw_request
 
-    def record(self: HttpClient, data: Any, *args: Any, **kwargs: Any) -> Any:
+    def record(self: object, data: Any, *args: Any, **kwargs: Any) -> Any:
         sent.append(data)
         return raw_request(self, data, *args, **kwargs)
 

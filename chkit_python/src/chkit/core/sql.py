@@ -13,7 +13,11 @@ from chkit.core.constraint import constraint_expression, constraint_kind, render
 from chkit.core.engine import is_merge_tree_engine, supports_sort_order
 from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine, render_kafka_setting
-from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
+from chkit.core.key_clause import (
+    is_plain_column_reference,
+    key_clause_fingerprint,
+    normalize_key_columns,
+)
 from chkit.core.model import (
     ColumnDefinition,
     DictionaryAttribute,
@@ -121,6 +125,19 @@ def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str
         quote_identifier(c) if c in column_names or is_plain_column_reference(c) else c
         for c in normalize_key_columns(columns, column_names)
     )
+
+
+def key_fingerprint(definition: TableDefinition, keys: list[str] | None) -> str:
+    """A key (``order_by``, ``primary_key``, ``unique_key``) in comparison form.
+
+    Its tokens as chkit renders them, so whitespace, identifier quoting and how
+    the parts are split across entries (``['cityHash64(a', 'b)']``) carry no
+    meaning (#176, #178), while a declared column named ``a, b`` stays one name
+    rather than reading as columns ``a`` and ``b`` (#558). The planner and the
+    cutover compare keys through it, so they agree on whether a key changed.
+    """
+    column_names = {column.name for column in definition.columns}
+    return key_clause_fingerprint(render_key_clause_columns(keys or [], column_names))
 
 
 def _render_index_type(idx: SkipIndexDefinition) -> str:  # noqa: PLR0911

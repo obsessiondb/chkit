@@ -3,6 +3,7 @@ import { readFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 import { buildRegistry } from '../../registry/build.js'
+import { createIsolatedCliEnv } from '../spawn-cli.js'
 import { fixtureTracker, write, writeManifest } from './fixtures.js'
 
 const CLI_ENTRY = resolve(import.meta.dir, '../../bin/chkit.ts')
@@ -307,12 +308,13 @@ test.serial('HTTP catalogs, named pins and item URLs resolve in asynchronous CLI
 })
 
 async function runCli(cwd: string, args: string[]) {
+  const isolated = createIsolatedCliEnv()
   const child = Bun.spawn({
-    cmd: [process.execPath, CLI_ENTRY, ...args], cwd,
+    cmd: [process.execPath, CLI_ENTRY, ...args], cwd, env: isolated.env,
     stdout: 'pipe', stderr: 'pipe', stdin: 'ignore', timeout: 10_000,
   })
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
-  ])
+  ]).finally(isolated.cleanup)
   return { stdout, stderr, exitCode }
 }

@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import decimal
 import threading
-from collections.abc import Iterator
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -48,9 +47,8 @@ def _wait_for_submit(_seconds: float) -> None:
 
 
 @pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(migrate_async_apply.time, "sleep", _wait_for_submit)
-    return
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", _wait_for_submit)
 
 
 # ---------- pure helpers ----------
@@ -712,7 +710,7 @@ def test_apply_async_polls_while_the_submit_request_is_open(
 ) -> None:
     """The submit does not block: progress lines come while the load runs, as
     in TS, and the step returns once the request has closed."""
-    monkeypatch.setattr(migrate_async_apply.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
     client = _OpenSubmitClient(
         statuses=[
             QueryStatus(status="unknown"),  # initial in-flight check
@@ -749,7 +747,7 @@ def test_apply_async_query_failing_while_the_submit_is_open_raises_the_polled_er
 ) -> None:
     """The failure comes from query_log, as in TS; the submit error that
     follows it is waited for, not raised."""
-    monkeypatch.setattr(migrate_async_apply.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
     client = _OpenSubmitClient(
         statuses=[
             QueryStatus(status="unknown"),
@@ -782,7 +780,7 @@ def test_apply_async_interrupt_does_not_wait_for_the_open_submit(
         if len(sleeps) == 2:
             raise KeyboardInterrupt
 
-    monkeypatch.setattr(migrate_async_apply.time, "sleep", interrupt_on_second_sleep)
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", interrupt_on_second_sleep)
     client = _OpenSubmitClient(
         statuses=[
             QueryStatus(status="unknown"),

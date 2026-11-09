@@ -12,7 +12,6 @@ from typing import Any
 
 import pytest
 
-from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.alter_column_statement import (
     ColumnIntent,
     parse_modify_column_intent,
@@ -26,7 +25,7 @@ _FORMAT = re.compile(r"^SELECT formatQuerySingleLine\('SELECT (.*)'\) AS formatt
 
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
 
 
 @dataclass

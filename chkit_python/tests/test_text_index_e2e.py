@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import functools
 import json
 from collections.abc import Iterator
 from pathlib import Path
@@ -41,7 +42,13 @@ def _find_table(client: ClickHouseClient, database: str, name: str) -> Introspec
 def _load_pulled(definition: TableDefinition) -> TableDefinition:
     namespace: dict[str, Any] = {}
     exec(compile(render_schema_file([definition]), "schema.py", "exec"), namespace)
-    return namespace["definitions"][0]
+    pulled = namespace["definitions"][0]
+    assert isinstance(pulled, TableDefinition)
+    return pulled
+
+
+def _shape_matches(target: TableDefinition, item: IntrospectedTable | None) -> bool:
+    return item is not None and compare_table_shape(target, item) is None
 
 
 @pytest.fixture
@@ -138,15 +145,16 @@ def test_live_add_and_change_text_index(text_client: TextClient) -> None:
             plan = plan_diff([before], [after])
             assert plan.operations
             for op in plan.operations:
-                run_once_visible(lambda sql=op.sql: client.execute(sql))
+                run_once_visible(functools.partial(client.execute, op.sql))
             actual = poll_until(
                 lambda: _find_table(client, database, name),
-                lambda item, target=after: item is not None
-                and compare_table_shape(target, item) is None,
+                functools.partial(_shape_matches, after),
             )
             assert actual is not None
             assert compare_table_shape(after, actual) is None
-        assert "index_mismatch" in compare_table_shape(with_index, actual).reason_codes
+        drift = compare_table_shape(with_index, actual)
+        assert drift is not None
+        assert "index_mismatch" in drift.reason_codes
     finally:
         client.execute(f"DROP TABLE IF EXISTS {full_name} SYNC")
 
@@ -183,7 +191,7 @@ def test_tuning_newer_options_and_materializing_existing_rows(text_client: TextC
             )
         )
         for op in plan_diff([without_index], [definition]).operations:
-            run_once_visible(lambda sql=op.sql: client.execute(sql))
+            run_once_visible(functools.partial(client.execute, op.sql))
         run_once_visible(
             lambda: client.execute(
                 f"ALTER TABLE {full_name} MATERIALIZE INDEX idx SETTINGS mutations_sync = 2"
@@ -283,7 +291,9 @@ def test_quoted_null_column_round_trips_and_literal_change_migrates(
         run_once_visible(lambda: client.execute(f"INSERT INTO {full_name} VALUES (1, 'doc ', 'alpha')"))
         actual = settled(definition)
         assert compare_table_shape(definition, actual) is None
-        assert "index_mismatch" in compare_table_shape(changed, actual).reason_codes
+        drift = compare_table_shape(changed, actual)
+        assert drift is not None
+        assert "index_mismatch" in drift.reason_codes
         pulled = _load_pulled(definition.model_copy(update={"indexes": actual.indexes}))
         assert plan_diff([definition], [pulled]).operations == []
         assert poll_until(lambda: search(index.expression), lambda ids: ids == [1]) == [1]
@@ -293,7 +303,7 @@ def test_quoted_null_column_round_trips_and_literal_change_migrates(
             "alter_table_add_index",
         ]
         for op in plan.operations:
-            run_once_visible(lambda sql=op.sql: client.execute(sql))
+            run_once_visible(functools.partial(client.execute, op.sql))
         run_once_visible(
             lambda: client.execute(
                 f"ALTER TABLE {full_name} MATERIALIZE INDEX idx SETTINGS mutations_sync = 2"

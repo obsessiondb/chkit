@@ -26,6 +26,7 @@ from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import PlanOptions
 from chkit_plugin_backfill.planner import (
+    BuildBackfillPlanOutput,
     assert_backfill_target_safe,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
@@ -681,7 +682,9 @@ other = materialized_view(
 """
 
 
-def _plan_view_target(tmp_path: Path, query: PlannerQuery, schema: str = VIEW_ONLY_SCHEMA):
+def _plan_view_target(
+    tmp_path: Path, query: PlannerQuery, schema: str = VIEW_ONLY_SCHEMA
+) -> BuildBackfillPlanOutput:
     (tmp_path / "schema.py").write_text(schema, encoding="utf-8")
     return build_backfill_plan(
         opts=PlanOptions.model_validate({"target": "app.events_copy"}),
