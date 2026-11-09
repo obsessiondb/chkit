@@ -95,9 +95,8 @@ def test_trailing_comment_no_longer_swallows_the_statement_terminator() -> None:
     )
     statements = extract_executable_statements(render_migration_body(plan))
     assert len(statements) == len(plan.operations)
-    # The Python splitter keeps the leading marker line and drops the `;`.
-    assert any(st.endswith("CREATE VIEW IF NOT EXISTS app.a_first AS\nSELECT 1 AS x") for st in statements)
-    assert any(st.endswith("CREATE VIEW IF NOT EXISTS app.b_second AS\nSELECT 2 AS y") for st in statements)
+    assert "CREATE VIEW IF NOT EXISTS app.a_first AS\nSELECT 1 AS x;" in statements
+    assert "CREATE VIEW IF NOT EXISTS app.b_second AS\nSELECT 2 AS y;" in statements
 
 
 def test_commented_partition_by_and_ttl_keep_create_table_complete() -> None:

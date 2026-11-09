@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
+import fixture from '../../../test/fixtures/sql-splitter.json'
 import { extractExecutableStatements, splitSqlStatements } from './sql-splitter.js'
 
 describe('splitSqlStatements', () => {
@@ -206,4 +207,23 @@ describe('extractExecutableStatements with comment-only statements', () => {
     ].join('\n')
     expect(extractExecutableStatements(scaffold)).toEqual([])
   })
+})
+
+// test/fixtures/sql-splitter.json is shared with chkit-py
+// (tests/test_sql_splitter_parity.py): both ports must split each input into
+// the same statements, comments stripped and the `;` kept (#486).
+describe('extractExecutableStatements shared fixture', () => {
+  test('splits a migration file with markers, strings, a heredoc and comments', () => {
+    const render = (text: string): string =>
+      text.replaceAll('{database}', 'app').replaceAll('{table}', 'events')
+    expect(extractExecutableStatements(render(fixture.migration.sql))).toEqual(
+      fixture.migration.statements.map(render),
+    )
+  })
+
+  for (const { name, sql, statements } of fixture.cases) {
+    test(name, () => {
+      expect(extractExecutableStatements(sql)).toEqual(statements)
+    })
+  }
 })
