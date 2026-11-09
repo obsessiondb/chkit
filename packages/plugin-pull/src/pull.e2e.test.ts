@@ -69,7 +69,8 @@ describe('@chkit/plugin-pull live env e2e', () => {
   // Try every drop, then fail the run if any failed: a swallowed failure
   // leaked these databases on the shared ObsessionDB service (#651).
   // The executor holds one session, which runs one query at a time, so the
-  // drops go in sequence.
+  // drops go in sequence. SYNC waits for each drop to finish, which can take
+  // longer than Bun's default 5 s hook budget; past it Bun abandons the hook.
   afterAll(async () => {
     const failures: unknown[] = []
     for (const database of [targetDatabase, noiseDatabase, projectionDatabase]) {
@@ -79,7 +80,7 @@ describe('@chkit/plugin-pull live env e2e', () => {
     }
     await executor.close()
     if (failures.length > 0) throw new AggregateError(failures, 'pull e2e cleanup could not drop its databases')
-  })
+  }, 60_000)
 
   test('validates required env variables are present', () => {
     expect(() => getLiveEnv()).not.toThrow()
