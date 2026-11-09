@@ -50,10 +50,21 @@ describe('@chkit/cli -- ends a core command\'s flags (#614)', () => {
         [['migrate', ...c, '--', 'x'], 'x'],
         [['drift', ...c, '--', 'x'], 'x'],
         [['check', ...c, '--', '-z'], '-z'],
+        // Stray arguments before and after -- are reported together (#612).
+        [['status', ...c, 'foo', '--', 'bar'], 'foo bar'],
+        [['migrate', ...c, 'prod', '--', '--apply'], 'prod --apply'],
       ] as const) {
         const result = runCli([...args])
         expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([args, 1, '', extraArgs(rest)])
       }
+
+      // A --json before -- sets JSON mode for them; one after it is one of them.
+      const both = runCli(['status', ...c, 'foo', '--json', '--', 'bar'])
+      expect([both.exitCode, both.stderr.trim(), JSON.parse(both.stdout)]).toEqual([
+        1,
+        extraArgs('foo bar'),
+        { command: 'status', schemaVersion: 1, ok: false, error: { code: 'usage', message: extraArgs('foo bar') } },
+      ])
 
       // A flag never takes -- as its value, and a flag error before -- comes first.
       const missing = runCli(['generate', ...c, '--name', '--', '--dryrun'])

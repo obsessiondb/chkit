@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 
-from chkit.core.sql_lexer import iter_sql_tokens
+from chkit.core.sql_lexer import iter_sql_tokens, js_trim
 
 _QUOTE_CHARS = frozenset({"'", '"', "`"})
 
@@ -51,7 +51,7 @@ def strip_wrapping_parens(text: str) -> str:
     if not (text.startswith("(") and text.endswith(")")):
         return text
     close = find_matching_paren(text, 0)
-    return text[1:-1].strip() if close == len(text) - 1 else text
+    return js_trim(text[1:-1]) if close == len(text) - 1 else text
 
 
 def find_matching_paren(text: str, open_index: int) -> int | None:

@@ -4,7 +4,7 @@ import { relative, resolve } from 'node:path'
 import { defineFlags, typedFlags } from '@chkit/core'
 import type { ConnectChoice } from '@chkit/plugin-obsessiondb'
 
-import { parseCommandArgs } from '../runtime/command-dispatch.js'
+import { parseCommandArgs, UnexpectedArgumentsError } from '../runtime/command-dispatch.js'
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 import { ensureProjectDependencies } from '../runtime/deps.js'
 
@@ -153,7 +153,7 @@ function parseInitOptions(argv: string[]): InitOptions | null {
     return reportUsageError(`Invalid value for '--connect': '${connect}' is not one of ${choices}.`)
   }
   if (parsed.positionals.length > 0) {
-    return reportUsageError(`Got unexpected extra argument(s) (${parsed.positionals.join(' ')})`)
+    return reportUsageError(new UnexpectedArgumentsError(parsed.positionals).message)
   }
   return {
     yes: flags['--yes'] === true,

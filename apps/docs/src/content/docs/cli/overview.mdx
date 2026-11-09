@@ -65,7 +65,9 @@ The global flags and `-t`/`--table` can also come before the command: `chkit --j
 
 Both CLIs accept the same short forms: the ones in these tables, `-t` for `--table`, `generate -n`, `pull -o`/`-d`/`-f` and `init -y`. A short flag takes its value as `-t events`, `-t=events` or `-tevents`. Short flags cannot be bundled: `-fo out.ts` is an unknown flag. `-v`/`-V` work only before a command. Any other short flag, such as `-x`, is rejected as an unknown flag, the same as an unknown long flag. Before the config is loaded, chkit does not know which flags its plugins add, so a plugin flag value that starts with `-c` (`--tag -critical`) reads as `--config`, and on the commands that take `--table` one that starts with `-t` reads as `--table`; write it with `=` (`--tag=-critical`). Given more than once, `--config` keeps the last path: `-c a.ts --config b.ts` loads `b.ts`.
 
-`--` ends a command's flags: everything after it is a plain argument, even when it starts with `-`, such as `--json` or `--help`. A trailing `--` alone changes nothing. `snapshot`, `query` and plugin commands take what follows it as their arguments; `init`, `generate`, `migrate`, `status`, `drift` and `check` take no arguments, so they reject it: `chkit status -- x` fails with `Got unexpected extra argument(s) (x)` (exit code 1).
+`--` ends a command's flags: everything after it is a plain argument, even when it starts with `-`, such as `--json` or `--help`. A trailing `--` alone changes nothing. `query`, `snapshot`, `plugin` and plugin commands take their own arguments, including what follows `--`.
+
+`init`, `generate`, `migrate`, `status`, `drift` and `check` take only flags. Any other argument, before or after `--`, such as `prod` in `chkit migrate prod --apply` or `x` in `chkit status -- x`, stops the command before it runs, with `Got unexpected extra argument(s) (prod)` and exit code 1, the same as an unknown flag; under `--json` (given before `--`), the error envelope has code `usage`.
 
 ### Table scope
 
