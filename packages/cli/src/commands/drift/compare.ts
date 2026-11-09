@@ -18,6 +18,7 @@ import {
   renderKeyClauseColumns,
   splitTopLevelComma,
   sqlExpressionFingerprint,
+  isTrivia,
   unquoteIdentifiers,
   type ColumnDefinition,
   type ProjectionDefinition,
@@ -314,22 +315,27 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   }
 }
 
-// chkit renders `INDEX name (expr)`, and ClickHouse keeps those parentheses in
-// system.data_skipping_indices.expr. Strip one pair only when it encloses the
-// whole expression, so `(a) + (b)` stays intact.
-function stripEnclosingParens(value: string): string {
-  if (!value.startsWith('(') || !value.endsWith(')')) return value
-  let depth = 0
-  for (let i = 0; i < value.length; i++) {
-    if (value[i] === '(') depth++
-    else if (value[i] === ')') depth--
-    if (depth === 0 && i < value.length - 1) return value
-  }
-  return value.slice(1, -1).trim()
-}
-
+// chkit renders `INDEX name (expr)`. Stock ClickHouse drops the parentheses
+// that enclose the whole expression, ObsessionDB keeps one pair (#512), and a
+// schema may write more (`((s))`). Peel every such pair, reading the SQL with
+// the shared lexer so `(a) + (b)` and the parentheses inside a string, quoted
+// name or heredoc (`$$)$$`) stay intact.
 function indexExpressionBase(index: SkipIndexDefinition): string {
-  return stripEnclosingParens(normalizeSQLFragment(index.expression))
+  let expression = normalizeSQLFragment(index.expression)
+  for (;;) {
+    const tokens = tokenizeSQL(expression).filter((token) => !isTrivia(token))
+    const first = tokens[0]
+    const last = tokens.at(-1)
+    if (first?.text !== '(' || last?.text !== ')') return expression
+    let depth = 0
+    const encloses = tokens.every((token, i) => {
+      if (token.text === '(') depth++
+      else if (token.text === ')') depth--
+      return depth > 0 || i === tokens.length - 1
+    })
+    if (!encloses) return expression
+    expression = expression.slice(first.end, last.start).trim()
+  }
 }
 
 function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCanonicalizer): string {

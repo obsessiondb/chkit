@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { normalizeTextIndexSQL } from '@chkit/core'
+
 import { normalizeIndexFromSystemRow, parseConstraintsFromCreateTableQuery } from './index.js'
 
 function indexRow(type: string, granularity = 1) {
@@ -46,6 +48,23 @@ describe('skip index introspection', () => {
     expect(normalizeIndexFromSystemRow(indexRow(type))).toEqual({
       name: 'idx', expression: 'embedding', granularity: 1, type: 'raw', rawType: type,
     })
+  })
+
+  // ObsessionDB keeps the parentheses chkit renders (`(s)`); stock ClickHouse
+  // stores `s`. Pull writes the stock form from either server (#512).
+  test.each([
+    ['(s)', 's'],
+    ['s', 's'],
+    ['((a + b) * c)', '(a + b) * c'],
+    ['(a + b) * c', '(a + b) * c'],
+    ['(a) + (b)', '(a) + (b)'],
+    ['a, b', 'a, b'],
+    ["(s = ')(')", "s = ')('"],
+    ["(s = '(') OR (t = ')')", "(s = '(') OR (t = ')')"],
+  ])('reads the expression %s back as %s', (expr, expected) => {
+    expect(normalizeIndexFromSystemRow({ ...indexRow('minmax'), expr }).expression).toBe(expected)
+    const text = normalizeIndexFromSystemRow({ ...indexRow("text(tokenizer = 'splitByNonAlpha')"), expr })
+    expect(text.expression).toBe(normalizeTextIndexSQL(expected))
   })
 
   test('still reads the structured types', () => {

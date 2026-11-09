@@ -6,7 +6,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { applyMigration } from '../../../commands/migrate/apply.js'
+import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
 import type {
   JournalStore,
   MigrationRowState,
@@ -207,8 +207,179 @@ describe('applyMigration sync resume (#6)', () => {
     })
     rmSync(dir, { recursive: true, force: true })
 
-    expect(events).toEqual(['command', 'completed-write', 'propagation-query'])
+    // The second write clears the pending-wait marker once the wait passed (#513).
+    expect(events).toEqual(['command', 'completed-write', 'propagation-query', 'completed-write'])
+    expect(current?.operations[0]?.lastError).toBe('')
   })
+})
+
+describe('applyMigration resume after a propagation wait timeout (#513)', () => {
+  const CREATE = 'CREATE TABLE IF NOT EXISTS default.t (id UInt64) ENGINE = MergeTree ORDER BY id;'
+  const INSERT = 'INSERT INTO default.t VALUES (1);'
+  const SQL = `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n${INSERT}\n`
+
+  // A single-replica target on which default.t is listed in system.tables
+  // only while `visible` is set.
+  function propagationDb(events: string[], visible: { value: boolean }) {
+    return {
+      async command(sql: string) {
+        events.push(`command ${sql}`)
+      },
+      async query(sql: string) {
+        if (sql.includes('system.one')) return []
+        events.push('propagation-query')
+        return visible.value ? [{ x: 1 }] : []
+      },
+    } as unknown as ClickHouseExecutor
+  }
+
+  function recordingStore(events: string[]) {
+    const fake = createFakeStore()
+    const appendEntry = fake.store.appendEntry
+    fake.store.appendEntry = async (entry) => {
+      events.push('append')
+      await appendEntry(entry)
+    }
+    return fake
+  }
+
+  test('waits again for a completed statement whose wait timed out, then runs the next statement and records', async () => {
+    const dir = writeMigration(SQL)
+    const events: string[] = []
+    const visible = { value: false }
+    const { store, state, appended } = recordingStore(events)
+    const args = {
+      db: propagationDb(events, visible),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    expect(events[0]).toBe(`command ${CREATE}`)
+    expect(events.filter((event) => event.startsWith('command'))).toHaveLength(1)
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status, op.lastError])).toEqual([
+      [0, 'completed', PROPAGATION_WAIT_PENDING],
+    ])
+    expect(appended).toEqual([])
+
+    visible.value = true
+    events.length = 0
+    await applyMigration(args)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events).toEqual(['propagation-query', `command ${INSERT}`, 'append'])
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status, op.lastError])).toEqual([
+      [0, 'completed', ''],
+      [1, 'completed', ''],
+    ])
+    expect(appended).toMatchObject([{ name: 'm.sql', checksum: checksumSQL(SQL) }])
+  }, 30_000)
+
+  // --abandon keeps every record as failed, so the next run restarts at
+  // statement 1 with the abandoned record of statement 2 still in the state.
+  test('waits again after a restart from --abandon, although a later statement is recorded', async () => {
+    const dir = writeMigration(SQL)
+    const events: string[] = []
+    const visible = { value: false }
+    const abandoned = (index: number, was: string): OperationState => ({
+      ...operation(index, 'failed'),
+      lastError: `abandoned via chkit migrate --abandon (was ${was})`,
+    })
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(SQL), [
+        { ...abandoned(0, 'completed'), operationType: 'create_table', operationKey: 'table:default.t' },
+        abandoned(1, 'failed'),
+      ]),
+    )
+    const args = {
+      db: propagationDb(events, visible),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    expect(events.filter((event) => event.startsWith('command'))).toEqual([`command ${CREATE}`])
+
+    visible.value = true
+    events.length = 0
+    await applyMigration(args)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events).toEqual(['propagation-query', `command ${INSERT}`])
+    expect(appended).toHaveLength(1)
+  }, 30_000)
+
+  test('does not record the migration when the wait times out again', async () => {
+    const dir = writeMigration(SQL)
+    const events: string[] = []
+    const visible = { value: false }
+    const { store, state, writes, appended } = recordingStore(events)
+    const args = {
+      db: propagationDb(events, visible),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    const writesAfterFirstRun = writes.length
+    events.length = 0
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events.length).toBeGreaterThan(1)
+    expect(events.every((event) => event === 'propagation-query')).toBe(true)
+    expect(writes).toHaveLength(writesAfterFirstRun)
+    expect(state()?.migrationCompleted).toBe(false)
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status])).toEqual([[0, 'completed']])
+    expect(appended).toEqual([])
+  }, 60_000)
+
+  // A completed statement whose wait passed is not waited for again, even
+  // when no later statement is recorded (--retry drops the record of an
+  // edited statement). Here a DROP that ran before its acknowledgement was
+  // lost removed what the CREATE's wait looks for: that wait could never pass.
+  test('does not wait again for a completed statement whose wait passed', async () => {
+    const sql =
+      `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n` +
+      '-- operation: drop_table key=table:default.t risk=danger\nDROP TABLE IF EXISTS default.t;\n'
+    const dir = writeMigration(sql)
+    const events: string[] = []
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(sql), [
+        operation(0, 'completed', { type: 'create_table', key: 'table:default.t' }),
+      ]),
+    )
+
+    await applyMigration({
+      db: propagationDb(events, { value: false }),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events).toEqual(['command DROP TABLE IF EXISTS default.t;', 'propagation-query'])
+    expect(appended).toHaveLength(1)
+  }, 30_000)
 })
 
 describe('applyMigration backfill assertions (#274)', () => {

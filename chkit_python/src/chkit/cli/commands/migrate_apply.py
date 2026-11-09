@@ -46,7 +46,10 @@ from chkit.cli.journal_store import (
 )
 from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.plugin_runtime import PluginRuntime
-from chkit.cli.safety_markers import extract_migration_operation_summaries
+from chkit.cli.safety_markers import (
+    MigrationOperationSummary,
+    extract_migration_operation_summaries,
+)
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.async_insert_guard import assert_no_fire_and_forget_async_inserts
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
@@ -62,6 +65,14 @@ from chkit.plugins import ChxOnAfterApplyContext, ChxOnBeforeApplyContext
 
 _WHITESPACE_RE = re.compile(r"\s+")
 _CUTOVER_START_KEY = re.compile(r"^table:([^.]+)\.(.+):cutover:start$")
+
+# ``last_error`` of a completed sync statement whose DDL propagation wait has
+# not passed yet (#513, TS ``PROPAGATION_WAIT_PENDING``). A statement is
+# recorded completed before its wait, so a re-run never replays it; while this
+# marker is set, a re-run waits for it again before it runs the next statement.
+# A write after the wait passes clears it. --abandon replaces it, and --retry
+# keeps it with the record.
+PROPAGATION_WAIT_PENDING = "executed; waiting for the change to reach every replica"
 
 
 @dataclass(frozen=True, slots=True)
@@ -155,10 +166,22 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         # Sync DDL path with per-statement journaling + resume. Re-read state
         # each iteration so async ops written above (or in a prior run) are kept.
         state_before = journal_store.read_migration_state(file)
-        if _operation_is_completed(state_before, index):
-            continue
-        identity = statement_identity(operation_summaries, index)
         cluster = input_.config.clickhouse.cluster if input_.config.clickhouse else None
+        identity = statement_identity(operation_summaries, index)
+        if state_before is not None and _operation_is_completed(state_before, index):
+            if _propagation_wait_pending(state_before, index):
+                # The run that completed it stopped before its propagation
+                # wait passed (#513): wait again before the next statement runs.
+                _complete_propagation(
+                    input_,
+                    fallback_state=state_before,
+                    index=index,
+                    identity=identity,
+                    operation=operation,
+                    statement=statement,
+                    cluster=cluster,
+                )
+            continue
         prior_attempt = (
             next((op for op in state_before.operations if op.operation_index == index), None)
             if state_before is not None
@@ -233,30 +256,33 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             ) from error
         # Mark completed as soon as the statement has executed — BEFORE waiting
         # for DDL propagation, so a propagation timeout never makes a re-run
-        # replay this statement into an "already exists" error.
+        # replay this statement into an "already exists" error. Until its wait
+        # passes, the record carries PROPAGATION_WAIT_PENDING, so a re-run
+        # waits for it again before the next statement (#513).
+        waits = _has_propagation_wait(operation)
         state_after = journal_store.read_migration_state(file) or base_state
         journal_store.write_migration_state(
             upsert_operation(
                 state_after,
-                _sync_operation_state(index, identity.type, identity.key, "completed"),
+                _sync_operation_state(
+                    index,
+                    identity.type,
+                    identity.key,
+                    "completed",
+                    PROPAGATION_WAIT_PENDING if waits else "",
+                ),
                 iso_without_zone(datetime.now(tz=UTC)),
             )
         )
-        if operation is not None and operation.type == "exchange_tables":
-            # A swap that has not reached every replica stops the migration (as
-            # in TS): the cutover steps after it would read a replica that
-            # still has the old names.
-            wait_for_exchange(input_.client, statement, cluster=cluster)
-        elif operation is not None and operation.mode != "barrier":
-            # Poll system.tables / system.columns until the DDL is visible.
-            # Critical for Replicated / ObsessionDB Shared engines. A wait that
-            # times out stops the migration, as in TS.
-            wait_for_ddl_propagation(
-                input_.client,
-                operation.type,
-                operation.key,
-                cluster=cluster,
+        if waits:
+            _complete_propagation(
+                input_,
+                fallback_state=state_after,
+                index=index,
+                identity=identity,
+                operation=operation,
                 statement=statement,
+                cluster=cluster,
             )
 
     # TS ``toISOString().replace('Z', '')``: a `Z` suffix only parses with
@@ -296,6 +322,74 @@ def statement_error(
         f"  {preview_statement(statement)}\n"
         f"{clickhouse_error_message(error)}"
     )
+
+
+def _propagation_wait_pending(state: MigrationRowState, index: int) -> bool:
+    """Whether completed statement ``index`` carries PROPAGATION_WAIT_PENDING
+    (TS ``propagationWaitPending``)."""
+    return any(
+        op.operation_index == index
+        and op.status == "completed"
+        and op.last_error == PROPAGATION_WAIT_PENDING
+        for op in state.operations
+    )
+
+
+def _has_propagation_wait(operation: MigrationOperationSummary | None) -> bool:
+    return operation is not None and (
+        operation.type == "exchange_tables" or operation.mode != "barrier"
+    )
+
+
+def _complete_propagation(
+    input_: ApplyMigrationInput,
+    *,
+    fallback_state: MigrationRowState,
+    index: int,
+    identity: StatementIdentity,
+    operation: MigrationOperationSummary | None,
+    statement: str,
+    cluster: str | None,
+) -> None:
+    """Wait until a sync statement's DDL reaches every replica, then clear its
+    pending marker (TS ``completePropagation``). A resumed run calls it with
+    the same inputs as the first."""
+    _wait_for_propagation(input_.client, operation, statement, cluster)
+    state = input_.journal_store.read_migration_state(input_.file) or fallback_state
+    input_.journal_store.write_migration_state(
+        upsert_operation(
+            state,
+            _sync_operation_state(index, identity.type, identity.key, "completed"),
+            iso_without_zone(datetime.now(tz=UTC)),
+        )
+    )
+
+
+def _wait_for_propagation(
+    client: ClickHouseClient,
+    operation: MigrationOperationSummary | None,
+    statement: str,
+    cluster: str | None,
+) -> None:
+    """Wait until a sync statement's DDL reaches every replica. A wait that
+    times out stops the migration, as in TS."""
+    if operation is None:
+        return
+    if operation.type == "exchange_tables":
+        # A swap that has not reached every replica stops the migration (as
+        # in TS): the cutover steps after it would read a replica that
+        # still has the old names.
+        wait_for_exchange(client, statement, cluster=cluster)
+    elif operation.mode != "barrier":
+        # Poll system.tables / system.columns until the DDL is visible.
+        # Critical for Replicated / ObsessionDB Shared engines.
+        wait_for_ddl_propagation(
+            client,
+            operation.type,
+            operation.key,
+            cluster=cluster,
+            statement=statement,
+        )
 
 
 def _swapped_tables(

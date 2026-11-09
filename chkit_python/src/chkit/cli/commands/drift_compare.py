@@ -44,7 +44,13 @@ from chkit.core.sql import (
     column_type_fingerprint,
     render_key_clause_columns,
 )
-from chkit.core.sql_lexer import JS_WHITESPACE_RUN, identifier_name, js_trim, tokenize_sql
+from chkit.core.sql_lexer import (
+    JS_WHITESPACE_RUN,
+    identifier_name,
+    is_trivia,
+    js_trim,
+    tokenize_sql,
+)
 from chkit.core.sql_normalizer import (
     is_synthetic_ephemeral_default,
     normalize_engine,
@@ -376,27 +382,29 @@ def _render_index_type_fingerprint(index: SkipIndexDefinition) -> str:  # noqa: 
     )
 
 
-def _strip_enclosing_parens(value: str) -> str:
-    """Drop one pair of parentheses only when it encloses the whole value.
-
-    chkit renders ``INDEX name (expr)`` and ClickHouse keeps those parentheses
-    in ``system.data_skipping_indices.expr``; ``(a) || (b)`` stays as written.
-    """
-    if not (value.startswith("(") and value.endswith(")")):
-        return value
-    depth = 0
-    for i, ch in enumerate(value):
-        if ch == "(":
-            depth += 1
-        elif ch == ")":
-            depth -= 1
-        if depth == 0 and i < len(value) - 1:
-            return value
-    return value[1:-1].strip()
-
-
 def _index_expression_base(index: SkipIndexDefinition) -> str:
-    return _strip_enclosing_parens(normalize_sql_fragment(index.expression))
+    """The index expression without the parentheses that enclose all of it.
+
+    chkit renders ``INDEX name (expr)``. Stock ClickHouse drops those
+    parentheses, ObsessionDB keeps one pair (#512), and a schema may write more
+    (``((s))``). Every such pair is peeled, reading the SQL with the shared
+    lexer so ``(a) + (b)`` and the parentheses inside a string, quoted name or
+    heredoc (``$$)$$``) stay intact.
+    """
+    expression = normalize_sql_fragment(index.expression)
+    while True:
+        tokens = [token for token in tokenize_sql(expression) if not is_trivia(token)]
+        if not tokens or tokens[0].text != "(" or tokens[-1].text != ")":
+            return expression
+        depth = 0
+        for i, token in enumerate(tokens):
+            if token.text == "(":
+                depth += 1
+            elif token.text == ")":
+                depth -= 1
+            if depth == 0 and i < len(tokens) - 1:
+                return expression
+        expression = js_trim(expression[tokens[0].end : tokens[-1].start])
 
 
 def _normalize_index_shape(

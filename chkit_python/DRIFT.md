@@ -1898,3 +1898,16 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   explicitly, because `clickhouse-connect`'s own defaults are 8443/8123.
 - `resolveConfig` / `resolve_config` default `secure` to the scheme and reject an
   explicit `secure` that contradicts it with the same message.
+
+### Executable statements match TS (#486)
+- No divergence left. `extract_executable_statements` is a 1:1 port of TS
+  `extractExecutableStatements`: `--` comments are stripped and every statement keeps its
+  `;`, so plugins, the failed-statement preview, the destructive-SQL scan and the journal
+  see the same statements as in TS. This replaces the "strips `;` for clickhouse-connect"
+  convention under #R3 and the "Python keeps the `-- operation:` marker lines" note under
+  #202: `parse_exchange_tables` no longer skips leading comment lines, and the
+  safety-marker scan no longer strips comments itself.
+- The trailing `;` is not a clickhouse-connect limit: `command()` and `query()` drop it
+  (`bind_query` calls `rstrip(";")`) before sending, as
+  `@clickhouse/client` does (`removeTrailingSemi`). Both CLIs send the same SQL.
+- `test/fixtures/sql-splitter.json` holds the cases both suites check.
