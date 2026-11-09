@@ -34,10 +34,6 @@ export interface MigrationOperationSummary {
   summary: string
 }
 
-export function migrationContainsDangerOperation(sql: string): boolean {
-  return extractDestructiveOperationSummaries(sql).length > 0
-}
-
 function extractDestructiveOperationSummaries(sql: string): string[] {
   return sql
     .split('\n')
