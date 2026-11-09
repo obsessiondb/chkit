@@ -1,22 +1,19 @@
-import { isTrivia, readHeredoc, tokenizeSQL, type SQLToken } from './sql-lexer.js'
+import { isTrivia, tokenizeSQL, type SQLToken } from './sql-lexer.js'
 
 export function splitSqlStatements(sql: string): string[] {
   const statements: string[] = []
   let current = ''
-  let inLineComment = false
+  const lexed = lexedEnds(sql)
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
 
-    const end = quotedEnd(sql, i, inLineComment)
+    const end = quotedEnd(sql, i, lexed)
     if (end !== undefined) {
-      const quoted = sql.slice(i, end)
-      current += quoted
-      if (quoted.includes('\n')) inLineComment = false
+      current += sql.slice(i, end)
       i = end - 1
       continue
     }
-    inLineComment = ch !== '\n' && (inLineComment || startsLineComment(sql, i))
 
     if (ch === ';') {
       const trimmed = current.trim()
@@ -38,7 +35,7 @@ export function extractExecutableStatements(sql: string): string[] {
   // We can't use a naive line-based filter because `--` inside string
   // literals must be preserved.
   let stripped = ''
-  let inLineComment = false
+  const lexed = lexedEnds(sql)
 
   for (let i = 0; i < sql.length; i += 1) {
     const ch = sql[i] ?? ''
@@ -52,16 +49,13 @@ export function extractExecutableStatements(sql: string): string[] {
       continue
     }
 
-    const end = quotedEnd(sql, i, inLineComment)
+    const end = quotedEnd(sql, i, lexed)
     if (end !== undefined) {
-      const quoted = sql.slice(i, end)
-      stripped += quoted
-      if (quoted.includes('\n')) inLineComment = false
+      stripped += sql.slice(i, end)
       i = end - 1
       continue
     }
 
-    inLineComment = ch !== '\n' && (inLineComment || startsLineComment(sql, i))
     stripped += ch
   }
 
@@ -78,52 +72,42 @@ export function extractExecutableStatements(sql: string): string[] {
   return executable
 }
 
-const NAME_CHAR = /[A-Za-z0-9_$]/
-
-// `//x`, `# x` and `#!x` start a line comment, as in ClickHouse (`#x` does not).
-// The splitter does not skip these comments (#197), but a `$` inside one starts
-// no heredoc: a heredoc there would swallow the statements after the comment.
-function startsLineComment(sql: string, i: number): boolean {
-  const ch = sql[i]
-  const next = sql[i + 1]
-  return (ch === '/' && next === '/') || (ch === '#' && (next === ' ' || next === '!'))
+// Where the ClickHouse lexer reads a heredoc, a block comment (they nest) or a
+// backtick-quoted name (with backslash escapes), the offset of its first
+// character maps to its end. The scanner takes these ends only where it is at
+// such a token itself; inside a `//` or `#` comment, which it does not know
+// (#197), it keeps its own reading, so statements end where they always did.
+function lexedEnds(sql: string): Map<number, number> {
+  const ends = new Map<number, number>()
+  for (const token of tokenizeSQL(sql)) {
+    const first = token.text[0]
+    if (
+      token.kind === 'block_comment' ||
+      (token.kind === 'string' && first === '$') ||
+      (token.kind === 'quoted_identifier' && first === '`')
+    ) {
+      ends.set(token.start, token.end)
+    }
+  }
+  return ends
 }
 
 // The end of the string, quoted identifier, block comment or heredoc that
 // starts at `i`, or undefined when none starts there: a `;` or `--` inside one
-// is text. An unclosed quote or block comment runs to the end of the input; an
-// unclosed `$tag$` is not a heredoc, as in ClickHouse.
-function quotedEnd(sql: string, i: number, inLineComment: boolean): number | undefined {
+// is text. An unclosed quote or block comment runs to the end of the input.
+function quotedEnd(sql: string, i: number, lexed: Map<number, number>): number | undefined {
   const ch = sql[i] ?? ''
-  if (ch === '/' && sql[i + 1] === '*') {
-    if (!inLineComment) return blockCommentEnd(sql, i)
-    // As before nesting: a `/*` inside a line comment ends at the first `*/`.
-    const close = sql.indexOf('*/', i + 2)
-    return close === -1 ? sql.length : close + 2
-  }
-  if (ch === "'" || ch === '"' || ch === '`') return quoteEnd(sql, i, ch)
-  // `a$$b` is one name: a heredoc starts only where a name does not go on.
-  if (ch === '$' && !inLineComment && !NAME_CHAR.test(sql[i - 1] ?? '')) return readHeredoc(sql, i)
+  if (ch === '/' && sql[i + 1] === '*') return lexed.get(i) ?? closeEnd(sql, i + 2, '*/')
+  if (ch === '`') return lexed.get(i) ?? closeEnd(sql, i + 1, '`')
+  if (ch === "'" || ch === '"') return quoteEnd(sql, i, ch)
+  // Only a heredoc ClickHouse reads: an unclosed `$tag$`, or a `$` inside a name.
+  if (ch === '$') return lexed.get(i)
   return undefined
 }
 
-// ClickHouse block comments nest: `/* a /* b */ c */` is one comment.
-function blockCommentEnd(sql: string, i: number): number {
-  let depth = 0
-  let j = i
-  while (j < sql.length) {
-    if (sql.startsWith('/*', j)) {
-      depth += 1
-      j += 2
-    } else if (sql.startsWith('*/', j)) {
-      depth -= 1
-      j += 2
-      if (depth === 0) return j
-    } else {
-      j += 1
-    }
-  }
-  return sql.length
+function closeEnd(sql: string, from: number, close: string): number {
+  const at = sql.indexOf(close, from)
+  return at === -1 ? sql.length : at + close.length
 }
 
 // A backslash escapes the next character. A doubled quote ends one quoted part

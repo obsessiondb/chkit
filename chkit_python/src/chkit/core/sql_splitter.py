@@ -8,37 +8,28 @@ check.
 
 from __future__ import annotations
 
-import re
-
-from chkit.core.sql_lexer import SQLToken, is_trivia, js_trim, read_heredoc, tokenize_sql
-
-_NAME_CHAR = re.compile(r"[A-Za-z0-9_$]")
+from chkit.core.sql_lexer import SQLToken, is_trivia, js_trim, tokenize_sql
 
 
 def split_sql_statements(text: str) -> list[str]:
     """Split a SQL blob into statements, each ending in ``;``.
 
-    A ``;`` inside a string, a quoted identifier, a nested ``/* */`` comment
-    or a ``$tag$`` heredoc does not end a statement; a ``$`` inside a ``//``,
-    ``# `` or ``#!`` comment starts no heredoc. ``--`` comments are not
+    A ``;`` inside a string, a quoted identifier, a block comment or a
+    ``$tag$`` heredoc does not end a statement. ``--`` comments are not
     special here: `extract_executable_statements` strips them first.
     """
     statements: list[str] = []
     current: list[str] = []
-    in_line_comment = False
+    lexed = _lexed_ends(text)
     i = 0
     n = len(text)
     while i < n:
         ch = text[i]
-        end = _quoted_end(text, i, in_line_comment=in_line_comment)
+        end = _quoted_end(text, i, lexed)
         if end is not None:
-            quoted = text[i:end]
-            current.append(quoted)
-            if "\n" in quoted:
-                in_line_comment = False
+            current.append(text[i:end])
             i = end
             continue
-        in_line_comment = ch != "\n" and (in_line_comment or _starts_line_comment(text, i))
         if ch == ";":
             trimmed = js_trim("".join(current))
             if trimmed:
@@ -68,7 +59,7 @@ def extract_executable_statements(text: str) -> list[str]:
     the ``;``.
     """
     stripped: list[str] = []
-    in_line_comment = False
+    lexed = _lexed_ends(text)
     i = 0
     n = len(text)
     while i < n:
@@ -80,15 +71,11 @@ def extract_executable_statements(text: str) -> list[str]:
                 break
             i = newline
             continue
-        end = _quoted_end(text, i, in_line_comment=in_line_comment)
+        end = _quoted_end(text, i, lexed)
         if end is not None:
-            quoted = text[i:end]
-            stripped.append(quoted)
-            if "\n" in quoted:
-                in_line_comment = False
+            stripped.append(text[i:end])
             i = end
             continue
-        in_line_comment = ch != "\n" and (in_line_comment or _starts_line_comment(text, i))
         stripped.append(ch)
         i += 1
 
@@ -102,53 +89,49 @@ def extract_executable_statements(text: str) -> list[str]:
     return executable
 
 
-def _starts_line_comment(text: str, i: int) -> bool:
-    """``//x``, ``# x`` and ``#!x`` start a line comment, as in ClickHouse (``#x``
-    does not). The splitter does not skip these comments (#197), but a ``$``
-    inside one starts no heredoc: a heredoc there would swallow the statements
-    after the comment."""
-    return text.startswith(("//", "# ", "#!"), i)
+def _lexed_ends(text: str) -> dict[int, int]:
+    """Where the ClickHouse lexer reads a heredoc, a block comment (they nest)
+    or a backtick-quoted name (with backslash escapes), the offset of its first
+    character maps to its end.
+
+    The scanner takes these ends only where it is at such a token itself;
+    inside a ``//`` or ``#`` comment, which it does not know (#197), it keeps
+    its own reading, so statements end where they always did.
+    """
+    ends: dict[int, int] = {}
+    for token in tokenize_sql(text):
+        first = token.text[:1]
+        if (
+            token.kind == "block_comment"
+            or (token.kind == "string" and first == "$")
+            or (token.kind == "quoted_identifier" and first == "`")
+        ):
+            ends[token.start] = token.end
+    return ends
 
 
-def _quoted_end(text: str, i: int, *, in_line_comment: bool) -> int | None:
+def _quoted_end(text: str, i: int, lexed: dict[int, int]) -> int | None:
     """The end of the string, quoted identifier, block comment or heredoc that
     starts at ``i``, or None when none starts there.
 
-    An unclosed quote or block comment runs to the end of the input; an
-    unclosed ``$tag$`` is not a heredoc, as in ClickHouse.
+    An unclosed quote or block comment runs to the end of the input.
     """
     ch = text[i]
     if text.startswith("/*", i):
-        if not in_line_comment:
-            return _block_comment_end(text, i)
-        # As before nesting: a `/*` inside a line comment ends at the first `*/`.
-        close = text.find("*/", i + 2)
-        return len(text) if close == -1 else close + 2
-    if ch in ("'", '"', "`"):
+        return lexed.get(i, _close_end(text, i + 2, "*/"))
+    if ch == "`":
+        return lexed.get(i, _close_end(text, i + 1, "`"))
+    if ch in ("'", '"'):
         return _quote_end(text, i, ch)
-    # `a$$b` is one name: a heredoc starts only where a name does not go on.
-    if ch == "$" and not in_line_comment and not (i > 0 and _NAME_CHAR.match(text[i - 1])):
-        return read_heredoc(text, i)
+    # Only a heredoc ClickHouse reads: an unclosed `$tag$`, or a `$` inside a name.
+    if ch == "$":
+        return lexed.get(i)
     return None
 
 
-def _block_comment_end(text: str, i: int) -> int:
-    """ClickHouse block comments nest: ``/* a /* b */ c */`` is one comment."""
-    depth = 0
-    j = i
-    n = len(text)
-    while j < n:
-        if text.startswith("/*", j):
-            depth += 1
-            j += 2
-        elif text.startswith("*/", j):
-            depth -= 1
-            j += 2
-            if depth == 0:
-                return j
-        else:
-            j += 1
-    return n
+def _close_end(text: str, start: int, close: str) -> int:
+    at = text.find(close, start)
+    return len(text) if at == -1 else at + len(close)
 
 
 def _quote_end(text: str, i: int, quote: str) -> int:

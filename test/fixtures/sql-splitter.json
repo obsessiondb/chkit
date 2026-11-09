@@ -162,6 +162,14 @@
       ]
     },
     {
+      "name": "block comment markers across // comment lines end where they did before",
+      "sql": "// /*\n// */ /* /* */\nSELECT 1; SELECT 2;",
+      "statements": [
+        "// /*\n// */ /* /* */\nSELECT 1;",
+        "SELECT 2;"
+      ]
+    },
+    {
       "name": "a statement made only of comments is dropped",
       "sql": "SELECT 1;\n-- only a comment\n;\n/* and a block */\n",
       "statements": [
