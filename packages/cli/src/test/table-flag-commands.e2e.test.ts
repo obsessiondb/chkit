@@ -148,6 +148,38 @@ describe('@chkit/cli --table only where it scopes the command (#565)', () => {
     }
   }, 60_000)
 
+  test('a plugin command resolves its --table selector against the schema (#626)', async () => {
+    const fixture = await createArchiveFixture()
+    try {
+      const config = ['--config', fixture.configPath]
+      for (const command of [['archive', 'backup'], ['plugin', 'archive', 'backup']]) {
+        for (const [selector, expected] of [
+          ['app.e*', 'backup app.e* app.events'],
+          ['u*', 'backup u* app.users'],
+          ['missing', 'backup missing'],
+        ] as const) {
+          const result = runCli([...command, '--table', selector, ...config], fixture.dir)
+          expect([command, result.exitCode, result.stdout.trim(), result.stderr]).toEqual([command, 0, expected, ''])
+        }
+
+        const message = 'Invalid --table selector "a*b". "*" is only allowed as a trailing suffix (for example, events_*).'
+        const invalid = runCli([...command, '--table', 'a*b', ...config], fixture.dir)
+        expect([command, invalid.exitCode, invalid.stdout, invalid.stderr.trim()]).toEqual([command, 1, '', message])
+
+        const invalidJson = runCli([...command, '--table', 'a*b', '--json', ...config], fixture.dir)
+        expect(invalidJson.exitCode).toBe(1)
+        expect(JSON.parse(invalidJson.stdout)).toEqual({
+          command: command[0],
+          schemaVersion: 1,
+          ok: false,
+          error: { code: 'error', message },
+        })
+      }
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
   test('query does not read --table as a flag', async () => {
     const fixture = await createPluginFixture()
     try {

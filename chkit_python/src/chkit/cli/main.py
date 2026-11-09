@@ -29,9 +29,21 @@ from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
 from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
-from chkit.core.flags import MissingFlagValueError, UnknownFlagError
+from chkit.core.flags import (
+    FlagDef,
+    MissingFlagValueError,
+    UnknownFlagError,
+    expand_short_flags,
+)
 
 _HELP_OPTION_NAMES = ("-h", "--help")
+# TS TABLE_FLAG: only its forms matter here, to move a leading --table (#565).
+_TABLE_FLAG: FlagDef = {
+    "name": "--table",
+    "short": "-t",
+    "type": "string",
+    "description": "Limit command scope to tables by exact name or trailing wildcard prefix",
+}
 
 
 def _option_forms(params: list[Any]) -> tuple[dict[str, bool], dict[str, str]]:
@@ -151,6 +163,9 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
 
     own: list[str] = []
     forwarded: list[str] = []
+    # A --table given before the names moves behind them, as in TS, so it is
+    # never read as a name; the plugin command accepts or rejects it (#565).
+    leading_table: list[str] = []
     i = 0
     while i < len(args):
         token = args[i]
@@ -158,6 +173,18 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         if token == "--":
             forwarded.extend(_after_dash_dash(args[i:], names - len(forwarded)))
             break
+        table_token = expand_short_flags([token], [_TABLE_FLAG])[0]
+        if len(forwarded) < names and (
+            table_token == "--table" or table_token.startswith("--table=")
+        ):
+            leading_table.append(table_token)
+            # Without a value (as parse_flags reads it), the plugin command
+            # reports the missing value and the next flag, such as --json,
+            # still counts.
+            if table_token == "--table" and i < len(args) and not args[i].startswith("--"):
+                leading_table.append(args[i])
+                i += 1
+            continue
         long_name = token.split("=", 1)[0] if token.startswith("--") else None
         short_name = token[:2] if long_name is None else None
         if token in takes_value:
@@ -175,7 +202,7 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
             own.extend([short_name, value[1:] if value.startswith("=") else value])
         else:
             forwarded.append(token)
-    return [*own, "--", *forwarded]
+    return [*own, "--", *forwarded[:names], *leading_table, *forwarded[names:]]
 
 
 # JavaScript's `\s`, so both ports split SQL from flags on the same characters.

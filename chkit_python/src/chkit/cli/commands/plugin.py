@@ -24,7 +24,12 @@ from chkit.cli.plugin_runtime import (
     make_plugin_context,
     null_plugin_context,
 )
-from chkit.cli.table_scope import TableScope
+from chkit.cli.schema_loader import load_schema
+from chkit.cli.table_scope import (
+    TableScope,
+    resolve_table_scope,
+    table_keys_from_definitions,
+)
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.flags import (
     FlagDef,
@@ -126,6 +131,26 @@ def _extended_flag_defs(
     return extended
 
 
+def _resolve_plugin_table_scope(
+    schema: list[str], selector: str | None
+) -> TableScope:
+    """The scope of a plugin command that declares ``--table`` (TS
+    ``resolvePluginTableScope``, #565).
+
+    Without a selector the scope is unfiltered whatever the schema holds, so
+    only a selector needs the schema. A plugin command that needs the schema
+    loads it and reports its load errors itself, so a load error here leaves
+    the selector resolved against no tables. An invalid selector raises.
+    """
+    if not selector:
+        return resolve_table_scope(None, [])
+    try:
+        definitions = load_schema(schema)
+    except Exception:
+        definitions = []
+    return resolve_table_scope(selector, table_keys_from_definitions(definitions))
+
+
 def dispatch_plugin_command(
     *,
     plugin_name: str,
@@ -179,6 +204,12 @@ def dispatch_plugin_command(
         report_flag_error(invoking_command, str(error), json_mode=output_json)
     if extra_flags:
         flags.update(extra_flags)
+    # Set only when the command declares --table (#565).
+    table_selector = flags.get("--table")
+    table_scope = _resolve_plugin_table_scope(
+        config.schema_,
+        table_selector if isinstance(table_selector, str) else None,
+    )
 
     # Connect opportunistically — some plugin commands don't need a DB
     # (codegen, backfill status, ...). Mirroring TS, an unreachable
@@ -203,7 +234,7 @@ def dispatch_plugin_command(
             flags=dict(flags),
             options={},
             raw_options={},
-            table_scope=TableScope(enabled=False),
+            table_scope=table_scope,
             # TS routes plugin prints through printOutput: --json emits real
             # JSON (bare strings wrapped in {schemaVersion, message}); plain
             # mode prints strings only.
