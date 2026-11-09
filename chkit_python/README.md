@@ -117,7 +117,7 @@ cd chkit
 bun run infra:up    # local ClickHouse test stack (Docker)
 cd chkit_python
 uv run --locked --extra dev pytest
-uv run --locked --extra dev mypy src
+uv run --locked --extra dev mypy src tests tests_cluster tests_workbench_api
 uv run --locked --extra dev ruff check src tests tests_cluster tests_workbench_api
 bash scripts/build.sh   # sdist + wheel, twine check, wheel smoke test
 ```

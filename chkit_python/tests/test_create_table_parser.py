@@ -217,6 +217,7 @@ def test_projection_with_nested_parens() -> None:
     projections = parse_projections_from_create_table_query(ddl)
     assert len(projections) == 1
     assert projections[0].name == "nested"
+    assert projections[0].query is not None
     assert "WHERE id IN (1, 2, 3)" in projections[0].query
 
 
