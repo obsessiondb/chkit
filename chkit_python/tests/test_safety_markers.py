@@ -256,6 +256,7 @@ def test_unmarked_key_extracts_db_table() -> None:
         "WITH (SELECT 1) AS x SELECT x",
         "(WITH 1 AS x SELECT x);",
         "WITH 1 AS x SELECT `insert` FROM t",
+        "SELECT * FROM (SELECT 1 AS insert, 2 AS parallel)",
     ],
 )
 def test_is_select_statement(statement: str) -> None:
@@ -270,6 +271,10 @@ def test_is_select_statement(statement: str) -> None:
         "INSERT INTO default.t SELECT 1;",
         "WITH 1 AS x INSERT INTO default.t SELECT x;",
         "with 1 as x insert into default.t values (1);",
+        "(WITH 1 AS x INSERT INTO default.t SELECT x)",
+        "SELECT 1 PARALLEL WITH CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;",
+        "(SELECT 1) parallel /* c */ with DROP TABLE default.t",
+        "WITH 1 AS x SELECT x PARALLEL WITH DROP TABLE default.t",
         "`SELECT` 1",
         "'SELECT'",
         "EXPLAIN SELECT 1",

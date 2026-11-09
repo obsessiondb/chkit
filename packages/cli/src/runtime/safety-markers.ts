@@ -131,24 +131,29 @@ export function findNonSelectBarriers(sql: string): NonSelectBarrier[] {
 
 /**
  * A SELECT, possibly in parentheses, or a `WITH ... SELECT`. ClickHouse also
- * reads `WITH ... INSERT INTO`, so a WITH statement with an INSERT outside
- * parentheses is not one; a column or alias named `insert` there has to be
- * quoted.
+ * reads `WITH ... INSERT INTO`, and runs the statements joined by `PARALLEL
+ * WITH` even when it then rejects a SELECT among them, so an `INSERT` or a
+ * `PARALLEL WITH` outside a subquery makes it something else. A column or
+ * alias named `insert` or `parallel` there has to be quoted.
  */
 export function isSelectStatement(statement: string): boolean {
   const tokens = tokenizeSQL(statement).filter((token) => !isTrivia(token))
   let start = 0
   while (isPunctuation(tokens[start], '(')) start++
   const first = keyword(tokens[start])
-  if (first === 'SELECT') return true
-  if (first !== 'WITH') return false
+  if (first !== 'SELECT' && first !== 'WITH') return false
   let depth = 0
-  for (const token of tokens.slice(start)) {
+  for (const [index, token] of tokens.entries()) {
     if (isPunctuation(token, '(')) depth++
     else if (isPunctuation(token, ')')) depth--
-    else if (depth === 0 && keyword(token) === 'INSERT') return false
+    else if (depth <= start && isOtherStatementKeyword(token, tokens[index + 1])) return false
   }
   return true
+}
+
+function isOtherStatementKeyword(token: SQLToken, next: SQLToken | undefined): boolean {
+  const word = keyword(token)
+  return word === 'INSERT' || (word === 'PARALLEL' && keyword(next) === 'WITH')
 }
 
 function isPunctuation(token: SQLToken | undefined, text: string): boolean {

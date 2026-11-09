@@ -233,28 +233,37 @@ def find_non_select_barriers(sql: str) -> list[NonSelectBarrier]:
 def is_select_statement(statement: str) -> bool:
     """A SELECT, possibly in parentheses, or a ``WITH ... SELECT``.
 
-    ClickHouse also reads ``WITH ... INSERT INTO``, so a WITH statement with an
-    INSERT outside parentheses is not one; a column or alias named ``insert``
-    there has to be quoted.
+    ClickHouse also reads ``WITH ... INSERT INTO``, and runs the statements
+    joined by ``PARALLEL WITH`` even when it then rejects a SELECT among them,
+    so an ``INSERT`` or a ``PARALLEL WITH`` outside a subquery makes it
+    something else. A column or alias named ``insert`` or ``parallel`` there
+    has to be quoted.
     """
     tokens = [token for token in tokenize_sql(statement) if not is_trivia(token)]
     start = 0
     while start < len(tokens) and _is_punctuation(tokens[start], "("):
         start += 1
     first = _keyword(tokens[start]) if start < len(tokens) else None
-    if first == "SELECT":
-        return True
-    if first != "WITH":
+    if first not in ("SELECT", "WITH"):
         return False
     depth = 0
-    for token in tokens[start:]:
+    for index, token in enumerate(tokens):
         if _is_punctuation(token, "("):
             depth += 1
         elif _is_punctuation(token, ")"):
             depth -= 1
-        elif depth == 0 and _keyword(token) == "INSERT":
+        elif depth <= start and _is_other_statement_keyword(
+            token, tokens[index + 1] if index + 1 < len(tokens) else None
+        ):
             return False
     return True
+
+
+def _is_other_statement_keyword(token: SQLToken, following: SQLToken | None) -> bool:
+    word = _keyword(token)
+    return word == "INSERT" or (
+        word == "PARALLEL" and following is not None and _keyword(following) == "WITH"
+    )
 
 
 def _is_punctuation(token: SQLToken, text: str) -> bool:
