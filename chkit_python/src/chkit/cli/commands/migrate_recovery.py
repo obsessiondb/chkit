@@ -304,8 +304,10 @@ def rebase_in_progress_state(
 
 def split_changed_statements(
     operations: Sequence[OperationState],
-    legacy_statements: Sequence[str],
-    statements: Sequence[str],
+    *,
+    legacy: Sequence[str],
+    current: Sequence[str],
+    positions_kept: bool,
 ) -> list[int]:
     """The statements (1-based) of an in-progress state that completed or
     started at a position where the split before #562 and the current split of
@@ -313,7 +315,15 @@ def split_changed_statements(
 
     A state recorded with the old split would resume at the wrong statements
     there: skip one that never ran, or run one again.
+
+    The journal indexes the statements ``on_before_apply`` returns. When the
+    plugins returned as many statements as they got, those keep the positions
+    of the split; when they added or removed some, the positions cannot be
+    matched, so every recorded statement counts as changed once the two splits
+    differ.
     """
+    if list(legacy) == list(current):
+        return []
 
     def at(items: Sequence[str], index: int) -> str | None:
         return items[index] if 0 <= index < len(items) else None
@@ -322,7 +332,10 @@ def split_changed_statements(
         op.operation_index + 1
         for op in operations
         if op.status in {"completed", "started"}
-        and at(legacy_statements, op.operation_index) != at(statements, op.operation_index)
+        and (
+            not positions_kept
+            or at(legacy, op.operation_index) != at(current, op.operation_index)
+        )
     )
 
 

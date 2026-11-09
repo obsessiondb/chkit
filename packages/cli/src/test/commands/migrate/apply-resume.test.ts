@@ -897,6 +897,31 @@ describe('applyMigration with a state another release split differently (#562)',
     expect(appended).toHaveLength(1)
   })
 
+  // The journal indexes the statements onBeforeApply returns: once a plugin
+  // removes one, the old and new positions cannot be matched.
+  test('refuses when onBeforeApply removed statements of a file the two splits differ on', async () => {
+    const sql = `SET allow_experimental_x = 1;\n${SPLIT_SQL}`
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(inProgressState(checksumSQL(sql), [operation(0, 'completed')]))
+
+    const attempt = applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime((statements) => statements.filter((s) => !s.startsWith('SET '))),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow('The journal recorded statement 1 as completed or started, which is not')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
   test('runs an abandoned state from statement 1', async () => {
     const dir = writeMigration(SPLIT_SQL)
     const { db, commandCalls } = recordingDb()

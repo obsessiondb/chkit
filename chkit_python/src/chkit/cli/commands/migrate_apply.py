@@ -139,8 +139,9 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
     ):
         changed = split_changed_statements(
             initial_state.operations,
-            extract_legacy_executable_statements(sql),
-            parsed_statements,
+            legacy=extract_legacy_executable_statements(sql),
+            current=parsed_statements,
+            positions_kept=len(statements) == len(parsed_statements),
         )
         if changed:
             raise statement_split_changed_error(

@@ -1577,3 +1577,21 @@ def test_apply_runs_an_abandoned_state_from_statement_1(tmp_path: Path) -> None:
         "ALTER TABLE t ADD COLUMN c UInt64;",
     ]
     assert len(store.appended) == 1
+
+
+def test_apply_refuses_when_on_before_apply_removed_statements_of_a_file_the_splits_differ_on(
+    tmp_path: Path,
+) -> None:
+    """The journal indexes the statements on_before_apply returns: once a
+    plugin removes one, the old and new positions cannot be matched."""
+    sql = f"SET allow_experimental_x = 1;\n{SPLIT_SQL}"
+    client = _RecordingClient()
+    store = FakeStore(state=in_progress([op(0, "completed")], checksum=checksum_sql(sql)))
+    runtime = _FakeRuntime(lambda statements: [s for s in statements if not s.startswith("SET ")])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert "The journal recorded statement 1 as completed or started, which is not" in str(
+        info.value
+    )
+    assert client.calls == []

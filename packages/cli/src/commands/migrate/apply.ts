@@ -200,11 +200,11 @@ export async function applyMigration(input: {
     !initialState.migrationCompleted &&
     initialState.chkitVersion !== CLI_VERSION
   ) {
-    const changed = splitChangedStatements(
-      initialState.operations,
-      extractLegacyExecutableStatements(sql),
-      parsedStatements,
-    )
+    const changed = splitChangedStatements(initialState.operations, {
+      legacy: extractLegacyExecutableStatements(sql),
+      current: parsedStatements,
+      positionsKept: statements.length === parsedStatements.length,
+    })
     if (changed.length > 0) {
       throw statementSplitChangedError({
         migration: file,

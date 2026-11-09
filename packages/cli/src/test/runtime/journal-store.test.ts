@@ -346,7 +346,7 @@ describe('createJournalStore', () => {
         name: 'm.sql',
         appliedAt,
         checksum: 'abc',
-        chkitVersion: '0.0.0',
+        chkitVersion: CLI_VERSION,
         migrationCompleted: false,
         operations: [
           {
@@ -398,9 +398,9 @@ describe('createJournalStore', () => {
     })
 
     // migrate resumes a state without checking its split only when this
-    // release recorded it (#562), so a new state carries the release, read
+    // release wrote it last (#562), so every write records this release, read
     // back from the server or from the last write.
-    test('records this release on a state that has none', async () => {
+    test('records this release on every write', async () => {
       const { db, commandCalls } = createScriptedExecutor(
         new Map<string | RegExp, unknown[]>([
           [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
@@ -408,7 +408,7 @@ describe('createJournalStore', () => {
         ]),
       )
       const store = createJournalStore(db)
-      await store.writeMigrationState({ ...writtenState('2026-10-09T12:00:00.200'), chkitVersion: '' })
+      await store.writeMigrationState({ ...writtenState('2026-10-09T12:00:00.200'), chkitVersion: '0.0.1-old' })
 
       expect(commandCalls.find((sql) => sql.startsWith('INSERT'))).toContain(`'abc', '${CLI_VERSION}', false`)
       expect((await store.readMigrationState('m.sql'))?.chkitVersion).toBe(CLI_VERSION)

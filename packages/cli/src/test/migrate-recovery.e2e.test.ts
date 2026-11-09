@@ -262,6 +262,16 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
       expect(run2.exitCode).toBe(1)
       expect(errorOf(run2).message).toContain(`Migration ${M} failed at statement 2 of 2`)
 
+      // An older release's state with nothing completed resumes. The run writes
+      // the state as this release, so after another failure it resumes again.
+      await recordOldReleaseState(project, M, ['failed'])
+      await waitForJournal(project, M, (row) => row.statuses === 'failed')
+      const run3 = migrate(project, ['--execute', '--json'])
+      expect(errorOf(run3).message).toContain(`Migration ${M} failed at statement 2 of 2`)
+      await waitForJournal(project, M, (row) => row.statuses === 'completed,failed')
+      const run4 = migrate(project, ['--execute', '--json'])
+      expect(errorOf(run4).message).toContain(`Migration ${M} failed at statement 2 of 2`)
+
       // The state an older release would have left: it ran the CREATE and the
       // commented-out ALTER, then CREATE b failed.
       await recordOldReleaseState(project, M, ['completed', 'completed', 'failed'])

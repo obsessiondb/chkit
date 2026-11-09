@@ -424,9 +424,10 @@ SETTINGS index_granularity = 1`
     },
 
     async writeMigrationState(input: MigrationRowState): Promise<void> {
-      // The release that first recorded the state; migrate checks it before it
-      // resumes the state (#562).
-      const state = { ...input, chkitVersion: input.chkitVersion || CLI_VERSION }
+      // The release that wrote the state last. migrate checks a state another
+      // release wrote before it resumes it, so the statement positions in a
+      // state this release wrote are always this release's split (#562).
+      const state = { ...input, chkitVersion: CLI_VERSION }
       if (_databaseMissing) {
         debug('journal', 'resetting databaseMissing flag — migration may have created the database')
         _databaseMissing = false

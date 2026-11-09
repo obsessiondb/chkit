@@ -725,6 +725,17 @@ def test_refuses_to_resume_a_partial_run_another_release_split_differently(
         assert run2.exit_code == 1
         assert f"Migration {m} failed at statement 2 of 2" in _error_of(run2)["message"]
 
+        # An older release's state with nothing completed resumes. The run
+        # writes the state as this release, so after another failure it
+        # resumes again.
+        _record_old_release_state(project, m, ["failed"])
+        _wait_journal(project, m, lambda r: r.statuses == "failed")
+        run3 = _migrate(["--execute", "--json"])
+        assert f"Migration {m} failed at statement 2 of 2" in _error_of(run3)["message"]
+        _wait_journal(project, m, lambda r: r.statuses == "completed,failed")
+        run4 = _migrate(["--execute", "--json"])
+        assert f"Migration {m} failed at statement 2 of 2" in _error_of(run4)["message"]
+
         # The state an older release would have left: it ran the CREATE and the
         # commented-out ALTER, then CREATE b failed.
         _record_old_release_state(project, m, ["completed", "completed", "failed"])

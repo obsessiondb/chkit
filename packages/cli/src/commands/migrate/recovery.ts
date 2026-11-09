@@ -215,15 +215,22 @@ export function rebaseInProgressState(
  * at a position where the split before #562 and the current split of the file
  * give different statements. A state recorded with the old split would resume
  * at the wrong statements there: skip one that never ran, or run one again.
+ *
+ * The journal indexes the statements onBeforeApply returns. When the plugins
+ * returned as many statements as they got, those keep the positions of the
+ * split; when they added or removed some, the positions cannot be matched, so
+ * every recorded statement counts as changed once the two splits differ.
  */
 export function splitChangedStatements(
   operations: readonly OperationState[],
-  legacyStatements: readonly string[],
-  statements: readonly string[],
+  splits: { legacy: readonly string[]; current: readonly string[]; positionsKept: boolean },
 ): number[] {
+  const { legacy, current, positionsKept } = splits
+  const same = legacy.length === current.length && legacy.every((statement, index) => statement === current[index])
+  if (same) return []
   return operations
     .filter((op) => op.status === 'completed' || op.status === 'started')
-    .filter((op) => legacyStatements[op.operationIndex] !== statements[op.operationIndex])
+    .filter((op) => !positionsKept || legacy[op.operationIndex] !== current[op.operationIndex])
     .map((op) => op.operationIndex + 1)
     .sort((a, b) => a - b)
 }
