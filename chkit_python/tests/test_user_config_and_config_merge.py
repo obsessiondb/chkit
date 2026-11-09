@@ -462,6 +462,33 @@ def test_cli_missing_config_reports_the_absolute_path_like_ts(
     }
 
 
+def test_load_config_collapses_dot_dot_before_checking_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Node ``path.resolve`` collapses ``..`` lexically before TS checks the
+    file, so ``nodir/..`` finds the config even though ``nodir`` is missing."""
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "real.config.py").write_text(
+        'config = {"schema": [], "outDir": "lexical"}\n', encoding="utf-8"
+    )
+
+    loaded = load_config(Path("nodir/../real.config.py"))
+    assert loaded.out_dir == "lexical"
+
+
+def test_load_config_collapses_a_double_leading_slash_like_ts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    missing = f"/{tmp_path}/missing.config.py"
+    assert missing.startswith("//")
+
+    with pytest.raises(FileNotFoundError) as error:
+        load_config(Path(missing))
+    assert str(error.value) == f"Config not found at {tmp_path}/missing.config.py."
+
+
 def test_cli_plugin_obsessiondb_runs_without_project_or_credentials(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
