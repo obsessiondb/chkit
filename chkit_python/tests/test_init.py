@@ -162,8 +162,9 @@ def test_onboarding_threads_all_flag_values_to_plugin(
 
 
 def _usage_message(output: str) -> str:
-    """The usage error's text, without click's box drawing and line wrapping."""
-    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", output).split())
+    """The usage error's text, without click's colors, box drawing and line wrapping."""
+    plain = re.sub(r"\x1b\[[0-9;]*m", "", output)
+    return " ".join(re.sub(r"[│╭╮╰╯─]", " ", plain).split())
 
 
 # TS prints the same messages (packages/cli/src/test/short-flags.e2e.test.ts, #569).
