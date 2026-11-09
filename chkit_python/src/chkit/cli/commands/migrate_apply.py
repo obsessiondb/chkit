@@ -64,13 +64,13 @@ from chkit.clickhouse.ddl_propagation import (
 )
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.core.model import ChxResolvedConfig
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
 from chkit.core.sql_splitter import (
     extract_executable_statements,
     extract_legacy_executable_statements,
 )
 from chkit.plugins import ChxOnAfterApplyContext, ChxOnBeforeApplyContext
 
-_WHITESPACE_RE = re.compile(r"\s+")
 _CUTOVER_START_KEY = re.compile(r"^table:([^.]+)\.(.+):cutover:start$")
 
 # ``last_error`` of a completed sync statement whose DDL propagation wait has
@@ -337,7 +337,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
 
 def preview_statement(sql: str, max_length: int = 120) -> str:
     """One-line, length-capped preview of a SQL statement for error messages."""
-    one_line = _WHITESPACE_RE.sub(" ", sql).strip()
+    one_line = js_trim(JS_WHITESPACE_RUN.sub(" ", sql))
     return f"{one_line[:max_length]}…" if len(one_line) > max_length else one_line
 
 

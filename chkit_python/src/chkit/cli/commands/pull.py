@@ -196,7 +196,7 @@ def _is_journal_table(item: object) -> bool:
     # chkit's migration journal (CHKIT_JOURNAL_TABLE, ``_chkit_migrations`` by
     # default) is chkit's own bookkeeping, not part of the user's schema (#466).
     kind = getattr(item, "kind", None)
-    journal = (os.environ.get("CHKIT_JOURNAL_TABLE") or "").strip() or "_chkit_migrations"
+    journal = js_trim(os.environ.get("CHKIT_JOURNAL_TABLE") or "") or "_chkit_migrations"
     return (kind is None or kind == "table") and getattr(item, "name", None) == journal
 
 
