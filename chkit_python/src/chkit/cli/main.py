@@ -102,6 +102,19 @@ def _normalize_short_options(args: list[str], params: list[Any]) -> list[str]:
     return normalized
 
 
+def _after_dash_dash(rest: list[str], missing_names: int) -> list[str]:
+    """The forwarded tokens for the user's ``--`` and the ``rest`` after it.
+
+    Names the forwarder still needs (plugin, command) come first, then the
+    ``--`` that ends the plugin command's flags (#568). Without those names the
+    ``--`` ends nothing and is dropped, as in TS.
+    """
+    missing = max(missing_names, 0)
+    if len(rest) < missing:
+        return rest
+    return [*rest[:missing], "--", *rest[missing:]]
+
+
 def _reject_group_bundles(ctx: Any, args: list[str], params: list[Any]) -> list[str]:
     """The top-level options (``-h``, ``-v`` / ``-V`` / ``--version``) take no
     value, so a token such as ``-vx`` before the command is a bundle, which TS
@@ -124,9 +137,17 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
     options. As in TS, only the forwarder's options in their exact forms
     (``-h``, ``--json``, ``-c x`` / ``-c=x`` / ``-cx``, ``--config x``) are
     read here; every other token goes behind ``--``, in order, so click hands
-    it to the plugin untouched (#491).
+    it to the plugin untouched (#491). A ``--`` of the user's own is kept, so
+    the plugin command reads it as the end of its flags (#568). The plugin and
+    command names still come first, as in TS: ``plugin -- p c x`` forwards
+    ``p c -- x``.
     """
     takes_value, long_form = _option_forms(params)
+    # The forwarder's own positional names (plugin, command), which a
+    # user's `--` must not swallow (#568).
+    names = sum(
+        1 for param in params if param.param_type_name == "argument" and param.nargs == 1
+    )
 
     own: list[str] = []
     forwarded: list[str] = []
@@ -135,7 +156,7 @@ def _split_forwarded_args(args: list[str], params: list[Any]) -> list[str]:
         token = args[i]
         i += 1
         if token == "--":
-            forwarded.extend(args[i:])
+            forwarded.extend(_after_dash_dash(args[i:], names - len(forwarded)))
             break
         long_name = token.split("=", 1)[0] if token.startswith("--") else None
         short_name = token[:2] if long_name is None else None

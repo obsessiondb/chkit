@@ -95,6 +95,32 @@ function splitQueryArgs(
 }
 
 /**
+ * Splits a plugin command's arguments at the first `--`. A flag never takes
+ * `--` as its value, so that one ends the flags: every token after it is a
+ * positional as is, even when it starts with `-` (#568).
+ */
+function splitAtEndOfFlags(argv: string[]): { flagArgs: string[]; rest: string[] } {
+	const end = argv.indexOf('--')
+	if (end === -1) return { flagArgs: argv, rest: [] }
+	return { flagArgs: argv.slice(0, end), rest: argv.slice(end + 1) }
+}
+
+/**
+ * Parses a plugin command's arguments: its flags go to `flags`, the rest to
+ * `positionals`, the `args` the command gets (#568). Throws on a flag error.
+ */
+export function parsePluginCommandArgs(
+	argv: string[],
+	flagDefs: readonly FlagDef[],
+): { flags: ParsedFlags; positionals: string[] } {
+	const { flagArgs, rest } = splitAtEndOfFlags(argv)
+	return {
+		flags: parseFlags(flagArgs, flagDefs),
+		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
+	}
+}
+
+/**
  * A query argument that starts with `-` is a flag unless it holds a line
  * break, or whitespace before any `=`: SQL that starts with a line comment,
  * such as `-- note\nSELECT 1` or `--tag=x\nSELECT 1`, stays SQL. A lone `-`
@@ -112,6 +138,7 @@ export function parseCommandArgs(
 	commandName: string,
 	argv: string[],
 	flagDefs: readonly FlagDef[],
+	{ endOfFlags = false }: { endOfFlags?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } | null {
 	if (commandName === 'query') {
 		const { flagArgs, positionals } = splitQueryArgs(argv, flagDefs)
@@ -120,9 +147,20 @@ export function parseCommandArgs(
 		return { flags, positionals }
 	}
 
-	const flags = parseFlagsOrReport(commandName, argv, flagDefs)
+	const { flagArgs, rest } = endOfFlags
+		? splitAtEndOfFlags(argv)
+		: { flagArgs: argv, rest: [] }
+	const flags = parseFlagsOrReport(commandName, flagArgs, flagDefs)
 	if (!flags) return null
-	return { flags, positionals: extractPositionals(argv, flagDefs) }
+	return {
+		flags,
+		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
+	}
+}
+
+/** Core commands keep rejecting `--`; plugin commands read it as the end of their flags. */
+function isPluginCommand(resolved: RegisteredCommand): boolean {
+	return resolved.pluginName !== undefined && resolved.pluginName !== 'core'
 }
 
 /**
@@ -151,6 +189,7 @@ export function parseInitFlags(input: {
 		input.commandName,
 		argsAfterCommand,
 		input.registry.resolveFlags(input.commandName, subcommand.name),
+		{ endOfFlags: isPluginCommand(input.resolved) },
 	)
 	return parsed ? parsed.flags : null
 }
@@ -175,19 +214,42 @@ export function forwardedCommandFlags(
 	return [...(command.flags ?? []), ...extensionFlags]
 }
 
+/**
+ * Splits `chkit plugin` arguments into the plugin name, the command name and
+ * the command's arguments. A `--` before the names ends the flags but the
+ * names still come first, as click reads them in chkit-py:
+ * `chkit plugin -- p c x` runs `p c` with `-- x` (#568).
+ */
+export function routeForwardedArgs(rest: string[]): {
+	pluginName: string | undefined
+	commandName: string | undefined
+	commandArgs: string[]
+} {
+	const end = rest.indexOf('--')
+	if (end === -1 || end >= 2) {
+		const [pluginName, commandName, ...commandArgs] = rest
+		return { pluginName, commandName, commandArgs }
+	}
+	const [pluginName, commandName, ...after] = [
+		...rest.slice(0, end),
+		...rest.slice(end + 1),
+	]
+	return { pluginName, commandName, commandArgs: ['--', ...after] }
+}
+
 function parseForwardedInitFlags(
 	argsAfterCommand: string[],
 	plugins: PluginRuntime['plugins'],
 ): ParsedFlags | null {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
-	const [pluginName, commandName, ...commandArgs] = rest
+	const { pluginName, commandName, commandArgs } = routeForwardedArgs(rest)
 	const command = plugins
 		.find((entry) => entry.plugin.manifest.name === pluginName)
 		?.plugin.commands?.find((cmd) => cmd.name === commandName)
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)
 	try {
-		return { ...flags, ...parseFlags(commandArgs, defs) }
+		return { ...flags, ...parsePluginCommandArgs(commandArgs, defs).flags }
 	} catch (error) {
 		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
 		// does, in the format the plugin command uses for it.
@@ -253,6 +315,11 @@ function stripGlobalFlags(argv: string[]): {
 
 	for (let i = 0; i < argv.length; i++) {
 		const token = argv[i] as string
+		// After --, a global flag is a positional of the plugin command (#568).
+		if (token === '--') {
+			rest.push(...argv.slice(i))
+			break
+		}
 		if (token === '--json') {
 			jsonMode = true
 			continue
@@ -349,7 +416,6 @@ export async function runResolvedCommand(input: {
 	const subcommandName = subcommand.name
 
 	const isPluginCommandForwarder = input.commandName === 'plugin'
-	const isQuery = input.commandName === 'query'
 
 	let flags: ParsedFlags
 	let positionals: string[] = []
@@ -365,21 +431,15 @@ export async function runResolvedCommand(input: {
 			input.commandName,
 			subcommandName,
 		)
-		if (isQuery) {
-			const parsed = parseCommandArgs(
-				input.commandName,
-				argsAfterCommand,
-				allFlags,
-			)
-			if (!parsed) return
-			flags = parsed.flags
-			positionals = parsed.positionals
-		} else {
-			const parsedFlags = parseFlagsOrReport(input.commandName, argsAfterCommand, allFlags)
-			if (!parsedFlags) return
-			flags = parsedFlags
-			positionals = extractPositionals(argsAfterCommand, allFlags)
-		}
+		const parsed = parseCommandArgs(
+			input.commandName,
+			argsAfterCommand,
+			allFlags,
+			{ endOfFlags: isPluginCommand(input.resolved) },
+		)
+		if (!parsed) return
+		flags = parsed.flags
+		positionals = parsed.positionals
 	}
 
 	const gf = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)

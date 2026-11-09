@@ -76,13 +76,19 @@ def _split_positionals_and_flags(
 
     Mirrors the TS dispatcher: option tokens are validated against the plugin
     command's declared flags (unknown ``--flags`` error out via
-    ``UnknownFlagError``), everything else stays positional.
+    ``UnknownFlagError``), everything else stays positional. A flag never
+    takes ``--`` as its value, so the first one ends the flags: every token
+    after it is a positional as is, even when it starts with ``-`` (#568).
     """
     allowed = {"name", "type", "description", "placeholder", "negation", "short"}
     defs = [
         cast("FlagDef", {k: v for k, v in entry.items() if k in allowed})
         for entry in flag_defs
     ]
+    rest: list[str] = []
+    if "--" in tokens:
+        end = tokens.index("--")
+        tokens, rest = tokens[:end], tokens[end + 1 :]
     flags = parse_flags(tokens, defs)
 
     lookup = {d["name"]: d for d in defs}
@@ -103,7 +109,7 @@ def _split_positionals_and_flags(
             continue
         positionals.append(token)
         i += 1
-    return positionals, flags
+    return [*positionals, *rest], flags
 
 
 def _extended_flag_defs(
