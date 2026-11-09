@@ -4,12 +4,15 @@ from __future__ import annotations
 
 from chkit.core.flags import FlagDef, MissingFlagValueError, expand_short_flags
 
-# The TS GLOBAL_FLAGS plus TABLE_FLAG (packages/cli/src/runtime/global-flags.ts):
-# `--table` may lead too; the command then accepts or rejects it (#565).
-_LEADING_FLAGS: list[FlagDef] = [
+# packages/cli/src/runtime/global-flags.ts.
+GLOBAL_FLAGS: list[FlagDef] = [
     {"name": "--help-plugins", "type": "boolean"},
     {"name": "--config", "short": "-c", "type": "string"},
     {"name": "--json", "type": "boolean"},
+]
+# `--table` may lead too; the command then accepts or rejects it (#565).
+_LEADING_FLAGS: list[FlagDef] = [
+    *GLOBAL_FLAGS,
     {"name": "--table", "short": "-t", "type": "string"},
 ]
 
@@ -44,3 +47,25 @@ def normalize_global_args(argv: list[str]) -> list[str]:
     if index == len(argv):
         return ["--help", *leading]
     return [argv[index], *leading, *argv[index + 1 :]]
+
+
+def extract_config_path(argv: list[str]) -> str | None:
+    """Port of ``extractConfigPath`` (``packages/cli/src/runtime/extract-config-path.ts``):
+    the last ``--config`` before ``--``. Short forms must already be expanded.
+    A ``--config`` without a value (last token, or followed by a ``--`` token)
+    raises ``MissingFlagValueError``."""
+    config_path: str | None = None
+    index = 0
+    while index < len(argv):
+        token = argv[index]
+        if token == "--":
+            break
+        if token == "--config":
+            if index + 1 >= len(argv) or argv[index + 1].startswith("--"):
+                raise MissingFlagValueError("--config")
+            config_path = argv[index + 1]
+            index += 1
+        elif token.startswith("--config="):
+            config_path = token[len("--config=") :]
+        index += 1
+    return config_path

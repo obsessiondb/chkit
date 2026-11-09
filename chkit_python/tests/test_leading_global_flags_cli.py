@@ -231,3 +231,32 @@ def test_an_unknown_command_under_json_writes_the_ts_envelope(argv: list[str], t
         "ok": False,
         "error": {"code": "unknown_command", "message": f"Unknown command: {token}"},
     }
+
+
+@pytest.mark.parametrize(
+    ("argv", "json_mode"),
+    [
+        (["nope", "-c"], False),
+        (["nope", "--help", "--config"], False),
+        (["nope", "-t", "-c"], False),
+        (["nope", "--json", "--config"], True),
+        # As TS reportUsageError: --json anywhere, also after the `--`.
+        (["nope", "-c", "--", "--json"], True),
+        (["--json", "nope", "--config", "--json"], True),
+    ],
+)
+def test_an_unknown_command_reads_its_config_value_first_as_in_ts(
+    argv: list[str], json_mode: bool
+) -> None:
+    result = CliRunner().invoke(app, argv)
+    assert result.exit_code == 1, (argv, result.output)
+    assert result.stderr == "Missing value for --config\n"
+    if json_mode:
+        assert json.loads(result.stdout) == {
+            "command": "nope",
+            "schemaVersion": 1,
+            "ok": False,
+            "error": {"code": "usage", "message": "Missing value for --config"},
+        }
+    else:
+        assert result.stdout == ""

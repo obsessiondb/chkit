@@ -11,7 +11,7 @@ from typer.core import TyperCommand, TyperGroup
 from typer.exceptions import TyperException
 
 from chkit import __version__
-from chkit.cli.argv import normalize_global_args
+from chkit.cli.argv import GLOBAL_FLAGS, extract_config_path, normalize_global_args
 from chkit.cli.commands import (
     check,
     codegen_shortcut,
@@ -30,7 +30,7 @@ from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.json_output import emit_json_error, has_emitted_json, json_error_code
 from chkit.cli.logging_setup import configure_cli_logging, is_debug_enabled
 from chkit.clickhouse.client import clickhouse_error_message
-from chkit.core.flags import MissingFlagValueError, UnknownFlagError
+from chkit.core.flags import MissingFlagValueError, UnknownFlagError, expand_short_flags
 
 _HELP_OPTION_NAMES = ("-h", "--help")
 # The top-level options, which TS reads only as the first token.
@@ -281,6 +281,11 @@ class _ChkitGroup(TyperGroup):
             normalized = normalized[:1]
         elif normalized and self.get_command(ctx, normalized[0]) is None:
             command = normalized[0]
+            # As TS, which reads the config path before it finds the command unknown.
+            try:
+                extract_config_path(expand_short_flags(normalized[1:], GLOBAL_FLAGS))
+            except MissingFlagValueError as error:
+                report_flag_error(command, str(error), json_mode="--json" in normalized)
             message = f"Unknown command: {command}"
             typer.echo(message, err=True)
             if "--json" in _option_args(normalized):
