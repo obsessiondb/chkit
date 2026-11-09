@@ -25,6 +25,7 @@ import {
   createStatelessLiveExecutor,
   formatTestDiagnostic,
   getLiveEnv,
+  pollUntil,
   runCli,
   startCli,
   type CliResult,
@@ -540,6 +541,39 @@ export async function runRetryScenario(
     assertChkitClean(project)
   } finally {
     if (!stopped) await writers.stop()
+    await dropCutoverProject(target, project)
+  }
+}
+
+/**
+ * A table created with only ORDER BY, as outside chkit (#524). Before
+ * ClickHouse 26.7 its parts attach only to a table that leaves PRIMARY KEY
+ * out too, so the snapshot must copy the table's stored definition.
+ */
+export async function runUndeclaredPrimaryKeyScenario(target: CutoverTarget, label: string): Promise<void> {
+  const project = await createCutoverProject(target, label)
+  try {
+    const fqn = `${target.database}.${project.table}`
+    await target.admin.command(`DROP TABLE ${fqn} SYNC`)
+    await target.admin.command(`CREATE TABLE ${fqn} (id UInt64, user_id UInt64, payload String) ENGINE = ${target.engine} ORDER BY id`)
+    const [created] = await pollUntil(
+      () => target.admin.query<{ engine_full: string }>(`SELECT engine_full FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
+      (found) => found.length > 0,
+    )
+    if (created === undefined || created.engine_full.includes(' PRIMARY KEY ')) throw new Error(`the table must have no PRIMARY KEY, found ${JSON.stringify(created)}`)
+    await target.admin.command(`INSERT INTO ${fqn} (id, user_id, payload) SELECT number, number % 97, 'historic' FROM numbers(1000)`)
+
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${fqn}=id`, '--json']), 'generate --cutover')
+    expectOk(cli(project, ['migrate', '--apply', '--json']), 'migrate --apply (cutover)')
+    const keys = await sortingKeys(target, project)
+    if (JSON.stringify(keys) !== JSON.stringify({ [project.table]: 'user_id, id', [project.previous]: 'id' })) {
+      throw new Error(`layouts after the cutover: ${JSON.stringify(keys)}`)
+    }
+    const [count] = await rows<{ total: number | string }>(target, `SELECT count() AS total FROM ${target.rowsOf(project.table)}`)
+    if (Number(count?.total) !== 1000) throw new Error(`the new table must hold the 1000 rows, found ${JSON.stringify(count)}`)
+    assertChkitClean(project)
+  } finally {
     await dropCutoverProject(target, project)
   }
 }

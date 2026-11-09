@@ -22,6 +22,7 @@ from tests.cutover_scenario import (
     run_backfill_scenario,
     run_keep_scenario,
     run_retry_scenario,
+    run_undeclared_primary_key_scenario,
 )
 from tests.e2e_testkit import resolve_live_env
 
@@ -83,3 +84,9 @@ def test_cuts_over_an_index_granularity_change_resuming_after_a_failure_at_every
     target: CutoverTarget, tmp_path: Path
 ) -> None:
     run_retry_scenario(target, "cutover_granularity", tmp_path, GRANULARITY_CHANGE)
+
+
+def test_cuts_over_a_table_created_with_only_order_by(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_undeclared_primary_key_scenario(target, "cutover_pk", tmp_path)
