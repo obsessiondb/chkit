@@ -67,6 +67,15 @@ describe('parseCutoverRequest', () => {
     expect(parseCutoverRequest(' app.events = user_id, id ')).toEqual({ database: 'app', table: 'events', key: ['user_id', 'id'] })
   })
 
+  test('trims JavaScript whitespace', () => {
+    // chkit-py's test_name_trim.py asserts the same (#580).
+    expect(parseCutoverRequest('\ufeffapp.events\ufeff=\ufeffid\x85, \x1cuser_id')).toEqual({
+      database: 'app',
+      table: 'events',
+      key: ['id\x85', '\x1cuser_id'],
+    })
+  })
+
   test('requires a key, because the key is the boundary between mirrored and copied rows', () => {
     expect(() => parseCutoverRequest('app.events')).toThrow('--cutover app.events needs the columns that identify a row')
     expect(() => parseCutoverRequest('app.events=')).toThrow('needs the columns that identify a row')
@@ -456,6 +465,9 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
     const buffer = (engine: string) => table({ database: 'app', name: 'events_buffer', engine, columns } as never)
     const refused = (engine: string) => messages(() => plan({ definitions: [NEW, buffer(engine)] })).length
     expect(refused("Buffer(`app`, \"events\", 16, 10, 100, 10000, 1000000, 10000000, 100000000)")).toBe(1)
+    // Arguments trim JavaScript whitespace; chkit-py's test_cutover.py asserts the same (#580).
+    expect(refused('Buffer(\ufeffapp\ufeff, \ufeffevents, 16, 10, 100, 10000, 1000000, 10000000, 100000000)')).toBe(1)
+    expect(() => plan({ definitions: [NEW, buffer('Buffer(app\x85, events, 16, 10, 100, 10000, 1000000, 10000000, 100000000)')] })).not.toThrow()
     expect(() => plan({ definitions: [NEW, buffer("Buffer('app', 'other', 16, 10, 100, 10000, 1000000, 10000000, 100000000)")] })).not.toThrow()
     const started = Date.now()
     expect(() => plan({ definitions: [NEW, buffer(`Buffer(${'\t'.repeat(50_000)}`)] })).not.toThrow()

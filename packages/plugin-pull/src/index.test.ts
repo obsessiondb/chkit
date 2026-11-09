@@ -1156,6 +1156,17 @@ TO app.t AS SELECT 1`
     ])
   })
 
+  test('parseRefreshClause DEPENDS ON entries trim JavaScript whitespace', () => {
+    // chkit-py's test_name_trim.py asserts the same (#580).
+    const refresh = __testUtils.parseRefreshClause(
+      'CREATE MATERIALIZED VIEW app.mv REFRESH EVERY 1 HOUR DEPENDS ON \ufeffapp.src\x85, \ufeffother TO app.t AS SELECT 1'
+    )
+    expect(refresh?.dependsOn).toEqual([
+      { database: 'app', name: 'src\x85' },
+      { database: 'default', name: 'other' },
+    ])
+  })
+
   test('parseRefreshClause ignores DEFINER / SQL SECURITY noise that Cloud auto-injects', () => {
     const cloudDdl = `CREATE MATERIALIZED VIEW app.mv
 REFRESH EVERY 30 SECOND APPEND TO app.t

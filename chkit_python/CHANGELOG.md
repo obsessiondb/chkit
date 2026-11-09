@@ -18,6 +18,10 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- Schema names (databases, tables, views, dictionaries, columns, attributes, `renamed_from`)
+  and the names in `--table`, `--cutover`, `--rename-*` and `pull --database` are trimmed
+  with the same whitespace as TS (#580): a BOM (`﻿`) at either end is removed and
+  `\x1c`-`\x1f` and `\x85` are kept, so both CLIs canonicalize and render a name the same way.
 - Waits for a created, dropped or altered table, view, column or dictionary check 21 times,
   0.5 s apart, like TS (#578). They checked 20 times and slept 0.5 s after the last check.
 - `migrate --apply` no longer prints `submit raised (...) — polling for the server-side state`

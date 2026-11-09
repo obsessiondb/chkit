@@ -590,6 +590,20 @@ def test_refuses_a_buffer_table_and_a_streaming_source_behind_an_intermediate_ta
         update={"engine": 'Buffer(`app`, "events", 16, 10, 100, 10000, 1000000, 10000000, 100000000)'}
     )
     assert len(messages(definitions=[NEW, quoted])) == 1
+    # Arguments trim JavaScript whitespace, as in TS (#580).
+    bom = buffer.model_copy(
+        update={
+            "engine": "Buffer(\ufeffapp\ufeff, \ufeffevents, 16, 10, 100, 10000, 1000000, "
+            "10000000, 100000000)"
+        }
+    )
+    assert len(messages(definitions=[NEW, bom])) == 1
+    nel = buffer.model_copy(
+        update={
+            "engine": "Buffer(app\x85, events, 16, 10, 100, 10000, 1000000, 10000000, 100000000)"
+        }
+    )
+    assert plan(definitions=[NEW, nel]).operations
 
 
 def test_validate_start_explains_leftovers_of_an_earlier_attempt() -> None:
