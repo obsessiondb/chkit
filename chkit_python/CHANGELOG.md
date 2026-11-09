@@ -18,6 +18,10 @@
 - `chkit plugin <name> <command>`, `codegen` and `obsessiondb` reject an unknown short flag
   such as `-x` as `Unknown flag: -x`, like an unknown long flag, instead of passing it to the
   plugin command as a positional argument (#491, fixed in TS too).
+- In `chkit plugin <name> <command>`, `codegen` and `obsessiondb`, a `--` ends the plugin
+  command's flags: the tokens after it reach `args` as they are, even when they start with `-`,
+  where a `-x` or `--json` after it was rejected as an unknown flag and `--name -- x` read `x`
+  as the value of `--name` (#568, fixed in TS too).
 ### Changed
 - `migrate --apply` runs the same statements as TS (#486): `--` comments are stripped and
   each statement keeps its `;`, so `on_before_apply` plugins and the failed-statement

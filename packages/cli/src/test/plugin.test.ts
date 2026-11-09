@@ -143,6 +143,60 @@ describe('plugin runtime', () => {
     }
   })
 
+  test('plugin commands get only positionals in args, and -- ends their flags (#568)', async () => {
+    const fixture = await createFixture()
+    const pluginPath = join(fixture.dir, 'echo-plugin.ts')
+    try {
+      await writeFile(
+        pluginPath,
+        `import { definePlugin } from '${CLI_ENTRY}'\n\nexport const plugin = definePlugin({\n  manifest: { name: 'echoer', apiVersion: 1 },\n  commands: [\n    {\n      name: 'echo',\n      flags: [\n        { name: '--name', type: 'string', description: 'Name' },\n        { name: '--loud', type: 'boolean', description: 'Loud' },\n      ],\n      run({ args, flags, print }) {\n        print({ args, name: flags['--name'] ?? null, loud: flags['--loud'] ?? null })\n      },\n    },\n    { name: 'other', run() {} },\n  ],\n})\n`,
+        'utf8'
+      )
+      await writeFile(
+        fixture.configPath,
+        `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  plugins: [{ plugin }],\n}\n`,
+        'utf8'
+      )
+      // The global flags go first: after --, they would be positionals.
+      const run = ([command = '', ...rest]: string[]) => {
+        const result = runCli([command, '--config', fixture.configPath, '--json', ...rest])
+        expect(result.stderr).toBe('')
+        expect(result.exitCode).toBe(0)
+        return JSON.parse(result.stdout) as { args: string[]; name: string | null; loud: boolean | null }
+      }
+
+      expect(run(['plugin', 'echoer', 'echo', 'alpha', '--name', 'ada', 'beta', '--loud'])).toEqual({
+        args: ['alpha', 'beta'],
+        name: 'ada',
+        loud: true,
+      })
+      // After --, every token is a positional, global flags included.
+      expect(run(['plugin', 'echoer', 'echo', 'alpha', '--loud', '--', '--name', 'x', '-z', '--json', '--'])).toEqual({
+        args: ['alpha', '--name', 'x', '-z', '--json', '--'],
+        name: null,
+        loud: true,
+      })
+      // The shortcut path passes the subcommand name too, as before.
+      expect(run(['echoer', 'echo', 'alpha', '--name', 'ada', '--', '--loud', '-z'])).toEqual({
+        args: ['echo', 'alpha', '--loud', '-z'],
+        name: 'ada',
+        loud: null,
+      })
+
+      // A flag value is never the --.
+      const missing = runCli(['plugin', '--config', fixture.configPath, 'echoer', 'echo', '--name', '--', 'beta'])
+      expect(missing.exitCode).toBe(1)
+      expect(missing.stderr.trim()).toBe('Missing value for --name')
+
+      // A command without flags still rejects an unknown flag before --.
+      const unknown = runCli(['plugin', '--config', fixture.configPath, 'echoer', 'other', '-z', '--', 'x'])
+      expect(unknown.exitCode).toBe(1)
+      expect(unknown.stderr.trim()).toBe('Unknown flag: -z')
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
   test('onBeforePluginCommand intercepts another plugin command', async () => {
     const fixture = await createFixture()
     const targetPath = join(fixture.dir, 'target-plugin.ts')

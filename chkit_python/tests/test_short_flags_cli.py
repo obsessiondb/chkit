@@ -89,7 +89,7 @@ def test_a_forwarder_reads_only_its_own_options_and_passes_the_rest_on(
         (["--out-file", "-hmodels.py", "--json"], ["--out-file", "-hmodels.py"], None),
         # A bundle reaches the plugin, which rejects it as TS does, not click's help.
         (["-xh"], ["-xh"], None),
-        (["--check", "-c=cfg.py", "--", "-c", "x"], ["--check", "-c", "x"], "cfg.py"),
+        (["--check", "-c=cfg.py", "--", "-c", "x"], ["--check", "--", "-c", "x"], "cfg.py"),
         (["-ccfg.py", "--check"], ["--check"], "cfg.py"),
         (["--config", "cfg.py", "--check"], ["--check"], "cfg.py"),
     ):
