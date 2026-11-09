@@ -5,6 +5,8 @@
 ### Added
 - `-h` is `--help` on every command and `-v` is `--version`, as in TS (#491). TS now accepts
   chkit-py's short flags too, so both CLIs take the same ones.
+- `chkit drift` and `chkit check` report a dictionary whose attributes, primary key, source,
+  layout, lifetime, range or settings differ from the schema, as in TS (#492).
 
 ### Changed
 - `status` rejects `--table`/`-t` as `No such option` instead of accepting and ignoring it

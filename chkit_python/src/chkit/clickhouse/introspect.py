@@ -153,6 +153,15 @@ class IntrospectedView:
     to: tuple[str, str] | None = None
 
 
+@dataclass(frozen=True, slots=True)
+class IntrospectedDictionary:
+    database: str
+    name: str
+    # The ``CREATE DICTIONARY`` statement as ClickHouse stores it, with secrets
+    # shown as ``[HIDDEN]``.
+    create_query: str
+
+
 _NULLABLE_RE = re.compile(r"^Nullable\((.+)\)$")
 _INDEX_TYPE_RE = re.compile(r"^(\w+)\((.*)\)$", re.DOTALL)
 
@@ -539,6 +548,31 @@ def list_view_details(client: Any, databases: list[str]) -> list[IntrospectedVie
             )
         )
     return out
+
+
+def list_dictionary_details(client: Any, databases: list[str]) -> list[IntrospectedDictionary]:
+    """The dictionaries in ``databases``, with the statement ClickHouse stores for each.
+
+    Read from ``system.tables``, not ``system.dictionaries``: the latter shows
+    an empty source and layout until the dictionary first loads. A table with
+    ``ENGINE = Dictionary(...)`` has the same engine name and is left out.
+    """
+    if not databases:
+        return []
+    rows = client.query(
+        f"SELECT database, name, create_table_query "
+        f"FROM system.tables "
+        f"WHERE is_temporary = 0 AND database IN ({_quote_str_list(databases)}) "
+        f"AND engine = 'Dictionary' AND startsWith(create_table_query, 'CREATE DICTIONARY')"
+    ).rows
+    return [
+        IntrospectedDictionary(
+            database=str(r["database"]),
+            name=str(r["name"]),
+            create_query=str(r.get("create_table_query") or ""),
+        )
+        for r in rows
+    ]
 
 
 _MV_NAME_END = 4

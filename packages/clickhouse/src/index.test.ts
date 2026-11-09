@@ -764,6 +764,13 @@ COMMENT 'User lookup dictionary'`
     expect(parseLifetimeFromCreateDictionaryQuery(query)).toBe('MIN 0 MAX 300')
   })
 
+  test('parses a source whose string ends in an escaped backslash', () => {
+    const backslashQuery =
+      "CREATE DICTIONARY default.files (`id` UInt64) PRIMARY KEY id SOURCE(FILE(PATH '/data/C:\\\\' FORMAT 'TSV')) LIFETIME(MIN 0 MAX 300) LAYOUT(FLAT())"
+    expect(parseSourceFromCreateDictionaryQuery(backslashQuery)).toBe("FILE(PATH '/data/C:\\\\' FORMAT 'TSV')")
+    expect(parseLayoutFromCreateDictionaryQuery(backslashQuery)).toBe('FLAT()')
+  })
+
   test('returns empty results for undefined query', () => {
     expect(parseDictionaryAttributesFromCreateDictionaryQuery(undefined)).toEqual([])
     expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(undefined)).toEqual([])
