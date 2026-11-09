@@ -4,7 +4,7 @@ import { relative, resolve } from 'node:path'
 import { defineFlags, typedFlags } from '@chkit/core'
 import type { ConnectChoice } from '@chkit/plugin-obsessiondb'
 
-import { parseCommandArgs } from '../runtime/command-dispatch.js'
+import { parseCommandArgs, UnexpectedArgumentsError } from '../runtime/command-dispatch.js'
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 import { ensureProjectDependencies } from '../runtime/deps.js'
 
@@ -28,7 +28,10 @@ interface InitOptions {
 }
 
 export async function cmdInit(argv: string[] = []): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  // Only before `--`: what follows it is an argument, which init rejects (#614).
+  const end = argv.indexOf('--')
+  const beforeEnd = end === -1 ? argv : argv.slice(0, end)
+  if (beforeEnd.includes('--help') || beforeEnd.includes('-h')) {
     console.log(`chkit init [options]
 
 Create a TypeScript config and example schema; install project dependencies.
@@ -150,7 +153,7 @@ function parseInitOptions(argv: string[]): InitOptions | null {
     return reportUsageError(`Invalid value for '--connect': '${connect}' is not one of ${choices}.`)
   }
   if (parsed.positionals.length > 0) {
-    return reportUsageError(`Got unexpected extra argument(s) (${parsed.positionals.join(' ')})`)
+    return reportUsageError(new UnexpectedArgumentsError(parsed.positionals).message)
   }
   return {
     yes: flags['--yes'] === true,

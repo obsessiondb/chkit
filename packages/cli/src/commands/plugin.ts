@@ -1,11 +1,5 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
-import {
-  forwardedCommandFlags,
-  parsePluginCommandArgs,
-  rejectsPositionals,
-  routeForwardedArgs,
-  UnexpectedArgumentsError,
-} from '../runtime/command-dispatch.js'
+import { forwardedCommandFlags, parsePluginCommandArgs, routeForwardedArgs } from '../runtime/command-dispatch.js'
 import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
 import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
@@ -24,8 +18,11 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   const jsonMode = flags['--json'] === true
 
   const { pluginName, commandName, commandArgs } = routeForwardedArgs(args)
+  // The built-in plugins (core, skill-hint) only carry chkit's own commands
+  // and hooks: `chkit plugin` covers the plugins of the config, as chkit-py.
+  const plugins = pluginRuntime.plugins.filter((entry) => !entry.internal)
 
-  if (pluginRuntime.plugins.length === 0) {
+  if (plugins.length === 0) {
     if (jsonMode) {
       emitJson('plugin', {
         error: 'No plugins configured. Add entries to config.plugins first.',
@@ -38,7 +35,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
 
   if (!pluginName) {
     const payload = {
-      plugins: pluginRuntime.plugins.map((entry) => ({
+      plugins: plugins.map((entry) => ({
         name: entry.plugin.manifest.name,
         version: entry.plugin.manifest.version ?? null,
         commands: (entry.plugin.commands ?? []).map((command) => ({
@@ -67,11 +64,9 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 0
   }
 
-  const selectedPlugin = pluginRuntime.plugins.find(
-    (entry) => entry.plugin.manifest.name === pluginName
-  )
+  const selectedPlugin = plugins.find((entry) => entry.plugin.manifest.name === pluginName)
   if (!selectedPlugin) {
-    const known = pluginRuntime.plugins.map((entry) => entry.plugin.manifest.name).sort()
+    const known = plugins.map((entry) => entry.plugin.manifest.name).sort()
     throw new Error(
       `Unknown plugin "${pluginName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
     )
@@ -125,18 +120,11 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   let mergedFlags: ParsedFlags
   let positionals: string[]
   try {
-    // `chkit plugin core migrate prod` rejects `prod` as `chkit migrate prod` does (#612).
-    const parsed = parsePluginCommandArgs(commandArgs, commandFlags, {
-      rejectPositionals: rejectsPositionals(pluginName, commandName),
-    })
+    const parsed = parsePluginCommandArgs(commandArgs, commandFlags)
     mergedFlags = { ...flags, ...parsed.flags }
     positionals = parsed.positionals
   } catch (error) {
-    if (
-      error instanceof UnknownFlagError ||
-      error instanceof MissingFlagValueError ||
-      error instanceof UnexpectedArgumentsError
-    ) {
+    if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
       if (jsonMode) {
         emitJson('plugin', { ok: false, error: error.message })
       } else {

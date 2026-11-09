@@ -59,7 +59,7 @@ Column types are compared as rendered SQL types, in the spacing ClickHouse store
 
 ### Expression normalization
 
-ClickHouse rewrites SQL expressions when it stores them — it spaces argument separators and operators, adds precedence parentheses, and rewrites `INTERVAL 5 YEAR` to `toIntervalYear(5)`. So a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` expression written as `cityHash64(a,b)` is stored as `cityHash64(a, b)`. To avoid reporting these as drift, `drift` normalizes expressions through ClickHouse's own formatter before comparing, so equivalent expressions match regardless of spelling. When the connected server can't format an expression, comparison falls back to plain text matching.
+ClickHouse rewrites SQL expressions when it stores them — it spaces argument separators and operators, adds precedence parentheses, and rewrites `INTERVAL 5 YEAR` to `toIntervalYear(5)`. So a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` expression written as `cityHash64(a,b)` is stored as `cityHash64(a, b)`. To avoid reporting these as drift, `drift` normalizes expressions through ClickHouse's own formatter before comparing, so equivalent expressions match regardless of spelling. This includes the expression of a [full-text index](/schema/dsl-reference/#full-text-indexes), so `NOT a AND b` matches the stored `(NOT a) AND b`; its tokenizer and other parameters are compared one by one. When the connected server can't format an expression, comparison falls back to plain text matching.
 
 ### View and materialized view queries
 

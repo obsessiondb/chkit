@@ -24,6 +24,7 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import ObjectDriftDetail, TableDriftDetail
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import read_snapshot
@@ -48,17 +49,13 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     ] = False,
     table_selector: Annotated[
         str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help="Scope drift detection to tables matching the selector.",
-        ),
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
     ] = None,
     live: Annotated[  # noqa: ARG001
         bool,
         typer.Option(
             "--live",
-            help="No-op, kept for existing scripts: drift always reads the live server.",
+            help="No-op, kept for existing scripts: drift always reads the live server",
         ),
     ] = False,
     # Accepted so existing scripts keep working, and handed to on_init and

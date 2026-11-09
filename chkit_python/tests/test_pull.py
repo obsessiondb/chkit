@@ -122,6 +122,54 @@ def test_parse_refresh_after_with_randomize_and_depends_on() -> None:
     ]
 
 
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause reads quoted
+# DEPENDS ON names as ClickHouse means them": create_table_query as ClickHouse
+# 26.3 returns it (#631).
+def test_parse_refresh_depends_on_reads_quoted_names() -> None:
+    ddl = (
+        "CREATE MATERIALIZED VIEW d.mv2 REFRESH EVERY 1 HOUR DEPENDS ON d.r1, "
+        "d.`we\\`ird`, d.`a.b`, d.`x\\``, d.`has AS kw`, d.`q\"d`, `a, b`.`TO` "
+        "TO d.dst (`a` UInt8) DEFINER = default SQL SECURITY DEFINER AS SELECT a FROM d.src"
+    )
+    refresh = parse_refresh_clause(ddl)
+    assert refresh is not None
+    assert refresh.depends_on == [
+        DependsOnEntry(database="d", name="r1"),
+        DependsOnEntry(database="d", name="we`ird"),
+        DependsOnEntry(database="d", name="a.b"),
+        DependsOnEntry(database="d", name="x`"),
+        DependsOnEntry(database="d", name="has AS kw"),
+        DependsOnEntry(database="d", name='q"d'),
+        DependsOnEntry(database="a, b", name="TO"),
+    ]
+
+
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause decodes escapes in
+# quoted DEPENDS ON names as ClickHouse does".
+def test_parse_refresh_depends_on_decodes_escapes() -> None:
+    refresh = parse_refresh_clause(
+        "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR DEPENDS ON d.`x\\ny`, d.`b\\x41` "
+        "TO d.dst AS SELECT 1"
+    )
+    assert refresh is not None
+    assert refresh.depends_on == [
+        DependsOnEntry(database="d", name="x\ny"),
+        DependsOnEntry(database="d", name="bA"),
+    ]
+
+
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause ignores DEPENDS
+# ON text inside a string or the SELECT".
+def test_parse_refresh_ignores_depends_on_inside_a_string() -> None:
+    refresh = parse_refresh_clause(
+        "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR TO d.dst "
+        "AS SELECT 'DEPENDS ON d.x' AS c"
+    )
+    assert refresh is not None
+    assert refresh.every == "1 HOUR"
+    assert refresh.depends_on is None
+
+
 def test_parse_refresh_settings_block() -> None:
     ddl = (
         "CREATE MATERIALIZED VIEW db.mv REFRESH EVERY 1 hour "

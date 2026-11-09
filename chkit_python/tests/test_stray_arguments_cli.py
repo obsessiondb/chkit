@@ -55,6 +55,10 @@ CASES = [
     (["drift", "foo"], "foo"),
     (["check", "--table", "app.users", "foo"], "foo"),
     (["init", "foo", "--yes"], "foo"),
+    # Before and after `--` together, as TS reports them (#614).
+    (["status", "foo", "--", "bar"], "foo bar"),
+    (["migrate", "prod", "--", "--apply"], "prod --apply"),
+    (["status", "foo", "--", "--json"], "foo --json"),
 ]
 
 
@@ -77,6 +81,19 @@ def test_a_stray_argument_prints_the_ts_message_and_exits_1(
 @pytest.mark.usefixtures("project")
 def test_a_stray_argument_under_json_writes_the_usage_envelope() -> None:
     result = CliRunner().invoke(app, ["status", "foo", "bar", "--json"])
+    message = "Got unexpected extra argument(s) (foo bar)"
+    assert (result.exit_code, result.stderr) == (1, f"{message}\n")
+    assert json.loads(result.stdout) == {
+        "command": "status",
+        "schemaVersion": 1,
+        "ok": False,
+        "error": {"code": "usage", "message": message},
+    }
+
+
+@pytest.mark.usefixtures("project")
+def test_only_a_json_before_dash_dash_writes_the_envelope() -> None:
+    result = CliRunner().invoke(app, ["status", "foo", "--json", "--", "bar"])
     message = "Got unexpected extra argument(s) (foo bar)"
     assert (result.exit_code, result.stderr) == (1, f"{message}\n")
     assert json.loads(result.stdout) == {

@@ -60,16 +60,14 @@ function splitQueryArgs(
 	const byName = new Map<string, FlagDef>()
 	for (const def of flagDefs) byName.set(def.name, def)
 
-	const tokens = expandShortFlags(argv, flagDefs)
+	// Split at the first `--` before scanning, so a value flag never takes it
+	// as its value and nothing after it is read as a flag (#614).
+	const { flagArgs: tokens, rest } = splitAtEndOfFlags(expandShortFlags(argv, flagDefs))
 	const flagArgs: string[] = []
 	const positionals: string[] = []
 	for (let i = 0; i < tokens.length; i += 1) {
 		const token = tokens[i]
 		if (token === undefined) continue
-		if (token === '--') {
-			positionals.push(...tokens.slice(i + 1))
-			break
-		}
 
 		const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
 		const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
@@ -91,13 +89,13 @@ function splitQueryArgs(
 		}
 	}
 
-	return { flagArgs, positionals }
+	return { flagArgs, positionals: [...positionals, ...rest] }
 }
 
 /**
- * Splits a plugin command's arguments at the first `--`. A flag never takes
+ * Splits a command's arguments at the first `--`. A flag never takes
  * `--` as its value, so that one ends the flags: every token after it is a
- * positional as is, even when it starts with `-` (#568).
+ * positional as is, even when it starts with `-` (#568, #614).
  */
 function splitAtEndOfFlags(argv: string[]): { flagArgs: string[]; rest: string[] } {
 	const end = argv.indexOf('--')
@@ -115,21 +113,17 @@ export class UnexpectedArgumentsError extends Error {
 
 /**
  * Parses a plugin command's arguments: its flags go to `flags`, the rest to
- * `positionals`, the `args` the command gets (#568). Throws on a flag error,
- * and with `rejectPositionals` on a positional after the flags parse.
+ * `positionals`, the `args` the command gets (#568). Throws on a flag error.
  */
 export function parsePluginCommandArgs(
 	argv: string[],
 	flagDefs: readonly FlagDef[],
-	{ rejectPositionals = false }: { rejectPositionals?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } {
 	const { flagArgs, rest } = splitAtEndOfFlags(argv)
-	const flags = parseFlags(flagArgs, flagDefs)
-	const positionals = [...extractPositionals(flagArgs, flagDefs), ...rest]
-	if (rejectPositionals && positionals.length > 0) {
-		throw new UnexpectedArgumentsError(positionals)
+	return {
+		flags: parseFlags(flagArgs, flagDefs),
+		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
 	}
-	return { flags, positionals }
 }
 
 /**
@@ -146,14 +140,16 @@ function looksLikeFlag(token: string): boolean {
 	return !/\s/.test(name)
 }
 
+/**
+ * Parses a command's arguments. `--` ends the flags of every command: what
+ * follows it is a positional (#568, #614). A command that does not take
+ * arguments rejects those with click's message, as chkit-py does.
+ */
 export function parseCommandArgs(
 	commandName: string,
 	argv: string[],
 	flagDefs: readonly FlagDef[],
-	{
-		endOfFlags = false,
-		rejectPositionals = false,
-	}: { endOfFlags?: boolean; rejectPositionals?: boolean } = {},
+	{ rejectPositionals = false }: { rejectPositionals?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } | null {
 	if (commandName === 'query') {
 		const { flagArgs, positionals } = splitQueryArgs(argv, flagDefs)
@@ -162,14 +158,13 @@ export function parseCommandArgs(
 		return { flags, positionals }
 	}
 
-	const { flagArgs, rest } = endOfFlags
-		? splitAtEndOfFlags(argv)
-		: { flagArgs: argv, rest: [] }
+	const { flagArgs, rest } = splitAtEndOfFlags(argv)
 	const flags = parseFlagsOrReport(commandName, flagArgs, flagDefs)
 	if (!flags) return null
 	const positionals = [...extractPositionals(flagArgs, flagDefs), ...rest]
 	if (rejectPositionals && positionals.length > 0) {
-		// Reported after any flag error, as click does in chkit-py (#612).
+		// Reported after any flag error, as click does in chkit-py (#612). JSON
+		// mode comes only from the flags: a --json after `--` is an argument (#614).
 		reportCommandUsageError(
 			commandName,
 			new UnexpectedArgumentsError(positionals).message,
@@ -180,31 +175,17 @@ export function parseCommandArgs(
 	return { flags, positionals }
 }
 
-/** Core commands keep rejecting `--`; plugin commands read it as the end of their flags. */
-function isPluginCommand(resolved: RegisteredCommand): boolean {
-	return resolved.pluginName !== undefined && resolved.pluginName !== 'core'
-}
-
 /** The core commands that read positionals: the SQL, the snapshot subcommand, the forwarded plugin command. */
 const CORE_COMMANDS_WITH_POSITIONALS = new Set(['query', 'snapshot', 'plugin'])
 
 /**
- * Every other core command takes none, so a stray argument is a usage error
- * instead of being ignored (#612), also through `chkit plugin core <command>`.
- * Plugin commands get theirs in `args`.
+ * Every other core command takes none, so a stray argument, before or after
+ * `--`, is a usage error instead of being ignored (#612, #614). Plugin
+ * commands get theirs in `args`.
  */
-export function rejectsPositionals(
-	pluginName: string | undefined,
-	commandName: string,
-): boolean {
-	return pluginName === 'core' && !CORE_COMMANDS_WITH_POSITIONALS.has(commandName)
-}
-
 function commandArgsOptions(commandName: string, resolved: RegisteredCommand) {
-	return {
-		endOfFlags: isPluginCommand(resolved),
-		rejectPositionals: rejectsPositionals(resolved.pluginName, commandName),
-	}
+	const isCore = resolved.pluginName === undefined || resolved.pluginName === 'core'
+	return { rejectPositionals: isCore && !CORE_COMMANDS_WITH_POSITIONALS.has(commandName) }
 }
 
 /**
@@ -287,23 +268,20 @@ function parseForwardedInitFlags(
 ): ParsedFlags | null {
 	const { flags, rest } = forwarderFlags(argsAfterCommand)
 	const { pluginName, commandName, commandArgs } = routeForwardedArgs(rest)
+	// As in `cmdPlugin`, the built-in plugins are not targets of `chkit plugin`.
 	const command = plugins
-		.find((entry) => entry.plugin.manifest.name === pluginName)
+		.find((entry) => !entry.internal && entry.plugin.manifest.name === pluginName)
 		?.plugin.commands?.find((cmd) => cmd.name === commandName)
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)
 	try {
-		const parsed = parsePluginCommandArgs(commandArgs, defs, {
-			rejectPositionals: rejectsPositionals(pluginName, command.name),
-		})
-		return { ...flags, ...parsed.flags }
+		return { ...flags, ...parsePluginCommandArgs(commandArgs, defs).flags }
 	} catch (error) {
 		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
 		// does, in the format the plugin command uses for it.
 		if (
 			error instanceof UnknownFlagError ||
-			error instanceof MissingFlagValueError ||
-			error instanceof UnexpectedArgumentsError
+			error instanceof MissingFlagValueError
 		) {
 			if (flags['--json'] === true) {
 				emitJson('plugin', { ok: false, error: error.message })
