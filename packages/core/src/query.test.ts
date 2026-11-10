@@ -148,6 +148,11 @@ describe('query definitions', () => {
     )
   })
 
+  test('a Nullable type stays as written when made optional, so both forms share a param', () => {
+    const city = t.string().meta({ clickhouse: 'Nullable(String) ' })
+    expect(query`SELECT ${p('v', city)}, ${p('v', city.optional())}`.sql).toBe('SELECT {v:Nullable(String) }, {v:Nullable(String) }')
+  })
+
   test('p throws for a type ClickHouse cannot take as a param', () => {
     expect(() => p('tags', z.array(z.string()).optional())).toThrow('p("tags"): ClickHouse has no Nullable(Array(String))')
     expect(() => p('pair', t.tuple([t.string(), t.uint8()]) as never)).toThrow(
