@@ -726,7 +726,12 @@ describe('@chkit/cli drift comparer', () => {
     ["ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", 'SharedMergeTree', false],
     ["ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', v)", 'SharedReplacingMergeTree(v)', false],
     ['ReplicatedReplacingMergeTree(v)', 'SharedReplacingMergeTree(v)', false],
-    ["ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)", 'SharedReplacingMergeTree(v)', false],
+    // ObsessionDB keeps an expression path as written.
+    [
+      "ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+      "SharedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+      false,
+    ],
     ['ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)', 'SharedReplacingMergeTree(v)', false],
     ['ReplicatedVersionedCollapsingMergeTree(id, v)', 'SharedVersionedCollapsingMergeTree(id, v)', false],
     ['ReplicatedReplacingMergeTree(v)', 'SharedMergeTree', true],

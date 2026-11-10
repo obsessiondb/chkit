@@ -44,10 +44,9 @@ export function supportsSortOrder(engine: string): boolean {
 }
 
 const REPLICATED_ENGINE = /^\s*Replicated([A-Za-z0-9_]*MergeTree)\s*(?:\(([\s\S]*)\))?\s*$/
-// A Keeper path or replica name: a string literal, a heredoc, or a constant
-// expression such as concat('/p/', currentDatabase()). The engine parameters
-// after them are column names or tuples, never these forms.
-const REPLICATION_ARGUMENT = /^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$|[A-Za-z_][A-Za-z0-9_]*\s*\([\s\S]*\))$/
+// A Keeper path or replica name that the server drops: a string literal or a
+// heredoc. ObsessionDB keeps an expression path such as concat(...) as written.
+const REPLICATION_ARGUMENT = /^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$)$/
 
 /**
  * The engine a `Replicated*MergeTree` table has on a shared-storage server

@@ -73,14 +73,10 @@ _REPLICATED_ENGINE: Final[re.Pattern[str]] = re.compile(
 )
 # The Keeper path and replica name lead a Replicated engine's arguments.
 _REPLICATION_ARGUMENTS: Final[int] = 2
-# A Keeper path or replica name: a string literal, a heredoc, or a constant
-# expression such as concat('/p/', currentDatabase()). The engine parameters
-# after them are column names or tuples, never these forms.
+# A Keeper path or replica name that the server drops: a string literal or a
+# heredoc. ObsessionDB keeps an expression path such as concat(...) as written.
 _REPLICATION_ARGUMENT: Final[re.Pattern[str]] = re.compile(
-    js_regex(
-        r"^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$"
-        r"|[A-Za-z_][A-Za-z0-9_]*\s*\([\s\S]*\))$"
-    )
+    js_regex(r"^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$)$")
 )
 
 

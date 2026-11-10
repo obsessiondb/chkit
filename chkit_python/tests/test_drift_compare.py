@@ -247,9 +247,10 @@ def test_table_shape_detects_engine_mismatch() -> None:
             False,
         ),
         ("ReplicatedReplacingMergeTree(v)", "SharedReplacingMergeTree(v)", False),
+        # ObsessionDB keeps an expression path as written.
         (
             "ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
-            "SharedReplacingMergeTree(v)",
+            "SharedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
             False,
         ),
         ("ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)", "SharedReplacingMergeTree(v)", False),
