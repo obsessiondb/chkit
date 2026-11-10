@@ -253,7 +253,7 @@ def _resolve_plugin_table_scope(
     return resolve_table_scope(selector, table_keys_from_definitions(definitions))
 
 
-def dispatch_plugin_command(  # noqa: PLR0912
+def dispatch_plugin_command(  # noqa: PLR0912, PLR0915
     *,
     plugin_name: str,
     command_name: str | None,
@@ -320,6 +320,14 @@ def dispatch_plugin_command(  # noqa: PLR0912
             positionals, parsed = _split_positionals_and_flags(tokens, flag_defs)
         except (UnknownFlagError, MissingFlagValueError) as error:
             report_flag_error(invoking_command, str(error), json_mode=output_json)
+        # A command that takes no arguments rejects them as core commands do, in
+        # click's words, before on_init and the command run (#659).
+        if not found[0].takes_args and positionals:
+            report_usage_error(
+                invoking_command,
+                f"Got unexpected extra argument(s) ({' '.join(positionals)})",
+                json_mode=output_json,
+            )
         flags = {**own_flags, **parsed}
 
     with contextlib.ExitStack() as forwarder_scope:

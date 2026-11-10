@@ -430,7 +430,10 @@ class PluginRuntime:
         except Exception as cause:
             if entry.internal:
                 raise
-            raise PluginExecutionError(plugin_name, "command", cause) from cause
+            # As TS names the command: `failed in command:<name>: ...`.
+            raise PluginExecutionError(
+                plugin_name, f"command:{command_name}", cause
+            ) from cause
         finally:
             # The caller owns the default context; this closes only a plugin's own.
             if plugin_context is not None:

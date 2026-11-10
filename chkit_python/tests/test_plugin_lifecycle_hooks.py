@@ -514,5 +514,5 @@ def test_on_complete_error_after_a_failure_keeps_the_original_error(
     result = _invoke(["plugin", "probe", "boom"])
 
     assert result.exit_code == 1, result.output
-    assert result.stderr.strip() == 'Plugin "probe" failed in command: boom failed'
+    assert result.stderr.strip() == 'Plugin "probe" failed in command:boom: boom failed'
     assert _calls(project)[-1] == ["on_complete", "plugin", 1, False]
