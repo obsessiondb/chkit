@@ -1131,7 +1131,9 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(lines[0]).toBe(
       `  load_table_data: previous attempt of query_id=${QUERY_ID} is no longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — running before-retry then resubmitting`,
     )
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    // The attempt is journaled failed with the server's error before the retry.
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
+    expect(writes[0]?.operations[0]?.lastError).toBe('Code: 241. DB::Exception: Memory limit exceeded\nstack')
   })
 
   test('a started attempt without a query_log entry is compensated and resubmitted', async () => {
@@ -1139,7 +1141,7 @@ describe('applyAsyncStatement re-run of a started step', () => {
       { status: 'unknown' },
       { status: 'finished', writtenRows: 16, durationMs: 8000 },
     ])
-    const { store } = createFakeJournalStore(startedRecord())
+    const { store, writes } = createFakeJournalStore(startedRecord())
 
     await applyAsyncStatement({
       ...BASE_INPUT,
@@ -1155,6 +1157,63 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(statusCalls[0]).toEqual({ queryId: QUERY_ID, afterTime: '2026-05-26T09:59:58.000Z', everyReplica: true })
     expect(commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
     expect(submitCalls).toHaveLength(1)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
+  })
+
+  // The attempt's QueryFinish can reach query_log only after the check (it is
+  // flushed on a timer). A run that stops after the compensation, before it
+  // journals the new attempt, must leave a record whose QueryFinish a re-run
+  // does not take for the outcome: the rows it loaded were truncated.
+  test('a re-run after a compensation that stopped the run compensates and resubmits again', async () => {
+    const { store, writes } = createFakeJournalStore(startedRecord())
+    const input = {
+      ...BASE_INPUT,
+      fingerprint: 'v1:load',
+      beforeRetry: 'TRUNCATE TABLE t',
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    }
+    // Run 1: no outcome yet; the TRUNCATE ran, but its response was lost.
+    const first = createFakeExecutor([{ status: 'unknown' }])
+    const lostResponse = {
+      ...first.db,
+      command: async () => {
+        throw new Error('socket hang up')
+      },
+    } as unknown as ClickHouseExecutor
+    await expect(applyAsyncStatement({ ...input, db: lostResponse })).rejects.toThrow('socket hang up')
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed'])
+    expect(writes[0]?.operations[0]?.lastError).toBe('no longer running and no outcome in system.query_log; retried')
+
+    // Run 2: the first attempt's QueryFinish is in query_log by now.
+    const second = createFakeExecutor([
+      { status: 'finished', writtenRows: 16, durationMs: 8000 },
+      { status: 'finished', writtenRows: 16, durationMs: 8000 },
+    ])
+    await applyAsyncStatement({ ...input, db: second.db })
+
+    expect(second.statusCalls[0]).toMatchObject({ everyReplica: true, runningOnly: true })
+    expect(second.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
+    expect(second.submitCalls).toHaveLength(1)
+  })
+
+  test('a started record with a zoned start time is read with that zone', async () => {
+    const { db, statusCalls } = createFakeExecutor([{ status: 'finished', writtenRows: 16, durationMs: 8000 }])
+    const { store } = createFakeJournalStore(startedRecord({ startedAt: '2026-05-26T10:00:00.000Z' }))
+
+    await applyAsyncStatement({
+      ...BASE_INPUT,
+      fingerprint: 'v1:load',
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(statusCalls[0]?.afterTime).toBe('2026-05-26T09:59:58.000Z')
   })
 
   // Only a started attempt of this statement's SQL can have finished unseen:

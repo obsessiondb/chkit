@@ -1231,8 +1231,12 @@ def test_rerun_of_a_started_attempt_that_failed_on_the_server_resubmits() -> Non
         "longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — "
         "running before-retry then resubmitting"
     )
+    # The attempt is journaled failed with the server's error before the retry.
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
+    assert journal.writes[0].operations[0].last_error == (
+        "Code: 241. DB::Exception: Memory limit exceeded\nstack"
+    )
 
 
 def test_rerun_of_a_started_attempt_without_a_query_log_entry_resubmits() -> None:
@@ -1249,6 +1253,60 @@ def test_rerun_of_a_started_attempt_without_a_query_log_entry_resubmits() -> Non
     assert client.after_times[0] == "2026-05-26T09:59:58.000Z"
     assert client.executed == ["TRUNCATE TABLE db.t"]
     assert len(client.submitted) == 1
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
+
+
+class _LostResponseClient(_ScriptedClient):
+    """Its before-retry SQL runs on the server, but the response is lost."""
+
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        super().execute(statement, settings)
+        msg = "socket hang up"
+        raise RuntimeError(msg)
+
+
+def test_rerun_after_a_compensation_that_stopped_the_run_compensates_again() -> None:
+    """The attempt's QueryFinish can reach query_log only after the check (it
+    is flushed on a timer). A run that stops after the compensation, before it
+    journals the new attempt, must leave a record whose QueryFinish a re-run
+    does not take for the outcome: the rows it loaded were truncated."""
+    journal = _FakeJournalStore(state=_started_record())
+    # Run 1: no outcome yet; the TRUNCATE ran, but its response was lost.
+    first = _LostResponseClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    with pytest.raises(RuntimeError, match="socket hang up"):
+        apply_async_statement(_rerun_input(first, journal))
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["failed"]
+    assert journal.writes[0].operations[0].last_error == (
+        "no longer running and no outcome in system.query_log; retried"
+    )
+
+    # Run 2: the first attempt's QueryFinish is in query_log by now.
+    second = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    apply_async_statement(_rerun_input(second, journal))
+
+    assert second.every_replica[0] is True
+    assert second.running_only[0] is True
+    assert second.executed == ["TRUNCATE TABLE db.t"]
+    assert len(second.submitted) == 1
+
+
+def test_rerun_reads_a_zoned_start_time_with_that_zone() -> None:
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
+        strict=True,
+    )
+    journal = _FakeJournalStore(state=_started_record(started_at="2026-05-26T10:00:00.000Z"))
+    apply_async_statement(_rerun_input(client, journal))
+
+    assert client.after_times[0] == "2026-05-26T09:59:58.000Z"
 
 
 # Only a started attempt of this statement's SQL can have finished unseen: a

@@ -34,6 +34,9 @@ const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
 // momentary timeout doesn't abort a long-running load; only give up after the budget.
 // The same budget limits `unknown` polls after a failed submit (#657).
 const MAX_TRANSIENT_POLL_ERRORS = 20
+// The lastError of a started attempt that no replica runs and that has no
+// outcome in system.query_log, journaled before it is retried (#672).
+const NO_OUTCOME_ERROR = 'no longer running and no outcome in system.query_log; retried'
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -192,6 +195,26 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     log(
       `  ${operationType}: previous attempt of query_id=${queryId} is no longer running (status=${prior.status}${errorTail}) — running before-retry then resubmitting`,
     )
+    // The checked attempt is journaled failed before anything is compensated.
+    // Its QueryFinish can still reach query_log after this check (query_log
+    // is flushed on a timer), and a run that stops between the compensation
+    // and the next 'started' write must not take it for this statement's
+    // outcome on its re-run (#672).
+    if (attemptLowerBound !== undefined && initialMigrationState !== null) {
+      await journalStore.writeMigrationState(
+        upsertOperation(
+          initialMigrationState,
+          {
+            ...priorOpState,
+            queryId,
+            status: 'failed',
+            finishedAt: isoWithoutZone(new Date(now())),
+            lastError: attemptOutcome === 'failed' ? prior.lastError : NO_OUTCOME_ERROR,
+          },
+          now,
+        ),
+      )
+    }
     if (beforeRetry !== null) {
       log(`  ${operationType}: running before-retry SQL`)
       await db.command(beforeRetry, settings)
@@ -500,7 +523,9 @@ async function checkInFlight(
 function startedAttemptLowerBound(op: OperationState | undefined, fingerprint: string): string | undefined {
   if (op?.status !== 'started' || op.queryId === '') return undefined
   if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return undefined
-  return queryLogLowerBound(Date.parse(`${op.startedAt.trim().replace(' ', 'T')}Z`), 0)
+  // The journal returns DateTime64 without a zone, all of it UTC.
+  const iso = op.startedAt.trim().replace(' ', 'T')
+  return queryLogLowerBound(Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`), 0)
 }
 
 // The attached attempt had run for elapsedMs when the in-flight check, which

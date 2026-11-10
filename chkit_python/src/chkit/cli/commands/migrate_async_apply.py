@@ -66,6 +66,9 @@ QUERY_LOG_SKEW_MARGIN_MS = 2_000
 UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
 # Poll request failures in a row, and `unknown` polls after a failed submit (#657).
 MAX_TRANSIENT_POLL_ERRORS = 20
+# The last_error of a started attempt that no replica runs and that has no
+# outcome in system.query_log, journaled before it is retried (#672).
+NO_OUTCOME_ERROR = "no longer running and no outcome in system.query_log; retried"
 SUBMIT_THREAD_NAME = "chkit-async-submit"
 _EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _BYTES_KIB = 1024
@@ -345,6 +348,28 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             f"no longer running (status={prior_status}{err_tail}) — "
             f"running before-retry then resubmitting"
         )
+        # The checked attempt is journaled failed before anything is
+        # compensated. Its QueryFinish can still reach query_log after this
+        # check (query_log is flushed on a timer), and a run that stops between
+        # the compensation and the next 'started' write must not take it for
+        # this statement's outcome on its re-run (#672).
+        if attempt_lower_bound is not None and initial_state is not None:
+            journal_store.write_migration_state(
+                upsert_operation(
+                    initial_state,
+                    prior_op.model_copy(
+                        update={
+                            "query_id": query_id,
+                            "status": "failed",
+                            "finished_at": iso_without_zone(datetime.now(tz=UTC)),
+                            "last_error": prior_error
+                            if attempt_outcome == "failed"
+                            else NO_OUTCOME_ERROR,
+                        }
+                    ),
+                    iso_without_zone(datetime.now(tz=UTC)),
+                )
+            )
         if input_.before_retry is not None:
             input_.log(f"  {input_.operation_type}: running before-retry SQL")
             client.execute(input_.before_retry, settings=input_.settings)
@@ -671,9 +696,10 @@ def _started_attempt_lower_bound(
         return None
     if op.fingerprint not in ("", fingerprint):
         return None
-    started = datetime.fromisoformat(op.started_at.strip().replace(" ", "T")).replace(
-        tzinfo=UTC
-    )
+    # The journal returns DateTime64 without a zone, all of it UTC.
+    started = datetime.fromisoformat(op.started_at.strip().replace(" ", "T"))
+    if started.tzinfo is None:
+        started = started.replace(tzinfo=UTC)
     started_ms = (started - _EPOCH) // timedelta(milliseconds=1)
     return _query_log_lower_bound(started_ms, 0)
 
