@@ -30,7 +30,8 @@ const NUMBER_TYPES: Record<string, string> = {
 }
 const BIGINT_TYPES: Record<string, string> = { int64: 'Int64', uint64: 'UInt64' }
 const NOT_NULLABLE = /^(Array|Map|Tuple|Nested|JSON|Variant|Dynamic)\b/
-const NULLABLE = /^(LowCardinality\s*\(\s*)?Nullable\s*\(/
+const LOW_CARDINALITY = /^\s*LowCardinality\s*\(/
+const LOW_CARDINALITY_NULLABLE = /^\s*LowCardinality\s*\(\s*Nullable\s*\(/
 const COLUMN_ONLY = /(?:^|[(,]\s*)(Tuple|Nested|Variant|Dynamic|AggregateFunction)\b/
 const DECIMAL = /^-?\d+(\.\d+)?$/
 
@@ -182,11 +183,11 @@ function quote(value: string): string {
 }
 
 /** ClickHouse has no Nullable(LowCardinality(T)), so a nullable LowCardinality(T) is LowCardinality(Nullable(T)). */
-function nullable(raw: string): string {
-  const type = raw.trim()
-  if (NULLABLE.test(type)) return raw
+function nullable(type: string): string {
+  if (type.startsWith('Nullable(') || LOW_CARDINALITY_NULLABLE.test(type)) return type
+  if (LOW_CARDINALITY.test(type)) return nullableColumnType(type.trim())
   if (NOT_NULLABLE.test(type)) {
     throw new Error(`ClickHouse has no Nullable(${type}); use .default() instead of .optional() or .nullable()`)
   }
-  return nullableColumnType(type)
+  return `Nullable(${type})`
 }
