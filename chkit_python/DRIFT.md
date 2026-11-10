@@ -1909,3 +1909,14 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   (`bind_query` calls `rstrip(";")`) before sending, as
   `@clickhouse/client` does (`removeTrailingSemi`). Both CLIs send the same SQL.
 - `test/fixtures/sql-splitter.json` holds the cases both suites check.
+
+### `pull` output matches TS (#487)
+- `pull --json` emits the TS keys in the TS order (`ok`, `command`,
+  `outFile`, `definitionCount`, `tableCount`, `databases`, `skippedObjects`, `dryrun`,
+  `warnings`, `content` under `--dryrun`); the Python-only `viewCount`,
+  `materializedViewCount` and `dictionaryCount` are gone. Errors (#664), a missing
+  primary key (#518) and column codecs through the console API (#517) were fixed earlier.
+- Left: the `on_pull_introspect` hook is not the TS `pull({ introspect })` option. It
+  returns definitions and runs before Python connects, so without `--database` it gets
+  no databases and the payload reports `databases: []` and no `skippedObjects`; TS lists
+  the server's databases first and passes them to its introspector.
