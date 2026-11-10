@@ -578,3 +578,61 @@ describe('orderByDependencies', () => {
     expect(orderByDependencies(['a', 'b'], (x) => x, () => ['zzz'])).toEqual(['a', 'b'])
   })
 })
+
+describe('planDiff orders ADD COLUMNs by the columns their expressions read (#681)', () => {
+  const orders = (columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name: 'orders',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+  const addedColumns = (columns: ColumnDefinition[]) =>
+    planDiff([orders([])], [orders(columns)]).operations.map((op) => op.sql)
+
+  test('adds a column before the DEFAULT that reads it, although its name sorts later', () => {
+    expect(
+      addedColumns([
+        { name: 'price', type: 'UInt64' },
+        { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;',
+    ])
+  })
+
+  test('orders MATERIALIZED and ALIAS reads and keeps key order for the other columns', () => {
+    expect(
+      addedColumns([
+        { name: 'a_alias', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'z_base * 2' } },
+        { name: 'b_plain', type: 'UInt64' },
+        { name: 'c_mat', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: '`a_alias` + id' } },
+        { name: 'z_base', type: 'UInt64' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b_plain` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `z_base` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a_alias` UInt64 ALIAS z_base * 2;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c_mat` UInt64 MATERIALIZED `a_alias` + id;',
+    ])
+  })
+
+  test('keeps key order for a cycle and for names inside string literals', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'b + 1' } },
+        { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } },
+        { name: 'c', type: 'String', default: { expression: "concat('d', toString(id))" } },
+        { name: 'd', type: 'String' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT b + 1;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;',
+      "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c` String DEFAULT concat('d', toString(id));",
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;',
+    ])
+  })
+})

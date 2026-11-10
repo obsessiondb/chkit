@@ -215,10 +215,15 @@ export function assertCliColumnMappingsResolvable(
  * the planner's order, which is dependency-aware (#231); the classes this
  * pipeline adds to are ordered by key, and operations that share a key keep
  * the planner's order, so a column's `REMOVE DEFAULT` still runs before its
- * `MODIFY COLUMN`.
+ * `MODIFY COLUMN`. The column ADDs fill their key-order positions in the
+ * planner's order, which puts an ADD after the ADDs its default reads (#681).
  */
 function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]): MigrationOperation[] {
-  return [...kept, ...added]
+  const isAdd = (operation: MigrationOperation) => operation.type === 'alter_table_add_column'
+  const merged = [...kept, ...added]
+  const adds = merged.filter(isAdd)
+  let next = 0
+  return merged
     .map((operation, index) => ({ operation, index }))
     .sort((a, b) => {
       const rank = rankOperation(a.operation)
@@ -227,7 +232,7 @@ function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]
       if (rank === DROP_RANK || rank === CREATE_RANK) return a.index - b.index
       return compareCodePoints(a.operation.key, b.operation.key) || a.index - b.index
     })
-    .map(({ operation }) => operation)
+    .map(({ operation }) => (isAdd(operation) ? (adds[next++] ?? operation) : operation))
 }
 
 function rankOperation(op: MigrationOperation): number {
