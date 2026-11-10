@@ -1,4 +1,4 @@
-import { extractExecutableStatements, isTrivia, tokenizeSQL } from '@chkit/core'
+import { extractExecutableStatements, isTrivia, tokenizeSQL, type SQLToken } from '@chkit/core'
 
 export { extractExecutableStatements }
 
@@ -100,6 +100,70 @@ export function extractMigrationOperationSummaries(sql: string): MigrationOperat
     if (parsed !== null) summaries.push(parsed)
   }
   return summaries
+}
+
+export interface NonSelectBarrier {
+  /** 0-based position among the statements. */
+  index: number
+  statement: string
+  /** The `-- operation:` marker text after the prefix. */
+  summary: string
+}
+
+/**
+ * The statements marked `mode=barrier` that are not a SELECT (#634); the
+ * n-th operation marker belongs to the n-th statement. The barrier read runs
+ * its statement as a query, once and then every second, and nothing waits for
+ * a change it makes to reach the other replicas, so migrate refuses any other
+ * statement there.
+ */
+export function findNonSelectBarriers(
+  statements: readonly string[],
+  operations: readonly MigrationOperationSummary[],
+): NonSelectBarrier[] {
+  const found: NonSelectBarrier[] = []
+  for (const [index, statement] of statements.entries()) {
+    const operation = operations[index]
+    if (operation?.mode !== 'barrier' || isSelectStatement(statement)) continue
+    found.push({ index, statement, summary: operation.summary })
+  }
+  return found
+}
+
+/**
+ * A SELECT, possibly in parentheses, a `WITH ... SELECT` or a FROM-first
+ * `FROM ... SELECT`. ClickHouse also reads `WITH ... INSERT INTO`, and runs
+ * the statements joined by `PARALLEL WITH` even when it then rejects a SELECT
+ * among them, so an `INSERT INTO` or a `PARALLEL WITH` outside a subquery
+ * makes it something else. A column or alias named `parallel` followed by a
+ * WITH modifier (`GROUP BY parallel WITH TOTALS`) there has to be quoted.
+ */
+export function isSelectStatement(statement: string): boolean {
+  const tokens = tokenizeSQL(statement).filter((token) => !isTrivia(token))
+  let start = 0
+  while (isPunctuation(tokens[start], '(')) start++
+  const first = keyword(tokens[start])
+  if (first !== 'SELECT' && first !== 'WITH' && first !== 'FROM') return false
+  let depth = 0
+  for (const [index, token] of tokens.entries()) {
+    if (isPunctuation(token, '(')) depth++
+    else if (isPunctuation(token, ')')) depth--
+    else if (depth <= start && isOtherStatementKeyword(token, tokens[index + 1])) return false
+  }
+  return true
+}
+
+function isOtherStatementKeyword(token: SQLToken, next: SQLToken | undefined): boolean {
+  const pair = `${keyword(token)} ${keyword(next)}`
+  return pair === 'INSERT INTO' || pair === 'PARALLEL WITH'
+}
+
+function isPunctuation(token: SQLToken | undefined, text: string): boolean {
+  return token?.kind === 'punctuation' && token.text === text
+}
+
+function keyword(token: SQLToken | undefined): string | undefined {
+  return token?.kind === 'identifier' ? token.text.toUpperCase() : undefined
 }
 
 function describeDestructiveOperation(

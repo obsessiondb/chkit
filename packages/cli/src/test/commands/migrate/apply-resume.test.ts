@@ -7,6 +7,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
+import { MigrateError } from '../../../commands/migrate/errors.js'
 import type {
   JournalStore,
   MigrationRowState,
@@ -1067,17 +1068,8 @@ describe('applyMigration mode=barrier', () => {
     rmSync(dir, { recursive: true, force: true })
   }, 15_000)
 
-  // An exchange_tables statement keeps its replica wait when marked barrier:
-  // the barrier read runs an EXCHANGE TABLES as ClickHouse would (#577).
-  const EXCHANGE_BARRIER_SQL =
-    '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n' +
-    'EXCHANGE TABLES default.a AND default.b;\n' +
-    '-- operation: drop_table key=table:default.b risk=danger\n' +
-    'DROP TABLE IF EXISTS default.b SYNC;\n'
-  const DROP_SENT = 'DROP TABLE IF EXISTS default.b SYNC;'
-
-  // A two-replica target: no INSERT is running, the replicas agree on both
-  // exchanged tables, and the dropped table is gone everywhere.
+  // A two-replica target where no INSERT is running; every other read
+  // (a propagation wait) is recorded.
   function twoReplicaDb() {
     const events: string[] = []
     const db = {
@@ -1086,15 +1078,7 @@ describe('applyMigration mode=barrier', () => {
       },
       async query<T>(statement: string): Promise<T[]> {
         if (statement.includes('system.one')) return [{ replicas: 2 }] as T[]
-        if (statement.includes('EXCHANGE TABLES')) events.push('barrier read')
-        if (statement.includes('system.processes')) events.push('barrier read')
-        if (statement.includes('uniqExact(uuid)')) {
-          events.push('exchange wait')
-          return [
-            { database: 'default', name: 'a', replicas: 2, uuids: 1, sample_uuid: 'u1' },
-            { database: 'default', name: 'b', replicas: 2, uuids: 1, sample_uuid: 'u2' },
-          ] as T[]
-        }
+        events.push(statement.includes('system.processes') ? 'barrier read' : `query ${statement}`)
         return [] as T[]
       },
     } as unknown as ClickHouseExecutor
@@ -1115,45 +1099,6 @@ describe('applyMigration mode=barrier', () => {
     })
   }
 
-  test('an EXCHANGE TABLES marked mode=barrier waits for every replica before the next statement', async () => {
-    const dir = writeMigration(EXCHANGE_BARRIER_SQL)
-    const { db, events } = twoReplicaDb()
-    const { store, appended, writes } = createFakeStore()
-    await applyOnTwoReplicas(db, dir, store)
-    expect(events).toEqual(['barrier read', 'exchange wait', `command ${DROP_SENT}`])
-    const exchangeRecords = writes.flatMap((state) =>
-      state.operations.filter((op) => op.operationIndex === 0).map((op) => [op.status, op.lastError]),
-    )
-    expect(exchangeRecords.slice(0, 3)).toEqual([
-      ['started', ''],
-      ['completed', PROPAGATION_WAIT_PENDING],
-      ['completed', ''],
-    ])
-    expect(appended).toHaveLength(1)
-    rmSync(dir, { recursive: true, force: true })
-  })
-
-  test('a resumed EXCHANGE TABLES barrier with a pending marker waits again before the next statement', async () => {
-    const dir = writeMigration(EXCHANGE_BARRIER_SQL)
-    const { db, events } = twoReplicaDb()
-    const { store, appended, state } = createFakeStore(
-      inProgressState(checksumSQL(EXCHANGE_BARRIER_SQL), [
-        {
-          ...operation(0, 'completed', { type: 'exchange_tables', key: 'table:default.a' }),
-          lastError: PROPAGATION_WAIT_PENDING,
-        },
-      ]),
-    )
-    await applyOnTwoReplicas(db, dir, store)
-    expect(events).toEqual(['exchange wait', `command ${DROP_SENT}`])
-    expect(state()?.operations.map((op) => [op.operationIndex, op.status, op.lastError])).toEqual([
-      [0, 'completed', ''],
-      [1, 'completed', ''],
-    ])
-    expect(appended).toHaveLength(1)
-    rmSync(dir, { recursive: true, force: true })
-  })
-
   test('a SELECT barrier has no propagation wait', async () => {
     const sql =
       '-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier risk=safe mode=barrier\n' +
@@ -1168,6 +1113,42 @@ describe('applyMigration mode=barrier', () => {
       ['completed', ''],
     ])
     expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('refuses a barrier a plugin rewrote into another statement before anything runs (#634)', async () => {
+    const sql =
+      '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n' +
+      "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n" +
+      '-- operation: drop_table key=table:default.b risk=danger\n' +
+      'DROP TABLE IF EXISTS default.b SYNC;\n'
+    const dir = writeMigration(sql)
+    const { db, events } = twoReplicaDb()
+    const { store, appended, writes } = createFakeStore()
+    const rewrite = fakePluginRuntime((statements) => [
+      'EXCHANGE TABLES default.a AND default.b;',
+      ...statements.slice(1),
+    ])
+    const error = await applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: rewrite,
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(MigrateError)
+    expect(error).toMatchObject({ code: 'barrier_not_select' })
+    expect(String(error)).toContain(
+      '  - m.sql, statement 1 of 2 (-- operation: exchange_tables key=table:default.a risk=caution mode=barrier):\n' +
+        '      EXCHANGE TABLES default.a AND default.b;',
+    )
+    expect(events).toEqual([])
+    expect(writes).toEqual([])
+    expect(appended).toEqual([])
     rmSync(dir, { recursive: true, force: true })
   })
 })
