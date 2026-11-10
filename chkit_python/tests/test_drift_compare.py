@@ -235,6 +235,42 @@ def test_table_shape_detects_engine_mismatch() -> None:
     assert "engine_mismatch" in detail.reason_codes
 
 
+# ObsessionDB and ClickHouse Cloud store Replicated* as Shared*, without the path and replica (#669).
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        ("ReplicatedMergeTree()", "SharedMergeTree", False),
+        ("ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", "SharedMergeTree", False),
+        (
+            "ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', v)",
+            "SharedReplacingMergeTree(v)",
+            False,
+        ),
+        ("ReplicatedReplacingMergeTree(v)", "SharedReplacingMergeTree(v)", False),
+        # ObsessionDB keeps an expression path as written.
+        (
+            "ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+            "SharedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+            False,
+        ),
+        ("ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)", "SharedReplacingMergeTree(v)", False),
+        ("ReplicatedVersionedCollapsingMergeTree(id, v)", "SharedVersionedCollapsingMergeTree(id, v)", False),
+        ("ReplicatedReplacingMergeTree(v)", "SharedMergeTree", True),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', v)", "SharedReplacingMergeTree(id)", True),
+        # A server without Shared engines really has a non-replicated table.
+        ("ReplicatedMergeTree()", "MergeTree", True),
+    ],
+)
+def test_table_shape_replicated_engine_on_shared_server(
+    expected_engine: str, actual_engine: str, mismatch: bool
+) -> None:
+    columns = [ColumnDefinition(name="id", type="UInt64"), ColumnDefinition(name="v", type="UInt64")]
+    detail = compare_table_shape(
+        _t(engine=expected_engine, columns=list(columns)), _it(engine=actual_engine, columns=columns)
+    )
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
 def test_table_shape_detects_order_by_mismatch() -> None:
     detail = compare_table_shape(_t(order_by=["id", "ts"]), _it(order_by="(id)"))
     assert detail is not None

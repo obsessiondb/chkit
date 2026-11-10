@@ -28,6 +28,7 @@ import {
   type TextSkipIndex,
   tokenizeSQL,
   renderVectorIndexType,
+  replicatedEngineAsShared,
   type MaterializedViewDefinition,
   type TableConstraintDefinition,
   type TableDefinition,
@@ -443,6 +444,17 @@ function normalizeEngine(value: string | undefined): string {
 }
 
 /**
+ * ObsessionDB and ClickHouse Cloud store a `Replicated*MergeTree` table as
+ * `Shared*MergeTree`, without the Keeper path and replica name (#669).
+ */
+function enginesMatch(expected: string | undefined, actual: string | undefined): boolean {
+  if (normalizeEngine(expected) === normalizeEngine(actual)) return true
+  if (!expected || !actual || !actual.trim().startsWith('Shared')) return false
+  const shared = replicatedEngineAsShared(expected)
+  return shared !== undefined && normalizeEngine(shared) === normalizeEngine(actual)
+}
+
+/**
  * Every SQL fragment `compareTableShape` will look up in a `SqlCanonicalizer`,
  * at the exact granularity it looks them up (whole expressions for index/ttl,
  * per-element for key/partition clauses, whole query for SELECT projections).
@@ -528,7 +540,7 @@ export function compareTableShape(
   )
   const ttlMismatch = expectedTTL !== actualTTL
 
-  const engineMismatch = normalizeEngine(expected.engine) !== normalizeEngine(actual.engine)
+  const engineMismatch = !enginesMatch(expected.engine, actual.engine)
   const clauses = tableClauses(expected, actual)
   const expectedPrimaryKey = normalizeClause(clauses.primaryKey[0], canonicalizer)
   const actualPrimaryKey = normalizeClause(clauses.primaryKey[1], canonicalizer)
