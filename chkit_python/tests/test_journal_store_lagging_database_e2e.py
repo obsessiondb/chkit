@@ -44,38 +44,41 @@ def _connect(database: str) -> ClickHouseClient:
 class _LaggingReplicaClient:
     """The target as a multi-replica server looks right after ``CREATE DATABASE``.
 
-    The replica that answers the journal probe already has the database (and
-    no journal), while the replica the next request reaches does not yet. Here
-    the database does not exist on the server at first, so every real request
-    fails with UNKNOWN_DATABASE, until the first such failure "propagates" it.
+    The replica that answers the reads already has the database (and no
+    journal), while the replica the journal ``CREATE`` reaches does not yet.
+    Here the database does not exist on the server at first, so the real
+    ``CREATE`` fails with UNKNOWN_DATABASE and goes through the client's retry
+    without the database; only then does the database "propagate".
     """
 
-    def __init__(self, target: ClickHouseClient, propagate: Callable[[], None]) -> None:
+    def __init__(
+        self, target: ClickHouseClient, database: str, propagate: Callable[[], None]
+    ) -> None:
         self._target = target
+        self._database = database
         self._propagate = propagate
         self._propagated = False
 
     def __getattr__(self, name: str) -> Any:
         return getattr(self._target, name)
 
-    def _lagging(self, run: Callable[[], Any]) -> Any:
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         try:
-            return run()
+            self._target.execute(statement, settings)
         except Exception as error:
             if not self._propagated and is_unknown_database_error(error):
                 self._propagated = True
                 self._propagate()
             raise
 
-    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
-        self._lagging(lambda: self._target.execute(statement, settings))
-
     def query(self, statement: str, settings: dict[str, Any] | None = None) -> QueryResult:
-        if not self._propagated and statement.startswith(_PROBE_PREFIX):
-            msg = "Code: 60. DB::Exception: Table does not exist. (UNKNOWN_TABLE)"
-            raise RuntimeError(msg)
-        result: QueryResult = self._lagging(lambda: self._target.query(statement, settings))
-        return result
+        if not self._propagated:
+            if statement.startswith("SELECT currentDatabase()"):
+                return QueryResult(column_names=["database"], rows=[{"database": self._database}])
+            if statement.startswith(_PROBE_PREFIX):
+                msg = "Code: 60. DB::Exception: Table does not exist. (UNKNOWN_TABLE)"
+                raise RuntimeError(msg)
+        return self._target.query(statement, settings)
 
 
 @pytest.fixture
@@ -94,7 +97,7 @@ def test_journal_lands_in_the_target_database_never_in_default(
     target = _connect(database)
     try:
         client = _LaggingReplicaClient(
-            target, lambda: admin.execute(f"CREATE DATABASE {quote_ident(database)}")
+            target, database, lambda: admin.execute(f"CREATE DATABASE {quote_ident(database)}")
         )
         store = JournalStore(client)  # type: ignore[arg-type]
         store.write_migration_state(

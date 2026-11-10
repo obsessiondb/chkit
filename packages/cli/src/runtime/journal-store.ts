@@ -151,6 +151,9 @@ function fingerprintColumnWarning(journalTable: string, error: unknown): string 
   )
 }
 
+/** Retries of the journal CREATE while its database reaches the replica (#493). */
+const CREATE_RETRIES = 20
+
 function isRetryableInsertRace(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   const message = error.message
@@ -341,17 +344,7 @@ SETTINGS index_granularity = 1`
       }
     }
     debug('journal', 'creating journal table')
-    try {
-      await createJournalTable()
-    } catch (error) {
-      if (isUnknownDatabaseError(error)) {
-        debug('journal', 'database missing on CREATE — deferring')
-        _databaseMissing = true
-        bootstrapped = true
-        return
-      }
-      throw error
-    }
+    await createJournalTable()
     await pRetry(async (attempt) => {
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
@@ -365,20 +358,29 @@ SETTINGS index_granularity = 1`
 
   // The probe found the database, so UNKNOWN_DATABASE here means this request
   // reached a replica that has not applied CREATE DATABASE yet (#493): retry
-  // until it has, and defer the journal only if it never does.
+  // until it has. A database that never arrives stops the run, so the state
+  // being written is never dropped.
   async function createJournalTable(): Promise<void> {
-    await pRetry(async () => {
-      await db.command(createTableSql(await currentDatabase()))
-    }, {
-      retries: 20,
-      minTimeout: 500,
-      factor: 1,
-      shouldRetry: ({ error, attemptNumber }) => {
-        if (!isUnknownDatabaseError(error)) return false
-        debug('journal', `database not yet on this replica — retrying the journal CREATE (attempt ${attemptNumber})`)
-        return true
-      },
-    })
+    try {
+      await pRetry(async () => {
+        await db.command(createTableSql(await currentDatabase()))
+      }, {
+        retries: CREATE_RETRIES,
+        minTimeout: 500,
+        factor: 1,
+        shouldRetry: ({ error, attemptNumber }) => {
+          if (!isUnknownDatabaseError(error)) return false
+          debug('journal', `database not yet on this replica — retrying the journal CREATE (attempt ${attemptNumber})`)
+          return true
+        },
+      })
+    } catch (error) {
+      if (!isUnknownDatabaseError(error)) throw error
+      throw new Error(
+        `Cannot create the journal table ${journalTable}: its database is still missing on the replica that received the CREATE after ${CREATE_RETRIES + 1} attempts. Re-run chkit once the database has reached every replica. ${errorText(error)}`,
+        { cause: error },
+      )
+    }
   }
 
   // On a multi-replica target, the replica that answered the probe may not

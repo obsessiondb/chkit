@@ -371,7 +371,7 @@ class JournalStore:
             f"SETTINGS index_granularity = 1"
         )
 
-    def _ensure_table(self, *, create: bool) -> None:  # noqa: PLR0911
+    def _ensure_table(self, *, create: bool) -> None:
         """Make sure the journal can be read or, with ``create``, written.
 
         Only a write creates the journal or adds the columns an old one lacks,
@@ -410,14 +410,7 @@ class JournalStore:
                     return
                 self._table_missing = True
                 return
-        try:
-            self._create_journal_table()
-        except Exception as exc:
-            if is_unknown_database_error(exc):
-                self._database_missing = True
-                self._bootstrapped = True
-                return
-            raise
+        self._create_journal_table()
         self._wait_for_every_replica()
         # Another process, maybe an older release, may have created it first.
         self._fingerprint_column = self._detect_fingerprint_column()
@@ -428,16 +421,25 @@ class JournalStore:
         """Create the journal in the database the probe found.
 
         UNKNOWN_DATABASE here means this request reached a replica that has not
-        applied ``CREATE DATABASE`` yet (#493): retry until it has, and defer
-        the journal only if it never does.
+        applied ``CREATE DATABASE`` yet (#493): retry until it has. A database
+        that never arrives stops the run, so the state being written is never
+        dropped.
         """
         for attempt in range(1, MAX_RETRIES + 2):
             try:
                 self._client.execute(self._create_table_sql(self._current_database()))
                 return
             except Exception as exc:
-                if not is_unknown_database_error(exc) or attempt > MAX_RETRIES:
+                if not is_unknown_database_error(exc):
                     raise
+                if attempt > MAX_RETRIES:
+                    msg = (
+                        f"Cannot create the journal table {self._table}: its database is "
+                        "still missing on the replica that received the CREATE after "
+                        f"{attempt} attempts. Re-run chkit once the database has reached "
+                        f"every replica. {exc}"
+                    )
+                    raise RuntimeError(msg) from exc
                 debug(
                     "journal",
                     "database not yet on this replica — retrying the journal CREATE "

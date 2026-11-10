@@ -17,33 +17,40 @@ import {
 const SERVER_DEFAULT_DATABASE = 'default'
 
 /**
- * The target as a multi-replica server looks right after CREATE DATABASE: the
- * replica that answers the journal probe already has the database (and no
- * journal), while the replica the next request reaches does not yet. Here the
- * database does not exist on the server at first, so every real request fails
- * with UNKNOWN_DATABASE, until the first such failure "propagates" it.
+ * The target as a multi-replica server looks right after CREATE DATABASE:
+ * the replica that answers the reads already has the database (and no
+ * journal), while the replica the journal CREATE reaches does not yet. Here
+ * the database does not exist on the server at first, so the real CREATE
+ * fails with UNKNOWN_DATABASE and goes through the executor's retry without
+ * the database; only then does the database "propagate".
  */
-function laggingReplicaExecutor(target: ClickHouseExecutor, propagate: () => Promise<void>): ClickHouseExecutor {
+function laggingReplicaExecutor(
+  target: ClickHouseExecutor,
+  database: string,
+  propagate: () => Promise<void>,
+): ClickHouseExecutor {
   let propagated = false
-  async function lagging<T>(run: () => Promise<T>): Promise<T> {
-    try {
-      return await run()
-    } catch (error) {
-      if (!propagated && isUnknownDatabaseError(error)) {
-        propagated = true
-        await propagate()
-      }
-      throw error
-    }
-  }
   return {
     ...target,
-    command: (sql, settings) => lagging(() => target.command(sql, settings)),
-    async query<T>(sql: string, settings?: Parameters<ClickHouseExecutor['query']>[1]): Promise<T[]> {
-      if (!propagated && /^SELECT name, migration_completed, operations FROM /.test(sql)) {
-        throw Object.assign(new Error('Table does not exist. (UNKNOWN_TABLE)'), { code: '60' })
+    async command(sql, settings) {
+      try {
+        await target.command(sql, settings)
+      } catch (error) {
+        if (!propagated && isUnknownDatabaseError(error)) {
+          propagated = true
+          await propagate()
+        }
+        throw error
       }
-      return await lagging(() => target.query<T>(sql, settings))
+    },
+    async query<T>(sql: string, settings?: Parameters<ClickHouseExecutor['query']>[1]): Promise<T[]> {
+      if (!propagated) {
+        if (sql.startsWith('SELECT currentDatabase()')) return [{ database }] as T[]
+        if (sql.startsWith('SELECT name, migration_completed, operations FROM ')) {
+          throw Object.assign(new Error('Table does not exist. (UNKNOWN_TABLE)'), { code: '60' })
+        }
+      }
+      return await target.query<T>(sql, settings)
     },
   }
 }
@@ -68,7 +75,7 @@ describe('journal store while CREATE DATABASE is still reaching replicas', () =>
       const strayJournal = `${quoteIdent(SERVER_DEFAULT_DATABASE)}.${quoteIdent(journalTable)}`
 
       try {
-        const db = laggingReplicaExecutor(target, () => admin.command(`CREATE DATABASE ${quoteIdent(database)}`))
+        const db = laggingReplicaExecutor(target, database, () => admin.command(`CREATE DATABASE ${quoteIdent(database)}`))
         const store = createJournalStore(db)
         await store.writeMigrationState({
           name: 'bootstrap.sql',

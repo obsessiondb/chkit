@@ -110,15 +110,16 @@ def test_create_on_a_replica_without_the_database_yet_is_retried(
     assert client.executed[1].startswith("INSERT INTO _chkit_migrations")
 
 
-def test_create_that_never_finds_the_database_skips_the_insert(
+def test_create_that_never_finds_the_database_stops_the_write(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    """The probe saw the database, so the state is never silently dropped."""
     monkeypatch.setattr("chkit.cli.journal_store.time.sleep", lambda _: None)
     client = _ProbeFailingClient(probe_error=_UNKNOWN_TABLE, create_error=_UNKNOWN_DATABASE)
     store = JournalStore(client)  # type: ignore[arg-type]
 
-    store.write_migration_state(_state())
+    with pytest.raises(RuntimeError, match="its database is still missing on the replica"):
+        store.write_migration_state(_state())
 
-    assert store.database_missing is True
     assert client.create_attempts == 21
     assert client.executed == []
