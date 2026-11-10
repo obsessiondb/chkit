@@ -76,7 +76,7 @@ def test_unknown_table_probe_creates_the_journal_and_inserts() -> None:
 
     assert store.database_missing is False
     assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS `app`._chkit_migrations")
-    assert client.executed[1].startswith("INSERT INTO _chkit_migrations")
+    assert client.executed[1].startswith("INSERT INTO `app`._chkit_migrations")
 
 
 def test_unknown_database_skips_the_insert() -> None:
@@ -107,7 +107,7 @@ def test_create_on_a_replica_without_the_database_yet_is_retried(
     assert store.database_missing is False
     assert client.create_attempts == 3
     assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS `app`._chkit_migrations")
-    assert client.executed[1].startswith("INSERT INTO _chkit_migrations")
+    assert client.executed[1].startswith("INSERT INTO `app`._chkit_migrations")
 
 
 def test_create_that_never_finds_the_database_stops_the_write(

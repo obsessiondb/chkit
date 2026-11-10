@@ -167,7 +167,7 @@ def test_the_first_write_adds_the_column_to_a_journal_an_older_release_created()
     store.write_migration_state(_state(["v1:a"]))
     writes = [sql for sql in client.executed if not sql.startswith("SYSTEM SYNC REPLICA")]
     assert writes[0] == (
-        "ALTER TABLE _chkit_migrations ADD COLUMN IF NOT EXISTS "
+        "ALTER TABLE `default`._chkit_migrations ADD COLUMN IF NOT EXISTS "
         "operation_fingerprints Array(String) DEFAULT []"
     )
     assert writes[1].endswith(", ['v1:a'])")
@@ -320,7 +320,7 @@ def two_replicas(single_replica: None, monkeypatch: pytest.MonkeyPatch) -> None:
     _ = single_replica  # replaced below
     fanout = ReplicaFanout(cluster="default", replicas=2)
     monkeypatch.setattr("chkit.clickhouse.ddl_propagation.resolve_replica_fanout", lambda *_: fanout)
-    monkeypatch.setattr("chkit.cli.journal_store.resolve_replica_fanout", lambda *_: fanout)
+    monkeypatch.setattr("chkit.cli.journal_store.resolve_replica_fanout_or_raise", lambda *_: fanout)
 
 
 @pytest.mark.usefixtures("two_replicas")

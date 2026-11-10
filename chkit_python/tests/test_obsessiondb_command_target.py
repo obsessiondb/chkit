@@ -150,7 +150,7 @@ def test_migrate_through_the_service_records_applied_at_without_a_zone(
     )
 
     assert result.exit_code == 0, result.output
-    inserts = [sql for _, sql in calls if sql.startswith("INSERT INTO _chkit_migrations")]
+    inserts = [sql for _, sql in calls if re.match(r"INSERT INTO `[^`]+`\._chkit_migrations ", sql)]
     assert inserts
     applied_at = re.search(r"VALUES \('[^']*', '([^']*)'", inserts[-1])
     assert applied_at is not None

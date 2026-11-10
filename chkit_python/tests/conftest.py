@@ -106,7 +106,7 @@ def single_replica(monkeypatch: pytest.MonkeyPatch) -> None:
     server; without this the probe would consume one of their scripted answers.
     """
     monkeypatch.setattr("chkit.clickhouse.ddl_propagation.resolve_replica_fanout", lambda *_: None)
-    monkeypatch.setattr("chkit.cli.journal_store.resolve_replica_fanout", lambda *_: None)
+    monkeypatch.setattr("chkit.cli.journal_store.resolve_replica_fanout_or_raise", lambda *_: None)
 
 
 @pytest.fixture(autouse=True)

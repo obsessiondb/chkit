@@ -109,4 +109,63 @@ describe('journal store while CREATE DATABASE is still reaching replicas', () =>
     },
     60_000,
   )
+
+  test(
+    'a journal INSERT that reaches a replica without the database never lands in default (#700)',
+    async () => {
+      const admin = createLiveExecutor(liveEnv)
+      const database = `${createPrefix('lagging_insert')}db`
+      const journalTable = createJournalTableName('lagging_insert')
+      const previousJournalTable = process.env.CHKIT_JOURNAL_TABLE
+      process.env.CHKIT_JOURNAL_TABLE = journalTable
+      const connection = { url: liveEnv.clickhouseUrl, username: liveEnv.clickhouseUser, password: liveEnv.clickhousePassword }
+      const target = createClickHouseExecutor({ ...connection, database })
+      // A replica that has not applied CREATE DATABASE yet: its requests fail
+      // with UNKNOWN_DATABASE, and the executor retries them without it.
+      const lagging = createClickHouseExecutor({ ...connection, database: `${database}_lagging` })
+      const journal = `${quoteIdent(database)}.${quoteIdent(journalTable)}`
+      const strayJournal = `${quoteIdent(SERVER_DEFAULT_DATABASE)}.${quoteIdent(journalTable)}`
+      const state = {
+        name: 'second.sql',
+        appliedAt: '2026-11-10 12:00:00.000',
+        checksum: 'cs',
+        chkitVersion: 'v',
+        migrationCompleted: true,
+        operations: [],
+      }
+
+      try {
+        await admin.command(`CREATE DATABASE ${quoteIdent(database)}`)
+        await createJournalStore(target).writeMigrationState({ ...state, name: 'first.sql' })
+        // A compatible journal in default, as another project or #493 left one.
+        await admin.command(`CREATE TABLE ${strayJournal} AS ${journal}`)
+
+        const db: ClickHouseExecutor = {
+          ...target,
+          command: (sql, settings) =>
+            sql.startsWith('INSERT INTO') ? lagging.command(sql, settings) : target.command(sql, settings),
+        }
+        await createJournalStore(db).writeMigrationState(state)
+
+        const stray = await admin.query<{ rows: string }>(`SELECT count() AS rows FROM ${strayJournal}`)
+        expect(Number(stray[0]?.rows)).toBe(0)
+        const rows = await waitForRows<{ name: string }>(
+          admin,
+          `SELECT name FROM ${journal} FINAL ORDER BY name SETTINGS select_sequential_consistency = 1`,
+          (found) => found.length === 2,
+          'both journal rows in the target database',
+        )
+        expect(rows).toEqual([{ name: 'first.sql' }, { name: 'second.sql' }])
+      } finally {
+        if (previousJournalTable === undefined) delete process.env.CHKIT_JOURNAL_TABLE
+        else process.env.CHKIT_JOURNAL_TABLE = previousJournalTable
+        await admin.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`).catch(() => {})
+        await admin.command(`DROP TABLE IF EXISTS ${strayJournal} SYNC`).catch(() => {})
+        await lagging.close()
+        await target.close()
+        await admin.close()
+      }
+    },
+    60_000,
+  )
 })
