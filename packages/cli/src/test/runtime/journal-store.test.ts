@@ -264,6 +264,44 @@ describe('createJournalStore', () => {
     expect(commandCalls.filter((sql) => sql.startsWith('INSERT INTO'))).toEqual([])
   })
 
+  test('retries a journal CREATE that reached a replica without the database yet (#493)', async () => {
+    // The probe found the database; the first CREATE reached a replica that
+    // has not applied CREATE DATABASE yet.
+    const commandCalls: string[] = []
+    let createAttempts = 0
+    const db = {
+      async command(sql: string) {
+        if (sql.startsWith('CREATE TABLE')) {
+          createAttempts += 1
+          if (createAttempts === 1) throw Object.assign(new Error('Database app does not exist'), { code: '81' })
+        }
+        commandCalls.push(sql)
+      },
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.startsWith('SELECT currentDatabase()')) return [{ database: 'app' }] as T[]
+        if (/SELECT name, migration_completed, operations FROM .* LIMIT 0/.test(sql) && createAttempts < 2) {
+          throw Object.assign(new Error('Table app._chkit_migrations does not exist. (UNKNOWN_TABLE)'), { code: '60' })
+        }
+        return []
+      },
+    } as unknown as ClickHouseExecutor
+
+    const store = createJournalStore(db)
+    await store.writeMigrationState({
+      name: 'bootstrap.sql',
+      appliedAt: '2026-05-26 12:00:00.000',
+      checksum: 'cs',
+      chkitVersion: 'v',
+      migrationCompleted: true,
+      operations: [],
+    })
+
+    expect(store.databaseMissing).toBe(false)
+    expect(createAttempts).toBe(2)
+    expect(commandCalls[0]).toStartWith('CREATE TABLE IF NOT EXISTS `app`._chkit_migrations')
+    expect(commandCalls.some((sql) => sql.startsWith('INSERT INTO _chkit_migrations'))).toBe(true)
+  })
+
   test('writeMigrationState escapes single quotes inside lastError so SQL stays valid', async () => {
     const { db, commandCalls } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
@@ -576,7 +614,7 @@ describe('createJournalStore', () => {
         operations: [],
       })
 
-      expect(commands[0]).toStartWith('CREATE TABLE IF NOT EXISTS _chkit_migrations')
+      expect(commands[0]).toStartWith('CREATE TABLE IF NOT EXISTS `default`._chkit_migrations')
       expect(commands.some((sql) => sql.startsWith('INSERT INTO _chkit_migrations'))).toBe(true)
     })
 

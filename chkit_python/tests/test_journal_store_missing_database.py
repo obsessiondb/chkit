@@ -34,16 +34,24 @@ class _ProbeFailingClient:
 
     probe_error: str
     create_error: str | None = None
+    # How many CREATEs fail with ``create_error`` before one succeeds; ``None``
+    # fails every one.
+    create_failures: int | None = None
     executed: list[str] = field(default_factory=list[str])
+    create_attempts: int = 0
 
     def query(self, sql: str) -> Any:
+        if sql.startswith("SELECT currentDatabase()"):
+            return SimpleNamespace(rows=[{"database": "app"}])
         if not any(executed.startswith("CREATE TABLE") for executed in self.executed):
             raise RuntimeError(self.probe_error)
         return SimpleNamespace(rows=[])
 
     def execute(self, sql: str) -> None:
         if sql.startswith("CREATE TABLE") and self.create_error is not None:
-            raise RuntimeError(self.create_error)
+            self.create_attempts += 1
+            if self.create_failures is None or self.create_attempts <= self.create_failures:
+                raise RuntimeError(self.create_error)
         self.executed.append(sql)
 
 
@@ -67,7 +75,7 @@ def test_unknown_table_probe_creates_the_journal_and_inserts() -> None:
     store.write_migration_state(_state())
 
     assert store.database_missing is False
-    assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS _chkit_migrations")
+    assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS `app`._chkit_migrations")
     assert client.executed[1].startswith("INSERT INTO _chkit_migrations")
 
 
@@ -80,4 +88,37 @@ def test_unknown_database_skips_the_insert() -> None:
     store.write_migration_state(_state())
 
     assert store.database_missing is True
+    assert client.executed == []
+
+
+def test_create_on_a_replica_without_the_database_yet_is_retried(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The probe found the database, but the CREATE reached a replica that has
+    not applied ``CREATE DATABASE`` yet (#493)."""
+    monkeypatch.setattr("chkit.cli.journal_store.time.sleep", lambda _: None)
+    client = _ProbeFailingClient(
+        probe_error=_UNKNOWN_TABLE, create_error=_UNKNOWN_DATABASE, create_failures=2
+    )
+    store = JournalStore(client)  # type: ignore[arg-type]
+
+    store.write_migration_state(_state())
+
+    assert store.database_missing is False
+    assert client.create_attempts == 3
+    assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS `app`._chkit_migrations")
+    assert client.executed[1].startswith("INSERT INTO _chkit_migrations")
+
+
+def test_create_that_never_finds_the_database_skips_the_insert(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("chkit.cli.journal_store.time.sleep", lambda _: None)
+    client = _ProbeFailingClient(probe_error=_UNKNOWN_TABLE, create_error=_UNKNOWN_DATABASE)
+    store = JournalStore(client)  # type: ignore[arg-type]
+
+    store.write_migration_state(_state())
+
+    assert store.database_missing is True
+    assert client.create_attempts == 21
     assert client.executed == []

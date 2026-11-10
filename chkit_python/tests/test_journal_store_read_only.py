@@ -103,7 +103,7 @@ def test_the_first_write_creates_the_journal_that_reads_found_missing() -> None:
         )
     )
 
-    assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS _chkit_migrations")
+    assert client.executed[0].startswith("CREATE TABLE IF NOT EXISTS `default`._chkit_migrations")
     assert any(sql.startswith("INSERT INTO _chkit_migrations") for sql in client.executed)
 
 

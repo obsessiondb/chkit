@@ -122,6 +122,13 @@ def test_migrate_apply_creates_a_missing_database(
         assert [(row["name"], bool(row["migration_completed"])) for row in journal] == [
             (migration.name, True)
         ]
+        # A statement that fails on the missing database is retried without
+        # it, in the server's default database: no journal may land there (#493).
+        stray = live.query(
+            "SELECT count() AS tables FROM system.tables "
+            f"WHERE database = 'default' AND name = '{journal_table}'"
+        ).rows
+        assert int(stray[0]["tables"]) == 0
 
         after = chkit_json("status")
         assert "databaseMissing" not in after
@@ -129,3 +136,4 @@ def test_migrate_apply_creates_a_missing_database(
         assert after["pending"] == 0
     finally:
         live.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+        live.execute(f"DROP TABLE IF EXISTS default.{quote_ident(journal_table)} SYNC")

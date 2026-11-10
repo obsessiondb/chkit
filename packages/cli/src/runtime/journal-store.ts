@@ -9,7 +9,7 @@ import {
   type ClickHouseExecutor,
   type ReplicaFanout,
 } from '@chkit/clickhouse'
-import { onClusterClause } from '@chkit/core'
+import { onClusterClause, quoteIdentifier } from '@chkit/core'
 import pRetry from 'p-retry'
 
 import { createTableElementNames } from './create-table-columns.js'
@@ -262,7 +262,10 @@ export function createJournalStore(db: ClickHouseExecutor, cluster?: string): Jo
   const journalEngine = cluster
     ? "ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/chkit_journal', '{shard}_{replica}', applied_at)"
     : 'ReplacingMergeTree(applied_at)'
-  const createTableSql = `CREATE TABLE IF NOT EXISTS ${journalTable}${onCluster} (
+  // Named in its database: the executor retries a statement that fails with
+  // UNKNOWN_DATABASE without the database, which would otherwise create the
+  // journal in the server's default database (#493).
+  const createTableSql = (database: string) => `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(database)}.${journalTable}${onCluster} (
     name String,
     applied_at DateTime64(3, 'UTC'),
     checksum String,
@@ -339,7 +342,7 @@ SETTINGS index_granularity = 1`
     }
     debug('journal', 'creating journal table')
     try {
-      await db.command(createTableSql)
+      await createJournalTable()
     } catch (error) {
       if (isUnknownDatabaseError(error)) {
         debug('journal', 'database missing on CREATE — deferring')
@@ -358,6 +361,24 @@ SETTINGS index_granularity = 1`
     fingerprintColumn = await detectFingerprintColumn()
     bootstrapped = true
     tableMissing = false
+  }
+
+  // The probe found the database, so UNKNOWN_DATABASE here means this request
+  // reached a replica that has not applied CREATE DATABASE yet (#493): retry
+  // until it has, and defer the journal only if it never does.
+  async function createJournalTable(): Promise<void> {
+    await pRetry(async () => {
+      await db.command(createTableSql(await currentDatabase()))
+    }, {
+      retries: 20,
+      minTimeout: 500,
+      factor: 1,
+      shouldRetry: ({ error, attemptNumber }) => {
+        if (!isUnknownDatabaseError(error)) return false
+        debug('journal', `database not yet on this replica — retrying the journal CREATE (attempt ${attemptNumber})`)
+        return true
+      },
+    })
   }
 
   // On a multi-replica target, the replica that answered the probe may not

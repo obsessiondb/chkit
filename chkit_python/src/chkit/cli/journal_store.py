@@ -53,6 +53,7 @@ from chkit.clickhouse.ddl_propagation import (
     wait_for_table,
 )
 from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
+from chkit.core.identifier import quote_identifier
 from chkit.core.on_cluster import on_cluster_clause
 from chkit.core.sql_lexer import js_regex, js_trim
 
@@ -332,7 +333,7 @@ class JournalStore:
     def table_name(self) -> str:
         return self._table
 
-    def _create_table_sql(self) -> str:
+    def _create_table_sql(self, database: str) -> str:
         # In cluster mode the journal must be consistent across every node, so
         # it uses a replicated engine with a no-``{shard}`` Keeper path (one
         # cluster-wide replication group) created ``ON CLUSTER``. ``{uuid}`` is
@@ -344,7 +345,10 @@ class JournalStore:
         # unique cluster-wide — per-shard ``{replica}`` naming (the common
         # multi-shard layout) would otherwise collide. The read path already
         # uses SYNC REPLICA + FINAL + sequential consistency. Single-node/Cloud
-        # keeps the plain engine.
+        # keeps the plain engine. The table is named in its database: the client
+        # retries a statement that fails with UNKNOWN_DATABASE without the
+        # database, which would otherwise create the journal in the server's
+        # default database (#493).
         engine = (
             "ReplicatedReplacingMergeTree("
             "'/clickhouse/tables/{uuid}/chkit_journal', "
@@ -353,7 +357,8 @@ class JournalStore:
             else "ReplacingMergeTree(applied_at)"
         )
         return (
-            f"CREATE TABLE IF NOT EXISTS {self._table}{self._on_cluster} (\n"
+            f"CREATE TABLE IF NOT EXISTS {quote_identifier(database)}.{self._table}"
+            f"{self._on_cluster} (\n"
             f"    name String,\n"
             f"    applied_at DateTime64(3, 'UTC'),\n"
             f"    checksum String,\n"
@@ -406,7 +411,7 @@ class JournalStore:
                 self._table_missing = True
                 return
         try:
-            self._client.execute(self._create_table_sql())
+            self._create_journal_table()
         except Exception as exc:
             if is_unknown_database_error(exc):
                 self._database_missing = True
@@ -418,6 +423,27 @@ class JournalStore:
         self._fingerprint_column = self._detect_fingerprint_column()
         self._bootstrapped = True
         self._table_missing = False
+
+    def _create_journal_table(self) -> None:
+        """Create the journal in the database the probe found.
+
+        UNKNOWN_DATABASE here means this request reached a replica that has not
+        applied ``CREATE DATABASE`` yet (#493): retry until it has, and defer
+        the journal only if it never does.
+        """
+        for attempt in range(1, MAX_RETRIES + 2):
+            try:
+                self._client.execute(self._create_table_sql(self._current_database()))
+                return
+            except Exception as exc:
+                if not is_unknown_database_error(exc) or attempt > MAX_RETRIES:
+                    raise
+                debug(
+                    "journal",
+                    "database not yet on this replica — retrying the journal CREATE "
+                    f"(attempt {attempt})",
+                )
+                time.sleep(RETRY_DELAY_SECONDS)
 
     def _exists_on_another_replica(self) -> bool:
         # On a multi-replica target, the replica that answered the probe may
