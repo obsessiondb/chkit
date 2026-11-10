@@ -225,6 +225,26 @@ describe('createRemoteExecutor queryStatus', () => {
 			workbench.stop()
 		}
 	})
+
+	// #671: the console relays ClickHouse's error text; the thrown error keeps
+	// the exception code so async migrate can tell a server rejection from a
+	// transport failure.
+	test('a ClickHouse rejection keeps its exception code on the thrown error', async () => {
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			processesError: 'Code: 62. DB::Exception: Syntax error: failed at position 1',
+		})
+		try {
+			const remote = connect(workbench.url)
+
+			const error = await remote.queryStatus('qid-1', { everyReplica: true }).catch((e: unknown) => e)
+			expect(error).toBeInstanceOf(Error)
+			expect((error as Error).message).toContain('Syntax error')
+			expect((error as Error & { code?: string }).code).toBe('62')
+		} finally {
+			workbench.stop()
+		}
+	})
 })
 
 // drift and pull read object comments from system.tables.comment, as the

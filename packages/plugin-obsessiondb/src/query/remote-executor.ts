@@ -23,7 +23,14 @@ function throwIfError(
 	res: Awaited<ReturnType<ApiClient['workbench']['query']['execute']>>,
 ): void {
 	if (res.error) {
-		throw new Error(res.error)
+		const error = new Error(res.error)
+		// The console relays ClickHouse's own error text ("Code: 62. DB::Exception:
+		// ..."). Keep the exception code on the thrown error so callers (async
+		// migrate's poller) can tell a server rejection from a transport failure,
+		// like @clickhouse/client's ClickHouseError.code (#671).
+		const code = /Code: (\d+)/.exec(res.error)?.[1]
+		if (code !== undefined) (error as Error & { code?: string }).code = code
+		throw error
 	}
 }
 

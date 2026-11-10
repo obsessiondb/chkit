@@ -35,6 +35,23 @@ const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
 // The same budget limits `unknown` polls after a failed submit (#657).
 const MAX_TRANSIENT_POLL_ERRORS = 20
 
+// A server rejection (the statement never ran) carries a ClickHouse exception
+// code: @clickhouse/client attaches it to ClickHouseError, and the ObsessionDB
+// console executor keeps it from the server's error text. wrapConnectionError
+// rethrows an authentication failure as a plain error named by its message.
+// Both mean the query will never appear in system.query_log, so the attempt
+// can be journaled failed right away. Anything else - a gateway timeout, a
+// proxy 5xx, a network cut - is indeterminate: the server may be running the
+// query without any poll having seen it (#671).
+function isServerRejection(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  if ('code' in error) {
+    const code = (error as { code?: unknown }).code
+    if (typeof code === 'string' && /^\d+$/.test(code)) return true
+  }
+  return /authentication failed/i.test(error.message)
+}
+
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -370,13 +387,15 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       }
 
       // status === 'unknown'
-      // If submit has already rejected and no poll found the query running, it
-      // never made it server-side (e.g. SQL parse error) — record the attempt as
-      // failed and surface that error. Known gap: a load that ends before the
-      // first poll, with a transport error on its submit, also lands here (#657).
-      // Otherwise it's a transient gap (just-submitted, or just-finished before
-      // query_log has it); loop.
-      if (submitError && !seenRunning) {
+      // If submit has already rejected and no poll found the query running, a
+      // definitive server rejection (e.g. SQL parse error) means the query
+      // never made it server-side — record the attempt as failed and surface
+      // that error. A transport failure on the submit says nothing: the server
+      // may be running the query unobserved, so it falls through to the
+      // bounded grace below instead of being journaled failed (#671).
+      // Without a submit error it's a transient gap (just-submitted, or
+      // just-finished before query_log has it); loop.
+      if (submitError && !seenRunning && isServerRejection(submitError)) {
         const failedOp: OperationState = {
           operationIndex: statementIndex,
           operationKey,
