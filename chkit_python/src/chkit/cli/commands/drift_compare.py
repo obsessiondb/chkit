@@ -541,9 +541,11 @@ def _table_clauses(
     }
 
 
-# Operator keywords the server rewrites in engine arguments (``is null`` reads back as ``IS NULL``).
-_ENGINE_ARGUMENT_KEYWORDS = frozenset(
-    {"and", "or", "not", "is", "null", "true", "false", "in", "like", "ilike"}
+# Keywords the server rewrites in engine arguments: ``is null`` reads back as
+# ``IS NULL``, ``TRUE`` as ``true``. A bare ``true``, ``false`` or ``null`` is always a literal.
+_ENGINE_LITERAL_KEYWORDS = frozenset({"null", "true", "false"})
+_ENGINE_OPERATOR_KEYWORDS = frozenset(
+    {"and", "or", "not", "is", "in", "like", "ilike", "distinct", "from", "global"}
 )
 
 
@@ -551,7 +553,8 @@ def _normalize_engine_for_compare(value: str | None) -> str:
     """Column names and string literals in engine arguments are case-sensitive,
     so they keep their case (#673). Function names (``RAND()`` reads back as
     ``rand()``) and operator keywords do not, and whitespace between tokens is
-    insignificant."""
+    insignificant. An operator keyword that is a whole argument on its own can
+    only be a column."""
     if not value:
         return ""
     tokens = [
@@ -559,16 +562,21 @@ def _normalize_engine_for_compare(value: str | None) -> str:
         for token in tokenize_sql(normalize_engine(normalize_sql_fragment(value)))
         if not is_trivia(token)
     ]
-    return " ".join(
-        token.text.lower()
-        if token.kind == "identifier"
-        and (
-            (index + 1 < len(tokens) and tokens[index + 1].text == "(")
-            or token.text.lower() in _ENGINE_ARGUMENT_KEYWORDS
+
+    def normalized(index: int) -> str:
+        token = tokens[index]
+        if token.kind != "identifier":
+            return token.text
+        lower = token.text.lower()
+        previous = tokens[index - 1].text if index > 0 else None
+        following = tokens[index + 1].text if index + 1 < len(tokens) else None
+        stands_alone = previous in ("(", ",") and following in (")", ",")
+        keyword = lower in _ENGINE_LITERAL_KEYWORDS or (
+            lower in _ENGINE_OPERATOR_KEYWORDS and not stands_alone
         )
-        else token.text
-        for index, token in enumerate(tokens)
-    )
+        return lower if following == "(" or keyword else token.text
+
+    return " ".join(normalized(index) for index in range(len(tokens)))
 
 
 def _engines_match(expected: str | None, actual: str | None) -> bool:

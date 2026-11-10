@@ -777,12 +777,16 @@ describe('@chkit/cli drift comparer', () => {
     ["GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", true],
     ["ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", 'SharedReplacingMergeTree(ver)', true],
     ["Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", true],
+    ['ReplacingMergeTree(And)', 'ReplacingMergeTree(and)', true],
+    ['SummingMergeTree((From, Value))', 'SummingMergeTree((from, Value))', true],
     ['CollapsingMergeTree(Sign)', 'CollapsingMergeTree(Sign)', false],
     ['ReplacingMergeTree( Ver )', 'ReplacingMergeTree(Ver)', false],
     ["ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", 'SharedReplacingMergeTree(Ver)', false],
     ['Distributed(c, app, t, RAND())', "Distributed('c', 'app', 't', rand())", false],
     ['Distributed(c, app, t, If(Sign > 1, 1, 0))', "Distributed('c', 'app', 't', if(Sign > 1, 1, 0))", false],
     ['Distributed(c, app, t, Path is not null and TRUE)', "Distributed('c', 'app', 't', Path IS NOT NULL AND true)", false],
+    ['Distributed(c, app, t, id is distinct from 0)', "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", false],
+    ["Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", false],
   ]
   for (const [expectedEngine, actualEngine, mismatch] of engineArgumentCase) {
     test(`engine ${expectedEngine} against ${actualEngine} ${mismatch ? 'is' : 'is not'} a mismatch`, () => {

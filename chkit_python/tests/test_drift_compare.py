@@ -283,6 +283,8 @@ def test_table_shape_replicated_engine_on_shared_server(
         ("GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", True),
         ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(ver)", True),
         ("Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", True),
+        ("ReplacingMergeTree(And)", "ReplacingMergeTree(and)", True),
+        ("SummingMergeTree((From, Value))", "SummingMergeTree((from, Value))", True),
         ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(Sign)", False),
         ("ReplacingMergeTree( Ver )", "ReplacingMergeTree(Ver)", False),
         ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(Ver)", False),
@@ -293,6 +295,8 @@ def test_table_shape_replicated_engine_on_shared_server(
             "Distributed('c', 'app', 't', Path IS NOT NULL AND true)",
             False,
         ),
+        ("Distributed(c, app, t, id is distinct from 0)", "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", False),
+        ("Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", False),
     ],
 )
 def test_table_shape_engine_argument_case(expected_engine: str, actual_engine: str, mismatch: bool) -> None:

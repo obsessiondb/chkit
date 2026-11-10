@@ -438,24 +438,30 @@ function tableClauses(expected: TableDefinition, actual: ActualTableShape) {
   } satisfies Record<string, [string | undefined, string | undefined]>
 }
 
-// Operator keywords the server rewrites in engine arguments (`is null` reads back as `IS NULL`).
-const ENGINE_ARGUMENT_KEYWORDS = new Set(['and', 'or', 'not', 'is', 'null', 'true', 'false', 'in', 'like', 'ilike'])
+// Keywords the server rewrites in engine arguments: `is null` reads back as
+// `IS NULL`, `TRUE` as `true`. A bare `true`, `false` or `null` is always a literal.
+const ENGINE_LITERAL_KEYWORDS = new Set(['null', 'true', 'false'])
+const ENGINE_OPERATOR_KEYWORDS = new Set(['and', 'or', 'not', 'is', 'in', 'like', 'ilike', 'distinct', 'from', 'global'])
 
 /**
  * Column names and string literals in engine arguments are case-sensitive, so
  * they keep their case (#673). Function names (`RAND()` reads back as `rand()`)
  * and operator keywords do not, and whitespace between tokens is insignificant.
+ * An operator keyword that is a whole argument on its own can only be a column.
  */
 function normalizeEngine(value: string | undefined): string {
   if (!value) return ''
   const tokens = tokenizeSQL(coreNormalizeEngine(normalizeSQLFragment(value))).filter((token) => !isTrivia(token))
   return tokens
-    .map((token, index) =>
-      token.kind === 'identifier' &&
-      (tokens[index + 1]?.text === '(' || ENGINE_ARGUMENT_KEYWORDS.has(token.text.toLowerCase()))
-        ? token.text.toLowerCase()
-        : token.text
-    )
+    .map((token, index) => {
+      if (token.kind !== 'identifier') return token.text
+      const lower = token.text.toLowerCase()
+      const previous = tokens[index - 1]?.text
+      const next = tokens[index + 1]?.text
+      const standsAlone = (previous === '(' || previous === ',') && (next === ')' || next === ',')
+      const keyword = ENGINE_LITERAL_KEYWORDS.has(lower) || (ENGINE_OPERATOR_KEYWORDS.has(lower) && !standsAlone)
+      return next === '(' || keyword ? lower : token.text
+    })
     .join(' ')
 }
 
