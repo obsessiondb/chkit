@@ -7,9 +7,9 @@ from __future__ import annotations
 
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import ProjectionDefinition
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import iter_sql_tokens, js_trim
 from chkit.core.sql_normalizer import normalize_sql_fragment
-from chkit.core.sql_scan import find_quote_end, is_quote_char, strip_wrapping_parens
+from chkit.core.sql_scan import strip_wrapping_parens
 
 
 def is_index_projection(projection: ProjectionDefinition) -> bool:
@@ -17,26 +17,21 @@ def is_index_projection(projection: ProjectionDefinition) -> bool:
 
 
 def _space_after_commas(text: str) -> str:
-    """ClickHouse prints one space after every argument separator."""
+    """ClickHouse prints one space after every argument separator.
+
+    The input is read with the SQL lexer, so a comma in a string, quoted name
+    or heredoc (``$$a,b$$``) is text and keeps its literal (#596).
+    """
     out: list[str] = []
-    i = 0
-    while i < len(text):
-        char = text[i]
-        if is_quote_char(char):
-            end = find_quote_end(text, i, char)
-            out.append(text[i : end + 1])
-            i = end + 1
-            continue
+    after_comma = False
+    for token in iter_sql_tokens(text):
         # Whitespace is already collapsed to single spaces by
         # normalize_sql_fragment, so a comma is followed by at most one space.
-        if char == ",":
-            out.append(", ")
-            if i + 1 < len(text) and text[i + 1] == " ":
-                i += 1
-            i += 1
-            continue
-        out.append(char)
-        i += 1
+        piece = token.text
+        if after_comma and token.kind == "whitespace" and piece.startswith(" "):
+            piece = piece[1:]
+        after_comma = token.kind == "punctuation" and token.text == ","
+        out.append(", " if after_comma else piece)
     return "".join(out)
 
 

@@ -6,6 +6,7 @@ import re
 from typing import Literal
 
 from chkit.core.jsnum import parse_js_number
+from chkit.core.sql_lexer import js_trim
 from chkit_plugin_backfill.chunking.types import (
     Partition,
     PlannerContext,
@@ -22,7 +23,7 @@ _IDENTIFIER_RE = re.compile(r"\b[A-Za-z_][A-Za-z0-9_]*\b", re.ASCII)
 
 def _parse_clickhouse_utc_timestamp(value: str) -> str:
     """ClickHouse returns timestamps without timezone — they are always UTC."""
-    trimmed = value.strip()
+    trimmed = js_trim(value)
     normalized = trimmed if "T" in trimmed else trimmed.replace(" ", "T", 1) + "Z"
     if not normalized.endswith("Z"):
         normalized = f"{normalized}Z"
@@ -72,14 +73,14 @@ def _split_top_level_csv(input_: str) -> list[str]:
             continue
 
         if char == "," and depth == 0:
-            parts.append(current.strip())
+            parts.append(js_trim(current))
             current = ""
             continue
 
         current += char
 
-    if current.strip():
-        parts.append(current.strip())
+    if js_trim(current):
+        parts.append(js_trim(current))
 
     return parts
 
@@ -87,7 +88,7 @@ def _split_top_level_csv(input_: str) -> list[str]:
 def _resolve_sort_key_column(
     expression: str, known_columns: set[str]
 ) -> str | None:
-    trimmed = expression.strip()
+    trimmed = js_trim(expression)
     if trimmed in known_columns:
         return trimmed
 

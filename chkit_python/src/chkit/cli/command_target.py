@@ -14,7 +14,8 @@ from typing import Annotated, Any, NoReturn
 
 import typer
 
-from chkit.cli.json_output import emit_json_error, json_error_code
+from chkit.cli import command_lifecycle
+from chkit.cli.json_output import emit_json_error, json_error_code, print_output
 from chkit.cli.plugin_runtime import (
     PluginExecutionError,
     PluginRuntime,
@@ -30,7 +31,7 @@ from chkit.core.model import (
     ChxResolvedConfig,
     configured_index_granularity,
 )
-from chkit.plugins import ChxGetContextInput, ChxOnInitContext
+from chkit.plugins import ChxGetContextInput, ChxOnConfigLoadedContext, ChxOnInitContext
 
 # The TS ObsessionDB plugin adds --service to these commands through
 # extendCommands; Typer commands are static, so each declares it.
@@ -65,7 +66,8 @@ def resolve_plugin_executor(
     if flags is None:
         flags = {"--service": service} if service is not None else {}
     # TS onInit: ObsessionDB names the selected service (text mode only).
-    plugin_runtime.run_on_init(
+    command_lifecycle.run_on_init(
+        plugin_runtime,
         ChxOnInitContext(
             command=command,
             config_path=config_path,
@@ -74,7 +76,7 @@ def resolve_plugin_executor(
             flags=flags,
             config=config,
             options={},
-        )
+        ),
     )
     if after_init is not None:
         after_init()
@@ -96,6 +98,25 @@ def resolve_plugin_executor(
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
     return plugin_context.executor if plugin_context is not None else None
+
+
+def run_on_config_loaded_or_exit(
+    plugin_runtime: PluginRuntime, context: ChxOnConfigLoadedContext, *, output_json: bool
+) -> None:
+    """Run the on_config_loaded hooks of a plugin command. Report a hook error
+    as the TS dispatcher (``command-dispatch.ts``) reports it, and exit 2.
+
+    With ``--json`` the error goes to stdout as ``{ok: false, error}``.
+    Without it the message goes to stderr.
+    """
+    try:
+        plugin_runtime.run_on_config_loaded(context)
+    except Exception as error:
+        if output_json:
+            print_output({"ok": False, "error": str(error)}, json_mode=True)
+        else:
+            typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
 
 
 def open_client(

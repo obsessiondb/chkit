@@ -5,6 +5,8 @@ from __future__ import annotations
 import re
 from typing import TYPE_CHECKING
 
+from chkit.core.sql_lexer import js_trim
+
 if TYPE_CHECKING:
     from chkit.core.model import SkipIndexVectorSimilarity
 
@@ -43,7 +45,7 @@ def render_vector_index_type(index: SkipIndexVectorSimilarity) -> str:
 
 def parse_vector_index_args(args: str) -> dict[str, object] | None:
     """Parse ``type_full`` arguments into model fields (aliases), or None to keep it raw."""
-    parts = [part.strip() for part in args.split(",")]
+    parts = [js_trim(part) for part in args.split(",")]
     if len(parts) not in (2, 3, 5, 6):
         return None
     strings = [m.group(1) if (m := _STRING_ARG.match(part)) else None for part in parts]

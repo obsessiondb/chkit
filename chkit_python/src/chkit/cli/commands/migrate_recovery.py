@@ -14,6 +14,7 @@ from pydantic import BaseModel, ConfigDict, Field
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.journal_store import MigrationRowState, OperationState, OperationStatus
 from chkit.cli.safety_markers import MigrationOperationSummary
+from chkit.core.sql_lexer import js_trim
 
 
 @dataclass(frozen=True, slots=True)
@@ -124,7 +125,7 @@ def resolve_recovery_targets(
 
 def normalize_migration_name(raw: str, flag: str) -> str:
     """``name``, ``name.sql`` or a path to the file → ``name.sql``."""
-    base = re.split(r"[\\/]", raw.strip())[-1].strip()
+    base = js_trim(re.split(r"[\\/]", js_trim(raw))[-1])
     if base in {"", ".sql"}:
         msg = (
             f"{flag} requires a migration file name, for example "
