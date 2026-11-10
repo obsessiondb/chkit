@@ -295,6 +295,25 @@ describe('verifyRetryEdit with fingerprints', () => {
     expect(verifyRetryEdit([op(0, 'completed', A)], [current(A, 'v1:x')]).ok).toBe(true)
     expect(verifyRetryEdit([withFingerprint(op(0, 'completed', A), 'v1:a')], [current(A, undefined)]).ok).toBe(true)
   })
+
+  test('counts as matched by position only just the unmarked statements whose SQL it did not check', () => {
+    const S0 = { type: 'sql_statement', key: 'statement:0' }
+    const S1 = { type: 'sql_statement', key: 'statement:1' }
+    const S2 = { type: 'sql_statement', key: 'statement:2' }
+    const unmarked = (fingerprint: string | undefined): StatementIdentity => ({ ...S0, marked: false, fingerprint })
+    const result = verifyRetryEdit(
+      [
+        withFingerprint(op(0, 'completed', S0), 'v1:a'),
+        op(1, 'completed', S1),
+        withFingerprint(op(2, 'completed', S2), 'v1:c'),
+      ],
+      [unmarked('v1:a'), { ...unmarked('v1:b'), ...S1 }, { ...unmarked(undefined), ...S2 }],
+    )
+    expect(result).toEqual({ ok: true, completed: 3, unmarkedCompleted: 2, resumeIndex: null })
+    expect(
+      verifyRetryEdit([withFingerprint(op(0, 'completed', S0), 'v1:a')], [unmarked('v1:a'), unmarked('v1:b')]),
+    ).toEqual({ ok: true, completed: 1, unmarkedCompleted: 0, resumeIndex: 1 })
+  })
 })
 
 describe('recordedStatementMismatches', () => {

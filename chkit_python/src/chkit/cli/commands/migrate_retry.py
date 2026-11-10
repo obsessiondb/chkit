@@ -43,7 +43,8 @@ class RetryResume(BaseModel):
     completed_statements: int = Field(..., serialization_alias="completedStatements")
     # 1-based number of the first statement that runs; None when every statement completed.
     resume_at_statement: int | None = Field(..., serialization_alias="resumeAtStatement")
-    # Completed statements without an ``-- operation:`` marker, matched by position only.
+    # Completed statements without an ``-- operation:`` marker and without a
+    # recorded fingerprint to check their SQL, matched by position only.
     unmarked_completed_statements: int = Field(
         ..., serialization_alias="unmarkedCompletedStatements"
     )

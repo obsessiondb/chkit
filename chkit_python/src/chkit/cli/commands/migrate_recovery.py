@@ -210,7 +210,9 @@ def verify_retry_edit(
         if op.status != "completed":
             continue
         completed += 1
-        if not current.marked:
+        # A statement whose SQL was checked against its fingerprint is not
+        # matched by position only, marker or not.
+        if not current.marked and not _sql_checked(current, op):
             unmarked_completed += 1
     shared = _find_shared_marker_mismatches(operations, identities, mismatches)
     if mismatches or shared:
@@ -482,11 +484,11 @@ def _same_identity(identity: StatementIdentity, op: OperationState) -> bool:
 def _same_sql(identity: StatementIdentity, op: OperationState) -> bool:
     """A record without a fingerprint, or a statement that cannot be checked
     yet, is matched by position and marker only."""
-    return (
-        op.fingerprint == ""
-        or identity.fingerprint is None
-        or identity.fingerprint == op.fingerprint
-    )
+    return not _sql_checked(identity, op) or identity.fingerprint == op.fingerprint
+
+
+def _sql_checked(identity: StatementIdentity, op: OperationState) -> bool:
+    return op.fingerprint != "" and identity.fingerprint is not None
 
 
 def _marker_of(op: OperationState) -> Marker:

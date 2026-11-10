@@ -189,6 +189,66 @@ def test_a_user_that_cannot_alter_the_journal_still_writes_without_fingerprints(
     assert len([sql for sql in client.executed if sql.startswith("ALTER TABLE")]) == 1
 
 
+def test_a_run_that_cannot_add_the_column_says_once_on_stderr_that_it_records_no_fingerprints(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    denied = Exception(
+        "u: Not enough privileges. To execute this query, it's necessary to have the grant "
+        "ALTER ADD COLUMN(operation_fingerprints) ON db._chkit_migrations. "
+    )
+    client = _Client(
+        query_error=_no_column,
+        execute_error=lambda sql: denied if sql.startswith("ALTER TABLE") else None,
+    )
+    store = _store(client)
+    store.write_migration_state(_state(["v1:a"]))
+    store.write_migration_state(_state(["v1:a"]))
+    captured = capsys.readouterr()
+    assert captured.out == ""
+    assert captured.err == (
+        "⚠ Could not add the operation_fingerprints column to _chkit_migrations (u: Not "
+        "enough privileges. To execute this query, it's necessary to have the grant ALTER "
+        "ADD COLUMN(operation_fingerprints) ON db._chkit_migrations), so this run records "
+        "no statement fingerprints: a later --retry or resume checks the statements it "
+        'completes by position and "-- operation:" marker only, not by their SQL. The next '
+        "migration applied by a user that can ALTER _chkit_migrations adds the column.\n"
+    )
+
+
+def test_a_run_that_cannot_add_the_column_logs_why_with_chkit_debug(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    logged: list[tuple[str, str]] = []
+    monkeypatch.setattr(
+        "chkit.cli.journal_store.debug",
+        lambda category, message, detail=None: logged.append((category, message)),
+    )
+    client = _Client(
+        query_error=_no_column,
+        execute_error=lambda sql: (
+            _clickhouse_error(497, "ACCESS_DENIED") if sql.startswith("ALTER TABLE") else None
+        ),
+    )
+    _store(client).write_migration_state(_state(["v1:a"]))
+    assert (
+        "journal",
+        "could not add operation_fingerprints — recording no fingerprints: "
+        "Code: 497. DB::Exception: something. (ACCESS_DENIED)",
+    ) in logged
+
+
+def test_a_run_that_has_the_column_says_nothing_on_stderr(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    client = _Client(
+        execute_error=lambda sql: (
+            _clickhouse_error(497, "ACCESS_DENIED") if sql.startswith("ALTER TABLE") else None
+        ),
+    )
+    _store(client).write_migration_state(_state(["v1:a"]))
+    assert capsys.readouterr().err == ""
+
+
 def test_a_probe_that_fails_for_another_reason_stops_the_read() -> None:
     """Fingerprints that were recorded are never read as missing: only a server
     that says the column is missing switches to the old format."""
@@ -277,6 +337,119 @@ def test_a_column_no_replica_has_is_read_as_missing() -> None:
     JournalStore(client, cluster="default").read_migration_state("m.sql")  # type: ignore[arg-type]
     read = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
     assert "operation_fingerprints" not in read
+
+
+JOURNAL_PROBE = (
+    "SELECT count() AS fingerprinted FROM clusterAllReplicas('default', currentDatabase(), "
+    "'_chkit_migrations') WHERE notEmpty(operation_fingerprints)"
+)
+
+
+@dataclass
+class _DeniedColumnsClient:
+    """Two replicas, for a user without SHOW COLUMNS on system.columns (#402).
+
+    ``journal_probe`` gives the error of each probe through the journal (1-based).
+    """
+
+    journal_probe: Callable[[int], Exception | None]
+    execute_error: Callable[[str], Exception | None] = lambda _sql: None
+    queries: list[str] = field(default_factory=list[str])
+    executed: list[str] = field(default_factory=list[str])
+    probes: int = 0
+
+    def query(self, sql: str) -> _Result:
+        self.queries.append(sql)
+        if "currentDatabase() AS database" in sql:
+            return _Result([{"database": "default"}])
+        if "system.columns" in sql:
+            raise Exception(
+                "u: Not enough privileges. To execute this query, it's necessary to have "
+                "the grant SHOW COLUMNS ON system.columns. "
+            )
+        if "system.tables" in sql:
+            return _Result([{"replicas": 2}])
+        if sql == JOURNAL_PROBE:
+            self.probes += 1
+            error = self.journal_probe(self.probes)
+            if error is not None:
+                raise error
+            return _Result([{"fingerprinted": 0}])
+        return _Result([])
+
+    def execute(self, sql: str) -> None:
+        self.executed.append(sql)
+        error = self.execute_error(sql)
+        if error is not None:
+            raise error
+
+
+def _denied_store(client: _DeniedColumnsClient) -> JournalStore:
+    return JournalStore(client, cluster="default")  # type: ignore[arg-type]
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_a_column_every_replica_has_is_read() -> None:
+    client = _DeniedColumnsClient(journal_probe=lambda _call: None)
+    _denied_store(client).read_migration_state("m.sql")
+    read = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
+    assert "toJSONString(operation_fingerprints)" in read
+    assert len([sql for sql in client.queries if sql == JOURNAL_PROBE]) == 1
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_a_column_a_replica_lacks_is_read_as_missing() -> None:
+    client = _DeniedColumnsClient(
+        journal_probe=lambda _call: _clickhouse_error(47, "UNKNOWN_IDENTIFIER")
+    )
+    _denied_store(client).read_migration_state("m.sql")
+    read = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
+    assert "operation_fingerprints" not in read
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_a_journal_probe_that_fails_for_another_reason_stops_the_read() -> (
+    None
+):
+    client = _DeniedColumnsClient(
+        journal_probe=lambda _call: Exception("HTTP 503 Service Unavailable")
+    )
+    with pytest.raises(Exception, match="HTTP 503"):
+        _denied_store(client).read_migration_state("m.sql")
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_the_column_this_run_adds_is_waited_for_through_the_journal(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("chkit.cli.journal_store.RETRY_DELAY_SECONDS", 0)
+    client = _DeniedColumnsClient(
+        journal_probe=lambda call: (
+            _clickhouse_error(47, "UNKNOWN_IDENTIFIER") if call <= 2 else None
+        )
+    )
+    store = _denied_store(client)
+    store.read_journal()
+    store.write_migration_state(_state(["v1:a"]))
+    assert any(sql.startswith("ALTER TABLE") for sql in client.executed)
+    insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
+    assert insert.endswith(", ['v1:a'])")
+    assert len([sql for sql in client.queries if sql == JOURNAL_PROBE]) == 3
+    assert len([sql for sql in client.queries if "system.columns" in sql]) == 1
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_a_system_columns_probe_that_fails_for_another_reason_stops_the_read() -> None:
+    class _Unavailable(_ReplicatedClient):
+        def query(self, sql: str) -> _Result:
+            if "system.columns" in sql:
+                raise Exception("HTTP 503 Service Unavailable")
+            return super().query(sql)
+
+    with pytest.raises(Exception, match="HTTP 503"):
+        JournalStore(_Unavailable(with_column=[0]), cluster="default").read_migration_state(  # type: ignore[arg-type]
+            "m.sql"
+        )
 
 
 def test_the_abandon_report_leaves_fingerprints_out() -> None:

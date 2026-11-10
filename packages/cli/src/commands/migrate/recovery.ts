@@ -152,7 +152,9 @@ export function verifyRetryEdit(
     }
     if (op.status !== 'completed') continue
     completed += 1
-    if (!current.marked) unmarkedCompleted += 1
+    // A statement whose SQL was checked against its fingerprint is not
+    // matched by position only, marker or not.
+    if (!current.marked && !sqlChecked(current, op)) unmarkedCompleted += 1
   }
   const sharedMarkers = findSharedMarkerMismatches(operations, identities, mismatches)
   if (mismatches.length > 0 || sharedMarkers.length > 0) return { ok: false, mismatches, sharedMarkers }
@@ -334,7 +336,11 @@ function isBoundToPosition(op: OperationState): boolean {
 // A record without a fingerprint, or a statement that cannot be checked yet,
 // is matched by position and marker only.
 function sameSql(identity: StatementIdentity, op: OperationState): boolean {
-  return op.fingerprint === '' || identity.fingerprint === undefined || identity.fingerprint === op.fingerprint
+  return !sqlChecked(identity, op) || identity.fingerprint === op.fingerprint
+}
+
+function sqlChecked(identity: StatementIdentity, op: OperationState): boolean {
+  return op.fingerprint !== '' && identity.fingerprint !== undefined
 }
 
 function markerOf(op: OperationState): { type: string; key: string } {

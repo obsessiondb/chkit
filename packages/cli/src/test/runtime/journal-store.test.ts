@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
@@ -776,6 +776,46 @@ describe('createJournalStore', () => {
       expect(commands.filter((sql) => sql.startsWith('ALTER TABLE'))).toHaveLength(1)
     })
 
+    describe('a run that cannot add the column', () => {
+      let stderr: ReturnType<typeof spyOn<Console, 'error'>>
+      beforeEach(() => {
+        stderr = spyOn(console, 'error').mockImplementation(() => {})
+      })
+      afterEach(() => stderr.mockRestore())
+
+      test('says once on stderr that it records no fingerprints', async () => {
+        const denied = Object.assign(
+          new Error(
+            "u: Not enough privileges. To execute this query, it's necessary to have the grant ALTER ADD COLUMN(operation_fingerprints) ON db._chkit_migrations. ",
+          ),
+          { code: '497' },
+        )
+        const { store } = storeWith({
+          queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+          commandError: (sql) => (sql.startsWith('ALTER TABLE') ? denied : undefined),
+        })
+
+        await store.writeMigrationState(state(['v1:a']))
+        await store.writeMigrationState(state(['v1:a']))
+
+        expect(stderr.mock.calls).toEqual([[
+          "⚠ Could not add the operation_fingerprints column to _chkit_migrations (u: Not enough privileges. To execute this query, it's necessary to have the grant ALTER ADD COLUMN(operation_fingerprints) ON db._chkit_migrations), so this run records no statement fingerprints: " +
+            'a later --retry or resume checks the statements it completes by position and "-- operation:" marker only, not by their SQL. ' +
+            'The next migration applied by a user that can ALTER _chkit_migrations adds the column.',
+        ]])
+      })
+
+      test('says nothing when the journal has the column', async () => {
+        const { store } = storeWith({
+          commandError: (sql) => (sql.startsWith('ALTER TABLE') ? clickHouseError('497', 'ACCESS_DENIED') : undefined),
+        })
+
+        await store.writeMigrationState(state(['v1:a']))
+
+        expect(stderr).not.toHaveBeenCalled()
+      })
+    })
+
     // Fingerprints that were recorded are never read as missing (#599): only a
     // server that says the column is missing switches to the old format.
     test('a probe that fails for another reason stops the read', async () => {
@@ -848,6 +888,99 @@ describe('createJournalStore', () => {
 
         const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
         expect(read).not.toContain('operation_fingerprints')
+      })
+
+      // A user without SHOW COLUMNS on system.columns reads the journal as
+      // with an older release (#402): the replicas are probed through it.
+      describe('for a user that cannot read system.columns', () => {
+        const JOURNAL_PROBE =
+          /^SELECT count\(\) AS fingerprinted FROM clusterAllReplicas\('default', currentDatabase\(\), '_chkit_migrations'\) WHERE notEmpty\(operation_fingerprints\)$/
+
+        function deniedStore(journalProbe: (call: number) => Error | undefined, commandError?: (sql: string) => Error | undefined) {
+          let probes = 0
+          const queries: string[] = []
+          const commands: string[] = []
+          const db = {
+            async command(sql: string) {
+              commands.push(sql)
+              const error = commandError?.(sql)
+              if (error) throw error
+            },
+            async query<T>(sql: string): Promise<T[]> {
+              queries.push(sql)
+              if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+              if (sql.includes('currentDatabase() AS database')) return [{ database: 'default' }] as T[]
+              if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+              if (sql.includes('system.columns')) {
+                throw Object.assign(
+                  new Error("u: Not enough privileges. To execute this query, it's necessary to have the grant SHOW COLUMNS ON system.columns. "),
+                  { code: '497' },
+                )
+              }
+              if (JOURNAL_PROBE.test(sql)) {
+                probes += 1
+                const error = journalProbe(probes)
+                if (error) throw error
+                return [{ fingerprinted: 0 }] as T[]
+              }
+              return []
+            },
+          } as unknown as ClickHouseExecutor
+          return { store: createJournalStore(db), queries, commands }
+        }
+
+        test('a column every replica has is read', async () => {
+          const { store, queries } = deniedStore(() => undefined)
+
+          await store.readMigrationState('m.sql')
+
+          const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
+          expect(read).toContain('toJSONString(operation_fingerprints)')
+          expect(queries.filter((sql) => JOURNAL_PROBE.test(sql))).toHaveLength(1)
+        })
+
+        test('a column a replica lacks is read as missing', async () => {
+          const { store, queries } = deniedStore(() => clickHouseError('47', 'UNKNOWN_IDENTIFIER'))
+
+          await store.readMigrationState('m.sql')
+
+          const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
+          expect(read).not.toContain('operation_fingerprints')
+        })
+
+        test('a journal probe that fails for another reason stops the read', async () => {
+          const { store } = deniedStore(() => new Error('HTTP 503 Service Unavailable'))
+
+          await expect(store.readMigrationState('m.sql')).rejects.toThrow('HTTP 503')
+        })
+
+        test('the column this run adds is waited for through the journal', async () => {
+          const { store, queries, commands } = deniedStore((call) =>
+            call <= 2 ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined,
+          )
+          await store.readJournal()
+
+          await store.writeMigrationState(state(['v1:a']))
+
+          expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(true)
+          expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toContain(", ['v1:a'])")
+          expect(queries.filter((sql) => JOURNAL_PROBE.test(sql))).toHaveLength(3)
+          expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(1)
+        })
+      })
+
+      test('a system.columns probe that fails for another reason stops the read', async () => {
+        const db = {
+          async command() {},
+          async query<T>(sql: string): Promise<T[]> {
+            if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+            if (sql.includes('system.columns')) throw new Error('HTTP 503 Service Unavailable')
+            return []
+          },
+        } as unknown as ClickHouseExecutor
+
+        await expect(createJournalStore(db).readMigrationState('m.sql')).rejects.toThrow('HTTP 503')
       })
     })
   })

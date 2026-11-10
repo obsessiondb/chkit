@@ -20,7 +20,10 @@ export interface RetryResume {
   completedStatements: number
   /** 1-based number of the first statement that runs; null when every statement already completed. */
   resumeAtStatement: number | null
-  /** Completed statements without an `-- operation:` marker, matched by position only. */
+  /**
+   * Completed statements without an `-- operation:` marker and without a
+   * recorded fingerprint to check their SQL, matched by position only.
+   */
   unmarkedCompletedStatements: number
 }
 

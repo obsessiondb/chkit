@@ -123,6 +123,7 @@ const UNKNOWN_IDENTIFIER: ClickHouseErrorKind = {
   message: /Unknown expression identifier|Missing columns/,
 }
 const READONLY: ClickHouseErrorKind = { code: '164', name: 'READONLY', message: /in readonly mode/ }
+const ACCESS_DENIED: ClickHouseErrorKind = { code: '497', name: 'ACCESS_DENIED', message: /Not enough privileges/ }
 
 /** Whether `error` is the ClickHouse error `kind`. The native client sets `code`. */
 function isClickHouseError(error: unknown, kind: ClickHouseErrorKind): boolean {
@@ -133,6 +134,19 @@ function isClickHouseError(error: unknown, kind: ClickHouseErrorKind): boolean {
 
 function errorText(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
+}
+
+/**
+ * The one line a run prints when it cannot add the fingerprint column, so a
+ * user without ALTER on the journal knows the SQL check of --retry is off.
+ */
+function fingerprintColumnWarning(journalTable: string, error: unknown): string {
+  const reason = (errorText(error).split('\n')[0] ?? '').trim().replace(/\.$/, '')
+  return (
+    `⚠ Could not add the ${FINGERPRINTS_COLUMN} column to ${journalTable} (${reason}), so this run records no statement fingerprints: ` +
+    'a later --retry or resume checks the statements it completes by position and "-- operation:" marker only, not by their SQL. ' +
+    `The next migration applied by a user that can ALTER ${journalTable} adds the column.`
+  )
 }
 
 function isRetryableInsertRace(error: unknown): boolean {
@@ -271,6 +285,9 @@ SETTINGS index_granularity = 1`
   // that were recorded are never read as missing.
   let fingerprintColumn = false
   let fingerprintColumnAdded = false
+  // The user may not read system.columns; the replicas are then probed
+  // through the journal itself.
+  let columnsUnreadable = false
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
 
@@ -384,15 +401,64 @@ SETTINGS index_granularity = 1`
         return false
       }
     }
-    const [row] = await db.query<{ replicas: number | string }>(
-      `SELECT count() AS replicas FROM ${allReplicas(fanout, 'system.columns')} WHERE database = currentDatabase() AND table = '${journalTable}' AND name = '${FINGERPRINTS_COLUMN}'`,
-    )
+    let rows: Array<{ replicas: number | string }>
+    try {
+      rows = await db.query<{ replicas: number | string }>(
+        `SELECT count() AS replicas FROM ${allReplicas(fanout, 'system.columns')} WHERE database = currentDatabase() AND table = '${journalTable}' AND name = '${FINGERPRINTS_COLUMN}'`,
+      )
+    } catch (error) {
+      if (!isClickHouseError(error, ACCESS_DENIED)) throw error
+      debug('journal', `cannot read system.columns — probing the journal on every replica: ${errorText(error)}`)
+      columnsUnreadable = true
+      return await everyReplicaHasFingerprintColumn(fanout.cluster)
+    }
+    const [row] = rows
     if (Number(row?.replicas ?? 0) === 0) {
       debug('journal', `no replica has the ${FINGERPRINTS_COLUMN} column`)
       return false
     }
     await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
     return true
+  }
+
+  /**
+   * The probe for a user that cannot read system.columns (#402): a query that
+   * names the column on every replica through the journal itself. Success
+   * means every replica has it, so there is nothing to wait for. A missing
+   * column means at least one replica lacks it, but not whether any other
+   * has it: a column some replicas have and others not yet (an ALTER that is
+   * still propagating) reads as missing, where system.columns would wait for
+   * it. That run then reads and writes the journal as an older release does.
+   * This is safe as long as every replica keeps the column once it has it:
+   * chkit writes fingerprints only after every replica has the column, so a
+   * journal with recorded fingerprints has it on every replica. A replica
+   * that loses it again, or a new replica that has not caught up yet, makes
+   * this run read the journal without its fingerprints.
+   */
+  async function everyReplicaHasFingerprintColumn(fanoutCluster: string): Promise<boolean> {
+    try {
+      await db.query(
+        `SELECT count() AS fingerprinted FROM clusterAllReplicas('${escapeSqlString(fanoutCluster)}', currentDatabase(), '${journalTable}') WHERE notEmpty(${FINGERPRINTS_COLUMN})`,
+      )
+      return true
+    } catch (error) {
+      if (!isClickHouseError(error, UNKNOWN_IDENTIFIER)) throw error
+      debug('journal', `a replica has no ${FINGERPRINTS_COLUMN} column`)
+      return false
+    }
+  }
+
+  /** Waits until every replica has the fingerprint column, after this run added it. */
+  async function waitForFingerprintColumn(fanoutCluster: string): Promise<void> {
+    if (!columnsUnreadable) {
+      await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
+      return
+    }
+    await pRetry(async () => {
+      if (!(await everyReplicaHasFingerprintColumn(fanoutCluster))) {
+        throw new Error(`waitForColumn: ${journalTable}.${FINGERPRINTS_COLUMN} not yet visible`)
+      }
+    }, { retries: 20, minTimeout: 500, factor: 1 })
   }
 
   /**
@@ -407,11 +473,11 @@ SETTINGS index_granularity = 1`
       await db.command(`ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS ${FINGERPRINTS_COLUMN_DEFINITION}`)
     } catch (error) {
       debug('journal', `could not add ${FINGERPRINTS_COLUMN} — recording no fingerprints: ${errorText(error)}`)
+      console.error(fingerprintColumnWarning(journalTable, error))
       return
     }
-    if (await resolveReplicaFanout(db, cluster)) {
-      await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
-    }
+    const fanout = await resolveReplicaFanout(db, cluster)
+    if (fanout) await waitForFingerprintColumn(fanout.cluster)
     fingerprintColumn = true
   }
 

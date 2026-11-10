@@ -1760,6 +1760,31 @@ def test_verify_retry_edit_matches_by_marker_only_without_a_fingerprint() -> Non
     ).ok
 
 
+def test_verify_retry_edit_counts_only_unmarked_statements_whose_sql_it_did_not_check() -> None:
+    s0 = Marker(type="sql_statement", key="statement:0")
+    s1 = Marker(type="sql_statement", key="statement:1")
+    s2 = Marker(type="sql_statement", key="statement:2")
+
+    def unmarked(marker: Marker, fingerprint: str | None) -> StatementIdentity:
+        return StatementIdentity(
+            type=marker.type, key=marker.key, marked=False, fingerprint=fingerprint
+        )
+
+    result = verify_retry_edit(
+        [
+            _with_fingerprint(op(0, "completed", s0), "v1:a"),
+            op(1, "completed", s1),
+            _with_fingerprint(op(2, "completed", s2), "v1:c"),
+        ],
+        [unmarked(s0, "v1:a"), unmarked(s1, "v1:b"), unmarked(s2, None)],
+    )
+    assert result == RetryEditOk(completed=3, unmarked_completed=2, resume_index=None)
+    assert verify_retry_edit(
+        [_with_fingerprint(op(0, "completed", s0), "v1:a")],
+        [unmarked(s0, "v1:a"), unmarked(s1, "v1:b")],
+    ) == RetryEditOk(completed=1, unmarked_completed=0, resume_index=1)
+
+
 def test_recorded_statement_mismatches_lists_completed_and_running_async_statements() -> None:
     operations = [
         _with_fingerprint(op(3, "completed", B), "v1:b"),

@@ -29,17 +29,28 @@ from datetime import UTC, datetime
 from pathlib import Path
 from typing import Any, Final, Literal
 
+import typer
 from pydantic import BaseModel, ConfigDict, Field
 
 from chkit import __version__
+from chkit.cli.logging_setup import debug
 from chkit.cli.migration_store import (
     ChecksumMismatch,
     MigrationJournal,
     MigrationJournalEntry,
     checksum_sql,
 )
-from chkit.clickhouse.client import ClickHouseClient, is_unknown_database_error
-from chkit.clickhouse.ddl_propagation import wait_for_column, wait_for_table
+from chkit.clickhouse.client import (
+    ClickHouseClient,
+    clickhouse_error_message,
+    is_unknown_database_error,
+)
+from chkit.clickhouse.ddl_propagation import (
+    MAX_RETRIES,
+    RETRY_DELAY_SECONDS,
+    wait_for_column,
+    wait_for_table,
+)
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
 from chkit.core.sql_lexer import js_regex, js_trim
@@ -235,12 +246,27 @@ _UNKNOWN_IDENTIFIER = (
     re.compile(r"Unknown expression identifier|Missing columns"),
 )
 _READONLY = (164, "READONLY", re.compile(r"in readonly mode"))
+_ACCESS_DENIED = (497, "ACCESS_DENIED", re.compile(r"Not enough privileges"))
 
 
 def _is_clickhouse_error(error: BaseException, kind: tuple[int, str, re.Pattern[str]]) -> bool:
     code, name, message = kind
     text = str(error)
     return f"Code: {code}." in text or name in text or message.search(text) is not None
+
+
+def _fingerprint_column_warning(table: str, error: BaseException) -> str:
+    """The one line a run prints when it cannot add the fingerprint column, so
+    a user without ALTER on the journal knows the SQL check of --retry is off."""
+    lines = clickhouse_error_message(error).split("\n")
+    reason = js_trim(lines[0]).removesuffix(".")
+    return (
+        f"⚠ Could not add the {_FINGERPRINTS_COLUMN} column to {table} ({reason}), so this "
+        "run records no statement fingerprints: a later --retry or resume checks the "
+        'statements it completes by position and "-- operation:" marker only, not by '
+        f"their SQL. The next migration applied by a user that can ALTER {table} adds "
+        "the column."
+    )
 
 
 def _is_retryable_insert_race(error: BaseException) -> bool:
@@ -262,6 +288,7 @@ class JournalStore:
         "_bootstrapped",
         "_client",
         "_cluster",
+        "_columns_unreadable",
         "_database_missing",
         "_fingerprint_column",
         "_fingerprint_column_added",
@@ -290,6 +317,9 @@ class JournalStore:
         # fingerprints that were recorded are never read as missing.
         self._fingerprint_column: bool = False
         self._fingerprint_column_added: bool = False
+        # The user may not read system.columns; the replicas are then probed
+        # through the journal itself.
+        self._columns_unreadable: bool = False
         # Read-your-writes: the last row version this store wrote per migration.
         self._last_written: dict[str, MigrationRowState] = {}
 
@@ -432,11 +462,22 @@ class JournalStore:
                     raise
                 return False
             return True
-        rows = self._client.query(
-            f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.columns')} "
-            f"WHERE database = currentDatabase() AND table = '{self._table}' "
-            f"AND name = '{_FINGERPRINTS_COLUMN}'"
-        ).rows
+        try:
+            rows = self._client.query(
+                f"SELECT count() AS replicas FROM {all_replicas(fanout, 'system.columns')} "
+                f"WHERE database = currentDatabase() AND table = '{self._table}' "
+                f"AND name = '{_FINGERPRINTS_COLUMN}'"
+            ).rows
+        except Exception as exc:
+            if not _is_clickhouse_error(exc, _ACCESS_DENIED):
+                raise
+            debug(
+                "journal",
+                "cannot read system.columns — probing the journal on every replica: "
+                f"{clickhouse_error_message(exc)}",
+            )
+            self._columns_unreadable = True
+            return self._every_replica_has_fingerprint_column(fanout.cluster)
         if not rows or int(rows[0]["replicas"]) == 0:
             return False
         wait_for_column(
@@ -447,6 +488,54 @@ class JournalStore:
             cluster=self._cluster,
         )
         return True
+
+    def _every_replica_has_fingerprint_column(self, fanout_cluster: str) -> bool:
+        """The probe for a user that cannot read system.columns (#402).
+
+        A query that names the column on every replica through the journal
+        itself. Success means every replica has it, so there is nothing to
+        wait for. A missing column means at least one replica lacks it, but
+        not whether any other has it: a column some replicas have and others
+        not yet (an ALTER that is still propagating) reads as missing, where
+        system.columns would wait for it. That run then reads and writes the
+        journal as an older release does. This is safe as long as every
+        replica keeps the column once it has it: chkit writes fingerprints
+        only after every replica has the column, so a journal with recorded
+        fingerprints has it on every replica. A replica that loses it again,
+        or a new replica that has not caught up yet, makes this run read the
+        journal without its fingerprints.
+        """
+        try:
+            self._client.query(
+                "SELECT count() AS fingerprinted FROM clusterAllReplicas("
+                f"'{_escape_sql_string(fanout_cluster)}', currentDatabase(), '{self._table}') "
+                f"WHERE notEmpty({_FINGERPRINTS_COLUMN})"
+            )
+        except Exception as exc:
+            if not _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
+                raise
+            debug("journal", f"a replica has no {_FINGERPRINTS_COLUMN} column")
+            return False
+        return True
+
+    def _wait_for_fingerprint_column(self, fanout_cluster: str) -> None:
+        """Wait until every replica has the fingerprint column, after this run added it."""
+        if not self._columns_unreadable:
+            wait_for_column(
+                self._client,
+                self._current_database(),
+                self._table,
+                _FINGERPRINTS_COLUMN,
+                cluster=self._cluster,
+            )
+            return
+        for attempt in range(MAX_RETRIES + 1):
+            if self._every_replica_has_fingerprint_column(fanout_cluster):
+                return
+            if attempt < MAX_RETRIES:
+                time.sleep(RETRY_DELAY_SECONDS)
+        msg = f"waitForColumn: {self._table}.{_FINGERPRINTS_COLUMN} not yet visible"
+        raise RuntimeError(msg)
 
     def _ensure_fingerprint_column(self) -> None:
         """Add the fingerprint column to a journal an older release created.
@@ -462,16 +551,17 @@ class JournalStore:
                 f"ALTER TABLE {self._table}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS {_FINGERPRINTS_COLUMN_DEFINITION}"
             )
-        except Exception:
-            return
-        if resolve_replica_fanout(self._client, self._cluster) is not None:
-            wait_for_column(
-                self._client,
-                self._current_database(),
-                self._table,
-                _FINGERPRINTS_COLUMN,
-                cluster=self._cluster,
+        except Exception as exc:
+            debug(
+                "journal",
+                f"could not add {_FINGERPRINTS_COLUMN} — recording no fingerprints: "
+                f"{clickhouse_error_message(exc)}",
             )
+            typer.echo(_fingerprint_column_warning(self._table, exc), err=True)
+            return
+        fanout = resolve_replica_fanout(self._client, self._cluster)
+        if fanout is not None:
+            self._wait_for_fingerprint_column(fanout.cluster)
         self._fingerprint_column = True
 
     def _ensure_schema_upgraded(self) -> None:
