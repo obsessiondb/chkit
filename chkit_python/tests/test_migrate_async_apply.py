@@ -657,6 +657,56 @@ def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() ->
     ]
 
 
+def test_apply_async_submit_failing_after_the_query_ran_waits_for_query_log() -> None:
+    """After the 524, the query can end between two polls. A poll then finds it
+    neither running nor yet in query_log (flushed on a timer). The server ran
+    the query, so the submit error does not mean it failed (#657)."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
+        ],
+        submit_raises=RuntimeError("error code: 524"),
+    )
+    journal = _FakeJournalStore()
+    lines: list[str] = []
+    result = apply_async_statement(_input(client=client, journal=journal, log=lines.append))
+    assert result.kind == "completed"
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert lines == [
+        f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})",
+        "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
+        "  alter_table_modify_column: status unknown — still polling (elapsed 0s)",
+        "  alter_table_modify_column: finished — written=16 rows (128 B) in 8s",
+    ]
+
+
+def test_apply_async_submit_failing_after_the_query_ran_gives_up_after_the_poll_budget() -> None:
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            *[QueryStatus(status="unknown") for _ in range(21)],
+        ],
+        submit_raises=RuntimeError("error code: 524"),
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert str(excinfo.value) == (
+        f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
+        "the submit request failed (error code: 524) and polling found no outcome 21\u00d7. "
+        "A re-run of `chkit migrate --apply` attaches to the query if it still runs and runs "
+        "the statement again if not."
+    )
+    # The outcome is unknown, so the attempt stays started.
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started"]
+
+
 class _OpenSubmitClient(_ScriptedClient):
     """Its submit request stays open until a poll sees the query end, as the
     HTTP request of a long load does. A submit that blocks the poller is never
