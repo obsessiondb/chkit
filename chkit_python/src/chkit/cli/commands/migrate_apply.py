@@ -12,7 +12,7 @@ no statement is recorded as completed or started (#233).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,7 +27,9 @@ from chkit.cli.commands.migrate_async_apply import (
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import (
+    PendingNonSelectBarrier,
     in_progress_checksum_mismatch_error,
+    non_select_barrier_error,
     recorded_statements_changed_error,
     statement_split_changed_error,
 )
@@ -56,6 +58,7 @@ from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
     extract_migration_operation_summaries,
+    find_non_select_barriers,
 )
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.async_insert_guard import assert_no_fire_and_forget_async_inserts
@@ -130,6 +133,12 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             )
         )
     )
+    # migrate refused a file's non-SELECT barrier before the run; a plugin may
+    # have rewritten the statements since (#634).
+    barriers = non_select_barriers(file, statements, operation_summaries)
+    if barriers:
+        raise non_select_barrier_error(barriers)
+
     migration_checksum = checksum_sql(sql)
     # What the journal records for each statement run, and checks against (#599).
     fingerprints = [statement_fingerprint(statement) for statement in statements]
@@ -375,6 +384,24 @@ def preview_statement(sql: str, max_length: int = 120) -> str:
     return f"{one_line[:max_length]}…" if len(one_line) > max_length else one_line
 
 
+def non_select_barriers(
+    migration: str,
+    statements: Sequence[str],
+    operations: Sequence[MigrationOperationSummary],
+) -> list[PendingNonSelectBarrier]:
+    """A migration's statements marked ``mode=barrier`` that are not a SELECT (#634)."""
+    return [
+        PendingNonSelectBarrier(
+            migration=migration,
+            statement=barrier.index + 1,
+            total=len(statements),
+            operation=barrier.summary,
+            preview=preview_statement(barrier.statement),
+        )
+        for barrier in find_non_select_barriers(statements, operations)
+    ]
+
+
 def statement_error(
     *, file: str, index: int, total: int, statement: str, error: BaseException
 ) -> StatementError:
@@ -398,9 +425,9 @@ def _propagation_wait_pending(state: MigrationRowState, index: int) -> bool:
 
 
 def _has_propagation_wait(operation: MigrationOperationSummary | None) -> bool:
-    return operation is not None and (
-        operation.type == "exchange_tables" or operation.mode != "barrier"
-    )
+    """A barrier changes no object, so it has no wait: migrate refuses a
+    barrier statement that is not a SELECT before anything runs (#634)."""
+    return operation is not None and operation.mode != "barrier"
 
 
 def _complete_propagation(
@@ -436,14 +463,14 @@ def _wait_for_propagation(
 ) -> None:
     """Wait until a sync statement's DDL reaches every replica. A wait that
     times out stops the migration, as in TS."""
-    if operation is None:
+    if operation is None or operation.mode == "barrier":
         return
     if operation.type == "exchange_tables":
         # A swap that has not reached every replica stops the migration (as
         # in TS): the cutover steps after it would read a replica that
         # still has the old names.
         wait_for_exchange(client, statement, cluster=cluster)
-    elif operation.mode != "barrier":
+    else:
         # Poll system.tables / system.columns until the DDL is visible.
         # Critical for Replicated / ObsessionDB Shared engines.
         wait_for_ddl_propagation(

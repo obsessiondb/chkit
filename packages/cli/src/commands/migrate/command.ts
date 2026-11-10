@@ -29,9 +29,10 @@ import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table
 
 import { abandonMigrationState, abandonReport, readAbandonableState } from './abandon.js'
 import { applyMigration } from './apply.js'
+import { findPendingNonSelectBarriers } from './barrier.js'
 import { scanDestructive } from './destructive.js'
 import { findEmptyMigrations } from './empty.js'
-import { emptyMigrationsError, MigrateError } from './errors.js'
+import { emptyMigrationsError, MigrateError, nonSelectBarrierError } from './errors.js'
 import {
   emitAbandonJson,
   emitApplySummaryJson,
@@ -169,6 +170,8 @@ async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | 
 
   const emptyExit = runEmptyMigrationGate(ctx, plan.emptyMigrations)
   if (emptyExit !== undefined) return emptyExit
+
+  await runBarrierGate(ctx, plan.pending)
 
   const confirmExit = await runConfirmGate(ctx)
   if (confirmExit !== undefined) return confirmExit
@@ -391,6 +394,19 @@ function runEmptyMigrationGate(ctx: MigrateContext, emptyMigrations: string[]): 
     return 1
   }
   throw emptyMigrationsError(emptyMigrations)
+}
+
+/**
+ * Gate: refuse to apply when a pending file marks a statement other than a
+ * SELECT `mode=barrier` (#634), before any migration runs; a plan-only run
+ * does not check.
+ */
+async function runBarrierGate(ctx: MigrateContext, pending: string[]): Promise<void> {
+  const { executeRequested, jsonMode, migrationsDir } = ctx
+  const applyPossible = executeRequested || (!jsonMode && !isBackgroundOrCI())
+  if (!applyPossible) return
+  const barriers = await findPendingNonSelectBarriers(migrationsDir, pending)
+  if (barriers.length > 0) throw nonSelectBarrierError(barriers)
 }
 
 /** Gate 2: in plan mode, stop unless the user confirms an interactive apply. */
