@@ -1276,7 +1276,7 @@ def test_rerun_without_before_retry_keeps_the_attempt_started_until_resubmitted(
     assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
 
 
-def test_rerun_journals_the_started_write_after_the_failed_one_on_a_frozen_clock(
+def test_rerun_journal_writes_get_increasing_versions_on_a_frozen_clock(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     frozen = datetime(2026, 5, 26, 10, 0, 0, 123_900, tzinfo=UTC)
@@ -1298,9 +1298,11 @@ def test_rerun_journals_the_started_write_after_the_failed_one_on_a_frozen_clock
     apply_async_statement(_rerun_input(client, journal))
 
     assert journal.writes is not None
-    assert [w.applied_at for w in journal.writes[:2]] == [
+    # Each write is a newer journal version than the one before.
+    assert [w.applied_at for w in journal.writes] == [
         "2026-05-26T10:00:00.123",
         "2026-05-26T10:00:00.124",
+        "2026-05-26T10:00:00.125",
     ]
 
 

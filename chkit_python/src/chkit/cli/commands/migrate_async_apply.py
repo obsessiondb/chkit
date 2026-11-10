@@ -192,6 +192,25 @@ def _describe_error(error: BaseException) -> str:
     return clickhouse_error_message(error)
 
 
+class _JournalClock:
+    """The applied_at version of each journal write of one statement (#672).
+
+    Strictly increasing even when the clock stalls or steps back:
+    ReplacingMergeTree keeps the newest version, and the replicated read keeps
+    either row of a tie, so a later write must never lose to an earlier one.
+    """
+
+    def __init__(self) -> None:
+        self._last: datetime | None = None
+
+    def next(self) -> str:
+        now = datetime.now(tz=UTC)
+        if self._last is not None:
+            now = max(now, self._last + timedelta(milliseconds=1))
+        self._last = now
+        return iso_without_zone(now)
+
+
 class _Submission:
     """The submit request, open on its own thread while the poller runs.
 
@@ -224,6 +243,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     """Submit ``sql`` and poll until terminal, journalling each transition."""
     client = input_.client
     journal_store = input_.journal_store
+    journal_clock = _JournalClock()
 
     initial_state = _accept_changed_checksum(
         journal_store.read_migration_state(input_.migration_name),
@@ -304,6 +324,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             started_at=prior_op.started_at
             if prior_op is not None
             else iso_without_zone(datetime.now(tz=UTC)),
+            journal_clock=journal_clock,
         )
 
     # 3. A started attempt that no replica runs any more finished on the
@@ -311,15 +332,16 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     # it journaled the outcome. Record it, without compensating or resubmitting.
     if attempt_outcome == "finished" and initial_state is not None and prior_op is not None:
         return _record_finished_attempt(
-            input_, initial_state, prior_op.model_copy(update={"query_id": query_id}), in_flight
+            input_,
+            initial_state,
+            prior_op.model_copy(update={"query_id": query_id}),
+            in_flight,
+            journal_clock,
         )
 
     # 4 / 5. Submit (with optional before-retry on resubmit). A started
     # attempt that failed on the server is retried the same way, reported
     # with its error.
-    # When the attempt was journaled failed, the time of that write; the
-    # 'started' write that follows must carry a newer version (#672).
-    invalidated_at: datetime | None = None
     if prior_op is not None:
         prior_status: str = prior_op.status
         prior_error = prior_op.last_error
@@ -343,8 +365,9 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             and initial_state is not None
             and input_.before_retry is not None
         ):
-            invalidated_at = _journal_attempt_failed(
+            _journal_attempt_failed(
                 journal_store,
+                journal_clock,
                 initial_state,
                 prior_op.model_copy(update={"query_id": query_id}),
                 prior_error if attempt_outcome == "failed" else NO_OUTCOME_ERROR,
@@ -366,9 +389,6 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     base_state = initial_state or fresh_migration_state(
         input_.migration_name, input_.migration_checksum
     )
-    started_written_at = datetime.now(tz=UTC)
-    if invalidated_at is not None:
-        started_written_at = max(started_written_at, invalidated_at + timedelta(milliseconds=1))
     journal_store.write_migration_state(
         upsert_operation(
             base_state,
@@ -383,9 +403,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
                 last_error="",
                 fingerprint=input_.fingerprint,
             ),
-            # ReplacingMergeTree(applied_at) keeps the newest version, and the
-            # replicated read keeps either row of a tie.
-            iso_without_zone(started_written_at),
+            journal_clock.next(),
         )
     )
 
@@ -406,6 +424,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         submission=submission,
         started_at=started_at,
         fingerprint=input_.fingerprint,
+        journal_clock=journal_clock,
     )
 
 
@@ -418,6 +437,7 @@ def _poll_until_terminal(
     submission: _Submission | None,
     started_at: str,
     fingerprint: str,
+    journal_clock: _JournalClock,
 ) -> AsyncApplyResult:
     """Poll, then wait for the submit request to close, as TS does.
 
@@ -432,6 +452,7 @@ def _poll_until_terminal(
             submission=submission,
             started_at=started_at,
             fingerprint=fingerprint,
+            journal_clock=journal_clock,
         )
     except Exception:
         if submission is not None:
@@ -451,6 +472,7 @@ def _poll(
     submission: _Submission | None,
     started_at: str,
     fingerprint: str,
+    journal_clock: _JournalClock,
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
     transient_errors = 0
@@ -512,7 +534,7 @@ def _poll(
                 upsert_operation(
                     base_state,
                     finished_op,
-                    iso_without_zone(datetime.now(tz=UTC)),
+                    journal_clock.next(),
                 )
             )
             # TS reads the duration as a double and prints the result as String(n).
@@ -542,7 +564,7 @@ def _poll(
                 upsert_operation(
                     base_state,
                     failed_op,
-                    iso_without_zone(datetime.now(tz=UTC)),
+                    journal_clock.next(),
                 )
             )
             msg = (
@@ -581,7 +603,7 @@ def _poll(
                             "fingerprint": fingerprint,
                         }
                     ),
-                    iso_without_zone(datetime.now(tz=UTC)),
+                    journal_clock.next(),
                 )
             )
             raise submit_error
@@ -669,6 +691,7 @@ def _record_finished_attempt(
     state: MigrationRowState,
     op: OperationState,
     status: QueryStatus,
+    journal_clock: _JournalClock,
 ) -> AsyncApplyResult:
     """Journal a started attempt that finished on the server as completed (#672)."""
     finished_op = op.model_copy(
@@ -679,7 +702,7 @@ def _record_finished_attempt(
         }
     )
     input_.journal_store.write_migration_state(
-        upsert_operation(state, finished_op, iso_without_zone(datetime.now(tz=UTC)))
+        upsert_operation(state, finished_op, journal_clock.next())
     )
     # TS reads the duration as a double and prints the result as String(n).
     finished_sec = js_number_to_string(js_math_round(float(status.duration_ms or 0) / 1000))
@@ -694,26 +717,25 @@ def _record_finished_attempt(
 
 def _journal_attempt_failed(
     journal_store: JournalStore,
+    journal_clock: _JournalClock,
     state: MigrationRowState,
     op: OperationState,
     last_error: str,
-) -> datetime:
-    """Journal a checked started attempt failed; return the time of the write."""
-    written_at = datetime.now(tz=UTC)
+) -> None:
+    """Journal a checked started attempt failed before it is compensated (#672)."""
     journal_store.write_migration_state(
         upsert_operation(
             state,
             op.model_copy(
                 update={
                     "status": "failed",
-                    "finished_at": iso_without_zone(written_at),
+                    "finished_at": iso_without_zone(datetime.now(tz=UTC)),
                     "last_error": last_error,
                 }
             ),
-            iso_without_zone(written_at),
+            journal_clock.next(),
         )
     )
-    return written_at
 
 
 def _started_attempt_lower_bound(

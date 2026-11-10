@@ -1158,9 +1158,13 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
     expect(submitCalls).toHaveLength(1)
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
-    // The 'started' write is a newer journal version, also on a frozen clock.
-    expect(writes[1]?.appliedAt).toBe('2023-11-14T22:13:20.001')
-    expect(writes[0]?.appliedAt).toBe('2023-11-14T22:13:20.000')
+    // Each write is a newer journal version than the one before, also on a
+    // frozen clock.
+    expect(writes.map((state) => state.appliedAt)).toEqual([
+      '2023-11-14T22:13:20.000',
+      '2023-11-14T22:13:20.001',
+      '2023-11-14T22:13:20.002',
+    ])
   })
 
   test('without before-retry SQL a started attempt without a query_log entry stays started until it is resubmitted', async () => {

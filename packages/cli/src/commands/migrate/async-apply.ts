@@ -84,6 +84,11 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     sleep = defaultSleep,
     now = Date.now,
   } = input
+  // The applied_at version of each journal write of this statement, strictly
+  // increasing even when the clock stalls or steps back: ReplacingMergeTree
+  // keeps the newest version, and the replicated read keeps either row of a
+  // tie, so a later write must never lose to an earlier one (#672).
+  const journalNow = monotonicClock(now)
 
   const initialMigrationState = acceptChangedChecksum(
     await journalStore.readMigrationState(migrationName),
@@ -156,6 +161,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       pollIntervalMs,
       sleep,
       now,
+      journalNow,
       // No submit promise — query was started by a prior chkit run that's
       // now gone. We only observe its eventual completion.
       submitPromise: null,
@@ -174,7 +180,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       finishedAt: isoWithoutZone(new Date(now())),
       lastError: '',
     }
-    await journalStore.writeMigrationState(upsertOperation(initialMigrationState, finishedOp, now))
+    await journalStore.writeMigrationState(upsertOperation(initialMigrationState, finishedOp, journalNow))
     log(
       `  ${operationType}: previous attempt of query_id=${queryId} finished on the server — written=${formatRows(inFlight.writtenRows)} (${formatBytes(inFlight.writtenBytes)}) in ${Math.round((inFlight.durationMs ?? 0) / 1000)}s, recording it as completed`,
     )
@@ -186,9 +192,6 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // that failed on the server is retried the same way, reported with its error.
   // 5. No prior row → FIRST attempt. Skip compensation, submit forward.
   // (priorOpState.status === 'completed' was already returned above.)
-  // When the attempt was journaled failed, the version of that write; the
-  // 'started' write that follows must carry a newer one (#672).
-  let invalidatedAt: number | undefined
   if (priorOpState !== undefined) {
     const prior =
       attemptOutcome === 'failed'
@@ -205,8 +208,6 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // on its re-run (#672). Without compensation the record stays started, so
     // that a re-run can still find that QueryFinish.
     if (attemptLowerBound !== undefined && initialMigrationState !== null && beforeRetry !== null) {
-      const invalidatedAtMs = now()
-      invalidatedAt = invalidatedAtMs
       await journalStore.writeMigrationState(
         upsertOperation(
           initialMigrationState,
@@ -217,7 +218,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
             finishedAt: isoWithoutZone(new Date(now())),
             lastError: attemptOutcome === 'failed' ? prior.lastError : NO_OUTCOME_ERROR,
           },
-          () => invalidatedAtMs,
+          journalNow,
         ),
       )
     }
@@ -251,9 +252,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
         lastError: '',
         fingerprint,
       },
-      // ReplacingMergeTree(applied_at) keeps the newest version, and the
-      // replicated read keeps either row of a tie.
-      startedWriteClock(now, invalidatedAt),
+      journalNow,
     ),
   )
 
@@ -280,6 +279,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     pollIntervalMs,
     sleep,
     now,
+    journalNow,
     submitPromise,
     startedAt,
   })
@@ -302,6 +302,8 @@ interface PollUntilTerminalInput {
   pollIntervalMs: number
   sleep: (ms: number) => Promise<void>
   now: () => number
+  /** The applied_at version of each journal write. */
+  journalNow: () => number
   submitPromise: Promise<unknown> | null
   startedAt: string
 }
@@ -323,6 +325,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
     pollIntervalMs,
     sleep,
     now,
+    journalNow,
     submitPromise,
     startedAt,
   } = input
@@ -391,7 +394,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
         await journalStore.writeMigrationState(
-          upsertOperation(baseState, finishedOp, now),
+          upsertOperation(baseState, finishedOp, journalNow),
         )
         log(
           `  ${operationType}: finished — written=${formatRows(status.writtenRows)} (${formatBytes(status.writtenBytes)}) in ${finishedSec}s`,
@@ -414,7 +417,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
         await journalStore.writeMigrationState(
-          upsertOperation(baseState, failedOp, now),
+          upsertOperation(baseState, failedOp, journalNow),
         )
         throw new Error(
           `Async migration step ${operationType} failed (query_id ${queryId}): ${status.error ?? '<unknown>'}`,
@@ -449,7 +452,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
+        await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, journalNow))
         throw submitError
       }
       if (submitError) {
@@ -522,8 +525,12 @@ async function checkInFlight(
   }
 }
 
-function startedWriteClock(now: () => number, invalidatedAt: number | undefined): () => number {
-  return invalidatedAt === undefined ? now : () => Math.max(now(), invalidatedAt + 1)
+function monotonicClock(now: () => number): () => number {
+  let last = Number.NEGATIVE_INFINITY
+  return () => {
+    last = Math.max(now(), last + 1)
+    return last
+  }
 }
 
 // Only a started attempt of this statement's SQL can have finished without
