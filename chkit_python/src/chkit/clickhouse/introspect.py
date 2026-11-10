@@ -54,7 +54,7 @@ from chkit.core.model import (
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
 )
-from chkit.core.sql_lexer import identifier_name, is_trivia, tokenize_sql
+from chkit.core.sql_lexer import identifier_name, is_trivia, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.table_settings import AUTO_MINMAX_INDEX_PREFIX
@@ -182,7 +182,7 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
         raise ValueError(f"Unsupported column default kind: {kind}")
     if row.default_expression and kind:
         # Preserve whitespace inside SQL string literals when pulling expressions.
-        default_value = row.default_expression.strip()
+        default_value = js_trim(row.default_expression)
 
     # ClickHouse synthesizes defaultValueOfTypeName('<type as written>') for a
     # bare EPHEMERAL column, keeping alias spellings such as BIGINT or TEXT.
@@ -193,7 +193,7 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
     ):
         default_value = None
     codec_steps = parse_codec(row.compression_codec)
-    comment = row.comment.strip() if row.comment is not None else None
+    comment = js_trim(row.comment) if row.comment is not None else None
 
     return ColumnDefinition.model_validate({
         "name": row.name,
@@ -213,7 +213,7 @@ def _numeric_args(args: str | None) -> list[float] | None:
     """Every argument as a number, or None when any is not a plain number."""
     if args is None:
         return None
-    parts = [part.strip() for part in args.split(",")]
+    parts = [js_trim(part) for part in args.split(",")]
     if not all(_NUMBER_ARG_RE.match(part) for part in parts):
         return None
     return [float(part) for part in parts]
@@ -228,7 +228,7 @@ def _is_server_generated_index(name: str, create_table_query: str | None) -> boo
     appears in the CREATE and is kept."""
     if not name.startswith(AUTO_MINMAX_INDEX_PREFIX):
         return False
-    pattern = rf"\bINDEX\s+`?{re.escape(name)}`?\s"
+    pattern = js_regex(rf"\bINDEX\s+`?{re.escape(name)}`?\s")
     return re.search(pattern, create_table_query or "", re.IGNORECASE) is None
 
 
@@ -253,7 +253,7 @@ def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
     raw = SkipIndexRaw(**base_payload, raw_type=normalize_sql_fragment(row.type))
 
     match = _INDEX_TYPE_RE.match(row.type)
-    base_name = match.group(1) if match is not None else row.type.strip()
+    base_name = match.group(1) if match is not None else js_trim(row.type)
     args_str = match.group(2) if match is not None else None
     numbers = _numeric_args(args_str)
 

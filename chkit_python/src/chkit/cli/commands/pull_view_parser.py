@@ -14,7 +14,14 @@ import re
 from dataclasses import dataclass
 
 from chkit.clickhouse.introspect import parse_materialized_view_target
-from chkit.core.sql_lexer import identifier_name, is_trivia, js_trim, tokenize_sql
+from chkit.core.sql_lexer import (
+    JS_WHITESPACE_RUN,
+    identifier_name,
+    is_trivia,
+    js_regex,
+    js_trim,
+    tokenize_sql,
+)
 
 __all__ = [
     "MaterializedViewRefreshShape",
@@ -50,11 +57,11 @@ class MaterializedViewRefreshShape:
 
 
 _DEFINER_RE = re.compile(
-    r"\bDEFINER\s*=\s*(?:CURRENT_USER|`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+)",
+    js_regex(r"\bDEFINER\s*=\s*(?:CURRENT_USER|`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+)"),
     re.IGNORECASE,
 )
 _SQL_SECURITY_RE = re.compile(
-    r"\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER|NONE)", re.IGNORECASE
+    js_regex(r"\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER|NONE)"), re.IGNORECASE
 )
 
 _INTERVAL_TOKEN = (
@@ -62,17 +69,19 @@ _INTERVAL_TOKEN = (
     r"(?:\s+\d+\s+(?:SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)S?)*"
 )
 _REFRESH_RE = re.compile(
-    rf"\bREFRESH\s+(EVERY|AFTER)\s+({_INTERVAL_TOKEN})", re.IGNORECASE
+    js_regex(rf"\bREFRESH\s+(EVERY|AFTER)\s+({_INTERVAL_TOKEN})"), re.IGNORECASE
 )
-_OFFSET_RE = re.compile(rf"\bOFFSET\s+({_INTERVAL_TOKEN})", re.IGNORECASE)
+_OFFSET_RE = re.compile(js_regex(rf"\bOFFSET\s+({_INTERVAL_TOKEN})"), re.IGNORECASE)
 _RANDOMIZE_RE = re.compile(
-    rf"\bRANDOMIZE\s+FOR\s+({_INTERVAL_TOKEN})", re.IGNORECASE
+    js_regex(rf"\bRANDOMIZE\s+FOR\s+({_INTERVAL_TOKEN})"), re.IGNORECASE
 )
 _SETTINGS_RE = re.compile(
-    r"\bSETTINGS\s+(.*?)(?=\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)",
+    js_regex(r"\bSETTINGS\s+(.*?)(?=\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)"),
     re.IGNORECASE | re.DOTALL,
 )
-_SETTING_ENTRY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
+_SETTING_ENTRY_RE = re.compile(
+    js_regex(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
+)
 _UNIT_RE = re.compile(
     r"\b(second|minute|hour|day|week|month|year)s?\b", re.IGNORECASE
 )
@@ -86,7 +95,7 @@ def _strip_definer_clauses(query: str) -> str:
 
 
 def _normalize_interval(value: str) -> str:
-    normalized = " ".join(value.split())
+    normalized = JS_WHITESPACE_RUN.sub(" ", js_trim(value))
 
     def _to_singular_upper(match: re.Match[str]) -> str:
         unit = match.group(0).upper()
@@ -185,7 +194,7 @@ def _parse_refresh_settings(segment: str) -> dict[str, str | int | float]:
         if match is None:
             continue
         key = match.group(1)
-        raw = match.group(2).strip()
+        raw = js_trim(match.group(2))
         if len(raw) >= _MIN_QUOTED_LEN and raw.startswith("'") and raw.endswith("'"):
             out[key] = raw[1:-1].replace("''", "'")
             continue

@@ -20,6 +20,7 @@ from chkit.core.sql_lexer import (
     JS_WHITESPACE_RUN,
     SQLToken,
     is_js_space,
+    js_regex,
     js_trim,
     tokenize_sql,
 )
@@ -96,7 +97,9 @@ _LOW_CARDINALITY_REJECTED_FAMILIES: Final[frozenset[str]] = frozenset({
     "DATETIME64", "TIME64",
 })
 
-_FUNCTION_CALL_START: Final[re.Pattern[str]] = re.compile(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
+_FUNCTION_CALL_START: Final[re.Pattern[str]] = re.compile(
+    js_regex(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
+)
 _BLANK_HASH_COMMENT: Final[re.Pattern[str]] = re.compile(f"#[{JS_WHITESPACE}]*")
 
 

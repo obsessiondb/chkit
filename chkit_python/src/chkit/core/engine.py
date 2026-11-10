@@ -6,6 +6,7 @@ import re
 from typing import Final
 
 from chkit.core.key_clause import split_top_level_comma
+from chkit.core.sql_lexer import js_regex, js_trim
 
 # Engines outside the MergeTree family that ClickHouse registers with
 # ``supports_sort_order`` (StorageFactory), so they accept PARTITION BY,
@@ -37,9 +38,9 @@ _NON_MERGE_TREE_SORT_ORDER_ENGINES: Final[frozenset[str]] = frozenset(
 # three arguments name objects, the rest are expressions.
 _DISTRIBUTED_NAME_ARGUMENTS: Final[int] = 3
 
-_ENGINE_NAME: Final[re.Pattern[str]] = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)")
+_ENGINE_NAME: Final[re.Pattern[str]] = re.compile(js_regex(r"^\s*([A-Za-z_][A-Za-z0-9_]*)"))
 _DISTRIBUTED_ARGS: Final[re.Pattern[str]] = re.compile(
-    r"^\s*Distributed\s*\(([\s\S]*)\)\s*$"
+    js_regex(r"^\s*Distributed\s*\(([\s\S]*)\)\s*$")
 )
 _PLAIN_IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _QUOTED_IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"^([`\"])((?:(?!\1).|\1\1)*)\1$")
@@ -80,7 +81,7 @@ def normalize_distributed_engine(engine: str) -> str:
     """
     match = _DISTRIBUTED_ARGS.match(engine)
     if match is None:
-        return engine.strip()
+        return js_trim(engine)
     args = [
         _quote_identifier_argument(arg) if index < _DISTRIBUTED_NAME_ARGUMENTS else arg
         for index, arg in enumerate(split_top_level_comma(match.group(1)))

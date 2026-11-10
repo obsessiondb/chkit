@@ -28,7 +28,7 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import canonicalize_projection
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
 from chkit.core.table_settings import (
     DEFAULT_INDEX_GRANULARITY,
@@ -198,7 +198,7 @@ _INTERVAL_UNIT_PATTERN: Final[re.Pattern[str]] = re.compile(
 def _canonicalize_interval(value: str | None) -> str | None:
     if value is None:
         return None
-    collapsed = re.sub(r"\s+", " ", value).strip()
+    collapsed = JS_WHITESPACE_RUN.sub(" ", js_trim(value))
 
     def _upper_singular(match: re.Match[str]) -> str:
         token = match.group(0).upper()

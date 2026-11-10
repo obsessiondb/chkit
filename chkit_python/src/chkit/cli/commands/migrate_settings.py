@@ -9,6 +9,7 @@ import re
 from collections.abc import Sequence
 
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.core.sql_lexer import js_trim
 
 _SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -33,17 +34,17 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
     limit (#321). Like the TS ``string[]`` flag, a value may list several
     comma-separated settings. Returns None when no setting was passed."""
     entries = [
-        part.strip()
+        js_trim(part)
         for value in values or []
         for part in value.split(",")
-        if part.strip()
+        if js_trim(part)
     ]
     if not entries:
         return None
     settings: dict[str, str] = {}
     for entry in entries:
         name, eq, value = entry.partition("=")
-        name = name.strip()
+        name = js_trim(name)
         if not eq or _SETTING_NAME.fullmatch(name) is None:
             msg = (
                 "--setting expects <name>=<value>, e.g. --setting "
@@ -56,5 +57,5 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
                 "parameter, not a query setting."
             )
             raise MigrateError("invalid_usage", msg)
-        settings[name] = value.strip()
+        settings[name] = js_trim(value)
     return settings

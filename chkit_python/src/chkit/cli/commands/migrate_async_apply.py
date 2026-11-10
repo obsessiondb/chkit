@@ -4,8 +4,8 @@
 
 Submits the statement via ``ClickHouseClient.submit`` with a deterministic
 ``query_id`` derived from ``(database, journal table, migration_name,
-statement_index)``, then
-polls ``query_status`` until terminal. The per-statement journal state
+statement_index)`` and, without waiting for its response, polls
+``query_status`` until terminal. The per-statement journal state
 is written before submit (intent), after each progress poll (heartbeat),
 and on terminal (completed | failed) so a CLI crash or kill mid-migration
 can resume on the next run.
@@ -31,6 +31,7 @@ Key invariants:
 from __future__ import annotations
 
 import hashlib
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -56,6 +57,7 @@ QUERY_LOG_SKEW_MARGIN_MS = 2_000
 # query_status's own default: every query_log entry for the id counts.
 UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
 MAX_TRANSIENT_POLL_ERRORS = 20
+SUBMIT_THREAD_NAME = "chkit-async-submit"
 _BYTES_KIB = 1024
 _BYTES_MIB = _BYTES_KIB * 1024
 _BYTES_GIB = _BYTES_MIB * 1024
@@ -175,6 +177,34 @@ def _describe_error(error: BaseException) -> str:
     return clickhouse_error_message(error)
 
 
+class _Submission:
+    """The submit request, open on its own thread while the poller runs.
+
+    The request returns when the query ends (or a proxy cuts it), so the
+    poller does not wait for it: TS starts ``db.submit`` without awaiting it.
+    ``error`` is set once the request has failed.
+    """
+
+    def __init__(self, submit: Callable[[], object]) -> None:
+        self.error: Exception | None = None
+        # A daemon, so an interrupted run exits while the request is open;
+        # the query keeps running and a re-run attaches to it.
+        self._thread = threading.Thread(
+            target=self._run, args=(submit,), name=SUBMIT_THREAD_NAME, daemon=True
+        )
+        self._thread.start()
+
+    def _run(self, submit: Callable[[], object]) -> None:
+        try:
+            submit()
+        except Exception as error:  # the poller decides what it means
+            self.error = error
+
+    def wait(self) -> Exception | None:
+        self._thread.join()
+        return self.error
+
+
 def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     """Submit ``sql`` and poll until terminal, journalling each transition."""
     client = input_.client
@@ -229,7 +259,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             migration_state=initial_state,
             query_id=query_id,
             poll_after_time=_attach_lower_bound(server_now_ms, in_flight.elapsed_ms),
-            submit_error=None,
+            submission=None,
             started_at=prior_op.started_at
             if prior_op is not None
             else iso_without_zone(datetime.now(tz=UTC)),
@@ -280,18 +310,16 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     poll_after_time = _query_log_lower_bound(_read_server_state(client)[0], 0)
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
-    submit_error: Exception | None = None
-    try:
-        client.submit(input_.sql, query_id=query_id, settings=input_.settings)
-    except Exception as error:
-        submit_error = error
+    submission = _Submission(
+        lambda: client.submit(input_.sql, query_id=query_id, settings=input_.settings)
+    )
 
     return _poll_until_terminal(
         input_=input_,
         migration_state=state_after_start,
         query_id=query_id,
         poll_after_time=poll_after_time,
-        submit_error=submit_error,
+        submission=submission,
         started_at=started_at,
     )
 
@@ -302,7 +330,38 @@ def _poll_until_terminal(
     migration_state: MigrationRowState | None,
     query_id: str,
     poll_after_time: str,
-    submit_error: Exception | None,
+    submission: _Submission | None,
+    started_at: str,
+) -> AsyncApplyResult:
+    """Poll, then wait for the submit request to close, as TS does.
+
+    Only an ``Exception`` waits for it: on Ctrl-C the run stops at once.
+    """
+    try:
+        result = _poll(
+            input_=input_,
+            migration_state=migration_state,
+            query_id=query_id,
+            poll_after_time=poll_after_time,
+            submission=submission,
+            started_at=started_at,
+        )
+    except Exception:
+        if submission is not None:
+            submission.wait()
+        raise
+    if submission is not None:
+        submission.wait()
+    return result
+
+
+def _poll(
+    *,
+    input_: AsyncApplyInput,
+    migration_state: MigrationRowState | None,
+    query_id: str,
+    poll_after_time: str,
+    submission: _Submission | None,
     started_at: str,
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
@@ -318,6 +377,9 @@ def _poll_until_terminal(
             elapsed_sec = int(time.monotonic() - poll_started_at)
             if transient_errors > MAX_TRANSIENT_POLL_ERRORS:
                 # A submit error is the only trace of e.g. a rejected statement (#561).
+                # The caller waits for the submit anyway; wait here so its error
+                # makes it into the message.
+                submit_error = submission.wait() if submission is not None else None
                 submit_tail = (
                     f" The submit request failed too ({_describe_error(submit_error)})."
                     if submit_error is not None
@@ -402,6 +464,7 @@ def _poll_until_terminal(
         # status is "unknown" here. If submit already raised, the query never
         # made it server-side (e.g. SQL parse error): record the attempt as
         # failed and surface that error. Otherwise it's a transient gap.
+        submit_error = submission.error if submission is not None else None
         if submit_error is not None:
             input_.journal_store.write_migration_state(
                 upsert_operation(

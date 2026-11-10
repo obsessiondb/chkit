@@ -26,6 +26,7 @@ import re
 from typing import Final
 
 from chkit.core.model import MigrationPlan
+from chkit.core.sql_lexer import js_regex
 
 # DDL statement prefixes where ``ON CLUSTER`` goes immediately after the
 # object reference that follows the prefix. Anything not matched here (or by
@@ -87,7 +88,7 @@ _ON_CLUSTER_TRAILING_ANCHORS: Final[tuple[str, ...]] = (
 # anchor keyword and the object reference. Preserved verbatim so the clause
 # lands after the object, never after the guard.
 _OBJECT_GUARD: Final[re.Pattern[str]] = re.compile(
-    r"IF\s+(?:NOT\s+)?EXISTS\s+", re.IGNORECASE
+    js_regex(r"IF\s+(?:NOT\s+)?EXISTS\s+"), re.IGNORECASE
 )
 
 # One identifier part: backtick-quoted (backslash-escaped or doubled backticks)
@@ -98,7 +99,7 @@ _IDENTIFIER_PART: Final[str] = r"(?:`(?:[^`\\]|\\.|``)*`|[^\s;(.`]+)"
 # backtick-quoted identifier containing spaces, dots or escaped backticks.
 # ``ON CLUSTER`` slots in right after it.
 _OBJECT_REF: Final[re.Pattern[str]] = re.compile(
-    rf"{_IDENTIFIER_PART}(?:\.{_IDENTIFIER_PART})*"
+    js_regex(rf"{_IDENTIFIER_PART}(?:\.{_IDENTIFIER_PART})*")
 )
 
 # Idempotency is checked positionally — an ``ON CLUSTER`` clause sitting
@@ -107,13 +108,13 @@ _OBJECT_REF: Final[re.Pattern[str]] = re.compile(
 # body) containing the words "on cluster" cannot suppress injection. This
 # pattern is matched against the slice **after** the object reference.
 _ON_CLUSTER_AT_REF: Final[re.Pattern[str]] = re.compile(
-    r"\s+ON\s+CLUSTER\b", re.IGNORECASE
+    js_regex(r"\s+ON\s+CLUSTER\b"), re.IGNORECASE
 )
 
 # For trailing anchors (RENAME/EXCHANGE), idempotency is checked by searching
 # for ``ON CLUSTER <name>`` at the very end of the statement body.
 _ON_CLUSTER_AT_END: Final[re.Pattern[str]] = re.compile(
-    r"\bON\s+CLUSTER\s+\S+\s*$", re.IGNORECASE
+    js_regex(r"\bON\s+CLUSTER\s+\S+\s*$"), re.IGNORECASE
 )
 
 
