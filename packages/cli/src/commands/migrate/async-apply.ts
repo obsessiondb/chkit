@@ -84,11 +84,6 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     sleep = defaultSleep,
     now = Date.now,
   } = input
-  // The applied_at version of each journal write of this statement, strictly
-  // increasing even when the clock stalls or steps back: ReplacingMergeTree
-  // keeps the newest version, and the replicated read keeps either row of a
-  // tie, so a later write must never lose to an earlier one (#672).
-  const journalNow = monotonicClock(now)
 
   const initialMigrationState = acceptChangedChecksum(
     await journalStore.readMigrationState(migrationName),
@@ -97,6 +92,15 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   )
   const priorOpState = initialMigrationState?.operations.find(
     (op) => op.operationIndex === statementIndex,
+  )
+  // The applied_at version of each journal write of this statement, strictly
+  // newer than the version it read and than its own previous write, even when
+  // the clock stalls or steps back: ReplacingMergeTree keeps the newest
+  // version, and the replicated read keeps either row of a tie, so a later
+  // write must never lose to an earlier one (#672).
+  const journalNow = monotonicClock(
+    now,
+    initialMigrationState === null ? Number.NEGATIVE_INFINITY : journalTimeMs(initialMigrationState.appliedAt),
   )
 
   // 1. Already completed → skip entirely, when it is this statement that ran (#599)
@@ -525,8 +529,8 @@ async function checkInFlight(
   }
 }
 
-function monotonicClock(now: () => number): () => number {
-  let last = Number.NEGATIVE_INFINITY
+function monotonicClock(now: () => number, floorMs: number): () => number {
+  let last = floorMs
   return () => {
     last = Math.max(now(), last + 1)
     return last
@@ -542,9 +546,13 @@ function monotonicClock(now: () => number): () => number {
 function startedAttemptLowerBound(op: OperationState | undefined, fingerprint: string): string | undefined {
   if (op?.status !== 'started' || op.queryId === '') return undefined
   if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return undefined
-  // The journal returns DateTime64 without a zone, all of it UTC.
-  const iso = op.startedAt.trim().replace(' ', 'T')
-  return queryLogLowerBound(Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`), 0)
+  return queryLogLowerBound(journalTimeMs(op.startedAt), 0)
+}
+
+// The journal returns DateTime64 without a zone, all of it UTC.
+function journalTimeMs(value: string): number {
+  const iso = value.trim().replace(' ', 'T')
+  return Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
 }
 
 // The attached attempt had run for elapsedMs when the in-flight check, which

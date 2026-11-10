@@ -1167,6 +1167,32 @@ describe('applyAsyncStatement re-run of a started step', () => {
     ])
   })
 
+  test('journal writes are newer than the version the run read, also when the clock is behind it', async () => {
+    const { db } = createFakeExecutor([
+      { status: 'unknown' },
+      { status: 'finished', writtenRows: 16, durationMs: 8000 },
+    ])
+    // An earlier run wrote the row 10 ms after this run's clock.
+    const { store, writes } = createFakeJournalStore({ ...startedRecord(), appliedAt: '2023-11-14 22:13:20.010' })
+
+    await applyAsyncStatement({
+      ...BASE_INPUT,
+      fingerprint: 'v1:load',
+      beforeRetry: 'TRUNCATE TABLE t',
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(writes.map((state) => state.appliedAt)).toEqual([
+      '2023-11-14T22:13:20.011',
+      '2023-11-14T22:13:20.012',
+      '2023-11-14T22:13:20.013',
+    ])
+  })
+
   test('without before-retry SQL a started attempt without a query_log entry stays started until it is resubmitted', async () => {
     const { db, submitCalls } = createFakeExecutor([
       { status: 'unknown' },

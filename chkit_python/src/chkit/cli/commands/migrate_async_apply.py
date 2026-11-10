@@ -195,13 +195,14 @@ def _describe_error(error: BaseException) -> str:
 class _JournalClock:
     """The applied_at version of each journal write of one statement (#672).
 
-    Strictly increasing even when the clock stalls or steps back:
+    Strictly newer than the version the statement read and than its own
+    previous write, even when the clock stalls or steps back:
     ReplacingMergeTree keeps the newest version, and the replicated read keeps
     either row of a tie, so a later write must never lose to an earlier one.
     """
 
-    def __init__(self) -> None:
-        self._last: datetime | None = None
+    def __init__(self, floor: datetime | None) -> None:
+        self._last = floor
 
     def next(self) -> str:
         now = datetime.now(tz=UTC)
@@ -243,12 +244,14 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     """Submit ``sql`` and poll until terminal, journalling each transition."""
     client = input_.client
     journal_store = input_.journal_store
-    journal_clock = _JournalClock()
 
     initial_state = _accept_changed_checksum(
         journal_store.read_migration_state(input_.migration_name),
         input_.migration_name,
         input_.migration_checksum,
+    )
+    journal_clock = _JournalClock(
+        None if initial_state is None else _journal_time(initial_state.applied_at)
     )
     prior_op = None
     if initial_state is not None:
@@ -754,12 +757,14 @@ def _started_attempt_lower_bound(
         return None
     if op.fingerprint not in ("", fingerprint):
         return None
-    # The journal returns DateTime64 without a zone, all of it UTC.
-    started = datetime.fromisoformat(op.started_at.strip().replace(" ", "T"))
-    if started.tzinfo is None:
-        started = started.replace(tzinfo=UTC)
-    started_ms = (started - _EPOCH) // timedelta(milliseconds=1)
+    started_ms = (_journal_time(op.started_at) - _EPOCH) // timedelta(milliseconds=1)
     return _query_log_lower_bound(started_ms, 0)
+
+
+def _journal_time(value: str) -> datetime:
+    """The journal returns DateTime64 without a zone, all of it UTC."""
+    parsed = datetime.fromisoformat(value.strip().replace(" ", "T"))
+    return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
 
 
 def _attach_lower_bound(server_now_ms: int, elapsed_ms: int | None) -> str:

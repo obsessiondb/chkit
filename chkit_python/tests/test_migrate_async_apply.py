@@ -1306,6 +1306,27 @@ def test_rerun_journal_writes_get_increasing_versions_on_a_frozen_clock(
     ]
 
 
+def test_rerun_journal_writes_are_newer_than_the_version_read() -> None:
+    # An earlier run wrote the row with a clock far ahead of this run's.
+    state = _started_record().model_copy(update={"applied_at": "2999-01-01 00:00:00.000"})
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    journal = _FakeJournalStore(state=state)
+    apply_async_statement(_rerun_input(client, journal))
+
+    assert journal.writes is not None
+    assert [w.applied_at for w in journal.writes] == [
+        "2999-01-01T00:00:00.001",
+        "2999-01-01T00:00:00.002",
+        "2999-01-01T00:00:00.003",
+    ]
+
+
 class _LostResponseClient(_ScriptedClient):
     """Its before-retry SQL runs on the server, but the response is lost."""
 
