@@ -24,6 +24,7 @@ import {
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
+  type SQLToken,
   textIndexFingerprint,
   type TextSkipIndex,
   tokenizeSQL,
@@ -442,16 +443,26 @@ function tableClauses(expected: TableDefinition, actual: ActualTableShape) {
 // `IS NULL`, `TRUE` as `true`. A bare `true`, `false` or `null` is always a literal.
 const ENGINE_LITERAL_KEYWORDS = new Set(['null', 'true', 'false'])
 const ENGINE_OPERATOR_KEYWORDS = new Set(['and', 'or', 'not', 'is', 'in', 'like', 'ilike', 'distinct', 'from', 'global'])
+// Names the server keeps quoted because they read back as a literal when bare
+// (writeProbablyQuotedStringImpl): `true` is a Bool, `` `true` `` a column.
+const ENGINE_LITERAL_NAMES = new Set(['null', 'true', 'false', 'inf', 'infinity', 'nan'])
+// Keywords the server quotes as names from some version on: 26.3 writes a
+// `cube` column bare, later versions `` `cube` ``.
+const ENGINE_KEYWORD_NAMES = new Set(['distinct', 'all', 'some', 'table', 'select', 'cube', 'rollup', 'recursive'])
+const BARE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
 
 /**
  * Column names and string literals in engine arguments are case-sensitive, so
  * they keep their case (#673). Function names (`RAND()` reads back as `rand()`)
  * and operator keywords do not, and whitespace between tokens is insignificant.
  * An operator keyword that is a whole argument on its own can only be a column.
+ * A quoted name compares as the server writes it back (#679).
  */
 function normalizeEngine(value: string | undefined): string {
   if (!value) return ''
-  const tokens = tokenizeSQL(coreNormalizeEngine(normalizeSQLFragment(value))).filter((token) => !isTrivia(token))
+  const tokens = tokenizeSQL(coreNormalizeEngine(normalizeSQLFragment(value)))
+    .filter((token) => !isTrivia(token))
+    .map((token, index, all) => unquoteEngineName(token, all[index - 1]?.text, all[index + 1]?.text))
   return tokens
     .map((token, index) => {
       if (token.kind !== 'identifier') return token.text
@@ -463,6 +474,25 @@ function normalizeEngine(value: string | undefined): string {
       return next === '(' || keyword ? lower : token.text
     })
     .join(' ')
+}
+
+/**
+ * The server writes a quoted name bare when the quotes are not needed: `Ver`
+ * for `` `Ver` `` or `"Ver"`, and `Null` for an engine or function name, which
+ * the server itself writes as `` `Null` ``. A name that needs its quotes keeps
+ * them, in backticks, so different names never compare equal.
+ */
+function unquoteEngineName(token: SQLToken, previous: string | undefined, next: string | undefined): SQLToken {
+  const name = token.kind === 'quoted_identifier' ? identifierName(token) : undefined
+  if (name === undefined) return token
+  const lower = name.toLowerCase()
+  const standsAlone = (previous === '(' || previous === ',') && (next === ')' || next === ',')
+  const bare =
+    BARE_NAME.test(name) &&
+    (next === '(' ||
+      (!ENGINE_LITERAL_NAMES.has(lower) && (standsAlone || !ENGINE_KEYWORD_NAMES.has(lower))))
+  if (bare) return { ...token, kind: 'identifier', text: name }
+  return { ...token, text: `\`${name.replaceAll('\\', '\\\\').replaceAll('`', '\\`')}\`` }
 }
 
 /**

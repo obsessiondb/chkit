@@ -794,7 +794,41 @@ describe('@chkit/cli drift comparer', () => {
     ['Distributed(c, app, t, id is distinct from 0)', "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", false],
     ["Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", false],
   ]
-  for (const [expectedEngine, actualEngine, mismatch] of engineArgumentCase) {
+  // A quoted name compares as the server writes it back (#679).
+  const engineQuoting: Array<[string, string, boolean]> = [
+    // The server writes the Null engine as `Null`.
+    ['Null', '`Null`', false],
+    ['Null()', '`Null`', false],
+    ['`Null`', '`Null`', false],
+    // It writes a quoted name bare unless the name needs its quotes.
+    ['ReplacingMergeTree(`Ver`)', 'ReplacingMergeTree(Ver)', false],
+    ['ReplacingMergeTree("Ver")', 'ReplacingMergeTree(Ver)', false],
+    ['`ReplacingMergeTree`(Ver)', 'ReplacingMergeTree(Ver)', false],
+    ['ReplacingMergeTree(`from`)', 'ReplacingMergeTree(from)', false],
+    ['ReplacingMergeTree(`And`)', 'ReplacingMergeTree(And)', false],
+    ['SummingMergeTree((`Value`, `my v`))', 'SummingMergeTree((Value, `my v`))', false],
+    ['Distributed(c, app, t, sipHash64(`my id`, `id`))', "Distributed('c', 'app', 't', sipHash64(`my id`, id))", false],
+    ['ReplacingMergeTree(`my ver`)', 'ReplacingMergeTree(`my ver`)', false],
+    ['ReplacingMergeTree("my ver")', 'ReplacingMergeTree(`my ver`)', false],
+    ['ReplacingMergeTree(`a.b`)', 'ReplacingMergeTree(`a.b`)', false],
+    ['ReplacingMergeTree(`1v`)', 'ReplacingMergeTree(`1v`)', false],
+    ['ReplacingMergeTree(`a``b`)', 'ReplacingMergeTree(`a\\`b`)', false],
+    ['ReplacingMergeTree(`null`)', 'ReplacingMergeTree(`null`)', false],
+    ['ReplacingMergeTree(`select`)', 'ReplacingMergeTree(`select`)', false],
+    // Newer servers quote `cube` as a keyword, older ones write it bare.
+    ['ReplacingMergeTree(`cube`)', 'ReplacingMergeTree(cube)', false],
+    ['ReplacingMergeTree(`cube`)', 'ReplacingMergeTree(`cube`)', false],
+    // Quoting that changes the name or what it means still counts: a bare `true` or `nan` is a literal.
+    ['ReplacingMergeTree(`Ver`)', 'ReplacingMergeTree(ver)', true],
+    ['ReplacingMergeTree(`from`)', 'ReplacingMergeTree(From)', true],
+    ['ReplacingMergeTree(`my ver`)', 'ReplacingMergeTree(`my Ver`)', true],
+    ['ReplacingMergeTree(`a.b`)', 'ReplacingMergeTree(a.b)', true],
+    ['ReplacingMergeTree(`ab`)', 'ReplacingMergeTree(`a\\`b`)', true],
+    ['ReplacingMergeTree(`Null`)', 'ReplacingMergeTree(`null`)', true],
+    ['ReplacingMergeTree(`true`)', 'ReplacingMergeTree(true)', true],
+    ['ReplacingMergeTree(`nan`)', 'ReplacingMergeTree(nan)', true],
+  ]
+  for (const [expectedEngine, actualEngine, mismatch] of [...engineArgumentCase, ...engineQuoting]) {
     test(`engine ${expectedEngine} against ${actualEngine} ${mismatch ? 'is' : 'is not'} a mismatch`, () => {
       const expected = table({
         database: 'app',
