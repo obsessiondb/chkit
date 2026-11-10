@@ -68,8 +68,8 @@ def supports_sort_order(engine: str) -> bool:
     )
 
 
-_REPLICATED_ENGINE: Final[re.Pattern[str]] = re.compile(
-    js_regex(r"^\s*Replicated([A-Za-z0-9_]*MergeTree)\s*(?:\(([\s\S]*)\))?\s*$")
+_REPLICATED_ENGINE_NAME: Final[re.Pattern[str]] = re.compile(
+    js_regex(r"^\s*Replicated([A-Za-z0-9_]*MergeTree)")
 )
 # The Keeper path and replica name lead a Replicated engine's arguments.
 _REPLICATION_ARGUMENTS: Final[int] = 2
@@ -88,11 +88,14 @@ def replicated_engine_as_shared(engine: str) -> str | None:
     is stored as ``SharedReplacingMergeTree(ver)``. The result has no ``Shared``
     prefix. None for any other engine (TS ``replicatedEngineAsShared``).
     """
-    match = _REPLICATED_ENGINE.match(engine)
+    match = _REPLICATED_ENGINE_NAME.match(engine)
     if match is None:
         return None
-    raw = match.group(2)
-    args = split_top_level_comma(raw) if raw is not None and js_trim(raw) else []
+    rest = js_trim(engine[match.end() :])
+    if rest and not (rest.startswith("(") and rest.endswith(")")):
+        return None
+    inner = rest[1:-1]
+    args = split_top_level_comma(inner) if js_trim(inner) else []
     if (
         len(args) >= _REPLICATION_ARGUMENTS
         and _REPLICATION_ARGUMENT.match(args[0]) is not None

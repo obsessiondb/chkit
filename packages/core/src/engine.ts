@@ -43,7 +43,7 @@ export function supportsSortOrder(engine: string): boolean {
   return isMergeTreeEngine(engine) || NON_MERGE_TREE_SORT_ORDER_ENGINES.has(engineName(engine))
 }
 
-const REPLICATED_ENGINE = /^\s*Replicated([A-Za-z0-9_]*MergeTree)\s*(?:\(([\s\S]*)\))?\s*$/
+const REPLICATED_ENGINE_NAME = /^\s*Replicated([A-Za-z0-9_]*MergeTree)/
 // A Keeper path or replica name that the server drops: a string literal or a
 // heredoc. ObsessionDB keeps an expression path such as concat(...) as written.
 const REPLICATION_ARGUMENT = /^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$)$/
@@ -56,9 +56,12 @@ const REPLICATION_ARGUMENT = /^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[
  * `SharedReplacingMergeTree(ver)`. Undefined for any other engine.
  */
 export function replicatedEngineAsShared(engine: string): string | undefined {
-  const match = REPLICATED_ENGINE.exec(engine)
+  const match = REPLICATED_ENGINE_NAME.exec(engine)
   if (!match) return undefined
-  const args = match[2]?.trim() ? splitTopLevelComma(match[2]) : []
+  const rest = engine.slice(match[0].length).trim()
+  if (rest !== '' && !(rest.startsWith('(') && rest.endsWith(')'))) return undefined
+  const inner = rest.slice(1, -1)
+  const args = inner.trim() ? splitTopLevelComma(inner) : []
   const [path, replica] = args
   const kept = path !== undefined && replica !== undefined && REPLICATION_ARGUMENT.test(path) && REPLICATION_ARGUMENT.test(replica)
     ? args.slice(2)
