@@ -24,9 +24,10 @@ import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
+from typer.exceptions import TyperException
 
 from chkit.cli.command_target import (
     ServiceOption,
@@ -44,9 +45,9 @@ from chkit.cli.commands.pull_view_parser import (
 from chkit.cli.config_loader import load_config
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
-from chkit.cli.plugin_runtime import load_plugin_runtime
+from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.table_scope import TableScope
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.clickhouse.create_dictionary_parser import (
     parse_dictionary_attributes_from_create_dictionary_query,
     parse_dictionary_primary_key_from_create_dictionary_query,
@@ -56,10 +57,7 @@ from chkit.clickhouse.create_dictionary_parser import (
     parse_lifetime_from_create_dictionary_query,
     parse_source_from_create_dictionary_query,
 )
-from chkit.clickhouse.index_granularity import (
-    IndexGranularityMismatchError,
-    assert_server_index_granularity,
-)
+from chkit.clickhouse.index_granularity import assert_server_index_granularity
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
     infer_schema_kind_from_engine,
@@ -244,22 +242,6 @@ def _refresh_shape_to_model(
         append=shape.append or None,
         empty=shape.empty or None,
     )
-
-
-def _assert_index_granularity(
-    client: ClickHouseClient, config: ChxResolvedConfig, *, output_json: bool
-) -> None:
-    """Stop when the server's MergeTree index_granularity default is not
-    ``clickhouse.indexGranularity``, reported as TS pull reports an error
-    (``wrapPluginRun``): on stdout, exit 1."""
-    try:
-        assert_server_index_granularity(client, configured_index_granularity(config))
-    except IndexGranularityMismatchError as error:
-        if output_json:
-            print_output({"ok": False, "command": "schema", "error": str(error)}, json_mode=True)
-        else:
-            typer.echo(f"Pull schema failed: {error}")
-        raise typer.Exit(code=1) from error
 
 
 def _pull_definitions(
@@ -481,20 +463,24 @@ def _kafka_setting_warnings(definitions: Sequence[SchemaDefinition]) -> list[str
     return warnings
 
 
+class PullConfigError(Exception):
+    """A config error, for which pull exits 2 (TS ``PullConfigError``)."""
+
+
 def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None:
     if out_file.exists() and not overwrite:
         msg = (
-            f"Output file already exists: {out_file}. "
-            f"Pass --force / --overwrite to replace it."
+            f"Output file already exists at {out_file}. "
+            "Re-run with --force or set plugin option overwrite=true."
         )
-        raise typer.BadParameter(msg)
+        raise PullConfigError(msg)
     out_file.parent.mkdir(parents=True, exist_ok=True)
     tmp_file = out_file.with_suffix(out_file.suffix + ".tmp")
     tmp_file.write_text(content, encoding="utf-8")
     tmp_file.replace(out_file)
 
 
-def run(  # noqa: PLR0912, PLR0917
+def run(  # noqa: PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -569,18 +555,49 @@ def run(  # noqa: PLR0912, PLR0917
             output_json=output_json,
         ),
     )
-    if executor is None and config.clickhouse is None:
+    try:
+        _run(
+            config,
+            plugin_runtime,
+            executor,
+            hook_flags=hook_flags,
+            database=database,
+            out_file=out_file,
+            dryrun=dryrun,
+            overwrite=overwrite,
+            output_json=output_json,
+        )
+    except (typer.Exit, typer.Abort, TyperException):
+        raise
+    except Exception as error:
         # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
-        # a config error on stdout and exits 2.
+        # an error on stdout and exits 2 for a config error, else 1.
+        message = clickhouse_error_message(error)
+        if output_json:
+            print_output({"ok": False, "command": "schema", "error": message}, json_mode=True)
+        else:
+            typer.echo(f"Pull schema failed: {message}")
+        raise typer.Exit(code=2 if isinstance(error, PullConfigError) else 1) from error
+
+
+def _run(
+    config: ChxResolvedConfig,
+    plugin_runtime: PluginRuntime,
+    executor: ClickHouseClient | None,
+    *,
+    hook_flags: dict[str, Any],
+    database: list[str] | None,
+    out_file: Path,
+    dryrun: bool,
+    overwrite: bool,
+    output_json: bool,
+) -> None:
+    if executor is None and config.clickhouse is None:
         msg = (
             "pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service "
             "(chkit obsessiondb service select)"
         )
-        if output_json:
-            print_output({"ok": False, "command": "schema", "error": msg}, json_mode=True)
-        else:
-            typer.echo(f"Pull schema failed: {msg}")
-        raise typer.Exit(code=2)
+        raise PullConfigError(msg)
 
     selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
 
@@ -606,7 +623,7 @@ def run(  # noqa: PLR0912, PLR0917
             # The pulled tables are compared later against definitions
             # canonicalized with clickhouse.indexGranularity, which must be this
             # server's default. A custom introspector reads elsewhere.
-            _assert_index_granularity(client, config, output_json=output_json)
+            assert_server_index_granularity(client, configured_index_granularity(config))
             # Capture objects so we can summarize what got skipped, even when
             # --database was passed explicitly.
             raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
