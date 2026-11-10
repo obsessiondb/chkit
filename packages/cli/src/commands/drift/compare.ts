@@ -24,6 +24,7 @@ import {
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
+  type SQLToken,
   textIndexFingerprint,
   type TextSkipIndex,
   tokenizeSQL,
@@ -438,9 +439,79 @@ function tableClauses(expected: TableDefinition, actual: ActualTableShape) {
   } satisfies Record<string, [string | undefined, string | undefined]>
 }
 
+// Keywords the server rewrites in engine arguments: `is null` reads back as
+// `IS NULL`, `TRUE` as `true`. A bare `true`, `false` or `null` is always a literal.
+const ENGINE_LITERAL_KEYWORDS = new Set(['null', 'true', 'false'])
+const ENGINE_OPERATOR_KEYWORDS = new Set(['and', 'or', 'not', 'is', 'in', 'like', 'ilike', 'distinct', 'from', 'global'])
+// The operator keywords that can open an expression (`NOT x`, `count(DISTINCT x)`);
+// the others always follow an operand.
+const ENGINE_PREFIX_KEYWORDS = new Set(['not', 'distinct'])
+// Names the server keeps quoted because they read back as a literal when bare
+// (writeProbablyQuotedStringImpl): `true` is a Bool, `` `true` `` a column.
+const ENGINE_LITERAL_NAMES = new Set(['null', 'true', 'false', 'inf', 'infinity', 'nan'])
+// Keywords the server quotes as names from some version on: 26.3 writes a
+// `cube` column bare, later versions `` `cube` ``.
+const ENGINE_KEYWORD_NAMES = new Set(['distinct', 'all', 'some', 'table', 'select', 'cube', 'rollup', 'recursive'])
+const BARE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Column names and string literals in engine arguments are case-sensitive, so
+ * they keep their case (#673). Function names (`RAND()` reads back as `rand()`)
+ * and operator keywords do not, and whitespace between tokens is insignificant.
+ * An operator keyword where an operand belongs (`if(And > 1, 1, 0)`) can only be
+ * a column. A quoted name compares as the server writes it back (#679).
+ */
 function normalizeEngine(value: string | undefined): string {
   if (!value) return ''
-  return coreNormalizeEngine(normalizeSQLFragment(value)).toLowerCase()
+  const tokens = tokenizeSQL(coreNormalizeEngine(normalizeSQLFragment(value)))
+    .filter((token) => !isTrivia(token))
+    .map((token, index, all) => unquoteEngineName(token, all[index - 1], all[index + 1]))
+  return tokens
+    .map((token, index) => {
+      if (token.kind !== 'identifier') return token.text
+      const lower = token.text.toLowerCase()
+      const previous = tokens[index - 1]
+      const next = tokens[index + 1]
+      const keyword = ENGINE_LITERAL_KEYWORDS.has(lower) || isOperatorKeyword(lower, previous, next)
+      return next?.text === '(' || keyword ? lower : token.text
+    })
+    .join(' ')
+}
+
+/**
+ * The server writes a quoted name bare when the quotes are not needed: `Ver`
+ * for `` `Ver` `` or `"Ver"`, and `Null` for an engine or function name, which
+ * the server itself writes as `` `Null` ``. A name that needs its quotes keeps
+ * them, in backticks, so different names never compare equal. An unquoted name
+ * stays a quoted identifier, so it keeps its case even where a keyword could be.
+ */
+function unquoteEngineName(token: SQLToken, previous: SQLToken | undefined, next: SQLToken | undefined): SQLToken {
+  const name = token.kind === 'quoted_identifier' ? identifierName(token) : undefined
+  if (name === undefined || !BARE_NAME.test(name)) {
+    return name === undefined ? token : { ...token, text: `\`${name.replaceAll('\\', '\\\\').replaceAll('`', '\\`')}\`` }
+  }
+  if (next?.text === '(') return { ...token, kind: 'identifier', text: name }
+  const lower = name.toLowerCase()
+  const keepsQuotes =
+    ENGINE_LITERAL_NAMES.has(lower) || (ENGINE_KEYWORD_NAMES.has(lower) && (endsOperand(previous) || startsOperand(next)))
+  return keepsQuotes ? { ...token, text: `\`${name}\`` } : { ...token, text: name }
+}
+
+function isOperatorKeyword(lower: string, previous: SQLToken | undefined, next: SQLToken | undefined): boolean {
+  if (!ENGINE_OPERATOR_KEYWORDS.has(lower)) return false
+  return endsOperand(previous) || (ENGINE_PREFIX_KEYWORDS.has(lower) && startsOperand(next))
+}
+
+function endsOperand(token: SQLToken | undefined): boolean {
+  return token !== undefined && (isValueToken(token) || token.text === ')' || token.text === ']')
+}
+
+function startsOperand(token: SQLToken | undefined): boolean {
+  return token !== undefined && (isValueToken(token) || token.text === '(')
+}
+
+function isValueToken(token: SQLToken): boolean {
+  return ['identifier', 'quoted_identifier', 'number', 'string'].includes(token.kind)
 }
 
 /**

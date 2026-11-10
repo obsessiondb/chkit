@@ -32,6 +32,7 @@ const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
 // A poll request can fail transiently (gateway 504/524, network blip) while the
 // server-side async query keeps running. Tolerate a bounded number of these so a
 // momentary timeout doesn't abort a long-running load; only give up after the budget.
+// The same budget limits `unknown` polls after a failed submit (#657).
 const MAX_TRANSIENT_POLL_ERRORS = 20
 
 function describeError(error: unknown): string {
@@ -279,6 +280,10 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
 
   const pollStartedAt = now()
   let transientPollErrors = 0
+  // Once a poll found the query running, the server has it, so a failed
+  // submit request (a gateway 524, a timeout) says nothing about its outcome (#657).
+  let seenRunning = false
+  let unknownPollsAfterSubmitError = 0
   try {
     for (;;) {
       await sleep(pollIntervalMs)
@@ -358,15 +363,20 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       }
 
       if (status.status === 'running') {
+        seenRunning = true
+        unknownPollsAfterSubmitError = 0
         log(progressLine(operationType, status, elapsedSec))
         continue
       }
 
       // status === 'unknown'
-      // If submit has already rejected, the query never made it server-side
-      // (e.g. SQL parse error) — record the attempt as failed and surface that
-      // error. Otherwise it's a transient gap (just-submitted or just-finished); loop.
-      if (submitError) {
+      // If submit has already rejected and no poll found the query running, it
+      // never made it server-side (e.g. SQL parse error) — record the attempt as
+      // failed and surface that error. Known gap: a load that ends before the
+      // first poll, with a transport error on its submit, also lands here (#657).
+      // Otherwise it's a transient gap (just-submitted, or just-finished before
+      // query_log has it); loop.
+      if (submitError && !seenRunning) {
         const failedOp: OperationState = {
           operationIndex: statementIndex,
           operationKey,
@@ -382,6 +392,14 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
         await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
         throw submitError
+      }
+      if (submitError) {
+        unknownPollsAfterSubmitError += 1
+        if (unknownPollsAfterSubmitError > MAX_TRANSIENT_POLL_ERRORS) {
+          throw new Error(
+            `Async migration step ${operationType} (query_id ${queryId}): the submit request failed (${describeError(submitError)}) and polling found no outcome ${unknownPollsAfterSubmitError}×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+          )
+        }
       }
       log(
         `  ${operationType}: status unknown — still polling (elapsed ${elapsedSec}s)`,

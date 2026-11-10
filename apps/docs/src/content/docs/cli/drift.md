@@ -53,6 +53,8 @@ Check these properties against `SHOW CREATE` output.
 
 When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
 
+Whitespace in engine arguments is ignored, and so is the case of function names and operator keywords, which ClickHouse rewrites (`RAND()` reads back as `rand()`). Column names and strings in engine arguments are case-sensitive and compare as written: `CollapsingMergeTree(Sign)` does not match `CollapsingMergeTree(sign)`. Quotes the server leaves out when it stores the engine do not count: ``ReplacingMergeTree(`Ver`)`` matches `ReplacingMergeTree(Ver)`, and `Null` matches the stored `` `Null` ``. A name that needs its quotes, such as `` `my ver` ``, or one that would read as a literal without them, such as `` `true` ``, keeps them.
+
 ### Nullable columns
 
 Column types are compared as rendered SQL types, in the spacing ClickHouse stores: `Decimal(10,2)` matches the stored `Decimal(10, 2)`, while text in quotes (an `Enum` label, a time zone) is compared as written. `type: 'Nullable(String)'` and `type: 'String', nullable: true` both render `Nullable(String)` and do not report drift. Changes to nullability or the underlying type still report `changed_column`.

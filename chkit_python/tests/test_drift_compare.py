@@ -271,6 +271,92 @@ def test_table_shape_replicated_engine_on_shared_server(
     assert (detail is not None and detail.engine_mismatch) is mismatch
 
 
+# Column names and string literals in engine arguments are case-sensitive (#673).
+# The server rewrites the case of function names and operator keywords only.
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(sign)", True),
+        ("ReplacingMergeTree(Ver)", "ReplacingMergeTree(ver)", True),
+        ("VersionedCollapsingMergeTree(Sign, Version)", "VersionedCollapsingMergeTree(sign, Version)", True),
+        ("SummingMergeTree((Value, Version))", "SummingMergeTree((value, Version))", True),
+        ("GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", True),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(ver)", True),
+        ("Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", True),
+        ("ReplacingMergeTree(And)", "ReplacingMergeTree(and)", True),
+        ("SummingMergeTree((From, Value))", "SummingMergeTree((from, Value))", True),
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(Sign)", False),
+        ("ReplacingMergeTree( Ver )", "ReplacingMergeTree(Ver)", False),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(Ver)", False),
+        ("Distributed(c, app, t, RAND())", "Distributed('c', 'app', 't', rand())", False),
+        ("Distributed(c, app, t, If(Sign > 1, 1, 0))", "Distributed('c', 'app', 't', if(Sign > 1, 1, 0))", False),
+        (
+            "Distributed(c, app, t, Path is not null and TRUE)",
+            "Distributed('c', 'app', 't', Path IS NOT NULL AND true)",
+            False,
+        ),
+        ("Distributed(c, app, t, id is distinct from 0)", "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", False),
+        ("Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", False),
+    ],
+)
+def test_table_shape_engine_argument_case(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
+# A quoted name compares as the server writes it back (#679).
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        # The server writes the Null engine as `Null`.
+        ("Null", "`Null`", False),
+        ("Null()", "`Null`", False),
+        ("`Null`", "`Null`", False),
+        # It writes a quoted name bare unless the name needs its quotes.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(Ver)", False),
+        ('ReplacingMergeTree("Ver")', "ReplacingMergeTree(Ver)", False),
+        ("`ReplacingMergeTree`(Ver)", "ReplacingMergeTree(Ver)", False),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(from)", False),
+        ("ReplacingMergeTree(`And`)", "ReplacingMergeTree(And)", False),
+        ("SummingMergeTree((`Value`, `my v`))", "SummingMergeTree((Value, `my v`))", False),
+        ("Distributed(c, app, t, sipHash64(`my id`, `id`))", "Distributed('c', 'app', 't', sipHash64(`my id`, id))", False),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my ver`)", False),
+        ('ReplacingMergeTree("my ver")', "ReplacingMergeTree(`my ver`)", False),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(`a.b`)", False),
+        ("ReplacingMergeTree(`1v`)", "ReplacingMergeTree(`1v`)", False),
+        ("ReplacingMergeTree(`a``b`)", "ReplacingMergeTree(`a\\`b`)", False),
+        ("ReplacingMergeTree(`null`)", "ReplacingMergeTree(`null`)", False),
+        ("ReplacingMergeTree(`select`)", "ReplacingMergeTree(`select`)", False),
+        # Newer servers quote `cube` as a keyword, older ones write it bare.
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(cube)", False),
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(`cube`)", False),
+        # Quoting that changes the name or what it means still counts: a bare `true` or `nan` is a literal.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(ver)", True),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(From)", True),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my Ver`)", True),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(a.b)", True),
+        ("ReplacingMergeTree(`ab`)", "ReplacingMergeTree(`a\\`b`)", True),
+        ("ReplacingMergeTree(`Null`)", "ReplacingMergeTree(`null`)", True),
+        ("ReplacingMergeTree(`true`)", "ReplacingMergeTree(true)", True),
+        ("ReplacingMergeTree(`nan`)", "ReplacingMergeTree(nan)", True),
+        # In an expression, as the server writes a sharding key back.
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(And + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(and + 1))", True),
+        ("Distributed(c, app, t, if(`And` > 1, 1, 0))", "Distributed('c', 'app', 't', if(And > 1, 1, 0))", False),
+        ("Distributed(c, app, t, if(And > 1, 1, 0))", "Distributed('c', 'app', 't', if(and > 1, 1, 0))", True),
+        ("Distributed(c, app, t, `And` AND `and`)", "Distributed('c', 'app', 't', And AND and)", False),
+        ("Distributed(c, app, t, `and` AND `And`)", "Distributed('c', 'app', 't', And AND and)", True),
+        ("Distributed(c, app, t, cityHash64(`cube` + 1))", "Distributed('c', 'app', 't', cityHash64(cube + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`select` + 1))", "Distributed('c', 'app', 't', cityHash64(`select` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`my v` + 1))", "Distributed('c', 'app', 't', cityHash64(`my v` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`true` + 1))", "Distributed('c', 'app', 't', cityHash64(true + 1))", True),
+    ],
+)
+def test_table_shape_engine_quoting(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
 def test_table_shape_detects_order_by_mismatch() -> None:
     detail = compare_table_shape(_t(order_by=["id", "ts"]), _it(order_by="(id)"))
     assert detail is not None
@@ -429,12 +515,19 @@ def test_table_shape_default_value_of_type_name_matches_bare_column_only_when_ep
 # #409 (port of #275): introspection unwraps Nullable(T) into type=T plus
 # nullable=True, so an inline Nullable type matches it.
 def test_table_shape_equates_inline_nullable_types_with_the_introspected_nullable_property() -> None:
-    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)", "LowCardinality(String)"]:
+    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)"]:
         inline = ColumnDefinition(name="value", type=f"Nullable({type_})")
         prop = ColumnDefinition(name="value", type=type_, nullable=True)
         assert _changed_columns(inline, prop) is None
         assert _changed_columns(prop, inline) is None
         assert _changed_columns(prop, prop) is None
+
+
+def test_table_shape_equates_nullable_low_cardinality_with_the_stored_type() -> None:
+    stored = ColumnDefinition(name="value", type="LowCardinality(Nullable(String))")
+    prop = ColumnDefinition(name="value", type="LowCardinality(String)", nullable=True)
+    assert _changed_columns(prop, stored) is None
+    assert _changed_columns(stored, prop) is None
 
 
 def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -> None:
@@ -449,7 +542,6 @@ def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -
         (col("String"), nullable("String")),
         (col("Nullable(String)"), nullable("UInt64")),
         (nullable("Nullable(String)"), nullable("String")),
-        (col("LowCardinality(Nullable(String))"), nullable("LowCardinality(String)")),
         (col("Array(Nullable(String))"), col("Array(String)")),
     ]
     for expected, actual in differences:

@@ -713,6 +713,69 @@ describe('applyAsyncStatement', () => {
       '  load_table_data: finished — written=16 rows (128 B) in 8s',
     ])
   })
+
+  // After the 524, the query can end between two polls. A poll then finds it
+  // neither running nor yet in query_log (flushed on a timer). The server ran
+  // the query, so the submit error does not mean it failed (#657).
+  test('a submit that fails after a poll found the query running waits for query_log', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        { status: 'unknown' },
+        { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+      ],
+      { failSubmit: () => new Error('error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: (line) => lines.push(line),
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    expect(lines).toEqual([
+      `  load_table_data: submitting async (query_id=${QUERY_ID})`,
+      '  load_table_data: written=9 rows (72 B), elapsed 0s',
+      '  load_table_data: status unknown — still polling (elapsed 0s)',
+      '  load_table_data: finished — written=16 rows (128 B) in 8s',
+    ])
+  })
+
+  test('a submit that fails after a poll found the query running gives up after the poll budget', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        ...Array.from({ length: 21 }, () => ({ status: 'unknown' as const })),
+      ],
+      { failSubmit: () => new Error('error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(
+      `Async migration step load_table_data (query_id ${QUERY_ID}): the submit request failed (error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+    )
+    // The outcome is unknown, so the attempt stays started.
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+  })
+
   // The query id is deterministic, so query_log still holds the earlier
   // attempt's QueryFinish after `migrate --abandon` (#233). A submission that
   // then fails before it starts (no query_log row) must not inherit it.
