@@ -1,5 +1,10 @@
 import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
-import { forwardedCommandFlags, parsePluginCommandArgs, routeForwardedArgs } from '../runtime/command-dispatch.js'
+import {
+  forwardedCommandFlags,
+  parsePluginCommandArgs,
+  reportStrayArgs,
+  routeForwardedArgs,
+} from '../runtime/command-dispatch.js'
 import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
 import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
@@ -133,6 +138,11 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
       return 1
     }
     throw error
+  }
+  // A command that takes no arguments rejects them as core commands do (#659).
+  if (targetCommand.takesArgs === false && positionals.length > 0) {
+    reportStrayArgs('plugin', positionals, jsonMode)
+    return 1
   }
 
   // Set only when the target command declares --table (#565).

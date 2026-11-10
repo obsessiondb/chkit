@@ -42,6 +42,7 @@ from chkit.clickhouse.client import ClickHouseClient, is_unknown_database_error
 from chkit.clickhouse.ddl_propagation import wait_for_column, wait_for_table
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
+from chkit.core.sql_lexer import js_regex, js_trim
 
 OperationStatus = Literal["started", "completed", "failed"]
 
@@ -111,7 +112,7 @@ class _UnknownDatabaseError(Exception):
 
 
 def resolve_journal_table_name() -> str:
-    candidate = (os.environ.get("CHKIT_JOURNAL_TABLE") or "").strip()
+    candidate = js_trim(os.environ.get("CHKIT_JOURNAL_TABLE") or "")
     if not candidate:
         return _DEFAULT_JOURNAL_TABLE
     if _JOURNAL_TABLE_PATTERN.match(candidate) is None:
@@ -226,7 +227,7 @@ def _fingerprints_array_literal(operations: list[OperationState]) -> str:
 _UNKNOWN_TABLE = (
     60,
     "UNKNOWN_TABLE",
-    re.compile(r"Unknown table expression identifier|Table \S+ does not exist"),
+    re.compile(js_regex(r"Unknown table expression identifier|Table \S+ does not exist")),
 )
 _UNKNOWN_IDENTIFIER = (
     47,

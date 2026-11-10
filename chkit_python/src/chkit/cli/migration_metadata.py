@@ -17,7 +17,9 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
-_META_LINE = re.compile(r"^--\s*([a-zA-Z][a-zA-Z0-9-]*)\s*:\s*(.+)$")
+from chkit.core.sql_lexer import js_regex, js_trim
+
+_META_LINE = re.compile(js_regex(r"^--\s*([a-zA-Z][a-zA-Z0-9-]*)\s*:\s*(.+)$"))
 
 KNOWN_KEYS: frozenset[str] = frozenset({"log"})
 
@@ -31,7 +33,7 @@ def extract_migration_metadata(sql: str) -> MigrationMetadata:
     """Walk leading comment lines, harvest recognised ``-- key: value`` pairs."""
     collected: dict[str, str] = {}
     for raw_line in sql.split("\n"):
-        line = raw_line.strip()
+        line = js_trim(raw_line)
         if line == "":
             continue
         if not line.startswith("--"):
@@ -40,7 +42,7 @@ def extract_migration_metadata(sql: str) -> MigrationMetadata:
         if match is None:
             continue
         key = match.group(1).lower()
-        value = match.group(2).strip()
+        value = js_trim(match.group(2))
         if not key or not value:
             continue
         if key not in KNOWN_KEYS:

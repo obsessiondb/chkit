@@ -12,6 +12,7 @@ import typer
 from chkit.cli.commands.migrate_abandon import AbandonReport, status_before_abandon
 from chkit.cli.commands.migrate_apply import preview_statement
 from chkit.cli.commands.migrate_retry import RetryNoopReason, RetryResolution, RetryResume
+from chkit.core.sql_lexer import js_trim
 
 # A regenerated migration plans the statements that completed again.
 _REPEATED_STATEMENTS_HINT = (
@@ -113,7 +114,7 @@ def render_abandon_text(
         statement = op.operation_index + 1
         status = status_before_abandon(op)
         if status == "failed":
-            reason = op.last_error.split("\n", 1)[0].strip()
+            reason = js_trim(op.last_error.split("\n", 1)[0])
             typer.echo(
                 f"Statement {statement} failed."
                 if reason == ""

@@ -8,10 +8,13 @@ branching, ``wrap_connection_error``).
 
 from __future__ import annotations
 
+import threading
 from unittest.mock import MagicMock
 
+import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
+from urllib3 import Timeout
 
 from chkit.clickhouse import (
     ClickHouseClient,
@@ -119,6 +122,156 @@ def test_execute_reraises_other_database_errors_without_retry() -> None:
         client.execute("CREATE TABL x")
 
     assert fake.command.call_count == 1
+
+
+# ---------- submit ----------
+
+
+def test_submit_runs_on_its_own_driver_without_a_session(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The submit request holds the session it is sent in until the query ends,
+    so polling on the main driver's session would be locked out (TS sends it
+    through a session-less client)."""
+    drivers: list[tuple[MagicMock, dict[str, object]]] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        drivers.append((driver, kwargs))
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123",
+            username="default",
+            password="pw",
+            database="analytics",
+            secure=False,
+        )
+    )
+    assert client.submit("INSERT INTO t SELECT 1", query_id="q1", settings={"x": "1"}) == "q1"
+    assert client.submit("INSERT INTO t SELECT 2", query_id="q2") == "q2"
+
+    [(main, main_kwargs), (submit_driver, submit_kwargs)] = drivers
+    main.command.assert_not_called()
+    assert submit_driver.database == "analytics"
+    assert submit_kwargs == {**main_kwargs, "autogenerate_session_id": False}
+    assert [call.args for call in submit_driver.command.call_args_list] == [
+        ("INSERT INTO t SELECT 1",),
+        ("INSERT INTO t SELECT 2",),
+    ]
+    assert [call.kwargs for call in submit_driver.command.call_args_list] == [
+        {"settings": {"x": "1", "query_id": "q1"}},
+        {"settings": {"query_id": "q2"}},
+    ]
+    client.close()
+    main.close.assert_called_once()
+    submit_driver.close.assert_called_once()
+    with pytest.raises(RuntimeError, match="closed"):
+        client.submit("INSERT INTO t SELECT 3", query_id="q3")
+    assert submit_driver.command.call_count == 2
+
+
+@pytest.mark.parametrize(
+    ("driver_interval", "expected_interval"),
+    [
+        # The driver derives 120 s from its 300 s read timeout; TS sends 30 s.
+        ("120000", "30000"),
+        # A user who cannot change settings gets no interval, as in TS.
+        (None, None),
+    ],
+)
+def test_every_driver_waits_without_a_timeout_as_ts(
+    monkeypatch: pytest.MonkeyPatch,
+    driver_interval: str | None,
+    expected_interval: str | None,
+) -> None:
+    """TS's client has ``request_timeout: 0``: no connect or read timeout. The
+    session driver and the submit driver match it, with TS's 30 s progress
+    headers."""
+    drivers: list[tuple[MagicMock, dict[str, object]]] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        driver.timeout = Timeout(connect=10, read=300)
+        driver._progress_interval = driver_interval
+        drivers.append((driver, kwargs))
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123",
+            username="default",
+            password="pw",
+            database="analytics",
+            secure=False,
+        )
+    )
+    client.submit("INSERT INTO t SELECT 1", query_id="q1")
+
+    assert len(drivers) == 2
+    for driver, kwargs in drivers:
+        assert kwargs["connect_timeout"] is None
+        assert (driver.timeout.connect_timeout, driver.timeout.read_timeout) == (None, None)
+        assert driver._progress_interval == expected_interval
+    client.close()
+
+
+def test_submit_driver_still_opening_at_close_sends_nothing(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An interrupted async migrate closes the client while its submit thread
+    may still open the submit driver: that driver is closed, never used."""
+    opening = threading.Event()
+    release = threading.Event()
+    drivers: list[MagicMock] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        drivers.append(driver)
+        if kwargs.get("autogenerate_session_id") is False:
+            opening.set()
+            release.wait(timeout=30)
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123",
+            username="default",
+            password="",
+            database="default",
+            secure=False,
+        )
+    )
+    errors: list[Exception] = []
+
+    def submit() -> None:
+        try:
+            client.submit("INSERT INTO t SELECT 1", query_id="q1")
+        except RuntimeError as error:
+            errors.append(error)
+
+    submitter = threading.Thread(target=submit)
+    submitter.start()
+    assert opening.wait(timeout=5)
+    closer = threading.Thread(target=client.close)
+    closer.start()
+    # close() returns without waiting for the driver to open: it has no
+    # connect timeout, so the wait could be unbounded (#661).
+    closer.join(timeout=2)
+    assert not closer.is_alive()
+    assert drivers[0].close.called
+    release.set()
+    submitter.join(timeout=5)
+    closer.join(timeout=5)
+
+    [_main, submit_driver] = drivers
+    submit_driver.command.assert_not_called()
+    submit_driver.close.assert_called_once()
+    assert [str(error) for error in errors] == ["ClickHouse client is closed."]
 
 
 # ---------- clickhouse_error_message ----------

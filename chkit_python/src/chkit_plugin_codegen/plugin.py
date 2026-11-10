@@ -224,6 +224,7 @@ def create_codegen_plugin(
                 name="codegen",
                 description="Generate Pydantic models from chkit schema definitions",
                 run=_run_codegen,
+                takes_args=False,
                 flags=list(CODEGEN_FLAGS),
             ),
         ],

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import decimal
+import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
@@ -37,9 +38,17 @@ SERVER_TIME_QUERY = (
 )
 
 
+def _wait_for_submit(_seconds: float) -> None:
+    # A poll interval outlasts these fakes' submit requests, so a submit error
+    # is known by the first poll, which keeps the call order deterministic.
+    for thread in threading.enumerate():
+        if thread.name == migrate_async_apply.SUBMIT_THREAD_NAME:
+            thread.join(timeout=5)
+
+
 @pytest.fixture(autouse=True)
 def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", _wait_for_submit)
 
 
 # ---------- pure helpers ----------
@@ -655,6 +664,143 @@ def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() ->
         "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
         "  alter_table_modify_column: finished — written=16 rows (128 B) in 8s",
     ]
+
+
+class _OpenSubmitClient(_ScriptedClient):
+    """Its submit request stays open until a poll sees the query end, as the
+    HTTP request of a long load does. A submit that blocks the poller is never
+    released and times out instead."""
+
+    def __init__(
+        self,
+        statuses: list[QueryStatus | BaseException],
+        *,
+        submit_raises: BaseException | None = None,
+    ) -> None:
+        super().__init__(statuses, submit_raises=submit_raises)
+        self.query_ended = threading.Event()
+        self.submit_returned = threading.Event()
+
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
+        self.submitted.append((statement, query_id))
+        ended = self.query_ended.wait(timeout=5)
+        self.events.append("submit returned" if ended else "submit timed out")
+        self.submit_returned.set()
+        if self._submit_raises is not None:
+            raise self._submit_raises
+        return query_id or "auto-id"
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+    ) -> QueryStatus:
+        status = super().query_status(
+            query_id,
+            after_time=after_time,
+            every_replica=every_replica,
+            running_only=running_only,
+        )
+        if status.status in ("finished", "failed"):
+            self.query_ended.set()
+        return status
+
+
+def test_apply_async_polls_while_the_submit_request_is_open(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The submit does not block: progress lines come while the load runs, as
+    in TS, and the step returns once the request has closed."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
+    client = _OpenSubmitClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            QueryStatus(status="running", written_rows=4, written_bytes=32),
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            QueryStatus(status="finished", written_rows=25, written_bytes=200, duration_ms=25000),
+        ]
+    )
+    journal = _FakeJournalStore()
+    lines: list[str] = []
+    result = apply_async_statement(_input(client=client, journal=journal, log=lines.append))
+    assert result.kind == "completed"
+    assert lines == [
+        f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})",
+        "  alter_table_modify_column: written=4 rows (32 B), elapsed 0s",
+        "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
+        "  alter_table_modify_column: finished — written=25 rows (200 B) in 25s",
+    ]
+    assert client.events == [
+        SERVER_TIME_QUERY,
+        "status",
+        SERVER_TIME_QUERY,
+        "status",
+        "status",
+        "status",
+        "submit returned",
+    ]
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+
+
+def test_apply_async_query_failing_while_the_submit_is_open_raises_the_polled_error(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The failure comes from query_log, as in TS; the submit error that
+    follows it is waited for, not raised."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
+    client = _OpenSubmitClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=4, written_bytes=32),
+            QueryStatus(status="failed", error="Memory limit exceeded"),
+        ],
+        submit_raises=RuntimeError("Memory limit exceeded (from the submit)"),
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert str(excinfo.value) == (
+        "Async migration step alter_table_modify_column failed "
+        f"(query_id {_QUERY_ID}): Memory limit exceeded"
+    )
+    assert client.events[-1] == "submit returned"
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+
+
+def test_apply_async_interrupt_does_not_wait_for_the_open_submit(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Ctrl-C stops the poller at once; the load keeps running on the server
+    and a re-run attaches to it."""
+    sleeps: list[float] = []
+
+    def interrupt_on_second_sleep(seconds: float) -> None:
+        sleeps.append(seconds)
+        if len(sleeps) == 2:
+            raise KeyboardInterrupt
+
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", interrupt_on_second_sleep)
+    client = _OpenSubmitClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="running", written_rows=4, written_bytes=32),
+        ]
+    )
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
+    assert not client.submit_returned.is_set()
+    client.query_ended.set()
+    assert client.submit_returned.wait(timeout=5)
 
 
 def _whole_seconds(after_time: str | None) -> int:

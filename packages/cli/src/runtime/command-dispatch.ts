@@ -103,6 +103,14 @@ function splitAtEndOfFlags(argv: string[]): { flagArgs: string[]; rest: string[]
 	return { flagArgs: argv.slice(0, end), rest: argv.slice(end + 1) }
 }
 
+/** A stray argument given to a command that takes none, in click's words as chkit-py reports it (#612). */
+export class UnexpectedArgumentsError extends Error {
+	constructor(args: readonly string[]) {
+		super(`Got unexpected extra argument(s) (${args.join(' ')})`)
+		this.name = 'UnexpectedArgumentsError'
+	}
+}
+
 /**
  * Parses a plugin command's arguments: its flags go to `flags`, the rest to
  * `positionals`, the `args` the command gets (#568). Throws on a flag error.
@@ -141,7 +149,7 @@ export function parseCommandArgs(
 	commandName: string,
 	argv: string[],
 	flagDefs: readonly FlagDef[],
-	{ takesArgs = true }: { takesArgs?: boolean } = {},
+	{ rejectPositionals = false }: { rejectPositionals?: boolean } = {},
 ): { flags: ParsedFlags; positionals: string[] } | null {
 	if (commandName === 'query') {
 		const { flagArgs, positionals } = splitQueryArgs(argv, flagDefs)
@@ -153,30 +161,55 @@ export function parseCommandArgs(
 	const { flagArgs, rest } = splitAtEndOfFlags(argv)
 	const flags = parseFlagsOrReport(commandName, flagArgs, flagDefs)
 	if (!flags) return null
-	if (!takesArgs && rest.length > 0) {
-		reportStrayArgs(commandName, rest, flagArgs.includes('--json'))
+	const positionals = [...extractPositionals(flagArgs, flagDefs), ...rest]
+	if (rejectPositionals && positionals.length > 0) {
+		// Reported after any flag error, as click does in chkit-py (#612). JSON
+		// mode comes only from the flags: a --json after `--` is an argument (#614).
+		reportCommandUsageError(
+			commandName,
+			new UnexpectedArgumentsError(positionals).message,
+			flags['--json'] === true,
+		)
 		return null
 	}
-	return {
-		flags,
-		positionals: [...extractPositionals(flagArgs, flagDefs), ...rest],
-	}
+	return { flags, positionals }
 }
 
-/** The core commands that read positionals; the others reject what follows `--` (#614). */
-const CORE_COMMANDS_WITH_ARGS = new Set(['snapshot', 'query', 'plugin'])
+/** The core commands that read positionals: the SQL, the snapshot subcommand, the forwarded plugin command. */
+const CORE_COMMANDS_WITH_POSITIONALS = new Set(['query', 'snapshot', 'plugin'])
 
-function commandTakesArgs(commandName: string, resolved: RegisteredCommand): boolean {
+/**
+ * Every other core command takes none, so a stray argument, before or after
+ * `--`, is a usage error instead of being ignored (#612, #614). A plugin
+ * command gets them in `args`, unless it sets `takesArgs: false` (#659).
+ */
+function commandArgsOptions(commandName: string, resolved: RegisteredCommand) {
 	const isCore = resolved.pluginName === undefined || resolved.pluginName === 'core'
-	return !isCore || CORE_COMMANDS_WITH_ARGS.has(commandName)
+	return { rejectPositionals: isCore && !CORE_COMMANDS_WITH_POSITIONALS.has(commandName) }
 }
 
-/** Reports like parseFlagsOrReport, in the words chkit-py (click) uses. */
-function reportStrayArgs(commandName: string, args: string[], jsonMode: boolean): void {
-	const message = `Got unexpected extra argument(s) (${args.join(' ')})`
-	console.error(message)
-	if (jsonMode) emitJsonError(commandName, { code: 'usage', message })
-	process.exitCode = 1
+/** Reports a stray argument as parseCommandArgs does for a core command. */
+export function reportStrayArgs(commandName: string, args: string[], jsonMode: boolean): void {
+	reportCommandUsageError(commandName, new UnexpectedArgumentsError(args).message, jsonMode)
+}
+
+/**
+ * Reports the arguments of a plugin command that takes none (`takesArgs:
+ * false`) as a core command's, before the command runs (#659). Returns
+ * whether it did.
+ */
+function reportsStrayPluginArgs(
+	commandName: string,
+	resolved: RegisteredCommand,
+	subcommandName: string | undefined,
+	parsed: { flags: ParsedFlags; positionals: string[] },
+): boolean {
+	const target = resolved.subcommands?.find((s) => s.name === subcommandName) ?? resolved
+	if (target.takesArgs !== false) return false
+	const args = withoutSubcommandName(parsed.positionals, subcommandName)
+	if (args.length === 0) return false
+	reportStrayArgs(commandName, args, parsed.flags['--json'] === true)
+	return true
 }
 
 /**
@@ -205,9 +238,13 @@ export function parseInitFlags(input: {
 		input.commandName,
 		argsAfterCommand,
 		input.registry.resolveFlags(input.commandName, subcommand.name),
-		{ takesArgs: commandTakesArgs(input.commandName, input.resolved) },
+		commandArgsOptions(input.commandName, input.resolved),
 	)
-	return parsed ? parsed.flags : null
+	if (!parsed) return null
+	if (reportsStrayPluginArgs(input.commandName, input.resolved, subcommand.name, parsed)) {
+		return null
+	}
+	return parsed.flags
 }
 
 /**
@@ -266,7 +303,13 @@ function parseForwardedInitFlags(
 	if (!pluginName || !command) return flags
 	const defs = forwardedCommandFlags(plugins, pluginName, command)
 	try {
-		return { ...flags, ...parsePluginCommandArgs(commandArgs, defs).flags }
+		const parsed = parsePluginCommandArgs(commandArgs, defs)
+		// As in `cmdPlugin`, a command that takes no arguments rejects them (#659).
+		if (command.takesArgs === false && parsed.positionals.length > 0) {
+			reportStrayArgs('plugin', parsed.positionals, flags['--json'] === true)
+			return null
+		}
+		return { ...flags, ...parsed.flags }
 	} catch (error) {
 		// Report a flag error before any hook runs, as `chkit <plugin> <command>`
 		// does, in the format the plugin command uses for it.
@@ -378,15 +421,21 @@ export function parseFlagsOrReport(
 			error instanceof UnknownFlagError ||
 			error instanceof MissingFlagValueError
 		) {
-			console.error(error.message)
-			if (args.includes('--json')) {
-				emitJsonError(commandName, { code: 'usage', message: error.message })
-			}
-			process.exitCode = 1
+			reportCommandUsageError(commandName, error.message, args.includes('--json'))
 			return null
 		}
 		throw error
 	}
+}
+
+function reportCommandUsageError(
+	commandName: string,
+	message: string,
+	jsonMode: boolean,
+): void {
+	console.error(message)
+	if (jsonMode) emitJsonError(commandName, { code: 'usage', message })
+	process.exitCode = 1
 }
 
 async function resolvePluginTableScope(input: {
@@ -468,9 +517,12 @@ export async function runResolvedCommand(input: {
 			input.commandName,
 			argsAfterCommand,
 			allFlags,
-			{ takesArgs: commandTakesArgs(input.commandName, input.resolved) },
+			commandArgsOptions(input.commandName, input.resolved),
 		)
 		if (!parsed) return
+		if (reportsStrayPluginArgs(input.commandName, input.resolved, subcommandName, parsed)) {
+			return
+		}
 		flags = parsed.flags
 		positionals = withoutSubcommandName(parsed.positionals, subcommandName)
 	}

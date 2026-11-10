@@ -18,6 +18,7 @@ import sys
 from collections.abc import Sequence
 
 from chkit.cli.safety_markers import DestructiveOperationMarker
+from chkit.core.sql_lexer import js_trim
 
 
 def is_background_or_ci() -> bool:
@@ -42,7 +43,7 @@ def _prompt_yes(message: str) -> bool:
         response = input(message)
     except EOFError:
         return False
-    return response.strip().lower() == "yes"
+    return js_trim(response).lower() == "yes"
 
 
 def confirm_apply() -> bool:

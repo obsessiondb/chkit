@@ -83,6 +83,7 @@ export interface PullPlugin {
   commands: Array<{
     name: 'schema'
     description: string
+    takesArgs?: boolean
     flags?: ReadonlyArray<{
       name: string
       type: 'boolean' | 'string' | 'string[]'
@@ -200,6 +201,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
       {
         name: 'schema',
         description: 'Pull live ClickHouse table schema and write chkit schema file',
+        takesArgs: false,
         flags: PULL_SCHEMA_FLAGS,
         optionsSchema,
         flagMapping: PULL_FLAG_MAP,

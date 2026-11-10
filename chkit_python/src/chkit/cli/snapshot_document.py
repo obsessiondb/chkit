@@ -14,6 +14,7 @@ from typing import Any, Literal, TypeAlias, cast
 from chkit.core.canonical import canonicalize_definitions, definition_key
 from chkit.core.conflict_markers import has_conflict_markers
 from chkit.core.model import SchemaDefinition, Snapshot
+from chkit.core.sql_lexer import js_trim
 
 SnapshotUnreadableReason: TypeAlias = Literal["empty", "conflict_markers", "invalid_json"]
 
@@ -54,7 +55,7 @@ def parse_snapshot_document(
     are canonicalized (``index_granularity``: ``clickhouse.indexGranularity``).
     Entries chkit never writes may still raise.
     """
-    if raw.strip() == "":
+    if js_trim(raw) == "":
         return UnreadableSnapshotDocument(reason="empty")
 
     try:

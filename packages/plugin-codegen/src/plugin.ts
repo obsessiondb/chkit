@@ -121,6 +121,7 @@ export function createCodegenPlugin(options: CodegenPluginOptions = {}): Codegen
       {
         name: 'codegen',
         description: 'Generate TypeScript artifacts from chkit schema definitions',
+        takesArgs: false,
         flags: CODEGEN_FLAGS,
         optionsSchema,
         flagMapping: CODEGEN_FLAG_MAP,

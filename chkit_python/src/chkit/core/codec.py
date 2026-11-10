@@ -23,7 +23,7 @@ from chkit.core.model import (
     _CodecT64,
     _CodecZSTD,
 )
-from chkit.core.sql_lexer import is_js_space, js_trim
+from chkit.core.sql_lexer import is_js_space, js_regex, js_trim
 
 CodecSpecInput: TypeAlias = ColumnCodec | Mapping[str, Any] | Sequence[ColumnCodec | Mapping[str, Any]]
 """Loose input accepted by public entry points: dicts or models, single or list."""
@@ -128,7 +128,7 @@ def render_codec(spec: CodecSpecInput) -> str:
 
 _ATOM_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(\w+)(?:\(([^)]*)\))?$")
 _CODEC_WRAPPER_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^CODEC\s*\(([\s\S]*)\)\s*$", re.IGNORECASE
+    js_regex(r"^CODEC\s*\(([\s\S]*)\)\s*$"), re.IGNORECASE
 )
 
 

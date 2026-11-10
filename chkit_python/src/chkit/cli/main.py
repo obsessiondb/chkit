@@ -2,9 +2,10 @@
 
 from __future__ import annotations
 
+import contextlib
 import logging
 import re
-from typing import Any
+from typing import Any, NoReturn
 
 import typer
 from typer._click.exceptions import UsageError  # click, which typer vendors privately
@@ -12,6 +13,7 @@ from typer.core import TyperCommand, TyperGroup
 from typer.exceptions import TyperException
 
 from chkit import __version__
+from chkit.cli import command_lifecycle
 from chkit.cli.argv import GLOBAL_FLAGS, extract_config_path, normalize_global_args
 from chkit.cli.commands import (
     check,
@@ -427,7 +429,8 @@ class _ChkitGroup(TyperGroup):
     value that is not one of the choices) is reported as TS reports one: one
     line on stderr, exit 1 and, under ``--json``, a ``usage`` error envelope.
     A usage error before the command is resolved is re-raised, so click
-    still reports it.
+    still reports it. It also runs the on_complete hooks of a command whose
+    on_init ran, with the exit code, on success and on error (#488).
     """
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
@@ -478,32 +481,63 @@ class _ChkitGroup(TyperGroup):
     def invoke(self, ctx: Any) -> Any:
         # The group's parser leaves the subcommand's arguments in ctx.args.
         json_mode = "--json" in _option_args(ctx.args)
+        command_lifecycle.reset()
         try:
-            return super().invoke(ctx)
-        except (typer.Exit, typer.Abort, BrokenPipeError):
+            result = super().invoke(ctx)
+        except typer.Exit as exit_:
+            self._complete(ctx, exit_.exit_code, json_mode=json_mode)
+            raise
+        except (typer.Abort, BrokenPipeError):
+            _complete_after_error(1)
             raise
         except Exception as error:
-            # A usage error of the resolved command: its arguments or its
-            # option values. A command that already wrote JSON keeps it alone.
+            # As in TS, on_complete runs before the error is reported, and an
+            # on_complete error must not mask it.
             if isinstance(error, UsageError) and ctx.invoked_subcommand is not None:
+                # A usage error of the resolved command: its arguments or its
+                # option values, exit 1 as in TS. A command that already wrote
+                # JSON keeps it alone.
+                _complete_after_error(1)
                 report_flag_error(
                     ctx.invoked_subcommand,
                     error.format_message(),
                     json_mode=json_mode and not has_emitted_json(),
                 )
-            if is_debug_enabled():
-                configure_cli_logging()
-                logging.getLogger("chkit.cli").debug("fatal error", exc_info=error)
-            message = clickhouse_error_message(error) or type(error).__name__
-            if json_mode and not has_emitted_json():
-                emit_json_error(
-                    ctx.invoked_subcommand or "chkit",
-                    {"code": json_error_code(error), "message": message},
-                )
-            if isinstance(error, TyperException):
-                raise
-            typer.echo(message, err=True)
-            raise typer.Exit(code=1) from error
+            exit_code = getattr(error, "exit_code", 1) if isinstance(error, TyperException) else 1
+            _complete_after_error(exit_code if isinstance(exit_code, int) else 1)
+            self._report(ctx, error, json_mode=json_mode)
+        self._complete(ctx, 0, json_mode=json_mode)
+        return result
+
+    def _complete(self, ctx: Any, exit_code: int, *, json_mode: bool) -> None:
+        """Run on_complete after the command ended with ``exit_code``; as in
+        TS, an on_complete error is the command's error then."""
+        try:
+            command_lifecycle.run_on_complete(exit_code)
+        except Exception as error:
+            self._report(ctx, error, json_mode=json_mode)
+
+    def _report(self, ctx: Any, error: Exception, *, json_mode: bool) -> NoReturn:
+        if is_debug_enabled():
+            configure_cli_logging()
+            logging.getLogger("chkit.cli").debug("fatal error", exc_info=error)
+        message = clickhouse_error_message(error) or type(error).__name__
+        if json_mode and not has_emitted_json():
+            emit_json_error(
+                ctx.invoked_subcommand or "chkit",
+                {"code": json_error_code(error), "message": message},
+            )
+        if isinstance(error, TyperException):
+            raise error
+        typer.echo(message, err=True)
+        raise typer.Exit(code=1) from error
+
+
+def _complete_after_error(exit_code: int) -> None:
+    """Run on_complete after a command failed. An on_complete error is dropped:
+    the command's own error is the one to report (TS ``bin/chkit.ts``)."""
+    with contextlib.suppress(Exception):
+        command_lifecycle.run_on_complete(exit_code)
 
 
 app = typer.Typer(
