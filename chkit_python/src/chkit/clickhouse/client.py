@@ -21,6 +21,7 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
+from urllib3 import Timeout
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.jsnum import js_math_round
@@ -33,6 +34,9 @@ from chkit.core.sql_lexer import js_trim
 logging.getLogger("clickhouse_connect").addHandler(logging.NullHandler())
 
 QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
+
+# TS's PROGRESS_SETTINGS (``@chkit/clickhouse``): a progress header every 30 s.
+PROGRESS_INTERVAL_MS = "30000"
 
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
 # integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
@@ -154,21 +158,25 @@ class ClickHouseClient:
                 username=username,
                 password=password,
                 secure=secure,
+                connect_timeout=None,
                 **options,
             )
         except Exception as error:
             wrap_connection_error(error, config.url, config.username)
         client.database = config.database
+        _use_ts_timeouts(client)
         return client
 
     def close(self) -> None:
-        # Set before taking the lock: a submit driver still opening (on the
-        # thread of an interrupted async migrate) sees it and sends nothing.
+        # Does not wait for a submit driver still opening (on the thread of an
+        # interrupted async migrate), which has no connect timeout: that
+        # thread sees ``_closed``, closes its driver and sends nothing.
         self._closed = True
         self._client.close()
         with self._submit_client_lock:
-            if self._submit_client is not None:
-                self._submit_client.close()
+            submit_client, self._submit_client = self._submit_client, None
+        if submit_client is not None:
+            submit_client.close()
 
     def __enter__(self) -> Self:
         return self
@@ -266,16 +274,21 @@ class ClickHouseClient:
 
     def _submit_driver(self) -> Any:
         with self._submit_client_lock:
-            if self._submit_client is None and not self._closed:
-                self._submit_client = self._open_driver(
-                    self._config, autogenerate_session_id=False
-                )
-            # close() may have started while the driver opened; it closes the
-            # driver once this lock is free.
-            if self._closed:
-                msg = "ClickHouse client is closed."
-                raise RuntimeError(msg)
-            return self._submit_client
+            submit_client = self._submit_client
+        if submit_client is None and not self._closed:
+            # Opened outside the lock, so close() does not wait for it.
+            opened = self._open_driver(self._config, autogenerate_session_id=False)
+            with self._submit_client_lock:
+                if self._submit_client is None and not self._closed:
+                    self._submit_client = opened
+                submit_client = self._submit_client
+            if submit_client is not opened:
+                opened.close()
+        # close() may have run while the driver opened.
+        if self._closed or submit_client is None:
+            msg = "ClickHouse client is closed."
+            raise RuntimeError(msg)
+        return submit_client
 
     def insert(
         self,
@@ -415,6 +428,23 @@ class ClickHouseClient:
         )
 
         return list_table_details(self, databases)
+
+
+def _use_ts_timeouts(client: Any) -> None:
+    """Wait for a request as long as the TS client does, with its progress headers.
+
+    TS sets ``request_timeout: 0`` (no timeout at all, connect included) and
+    sends progress headers every 30 s, which keep a long query's connection
+    alive through a proxy with an idle timeout. clickhouse-connect defaults to
+    a 300 s read timeout and derives the progress interval from it (120 s), and
+    rejects ``send_receive_timeout=None`` while it derives it, so both are set
+    on the driver once it is open. The driver sends the interval only when the
+    user may change settings, as TS sends progress settings on reads, and a
+    setting passed with a query still wins, as in TS.
+    """
+    client.timeout = Timeout(connect=None, read=None)
+    if client._progress_interval is not None:
+        client._progress_interval = PROGRESS_INTERVAL_MS
 
 
 def _safe_int(value: object) -> int | None:  # noqa: PLR0911

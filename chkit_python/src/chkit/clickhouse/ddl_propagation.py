@@ -452,9 +452,9 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
 
     Uses the retry budget of the other waits (21 checks, 0.5 s apart) and stops
     retrying at a 30 s deadline (TS also abandons a check that does not
-    return by then; a synchronous query here is bounded by the client's
-    receive timeout). On timeout the error names what was still different on
-    the last check.
+    return by then; a synchronous query here is not abandoned, and like every
+    chkit-py request it has no read timeout, #661). On timeout the error names
+    what was still different on the last check.
     """
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     detail = ""
