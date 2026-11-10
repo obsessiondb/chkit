@@ -73,7 +73,15 @@ _REPLICATED_ENGINE: Final[re.Pattern[str]] = re.compile(
 )
 # The Keeper path and replica name lead a Replicated engine's arguments.
 _REPLICATION_ARGUMENTS: Final[int] = 2
-_STRING_LITERAL: Final[re.Pattern[str]] = re.compile(js_regex(r"^'(?:[^'\\]|\\[\s\S]|'')*'$"))
+# A Keeper path or replica name: a string literal, a heredoc, or a constant
+# expression such as concat('/p/', currentDatabase()). The engine parameters
+# after them are column names or tuples, never these forms.
+_REPLICATION_ARGUMENT: Final[re.Pattern[str]] = re.compile(
+    js_regex(
+        r"^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$"
+        r"|[A-Za-z_][A-Za-z0-9_]*\s*\([\s\S]*\))$"
+    )
+)
 
 
 def replicated_engine_as_shared(engine: str) -> str | None:
@@ -91,8 +99,8 @@ def replicated_engine_as_shared(engine: str) -> str | None:
     args = split_top_level_comma(raw) if raw is not None and js_trim(raw) else []
     if (
         len(args) >= _REPLICATION_ARGUMENTS
-        and _STRING_LITERAL.match(args[0]) is not None
-        and _STRING_LITERAL.match(args[1]) is not None
+        and _REPLICATION_ARGUMENT.match(args[0]) is not None
+        and _REPLICATION_ARGUMENT.match(args[1]) is not None
     ):
         args = args[_REPLICATION_ARGUMENTS:]
     return f"{match.group(1)}({', '.join(args)})"

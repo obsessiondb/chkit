@@ -44,7 +44,10 @@ export function supportsSortOrder(engine: string): boolean {
 }
 
 const REPLICATED_ENGINE = /^\s*Replicated([A-Za-z0-9_]*MergeTree)\s*(?:\(([\s\S]*)\))?\s*$/
-const STRING_LITERAL = /^'(?:[^'\\]|\\[\s\S]|'')*'$/
+// A Keeper path or replica name: a string literal, a heredoc, or a constant
+// expression such as concat('/p/', currentDatabase()). The engine parameters
+// after them are column names or tuples, never these forms.
+const REPLICATION_ARGUMENT = /^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$|[A-Za-z_][A-Za-z0-9_]*\s*\([\s\S]*\))$/
 
 /**
  * The engine a `Replicated*MergeTree` table has on a shared-storage server
@@ -58,7 +61,7 @@ export function replicatedEngineAsShared(engine: string): string | undefined {
   if (!match) return undefined
   const args = match[2]?.trim() ? splitTopLevelComma(match[2]) : []
   const [path, replica] = args
-  const kept = path !== undefined && replica !== undefined && STRING_LITERAL.test(path) && STRING_LITERAL.test(replica)
+  const kept = path !== undefined && replica !== undefined && REPLICATION_ARGUMENT.test(path) && REPLICATION_ARGUMENT.test(replica)
     ? args.slice(2)
     : args
   return `${match[1]}(${kept.join(', ')})`

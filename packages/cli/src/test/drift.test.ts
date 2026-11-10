@@ -726,6 +726,9 @@ describe('@chkit/cli drift comparer', () => {
     ["ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", 'SharedMergeTree', false],
     ["ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', v)", 'SharedReplacingMergeTree(v)', false],
     ['ReplicatedReplacingMergeTree(v)', 'SharedReplacingMergeTree(v)', false],
+    ["ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)", 'SharedReplacingMergeTree(v)', false],
+    ['ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)', 'SharedReplacingMergeTree(v)', false],
+    ['ReplicatedVersionedCollapsingMergeTree(id, v)', 'SharedVersionedCollapsingMergeTree(id, v)', false],
     ['ReplicatedReplacingMergeTree(v)', 'SharedMergeTree', true],
     ["ReplicatedReplacingMergeTree('/p', '{replica}', v)", 'SharedReplacingMergeTree(id)', true],
     // A server without Shared engines really has a non-replicated table.

@@ -247,6 +247,13 @@ def test_table_shape_detects_engine_mismatch() -> None:
             False,
         ),
         ("ReplicatedReplacingMergeTree(v)", "SharedReplacingMergeTree(v)", False),
+        (
+            "ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+            "SharedReplacingMergeTree(v)",
+            False,
+        ),
+        ("ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)", "SharedReplacingMergeTree(v)", False),
+        ("ReplicatedVersionedCollapsingMergeTree(id, v)", "SharedVersionedCollapsingMergeTree(id, v)", False),
         ("ReplicatedReplacingMergeTree(v)", "SharedMergeTree", True),
         ("ReplicatedReplacingMergeTree('/p', '{replica}', v)", "SharedReplacingMergeTree(id)", True),
         # A server without Shared engines really has a non-replicated table.
@@ -258,7 +265,7 @@ def test_table_shape_replicated_engine_on_shared_server(
 ) -> None:
     columns = [ColumnDefinition(name="id", type="UInt64"), ColumnDefinition(name="v", type="UInt64")]
     detail = compare_table_shape(
-        _t(engine=expected_engine, columns=columns), _it(engine=actual_engine, columns=columns)
+        _t(engine=expected_engine, columns=list(columns)), _it(engine=actual_engine, columns=columns)
     )
     assert (detail is not None and detail.engine_mismatch) is mismatch
 
