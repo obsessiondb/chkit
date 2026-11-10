@@ -304,6 +304,59 @@ def test_table_shape_engine_argument_case(expected_engine: str, actual_engine: s
     assert (detail is not None and detail.engine_mismatch) is mismatch
 
 
+# A quoted name compares as the server writes it back (#679).
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        # The server writes the Null engine as `Null`.
+        ("Null", "`Null`", False),
+        ("Null()", "`Null`", False),
+        ("`Null`", "`Null`", False),
+        # It writes a quoted name bare unless the name needs its quotes.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(Ver)", False),
+        ('ReplacingMergeTree("Ver")', "ReplacingMergeTree(Ver)", False),
+        ("`ReplacingMergeTree`(Ver)", "ReplacingMergeTree(Ver)", False),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(from)", False),
+        ("ReplacingMergeTree(`And`)", "ReplacingMergeTree(And)", False),
+        ("SummingMergeTree((`Value`, `my v`))", "SummingMergeTree((Value, `my v`))", False),
+        ("Distributed(c, app, t, sipHash64(`my id`, `id`))", "Distributed('c', 'app', 't', sipHash64(`my id`, id))", False),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my ver`)", False),
+        ('ReplacingMergeTree("my ver")', "ReplacingMergeTree(`my ver`)", False),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(`a.b`)", False),
+        ("ReplacingMergeTree(`1v`)", "ReplacingMergeTree(`1v`)", False),
+        ("ReplacingMergeTree(`a``b`)", "ReplacingMergeTree(`a\\`b`)", False),
+        ("ReplacingMergeTree(`null`)", "ReplacingMergeTree(`null`)", False),
+        ("ReplacingMergeTree(`select`)", "ReplacingMergeTree(`select`)", False),
+        # Newer servers quote `cube` as a keyword, older ones write it bare.
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(cube)", False),
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(`cube`)", False),
+        # Quoting that changes the name or what it means still counts: a bare `true` or `nan` is a literal.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(ver)", True),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(From)", True),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my Ver`)", True),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(a.b)", True),
+        ("ReplacingMergeTree(`ab`)", "ReplacingMergeTree(`a\\`b`)", True),
+        ("ReplacingMergeTree(`Null`)", "ReplacingMergeTree(`null`)", True),
+        ("ReplacingMergeTree(`true`)", "ReplacingMergeTree(true)", True),
+        ("ReplacingMergeTree(`nan`)", "ReplacingMergeTree(nan)", True),
+        # In an expression, as the server writes a sharding key back.
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(And + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(and + 1))", True),
+        ("Distributed(c, app, t, if(`And` > 1, 1, 0))", "Distributed('c', 'app', 't', if(And > 1, 1, 0))", False),
+        ("Distributed(c, app, t, if(And > 1, 1, 0))", "Distributed('c', 'app', 't', if(and > 1, 1, 0))", True),
+        ("Distributed(c, app, t, `And` AND `and`)", "Distributed('c', 'app', 't', And AND and)", False),
+        ("Distributed(c, app, t, `and` AND `And`)", "Distributed('c', 'app', 't', And AND and)", True),
+        ("Distributed(c, app, t, cityHash64(`cube` + 1))", "Distributed('c', 'app', 't', cityHash64(cube + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`select` + 1))", "Distributed('c', 'app', 't', cityHash64(`select` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`my v` + 1))", "Distributed('c', 'app', 't', cityHash64(`my v` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`true` + 1))", "Distributed('c', 'app', 't', cityHash64(true + 1))", True),
+    ],
+)
+def test_table_shape_engine_quoting(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
 def test_table_shape_detects_order_by_mismatch() -> None:
     detail = compare_table_shape(_t(order_by=["id", "ts"]), _it(order_by="(id)"))
     assert detail is not None

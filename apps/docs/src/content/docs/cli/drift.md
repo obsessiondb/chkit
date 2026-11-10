@@ -53,7 +53,7 @@ Check these properties against `SHOW CREATE` output.
 
 When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
 
-Whitespace in engine arguments is ignored, and so is the case of function names and operator keywords, which ClickHouse rewrites (`RAND()` reads back as `rand()`). Column names and strings in engine arguments are case-sensitive and compare as written: `CollapsingMergeTree(Sign)` does not match `CollapsingMergeTree(sign)`.
+Whitespace in engine arguments is ignored, and so is the case of function names and operator keywords, which ClickHouse rewrites (`RAND()` reads back as `rand()`). Column names and strings in engine arguments are case-sensitive and compare as written: `CollapsingMergeTree(Sign)` does not match `CollapsingMergeTree(sign)`. Quotes the server leaves out when it stores the engine do not count: ``ReplacingMergeTree(`Ver`)`` matches `ReplacingMergeTree(Ver)`, and `Null` matches the stored `` `Null` ``. A name that needs its quotes, such as `` `my ver` ``, or one that would read as a literal without them, such as `` `true` ``, keeps them.
 
 ### Nullable columns
 

@@ -13,7 +13,7 @@ projections). Returns ``None`` when shapes are identical.
 from __future__ import annotations
 
 import re
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, TypeAlias
 
 from chkit.cli.commands.drift_diff import (
@@ -46,6 +46,7 @@ from chkit.core.sql import (
     render_key_clause_columns,
 )
 from chkit.core.sql_lexer import (
+    SQLToken,
     identifier_name,
     is_trivia,
     js_trim,
@@ -547,20 +548,41 @@ _ENGINE_LITERAL_KEYWORDS = frozenset({"null", "true", "false"})
 _ENGINE_OPERATOR_KEYWORDS = frozenset(
     {"and", "or", "not", "is", "in", "like", "ilike", "distinct", "from", "global"}
 )
+# The operator keywords that can open an expression (``NOT x``, ``count(DISTINCT x)``);
+# the others always follow an operand.
+_ENGINE_PREFIX_KEYWORDS = frozenset({"not", "distinct"})
+# Names the server keeps quoted because they read back as a literal when bare
+# (writeProbablyQuotedStringImpl): ``true`` is a Bool, ```true``` a column.
+_ENGINE_LITERAL_NAMES = frozenset({"null", "true", "false", "inf", "infinity", "nan"})
+# Keywords the server quotes as names from some version on: 26.3 writes a
+# ``cube`` column bare, later versions ```cube```.
+_ENGINE_KEYWORD_NAMES = frozenset(
+    {"distinct", "all", "some", "table", "select", "cube", "rollup", "recursive"}
+)
+_BARE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
 
 def _normalize_engine_for_compare(value: str | None) -> str:
     """Column names and string literals in engine arguments are case-sensitive,
     so they keep their case (#673). Function names (``RAND()`` reads back as
     ``rand()``) and operator keywords do not, and whitespace between tokens is
-    insignificant. An operator keyword that is a whole argument on its own can
-    only be a column."""
+    insignificant. An operator keyword where an operand belongs
+    (``if(And > 1, 1, 0)``) can only be a column. A quoted name compares as the
+    server writes it back (#679)."""
     if not value:
         return ""
-    tokens = [
+    lexed = [
         token
         for token in tokenize_sql(normalize_engine(normalize_sql_fragment(value)))
         if not is_trivia(token)
+    ]
+    tokens = [
+        _unquote_engine_name(
+            token,
+            lexed[index - 1] if index > 0 else None,
+            lexed[index + 1] if index + 1 < len(lexed) else None,
+        )
+        for index, token in enumerate(lexed)
     ]
 
     def normalized(index: int) -> str:
@@ -568,15 +590,58 @@ def _normalize_engine_for_compare(value: str | None) -> str:
         if token.kind != "identifier":
             return token.text
         lower = token.text.lower()
-        previous = tokens[index - 1].text if index > 0 else None
-        following = tokens[index + 1].text if index + 1 < len(tokens) else None
-        stands_alone = previous in ("(", ",") and following in (")", ",")
-        keyword = lower in _ENGINE_LITERAL_KEYWORDS or (
-            lower in _ENGINE_OPERATOR_KEYWORDS and not stands_alone
+        previous = tokens[index - 1] if index > 0 else None
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        keyword = lower in _ENGINE_LITERAL_KEYWORDS or _is_operator_keyword(
+            lower, previous, following
         )
-        return lower if following == "(" or keyword else token.text
+        function = following is not None and following.text == "("
+        return lower if function or keyword else token.text
 
     return " ".join(normalized(index) for index in range(len(tokens)))
+
+
+def _unquote_engine_name(
+    token: SQLToken, previous: SQLToken | None, following: SQLToken | None
+) -> SQLToken:
+    """The server writes a quoted name bare when the quotes are not needed:
+    ``Ver`` for ```Ver``` or ``"Ver"``, and ``Null`` for an engine or function
+    name, which the server itself writes as ```Null```. A name that needs its
+    quotes keeps them, in backticks, so different names never compare equal. An
+    unquoted name stays a quoted identifier, so it keeps its case even where a
+    keyword could be."""
+    name = identifier_name(token) if token.kind == "quoted_identifier" else None
+    if name is None:
+        return token
+    if _BARE_NAME_RE.fullmatch(name) is None:
+        return replace(token, text="`" + name.replace("\\", "\\\\").replace("`", "\\`") + "`")
+    if following is not None and following.text == "(":
+        return replace(token, kind="identifier", text=name)
+    lower = name.lower()
+    keeps_quotes = lower in _ENGINE_LITERAL_NAMES or (
+        lower in _ENGINE_KEYWORD_NAMES and (_ends_operand(previous) or _starts_operand(following))
+    )
+    return replace(token, text=f"`{name}`" if keeps_quotes else name)
+
+
+def _is_operator_keyword(lower: str, previous: SQLToken | None, following: SQLToken | None) -> bool:
+    if lower not in _ENGINE_OPERATOR_KEYWORDS:
+        return False
+    return _ends_operand(previous) or (
+        lower in _ENGINE_PREFIX_KEYWORDS and _starts_operand(following)
+    )
+
+
+def _ends_operand(token: SQLToken | None) -> bool:
+    return token is not None and (_is_value_token(token) or token.text in (")", "]"))
+
+
+def _starts_operand(token: SQLToken | None) -> bool:
+    return token is not None and (_is_value_token(token) or token.text == "(")
+
+
+def _is_value_token(token: SQLToken) -> bool:
+    return token.kind in ("identifier", "quoted_identifier", "number", "string")
 
 
 def _engines_match(expected: str | None, actual: str | None) -> bool:
