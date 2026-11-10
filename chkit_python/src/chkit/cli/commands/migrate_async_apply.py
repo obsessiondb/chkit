@@ -18,8 +18,10 @@ Key invariants:
 - ``before_retry`` SQL (parsed from the migration's ``-- before-retry:``
   line) runs only on resubmit, never on first attempt.
 - Status ``unknown`` is a transient state (just-submitted or
-  just-finished gap); loop until ``running`` / ``finished`` / ``failed``
-  unless the submit itself rejected, which is recorded as failed.
+  just-finished gap); loop until ``running`` / ``finished`` / ``failed``.
+  When the submit itself failed, a definitive server rejection is
+  recorded as failed, while an indeterminate one (e.g. a proxy timeout)
+  gets a bounded grace so ``system.query_log`` can catch up (#657).
 - The query id is deterministic, so ``system.query_log`` can still hold
   entries of an earlier attempt of the same statement (abandoned, or
   retried after an edit). A new submission only trusts entries of queries
@@ -31,12 +33,17 @@ Key invariants:
 from __future__ import annotations
 
 import hashlib
+import re
 import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Literal
+
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 
 from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
 from chkit.cli.commands.migrate_recovery import has_statement_progress
@@ -46,7 +53,11 @@ from chkit.cli.journal_store import (
     OperationState,
     resolve_journal_table_name,
 )
-from chkit.clickhouse.client import ClickHouseClient, QueryStatus, clickhouse_error_message
+from chkit.clickhouse.client import (
+    ClickHouseClient,
+    QueryStatus,
+    clickhouse_error_message,
+)
 from chkit.core.jsnum import js_math_round, js_number_to_string, js_to_fixed
 
 POLL_INTERVAL_SECONDS = 5.0
@@ -57,6 +68,13 @@ QUERY_LOG_SKEW_MARGIN_MS = 2_000
 # query_status's own default: every query_log entry for the id counts.
 UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
 MAX_TRANSIENT_POLL_ERRORS = 20
+# A poll can read ``unknown`` while holding an indeterminate submit error: a
+# proxy or network cut the submit request (e.g. HTTP 524) although the server
+# received the query and kept running it, and system.query_log lags the query
+# by seconds. Give the log a bounded grace to catch up before declaring the
+# outcome unknown; a re-run then re-attaches by query id instead of loading
+# the rows a second time (#657).
+MAX_UNKNOWN_POLLS_WITH_SUBMIT_ERROR = 20
 SUBMIT_THREAD_NAME = "chkit-async-submit"
 _BYTES_KIB = 1024
 _BYTES_MIB = _BYTES_KIB * 1024
@@ -175,6 +193,18 @@ def _progress_line(label: str, status: QueryStatus, elapsed_sec: int) -> str:
 
 def _describe_error(error: BaseException) -> str:
     return clickhouse_error_message(error)
+
+
+def _is_server_rejection(error: BaseException) -> bool:
+    """A ClickHouse exception means the server received and rejected the
+    statement: the query never ran and will never appear in system.query_log,
+    so the attempt can be journaled failed right away. Auth failures arrive
+    rethrown by ``wrap_connection_error`` without a code, so they match on
+    their message. Anything else - a gateway timeout, a proxy 5xx, a network
+    cut - is indeterminate: the server may be running the query (#657)."""
+    if isinstance(error, DatabaseError):
+        return True
+    return re.search(r"authentication failed", str(error), re.IGNORECASE) is not None
 
 
 class _Submission:
@@ -366,6 +396,7 @@ def _poll(
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
     transient_errors = 0
+    unknown_polls_with_submit_error = 0
 
     while True:
         time.sleep(input_.poll_interval_seconds)
@@ -461,30 +492,54 @@ def _poll(
             input_.log(_progress_line(input_.operation_type, status, elapsed_sec))
             continue
 
-        # status is "unknown" here. If submit already raised, the query never
-        # made it server-side (e.g. SQL parse error): record the attempt as
-        # failed and surface that error. Otherwise it's a transient gap.
+        # status is "unknown" here.
         submit_error = submission.error if submission is not None else None
         if submit_error is not None:
-            input_.journal_store.write_migration_state(
-                upsert_operation(
-                    base_state,
-                    OperationState.model_validate(
-                        {
-                            "operationIndex": input_.statement_index,
-                            "operationKey": input_.operation_key,
-                            "operationType": input_.operation_type,
-                            "queryId": query_id,
-                            "status": "failed",
-                            "startedAt": started_at,
-                            "finishedAt": iso_without_zone(datetime.now(tz=UTC)),
-                            "lastError": _describe_error(submit_error),
-                        }
-                    ),
-                    iso_without_zone(datetime.now(tz=UTC)),
+            if _is_server_rejection(submit_error):
+                # The server rejected the statement (e.g. SQL parse error), so
+                # the query never made it server-side: record the attempt as
+                # failed and surface that error.
+                input_.journal_store.write_migration_state(
+                    upsert_operation(
+                        base_state,
+                        OperationState.model_validate(
+                            {
+                                "operationIndex": input_.statement_index,
+                                "operationKey": input_.operation_key,
+                                "operationType": input_.operation_type,
+                                "queryId": query_id,
+                                "status": "failed",
+                                "startedAt": started_at,
+                                "finishedAt": iso_without_zone(datetime.now(tz=UTC)),
+                                "lastError": _describe_error(submit_error),
+                            }
+                        ),
+                        iso_without_zone(datetime.now(tz=UTC)),
+                    )
                 )
+                raise submit_error
+            # The submit failure is indeterminate (gateway timeout, proxy 5xx,
+            # network cut): the server may be running the query. Poll through a
+            # bounded grace so query_log can catch up (#657).
+            unknown_polls_with_submit_error += 1
+            if unknown_polls_with_submit_error > MAX_UNKNOWN_POLLS_WITH_SUBMIT_ERROR:
+                # No server trace after the grace: leave the attempt started so
+                # a re-run re-attaches by query id instead of loading the rows
+                # again.
+                msg = (
+                    f"Async migration step {input_.operation_type} "
+                    f"(query_id {query_id}): the submit request failed "
+                    f"({_describe_error(submit_error)}) and the query has not "
+                    "appeared server-side. The load may still be running "
+                    "server-side — re-run `chkit migrate --apply` to re-attach."
+                )
+                raise RuntimeError(msg) from submit_error
+            input_.log(
+                f"  {input_.operation_type}: submit failed "
+                f"({_describe_error(submit_error)}) — load may still be "
+                f"running, polling (elapsed {elapsed_sec}s)"
             )
-            raise submit_error
+            continue
         input_.log(
             f"  {input_.operation_type}: status unknown — still polling "
             f"(elapsed {elapsed_sec}s)"

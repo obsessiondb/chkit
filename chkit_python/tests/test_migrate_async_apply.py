@@ -9,6 +9,9 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 
 from chkit.cli.commands import migrate_async_apply
 from chkit.cli.commands.migrate_async_apply import (
@@ -585,18 +588,22 @@ _QUERY_ID = make_deterministic_query_id(
 def test_apply_async_submit_rejected_before_start_is_recorded_failed() -> None:
     client = _ScriptedClient(
         statuses=[QueryStatus(status="unknown")] * 3,
-        submit_raises=RuntimeError("Syntax error: failed at position 1"),
+        submit_raises=DatabaseError(
+            "Received ClickHouse exception, code: 62, server response: Code: 62. "
+            "DB::Exception: Syntax error: failed at position 1. (SYNTAX_ERROR) "
+            "(for url http://localhost:8123)"
+        ),
     )
     journal = _FakeJournalStore()
     lines: list[str] = []
-    with pytest.raises(RuntimeError, match="Syntax error"):
+    with pytest.raises(DatabaseError, match="Syntax error"):
         apply_async_statement(_input(client=client, journal=journal, log=lines.append))
     # The query never started, so the attempt is recorded as failed (#233):
     # an edited file can then run again without --retry.
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
     assert journal.writes[1].operations[0].last_error == (
-        "Syntax error: failed at position 1"
+        "Syntax error: failed at position 1. "
     )
     # The submit error is the command's error; no progress line repeats it (#561).
     assert lines == [f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})"]
@@ -655,6 +662,71 @@ def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() ->
         "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
         "  alter_table_modify_column: finished — written=16 rows (128 B) in 8s",
     ]
+
+
+def test_apply_async_524_in_the_flush_gap_still_journals_the_completed_load() -> None:
+    """#657: the proxy fails the submit (HTTP 524) and the query finishes while
+    its query_log row is still unflushed. The poll grace lets the log catch up
+    instead of journaling the completed load as failed."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            QueryStatus(status="unknown"),  # finished, query_log row not flushed yet
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=25, written_bytes=200, duration_ms=9000),
+        ],
+        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+    )
+    journal = _FakeJournalStore()
+    result = apply_async_statement(_input(client=client, journal=journal))
+    assert result.kind == "completed"
+    assert len(client.submitted) == 1
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+
+
+def test_apply_async_524_with_no_server_trace_asks_for_a_rerun_and_stays_started() -> None:
+    """#657: the query never appears server-side. After the grace the attempt
+    stays started so a re-run re-attaches by query id; it is not journaled
+    failed, which would re-load the rows. Same message as TS."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            *[QueryStatus(status="unknown") for _ in range(21)],
+        ],
+        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert str(excinfo.value) == (
+        f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
+        "the submit request failed (HTTP 524: error code: 524) and the query "
+        "has not appeared server-side. The load may still be running "
+        "server-side — re-run `chkit migrate --apply` to re-attach."
+    )
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started"]
+
+
+def test_apply_async_submit_authentication_failure_is_recorded_failed() -> None:
+    """wrap_connection_error rethrows an auth failure as a plain error without
+    a code; it is still a definitive server rejection, so the attempt is
+    journaled failed right away rather than polling through the grace."""
+    auth_error = RuntimeError(
+        'Authentication failed for user "default" at http://localhost:8123. '
+        "Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD."
+    )
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")] * 3,
+        submit_raises=auth_error,
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError, match="Authentication failed"):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+    assert journal.writes[1].operations[0].last_error == str(auth_error)
 
 
 class _OpenSubmitClient(_ScriptedClient):
@@ -863,7 +935,11 @@ def test_apply_async_new_submission_ignores_earlier_attempt(prior: str) -> None:
         ["flush gap"] * 30,
         attached_start=0,
         earlier_start=stale_start,
-        submit_raises=RuntimeError("Unknown table expression identifier 'default.src_typo'"),
+        submit_raises=DatabaseError(
+            "Received ClickHouse exception, code: 60, server response: Code: 60. "
+            "DB::Exception: Unknown table expression identifier 'default.src_typo'. "
+            "(UNKNOWN_TABLE) (for url http://localhost:8123)"
+        ),
     )
     state = (
         None
@@ -874,7 +950,7 @@ def test_apply_async_new_submission_ignores_earlier_attempt(prior: str) -> None:
         ).model_copy(update={"name": "20260101_000000_async.sql"})
     )
     journal = _FakeJournalStore(state=state)
-    with pytest.raises(RuntimeError, match="src_typo"):
+    with pytest.raises(DatabaseError, match="src_typo"):
         apply_async_statement(_input(client=client, journal=journal))
     assert all(after == SUBMISSION_BOUND for after in client.after_times[1:])
     assert journal.writes is not None

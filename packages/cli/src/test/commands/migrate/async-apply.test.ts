@@ -619,7 +619,7 @@ describe('applyAsyncStatement', () => {
   test('surfaces submit error when status remains unknown (SQL parse failure case)', async () => {
     const { db } = createFakeExecutor(
       [{ status: 'unknown' }, { status: 'unknown' }, { status: 'unknown' }],
-      { failSubmit: () => new Error('Syntax error: failed at position 1') },
+      { failSubmit: () => Object.assign(new Error('Syntax error: failed at position 1'), { code: '62' }) },
     )
     const { store, writes } = createFakeJournalStore(null)
     const lines: string[] = []
@@ -642,6 +642,34 @@ describe('applyAsyncStatement', () => {
     expect(writes[1]?.operations[0]?.lastError).toBe('Syntax error: failed at position 1')
     // The submit error is the command's error; no progress line repeats it (#561).
     expect(lines).toEqual([`  load_table_data: submitting async (query_id=${QUERY_ID})`])
+  })
+
+  // wrapConnectionError rethrows an authentication failure as a plain error
+  // without a code; it is still a definitive server rejection, so the attempt
+  // is journaled failed right away rather than polling through the grace.
+  test('a submit that fails on authentication is recorded failed without polling the grace', async () => {
+    const authError = new Error(
+      'Authentication failed for user "default" at http://localhost:8123. Check CLICKHOUSE_USER / CLICKHOUSE_PASSWORD.',
+    )
+    const { db } = createFakeExecutor(
+      [{ status: 'unknown' }, { status: 'unknown' }, { status: 'unknown' }],
+      { failSubmit: () => authError },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(/Authentication failed/)
+
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
+    expect(writes[1]?.operations[0]?.lastError).toBe(authError.message)
   })
 
   // When polling gives up, the submit error is the only trace of e.g. a rejected
@@ -713,6 +741,65 @@ describe('applyAsyncStatement', () => {
       '  load_table_data: finished — written=16 rows (128 B) in 8s',
     ])
   })
+
+  // #657: a proxy can fail the submit request (HTTP 524) while the server
+  // keeps running the query. A poll in the query_log flush gap then reads
+  // `unknown` with the submit error already in hand. The step must not be
+  // journaled failed: the poll grace lets query_log catch up instead.
+  test('a 524 submit failure in the query_log flush gap still journals the completed load', async () => {
+    const { db, submitCalls } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'unknown' }, // query finished, query_log row not flushed yet
+        { status: 'unknown' },
+        { status: 'finished', writtenRows: 25, writtenBytes: 200, durationMs: 9000 },
+      ],
+      { failSubmit: () => new Error('HTTP 524: error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(submitCalls).toHaveLength(1)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+  })
+
+  // #657: the query never appears server-side (the submit failed before the
+  // server saw it and no query_log row is coming). After the grace the attempt
+  // stays started so a re-run re-attaches by query id; it is not journaled
+  // failed, which would re-load the rows.
+  test('a 524 submit failure with no server trace asks for a re-run and keeps the attempt started', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        ...Array.from({ length: 21 }, () => ({ status: 'unknown' }) as QueryStatus),
+      ],
+      { failSubmit: () => new Error('HTTP 524: error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(
+      `Async migration step load_table_data (query_id ${QUERY_ID}): the submit request failed (HTTP 524: error code: 524) and the query has not appeared server-side. The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+    )
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+  })
   // The query id is deterministic, so query_log still holds the earlier
   // attempt's QueryFinish after `migrate --abandon` (#233). A submission that
   // then fails before it starts (no query_log row) must not inherit it.
@@ -728,7 +815,7 @@ describe('applyAsyncStatement', () => {
           return [{ now_ms: SERVER_NOW_MS, database: SERVER_DATABASE }]
         },
         async submit() {
-          throw new Error("Unknown table expression identifier 'default.src_typo'")
+          throw Object.assign(new Error("Unknown table expression identifier 'default.src_typo'"), { code: '60' })
         },
         // Like system.query_log: query_start_time >= parseDateTimeBestEffort(afterTime), in whole seconds.
         async queryStatus(id: string, opts?: { afterTime?: string }): Promise<QueryStatus> {

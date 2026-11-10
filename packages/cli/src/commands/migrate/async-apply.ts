@@ -2,6 +2,7 @@ import { createHash } from 'node:crypto'
 import { setTimeout as defaultSleep } from 'node:timers/promises'
 
 import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit/clickhouse'
+import { ClickHouseStreamedException } from '@chkit/clickhouse'
 
 import { debug } from '../../runtime/debug.js'
 import {
@@ -32,6 +33,30 @@ const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
 // server-side async query keeps running. Tolerate a bounded number of these so a
 // momentary timeout doesn't abort a long-running load; only give up after the budget.
 const MAX_TRANSIENT_POLL_ERRORS = 20
+// A poll can read `unknown` while holding an indeterminate submit error: a
+// proxy or network cut the submit request (e.g. HTTP 524) although the server
+// received the query and kept running it, and system.query_log lags the query
+// by seconds. Give the log a bounded grace to catch up before declaring the
+// outcome unknown; a re-run then re-attaches by query id instead of loading
+// the rows a second time (#657).
+const MAX_UNKNOWN_POLLS_WITH_SUBMIT_ERROR = 20
+
+// A ClickHouse exception (the server parsed and rejected the statement, so it
+// carries a numeric exception code) means the query never ran: it will never
+// appear in system.query_log, and the attempt can be journaled failed right
+// away. Anything else - a gateway timeout, a proxy 5xx, a network cut - is
+// indeterminate: the server may be running the query.
+function isServerRejection(error: unknown): boolean {
+  if (error instanceof ClickHouseStreamedException) return true
+  if (!(error instanceof Error)) return false
+  if ('code' in error) {
+    const code = (error as { code?: unknown }).code
+    if (typeof code === 'string' && /^\d+$/.test(code)) return true
+  }
+  // wrapConnectionError rethrows an authentication failure as a plain error
+  // without a code, named by its message; the server never ran the query.
+  return /authentication failed/i.test(error.message)
+}
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -254,6 +279,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
 
   const pollStartedAt = now()
   let transientPollErrors = 0
+  let unknownPollsWithSubmitError = 0
   try {
     for (;;) {
       await sleep(pollIntervalMs)
@@ -336,24 +362,41 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       }
 
       // status === 'unknown'
-      // If submit has already rejected, the query never made it server-side
-      // (e.g. SQL parse error) — record the attempt as failed and surface that
-      // error. Otherwise it's a transient gap (just-submitted or just-finished); loop.
       if (submitError) {
-        const failedOp: OperationState = {
-          operationIndex: statementIndex,
-          operationKey,
-          operationType,
-          queryId,
-          status: 'failed',
-          startedAt,
-          finishedAt: isoWithoutZone(new Date(now())),
-          lastError: describeError(submitError),
+        if (isServerRejection(submitError)) {
+          // The server rejected the statement (e.g. SQL parse error), so the
+          // query never made it server-side — record the attempt as failed and
+          // surface that error.
+          const failedOp: OperationState = {
+            operationIndex: statementIndex,
+            operationKey,
+            operationType,
+            queryId,
+            status: 'failed',
+            startedAt,
+            finishedAt: isoWithoutZone(new Date(now())),
+            lastError: describeError(submitError),
+          }
+          const baseState =
+            migrationState ?? freshMigrationState(migrationName, migrationChecksum)
+          await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
+          throw submitError
         }
-        const baseState =
-          migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
-        throw submitError
+        // The submit failure is indeterminate (gateway timeout, proxy 5xx,
+        // network cut): the server may be running the query. Poll through a
+        // bounded grace so query_log can catch up (#657).
+        unknownPollsWithSubmitError += 1
+        if (unknownPollsWithSubmitError > MAX_UNKNOWN_POLLS_WITH_SUBMIT_ERROR) {
+          // No server trace after the grace: leave the attempt started so a
+          // re-run re-attaches by query id instead of loading the rows again.
+          throw new Error(
+            `Async migration step ${operationType} (query_id ${queryId}): the submit request failed (${describeError(submitError)}) and the query has not appeared server-side. The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+          )
+        }
+        log(
+          `  ${operationType}: submit failed (${describeError(submitError)}) — load may still be running, polling (elapsed ${elapsedSec}s)`,
+        )
+        continue
       }
       log(
         `  ${operationType}: status unknown — still polling (elapsed ${elapsedSec}s)`,
