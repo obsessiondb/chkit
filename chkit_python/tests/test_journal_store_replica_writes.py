@@ -107,6 +107,17 @@ def test_a_replica_probe_that_keeps_failing_stops_the_write() -> None:
     assert [sql for sql in target.calls if _is_write(sql)] == []
 
 
+def test_a_database_that_never_reaches_the_probed_replica_stops_the_write() -> None:
+    """The journal probe succeeded, so a missing database later is lag, not a
+    database to create: the write fails instead of being dropped."""
+    target = _Target(probe=[_UNKNOWN_DATABASE])
+
+    with pytest.raises(RuntimeError, match="its database is still missing on the replica"):
+        JournalStore(target).write_migration_state(_state())  # type: ignore[arg-type]
+    assert target.probes == 21
+    assert [sql for sql in target.calls if _is_write(sql)] == []
+
+
 @pytest.mark.parametrize(
     "error",
     [

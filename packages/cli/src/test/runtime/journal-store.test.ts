@@ -1145,6 +1145,21 @@ describe('createJournalStore', () => {
       expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('INSERT INTO')))
     })
 
+    test('retries a replica probe that the console API reports without a code', async () => {
+      // The ObsessionDB console API sends only the message.
+      const { db, calls } = target({
+        probe: [new Error('Code: 81. DB::Exception: Database app does not exist. (UNKNOWN_DATABASE)'), 2],
+      })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      // The journal exists: the probe is retried, not taken for a missing journal.
+      expect(calls.some((sql) => sql.startsWith('CREATE TABLE'))).toBe(false)
+      const poll = calls.findIndex(isJournalPoll)
+      expect(poll).toBeGreaterThanOrEqual(0)
+      expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('INSERT INTO')))
+    })
+
     test('a replica probe that keeps failing stops the write', async () => {
       const { db, calls } = target({ probe: [clickHouseError('159', 'Timeout exceeded. (TIMEOUT_EXCEEDED)')] })
 

@@ -393,11 +393,6 @@ class JournalStore:
             self._client.query(
                 f"SELECT name, migration_completed, operations FROM {self._table} LIMIT 0"
             )
-            self._wait_for_every_replica()
-            self._fingerprint_column = self._detect_fingerprint_column()
-            self._bootstrapped = True
-            self._table_missing = False
-            return
         except Exception as exc:
             if is_unknown_database_error(exc):
                 self._database_missing = True
@@ -421,6 +416,14 @@ class JournalStore:
                     return
                 self._table_missing = True
                 return
+        else:
+            # Only the probe's own error is read above: a failure of the
+            # waits after it stops the run (#700).
+            self._wait_for_every_replica()
+            self._fingerprint_column = self._detect_fingerprint_column()
+            self._bootstrapped = True
+            self._table_missing = False
+            return
         self._create_journal_table()
         self._wait_for_every_replica()
         # Another process, maybe an older release, may have created it first.
@@ -443,10 +446,12 @@ class JournalStore:
                 if not is_unknown_database_error(exc):
                     raise
                 if attempt > MAX_RETRIES:
+                    # The server's message is left out, so the error never
+                    # reads as a missing database itself; it stays the cause.
                     msg = (
                         f"Cannot {what}: its database is still missing on the replica "
                         f"that received the request after {attempt} attempts. Re-run "
-                        f"chkit once the database has reached every replica. {exc}"
+                        "chkit once the database has reached every replica."
                     )
                     raise RuntimeError(msg) from exc
                 debug(

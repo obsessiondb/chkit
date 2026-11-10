@@ -154,6 +154,15 @@ function fingerprintColumnWarning(journalTable: string, error: unknown): string 
 /** Retries of a journal request while its database reaches the replica (#493). */
 const CREATE_RETRIES = 20
 
+/**
+ * UNKNOWN_DATABASE from either executor: the native client sets `code`, the
+ * ObsessionDB console API sends only the message.
+ */
+function isDatabaseMissing(error: unknown): boolean {
+  if (isUnknownDatabaseError(error)) return true
+  return error instanceof Error && /\bCode: 81\b|UNKNOWN_DATABASE/i.test(error.message)
+}
+
 function isRetryableInsertRace(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   const message = error.message
@@ -308,42 +317,49 @@ SETTINGS index_granularity = 1`
   async function ensureTable(create: boolean): Promise<void> {
     if (bootstrapped || (tableMissing && !create)) return
     debug('journal', `probing journal table "${journalTable}"`)
+    let probeError: unknown
     try {
       await db.query(`SELECT name, migration_completed, operations FROM ${journalTable} LIMIT 0`)
+    } catch (error) {
+      probeError = error
+    }
+    // Only the probe's own error is read below: a failure of the waits
+    // after it stops the run (#700).
+    if (probeError === undefined) {
       debug('journal', 'journal table exists')
       await waitForEveryReplica()
       fingerprintColumn = await detectFingerprintColumn()
       bootstrapped = true
       tableMissing = false
       return
-    } catch (error) {
-      if (isUnknownDatabaseError(error)) {
-        debug('journal', 'database does not exist')
-        _databaseMissing = true
-        bootstrapped = true
-        return
-      }
-      if (isClickHouseError(error, UNKNOWN_IDENTIFIER)) {
-        debug('journal', 'journal table predates per-operation tracking — upgrading')
-        // Every replica must have the journal before its ALTERs run (#700).
+    }
+    const error = probeError
+    if (isUnknownDatabaseError(error)) {
+      debug('journal', 'database does not exist')
+      _databaseMissing = true
+      bootstrapped = true
+      return
+    }
+    if (isClickHouseError(error, UNKNOWN_IDENTIFIER)) {
+      debug('journal', 'journal table predates per-operation tracking — upgrading')
+      // Every replica must have the journal before its ALTERs run (#700).
+      await waitForEveryReplica()
+      await ensureSchemaUpgraded()
+      fingerprintColumn = await detectFingerprintColumn()
+      bootstrapped = true
+      return
+    }
+    if (!create) {
+      if (!isClickHouseError(error, UNKNOWN_TABLE)) throw error
+      if (await existsOnAnotherReplica()) {
         await waitForEveryReplica()
-        await ensureSchemaUpgraded()
         fingerprintColumn = await detectFingerprintColumn()
         bootstrapped = true
         return
       }
-      if (!create) {
-        if (!isClickHouseError(error, UNKNOWN_TABLE)) throw error
-        if (await existsOnAnotherReplica()) {
-          await waitForEveryReplica()
-          fingerprintColumn = await detectFingerprintColumn()
-          bootstrapped = true
-          return
-        }
-        debug('journal', 'journal table does not exist — reading it as empty')
-        tableMissing = true
-        return
-      }
+      debug('journal', 'journal table does not exist — reading it as empty')
+      tableMissing = true
+      return
     }
     debug('journal', 'creating journal table')
     await createJournalTable()
@@ -369,15 +385,17 @@ SETTINGS index_granularity = 1`
         minTimeout: 500,
         factor: 1,
         shouldRetry: ({ error, attemptNumber }) => {
-          if (!isUnknownDatabaseError(error)) return false
+          if (!isDatabaseMissing(error)) return false
           debug('journal', `database not yet on this replica — retrying to ${what} (attempt ${attemptNumber})`)
           return true
         },
       })
     } catch (error) {
-      if (!isUnknownDatabaseError(error)) throw error
+      if (!isDatabaseMissing(error)) throw error
+      // The server's message is left out, so the error never reads as a
+      // missing database itself; it stays the cause.
       throw new Error(
-        `Cannot ${what}: its database is still missing on the replica that received the request after ${CREATE_RETRIES + 1} attempts. Re-run chkit once the database has reached every replica. ${errorText(error)}`,
+        `Cannot ${what}: its database is still missing on the replica that received the request after ${CREATE_RETRIES + 1} attempts. Re-run chkit once the database has reached every replica.`,
         { cause: error },
       )
     }
