@@ -91,6 +91,7 @@ describe('query definitions', () => {
       [p('v', t.array(t.lowCardinality(t.string()))), 'Array(LowCardinality(String))'],
       [p('v', t.map(t.string(), t.nullable(t.uint8()))), 'Map(String, Nullable(UInt8))'],
       [p('v', t.lowCardinality(t.nullable(t.string()))), 'LowCardinality(Nullable(String))'],
+      [p('v', t.lowCardinality(t.string()).optional()), 'LowCardinality(Nullable(String))'],
       [p('v', t.simpleAggregateFunction('max', t.dateTime())), 'SimpleAggregateFunction(max, DateTime)'],
       [p('v', z.string()), 'String'],
       [p('v', z.int()), 'Int64'],

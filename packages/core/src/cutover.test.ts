@@ -372,6 +372,14 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
         plan({ oldDef: events({ columns: nullable }), newDef: events({ columns: nullable, primaryKey: ['user_id'], orderBy: ['user_id'] }) })
       )
     ).toEqual([expect.stringContaining('key column id is Nullable')])
+    for (const type of ['Nullable(UInt64)', 'LowCardinality(Nullable(String))', ' LowCardinality ( Nullable (String))']) {
+      const inline = [{ name: 'id', type }, columns[1], columns[2]] as TableDefinition['columns']
+      expect(
+        messages(() =>
+          plan({ oldDef: events({ columns: inline }), newDef: events({ columns: inline, primaryKey: ['user_id'], orderBy: ['user_id'] }) })
+        )
+      ).toEqual([expect.stringContaining('key column id is Nullable')])
+    }
   })
 
   test('a column type change, which belongs in a separate migration', () => {
