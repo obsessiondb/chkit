@@ -1,3 +1,5 @@
+import { compareCodePoints } from '@chkit/core'
+
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { errorEnvelope, serviceListEnvelope } from '../json-envelope.js'
 import { listServiceOrganizations, listServices } from './api.js'
@@ -200,7 +202,7 @@ async function runServiceAlias(context: PluginCommandContext): Promise<number> {
 	if (action === 'list' || action === 'ls') {
 		const aliases = await loadServiceAliases(context.configPath)
 		const entries = Object.entries(aliases).sort(([a], [b]) =>
-			a.localeCompare(b),
+			compareCodePoints(a, b),
 		)
 		if (entries.length === 0) {
 			print('No service aliases defined.')

@@ -183,8 +183,7 @@ def test_adds_a_column_to_local_and_distributed_tables_separately() -> None:
     added: list[ColumnInput] = [*COLUMNS, {"name": "country", "type": "String"}]
     before = canonicalize_definitions([local(), distributed()])
     after = canonicalize_definitions([local(added), distributed(columns=added)])
-    # Codepoint key order (TS uses localeCompare and lists events_local first;
-    # see DRIFT.md, plan-pipeline sort).
+    # Code-point key order, as in TS (#489).
     assert [(op.risk, op.sql) for op in plan_diff(before, after).operations] == [
         ("safe", "ALTER TABLE app.events ADD COLUMN IF NOT EXISTS `country` String;"),
         ("safe", "ALTER TABLE app.events_local ADD COLUMN IF NOT EXISTS `country` String;"),

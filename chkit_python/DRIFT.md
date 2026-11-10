@@ -617,10 +617,8 @@ empty — every item in the checklist has a decision recorded somewhere.
    pull/drift), we should propose them back to TS too to keep parity, or accept
    one-way drift here.
 
-4. **TS plan-pipeline sort uses `localeCompare` (locale-aware).** Python uses default
-   string ordering (codepoint). For ASCII-only migration keys this is equivalent;
-   for non-ASCII it could differ. All current keys are ASCII so no real divergence,
-   but worth noting for future-proofing.
+4. **Name order (resolved, #489).** TS sorted names with `localeCompare`; it now
+   sorts them by code point, as Python does.
 
 5. **Bytecode cache for end-user `clickhouse.config.py`.** Side effect of the
    mtime-cache fix: even if the user's config never changes between runs, each

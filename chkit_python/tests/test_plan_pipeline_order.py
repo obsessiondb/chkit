@@ -156,10 +156,8 @@ def test_column_rename_keeps_remove_default_right_before_its_modify_column() -> 
             planned, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
         ),
     )
-    # TS sorts keys with localeCompare, which puts `column_rename:` before
-    # `column:`; Python sorts by codepoint (DRIFT.md, plan-pipeline sort), so
-    # the rename comes last here. The pinned invariant is the same: REMOVE
-    # DEFAULT runs right before its MODIFY COLUMN.
+    # Keys sort by code point in both ports (#489), so the rename comes last.
+    # The pinned invariant: REMOVE DEFAULT runs right before its MODIFY COLUMN.
     assert [op.sql for op in plan.operations] == [
         "ALTER TABLE app.t MODIFY COLUMN `code` REMOVE DEFAULT;",
         "ALTER TABLE app.t MODIFY COLUMN `code` Int64;",

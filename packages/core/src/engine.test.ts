@@ -115,8 +115,8 @@ describe('Distributed table migrations', () => {
     const added = [...columns, { name: 'country', type: 'String' }]
     const after = canonicalizeDefinitions([{ ...local(), columns: added }, { ...distributed(), columns: added }])
     expect(planDiff(before, after).operations.map((op) => [op.risk, op.sql])).toEqual([
-      ['safe', 'ALTER TABLE app.events_local ADD COLUMN IF NOT EXISTS `country` String;'],
       ['safe', 'ALTER TABLE app.events ADD COLUMN IF NOT EXISTS `country` String;'],
+      ['safe', 'ALTER TABLE app.events_local ADD COLUMN IF NOT EXISTS `country` String;'],
     ])
   })
 

@@ -135,9 +135,9 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
       buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }])
     )
     expect(plan.operations.map((operation) => operation.sql)).toEqual([
-      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
       'ALTER TABLE app.t MODIFY COLUMN `code` REMOVE DEFAULT;',
       'ALTER TABLE app.t MODIFY COLUMN `code` Int64;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
     ])
   })
 })

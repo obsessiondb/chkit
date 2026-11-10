@@ -3,6 +3,7 @@ import { Readable } from 'node:stream'
 import {
 	AUTO_MINMAX_INDEX_PREFIX,
 	type ChxConfig,
+	compareCodePoints,
 	type ColumnDefinition,
 	isSyntheticEphemeralDefault,
 	normalizeSQLFragment,
@@ -435,9 +436,9 @@ export function buildIntrospectedTables(
 			}
 		})
 		.sort((a, b) => {
-			const dbOrder = a.database.localeCompare(b.database)
+			const dbOrder = compareCodePoints(a.database, b.database)
 			if (dbOrder !== 0) return dbOrder
-			return a.name.localeCompare(b.name)
+			return compareCodePoints(a.name, b.name)
 		})
 }
 

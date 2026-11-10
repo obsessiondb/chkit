@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { diffNamedShapeMaps } from '../commands/drift/diff.js'
+
 import {
   type ColumnDefinition,
   type SkipIndexDefinition,
@@ -1640,6 +1642,23 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
     expect(compareViewShape(expected, live, 'app', canonicalizer)).toEqual([])
     const elsewhere = { query: "SELECT id, dictGet('other.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM t" }
     expect(compareViewShape(expected, elsewhere, 'app', canonicalizer)).toMatchObject([{ code: 'query_mismatch' }])
+  })
+
+  test('named shape diffs are ordered by code point, not UTF-16 units', () => {
+    const high = '\u{1F600}'
+    const privateUse = '\uE000'
+    const expected = new Map([
+      [high, 'a'],
+      [privateUse, 'b'],
+    ])
+    const actual = new Map([
+      [high, 'c'],
+      [privateUse, 'd'],
+    ])
+
+    // A bare sort() compares UTF-16 units and puts the surrogate pair first;
+    // Python's str order, and everything else in drift, puts U+E000 first.
+    expect(diffNamedShapeMaps(expected, actual)).toEqual([privateUse, high])
   })
 })
 

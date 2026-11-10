@@ -12,6 +12,7 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  compareCodePoints,
   configuredIndexGranularity,
   type ColumnDefaultValue,
   createPluginRunner,
@@ -528,7 +529,7 @@ function summarizeSkippedObjects(
   }
   return [...counts.entries()]
     .map(([kind, count]) => ({ kind, count }))
-    .sort((a, b) => a.kind.localeCompare(b.kind))
+    .sort((a, b) => compareCodePoints(a.kind, b.kind))
 }
 
 function splitTopLevelCommaSeparated(input: string | undefined): string[] {
