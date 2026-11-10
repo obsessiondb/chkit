@@ -339,6 +339,17 @@ def test_table_shape_engine_argument_case(expected_engine: str, actual_engine: s
         ("ReplacingMergeTree(`Null`)", "ReplacingMergeTree(`null`)", True),
         ("ReplacingMergeTree(`true`)", "ReplacingMergeTree(true)", True),
         ("ReplacingMergeTree(`nan`)", "ReplacingMergeTree(nan)", True),
+        # In an expression, as the server writes a sharding key back.
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(And + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(and + 1))", True),
+        ("Distributed(c, app, t, if(`And` > 1, 1, 0))", "Distributed('c', 'app', 't', if(And > 1, 1, 0))", False),
+        ("Distributed(c, app, t, if(And > 1, 1, 0))", "Distributed('c', 'app', 't', if(and > 1, 1, 0))", True),
+        ("Distributed(c, app, t, `And` AND `and`)", "Distributed('c', 'app', 't', And AND and)", False),
+        ("Distributed(c, app, t, `and` AND `And`)", "Distributed('c', 'app', 't', And AND and)", True),
+        ("Distributed(c, app, t, cityHash64(`cube` + 1))", "Distributed('c', 'app', 't', cityHash64(cube + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`select` + 1))", "Distributed('c', 'app', 't', cityHash64(`select` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`my v` + 1))", "Distributed('c', 'app', 't', cityHash64(`my v` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`true` + 1))", "Distributed('c', 'app', 't', cityHash64(true + 1))", True),
     ],
 )
 def test_table_shape_engine_quoting(expected_engine: str, actual_engine: str, mismatch: bool) -> None:

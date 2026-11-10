@@ -827,6 +827,17 @@ describe('@chkit/cli drift comparer', () => {
     ['ReplacingMergeTree(`Null`)', 'ReplacingMergeTree(`null`)', true],
     ['ReplacingMergeTree(`true`)', 'ReplacingMergeTree(true)', true],
     ['ReplacingMergeTree(`nan`)', 'ReplacingMergeTree(nan)', true],
+    // In an expression, as the server writes a sharding key back.
+    ['Distributed(c, app, t, cityHash64(`And` + 1))', "Distributed('c', 'app', 't', cityHash64(And + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`And` + 1))', "Distributed('c', 'app', 't', cityHash64(and + 1))", true],
+    ['Distributed(c, app, t, if(`And` > 1, 1, 0))', "Distributed('c', 'app', 't', if(And > 1, 1, 0))", false],
+    ['Distributed(c, app, t, if(And > 1, 1, 0))', "Distributed('c', 'app', 't', if(and > 1, 1, 0))", true],
+    ['Distributed(c, app, t, `And` AND `and`)', "Distributed('c', 'app', 't', And AND and)", false],
+    ['Distributed(c, app, t, `and` AND `And`)', "Distributed('c', 'app', 't', And AND and)", true],
+    ['Distributed(c, app, t, cityHash64(`cube` + 1))', "Distributed('c', 'app', 't', cityHash64(cube + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`select` + 1))', "Distributed('c', 'app', 't', cityHash64(`select` + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`my v` + 1))', "Distributed('c', 'app', 't', cityHash64(`my v` + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`true` + 1))', "Distributed('c', 'app', 't', cityHash64(true + 1))", true],
   ]
   for (const [expectedEngine, actualEngine, mismatch] of [...engineArgumentCase, ...engineQuoting]) {
     test(`engine ${expectedEngine} against ${actualEngine} ${mismatch ? 'is' : 'is not'} a mismatch`, () => {
