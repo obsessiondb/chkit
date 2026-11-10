@@ -31,6 +31,15 @@ from chkit_plugin_obsessiondb.credentials import (
     Credentials,
     save_credentials,
 )
+from chkit_plugin_obsessiondb.json_envelope import (
+    CLAIM_COMMAND,
+    SIGNUP_EMAIL_COMMAND,
+    error_envelope,
+    no_email_envelope,
+    otp_sent_envelope,
+    verified_envelope,
+    verify_code_command,
+)
 
 _ORG_NAME_MAX_LEN = 32
 _OTP_LEN = 6
@@ -54,19 +63,7 @@ def _is_tty_stdin() -> bool:
 def _prompt_email(print_fn: Callable[[object], None], *, json_mode: bool) -> str | None:
     if not _is_tty_stdin():
         if json_mode:
-            print_fn(
-                {
-                    "command": "obsessiondb signup",
-                    "ok": False,
-                    "error": {
-                        "code": "email_required",
-                        "message": (
-                            "No email provided. In non-interactive environments, "
-                            "rerun with --email <you@example.com>."
-                        ),
-                    },
-                }
-            )
+            print_fn(no_email_envelope())
         else:
             for line in signup_email_runbook():
                 print_fn(line)
@@ -83,17 +80,16 @@ def _prompt_email(print_fn: Callable[[object], None], *, json_mode: bool) -> str
 
 def _prompt_code(print_fn: Callable[[object], None], *, json_mode: bool) -> str | None:
     if not _is_tty_stdin():
-        message = "No code provided. Re-run with --code <code> in non-interactive environments."
         if json_mode:
             print_fn(
-                {
-                    "command": "obsessiondb signup",
-                    "ok": False,
-                    "error": {"code": "code_required", "message": message},
-                }
+                error_envelope(
+                    "obsessiondb signup",
+                    "code_required",
+                    "No code provided. Re-run with --code <code>.",
+                )
             )
         else:
-            print_fn(message)
+            print_fn("No code provided. Re-run with --code <code> in non-interactive environments.")
         return None
     try:
         value = input("Enter the 6-digit code from your email: ").strip()
@@ -109,19 +105,15 @@ def signup_email_runbook() -> list[str]:
     """Full two-step recipe printed when no email is available non-interactively."""
     return [
         "No email provided. In non-interactive environments, sign up in two steps:",
-        "  1. chkit obsessiondb signup --email you@example.com --request-only",
-        "     # sends a 6-digit code",
-        "  2. chkit obsessiondb signup --email you@example.com --code 123456",
-        "     # verifies and signs in",
-        "Then claim a service: chkit obsessiondb service claim",
+        f"  1. {SIGNUP_EMAIL_COMMAND}          # sends a 6-digit code",
+        f"  2. {verify_code_command('<you@example.com>')}   # verifies and signs in",
+        f"Then claim a service: {CLAIM_COMMAND}",
     ]
 
 
 def verify_step_hint(email: str) -> list[str]:
-    return [
-        f"Next: chkit obsessiondb signup --email {email} --code <CODE>",
-        "Then: chkit obsessiondb service claim",
-    ]
+    """Follow-up commands printed after a code was sent to ``email``."""
+    return [f"Next: {verify_code_command(email)}", f"Then: {CLAIM_COMMAND}"]
 
 
 def derive_org_name(email: str) -> str:
@@ -175,16 +167,7 @@ def run_signup(  # noqa: PLR0912
             send_verification_otp(base_url, email)
         except OtpRateLimitError as error:
             if json_mode:
-                print_fn(
-                    {
-                        "command": "obsessiondb signup",
-                        "ok": False,
-                        "error": {
-                            "code": "otp_rate_limited",
-                            "message": str(error),
-                        },
-                    }
-                )
+                print_fn(error_envelope("obsessiondb signup", "otp_rate_limited", str(error)))
             else:
                 print_fn(str(error))
             return 1
@@ -194,14 +177,7 @@ def run_signup(  # noqa: PLR0912
 
         if options.request_only or not _is_tty_stdin():
             if json_mode:
-                print_fn(
-                    {
-                        "command": "obsessiondb signup",
-                        "ok": True,
-                        "status": "otp_sent",
-                        "email": email,
-                    }
-                )
+                print_fn(otp_sent_envelope(email))
             else:
                 for line in verify_step_hint(email):
                     print_fn(line)
@@ -218,14 +194,7 @@ def run_signup(  # noqa: PLR0912
         base_url, result.token, email=email, org_name=options.org_name
     )
     if json_mode:
-        print_fn(
-            {
-                "command": "obsessiondb signup",
-                "ok": True,
-                "status": "verified",
-                "email": email,
-            }
-        )
+        print_fn(verified_envelope(email))
     elif created is not None:
         print_fn(f'Created organization "{created}".')
         print_fn(f"Signed in as {result.user.email}.")
