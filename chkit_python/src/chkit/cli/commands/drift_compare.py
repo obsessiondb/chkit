@@ -24,6 +24,7 @@ from chkit.cli.commands.drift_diff import (
 from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView, SchemaObjectKind
 from chkit.core.column_default import literal_default_fingerprint, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
+from chkit.core.engine import replicated_engine_as_shared
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
 from chkit.core.key_clause import key_clause_fingerprint, split_top_level_comma
 from chkit.core.model import (
@@ -546,6 +547,19 @@ def _normalize_engine_for_compare(value: str | None) -> str:
     return normalize_engine(normalize_sql_fragment(value)).lower()
 
 
+def _engines_match(expected: str | None, actual: str | None) -> bool:
+    """ObsessionDB and ClickHouse Cloud store a ``Replicated*MergeTree`` table as
+    ``Shared*MergeTree``, without the Keeper path and replica name (#669)."""
+    if _normalize_engine_for_compare(expected) == _normalize_engine_for_compare(actual):
+        return True
+    if not expected or not actual or not js_trim(actual).startswith("Shared"):
+        return False
+    shared = replicated_engine_as_shared(expected)
+    return shared is not None and _normalize_engine_for_compare(
+        shared
+    ) == _normalize_engine_for_compare(actual)
+
+
 def collect_table_sql_fragments(
     expected: TableDefinition, actual: IntrospectedTable
 ) -> TableSqlFragments:
@@ -644,9 +658,7 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     )
     ttl_mismatch = expected_ttl != actual_ttl
 
-    engine_mismatch = _normalize_engine_for_compare(
-        expected.engine
-    ) != _normalize_engine_for_compare(actual.engine)
+    engine_mismatch = not _engines_match(expected.engine, actual.engine)
 
     clauses = _table_clauses(expected, actual)
     expected_pk = _normalize_clause(clauses["primary_key"][0], canonicalizer)

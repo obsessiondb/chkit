@@ -720,6 +720,45 @@ describe('@chkit/cli drift comparer', () => {
     expect(result).toBeNull()
   })
 
+  // ObsessionDB and ClickHouse Cloud store Replicated* as Shared*, without the path and replica (#669).
+  const replicatedOnShared: Array<[string, string, boolean]> = [
+    ['ReplicatedMergeTree()', 'SharedMergeTree', false],
+    ["ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", 'SharedMergeTree', false],
+    ["ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', v)", 'SharedReplacingMergeTree(v)', false],
+    ['ReplicatedReplacingMergeTree(v)', 'SharedReplacingMergeTree(v)', false],
+    ['ReplicatedReplacingMergeTree(v)', 'SharedMergeTree', true],
+    ["ReplicatedReplacingMergeTree('/p', '{replica}', v)", 'SharedReplacingMergeTree(id)', true],
+    // A server without Shared engines really has a non-replicated table.
+    ['ReplicatedMergeTree()', 'MergeTree', true],
+  ]
+  for (const [expectedEngine, actualEngine, mismatch] of replicatedOnShared) {
+    test(`${expectedEngine} against ${actualEngine} ${mismatch ? 'is' : 'is not'} an engine mismatch`, () => {
+      const expected = table({
+        database: 'app',
+        name: 'users',
+        engine: expectedEngine,
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'v', type: 'UInt64' }],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      })
+
+      const result = compareTableShape(expected, {
+        engine: actualEngine,
+        primaryKey: '(id)',
+        orderBy: '(id)',
+        uniqueKey: undefined,
+        partitionBy: undefined,
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'v', type: 'UInt64' }],
+        settings: {},
+        indexes: [],
+        projections: [],
+        ttl: undefined,
+      })
+
+      expect(result?.engineMismatch ?? false).toBe(mismatch)
+    })
+  }
+
   test('emits reason codes for semantic drift', () => {
     const expected = table({
       database: 'app',

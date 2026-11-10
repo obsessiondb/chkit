@@ -68,6 +68,36 @@ def supports_sort_order(engine: str) -> bool:
     )
 
 
+_REPLICATED_ENGINE: Final[re.Pattern[str]] = re.compile(
+    js_regex(r"^\s*Replicated([A-Za-z0-9_]*MergeTree)\s*(?:\(([\s\S]*)\))?\s*$")
+)
+# The Keeper path and replica name lead a Replicated engine's arguments.
+_REPLICATION_ARGUMENTS: Final[int] = 2
+_STRING_LITERAL: Final[re.Pattern[str]] = re.compile(js_regex(r"^'(?:[^'\\]|\\[\s\S]|'')*'$"))
+
+
+def replicated_engine_as_shared(engine: str) -> str | None:
+    """The engine a ``Replicated*MergeTree`` table has on a shared-storage server.
+
+    ObsessionDB and ClickHouse Cloud drop the Keeper path and replica name and
+    keep the other arguments, so ``ReplicatedReplacingMergeTree('/p', '{replica}', ver)``
+    is stored as ``SharedReplacingMergeTree(ver)``. The result has no ``Shared``
+    prefix. None for any other engine (TS ``replicatedEngineAsShared``).
+    """
+    match = _REPLICATED_ENGINE.match(engine)
+    if match is None:
+        return None
+    raw = match.group(2)
+    args = split_top_level_comma(raw) if raw is not None and js_trim(raw) else []
+    if (
+        len(args) >= _REPLICATION_ARGUMENTS
+        and _STRING_LITERAL.match(args[0]) is not None
+        and _STRING_LITERAL.match(args[1]) is not None
+    ):
+        args = args[_REPLICATION_ARGUMENTS:]
+    return f"{match.group(1)}({', '.join(args)})"
+
+
 def is_distributed_engine(engine: str) -> bool:
     return engine_name(engine) == "Distributed"
 

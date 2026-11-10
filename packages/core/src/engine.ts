@@ -43,6 +43,27 @@ export function supportsSortOrder(engine: string): boolean {
   return isMergeTreeEngine(engine) || NON_MERGE_TREE_SORT_ORDER_ENGINES.has(engineName(engine))
 }
 
+const REPLICATED_ENGINE = /^\s*Replicated([A-Za-z0-9_]*MergeTree)\s*(?:\(([\s\S]*)\))?\s*$/
+const STRING_LITERAL = /^'(?:[^'\\]|\\[\s\S]|'')*'$/
+
+/**
+ * The engine a `Replicated*MergeTree` table has on a shared-storage server
+ * (ObsessionDB, ClickHouse Cloud), without the `Shared` prefix: the server
+ * drops the Keeper path and replica name and keeps the other arguments, so
+ * `ReplicatedReplacingMergeTree('/p', '{replica}', ver)` is stored as
+ * `SharedReplacingMergeTree(ver)`. Undefined for any other engine.
+ */
+export function replicatedEngineAsShared(engine: string): string | undefined {
+  const match = REPLICATED_ENGINE.exec(engine)
+  if (!match) return undefined
+  const args = match[2]?.trim() ? splitTopLevelComma(match[2]) : []
+  const [path, replica] = args
+  const kept = path !== undefined && replica !== undefined && STRING_LITERAL.test(path) && STRING_LITERAL.test(replica)
+    ? args.slice(2)
+    : args
+  return `${match[1]}(${kept.join(', ')})`
+}
+
 export function isDistributedEngine(engine: string): boolean {
   return engineName(engine) === 'Distributed'
 }
