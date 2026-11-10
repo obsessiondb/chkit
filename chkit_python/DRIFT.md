@@ -747,9 +747,14 @@ Findings are numbered as they appeared in the aggregate report.
   service is selected). Runtime exposes `resolveContext(input)` +
   `disposeContext(ctx)`.
 - **Fix:** [plugin_runtime.py](src/chkit/cli/plugin_runtime.py) — added
-  `resolve_context` (returns first non-None plugin) + `dispose_context`
+  `resolve_context` ~~(returns first non-None plugin)~~ + `dispose_context`
   (best-effort `close()`, swallows errors). Tests: `test_finding_12_*` (3
   tests covering input constructibility, resolution chain, error swallowing).
+- RESOLVED (#686): `resolve_context` runs every `get_context` hook, and the
+  last plugin executor wins, as in TS. Two differences stay. chkit-py does
+  not close the default executor, because the caller owns it and closes it.
+  `dispose_context` hides a close error on an overridden executor, where TS
+  fails with `failed in getContext`.
 
 ### #13 onboarding missing `package_manager` parameter — FIXED
 
