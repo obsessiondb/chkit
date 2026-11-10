@@ -16,6 +16,8 @@ import {
   waitForTable,
 } from './e2e-testkit.js'
 
+const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
+
 // Names a CDC source catalog (e.g. Postgres) may legally contain. Each one
 // breaks unescaped SQL or naive parsing: parens and commas in the table name,
 // spaces, escaped backticks, and a comma inside a key column.
@@ -116,7 +118,10 @@ describe('@chkit/cli quoted identifiers e2e', () => {
     240_000
   )
 
-  test(
+  // ObsessionDB applies a cross-database RENAME TABLE on one replica only for
+  // minutes, so the propagation wait times out; the server fix is tracked from
+  // #682. chkit emits the same SQL on every target, and verify still runs this.
+  test.skipIf(onObsessionDB)(
     'generate -> migrate renames a table into a new database that needs quoting (#490)',
     async () => {
       const executor = createLiveExecutor(liveEnv)
