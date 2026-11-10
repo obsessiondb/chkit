@@ -60,6 +60,8 @@ COLUMNS = [
     "{'name': 'nullable_delta', 'type': 'Int64', 'nullable': True, "
     "'codec': [{'kind': 'Delta', 'size': 8}, {'kind': 'LZ4'}]}",
     "{'name': 'low_cardinality', 'type': 'LowCardinality(String)', 'codec': {'kind': 'ZSTD'}}",
+    "{'name': 'low_cardinality_nullable', 'type': 'LowCardinality(String)', 'nullable': True, "
+    "'codec': {'kind': 'ZSTD'}}",
     "{'name': 'raw', 'type': 'String', 'codec': {'kind': 'raw', 'expression': 'ZSTD'}}",
     "{'name': 'raw_chain', 'type': 'Int64', 'codec': {'kind': 'raw', 'expression': 'Delta(8),ZSTD(3)'}}",
     "{'name': 'raw_fpc', 'type': 'Float64', 'codec': {'kind': 'raw', 'expression': 'FPC, LZ4'}}",
