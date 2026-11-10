@@ -45,11 +45,13 @@ from chkit.cli.commands.migrate_abandon import (
     read_abandonable_state,
 )
 from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migration
+from chkit.cli.commands.migrate_barrier import find_pending_non_select_barriers
 from chkit.cli.commands.migrate_empty import find_empty_migrations
 from chkit.cli.commands.migrate_errors import (
     EMPTY_MIGRATIONS_SUMMARY,
     MigrateError,
     empty_migrations_error,
+    non_select_barrier_error,
 )
 from chkit.cli.commands.migrate_output import (
     render_abandon_plan_only_notice,
@@ -397,6 +399,7 @@ def _run(
         if _render_plan(ctx, plan):
             return
         _run_empty_migration_gate(ctx, plan.empty_migrations)
+        _run_barrier_gate(ctx, plan.pending)
         if not _run_confirm_gate(ctx):
             return
         _run_destructive_gate(ctx, plan.pending)
@@ -626,6 +629,20 @@ def _run_empty_migration_gate(ctx: _MigrateContext, empty_migrations: list[str])
         raise typer.Exit(code=1)
     typer.secho(str(empty_migrations_error(empty_migrations)), fg=typer.colors.RED, err=True)
     raise typer.Exit(code=1)
+
+
+def _run_barrier_gate(ctx: _MigrateContext, pending: list[str]) -> None:
+    """Refuse to apply when a pending file marks a statement other than a
+    SELECT ``mode=barrier`` (#634), before any migration runs; a plan-only
+    run does not check."""
+    apply_possible = ctx.execute_requested or (
+        not ctx.json_mode and not is_background_or_ci()
+    )
+    if not apply_possible:
+        return
+    barriers = find_pending_non_select_barriers(ctx.migrations_dir, pending)
+    if barriers:
+        raise non_select_barrier_error(barriers)
 
 
 def _run_confirm_gate(ctx: _MigrateContext) -> bool:

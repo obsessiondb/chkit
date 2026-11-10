@@ -7,6 +7,7 @@ export type MigrateErrorCode =
   | 'retry_mismatch'
   | 'in_progress_checksum_mismatch'
   | 'statement_split_changed'
+  | 'barrier_not_select'
 
 /** A migrate failure with a stable code for `--json` consumers. */
 export class MigrateError extends Error {
@@ -68,6 +69,38 @@ export function statementSplitChangedError(input: {
       `The journal recorded ${label} ${statements.join(', ')} as completed or started, which ${statements.length === 1 ? 'is' : 'are'} not the same in this split.\n` +
       `  Finish the partial run with the chkit release that recorded it, then upgrade.\n` +
       `  Or discard the partial run, so the next apply starts the file over (statements that ran stay applied and run again): chkit migrate --apply --abandon ${migration}`,
+  )
+}
+
+/** A pending migration's statement marked `mode=barrier` that is not a SELECT. */
+export interface PendingNonSelectBarrier {
+  migration: string
+  /** 1-based position among the migration's executable statements. */
+  statement: number
+  total: number
+  /** The `-- operation:` marker text after the prefix. */
+  operation: string
+  /** One-line, length-capped preview of the statement. */
+  preview: string
+}
+
+/**
+ * Refusal of pending migrations that mark a statement other than a SELECT
+ * `mode=barrier` (#634): the barrier read would run it, maybe more than once,
+ * and nothing would wait for its change to reach every replica.
+ */
+export function nonSelectBarrierError(barriers: readonly PendingNonSelectBarrier[]): MigrateError {
+  const lines = barriers.map(
+    (barrier) =>
+      `  - ${barrier.migration}, statement ${barrier.statement} of ${barrier.total} (-- operation: ${barrier.operation}):\n` +
+      `      ${barrier.preview}`,
+  )
+  return new MigrateError(
+    'barrier_not_select',
+    'Cannot apply: a statement marked mode=barrier is not a SELECT:\n' +
+      `${lines.join('\n')}\n` +
+      'chkit runs a barrier statement as a read of the running INSERTs, once and then every second, and waits for no change it makes to reach every replica.\n' +
+      'Make each statement a SELECT (or WITH ... SELECT) that returns a query_id column, or remove mode=barrier from its -- operation: marker, then re-run chkit migrate --apply. No statement of these migrations ran.',
   )
 }
 

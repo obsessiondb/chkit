@@ -5,6 +5,8 @@ import {
   collectUnmarkedDestructiveStatements,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  findNonSelectBarriers,
+  isSelectStatement,
   migrationContainsDestructiveSql,
   scanDestructiveSqlStatements,
 } from '../../runtime/safety-markers.js'
@@ -357,5 +359,88 @@ describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () =
     const markers = collectDestructiveOperationMarkers('20260101_swap.sql', sql)
     expect(markers).toHaveLength(1)
     expect(markers[0]?.warningCode).toBe('drop_table_data_loss')
+  })
+})
+
+describe('isSelectStatement (#634)', () => {
+  const selects = [
+    "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');",
+    'select 1',
+    '  /* note */ -- line\n( (SELECT 1) ) UNION ALL (SELECT 2);',
+    '// note\nWITH 1 AS x SELECT x;',
+    '# note\nWITH x AS (SELECT 1), y AS (SELECT 2) SELECT * FROM x;',
+    'WITH (SELECT 1) AS x SELECT x',
+    '(WITH 1 AS x SELECT x);',
+    'WITH 1 AS x SELECT `insert` FROM t',
+    'SELECT * FROM (SELECT 1 AS insert, 2 AS parallel)',
+    "SELECT query_id FROM system.processes AS insert WHERE query_kind = 'Insert'",
+    'WITH 1 AS insert SELECT insert.x FROM t AS insert',
+    "FROM system.processes SELECT query_id WHERE query_kind = 'Insert';",
+  ]
+  const others = [
+    'CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    'EXCHANGE TABLES default.a AND default.b;',
+    'INSERT INTO default.t SELECT 1;',
+    'WITH 1 AS x INSERT INTO default.t SELECT x;',
+    'with 1 as x insert into default.t values (1);',
+    '(WITH 1 AS x INSERT INTO default.t SELECT x)',
+    'SELECT 1 PARALLEL WITH CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    '(SELECT 1) parallel /* c */ with DROP TABLE default.t',
+    'WITH 1 AS x SELECT x PARALLEL WITH DROP TABLE default.t',
+    '`SELECT` 1',
+    "'SELECT'",
+    'EXPLAIN SELECT 1',
+    'FROM default.t SELECT 1 PARALLEL WITH DROP TABLE default.t',
+    'SHOW PROCESSLIST',
+    '/* SELECT */ DROP TABLE default.t',
+    '',
+  ]
+
+  for (const statement of selects) {
+    test(`a SELECT: ${JSON.stringify(statement)}`, () => {
+      expect(isSelectStatement(statement)).toBe(true)
+    })
+  }
+  for (const statement of others) {
+    test(`not a SELECT: ${JSON.stringify(statement)}`, () => {
+      expect(isSelectStatement(statement)).toBe(false)
+    })
+  }
+})
+
+describe('findNonSelectBarriers (#634)', () => {
+  test('lists the statements marked mode=barrier that are not a SELECT, by position', () => {
+    const sql = [
+      '-- operation: create_table key=table:default.a risk=safe',
+      'CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;',
+      '-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier risk=safe mode=barrier',
+      "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';",
+      '-- operation: create_table key=table:default.b risk=safe mode=barrier',
+      'CREATE TABLE default.b (id UInt64) ENGINE = MergeTree ORDER BY id;',
+      '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier',
+      'EXCHANGE TABLES default.a AND default.b;',
+      '',
+    ].join('\n')
+
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([
+      {
+        index: 2,
+        statement: 'CREATE TABLE default.b (id UInt64) ENGINE = MergeTree ORDER BY id;',
+        summary: 'create_table key=table:default.b risk=safe mode=barrier',
+      },
+      {
+        index: 3,
+        statement: 'EXCHANGE TABLES default.a AND default.b;',
+        summary: 'exchange_tables key=table:default.a risk=caution mode=barrier',
+      },
+    ])
+  })
+
+  test('ignores statements without the barrier mode', () => {
+    const sql =
+      '-- operation: create_table key=table:default.a risk=safe mode=async\n' +
+      'CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;\n' +
+      'DROP TABLE default.b;\n'
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([])
   })
 })
