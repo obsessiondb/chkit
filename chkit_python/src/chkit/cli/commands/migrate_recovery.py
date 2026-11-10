@@ -80,6 +80,9 @@ class SharedMarkerMismatch(BaseModel):
 class RetryEditOk:
     completed: int
     unmarked_completed: int
+    # The unmarked ones the journal recorded without a fingerprint: matched by
+    # position only.
+    position_only_completed: int
     # 0-based index of the first statement that did not complete; None when all did.
     resume_index: int | None
     ok: bool = True
@@ -185,6 +188,7 @@ def verify_retry_edit(
     mismatches: list[OperationMismatch] = []
     completed = 0
     unmarked_completed = 0
+    position_only_completed = 0
     for op in bound:
         current = (
             identities[op.operation_index]
@@ -210,10 +214,13 @@ def verify_retry_edit(
         if op.status != "completed":
             continue
         completed += 1
-        # A statement whose SQL was checked against its fingerprint is not
-        # matched by position only, marker or not.
-        if not current.marked and not _sql_checked(current, op):
-            unmarked_completed += 1
+        if current.marked:
+            continue
+        unmarked_completed += 1
+        # A recorded fingerprint is checked here, or by apply once plugins have
+        # rewritten the statements.
+        if op.fingerprint == "":
+            position_only_completed += 1
     shared = _find_shared_marker_mismatches(operations, identities, mismatches)
     if mismatches or shared:
         return RetryEditMismatch(mismatches=mismatches, shared_markers=shared)
@@ -224,6 +231,7 @@ def verify_retry_edit(
     return RetryEditOk(
         completed=completed,
         unmarked_completed=unmarked_completed,
+        position_only_completed=position_only_completed,
         resume_index=resume_index,
     )
 
@@ -484,11 +492,11 @@ def _same_identity(identity: StatementIdentity, op: OperationState) -> bool:
 def _same_sql(identity: StatementIdentity, op: OperationState) -> bool:
     """A record without a fingerprint, or a statement that cannot be checked
     yet, is matched by position and marker only."""
-    return not _sql_checked(identity, op) or identity.fingerprint == op.fingerprint
-
-
-def _sql_checked(identity: StatementIdentity, op: OperationState) -> bool:
-    return op.fingerprint != "" and identity.fingerprint is not None
+    return (
+        op.fingerprint == ""
+        or identity.fingerprint is None
+        or identity.fingerprint == op.fingerprint
+    )
 
 
 def _marker_of(op: OperationState) -> Marker:

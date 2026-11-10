@@ -890,26 +890,29 @@ describe('createJournalStore', () => {
         expect(read).not.toContain('operation_fingerprints')
       })
 
-      // A user without SHOW COLUMNS on system.columns reads the journal as
-      // with an older release (#402): the replicas are probed through it.
+      // A user without SHOW COLUMNS on system.columns (#402) reads the column
+      // from each replica's CREATE statement in system.tables.
       describe('for a user that cannot read system.columns', () => {
-        const JOURNAL_PROBE =
-          /^SELECT count\(\) AS fingerprinted FROM clusterAllReplicas\('default', currentDatabase\(\), '_chkit_migrations'\) WHERE notEmpty\(operation_fingerprints\)$/
+        const TABLES_PROBE = /countIf\(position\(create_table_query, '`operation_fingerprints` '\) > 0\) AS with_column FROM clusterAllReplicas\('default', system\.tables\)/
 
-        function deniedStore(journalProbe: (call: number) => Error | undefined, commandError?: (sql: string) => Error | undefined) {
+        // `withColumn[n]` replicas define the column on the nth probe; `listed` list the journal.
+        function deniedStore(withColumn: number[], listed = 2) {
           let probes = 0
           const queries: string[] = []
           const commands: string[] = []
           const db = {
             async command(sql: string) {
               commands.push(sql)
-              const error = commandError?.(sql)
-              if (error) throw error
             },
             async query<T>(sql: string): Promise<T[]> {
               queries.push(sql)
               if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
               if (sql.includes('currentDatabase() AS database')) return [{ database: 'default' }] as T[]
+              if (TABLES_PROBE.test(sql)) {
+                const seen = withColumn[Math.min(probes, withColumn.length - 1)]
+                probes += 1
+                return [{ replicas: listed, with_column: seen }] as T[]
+              }
               if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
               if (sql.includes('system.columns')) {
                 throw Object.assign(
@@ -917,11 +920,8 @@ describe('createJournalStore', () => {
                   { code: '497' },
                 )
               }
-              if (JOURNAL_PROBE.test(sql)) {
-                probes += 1
-                const error = journalProbe(probes)
-                if (error) throw error
-                return [{ fingerprinted: 0 }] as T[]
+              if (sql.includes("WHERE name = 'm.sql'")) {
+                return [{ ...row([tuple(0)], ['v1:a']), ...(sql.includes('operation_fingerprints') ? {} : { operation_fingerprints: undefined }) }] as T[]
               }
               return []
             },
@@ -930,41 +930,58 @@ describe('createJournalStore', () => {
         }
 
         test('a column every replica has is read', async () => {
-          const { store, queries } = deniedStore(() => undefined)
+          const { store, queries } = deniedStore([2])
 
-          await store.readMigrationState('m.sql')
+          const read = await store.readMigrationState('m.sql')
 
-          const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
-          expect(read).toContain('toJSONString(operation_fingerprints)')
-          expect(queries.filter((sql) => JOURNAL_PROBE.test(sql))).toHaveLength(1)
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a'])
+          expect(queries.filter((sql) => TABLES_PROBE.test(sql))).toHaveLength(2)
         })
 
-        test('a column a replica lacks is read as missing', async () => {
-          const { store, queries } = deniedStore(() => clickHouseError('47', 'UNKNOWN_IDENTIFIER'))
+        test('a column a lagging replica lacks is waited for, never read as missing', async () => {
+          const { store, queries } = deniedStore([1, 1, 2])
 
-          await store.readMigrationState('m.sql')
+          const read = await store.readMigrationState('m.sql')
 
-          const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
-          expect(read).not.toContain('operation_fingerprints')
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a'])
+          expect(queries.filter((sql) => TABLES_PROBE.test(sql))).toHaveLength(3)
         })
 
-        test('a journal probe that fails for another reason stops the read', async () => {
-          const { store } = deniedStore(() => new Error('HTTP 503 Service Unavailable'))
+        test('the writes of a run that waited keep recording fingerprints', async () => {
+          const { store, commands } = deniedStore([1, 2])
 
-          await expect(store.readMigrationState('m.sql')).rejects.toThrow('HTTP 503')
+          await store.writeMigrationState(state(['v1:a']))
+
+          expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(false)
+          expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toContain(", ['v1:a'])")
         })
 
-        test('the column this run adds is waited for through the journal', async () => {
-          const { store, queries, commands } = deniedStore((call) =>
-            call <= 2 ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined,
+        test('a column no replica has is read as missing', async () => {
+          const { store, queries } = deniedStore([0])
+
+          const read = await store.readMigrationState('m.sql')
+
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
+          expect(queries.find((sql) => sql.includes("name = 'm.sql'"))).not.toContain('operation_fingerprints')
+        })
+
+        test('a replica that does not list the journal stops the read', async () => {
+          const { store } = deniedStore([0], 1)
+
+          await expect(store.readMigrationState('m.sql')).rejects.toThrow(
+            'Cannot tell whether the journal table _chkit_migrations has the operation_fingerprints column: 1 of 2 replicas list it.',
           )
+        })
+
+        test('the column this run adds is waited for through system.tables', async () => {
+          const { store, queries, commands } = deniedStore([0, 1, 2])
           await store.readJournal()
 
           await store.writeMigrationState(state(['v1:a']))
 
           expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(true)
           expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toContain(", ['v1:a'])")
-          expect(queries.filter((sql) => JOURNAL_PROBE.test(sql))).toHaveLength(3)
+          expect(queries.filter((sql) => TABLES_PROBE.test(sql))).toHaveLength(3)
           expect(queries.filter((sql) => sql.includes('system.columns'))).toHaveLength(1)
         })
       })

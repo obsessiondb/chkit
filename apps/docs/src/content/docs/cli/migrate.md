@@ -122,7 +122,7 @@ chkit migrate --apply --retry 20260929001110_funnel-model.sql
 - Completed statements are skipped and never run again. Correct an applied statement with a new migration, not by editing it.
 - Statements without an `-- operation:` marker are matched by position and SQL. Do not add, remove, or reorder statements above the one that failed.
 - A statement that a chkit release before [#599](https://github.com/obsessiondb/chkit/issues/599) recorded has no fingerprint, so `--retry` checks only its position and marker.
-- `--retry` warns about completed statements that have neither a marker nor a recorded fingerprint, which it could match by position only; `unmarkedCompletedStatements` in `--json` mode counts them.
+- `--retry` warns about completed statements that have neither a marker nor a recorded fingerprint, which it can match by position only. In `--json` mode, `unmarkedCompletedStatements` counts the completed statements without a marker and `positionOnlyCompletedStatements` counts those of them without a recorded fingerprint.
 - An [async statement](#async-operations-modeasync) that may still be running must also keep its position and marker. When an earlier attempt of it with other SQL is still running (for example after `--abandon` and an edit), `migrate` stops instead of attaching to that attempt: wait for it to finish or `KILL QUERY` it, then run `migrate` again.
 - If a completed statement moved, or its marker or SQL changed, `--retry` refuses and lists the statements. Restore them, or [abandon](#abandoning-a-failed-migration) the partial run.
 - Statements can share a marker: a column's generated `REMOVE DEFAULT` or `REMOVE MATERIALIZED` carries the marker of the `MODIFY COLUMN` after it. Keep both in the file and edit only the one that failed. `--retry` cannot tell them apart, so it also refuses an edit that leaves fewer statements with a completed statement's marker than the failed run recorded, such as one that deletes the completed `REMOVE`.
@@ -189,6 +189,7 @@ The table is a `ReplacingMergeTree` keyed by `name`: every change inserts a newe
 On a service whose endpoint spreads requests over several replicas, such as a multi-replica ObsessionDB service, a read can land on a replica that has not applied the latest DDL or journal write yet. chkit counts the replicas of the cluster set in `clickhouse.cluster`, or of the `default` cluster when none is set, once per run. With more than one replica:
 
 - After each DDL statement, `migrate` waits until every replica shows the change (the new table, view, dictionary, or column, or the dropped one) before it runs the next statement. A replaced dictionary waits until every replica's catalog entry stores the same uuid, including when the only change is a SOURCE password that ClickHouse redacts from the stored definition. An `ALTER` that ran on a replica that had not applied the previous one could otherwise write back the old schema.
+- Whether the journal has `operation_fingerprints` is read on every replica from `system.columns`, or, for a user that cannot read `system.columns`, from each replica's `CREATE` statement in `system.tables`. A column that only some replicas have yet is waited for; when a replica does not list the journal at all, `migrate` stops rather than read recorded fingerprints as missing.
 - A column change waits for the definition, not only the column: `ADD COLUMN` and `MODIFY COLUMN` wait until every replica reports the same type, default, comment, and codec in `system.columns`, and `RENAME COLUMN` until no replica lists the old name. `ADD INDEX` and `DROP INDEX` wait for the index on every replica.
 - After an `EXCHANGE TABLES`, `migrate` waits until every replica lists both tables with one uuid each, so the next statement cannot run on a replica that still has the old names. Before it retries an interrupted `EXCHANGE TABLES`, it waits for the same agreement and then runs the statement's `-- before-retry:` guard.
 - The journal is read from every replica with `clusterAllReplicas`, keeping the newest version of each migration's row, so a lagging replica cannot make `migrate` replay a statement that already completed.
@@ -336,7 +337,8 @@ chkit migrate --abandon 20260929001110_funnel-model.sql --apply
     "totalStatements": 16,
     "completedStatements": 4,
     "resumeAtStatement": 5,
-    "unmarkedCompletedStatements": 0
+    "unmarkedCompletedStatements": 0,
+    "positionOnlyCompletedStatements": 0
   }
 }
 ```

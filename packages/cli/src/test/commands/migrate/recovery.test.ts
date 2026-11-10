@@ -121,7 +121,7 @@ describe('verifyRetryEdit', () => {
       [op(0, 'completed', A), op(1, 'completed', B), op(2, 'failed', V)],
       identities(A, B, { type: 'create_view', key: 'view:db.w' }, V),
     )
-    expect(result).toEqual({ ok: true, completed: 2, unmarkedCompleted: 0, resumeIndex: 2 })
+    expect(result).toEqual({ ok: true, completed: 2, unmarkedCompleted: 0, positionOnlyCompleted: 0, resumeIndex: 2 })
   })
 
   test('rejects a completed statement whose marker changed', () => {
@@ -150,7 +150,7 @@ describe('verifyRetryEdit', () => {
       ],
       unmarked,
     )
-    expect(result).toEqual({ ok: true, completed: 2, unmarkedCompleted: 2, resumeIndex: 2 })
+    expect(result).toEqual({ ok: true, completed: 2, unmarkedCompleted: 2, positionOnlyCompleted: 2, resumeIndex: 2 })
   })
 
   test('resumes at statement 1 when nothing completed, and returns null when everything did', () => {
@@ -158,12 +158,14 @@ describe('verifyRetryEdit', () => {
       ok: true,
       completed: 0,
       unmarkedCompleted: 0,
+      positionOnlyCompleted: 0,
       resumeIndex: 0,
     })
     expect(verifyRetryEdit([op(0, 'completed', A), op(1, 'completed', B)], identities(A, B))).toEqual({
       ok: true,
       completed: 2,
       unmarkedCompleted: 0,
+      positionOnlyCompleted: 0,
       resumeIndex: null,
     })
   })
@@ -173,7 +175,7 @@ describe('verifyRetryEdit', () => {
       [op(0, 'completed', A), op(1, 'failed', V), op(2, 'started', B)],
       identities(A, B, V),
     )
-    expect(result).toEqual({ ok: true, completed: 1, unmarkedCompleted: 0, resumeIndex: 1 })
+    expect(result).toEqual({ ok: true, completed: 1, unmarkedCompleted: 0, positionOnlyCompleted: 0, resumeIndex: 1 })
   })
 
   test('rejects an async statement that may still be running when its position changed', () => {
@@ -187,6 +189,7 @@ describe('verifyRetryEdit', () => {
       ok: true,
       completed: 0,
       unmarkedCompleted: 0,
+      positionOnlyCompleted: 0,
       resumeIndex: 0,
     })
   })
@@ -228,12 +231,14 @@ describe('verifyRetryEdit', () => {
         ok: true,
         completed: 1,
         unmarkedCompleted: 0,
+        positionOnlyCompleted: 0,
         resumeIndex: 1,
       })
       expect(verifyRetryEdit(REMOVE_THEN_MODIFY, identities(MODIFY_F, A, MODIFY_F))).toEqual({
         ok: true,
         completed: 1,
         unmarkedCompleted: 0,
+        positionOnlyCompleted: 0,
         resumeIndex: 1,
       })
     })
@@ -253,7 +258,7 @@ describe('verifyRetryEdit', () => {
     test('does not apply once an abandon marked every statement failed', () => {
       expect(
         verifyRetryEdit([op(0, 'failed', MODIFY_F), op(1, 'failed', MODIFY_F)], identities(MODIFY_F)),
-      ).toEqual({ ok: true, completed: 0, unmarkedCompleted: 0, resumeIndex: 0 })
+      ).toEqual({ ok: true, completed: 0, unmarkedCompleted: 0, positionOnlyCompleted: 0, resumeIndex: 0 })
     })
   })
 })
@@ -269,7 +274,7 @@ describe('verifyRetryEdit with fingerprints', () => {
 
   test('accepts a completed statement with the same SQL', () => {
     const result = verifyRetryEdit([withFingerprint(op(0, 'completed', A), 'v1:a')], [current(A, 'v1:a'), current(B, 'v1:b')])
-    expect(result).toEqual({ ok: true, completed: 1, unmarkedCompleted: 0, resumeIndex: 1 })
+    expect(result).toEqual({ ok: true, completed: 1, unmarkedCompleted: 0, positionOnlyCompleted: 0, resumeIndex: 1 })
   })
 
   test('rejects a completed statement whose SQL changed under the same marker', () => {
@@ -288,7 +293,7 @@ describe('verifyRetryEdit with fingerprints', () => {
 
   test('does not check a failed statement, the one --retry runs again', () => {
     const result = verifyRetryEdit([withFingerprint(op(0, 'failed', A), 'v1:a')], [current(A, 'v1:x')])
-    expect(result).toEqual({ ok: true, completed: 0, unmarkedCompleted: 0, resumeIndex: 0 })
+    expect(result).toEqual({ ok: true, completed: 0, unmarkedCompleted: 0, positionOnlyCompleted: 0, resumeIndex: 0 })
   })
 
   test('matches by marker only when the record or the statement has no fingerprint', () => {
@@ -296,23 +301,36 @@ describe('verifyRetryEdit with fingerprints', () => {
     expect(verifyRetryEdit([withFingerprint(op(0, 'completed', A), 'v1:a')], [current(A, undefined)]).ok).toBe(true)
   })
 
-  test('counts as matched by position only just the unmarked statements whose SQL it did not check', () => {
+  test('counts as position-only just the unmarked statements recorded without a fingerprint', () => {
     const S0 = { type: 'sql_statement', key: 'statement:0' }
     const S1 = { type: 'sql_statement', key: 'statement:1' }
     const S2 = { type: 'sql_statement', key: 'statement:2' }
-    const unmarked = (fingerprint: string | undefined): StatementIdentity => ({ ...S0, marked: false, fingerprint })
-    const result = verifyRetryEdit(
-      [
-        withFingerprint(op(0, 'completed', S0), 'v1:a'),
-        op(1, 'completed', S1),
-        withFingerprint(op(2, 'completed', S2), 'v1:c'),
-      ],
-      [unmarked('v1:a'), { ...unmarked('v1:b'), ...S1 }, { ...unmarked(undefined), ...S2 }],
-    )
-    expect(result).toEqual({ ok: true, completed: 3, unmarkedCompleted: 2, resumeIndex: null })
-    expect(
-      verifyRetryEdit([withFingerprint(op(0, 'completed', S0), 'v1:a')], [unmarked('v1:a'), unmarked('v1:b')]),
-    ).toEqual({ ok: true, completed: 1, unmarkedCompleted: 0, resumeIndex: 1 })
+    const unmarked = (marker: { type: string; key: string }, fingerprint: string | undefined): StatementIdentity => ({
+      ...marker,
+      marked: false,
+      fingerprint,
+    })
+    const mixed = [
+      withFingerprint(op(0, 'completed', S0), 'v1:a'),
+      op(1, 'completed', S1),
+      withFingerprint(op(2, 'completed', S2), 'v1:c'),
+    ]
+    // Every unmarked completed statement still counts in unmarkedCompleted.
+    expect(verifyRetryEdit(mixed, [unmarked(S0, 'v1:a'), unmarked(S1, 'v1:b'), unmarked(S2, 'v1:c')])).toEqual({
+      ok: true,
+      completed: 3,
+      unmarkedCompleted: 3,
+      positionOnlyCompleted: 1,
+      resumeIndex: null,
+    })
+    // A check deferred until plugins rewrite the statements still checks the recorded fingerprints.
+    expect(verifyRetryEdit(mixed, [unmarked(S0, undefined), unmarked(S1, undefined), unmarked(S2, undefined)])).toEqual({
+      ok: true,
+      completed: 3,
+      unmarkedCompleted: 3,
+      positionOnlyCompleted: 1,
+      resumeIndex: null,
+    })
   })
 })
 

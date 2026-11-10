@@ -51,7 +51,7 @@ from chkit.clickhouse.ddl_propagation import (
     wait_for_column,
     wait_for_table,
 )
-from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
 from chkit.core.sql_lexer import js_regex, js_trim
 
@@ -317,8 +317,8 @@ class JournalStore:
         # fingerprints that were recorded are never read as missing.
         self._fingerprint_column: bool = False
         self._fingerprint_column_added: bool = False
-        # The user may not read system.columns; the replicas are then probed
-        # through the journal itself.
+        # The user may not read system.columns; the column is then read from
+        # the journal's definition in system.tables.
         self._columns_unreadable: bool = False
         # Read-your-writes: the last row version this store wrote per migration.
         self._last_written: dict[str, MigrationRowState] = {}
@@ -473,11 +473,11 @@ class JournalStore:
                 raise
             debug(
                 "journal",
-                "cannot read system.columns — probing the journal on every replica: "
-                f"{clickhouse_error_message(exc)}",
+                "cannot read system.columns — reading the journal definition from "
+                f"system.tables: {clickhouse_error_message(exc)}",
             )
             self._columns_unreadable = True
-            return self._every_replica_has_fingerprint_column(fanout.cluster)
+            return self._detect_fingerprint_column_from_tables(fanout)
         if not rows or int(rows[0]["replicas"]) == 0:
             return False
         wait_for_column(
@@ -489,53 +489,70 @@ class JournalStore:
         )
         return True
 
-    def _every_replica_has_fingerprint_column(self, fanout_cluster: str) -> bool:
-        """The probe for a user that cannot read system.columns (#402).
+    def _replicas_with_fingerprint_column(self, fanout: ReplicaFanout) -> tuple[int, int]:
+        """How many replicas list the journal, and how many define the column.
 
-        A query that names the column on every replica through the journal
-        itself. Success means every replica has it, so there is nothing to
-        wait for. A missing column means at least one replica lacks it, but
-        not whether any other has it: a column some replicas have and others
-        not yet (an ALTER that is still propagating) reads as missing, where
-        system.columns would wait for it. That run then reads and writes the
-        journal as an older release does. This is safe as long as every
-        replica keeps the column once it has it: chkit writes fingerprints
-        only after every replica has the column, so a journal with recorded
-        fingerprints has it on every replica. A replica that loses it again,
-        or a new replica that has not caught up yet, makes this run read the
-        journal without its fingerprints.
+        Read from each replica's CREATE statement in system.tables, for a user
+        that cannot read system.columns (#402): it answers per replica, as
+        system.columns does. A probe through the journal itself cannot,
+        because a remote query takes its columns from one replica, and
+        ``hasColumnInTable`` is folded into a constant on the replica that runs
+        the query.
         """
-        try:
-            self._client.query(
-                "SELECT count() AS fingerprinted FROM clusterAllReplicas("
-                f"'{_escape_sql_string(fanout_cluster)}', currentDatabase(), '{self._table}') "
-                f"WHERE notEmpty({_FINGERPRINTS_COLUMN})"
-            )
-        except Exception as exc:
-            if not _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
-                raise
-            debug("journal", f"a replica has no {_FINGERPRINTS_COLUMN} column")
-            return False
-        return True
+        rows = self._client.query(
+            "SELECT count(DISTINCT hostName()) AS replicas, "
+            f"countIf(position(create_table_query, '`{_FINGERPRINTS_COLUMN}` ') > 0) "
+            f"AS with_column FROM {all_replicas(fanout, 'system.tables')} "
+            f"WHERE database = currentDatabase() AND name = '{self._table}'"
+        ).rows
+        if not rows:
+            return 0, 0
+        return int(rows[0]["replicas"]), int(rows[0]["with_column"])
 
-    def _wait_for_fingerprint_column(self, fanout_cluster: str) -> None:
-        """Wait until every replica has the fingerprint column, after this run added it."""
-        if not self._columns_unreadable:
-            wait_for_column(
-                self._client,
-                self._current_database(),
-                self._table,
-                _FINGERPRINTS_COLUMN,
-                cluster=self._cluster,
+    def _detect_fingerprint_column_from_tables(self, fanout: ReplicaFanout) -> bool:
+        """``_detect_fingerprint_column`` without system.columns.
+
+        The column is missing only when every replica lists the journal
+        without it; when a replica does not list the journal, chkit cannot
+        tell, and stops rather than read recorded fingerprints as missing. A
+        column some replicas have is waited for.
+        """
+        replicas, with_column = self._replicas_with_fingerprint_column(fanout)
+        if with_column > 0:
+            self._wait_for_fingerprint_column_in_tables(fanout)
+            return True
+        if replicas < fanout.replicas:
+            msg = (
+                f"Cannot tell whether the journal table {self._table} has the "
+                f"{_FINGERPRINTS_COLUMN} column: {replicas} of {fanout.replicas} replicas "
+                "list it. Re-run chkit once every replica has the table."
             )
-            return
+            raise RuntimeError(msg)
+        debug("journal", f"no replica has the {_FINGERPRINTS_COLUMN} column")
+        return False
+
+    def _wait_for_fingerprint_column_in_tables(self, fanout: ReplicaFanout) -> None:
         for attempt in range(MAX_RETRIES + 1):
-            if self._every_replica_has_fingerprint_column(fanout_cluster):
+            _, with_column = self._replicas_with_fingerprint_column(fanout)
+            if with_column >= fanout.replicas:
                 return
             if attempt < MAX_RETRIES:
                 time.sleep(RETRY_DELAY_SECONDS)
         msg = f"waitForColumn: {self._table}.{_FINGERPRINTS_COLUMN} not yet visible"
         raise RuntimeError(msg)
+
+    def _wait_for_fingerprint_column(self, fanout: ReplicaFanout) -> None:
+        """Wait until every replica has the fingerprint column, after this run added it."""
+        if self._columns_unreadable:
+            self._wait_for_fingerprint_column_in_tables(fanout)
+            return
+        wait_for_column(
+            self._client,
+            self._current_database(),
+            self._table,
+            _FINGERPRINTS_COLUMN,
+            cluster=self._cluster,
+        )
 
     def _ensure_fingerprint_column(self) -> None:
         """Add the fingerprint column to a journal an older release created.
@@ -561,7 +578,7 @@ class JournalStore:
             return
         fanout = resolve_replica_fanout(self._client, self._cluster)
         if fanout is not None:
-            self._wait_for_fingerprint_column(fanout.cluster)
+            self._wait_for_fingerprint_column(fanout)
         self._fingerprint_column = True
 
     def _ensure_schema_upgraded(self) -> None:

@@ -153,6 +153,7 @@ describe('resolveRetry', () => {
       completedStatements: 1,
       resumeAtStatement: 2,
       unmarkedCompletedStatements: 0,
+      positionOnlyCompletedStatements: 0,
     })
   })
 
@@ -215,6 +216,32 @@ describe('resolveRetry', () => {
         resolveRetry({ ...BASE, migrationsDir, pluginsRewriteStatements: true }, { journalStore: fakeStore(state).store }),
       )
       expect(result).toMatchObject({ action: 'resume', completedStatements: 1 })
+    })
+
+    // A journal a no-ALTER run continued: statement 1 has a fingerprint, 2 not.
+    test('counts as position-only the unmarked statements without a fingerprint, also when a plugin may rewrite them', async () => {
+      const unmarked = ['CREATE TABLE db.a (id UInt64) ENGINE = MergeTree ORDER BY id;', 'CREATE TABLE db.b (id UInt64) ENGINE = MergeTree ORDER BY id;', 'CREATE TABLE db.c (id UInt64) ENGINE = MergeTree ORDER BY id;']
+      const state = stateWith({
+        operations: [
+          { ...op(0, 'completed', 'sql_statement', 'statement:0'), fingerprint: statementFingerprint(unmarked[0] ?? '') },
+          op(1, 'completed', 'sql_statement', 'statement:1'),
+          op(2, 'failed', 'sql_statement', 'statement:2'),
+        ],
+      })
+      for (const pluginsRewriteStatements of [false, true]) {
+        const migrationsDir = await mkdtemp(join(tmpdir(), 'chkit-retry-'))
+        await writeFile(join(migrationsDir, 'm.sql'), unmarked.join('\n'), 'utf8')
+        const result = await resolveRetry(
+          { ...BASE, migrationsDir, pluginsRewriteStatements },
+          { journalStore: fakeStore(state).store },
+        ).finally(() => rm(migrationsDir, { recursive: true, force: true }))
+        expect(result).toMatchObject({
+          action: 'resume',
+          completedStatements: 2,
+          unmarkedCompletedStatements: 2,
+          positionOnlyCompletedStatements: 1,
+        })
+      }
     })
   })
 })

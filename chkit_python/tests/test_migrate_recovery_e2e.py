@@ -279,6 +279,7 @@ def test_retry_resumes_edited_migration_and_later_failure_resumes_without_retry(
             "completedStatements": 1,
             "resumeAtStatement": 2,
             "unmarkedCompletedStatements": 0,
+            "positionOnlyCompletedStatements": 0,
         }
         # The preview wrote nothing.
         _wait_journal(project, m, lambda r: r.checksum == checksum_sql(v1) and r.completed == 0)

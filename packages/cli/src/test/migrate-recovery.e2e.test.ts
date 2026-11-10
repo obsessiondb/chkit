@@ -98,6 +98,7 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
         completedStatements: 1,
         resumeAtStatement: 2,
         unmarkedCompletedStatements: 0,
+        positionOnlyCompletedStatements: 0,
       })
       // The preview wrote nothing.
       await waitForJournal(project, M, (row) => row.checksum === checksumSQL(v1) && row.completed === 0)

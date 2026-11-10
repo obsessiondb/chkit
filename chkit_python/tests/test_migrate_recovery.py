@@ -221,7 +221,7 @@ def test_verify_retry_edit_accepts_kept_completed_prefix() -> None:
         [op(0, "completed", A), op(1, "completed", B), op(2, "failed", V)],
         identities(A, B, Marker(type="create_view", key="view:db.w"), V),
     )
-    assert result == RetryEditOk(completed=2, unmarked_completed=0, resume_index=2)
+    assert result == RetryEditOk(completed=2, unmarked_completed=0, position_only_completed=0, resume_index=2)
 
 
 def test_verify_retry_edit_rejects_changed_marker() -> None:
@@ -246,16 +246,16 @@ def test_verify_retry_edit_matches_unmarked_statements_by_position() -> None:
     result = verify_retry_edit(
         [op(0, "completed"), op(1, "completed")], statement_identities([], [None, None, None])
     )
-    assert result == RetryEditOk(completed=2, unmarked_completed=2, resume_index=2)
+    assert result == RetryEditOk(completed=2, unmarked_completed=2, position_only_completed=2, resume_index=2)
 
 
 def test_verify_retry_edit_resume_index_bounds() -> None:
     assert verify_retry_edit([op(0, "failed", A)], identities(B)) == RetryEditOk(
-        completed=0, unmarked_completed=0, resume_index=0
+        completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0
     )
     assert verify_retry_edit(
         [op(0, "completed", A), op(1, "completed", B)], identities(A, B)
-    ) == RetryEditOk(completed=2, unmarked_completed=0, resume_index=None)
+    ) == RetryEditOk(completed=2, unmarked_completed=0, position_only_completed=0, resume_index=None)
 
 
 def test_verify_retry_edit_ignores_failed_and_unsubmitted_started() -> None:
@@ -263,7 +263,7 @@ def test_verify_retry_edit_ignores_failed_and_unsubmitted_started() -> None:
         [op(0, "completed", A), op(1, "failed", V), op(2, "started", B)],
         identities(A, B, V),
     )
-    assert result == RetryEditOk(completed=1, unmarked_completed=0, resume_index=1)
+    assert result == RetryEditOk(completed=1, unmarked_completed=0, position_only_completed=0, resume_index=1)
 
 
 def test_verify_retry_edit_rejects_moved_running_async_statement() -> None:
@@ -280,7 +280,7 @@ def test_verify_retry_edit_rejects_moved_running_async_statement() -> None:
     )
     assert verify_retry_edit(
         [op(1, "started", LOAD, query_id="q-1")], identities(A, LOAD)
-    ) == RetryEditOk(completed=0, unmarked_completed=0, resume_index=0)
+    ) == RetryEditOk(completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0)
 
 
 _REMOVE_THEN_MODIFY = [op(0, "completed", MODIFY_F), op(1, "failed", MODIFY_F)]
@@ -303,7 +303,7 @@ def test_verify_retry_edit_rejects_deleting_completed_shared_marker() -> None:
 
 
 def test_verify_retry_edit_accepts_kept_shared_markers() -> None:
-    ok = RetryEditOk(completed=1, unmarked_completed=0, resume_index=1)
+    ok = RetryEditOk(completed=1, unmarked_completed=0, position_only_completed=0, resume_index=1)
     assert verify_retry_edit(_REMOVE_THEN_MODIFY, identities(MODIFY_F, MODIFY_F)) == ok
     assert verify_retry_edit(_REMOVE_THEN_MODIFY, identities(MODIFY_F, A, MODIFY_F)) == ok
 
@@ -326,7 +326,7 @@ def test_verify_retry_edit_reports_moved_shared_marker_once() -> None:
 def test_verify_retry_edit_after_abandon_has_no_shared_check() -> None:
     assert verify_retry_edit(
         [op(0, "failed", MODIFY_F), op(1, "failed", MODIFY_F)], identities(MODIFY_F)
-    ) == RetryEditOk(completed=0, unmarked_completed=0, resume_index=0)
+    ) == RetryEditOk(completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0)
 
 
 # ---------- errors ----------
@@ -518,6 +518,7 @@ def test_resolve_retry_resumes_at_first_incomplete(retry_dir: Path) -> None:
         completed_statements=1,
         resume_at_statement=2,
         unmarked_completed_statements=0,
+        position_only_completed_statements=0,
     )
     assert result.model_dump(by_alias=True) == {
         "action": "resume",
@@ -528,6 +529,7 @@ def test_resolve_retry_resumes_at_first_incomplete(retry_dir: Path) -> None:
         "completedStatements": 1,
         "resumeAtStatement": 2,
         "unmarkedCompletedStatements": 0,
+        "positionOnlyCompletedStatements": 0,
     }
     assert store.writes == []
 
@@ -884,6 +886,7 @@ _RESUME = RetryResume(
     completed_statements=1,
     resume_at_statement=2,
     unmarked_completed_statements=0,
+    position_only_completed_statements=0,
 )
 
 
@@ -892,7 +895,12 @@ def test_format_retry_notice() -> None:
         "Retry m.sql: the file changed after a failed apply. 1 completed statement(s) "
         "will be skipped; resuming at statement 2 of 3."
     ]
-    unmarked = format_retry_notice(_RESUME.model_copy(update={"unmarked_completed_statements": 1}))
+    # Unmarked statements whose fingerprints were checked are not position-only.
+    checked = _RESUME.model_copy(update={"unmarked_completed_statements": 1})
+    assert len(format_retry_notice(checked)) == 1
+    unmarked = format_retry_notice(
+        checked.model_copy(update={"position_only_completed_statements": 1})
+    )
     assert unmarked[1] == (
         '⚠ 1 completed statement(s) have no "-- operation:" marker and were matched by '
         "position only. Do not add, remove, or reorder statements above the first "
@@ -1053,6 +1061,7 @@ def _retry_for(sql: str, previous: str = "old") -> RetryResume:
         completed_statements=0,
         resume_at_statement=None,
         unmarked_completed_statements=0,
+        position_only_completed_statements=0,
     )
 
 
@@ -1715,7 +1724,7 @@ def test_verify_retry_edit_accepts_a_completed_statement_with_the_same_sql() -> 
         [_with_fingerprint(op(0, "completed", A), "v1:a")],
         [_current(A, "v1:a"), _current(B, "v1:b")],
     )
-    assert result == RetryEditOk(completed=1, unmarked_completed=0, resume_index=1)
+    assert result == RetryEditOk(completed=1, unmarked_completed=0, position_only_completed=0, resume_index=1)
 
 
 def test_verify_retry_edit_rejects_a_completed_statement_whose_sql_changed() -> None:
@@ -1750,7 +1759,7 @@ def test_verify_retry_edit_does_not_check_a_failed_statement() -> None:
     result = verify_retry_edit(
         [_with_fingerprint(op(0, "failed", A), "v1:a")], [_current(A, "v1:x")]
     )
-    assert result == RetryEditOk(completed=0, unmarked_completed=0, resume_index=0)
+    assert result == RetryEditOk(completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0)
 
 
 def test_verify_retry_edit_matches_by_marker_only_without_a_fingerprint() -> None:
@@ -1760,7 +1769,7 @@ def test_verify_retry_edit_matches_by_marker_only_without_a_fingerprint() -> Non
     ).ok
 
 
-def test_verify_retry_edit_counts_only_unmarked_statements_whose_sql_it_did_not_check() -> None:
+def test_verify_retry_edit_counts_as_position_only_just_statements_without_a_fingerprint() -> None:
     s0 = Marker(type="sql_statement", key="statement:0")
     s1 = Marker(type="sql_statement", key="statement:1")
     s2 = Marker(type="sql_statement", key="statement:2")
@@ -1770,19 +1779,25 @@ def test_verify_retry_edit_counts_only_unmarked_statements_whose_sql_it_did_not_
             type=marker.type, key=marker.key, marked=False, fingerprint=fingerprint
         )
 
-    result = verify_retry_edit(
-        [
-            _with_fingerprint(op(0, "completed", s0), "v1:a"),
-            op(1, "completed", s1),
-            _with_fingerprint(op(2, "completed", s2), "v1:c"),
-        ],
-        [unmarked(s0, "v1:a"), unmarked(s1, "v1:b"), unmarked(s2, None)],
+    mixed = [
+        _with_fingerprint(op(0, "completed", s0), "v1:a"),
+        op(1, "completed", s1),
+        _with_fingerprint(op(2, "completed", s2), "v1:c"),
+    ]
+    expected = RetryEditOk(
+        completed=3, unmarked_completed=3, position_only_completed=1, resume_index=None
     )
-    assert result == RetryEditOk(completed=3, unmarked_completed=2, resume_index=None)
-    assert verify_retry_edit(
-        [_with_fingerprint(op(0, "completed", s0), "v1:a")],
-        [unmarked(s0, "v1:a"), unmarked(s1, "v1:b")],
-    ) == RetryEditOk(completed=1, unmarked_completed=0, resume_index=1)
+    # Every unmarked completed statement still counts in unmarked_completed.
+    assert (
+        verify_retry_edit(mixed, [unmarked(s0, "v1:a"), unmarked(s1, "v1:b"), unmarked(s2, "v1:c")])
+        == expected
+    )
+    # A check deferred until plugins rewrite the statements still checks the
+    # recorded fingerprints.
+    assert (
+        verify_retry_edit(mixed, [unmarked(s0, None), unmarked(s1, None), unmarked(s2, None)])
+        == expected
+    )
 
 
 def test_recorded_statement_mismatches_lists_completed_and_running_async_statements() -> None:
@@ -1843,6 +1858,37 @@ def test_resolve_retry_with_fingerprints(retry_dir: Path) -> None:
     # A plugin may rewrite the statements: apply checks them instead.
     resumed = _resolve(retry_dir, state_with(changed), plugins_rewrite_statements=True)
     assert isinstance(resumed, RetryResume)
+
+
+@pytest.mark.parametrize("plugins_rewrite_statements", [False, True])
+def test_resolve_retry_counts_as_position_only_unmarked_statements_without_a_fingerprint(
+    tmp_path: Path, *, plugins_rewrite_statements: bool
+) -> None:
+    """A journal a no-ALTER run continued: statement 1 has a fingerprint, 2 not."""
+    unmarked = [
+        "CREATE TABLE db.a (id UInt64) ENGINE = MergeTree ORDER BY id;",
+        "CREATE TABLE db.b (id UInt64) ENGINE = MergeTree ORDER BY id;",
+        "CREATE TABLE db.c (id UInt64) ENGINE = MergeTree ORDER BY id;",
+    ]
+    (tmp_path / "m.sql").write_text("\n".join(unmarked), encoding="utf-8")
+    store = FakeStore(
+        in_progress(
+            [
+                _with_fingerprint(
+                    op(0, "completed", Marker(type="sql_statement", key="statement:0")),
+                    statement_fingerprint(unmarked[0]),
+                ),
+                op(1, "completed", Marker(type="sql_statement", key="statement:1")),
+                op(2, "failed", Marker(type="sql_statement", key="statement:2")),
+            ],
+            checksum="old",
+        )
+    )
+    resumed = _resolve(tmp_path, store, plugins_rewrite_statements=plugins_rewrite_statements)
+    assert isinstance(resumed, RetryResume)
+    assert resumed.completed_statements == 2
+    assert resumed.unmarked_completed_statements == 2
+    assert resumed.position_only_completed_statements == 1
 
 
 _FP_A = "CREATE TABLE p_a (id UInt64) ENGINE = MergeTree ORDER BY id;"

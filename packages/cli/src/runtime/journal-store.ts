@@ -7,6 +7,7 @@ import {
   waitForColumn,
   waitForTable,
   type ClickHouseExecutor,
+  type ReplicaFanout,
 } from '@chkit/clickhouse'
 import { onClusterClause } from '@chkit/core'
 import pRetry from 'p-retry'
@@ -285,8 +286,8 @@ SETTINGS index_granularity = 1`
   // that were recorded are never read as missing.
   let fingerprintColumn = false
   let fingerprintColumnAdded = false
-  // The user may not read system.columns; the replicas are then probed
-  // through the journal itself.
+  // The user may not read system.columns; the column is then read from the
+  // journal's definition in system.tables.
   let columnsUnreadable = false
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
@@ -408,9 +409,9 @@ SETTINGS index_granularity = 1`
       )
     } catch (error) {
       if (!isClickHouseError(error, ACCESS_DENIED)) throw error
-      debug('journal', `cannot read system.columns — probing the journal on every replica: ${errorText(error)}`)
+      debug('journal', `cannot read system.columns — reading the journal definition from system.tables: ${errorText(error)}`)
       columnsUnreadable = true
-      return await everyReplicaHasFingerprintColumn(fanout.cluster)
+      return await detectFingerprintColumnFromTables(fanout)
     }
     const [row] = rows
     if (Number(row?.replicas ?? 0) === 0) {
@@ -422,43 +423,55 @@ SETTINGS index_granularity = 1`
   }
 
   /**
-   * The probe for a user that cannot read system.columns (#402): a query that
-   * names the column on every replica through the journal itself. Success
-   * means every replica has it, so there is nothing to wait for. A missing
-   * column means at least one replica lacks it, but not whether any other
-   * has it: a column some replicas have and others not yet (an ALTER that is
-   * still propagating) reads as missing, where system.columns would wait for
-   * it. That run then reads and writes the journal as an older release does.
-   * This is safe as long as every replica keeps the column once it has it:
-   * chkit writes fingerprints only after every replica has the column, so a
-   * journal with recorded fingerprints has it on every replica. A replica
-   * that loses it again, or a new replica that has not caught up yet, makes
-   * this run read the journal without its fingerprints.
+   * How many replicas list the journal, and how many of them define the
+   * fingerprint column, read from each replica's CREATE statement in
+   * system.tables. For a user that cannot read system.columns (#402): it
+   * answers per replica, as system.columns does. A probe through the journal
+   * itself cannot, because a remote query takes its columns from one replica,
+   * and `hasColumnInTable` is folded into a constant on the replica that
+   * runs the query.
    */
-  async function everyReplicaHasFingerprintColumn(fanoutCluster: string): Promise<boolean> {
-    try {
-      await db.query(
-        `SELECT count() AS fingerprinted FROM clusterAllReplicas('${escapeSqlString(fanoutCluster)}', currentDatabase(), '${journalTable}') WHERE notEmpty(${FINGERPRINTS_COLUMN})`,
-      )
-      return true
-    } catch (error) {
-      if (!isClickHouseError(error, UNKNOWN_IDENTIFIER)) throw error
-      debug('journal', `a replica has no ${FINGERPRINTS_COLUMN} column`)
-      return false
-    }
+  async function replicasWithFingerprintColumn(fanout: ReplicaFanout): Promise<{ replicas: number; withColumn: number }> {
+    const [row] = await db.query<{ replicas: number | string; with_column: number | string }>(
+      `SELECT count(DISTINCT hostName()) AS replicas, countIf(position(create_table_query, '\`${FINGERPRINTS_COLUMN}\` ') > 0) AS with_column FROM ${allReplicas(fanout, 'system.tables')} WHERE database = currentDatabase() AND name = '${journalTable}'`,
+    )
+    return { replicas: Number(row?.replicas ?? 0), withColumn: Number(row?.with_column ?? 0) }
   }
 
-  /** Waits until every replica has the fingerprint column, after this run added it. */
-  async function waitForFingerprintColumn(fanoutCluster: string): Promise<void> {
-    if (!columnsUnreadable) {
-      await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
-      return
+  /**
+   * detectFingerprintColumn without system.columns. The column is missing only
+   * when every replica lists the journal without it; when a replica does not
+   * list the journal, chkit cannot tell, and stops rather than read recorded
+   * fingerprints as missing. A column some replicas have is waited for.
+   */
+  async function detectFingerprintColumnFromTables(fanout: ReplicaFanout): Promise<boolean> {
+    const { replicas, withColumn } = await replicasWithFingerprintColumn(fanout)
+    if (withColumn > 0) {
+      await waitForFingerprintColumnInTables(fanout)
+      return true
     }
+    if (replicas < fanout.replicas) {
+      throw new Error(
+        `Cannot tell whether the journal table ${journalTable} has the ${FINGERPRINTS_COLUMN} column: ${replicas} of ${fanout.replicas} replicas list it. Re-run chkit once every replica has the table.`,
+      )
+    }
+    debug('journal', `no replica has the ${FINGERPRINTS_COLUMN} column`)
+    return false
+  }
+
+  async function waitForFingerprintColumnInTables(fanout: ReplicaFanout): Promise<void> {
     await pRetry(async () => {
-      if (!(await everyReplicaHasFingerprintColumn(fanoutCluster))) {
+      const { withColumn } = await replicasWithFingerprintColumn(fanout)
+      if (withColumn < fanout.replicas) {
         throw new Error(`waitForColumn: ${journalTable}.${FINGERPRINTS_COLUMN} not yet visible`)
       }
     }, { retries: 20, minTimeout: 500, factor: 1 })
+  }
+
+  /** Waits until every replica has the fingerprint column, after this run added it. */
+  async function waitForFingerprintColumn(fanout: ReplicaFanout): Promise<void> {
+    if (columnsUnreadable) return await waitForFingerprintColumnInTables(fanout)
+    await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
   }
 
   /**
@@ -477,7 +490,7 @@ SETTINGS index_granularity = 1`
       return
     }
     const fanout = await resolveReplicaFanout(db, cluster)
-    if (fanout) await waitForFingerprintColumn(fanout.cluster)
+    if (fanout) await waitForFingerprintColumn(fanout)
     fingerprintColumn = true
   }
 

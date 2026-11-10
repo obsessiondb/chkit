@@ -8,6 +8,7 @@ journal-store tests.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from typing import Any
@@ -339,9 +340,9 @@ def test_a_column_no_replica_has_is_read_as_missing() -> None:
     assert "operation_fingerprints" not in read
 
 
-JOURNAL_PROBE = (
-    "SELECT count() AS fingerprinted FROM clusterAllReplicas('default', currentDatabase(), "
-    "'_chkit_migrations') WHERE notEmpty(operation_fingerprints)"
+TABLES_PROBE = (
+    "countIf(position(create_table_query, '`operation_fingerprints` ') > 0) "
+    "AS with_column FROM clusterAllReplicas('default', system.tables)"
 )
 
 
@@ -349,11 +350,12 @@ JOURNAL_PROBE = (
 class _DeniedColumnsClient:
     """Two replicas, for a user without SHOW COLUMNS on system.columns (#402).
 
-    ``journal_probe`` gives the error of each probe through the journal (1-based).
+    ``with_column[n]`` replicas define the column on the nth probe of
+    system.tables; ``listed`` replicas list the journal.
     """
 
-    journal_probe: Callable[[int], Exception | None]
-    execute_error: Callable[[str], Exception | None] = lambda _sql: None
+    with_column: list[int]
+    listed: int = 2
     queries: list[str] = field(default_factory=list[str])
     executed: list[str] = field(default_factory=list[str])
     probes: int = 0
@@ -362,6 +364,10 @@ class _DeniedColumnsClient:
         self.queries.append(sql)
         if "currentDatabase() AS database" in sql:
             return _Result([{"database": "default"}])
+        if TABLES_PROBE in sql:
+            seen = self.with_column[min(self.probes, len(self.with_column) - 1)]
+            self.probes += 1
+            return _Result([{"replicas": self.listed, "with_column": seen}])
         if "system.columns" in sql:
             raise Exception(
                 "u: Not enough privileges. To execute this query, it's necessary to have "
@@ -369,72 +375,94 @@ class _DeniedColumnsClient:
             )
         if "system.tables" in sql:
             return _Result([{"replicas": 2}])
-        if sql == JOURNAL_PROBE:
-            self.probes += 1
-            error = self.journal_probe(self.probes)
-            if error is not None:
-                raise error
-            return _Result([{"fingerprinted": 0}])
+        if "WHERE name = 'm.sql'" in sql:
+            row = _row([_tuple(0)], ["v1:a"])
+            if "operation_fingerprints" not in sql:
+                del row["operation_fingerprints"]
+            return _Result([row])
         return _Result([])
 
     def execute(self, sql: str) -> None:
         self.executed.append(sql)
-        error = self.execute_error(sql)
-        if error is not None:
-            raise error
 
 
 def _denied_store(client: _DeniedColumnsClient) -> JournalStore:
     return JournalStore(client, cluster="default")  # type: ignore[arg-type]
 
 
+def _tables_probes(client: _DeniedColumnsClient) -> int:
+    return len([sql for sql in client.queries if TABLES_PROBE in sql])
+
+
+@pytest.fixture
+def no_poll_delay(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("chkit.cli.journal_store.RETRY_DELAY_SECONDS", 0)
+
+
 @pytest.mark.usefixtures("two_replicas")
 def test_without_system_columns_a_column_every_replica_has_is_read() -> None:
-    client = _DeniedColumnsClient(journal_probe=lambda _call: None)
-    _denied_store(client).read_migration_state("m.sql")
-    read = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
-    assert "toJSONString(operation_fingerprints)" in read
-    assert len([sql for sql in client.queries if sql == JOURNAL_PROBE]) == 1
+    client = _DeniedColumnsClient(with_column=[2])
+    read = _denied_store(client).read_migration_state("m.sql")
+    assert read is not None
+    assert [op.fingerprint for op in read.operations] == ["v1:a"]
+    assert _tables_probes(client) == 2
 
 
-@pytest.mark.usefixtures("two_replicas")
-def test_without_system_columns_a_column_a_replica_lacks_is_read_as_missing() -> None:
-    client = _DeniedColumnsClient(
-        journal_probe=lambda _call: _clickhouse_error(47, "UNKNOWN_IDENTIFIER")
-    )
-    _denied_store(client).read_migration_state("m.sql")
-    read = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
-    assert "operation_fingerprints" not in read
+@pytest.mark.usefixtures("two_replicas", "no_poll_delay")
+def test_without_system_columns_a_column_a_lagging_replica_lacks_is_waited_for() -> None:
+    client = _DeniedColumnsClient(with_column=[1, 1, 2])
+    read = _denied_store(client).read_migration_state("m.sql")
+    assert read is not None
+    assert [op.fingerprint for op in read.operations] == ["v1:a"]
+    assert _tables_probes(client) == 3
 
 
-@pytest.mark.usefixtures("two_replicas")
-def test_without_system_columns_a_journal_probe_that_fails_for_another_reason_stops_the_read() -> (
+@pytest.mark.usefixtures("two_replicas", "no_poll_delay")
+def test_without_system_columns_the_writes_of_a_run_that_waited_keep_recording_fingerprints() -> (
     None
 ):
-    client = _DeniedColumnsClient(
-        journal_probe=lambda _call: Exception("HTTP 503 Service Unavailable")
-    )
-    with pytest.raises(Exception, match="HTTP 503"):
+    client = _DeniedColumnsClient(with_column=[1, 2])
+    _denied_store(client).write_migration_state(_state(["v1:a"]))
+    assert not any(sql.startswith("ALTER TABLE") for sql in client.executed)
+    insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
+    assert insert.endswith(", ['v1:a'])")
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_a_column_no_replica_has_is_read_as_missing() -> None:
+    client = _DeniedColumnsClient(with_column=[0])
+    read = _denied_store(client).read_migration_state("m.sql")
+    assert read is not None
+    assert [op.fingerprint for op in read.operations] == [""]
+    read_sql = next(sql for sql in client.queries if "name = 'm.sql'" in sql)
+    assert "operation_fingerprints" not in read_sql
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_a_replica_that_does_not_list_the_journal_stops_the_read() -> None:
+    client = _DeniedColumnsClient(with_column=[0], listed=1)
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(
+            "Cannot tell whether the journal table _chkit_migrations has the "
+            "operation_fingerprints column: 1 of 2 replicas list it."
+        ),
+    ):
         _denied_store(client).read_migration_state("m.sql")
 
 
-@pytest.mark.usefixtures("two_replicas")
-def test_without_system_columns_the_column_this_run_adds_is_waited_for_through_the_journal(
-    monkeypatch: pytest.MonkeyPatch,
-) -> None:
-    monkeypatch.setattr("chkit.cli.journal_store.RETRY_DELAY_SECONDS", 0)
-    client = _DeniedColumnsClient(
-        journal_probe=lambda call: (
-            _clickhouse_error(47, "UNKNOWN_IDENTIFIER") if call <= 2 else None
-        )
-    )
+@pytest.mark.usefixtures("two_replicas", "no_poll_delay")
+def test_without_system_columns_the_column_this_run_adds_is_waited_for_through_system_tables() -> (
+    None
+):
+    client = _DeniedColumnsClient(with_column=[0, 1, 2])
     store = _denied_store(client)
     store.read_journal()
     store.write_migration_state(_state(["v1:a"]))
     assert any(sql.startswith("ALTER TABLE") for sql in client.executed)
     insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
     assert insert.endswith(", ['v1:a'])")
-    assert len([sql for sql in client.queries if sql == JOURNAL_PROBE]) == 3
+    assert _tables_probes(client) == 3
     assert len([sql for sql in client.queries if "system.columns" in sql]) == 1
 
 

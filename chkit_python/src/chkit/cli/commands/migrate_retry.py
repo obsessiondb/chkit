@@ -43,10 +43,14 @@ class RetryResume(BaseModel):
     completed_statements: int = Field(..., serialization_alias="completedStatements")
     # 1-based number of the first statement that runs; None when every statement completed.
     resume_at_statement: int | None = Field(..., serialization_alias="resumeAtStatement")
-    # Completed statements without an ``-- operation:`` marker and without a
-    # recorded fingerprint to check their SQL, matched by position only.
+    # Completed statements without an ``-- operation:`` marker.
     unmarked_completed_statements: int = Field(
         ..., serialization_alias="unmarkedCompletedStatements"
+    )
+    # The unmarked completed statements the journal recorded without a
+    # fingerprint, so nothing checks their SQL: matched by position only.
+    position_only_completed_statements: int = Field(
+        ..., serialization_alias="positionOnlyCompletedStatements"
     )
 
 
@@ -119,6 +123,7 @@ def resolve_retry(  # noqa: PLR0911 - one return per TS no-op reason
         completed_statements=check.completed,
         resume_at_statement=None if check.resume_index is None else check.resume_index + 1,
         unmarked_completed_statements=check.unmarked_completed,
+        position_only_completed_statements=check.position_only_completed,
     )
 
 
