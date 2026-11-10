@@ -522,7 +522,7 @@ function unquoteColumnName(token: string): string {
 const INTERVAL_PATTERN =
   /^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$/i
 
-const REPLICATED_ENGINE_PATTERN = /^(Shared|Replicated)/
+const REPLICATED_ENGINE_PATTERN = /^Replicated/
 
 function validateInterval(
   def: MaterializedViewDefinition,
@@ -543,8 +543,7 @@ function validateInterval(
 
 function validateMaterializedViewDefinition(
   def: MaterializedViewDefinition,
-  issues: ValidationIssue[],
-  definitions: SchemaDefinition[]
+  issues: ValidationIssue[]
 ): void {
   const { refresh } = def
   if (!refresh) return
@@ -579,23 +578,6 @@ function validateMaterializedViewDefinition(
       'refresh_depends_on_requires_every',
       `Materialized view ${def.database}.${def.name} uses DEPENDS ON with REFRESH AFTER; ClickHouse only allows DEPENDS ON with REFRESH EVERY.`
     )
-  }
-
-  if (!refresh.append) {
-    const target = definitions.find(
-      (other): other is TableDefinition =>
-        other.kind === 'table' &&
-        other.database === def.to.database &&
-        other.name === def.to.name
-    )
-    if (target && REPLICATED_ENGINE_PATTERN.test(target.engine)) {
-      pushValidationIssue(
-        issues,
-        def,
-        'refresh_append_required_for_replicated_target',
-        `Materialized view ${def.database}.${def.name} refreshes a replicated target ${target.database}.${target.name} (${target.engine}) without APPEND. ClickHouse rejects this combination. Set refresh.append = true, or target a non-replicated table.`
-      )
-    }
   }
 }
 
@@ -757,7 +739,7 @@ export function validateDefinitions(definitions: SchemaDefinition[]): Validation
     if (def.kind === 'table') {
       validateTableDefinition(def, issues)
     } else if (def.kind === 'materialized_view') {
-      validateMaterializedViewDefinition(def, issues, definitions)
+      validateMaterializedViewDefinition(def, issues)
     } else if (def.kind === 'dictionary') {
       validateDictionaryDefinition(def, issues)
     }
@@ -776,6 +758,11 @@ export function assertValidDefinitions(definitions: SchemaDefinition[]): void {
  * is one quoted SQL string literal, such as `"'standard'"`. It renders as
  * `'''standard'''` and keeps the quotes in the value, which is usually SQL
  * written without `{ expression }`. A value may contain quotes, so it only warns.
+ *
+ * A refreshable materialized view without APPEND whose target is `Replicated*`
+ * also only warns: ClickHouse refuses it in a non-replicated database (Atomic),
+ * but ObsessionDB, ClickHouse Cloud and Replicated databases accept it, and
+ * chkit cannot see the database engine offline.
  */
 export function collectDefinitionWarnings(definitions: SchemaDefinition[]): ValidationIssue[] {
   const issues: ValidationIssue[] = []
@@ -788,6 +775,8 @@ export function collectDefinitionWarnings(definitions: SchemaDefinition[]): Vali
         pushValidationIssue(issues, def, 'quoted_string_default',
           `${describeQuotedStringDefault(`Table ${def.database}.${def.name} column "${column.name}"`, kind, quoted)}, or use default: { expression: ${JSON.stringify(quoted.raw.trim())} } for SQL. If the quotes belong to the value, ignore this warning.`)
       }
+    } else if (def.kind === 'materialized_view') {
+      warnReplaceRefreshOfReplicatedTarget(def, definitions, issues)
     } else if (def.kind === 'dictionary') {
       for (const attribute of def.attributes) {
         const quoted = quotedStringDefault(attribute.default)
@@ -798,6 +787,25 @@ export function collectDefinitionWarnings(definitions: SchemaDefinition[]): Vali
     }
   }
   return issues
+}
+
+function warnReplaceRefreshOfReplicatedTarget(
+  def: MaterializedViewDefinition,
+  definitions: SchemaDefinition[],
+  issues: ValidationIssue[]
+): void {
+  if (!def.refresh || def.refresh.append) return
+  const target = definitions.find(
+    (other): other is TableDefinition =>
+      other.kind === 'table' && other.database === def.to.database && other.name === def.to.name
+  )
+  if (!target || !REPLICATED_ENGINE_PATTERN.test(target.engine)) return
+  pushValidationIssue(
+    issues,
+    def,
+    'refresh_append_required_for_replicated_target',
+    `Materialized view ${def.database}.${def.name} refreshes a replicated target ${target.database}.${target.name} (${target.engine}) without APPEND. ClickHouse refuses this in a non-replicated database such as Atomic; ObsessionDB, ClickHouse Cloud and Replicated databases accept it. On a non-replicated database, set refresh.append = true or target a non-replicated table.`
+  )
 }
 
 /**

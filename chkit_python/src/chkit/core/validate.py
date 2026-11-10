@@ -645,7 +645,7 @@ _INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(
     re.IGNORECASE,
 )
 
-_REPLICATED_ENGINE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(Shared|Replicated)")
+_REPLICATED_ENGINE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^Replicated")
 
 
 def _validate_interval(
@@ -670,7 +670,6 @@ def _validate_interval(
 def _validate_materialized_view(
     definition: MaterializedViewDefinition,
     issues: list[ValidationIssue],
-    definitions: list[SchemaDefinition],
 ) -> None:
     refresh = definition.refresh
     if refresh is None:
@@ -714,27 +713,6 @@ def _validate_materialized_view(
             f"DEPENDS ON with REFRESH AFTER; ClickHouse only allows DEPENDS ON "
             f"with REFRESH EVERY.",
         )
-
-    if not refresh.append:
-        target: TableDefinition | None = None
-        for other in definitions:
-            if (
-                isinstance(other, TableDefinition)
-                and other.database == definition.to.database
-                and other.name == definition.to.name
-            ):
-                target = other
-                break
-        if target is not None and _REPLICATED_ENGINE_PATTERN.match(target.engine) is not None:
-            _push(
-                issues,
-                definition,
-                "refresh_append_required_for_replicated_target",
-                f"Materialized view {definition.database}.{definition.name} refreshes "
-                f"a replicated target {target.database}.{target.name} ({target.engine}) "
-                f"without APPEND. ClickHouse rejects this combination. Set "
-                f"refresh.append = true, or target a non-replicated table.",
-            )
 
 
 def _validate_dictionary(  # noqa: PLR0912
@@ -888,7 +866,7 @@ def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[Valida
         if isinstance(definition, TableDefinition):
             _validate_table(definition, issues)
         elif isinstance(definition, MaterializedViewDefinition):
-            _validate_materialized_view(definition, issues, materialized)
+            _validate_materialized_view(definition, issues)
         elif isinstance(definition, DictionaryDefinition):
             _validate_dictionary(definition, issues)
 
@@ -908,9 +886,15 @@ def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list
     ``"'standard'"``, renders as ``'''standard'''`` and keeps the quotes in the
     value, which is usually SQL written without ``SQLExpression``. A value may
     contain quotes, so it only warns.
+
+    A refreshable materialized view without APPEND whose target is ``Replicated*``
+    also only warns: ClickHouse refuses it in a non-replicated database (Atomic),
+    but ObsessionDB, ClickHouse Cloud and Replicated databases accept it, and
+    chkit cannot see the database engine offline.
     """
+    materialized: list[SchemaDefinition] = list(definitions)
     issues: list[ValidationIssue] = []
-    for definition in definitions:
+    for definition in materialized:
         if isinstance(definition, TableDefinition):
             for column in definition.columns:
                 kind = column.default_kind or "DEFAULT"
@@ -943,7 +927,41 @@ def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list
                     "dictionary defaults are literals only. "
                     "If the quotes belong to the value, ignore this warning.",
                 )
+        elif isinstance(definition, MaterializedViewDefinition):
+            _warn_replace_refresh_of_replicated_target(definition, materialized, issues)
     return issues
+
+
+def _warn_replace_refresh_of_replicated_target(
+    definition: MaterializedViewDefinition,
+    definitions: list[SchemaDefinition],
+    issues: list[ValidationIssue],
+) -> None:
+    if definition.refresh is None or definition.refresh.append:
+        return
+    target = next(
+        (
+            other
+            for other in definitions
+            if isinstance(other, TableDefinition)
+            and other.database == definition.to.database
+            and other.name == definition.to.name
+        ),
+        None,
+    )
+    if target is None or _REPLICATED_ENGINE_PATTERN.match(target.engine) is None:
+        return
+    _push(
+        issues,
+        definition,
+        "refresh_append_required_for_replicated_target",
+        f"Materialized view {definition.database}.{definition.name} refreshes "
+        f"a replicated target {target.database}.{target.name} ({target.engine}) "
+        f"without APPEND. ClickHouse refuses this in a non-replicated database such "
+        f"as Atomic; ObsessionDB, ClickHouse Cloud and Replicated databases accept "
+        f"it. On a non-replicated database, set refresh.append = true or target a "
+        f"non-replicated table.",
+    )
 
 
 def _quoted_string_default(value: ColumnDefaultValue | None) -> tuple[str, str | None] | None:

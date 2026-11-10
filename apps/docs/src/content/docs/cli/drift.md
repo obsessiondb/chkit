@@ -106,7 +106,7 @@ Column codecs are compared with `compression_codec` in `system.columns`. ClickHo
 | `setting_mismatch` | Table setting value differs |
 | `index_mismatch` | Index definition differs |
 | `ttl_mismatch` | TTL expression differs |
-| `engine_mismatch` | Table engine differs (after normalization) |
+| `engine_mismatch` | Table engine differs (after normalization). A `Shared*` engine matches the same engine without the prefix, and a `Replicated*` engine in the schema matches the `Shared*` engine that ObsessionDB and ClickHouse Cloud store it as, which drops the Keeper path and replica name |
 | `primary_key_mismatch` | Primary key expression differs |
 | `order_by_mismatch` | ORDER BY expression differs |
 | `partition_by_mismatch` | PARTITION BY expression differs |

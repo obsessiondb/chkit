@@ -4,6 +4,7 @@ import {
   ChxValidationError,
   canonicalizeDefinitions,
   codec,
+  collectDefinitionWarnings,
   collectDefinitionsFromModule,
   dictionary,
   isSchemaDefinition,
@@ -2035,44 +2036,53 @@ describe('@chkit/core refreshable materialized views', () => {
     expect(withEvery.some((i) => i.code === 'refresh_depends_on_requires_every')).toBe(false)
   })
 
-  test('validates non-APPEND RMV with replicated target (Rule 3)', () => {
-    const issues = validateDefinitions([
-      table({
-        database: 'analytics',
-        name: 'daily_rollup',
-        columns: [{ name: 'day', type: 'Date' }],
-        engine: 'SharedMergeTree',
-        primaryKey: ['day'],
-        orderBy: ['day'],
-      }),
+  const rollupTarget = (engine: string) =>
+    table({
+      database: 'analytics',
+      name: 'daily_rollup',
+      columns: [{ name: 'day', type: 'Date' }],
+      engine,
+      primaryKey: ['day'],
+      orderBy: ['day'],
+    })
+  const warnsReplaceRefresh = (definitions: Parameters<typeof collectDefinitionWarnings>[0]) =>
+    collectDefinitionWarnings(definitions).some(
+      (i) => i.code === 'refresh_append_required_for_replicated_target'
+    )
+
+  test('non-APPEND RMV with a Replicated target warns and plans (Rule 3)', () => {
+    const definitions = [
+      rollupTarget('ReplicatedMergeTree'),
       materializedView({ ...baseMv, refresh: { every: '1 HOUR' } }),
-    ])
-    expect(issues.map((i) => i.code)).toContain('refresh_append_required_for_replicated_target')
+    ]
+    expect(validateDefinitions(definitions)).toEqual([])
+    expect(warnsReplaceRefresh(definitions)).toBe(true)
+    expect(planDiff([], definitions).operations.map((op) => op.type)).toContain(
+      'create_materialized_view'
+    )
   })
 
-  test('no issue when APPEND RMV targets replicated table', () => {
-    const issues = validateDefinitions([
-      table({
-        database: 'analytics',
-        name: 'daily_rollup',
-        columns: [{ name: 'day', type: 'Date' }],
-        engine: 'SharedMergeTree',
-        primaryKey: ['day'],
-        orderBy: ['day'],
-      }),
-      materializedView({ ...baseMv, refresh: { every: '1 HOUR', append: true } }),
-    ])
+  test('no warning when non-APPEND RMV targets a Shared table', () => {
     expect(
-      issues.some((i) => i.code === 'refresh_append_required_for_replicated_target')
+      warnsReplaceRefresh([
+        rollupTarget('SharedMergeTree'),
+        materializedView({ ...baseMv, refresh: { every: '1 HOUR' } }),
+      ])
     ).toBe(false)
   })
 
-  test('no issue when target table is not in the schema (external)', () => {
-    const issues = validateDefinitions([
-      materializedView({ ...baseMv, refresh: { every: '1 HOUR' } }),
-    ])
+  test('no warning when APPEND RMV targets a Replicated table', () => {
     expect(
-      issues.some((i) => i.code === 'refresh_append_required_for_replicated_target')
+      warnsReplaceRefresh([
+        rollupTarget('ReplicatedMergeTree'),
+        materializedView({ ...baseMv, refresh: { every: '1 HOUR', append: true } }),
+      ])
+    ).toBe(false)
+  })
+
+  test('no warning when target table is not in the schema (external)', () => {
+    expect(
+      warnsReplaceRefresh([materializedView({ ...baseMv, refresh: { every: '1 HOUR' } })])
     ).toBe(false)
   })
 })
