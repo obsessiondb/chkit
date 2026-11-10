@@ -31,6 +31,7 @@ from typing import Any, Final, Literal
 
 from pydantic import BaseModel, ConfigDict, Field
 
+from chkit import __version__
 from chkit.cli.migration_store import (
     ChecksumMismatch,
     MigrationJournal,
@@ -41,6 +42,7 @@ from chkit.clickhouse.client import ClickHouseClient, is_unknown_database_error
 from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.on_cluster import on_cluster_clause
+from chkit.core.sql_lexer import js_regex, js_trim
 
 OperationStatus = Literal["started", "completed", "failed"]
 
@@ -97,7 +99,7 @@ class _UnknownDatabaseError(Exception):
 
 
 def resolve_journal_table_name() -> str:
-    candidate = (os.environ.get("CHKIT_JOURNAL_TABLE") or "").strip()
+    candidate = js_trim(os.environ.get("CHKIT_JOURNAL_TABLE") or "")
     if not candidate:
         return _DEFAULT_JOURNAL_TABLE
     if _JOURNAL_TABLE_PATTERN.match(candidate) is None:
@@ -193,7 +195,7 @@ def _operations_array_literal(operations: list[OperationState]) -> str:
 _UNKNOWN_TABLE = (
     60,
     "UNKNOWN_TABLE",
-    re.compile(r"Unknown table expression identifier|Table \S+ does not exist"),
+    re.compile(js_regex(r"Unknown table expression identifier|Table \S+ does not exist")),
 )
 _UNKNOWN_IDENTIFIER = (
     47,
@@ -506,6 +508,11 @@ class JournalStore:
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         """Upsert one migration row with INSERT race retry (5 x backoff)."""
+        # The release that wrote the state last. migrate checks a state another
+        # release wrote before it resumes it, so the statement positions in a
+        # state this release wrote are always this release's split (#562).
+        if state.chkit_version != __version__:
+            state = state.model_copy(update={"chkit_version": __version__})
         if self._database_missing:
             self._database_missing = False
             self._bootstrapped = False

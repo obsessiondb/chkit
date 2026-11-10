@@ -203,6 +203,7 @@ export function createRemoteExecutor(deps: {
 					elapsedMs: Math.round(Number(proc.elapsed) * 1000),
 				}
 			}
+			if (options?.runningOnly) return { status: 'unknown' as const }
 
 			const log = await executor.query<{
 				type: string
@@ -246,19 +247,25 @@ ${readSettings}`,
 				database: string
 				name: string
 				engine: string
+				comment?: string
 			}>(
-				`SELECT database, name, engine
+				`SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND name NOT LIKE '_chkit_%'`,
+  AND NOT startsWith(name, '_chkit_')`,
 			)
 
 			const out: SchemaObjectRef[] = []
 			for (const row of rows) {
 				const kind = inferSchemaKindFromEngine(row.engine)
 				if (!kind) continue
-				out.push({ kind, database: row.database, name: row.name })
+				out.push({
+					kind,
+					database: row.database,
+					name: row.name,
+					comment: row.comment ?? '',
+				})
 			}
 			return out
 		},
@@ -271,10 +278,10 @@ WHERE is_temporary = 0
 
 			const [tables, columns, indexes] = await Promise.all([
 				executor.query<SystemTableRow>(
-					`SELECT database, name, engine, create_table_query FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
+					`SELECT database, name, engine, create_table_query, primary_key, comment FROM system.tables WHERE is_temporary = 0 AND database IN (${quoted})`,
 				),
 				executor.query<SystemColumnRow>(
-					`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position FROM system.columns WHERE database IN (${quoted})`,
+					`SELECT database, \`table\`, name, type, default_kind, default_expression, comment, position, compression_codec FROM system.columns WHERE database IN (${quoted})`,
 				),
 				executor.query<SystemSkippingIndexRow>(
 					`SELECT database, \`table\`, name, expr, type_full AS type, granularity FROM system.data_skipping_indices WHERE database IN (${quoted})`,

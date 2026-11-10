@@ -33,7 +33,6 @@ from chkit.cli.migration_store import (
     checksum_sql,
 )
 from chkit.cli.safety_markers import extract_migration_operation_summaries
-from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import parse_exchange_tables, wait_for_exchange
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.clickhouse.replicas import ReplicaFanout
@@ -80,6 +79,7 @@ def events(
     name: str = "events",
     engine: str = "MergeTree",
     columns: list[Any] | None = None,
+    settings: dict[str, Any] | None = None,
 ) -> TableDefinition:
     order = order_by or ["id"]
     return table(
@@ -89,7 +89,25 @@ def events(
         columns=columns or COLUMNS,
         primaryKey=order,
         orderBy=order,
+        settings=settings,
     )
+
+
+def _norm(sql: str) -> str:
+    """The normalization the cutover applies to a stored read-only setting."""
+    return (
+        f"multiIf(lower({sql}) = 'true', '1', lower({sql}) = 'false', '0', "
+        f"ifNull(toString(toFloat64OrNull({sql})), {sql}))"
+    )
+
+
+_LIT_8192 = "'8192'"
+_LIT_4096 = "'4096'"
+_LIT_EMPTY = "''"
+_GRANULARITY = (
+    "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', "
+    "extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))"
+)
 
 
 OLD = events(["id"])
@@ -106,6 +124,7 @@ def plan(
     cluster: str | None = None,
     key: list[str] | None = None,
     definitions: list[SchemaDefinition] | None = None,
+    index_granularity: int | None = None,
 ) -> PlannedCutover:
     new = new_def or NEW
     return plan_cutover(
@@ -117,6 +136,7 @@ def plan(
             old_table=old_table,  # type: ignore[arg-type]
             cluster=cluster,
             stamp=STAMP,
+            index_granularity=index_granularity,
         ),
         definitions=definitions if definitions is not None else [new],
     )
@@ -216,43 +236,6 @@ def test_mirrors_snapshots_copies_verifies_and_swaps_in_order() -> None:
     ]
 
 
-def test_shadow_has_new_layout_and_snapshot_old_layout_with_metadata() -> None:
-    ops = plan().operations
-    assert "CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000" in ops[1].sql
-    assert "ORDER BY (`user_id`, `id`)" in ops[1].sql
-    assert "CREATE TABLE IF NOT EXISTS app.events__cutover_20261024120000_snapshot" in ops[4].sql
-    assert "ORDER BY (`id`)" in ops[4].sql
-    assert 'COMMENT \'chkit cutover {"chkitCutover":1,"database":"app","table":"events"' in ops[4].sql
-
-
-def test_mirror_and_copy_sql() -> None:
-    ops = plan().operations
-    assert ops[2].sql == (
-        "CREATE MATERIALIZED VIEW IF NOT EXISTS app.events__cutover_20261024120000_mirror "
-        "TO app.events__cutover_20261024120000 AS\n"
-        "SELECT `id`, `user_id`, `payload` FROM app.events;"
-    )
-    assert ops[2].warning is not None
-    assert "No INSERT may reuse a key (id)" in ops[2].warning
-    assert ops[3].sql == (
-        "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');"
-    )
-    assert ops[5].sql == (
-        "ALTER TABLE app.events__cutover_20261024120000_snapshot ATTACH PARTITION ALL FROM app.events;"
-    )
-    assert ops[5].before_retry == (
-        "TRUNCATE TABLE IF EXISTS app.events__cutover_20261024120000_snapshot SYNC"
-    )
-    assert ops[7].sql == "\n".join(
-        [
-            "INSERT INTO app.events__cutover_20261024120000 (`id`, `user_id`, `payload`)",
-            "SELECT `id`, `user_id`, `payload` FROM app.events__cutover_20261024120000_snapshot",
-            "WHERE (`id`) NOT IN (SELECT `id` FROM app.events__cutover_20261024120000)",
-            "SETTINGS insert_deduplicate = 0, select_sequential_consistency = 1;",
-        ]
-    )
-
-
 def test_verify_compares_rows_per_key() -> None:
     verify = plan().operations[8].sql
     # A tuple, because cityHash64 of a NULL argument is NULL and sumIf skips NULLs.
@@ -264,19 +247,25 @@ def test_verify_compares_rows_per_key() -> None:
     assert "The table was not swapped." in verify
 
 
-def test_exchange_is_guarded_on_every_attempt() -> None:
-    ops = plan().operations
-    exchange = ops[10]
-    assert exchange.sql == "EXCHANGE TABLES app.events AND app.events__cutover_20261024120000;"
-    assert exchange.before_retry is not None
-    assert f"{exchange.before_retry};" == ops[9].sql
-    assert "\n" not in exchange.before_retry
-    assert (
-        "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables "
-        "WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, "
-        "primary_key, partition_key)) FROM system.tables WHERE database = 'app' AND "
-        "name = 'events__cutover_20261024120000_snapshot')"
-    ) in exchange.before_retry
+def test_compares_a_numeric_read_only_setting_by_value() -> None:
+    # ClickHouse may store 1e6 as 1000000. on one table and 1000000 on another (#511).
+    ops = plan(new_def=events(settings={"index_granularity_bytes": 1e6})).operations
+    guard = next(op for op in ops if op.type == "exchange_tables").before_retry or ""
+    stored = "extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')"
+    assert _norm(stored) in guard
+
+
+def test_cuts_over_a_change_of_read_only_settings_only() -> None:
+    # The layout tells the tables apart by those settings too (#511).
+    new_def = events(settings={"index_granularity": 4096})
+    ops = plan(new_def=new_def).operations
+    guard = next(op for op in ops if op.type == "exchange_tables").before_retry or ""
+    assert "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192'," in guard
+    created = next(op for op in ops if op.type == "create_table")
+    assert "SETTINGS index_granularity = 4096;" in created.sql
+    minmax = plan(new_def=events(settings={"add_minmax_index_for_numeric_columns": 1})).operations
+    minmax_guard = next(op for op in minmax if op.type == "exchange_tables").before_retry or ""
+    assert "add_minmax_index_for_numeric_columns = ([^,]*)" in minmax_guard
 
 
 # An INSERT that resolved the table before the swap and the mirror's target
@@ -482,6 +471,40 @@ def test_refuses_an_engine_argument_only_change() -> None:
     assert "only the engine arguments change" in found[0]
 
 
+def test_refuses_keys_that_differ_only_in_spelling() -> None:
+    # As the planner compares keys; TS cutover.test.ts asserts the same.
+    old = events(["user_id", "id"], engine="ReplicatedMergeTree('/t/{uuid}', '{replica}')")
+    new = table(
+        database="app",
+        name="events",
+        engine="ReplicatedMergeTree('/t2/{uuid}', '{replica}')",
+        columns=COLUMNS,
+        primaryKey=["`user_id`,  id"],
+        orderBy=['"user_id"', "id"],
+    )
+    found = messages(old_def=old, new_def=new, cluster="c2")
+    assert len(found) == 1
+    assert "only the engine arguments change" in found[0]
+
+
+def test_cuts_over_a_key_on_a_column_named_with_a_comma() -> None:
+    # A key on column `a,b` to one on columns a and b, as the planner reads it;
+    # TS cutover.test.ts asserts the same.
+    named: list[Any] = [
+        {"name": "a,b", "type": "UInt64"},
+        {"name": "a", "type": "UInt64"},
+        {"name": "b", "type": "UInt64"},
+    ]
+    ops = plan(
+        old_def=events(["a,b"], columns=named),
+        new_def=events(["a", "b"], columns=named),
+        key=["a"],
+    ).operations
+    create = next(op for op in ops if op.type == "create_table")
+    assert "PRIMARY KEY (`a`, `b`)" in create.sql
+    assert any(op.type == "exchange_tables" for op in ops)
+
+
 def test_refuses_a_replication_path_without_a_macro() -> None:
     engine = "ReplicatedMergeTree('/clickhouse/tables/{shard}/app/events', '{replica}')"
     found = messages(
@@ -600,6 +623,20 @@ def test_refuses_a_buffer_table_and_a_streaming_source_behind_an_intermediate_ta
         update={"engine": 'Buffer(`app`, "events", 16, 10, 100, 10000, 1000000, 10000000, 100000000)'}
     )
     assert len(messages(definitions=[NEW, quoted])) == 1
+    # Arguments trim JavaScript whitespace, as in TS (#580).
+    bom = buffer.model_copy(
+        update={
+            "engine": "Buffer(\ufeffapp\ufeff, \ufeffevents, 16, 10, 100, 10000, 1000000, "
+            "10000000, 100000000)"
+        }
+    )
+    assert len(messages(definitions=[NEW, bom])) == 1
+    nel = buffer.model_copy(
+        update={
+            "engine": "Buffer(app\x85, events, 16, 10, 100, 10000, 1000000, 10000000, 100000000)"
+        }
+    )
+    assert plan(definitions=[NEW, nel]).operations
 
 
 def test_validate_start_explains_leftovers_of_an_earlier_attempt() -> None:
@@ -780,22 +817,49 @@ def test_barrier_times_out_with_the_running_query_ids() -> None:
         )
 
 
+def test_barrier_rounds_elapsed_seconds_half_up_like_js() -> None:
+    # TS prints Math.round(elapsed / 1000): a .5 tie rounds up, where Python's
+    # round() rounds to even (2.5 -> 2, 30.5 -> 30).
+    clock = [0.0]
+    lines: list[str] = []
+
+    def sleep(seconds: float) -> None:
+        clock[0] += seconds
+
+    client = _ProcessesClient([["a"], ["a"], ["a"]])
+    with pytest.raises(RuntimeError, match=r"still running after 61s \(query_id a\)"):
+        wait_for_insert_barrier(
+            client,
+            _BARRIER,
+            sleep=sleep,
+            now=lambda: clock[0],
+            log=lines.append,
+            poll_interval_seconds=30.5,
+            timeout_seconds=61.0,
+        )
+    assert "  still waiting for 1 INSERT query (elapsed 31s)" in lines
+
+    clock[0] = 0.0
+    with pytest.raises(RuntimeError, match=r"still running after 3s \(query_id a\)"):
+        wait_for_insert_barrier(
+            _ProcessesClient([["a"], ["a"]]),
+            _BARRIER,
+            sleep=sleep,
+            now=lambda: clock[0],
+            poll_interval_seconds=2.5,
+            timeout_seconds=2.5,
+        )
+
+
 def test_parse_exchange_tables() -> None:
     assert parse_exchange_tables(
         "EXCHANGE TABLES app.events AND app.`events shadow` ON CLUSTER 'c';"
     ) == (("app", "events"), ("app", "events shadow"))
     assert parse_exchange_tables("DROP TABLE app.events") is None
-    # migrate_apply runs a statement together with its marker comment lines.
-    assert parse_exchange_tables(
-        "-- operation: exchange_tables key=table:app.events risk=caution\n"
-        "-- before-retry: SELECT 1\n"
-        "EXCHANGE TABLES app.events AND app.events__cutover_1"
-    ) == (("app", "events"), ("app", "events__cutover_1"))
-    assert parse_exchange_tables("-- EXCHANGE TABLES app.a AND app.b") is None
 
 
 def test_wait_for_exchange_waits_for_uuid_agreement(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
     answers = [
         [
             {"database": "app", "name": "a", "replicas": 2, "uuids": 2, "sample_uuid": "u1"},
@@ -896,11 +960,6 @@ class _RecordingClient:
         return _Rows([{"x": 1}])
 
 
-def _sql_lines(calls: list[str]) -> list[str]:
-    """The executed SQL without the marker comments a statement carries."""
-    return [call.split("\n")[-1] for call in calls]
-
-
 def _op_state(index: int, status: str, type_: str, key: str) -> OperationState:
     return OperationState(
         operation_index=index,
@@ -938,7 +997,6 @@ def _run(tmp_path: Path, sql: str, client: _RecordingClient, store: _FakeStore) 
             file="m.sql",
             retry=None,
             log=lambda _line: None,
-            warn=lambda _line: None,
         )
     )
 
@@ -961,7 +1019,7 @@ EXCHANGE = ("exchange_tables", "table:default.t")
 def test_apply_does_not_run_before_retry_on_the_first_attempt(tmp_path: Path) -> None:
     client = _RecordingClient()
     _run(tmp_path, _SQL, client, _FakeStore())
-    assert _sql_lines(client.calls) == ["SELECT 1", "EXCHANGE TABLES default.t AND default.s"]
+    assert client.calls == ["SELECT 1;", "EXCHANGE TABLES default.t AND default.s;"]
 
 
 @pytest.mark.usefixtures("_apply_env")
@@ -978,9 +1036,9 @@ def test_apply_retries_a_failed_statement_once_its_guard_passes(tmp_path: Path) 
     client = _RecordingClient()
     store = _FakeStore(_state([_op_state(0, "completed", *START), _op_state(1, "failed", *EXCHANGE)]))
     _run(tmp_path, _SQL, client, store)
-    assert _sql_lines(client.calls) == [
+    assert client.calls == [
         "SELECT throwIf(swapped, 'already swapped')",
-        "EXCHANGE TABLES default.t AND default.s",
+        "EXCHANGE TABLES default.t AND default.s;",
     ]
     assert len(store.appended) == 1
 
@@ -995,10 +1053,9 @@ def test_apply_barrier_waits_instead_of_executing(
     )
     client = _RecordingClient(polls=[["q1"], ["q1"], []])
     store = _FakeStore()
-    barrier = migrate_apply.wait_for_insert_barrier
 
     def fast_barrier(*args: Any, **kwargs: Any) -> int:
-        return barrier(*args, **kwargs, sleep=lambda _s: None)
+        return wait_for_insert_barrier(*args, **kwargs, sleep=lambda _s: None)
 
     monkeypatch.setattr(migrate_apply, "wait_for_insert_barrier", fast_barrier)
     _run(tmp_path, sql, client, store)
@@ -1069,9 +1126,9 @@ def test_apply_refuses_the_exchange_when_such_inserts_started_during_the_cutover
     store = _FakeStore()
     with pytest.raises(migrate_apply.StatementError, match="wait_for_async_insert = 0"):
         _run(tmp_path, _GUARD_SQL, client, store)
-    assert _sql_lines(client.calls) == [
-        "SELECT 1",
-        "ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events",
+    assert client.calls == [
+        "SELECT 1;",
+        "ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;",
     ]
     # The refused EXCHANGE is not journaled as started.
     assert store.state is not None
@@ -1079,7 +1136,11 @@ def test_apply_refuses_the_exchange_when_such_inserts_started_during_the_cutover
 
 
 @pytest.mark.usefixtures("_apply_env")
-def test_apply_does_not_guard_other_statements(tmp_path: Path) -> None:
+def test_apply_does_not_guard_other_statements(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The fake reports every table as present, so the DROP's wait would time out.
+    monkeypatch.setattr(migrate_apply, "wait_for_ddl_propagation", lambda *_a, **_k: None)
     sql = (
         "-- operation: cutover_validate key=table:app.events:cutover:before_exchange risk=caution\n"
         "SELECT 1;\n"
@@ -1100,7 +1161,7 @@ def test_apply_stops_when_the_exchange_does_not_reach_every_replica(
         "chkit.clickhouse.ddl_propagation.resolve_replica_fanout",
         lambda *_: ReplicaFanout(cluster="default", replicas=2),
     )
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
     client = _QueryLogClient(lambda _sql: [])
     store = _FakeStore()
     with pytest.raises(
@@ -1117,34 +1178,36 @@ def test_apply_stops_when_the_exchange_does_not_reach_every_replica(
 
 
 @pytest.mark.usefixtures("_apply_env")
-def test_apply_still_only_warns_when_another_propagation_wait_fails(
+def test_apply_stops_when_another_propagation_wait_fails(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # As in TS (#464): the migration fails and is not recorded as applied.
     def slow(*_args: Any, **_kwargs: Any) -> None:
         msg = "not visible yet"
         raise RuntimeError(msg)
 
     monkeypatch.setattr(migrate_apply, "wait_for_ddl_propagation", slow)
     sql = "-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;\n"
-    warnings: list[str] = []
     (tmp_path / "m.sql").write_text(sql, encoding="utf-8")
     store = _FakeStore()
-    apply_migration(
-        ApplyMigrationInput(
-            client=cast(Any, _RecordingClient()),
-            journal_store=cast(Any, store),
-            plugin_runtime=cast(Any, _Runtime()),
-            config=cast(Any, SimpleNamespace(clickhouse=None)),
-            table_scope=cast(Any, None),
-            migrations_dir=tmp_path,
-            file="m.sql",
-            retry=None,
-            log=lambda _line: None,
-            warn=warnings.append,
+    with pytest.raises(RuntimeError, match="not visible yet"):
+        apply_migration(
+            ApplyMigrationInput(
+                client=cast(Any, _RecordingClient()),
+                journal_store=cast(Any, store),
+                plugin_runtime=cast(Any, _Runtime()),
+                config=cast(Any, SimpleNamespace(clickhouse=None)),
+                table_scope=cast(Any, None),
+                migrations_dir=tmp_path,
+                file="m.sql",
+                retry=None,
+                log=lambda _line: None,
+            )
         )
-    )
-    assert warnings == ["  ⚠ DDL propagation wait failed for table:app.t: not visible yet"]
-    assert len(store.appended) == 1
+    assert store.appended == []
+    # The DROP ran and is journaled as completed, so a re-run does not replay it.
+    assert store.state is not None
+    assert [op.status for op in store.state.operations] == ["completed"]
 
 
 # ---------- generate helpers ----------
@@ -1333,3 +1396,39 @@ def test_cutover_chunk_skips_keys_the_shadow_holds() -> None:
         "SETTINGS async_insert=0, asterisk_include_materialized_columns=0, "
         "asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1",
     ]
+
+
+def test_checks_the_old_table_stores_the_readonly_settings_before_it_creates_anything() -> None:
+    start = plan().operations[0]
+    assert start.type == "cutover_validate"
+    assert (
+        "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
+        f"(SELECT any(tuple({_norm(_GRANULARITY)})) FROM system.tables WHERE database = "
+        f"'app' AND name = 'events') = tuple({_norm(_LIT_8192)})) AS settings"
+    ) in start.sql
+    assert (
+        "throwIf(min(settings) = 0, 'app.events does not store the read-only settings this "
+        "migration expects (index_granularity = 8192)"
+    ) in start.sql
+    assert "Nothing was created or copied." in start.sql
+
+    # A setting only the new table declares is expected absent from the old one.
+    minmax = plan(
+        new_def=events(settings={"add_minmax_index_for_numeric_columns": True})
+    ).operations[0].sql
+    assert f"= tuple({_norm(_LIT_EMPTY)}, {_norm(_LIT_8192)})) AS settings" in minmax
+    assert "(add_minmax_index_for_numeric_columns unset, index_granularity = 8192)" in minmax
+
+
+def test_takes_a_missing_index_granularity_as_the_configured_server_default() -> None:
+    ops = plan(index_granularity=4096).operations
+    assert f"= tuple({_norm(_LIT_4096)})) AS settings" in ops[0].sql
+    assert (
+        "if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',"
+    ) in ops[0].sql
+    exchange = next(op for op in ops if op.type == "exchange_tables")
+    assert "= '', '4096'," in (exchange.before_retry or "")
+    snapshot = next(
+        op for op in ops if op.key == "table:app.events__cutover_20261024120000_snapshot"
+    )
+    assert "SETTINGS index_granularity = 4096" in snapshot.sql

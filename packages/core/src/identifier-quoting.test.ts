@@ -13,6 +13,7 @@ import {
   toCreateSQL,
 } from './sql.js'
 import { unquoteIdentifiers } from './identifier.js'
+import { normalizeKeyColumns } from './key-clause.js'
 import { validateDefinitions } from './validate.js'
 
 // Names a source catalog (e.g. Postgres, via CDC) can legally contain but that
@@ -259,6 +260,11 @@ describe('key clauses keep declared column names whole', () => {
     })
     expect(toCreateSQL(def)).toContain('ORDER BY (`id`, toDate(ts))')
   })
+
+  test('key entries trim JavaScript whitespace', () => {
+    // chkit-py's test_key_clause_expressions.py asserts the same (#523).
+    expect(normalizeKeyColumns(['﻿id\x1c', ' \x85ts﻿ '])).toEqual(['id\x1c', '\x85ts'])
+  })
 })
 
 describe('unquoteIdentifiers', () => {
@@ -266,6 +272,10 @@ describe('unquoteIdentifiers', () => {
     expect(unquoteIdentifiers('(id, `a b`, `c\\`d`, `e,f)`, `x\\\\y`, `g``h`)')).toBe(
       '(id, a b, c`d, e,f), x\\y, g`h)'
     )
+  })
+
+  test('reads other escapes as ClickHouse does (#639)', () => {
+    expect(unquoteIdentifiers('(`a\\q`, `b\\x41`, `c\\Nd`, `e\\%`)')).toBe('(a\\q, bA, cd, e\\%)')
   })
 
   test('leaves string literals untouched', () => {

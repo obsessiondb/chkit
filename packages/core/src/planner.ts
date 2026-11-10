@@ -1,7 +1,8 @@
-import { canonicalizeDefinitions, definitionKey } from './canonical.js'
+import { type CanonicalizeOptions, canonicalizeDefinitions, definitionKey } from './canonical.js'
 import { compareCodePoints } from './order.js'
 import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
+  ColumnDefaultValue,
   ColumnDefinition,
   ColumnRenameSuggestion,
   DictionaryDefinition,
@@ -11,6 +12,7 @@ import type {
   MigrationPlan,
   RiskLevel,
   SchemaDefinition,
+  SkipIndexDefinition,
   TableConstraintDefinition,
   TableDefinition,
   ValidationIssue,
@@ -20,22 +22,30 @@ import {
   renderAlterAddConstraint,
   renderAlterAddIndex,
   renderAlterAddProjection,
+  renderAlterCommentColumn,
   renderAlterDropColumn,
   renderAlterDropConstraint,
   renderAlterDropIndex,
   renderAlterDropProjection,
   renderAlterModifyColumn,
+  renderAlterModifyComment,
   renderAlterModifyRefresh,
   renderAlterModifySetting,
   renderAlterModifyTTL,
   renderAlterRemoveCodec,
+  renderAlterRemoveColumnComment,
   renderAlterRemoveColumnExpression,
   renderAlterResetSetting,
   renderDictionarySQL,
-  renderColumnType,
+  columnTypeFingerprint,
+  columnCodecFingerprint,
+  keyFingerprint,
   toCreateSQL,
 } from './sql.js'
+import { literalDefaultFingerprint, parseColumnDefault, renderDefault } from './column-default.js'
 import { constraintKind } from './constraint.js'
+import { readonlySettingsFingerprint } from './table-settings.js'
+import { sqlExpressionFingerprint } from './sql-normalizer.js'
 import { textIndexFingerprint } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { quoteIdentifier, renderIdentifier, renderQualifiedName } from './identifier.js'
@@ -146,56 +156,26 @@ function pushCreateDatabaseOperation(
   })
 }
 
-// Whitespace and identifier backtick-quoting carry no meaning in a key clause,
-// and ClickHouse normalizes both when it stores the key: `toStartOfHour( ts )`
-// comes back as `toStartOfHour(ts)`, and a column written bare as `user-id` in
-// config is stored/introspected quoted as `` `user-id` ``. Drop insignificant
-// whitespace and identifier backticks (but preserve single/double-quoted string
-// literals, which are semantic) so a config clause and the introspected clause
-// compare equal, avoiding a phantom table recreate. Comparison-only — never
-// used to render DDL, so keyword expressions like `INTERVAL 1 HOUR` and real
-// identifier quoting keep their form when emitted.
-function stripInsignificantFormatting(token: string): string {
-  let out = ''
-  let quote: "'" | '"' | null = null
-  for (let i = 0; i < token.length; i += 1) {
-    const char = token[i] ?? ''
-    if (quote) {
-      out += char
-      if (char === quote && token[i - 1] !== '\\') quote = null
-      continue
-    }
-    if (char === "'" || char === '"') {
-      quote = char
-      out += char
-      continue
-    }
-    if (char === '`') continue
-    if (/\s/.test(char)) continue
-    out += char
-  }
-  return out
-}
-
-function normalizeClauseList(value: string[] | undefined): string {
-  return (value ?? []).map(stripInsignificantFormatting).join(',')
-}
-
 function requiresTableRecreate(oldDef: TableDefinition, newDef: TableDefinition): boolean {
   return diffClauses([
     { oldValue: oldDef.engine, newValue: newDef.engine },
     {
-      oldValue: normalizeClauseList(oldDef.primaryKey),
-      newValue: normalizeClauseList(newDef.primaryKey),
+      oldValue: keyFingerprint(oldDef, oldDef.primaryKey),
+      newValue: keyFingerprint(newDef, newDef.primaryKey),
     },
     {
-      oldValue: normalizeClauseList(oldDef.orderBy),
-      newValue: normalizeClauseList(newDef.orderBy),
+      oldValue: keyFingerprint(oldDef, oldDef.orderBy),
+      newValue: keyFingerprint(newDef, newDef.orderBy),
     },
     { oldValue: oldDef.partitionBy ?? '', newValue: newDef.partitionBy ?? '' },
     {
-      oldValue: normalizeClauseList(oldDef.uniqueKey),
-      newValue: normalizeClauseList(newDef.uniqueKey),
+      oldValue: keyFingerprint(oldDef, oldDef.uniqueKey),
+      newValue: keyFingerprint(newDef, newDef.uniqueKey),
+    },
+    // ClickHouse refuses to change or reset these on an existing table (#466).
+    {
+      oldValue: readonlySettingsFingerprint(oldDef.settings),
+      newValue: readonlySettingsFingerprint(newDef.settings),
     },
   ])
 }
@@ -217,11 +197,29 @@ interface TableDiffResult {
   renameSuggestions: ColumnRenameSuggestion[]
 }
 
-function normalizeColumn(column: ColumnDefinition): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable'> {
-  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, ...rest } = column
+function normalizeColumn(
+  column: ColumnDefinition
+): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> & { codec: string } {
+  const { name: _name, renamedFrom: _renamedFrom, type: _type, nullable: _nullable, codec: _codec, ...rest } = column
   // Compare what the DSL renders: inline Nullable(T) and nullable: true are
   // equivalent, while an additional or differently placed wrapper is not.
-  return { type: renderColumnType(column), ...rest }
+  return {
+    // ClickHouse stores `Decimal(10,2)` as `Decimal(10, 2)` (#466).
+    type: columnTypeFingerprint(column),
+    ...rest,
+    ...(column.default === undefined ? {} : { default: defaultFingerprint(column.default) }),
+    // Codecs compare in the form ClickHouse stores them, like drift (#465).
+    codec: columnCodecFingerprint(column),
+  }
+}
+
+// A literal compares by the SQL it renders, so the literal 7 and the
+// expression '7' that pull reads back are the same default (#466). An
+// expression keeps its comments, which the snapshot records as written.
+function defaultFingerprint(value: ColumnDefaultValue): string {
+  const parsed = parseColumnDefault(value)
+  const sql = parsed.kind === 'expression' ? parsed.sql : renderDefault(value)
+  return literalDefaultFingerprint(sql) ?? sql
 }
 
 function normalizeColumnWithoutCodec(
@@ -231,12 +229,34 @@ function normalizeColumnWithoutCodec(
   return rest
 }
 
-function isCodecRemoval(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
-  if (!oldCol.codec || newCol.codec) return false
-  return (
-    JSON.stringify(normalizeColumnWithoutCodec(oldCol)) ===
-    JSON.stringify(normalizeColumnWithoutCodec(newCol))
-  )
+/** A column without its codec, and without its comment when the plan removes that in its own operation. */
+function columnAfterRemovals(column: ColumnDefinition, removeComment: boolean): Omit<ColumnDefinition, 'name' | 'renamedFrom' | 'nullable' | 'codec'> {
+  const normalized = normalizeColumnWithoutCodec(column)
+  const { comment: _comment, ...rest } = normalized
+  return removeComment ? rest : normalized
+}
+
+function isCommentOnlyChange(oldCol: ColumnDefinition, newCol: ColumnDefinition): boolean {
+  const { comment: _oldComment, ...oldRest } = normalizeColumn(oldCol)
+  const { comment: _newComment, ...newRest } = normalizeColumn(newCol)
+  return shapeKey(oldRest) === shapeKey(newRest)
+}
+
+/**
+ * A comment change on a table, view, materialized view or dictionary is an
+ * ALTER of the object in place: recreating a materialized view would lose the
+ * rows its source receives in between.
+ */
+function diffComment(oldDef: SchemaDefinition, newDef: SchemaDefinition): MigrationOperation[] {
+  if (oldDef.comment === newDef.comment) return []
+  return [
+    {
+      type: 'alter_table_modify_comment',
+      key: `${definitionKey(newDef)}:comment`,
+      risk: 'safe',
+      sql: renderAlterModifyComment(newDef),
+    },
+  ]
 }
 
 function renderRenameColumnSuggestionSQL(table: TableDefinition, from: string, to: string): string {
@@ -255,7 +275,7 @@ function inferColumnRenameSuggestions(
 
   const addedBySignature = new Map<string, ColumnDefinition[]>()
   for (const column of addedColumns) {
-    const signature = JSON.stringify(normalizeColumn(column))
+    const signature = shapeKey(normalizeColumn(column))
     const existing = addedBySignature.get(signature) ?? []
     existing.push(column)
     addedBySignature.set(signature, existing)
@@ -263,7 +283,7 @@ function inferColumnRenameSuggestions(
 
   const suggestions: ColumnRenameSuggestion[] = []
   for (const oldColumn of droppedColumns) {
-    const signature = JSON.stringify(normalizeColumn(oldColumn))
+    const signature = shapeKey(normalizeColumn(oldColumn))
     const candidates = addedBySignature.get(signature)
     if (!candidates || candidates.length !== 1) continue
     const [candidate] = candidates
@@ -298,7 +318,7 @@ function refreshEqual(
   oldRefresh: MaterializedViewRefresh | undefined,
   newRefresh: MaterializedViewRefresh | undefined
 ): boolean {
-  return JSON.stringify(oldRefresh ?? null) === JSON.stringify(newRefresh ?? null)
+  return shapeKey(oldRefresh ?? null) === shapeKey(newRefresh ?? null)
 }
 
 function diffMaterializedView(
@@ -312,7 +332,6 @@ function diffMaterializedView(
 
   const structuralChange =
     newDef.as !== oldDef.as ||
-    newDef.comment !== oldDef.comment ||
     newDef.to.database !== oldDef.to.database ||
     newDef.to.name !== oldDef.to.name ||
     hasOldRefresh !== hasNewRefresh ||
@@ -335,18 +354,18 @@ function diffMaterializedView(
     ]
   }
 
-  if (hasNewRefresh && !refreshEqual(oldDef.refresh, newDef.refresh)) {
-    return [
-      {
-        type: 'alter_materialized_view_modify_refresh',
-        key: `materialized_view:${newDef.database}.${newDef.name}:refresh`,
-        risk: 'caution',
-        sql: renderAlterModifyRefresh(newDef),
-      },
-    ]
-  }
-
-  return []
+  const refreshOps: MigrationOperation[] =
+    hasNewRefresh && !refreshEqual(oldDef.refresh, newDef.refresh)
+      ? [
+          {
+            type: 'alter_materialized_view_modify_refresh',
+            key: `materialized_view:${newDef.database}.${newDef.name}:refresh`,
+            risk: 'caution',
+            sql: renderAlterModifyRefresh(newDef),
+          },
+        ]
+      : []
+  return [...refreshOps, ...diffComment(oldDef, newDef)]
 }
 
 // `chkit pull` writes ClickHouse's own introspection placeholder
@@ -360,9 +379,47 @@ function dictionarySourceIsHidden(source: string): boolean {
 }
 
 function dictionaryComparisonShape(def: DictionaryDefinition, omitSource: boolean) {
-  if (!omitSource) return def
-  const { source, ...rest } = def
-  return rest
+  // The comment is compared on its own (diffComment), so changing only it
+  // plans COMMENT, not a CREATE OR REPLACE.
+  const { comment: _comment, source, ...rest } = def
+  const shape = { ...rest, lifetime: dictionaryLifetimeFingerprint(def.lifetime) }
+  return omitSource ? shape : { ...shape, source }
+}
+
+const LIFETIME_RANGE_RE = /^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$/i
+
+/**
+ * ClickHouse stores `LIFETIME(300)` as `LIFETIME(MIN 0 MAX 300)` and
+ * `LIFETIME(MAX 300 MIN 10)` as `LIFETIME(MIN 10 MAX 300)`, so a dictionary
+ * pulled back compares by that stored form.
+ */
+function dictionaryLifetimeFingerprint(lifetime: string): string {
+  const trimmed = lifetime.trim()
+  if (/^\d+$/.test(trimmed)) return `MIN 0 MAX ${trimmed}`
+  const range = LIFETIME_RANGE_RE.exec(trimmed)
+  if (!range) return trimmed
+  return range[1] !== undefined ? `MIN ${range[1]} MAX ${range[2]}` : `MIN ${range[4]} MAX ${range[3]}`
+}
+
+/**
+ * JSON with object keys sorted, for comparing definitions: key order follows
+ * how the schema spelled an object, and pull writes its own order (#466).
+ */
+// chkit renders `INDEX name (expr)`. Stock ClickHouse stores `s` for `(s)`,
+// ObsessionDB keeps `(s)`, so the parentheses around the whole expression are
+// not compared (#512). Inside the rendered parentheses `(a, b)` and `a, b` are
+// the same tuple, and `((s))`, `(s)` and `s` the same expression.
+function indexComparisonShape(index: SkipIndexDefinition): SkipIndexDefinition {
+  return { ...index, expression: sqlExpressionFingerprint(index.expression) }
+}
+
+function shapeKey(value: unknown): string {
+  return JSON.stringify(value, sortObjectKeys)
+}
+
+function sortObjectKeys(_key: string, value: unknown): unknown {
+  if (typeof value !== 'object' || value === null || Array.isArray(value)) return value
+  return Object.fromEntries(Object.entries(value).sort(([a], [b]) => (a < b ? -1 : a > b ? 1 : 0)))
 }
 
 function diffDictionary(
@@ -371,9 +428,8 @@ function diffDictionary(
 ): MigrationOperation[] {
   const omitSource = dictionarySourceIsHidden(newDef.source)
   const unchanged =
-    JSON.stringify(dictionaryComparisonShape(oldDef, omitSource)) ===
-    JSON.stringify(dictionaryComparisonShape(newDef, omitSource))
-  if (unchanged) return []
+    shapeKey(dictionaryComparisonShape(oldDef, omitSource)) === shapeKey(dictionaryComparisonShape(newDef, omitSource))
+  if (unchanged) return diffComment(oldDef, newDef)
 
   return [
     {
@@ -391,7 +447,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       Object.entries(def.settings ?? {}).map(([key, value]) => [key, kafkaSettingFingerprint(value)])
     )
     if (requiresTableRecreate(oldDef, newDef)
-      || JSON.stringify(oldDef.columns.map(column => [column.name, normalizeColumn(column)])) !== JSON.stringify(newDef.columns.map(column => [column.name, normalizeColumn(column)]))
+      || shapeKey(oldDef.columns.map(column => [column.name, normalizeColumn(column)])) !== shapeKey(newDef.columns.map(column => [column.name, normalizeColumn(column)]))
       || diffSettings(settings(oldDef), settings(newDef)).changes.length > 0
       || (oldDef.comment ?? '') !== (newDef.comment ?? '')) {
       throw new ChxValidationError([{
@@ -426,7 +482,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.columns,
     newDef.columns,
     (column) => column.name,
-    (left, right) => JSON.stringify(normalizeColumn(left)) === JSON.stringify(normalizeColumn(right))
+    (left, right) => shapeKey(normalizeColumn(left)) === shapeKey(normalizeColumn(right))
   )
   const addedColumns = columnDiff.added
   const droppedColumns = columnDiff.removed
@@ -453,17 +509,32 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     const oldKind = oldItem.defaultKind ?? 'DEFAULT'
     const newKind = newItem.defaultKind ?? 'DEFAULT'
     const key = `table:${newDef.database}.${newDef.name}:column:${name}`
+    const removeComment = oldItem.comment !== undefined && newItem.comment === undefined
+    if (isCommentOnlyChange(oldItem, newItem)) {
+      ops.push({
+        type: 'alter_table_modify_column',
+        key,
+        risk: 'safe',
+        sql: removeComment ? renderAlterRemoveColumnComment(newDef, name) : renderAlterCommentColumn(newDef, newItem),
+      })
+      continue
+    }
     const removeExpression = renderAlterRemoveColumnExpression(newDef, newItem, oldItem)
     // Its own operation: migrate pairs each `-- operation:` marker with exactly one statement.
     if (removeExpression) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: removeExpression })
-    const sql = isCodecRemoval(oldItem, newItem)
-      ? renderAlterRemoveCodec(newDef, name)
-      : renderAlterModifyColumn(newDef, newItem)
+    // MODIFY COLUMN without COMMENT keeps the old comment.
+    if (removeComment) ops.push({ type: 'alter_table_modify_column', key, risk: 'safe', sql: renderAlterRemoveColumnComment(newDef, name) })
+    // MODIFY COLUMN without a codec keeps the stored one: a removal is always
+    // REMOVE CODEC, its own operation before any other change (#465).
+    const codecRemoved = Boolean(oldItem.codec) && !newItem.codec
+    if (codecRemoved) ops.push({ type: 'alter_table_modify_column', key, risk: 'caution', sql: renderAlterRemoveCodec(newDef, name) })
+    // The removals above already reach the schema when nothing else changed.
+    if (codecRemoved && shapeKey(columnAfterRemovals(oldItem, removeComment)) === shapeKey(columnAfterRemovals(newItem, removeComment))) continue
     ops.push( {
       type: 'alter_table_modify_column',
       key,
       risk: 'caution',
-      sql,
+      sql: renderAlterModifyColumn(newDef, newItem),
       ...((oldKind === 'DEFAULT' || oldKind === 'MATERIALIZED' || newKind === 'DEFAULT' || newKind === 'MATERIALIZED') && (oldItem.default !== newItem.default || oldKind !== newKind)
         ? { warning: `Changing the expression for ${newDef.database}.${newDef.name}.${name} does not rewrite stored historical values. Review a separate MATERIALIZE COLUMN migration if a rewrite is required; never reconstruct values from discarded EPHEMERAL inputs.` }
         : {}),
@@ -484,7 +555,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     (index) => index.name,
     (left, right) => left.type === 'text' && right.type === 'text'
       ? textIndexFingerprint(left) === textIndexFingerprint(right)
-      : JSON.stringify(left) === JSON.stringify(right)
+      : shapeKey(indexComparisonShape(left)) === shapeKey(indexComparisonShape(right))
   )
   for (const index of indexDiff.added) {
     ops.push( {
@@ -521,7 +592,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.constraints ?? [],
     newDef.constraints ?? [],
     (constraint) => constraint.name,
-    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    (left, right) => shapeKey(left) === shapeKey(right)
   )
   const addConstraint = (constraint: TableConstraintDefinition): MigrationOperation => ({
     type: 'alter_table_add_constraint',
@@ -544,7 +615,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
     oldDef.projections ?? [],
     newDef.projections ?? [],
     (projection) => projection.name,
-    (left, right) => JSON.stringify(left) === JSON.stringify(right)
+    (left, right) => shapeKey(left) === shapeKey(right)
   )
   for (const projection of projectionDiff.added) {
     ops.push( {
@@ -604,6 +675,7 @@ function diffTables(oldDef: TableDefinition, newDef: TableDefinition): TableDiff
       sql: renderAlterModifyTTL(newDef, newDef.ttl),
     })
   }
+  ops.push(...diffComment(oldDef, newDef))
 
   return {
     operations: ops,
@@ -618,9 +690,13 @@ function constraintWarning(def: TableDefinition, constraint: TableConstraintDefi
     : `${subject} is an ASSUME constraint: ClickHouse never validates it, and queries optimized with optimize_using_constraints trust it, so an assumption that does not hold returns wrong results.`
 }
 
-export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: SchemaDefinition[]): MigrationPlan {
-  const oldCanonical = canonicalizeDefinitions(oldDefinitions)
-  const newCanonical = canonicalizeDefinitions(newDefinitions)
+export function planDiff(
+  oldDefinitions: SchemaDefinition[],
+  newDefinitions: SchemaDefinition[],
+  options: CanonicalizeOptions = {}
+): MigrationPlan {
+  const oldCanonical = canonicalizeDefinitions(oldDefinitions, options)
+  const newCanonical = canonicalizeDefinitions(newDefinitions, options)
   assertValidDefinitions(newCanonical)
   const oldMap = createMap(oldCanonical)
   const newMap = createMap(newCanonical)
@@ -646,9 +722,11 @@ export function planDiff(oldDefinitions: SchemaDefinition[], newDefinitions: Sch
     }
 
     if (newDef.kind === oldDef.kind && newDef.kind === 'view' && oldDef.kind === 'view') {
-      if (newDef.as !== oldDef.as || newDef.comment !== oldDef.comment) {
+      if (newDef.as !== oldDef.as) {
         pushDropOperation(operations, oldDef, 'caution')
         pushCreateOperation(operations, newDef, 'caution')
+      } else {
+        operations.push(...diffComment(oldDef, newDef))
       }
       continue
     }

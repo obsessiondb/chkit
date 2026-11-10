@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-backfill",
-  "version": "0.2.0-beta.11",
+  "version": "0.2.0-beta.16",
   "description": "Time-windowed data backfill with checkpoints for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -42,7 +42,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun run src/chunking/e2e/seed-datasets.script.ts && bun test src",
+    "test": "bun run ../../scripts/infra-up.ts && bun run src/chunking/e2e/seed-datasets.script.ts && bun test src --parallel",
     "clean": "rm -rf dist"
   },
   "dependencies": {

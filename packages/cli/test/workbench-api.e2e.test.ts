@@ -75,7 +75,7 @@ describe('async migrate through the real ObsessionDB workbench API', () => {
     const table = `\`${database}\`.\`${tableName}\``
     const operationKey = `table:${database}.${tableName}`
     const migrationName = `20990101000000_${tableName}.sql`
-    const queryId = makeDeterministicQueryId(migrationName, 0)
+    const queryId = makeDeterministicQueryId(database, '_chkit_migrations', migrationName, 0)
     let attempt: Promise<string> | undefined
     try {
       await remote.command(`CREATE TABLE ${table} (n UInt64) ENGINE = MergeTree ORDER BY n`)

@@ -6,6 +6,7 @@ import { writeSnapshot } from '@chkit/codegen'
 import {
   canonicalizeDefinitions,
   ChxValidationError,
+  configuredIndexGranularity,
   validateDefinitions,
   type ParsedFlags,
   type ResolvedChxConfig,
@@ -45,6 +46,7 @@ export interface SnapshotRebuildDeps {
 export async function runSnapshotRebuild(input: SnapshotRebuildInput, deps: SnapshotRebuildDeps): Promise<number> {
   const { metaDir } = resolveDirs(deps.config)
   const snapshotFile = join(metaDir, 'snapshot.json')
+  const indexGranularity = configuredIndexGranularity(deps.config)
 
   const loaded = await loadSchemaDefinitionsWithHooks(
     {
@@ -62,8 +64,8 @@ export async function runSnapshotRebuild(input: SnapshotRebuildInput, deps: Snap
   // A table that a keep-mode cutover retained is declared in the snapshot only,
   // so the rebuild keeps it, as `generate` does.
   const definitions = carryRetainedDefinitions({
-    previousDefinitions: await readRetainedSource(metaDir),
-    definitions: canonicalizeDefinitions(loaded),
+    previousDefinitions: await readRetainedSource(metaDir, indexGranularity),
+    definitions: canonicalizeDefinitions(loaded, { indexGranularity }),
     dropRetained: [],
   })
 
@@ -78,13 +80,13 @@ export async function runSnapshotRebuild(input: SnapshotRebuildInput, deps: Snap
     throw new Error(`${new ChxValidationError(issues).message}\n${details}`)
   }
 
-  const previous = await describePreviousSnapshot(snapshotFile, definitions)
+  const previous = await describePreviousSnapshot(snapshotFile, definitions, indexGranularity)
   const upToDate =
     previous.status === 'parsed' &&
     previous.added.length + previous.removed.length + previous.changed.length === 0
   // An unchanged snapshot is left alone, so a rebuild never churns `generatedAt`.
   const written = !input.dryrun && !upToDate
-  if (written) await writeSnapshot({ metaDir, definitions })
+  if (written) await writeSnapshot({ metaDir, definitions, indexGranularity })
 
   emitSnapshotRebuildOutput(
     {
@@ -101,9 +103,9 @@ export async function runSnapshotRebuild(input: SnapshotRebuildInput, deps: Snap
 }
 
 /** The definitions of the current snapshot, or none when it is missing or unreadable. */
-async function readRetainedSource(metaDir: string): Promise<SchemaDefinition[]> {
+async function readRetainedSource(metaDir: string, indexGranularity: number): Promise<SchemaDefinition[]> {
   try {
-    return (await readSnapshot(metaDir))?.definitions ?? []
+    return (await readSnapshot(metaDir, { indexGranularity }))?.definitions ?? []
   } catch {
     return []
   }
@@ -112,13 +114,14 @@ async function readRetainedSource(metaDir: string): Promise<SchemaDefinition[]> 
 async function describePreviousSnapshot(
   snapshotFile: string,
   next: SchemaDefinition[],
+  indexGranularity: number,
 ): Promise<PreviousSnapshotReport> {
   if (!existsSync(snapshotFile)) return { status: 'missing' }
   const raw = await readFile(snapshotFile, 'utf8')
 
   let parsed: ParsedSnapshotDocument
   try {
-    parsed = parseSnapshotDocument(raw)
+    parsed = parseSnapshotDocument(raw, { indexGranularity })
   } catch {
     // Valid JSON whose entries cannot be read as chkit definitions. The rebuild
     // replaces it anyway; it just cannot be compared.

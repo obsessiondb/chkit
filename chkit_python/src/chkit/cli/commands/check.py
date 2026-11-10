@@ -24,6 +24,7 @@ import typer
 
 from chkit.cli.command_target import (
     ServiceOption,
+    assert_index_granularity_matches_server,
     exit_no_target,
     open_client,
     resolve_plugin_executor,
@@ -31,6 +32,7 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import summarize_drift_reasons
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json
@@ -47,7 +49,8 @@ from chkit.cli.table_scope import (
     scope_to_payload,
     table_keys_from_definitions,
 )
-from chkit.core.model import ChxConfigEnv
+from chkit.core.model import ChxConfigEnv, configured_index_granularity
+from chkit.core.validate import collect_definition_warnings
 from chkit.plugins import (
     ChxOnCheckContext,
     ChxOnCheckResult,
@@ -61,31 +64,24 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
+    table_selector: Annotated[
+        str | None,
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
+    ] = None,
     strict: Annotated[
         bool,
-        typer.Option("--strict", help="Enable all policy checks."),
+        typer.Option("--strict", help="Enable all policy checks"),
     ] = False,
     live: Annotated[  # noqa: ARG001
         bool,
         typer.Option(
             "--live",
-            help="No-op, kept for existing scripts: check always reads the live server.",
+            help="No-op, kept for existing scripts: check always reads the live server",
         ),
     ] = False,
     output_json: Annotated[
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
-    table_selector: Annotated[
-        str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help=(
-                "Scope the drift and plugin checks to the matched tables; pending "
-                "and checksum checks still cover every migration."
-            ),
-        ),
-    ] = None,
     # As in TS, the ObsessionDB plugin's on_check reads these: a Distributed
     # table fails check when the target counts as ObsessionDB.
     force_shared_engines: ForceSharedEnginesOption = False,
@@ -97,6 +93,18 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
     resolved_config_path = str(config_path or "clickhouse.config.py")
+    # As in TS, every hook gets the parsed flags.
+    hook_flags = passed_flags(
+        {
+            "--config": str(config_path) if config_path is not None else None,
+            "--json": output_json,
+            "--table": table_selector,
+            "--strict": strict,
+            "--force-shared-engines": force_shared_engines,
+            "--no-shared-engines": no_shared_engines,
+            "--service": service,
+        }
+    )
     executor = resolve_plugin_executor(
         plugin_runtime,
         config,
@@ -104,6 +112,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         config_path=resolved_config_path,
         json_mode=output_json,
         service=service,
+        flags=hook_flags,
     )
     if executor is None and config.clickhouse is None:
         msg = "clickhouse config is required for check (journal is stored in ClickHouse)"
@@ -114,7 +123,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     migrations_dir.mkdir(parents=True, exist_ok=True)
 
     files = list_migration_filenames(migrations_dir)
-    snapshot = read_snapshot(meta_dir)
+    snapshot = read_snapshot(meta_dir, index_granularity=configured_index_granularity(config))
     table_scope = resolve_table_scope(
         table_selector,
         table_keys_from_definitions(snapshot.definitions if snapshot is not None else []),
@@ -123,6 +132,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     drifted = False
     drift_reasons = summarize_drift_reasons([], [])
     with open_client(executor, config.clickhouse) as client:
+        assert_index_granularity_matches_server("check", client, config, json_mode=output_json)
         store = JournalStore(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None
         )
@@ -143,6 +153,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 database=config.clickhouse.database if config.clickhouse else None,
                 fail_on_extra_objects=config.check.fail_on_extra_objects,
                 scope=table_scope if table_scope.enabled else None,
+                index_granularity=configured_index_granularity(config),
             )
             drifted = payload.drifted
             drift_reasons = summarize_drift_reasons(payload.object_drift, payload.table_drift)
@@ -160,18 +171,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         # Match the TS finding code: ``schema_drift`` (was ``drift``).
         failed_checks.append("schema_drift")
 
-    # As in TS, every hook gets the parsed flags.
-    hook_flags = passed_flags(
-        {
-            "--config": str(config_path) if config_path is not None else None,
-            "--json": output_json,
-            "--table": table_selector,
-            "--strict": strict,
-            "--force-shared-engines": force_shared_engines,
-            "--no-shared-engines": no_shared_engines,
-            "--service": service,
-        }
-    )
     # As in TS, the on_config_loaded hooks run right before on_check.
     plugin_runtime.run_on_config_loaded(
         ChxOnConfigLoadedContext(
@@ -199,6 +198,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         f"plugin:{result.plugin}" for result in plugin_results if _plugin_failed(result)
     )
     ok = not failed_checks
+    snapshot_definitions = snapshot.definitions if snapshot is not None else []
+    warnings = [issue.message for issue in collect_definition_warnings(snapshot_definitions)]
 
     # TS envelope: top-level ``policy`` + ``driftEvaluated`` + scope + plugins map.
     policy_payload: dict[str, bool] = {
@@ -233,6 +234,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             for r in plugin_results
         },
         "scope": scope_to_payload(table_scope),
+        "warnings": warnings,
     }
     database = config.clickhouse.database if config.clickhouse else None
     if database_missing:
@@ -277,6 +279,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 codes = [f.code for f in r.findings]
                 suffix = f" ({', '.join(codes)})" if codes else ""
                 typer.echo(f"- {r.plugin}: {'ok' if r.ok else 'failed'}{suffix}")
+        for warning in warnings:
+            typer.echo(f"Warning: {warning}", err=True)
         if failed_checks:
             typer.echo(f"Failed checks: {', '.join(failed_checks)}")
         plugin_runtime.run_on_check_report(plugin_results, typer.echo)

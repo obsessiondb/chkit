@@ -17,6 +17,7 @@ from chkit.cli.commands.drift_compare import (
     TableDriftDetail,
     collect_table_sql_fragments,
     collect_view_sql_queries,
+    compare_object_comments,
     compare_schema_objects,
     compare_table_shape,
     compare_view_shape,
@@ -36,6 +37,7 @@ from chkit.core.model import (
     TableDefinition,
     ViewDefinition,
 )
+from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY
 
 
 @dataclass(frozen=True, slots=True)
@@ -128,6 +130,7 @@ def build_drift_payload(
     database: str | None,
     fail_on_extra_objects: bool = False,
     scope: TableScope | None = None,
+    index_granularity: int = DEFAULT_INDEX_GRANULARITY,
 ) -> DriftPayload:
     """Run live introspection and produce the full DriftPayload."""
     selected_tables: set[str] | None = (
@@ -174,12 +177,12 @@ def build_drift_payload(
 
     expected_filtered = _expected_filtered()
     expected_objects = [
-        SchemaObjectShape(kind=d.kind, database=d.database, name=d.name)
+        SchemaObjectShape(kind=d.kind, database=d.database, name=d.name, comment=d.comment)
         for d in expected_filtered
     ]
     expected_databases = {d.database for d in expected_filtered}
     actual_in_scope = [
-        SchemaObjectShape(kind=o.kind, database=o.database, name=o.name)
+        SchemaObjectShape(kind=o.kind, database=o.database, name=o.name, comment=o.comment)
         for o in actual_objects
         if o.database in expected_databases
     ]
@@ -238,17 +241,23 @@ def build_drift_payload(
     table_drift_unsorted = [
         detail
         for expected, actual in pairs
-        if (detail := compare_table_shape(expected, actual, canonicalizer)) is not None
+        if (
+            detail := compare_table_shape(expected, actual, canonicalizer, index_granularity)
+        )
+        is not None
     ]
     table_drift = sorted(table_drift_unsorted, key=lambda d: d.table)
     view_drift = sorted(
-        (
-            detail
-            for expected_view, actual_view in view_pairs
-            for detail in compare_view_shape(
-                expected_view, actual_view, current_database, canonicalizer
-            )
-        ),
+        [
+            *(
+                detail
+                for expected_view, actual_view in view_pairs
+                for detail in compare_view_shape(
+                    expected_view, actual_view, current_database, canonicalizer
+                )
+            ),
+            *compare_object_comments(expected_objects, actual_in_scope),
+        ],
         key=lambda d: d.object,
     )
 

@@ -67,6 +67,15 @@ describe('parseCutoverRequest', () => {
     expect(parseCutoverRequest(' app.events = user_id, id ')).toEqual({ database: 'app', table: 'events', key: ['user_id', 'id'] })
   })
 
+  test('trims JavaScript whitespace', () => {
+    // chkit-py's test_name_trim.py asserts the same (#580).
+    expect(parseCutoverRequest('\ufeffapp.events\ufeff=\ufeffid\x85, \x1cuser_id')).toEqual({
+      database: 'app',
+      table: 'events',
+      key: ['id\x85', '\x1cuser_id'],
+    })
+  })
+
   test('requires a key, because the key is the boundary between mirrored and copied rows', () => {
     expect(() => parseCutoverRequest('app.events')).toThrow('--cutover app.events needs the columns that identify a row')
     expect(() => parseCutoverRequest('app.events=')).toThrow('needs the columns that identify a row')
@@ -172,6 +181,54 @@ describe('planCutover', () => {
     expect(verify).toContain('The table was not swapped.')
   })
 
+  test('cuts over a change of read-only settings only, telling the tables apart by them (#511)', () => {
+    const newDef = events({ settings: { index_granularity: 4096 } })
+    const ops = plan({ newDef }).operations
+    const guard = ops.find((op) => op.type === 'exchange_tables')?.beforeRetry ?? ''
+    expect(guard).toContain("if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192',")
+    expect(ops.find((op) => op.type === 'create_table')?.sql).toContain('SETTINGS index_granularity = 4096;')
+    const minmax = plan({ newDef: events({ settings: { add_minmax_index_for_numeric_columns: 1 } }) }).operations
+    expect(minmax.find((op) => op.type === 'exchange_tables')?.beforeRetry).toContain('add_minmax_index_for_numeric_columns = ([^,]*)')
+  })
+
+  test('cuts over a key on a column named `a,b` to a key on columns a and b, as the planner reads it', () => {
+    // chkit-py's test_cutover.py asserts the same.
+    const named = [{ name: 'a,b', type: 'UInt64' }, { name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64' }] as TableDefinition['columns']
+    const oldDef = events({ columns: named, primaryKey: ['a,b'], orderBy: ['a,b'] })
+    const newDef = events({ columns: named, primaryKey: ['a', 'b'], orderBy: ['a', 'b'] })
+    const ops = plan({ oldDef, newDef, key: ['a'] }).operations
+    expect(ops.find((op) => op.type === 'create_table')?.sql).toContain('PRIMARY KEY (`a`, `b`)')
+    expect(ops.some((op) => op.type === 'exchange_tables')).toBe(true)
+  })
+
+  test('compares a numeric read-only setting by value, as ClickHouse may store 1e6 as 1000000. (#511)', () => {
+    const guard = plan({ newDef: events({ settings: { index_granularity_bytes: 1e6 } }) }).operations.find((op) => op.type === 'exchange_tables')?.beforeRetry ?? ''
+    expect(guard).toContain("multiIf(lower(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')) = 'true', '1', lower(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')) = 'false', '0', ifNull(toString(toFloat64OrNull(extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)'))), extract(engine_full, '(?:SETTINGS |, )index_granularity_bytes = ([^,]*)')))")
+  })
+
+  test('checks the old table stores the read-only settings it expects before it creates anything (#466)', () => {
+    const start = plan().operations[0]
+    expect(start?.type).toBe('cutover_validate')
+    expect(start?.sql).toContain(
+      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(tuple(multiIf(lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'true', '1', lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'false', '0', ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))))) FROM system.tables WHERE database = 'app' AND name = 'events') = tuple(multiIf(lower('8192') = 'true', '1', lower('8192') = 'false', '0', ifNull(toString(toFloat64OrNull('8192')), '8192')))) AS settings"
+    )
+    expect(start?.sql).toContain("throwIf(min(settings) = 0, 'app.events does not store the read-only settings this migration expects (index_granularity = 8192)")
+    expect(start?.sql).toContain('Nothing was created or copied.')
+
+    // A setting only the new table declares is expected absent from the old one.
+    const minmax = plan({ newDef: events({ settings: { add_minmax_index_for_numeric_columns: true } }) }).operations[0]?.sql ?? ''
+    expect(minmax).toContain("= tuple(multiIf(lower('') = 'true', '1', lower('') = 'false', '0', ifNull(toString(toFloat64OrNull('')), '')), multiIf(lower('8192') = 'true', '1', lower('8192') = 'false', '0', ifNull(toString(toFloat64OrNull('8192')), '8192')))) AS settings")
+    expect(minmax).toContain('(add_minmax_index_for_numeric_columns unset, index_granularity = 8192)')
+  })
+
+  test('takes a missing index_granularity as the configured server default', () => {
+    const ops = plan({ options: { indexGranularity: 4096 } }).operations
+    expect(ops[0]?.sql).toContain("= tuple(multiIf(lower('4096') = 'true', '1', lower('4096') = 'false', '0', ifNull(toString(toFloat64OrNull('4096')), '4096')))) AS settings")
+    expect(ops[0]?.sql).toContain("if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '4096',")
+    expect(ops.find((op) => op.type === 'exchange_tables')?.beforeRetry).toContain("= '', '4096',")
+    expect(ops.find((op) => op.key === 'table:app.events__cutover_20261024120000_snapshot')?.sql).toContain('SETTINGS index_granularity = 4096')
+  })
+
   test('guards the exchange on every attempt, so a replay never swaps the tables back', () => {
     const ops = plan().operations
     const exchange = ops[10]
@@ -179,7 +236,7 @@ describe('planCutover', () => {
     expect(exchange?.beforeRetry).toBeDefined()
     expect(`${exchange?.beforeRetry};`).toBe(ops[9]?.sql)
     expect(exchange?.beforeRetry).toContain(
-      "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables WHERE database = 'app' AND name = 'events__cutover_20261024120000_snapshot')"
+      "(SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(multiIf(lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'true', '1', lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'false', '0', ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))))))) FROM system.tables WHERE database = 'app' AND name = 'events') = (SELECT any(tuple(engine, sorting_key, primary_key, partition_key, tuple(multiIf(lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'true', '1', lower(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))) = 'false', '0', ifNull(toString(toFloat64OrNull(if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)')))), if(extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)') = '', '8192', extract(engine_full, '(?:SETTINGS |, )index_granularity = ([^,]*)'))))))) FROM system.tables WHERE database = 'app' AND name = 'events__cutover_20261024120000_snapshot')"
     )
     expect(exchange?.beforeRetry).not.toContain('\n')
   })
@@ -332,6 +389,13 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
     expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments change')])
   })
 
+  test('keys that differ only in spelling, as the planner compares them', () => {
+    // chkit-py's test_cutover.py asserts the same.
+    const oldDef = events({ engine: "ReplicatedMergeTree('/t/{uuid}', '{replica}')", primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] })
+    const newDef = events({ engine: "ReplicatedMergeTree('/t2/{uuid}', '{replica}')", primaryKey: ['`user_id`,  id'], orderBy: ['"user_id"', 'id'] })
+    expect(messages(() => plan({ oldDef, newDef, options: { cluster: 'c2' } }))).toEqual([expect.stringContaining('only the engine arguments change')])
+  })
+
   test('a replication path without {table} or {uuid}, where the shadow would collide', () => {
     const replicated = (def: TableDefinition) => ({ ...def, engine: "ReplicatedMergeTree('/clickhouse/tables/{shard}/app/events', '{replica}')" })
     expect(messages(() => plan({ oldDef: replicated(OLD), newDef: replicated(NEW), options: { cluster: 'c2' } }))).toEqual([
@@ -418,6 +482,9 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
     const buffer = (engine: string) => table({ database: 'app', name: 'events_buffer', engine, columns } as never)
     const refused = (engine: string) => messages(() => plan({ definitions: [NEW, buffer(engine)] })).length
     expect(refused("Buffer(`app`, \"events\", 16, 10, 100, 10000, 1000000, 10000000, 100000000)")).toBe(1)
+    // Arguments trim JavaScript whitespace; chkit-py's test_cutover.py asserts the same (#580).
+    expect(refused('Buffer(\ufeffapp\ufeff, \ufeffevents, 16, 10, 100, 10000, 1000000, 10000000, 100000000)')).toBe(1)
+    expect(() => plan({ definitions: [NEW, buffer('Buffer(app\x85, events, 16, 10, 100, 10000, 1000000, 10000000, 100000000)')] })).not.toThrow()
     expect(() => plan({ definitions: [NEW, buffer("Buffer('app', 'other', 16, 10, 100, 10000, 1000000, 10000000, 100000000)")] })).not.toThrow()
     const started = Date.now()
     expect(() => plan({ definitions: [NEW, buffer(`Buffer(${'\t'.repeat(50_000)}`)] })).not.toThrow()

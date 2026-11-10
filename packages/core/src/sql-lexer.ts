@@ -45,19 +45,53 @@ const HEX_DIGIT = /[0-9A-Fa-f]/
 const HEREDOC_TAG = /[A-Za-z0-9_]/
 const EXPONENT = /^[eE][+-]?[0-9]/
 const HEX_EXPONENT = /^[pP][+-]?[0-9]/
+const HEX_BYTE = /^[0-9A-Fa-f]{2}$/
+const LAST_CONTROL_ASCII = 0x1f
+// ClickHouse's parseEscapeSequence: the escapes that stand for a control byte.
+const CONTROL_ESCAPES: Readonly<Record<string, string>> = {
+  '0': '\0',
+  a: '\x07',
+  b: '\b',
+  e: '\x1b',
+  f: '\f',
+  n: '\n',
+  r: '\r',
+  t: '\t',
+  v: '\v',
+}
+// Escaped characters that lose their backslash; any other escape keeps it, so
+// a LIKE pattern's `\%` stays `\%` (parseComplexEscapeSequence).
+const PLAIN_ESCAPES = new Set(['\\', "'", '"', '`', '/', '='])
+// A name may start with U+FEFF (`\xEF\xBB\xBF`); it is a character, not a BOM.
+const UTF8 = new TextDecoder('utf-8', { ignoreBOM: true })
 
 export function tokenizeSQL(sql: string): SQLToken[] {
   const tokens: SQLToken[] = []
+  const heredocEnd = heredocReader(sql)
   let previous: SQLToken | undefined
   let i = 0
   while (i < sql.length) {
-    const { kind, end, terminated } = readToken(sql, i, previous)
+    const { kind, end, terminated } = readToken(sql, i, previous, heredocEnd)
     const token: SQLToken = { kind, text: sql.slice(i, end), start: i, end, terminated }
     tokens.push(token)
     if (!isTrivia(token)) previous = token
     i = end
   }
   return tokens
+}
+
+/** The tokens of `tokenizeSQL`, one at a time, for a caller that keeps few of them. */
+export function* sqlTokens(sql: string): Generator<SQLToken> {
+  const heredocEnd = heredocReader(sql)
+  let previous: SQLToken | undefined
+  let i = 0
+  while (i < sql.length) {
+    const { kind, end, terminated } = readToken(sql, i, previous, heredocEnd)
+    const token: SQLToken = { kind, text: sql.slice(i, end), start: i, end, terminated }
+    yield token
+    if (!isTrivia(token)) previous = token
+    i = end
+  }
 }
 
 /** Whitespace and comments: tokens that never change what a statement means. */
@@ -69,7 +103,7 @@ export function isTrivia(token: SQLToken): boolean {
 export function identifierName(token: SQLToken): string | undefined {
   if (token.kind === 'identifier') return token.text
   if (token.kind !== 'quoted_identifier' || !token.terminated) return undefined
-  return unescapeQuoted(token.text)
+  return unescapeQuoted(token.text.slice(1, -1), token.text[0])
 }
 
 /** The value of a terminated string literal (`'…'` or a `$tag$…$tag$` heredoc). */
@@ -79,12 +113,58 @@ export function stringLiteralValue(token: SQLToken): string | undefined {
     const tagLength = token.text.indexOf('$', 1) + 1
     return token.text.slice(tagLength, token.text.length - tagLength)
   }
-  return unescapeQuoted(token.text)
+  return unescapeQuoted(token.text.slice(1, -1), "'")
+}
+
+/**
+ * The value ClickHouse reads from the body of a quoted name or string literal
+ * (readQuotedString): a doubled `quote` is one quote, `\xHH` is a byte, `\N` is
+ * nothing, `\n` and the other control escapes are their byte, `\\`, `\'`, `\"`,
+ * `` \` ``, `\/` and `\=` drop the backslash, and any other escape keeps it
+ * (`\q` is `\q`). The bytes read as UTF-8. An invalid `\x` (`\xZZ`) stays as
+ * written, where ClickHouse reads an arbitrary byte.
+ */
+export function unescapeQuoted(body: string, quote = '`'): string {
+  let out = ''
+  let bytes: number[] = []
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i] ?? ''
+    const next = body[i + 1] ?? ''
+    if (char === '\\' && next === 'x' && HEX_BYTE.test(body.slice(i + 2, i + 4))) {
+      bytes.push(Number.parseInt(body.slice(i + 2, i + 4), 16))
+      i += 3
+      continue
+    }
+    // `\N` adds no byte, so `\xC3\N\xA9` is still `é`.
+    if (char === '\\' && next === 'N') {
+      i += 1
+      continue
+    }
+    if (bytes.length > 0) {
+      out += UTF8.decode(Uint8Array.from(bytes))
+      bytes = []
+    }
+    if (char === '\\' && next !== '') {
+      i += 1
+      const decoded = CONTROL_ESCAPES[next] ?? next
+      // A raw control character after a backslash drops it too (isControlASCII).
+      if (!PLAIN_ESCAPES.has(decoded) && decoded.charCodeAt(0) > LAST_CONTROL_ASCII) out += '\\'
+      out += decoded
+      continue
+    }
+    if (char === quote && next === quote) {
+      out += quote
+      i += 1
+      continue
+    }
+    out += char
+  }
+  return bytes.length > 0 ? out + UTF8.decode(Uint8Array.from(bytes)) : out
 }
 
 // `previous` is the last token that is not trivia; ClickHouse uses it to tell
 // a qualifier dot from the start of a number.
-function readToken(sql: string, i: number, previous: SQLToken | undefined): TokenEnd {
+function readToken(sql: string, i: number, previous: SQLToken | undefined, readHeredoc: HeredocReader): TokenEnd {
   const char = sql[i] ?? ''
   const next = sql[i + 1] ?? ''
   if (WHITESPACE.test(char)) return complete('whitespace', skipWhile(sql, i, WHITESPACE))
@@ -100,7 +180,7 @@ function readToken(sql: string, i: number, previous: SQLToken | undefined): Toke
   if (char === "'") return { kind: 'string', ...readQuoted(sql, i, "'") }
   if (char === '`' || char === '"') return { kind: 'quoted_identifier', ...readQuoted(sql, i, char) }
   if (char === '$') {
-    const heredocEnd = readHeredoc(sql, i)
+    const heredocEnd = readHeredoc(i)
     if (heredocEnd !== undefined) return complete('string', heredocEnd)
     if (WORD_CHAR.test(next)) return complete('identifier', skipWhile(sql, i, IDENTIFIER_PART))
   }
@@ -206,38 +286,52 @@ function readQuoted(sql: string, i: number, quote: string): { end: number; termi
   return { end: sql.length, terminated: false }
 }
 
+/** The end of the heredoc that opens at `i`, or undefined when none does. */
+type HeredocReader = (i: number) => number | undefined
+
 // `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
 // is only a literal when the same tag closes it later; otherwise ClickHouse
-// reads the `$` as part of an identifier or as punctuation.
-function readHeredoc(sql: string, i: number): number | undefined {
-  const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
-  if (sql[tagEnd] !== '$') return undefined
-  const tag = sql.slice(i, tagEnd + 1)
-  const close = sql.indexOf(tag, tagEnd + 1)
-  return close === -1 ? undefined : close + tag.length
+// reads the `$` as part of an identifier or as punctuation. The closer is the
+// first later occurrence of the opener's text. Searching the rest of the input
+// once per opener is quadratic on many unclosed openers (#585), so the first
+// opener indexes every `$tag$` in the input and each one is a lookup.
+function heredocReader(sql: string): HeredocReader {
+  let tagStarts: Map<string, number[]> | undefined
+  return (i) => {
+    const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
+    if (sql[tagEnd] !== '$') return undefined
+    tagStarts ??= indexHeredocTags(sql)
+    const close = firstAtOrAfter(tagStarts.get(sql.slice(i + 1, tagEnd)) ?? [], tagEnd + 1)
+    return close === undefined ? undefined : close + tagEnd + 1 - i
+  }
 }
 
-// Resolves a doubled delimiter and backslash escapes to the escaped character,
-// which is exact for the quotes and backslashes names and literals contain.
-function unescapeQuoted(text: string): string {
-  const quote = text[0] ?? ''
-  const body = text.slice(1, -1)
-  let out = ''
-  for (let i = 0; i < body.length; i += 1) {
-    const char = body[i] ?? ''
-    if (char === '\\' && i + 1 < body.length) {
-      out += body[i + 1]
-      i += 1
-      continue
-    }
-    if (char === quote && body[i + 1] === quote) {
-      out += quote
-      i += 1
-      continue
-    }
-    out += char
+// Every offset where `$tag$` occurs, in order, by tag. An occurrence is a `$`,
+// the longest run of tag characters after it, then a `$` (a tag character is
+// never `$`), so each `$` starts at most one and the scan is linear.
+function indexHeredocTags(sql: string): Map<string, number[]> {
+  const starts = new Map<string, number[]>()
+  for (let i = sql.indexOf('$'); i !== -1; i = sql.indexOf('$', i + 1)) {
+    const tagEnd = skipWhile(sql, i + 1, HEREDOC_TAG)
+    if (sql[tagEnd] !== '$') continue
+    const tag = sql.slice(i + 1, tagEnd)
+    const offsets = starts.get(tag)
+    if (offsets === undefined) starts.set(tag, [i])
+    else offsets.push(i)
   }
-  return out
+  return starts
+}
+
+// The first of the ascending `offsets` that is at least `from`.
+function firstAtOrAfter(offsets: number[], from: number): number | undefined {
+  let low = 0
+  let high = offsets.length
+  while (low < high) {
+    const middle = (low + high) >>> 1
+    if ((offsets[middle] ?? 0) < from) low = middle + 1
+    else high = middle
+  }
+  return offsets[low]
 }
 
 function complete(kind: SQLTokenKind, end: number): TokenEnd {

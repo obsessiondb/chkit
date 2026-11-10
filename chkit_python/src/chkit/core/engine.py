@@ -6,6 +6,7 @@ import re
 from typing import Final
 
 from chkit.core.key_clause import split_top_level_comma
+from chkit.core.sql_lexer import js_regex, js_trim
 
 # Engines outside the MergeTree family that ClickHouse registers with
 # ``supports_sort_order`` (StorageFactory), so they accept PARTITION BY,
@@ -37,9 +38,9 @@ _NON_MERGE_TREE_SORT_ORDER_ENGINES: Final[frozenset[str]] = frozenset(
 # three arguments name objects, the rest are expressions.
 _DISTRIBUTED_NAME_ARGUMENTS: Final[int] = 3
 
-_ENGINE_NAME: Final[re.Pattern[str]] = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)")
+_ENGINE_NAME: Final[re.Pattern[str]] = re.compile(js_regex(r"^\s*([A-Za-z_][A-Za-z0-9_]*)"))
 _DISTRIBUTED_ARGS: Final[re.Pattern[str]] = re.compile(
-    r"^\s*Distributed\s*\(([\s\S]*)\)\s*$"
+    js_regex(r"^\s*Distributed\s*\(([\s\S]*)\)\s*$")
 )
 _PLAIN_IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"^[A-Za-z_][A-Za-z0-9_]*$")
 _QUOTED_IDENTIFIER: Final[re.Pattern[str]] = re.compile(r"^([`\"])((?:(?!\1).|\1\1)*)\1$")
@@ -67,6 +68,43 @@ def supports_sort_order(engine: str) -> bool:
     )
 
 
+_REPLICATED_ENGINE_NAME: Final[re.Pattern[str]] = re.compile(
+    js_regex(r"^\s*Replicated([A-Za-z0-9_]*MergeTree)")
+)
+# The Keeper path and replica name lead a Replicated engine's arguments.
+_REPLICATION_ARGUMENTS: Final[int] = 2
+# A Keeper path or replica name that the server drops: a string literal or a
+# heredoc. ObsessionDB keeps an expression path such as concat(...) as written.
+_REPLICATION_ARGUMENT: Final[re.Pattern[str]] = re.compile(
+    js_regex(r"^(?:'(?:[^'\\]|\\[\s\S]|'')*'|\$([A-Za-z0-9_]*)\$[\s\S]*\$\1\$)$")
+)
+
+
+def replicated_engine_as_shared(engine: str) -> str | None:
+    """The engine a ``Replicated*MergeTree`` table has on a shared-storage server.
+
+    ObsessionDB and ClickHouse Cloud drop the Keeper path and replica name and
+    keep the other arguments, so ``ReplicatedReplacingMergeTree('/p', '{replica}', ver)``
+    is stored as ``SharedReplacingMergeTree(ver)``. The result has no ``Shared``
+    prefix. None for any other engine (TS ``replicatedEngineAsShared``).
+    """
+    match = _REPLICATED_ENGINE_NAME.match(engine)
+    if match is None:
+        return None
+    rest = js_trim(engine[match.end() :])
+    if rest and not (rest.startswith("(") and rest.endswith(")")):
+        return None
+    inner = rest[1:-1]
+    args = split_top_level_comma(inner) if js_trim(inner) else []
+    if (
+        len(args) >= _REPLICATION_ARGUMENTS
+        and _REPLICATION_ARGUMENT.match(args[0]) is not None
+        and _REPLICATION_ARGUMENT.match(args[1]) is not None
+    ):
+        args = args[_REPLICATION_ARGUMENTS:]
+    return f"{match.group(1)}({', '.join(args)})"
+
+
 def is_distributed_engine(engine: str) -> bool:
     return engine_name(engine) == "Distributed"
 
@@ -80,7 +118,7 @@ def normalize_distributed_engine(engine: str) -> str:
     """
     match = _DISTRIBUTED_ARGS.match(engine)
     if match is None:
-        return engine.strip()
+        return js_trim(engine)
     args = [
         _quote_identifier_argument(arg) if index < _DISTRIBUTED_NAME_ARGUMENTS else arg
         for index, arg in enumerate(split_top_level_comma(match.group(1)))

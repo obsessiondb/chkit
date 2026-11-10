@@ -66,27 +66,21 @@ describe('@chkit/plugin-pull live env e2e', () => {
     await executor.command(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(projectionDatabase)}`)
   })
 
+  // Try every drop, then fail the run if any failed: a swallowed failure
+  // leaked these databases on the shared ObsessionDB service (#651).
+  // The executor holds one session, which runs one query at a time, so the
+  // drops go in sequence. SYNC waits for each drop to finish, which can take
+  // longer than Bun's default 5 s hook budget; past it Bun abandons the hook.
   afterAll(async () => {
-    try {
-      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(targetDatabase)}`)
-    } catch {
-      // Best-effort cleanup for shared e2e environment.
+    const failures: unknown[] = []
+    for (const database of [targetDatabase, noiseDatabase, projectionDatabase]) {
+      await executor
+        .command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
+        .catch((error: unknown) => failures.push(error))
     }
-
-    try {
-      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(noiseDatabase)}`)
-    } catch {
-      // Best-effort cleanup for shared e2e environment.
-    }
-
-    try {
-      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(projectionDatabase)}`)
-    } catch {
-      // Best-effort cleanup for shared e2e environment.
-    }
-
     await executor.close()
-  })
+    if (failures.length > 0) throw new AggregateError(failures, 'pull e2e cleanup could not drop its databases')
+  }, 60_000)
 
   test('validates required env variables are present', () => {
     expect(() => getLiveEnv()).not.toThrow()
@@ -322,6 +316,63 @@ describe('@chkit/plugin-pull live env e2e', () => {
         expect(accounts.columns.find((column) => column.name === 'updated_at')?.default).toBe('fn:now()')
         expect(toCreateSQL(accounts)).toContain('`updated_at` DateTime DEFAULT now()')
       } finally {
+        await rm(dir, { recursive: true, force: true })
+      }
+    },
+    240_000
+  )
+
+  test(
+    'pulls the codecs ClickHouse stores as typed atoms, without filled-in sizes (#465)',
+    async () => {
+      const codecDatabase = `chkit_e2e_pull_codec_${runTag}`
+      const codecTable = `${createPrefix('pull_codec')}metrics`
+      const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-codec-e2e-'))
+      const pulledSchemaPath = join(dir, 'pulled.ts')
+      const command = createPullPlugin({ outFile: pulledSchemaPath, overwrite: true }).commands[0]
+      if (!command) throw new Error('Pull plugin command not registered')
+
+      try {
+        await executor.command(`CREATE DATABASE IF NOT EXISTS ${quoteIdent(codecDatabase)}`)
+        await executor.command(
+          `CREATE TABLE ${quoteIdent(codecDatabase)}.${quoteIdent(codecTable)} (id UInt64, d UInt64 CODEC(Delta, ZSTD), g Float64 CODEC(Gorilla), h String CODEC(LZ4HC), f Float64 CODEC(FPC), dd UInt64 CODEC(DoubleDelta), tb UInt64 CODEC(T64('bit')), zw String CODEC(ZSTD(3, 24)), tu Tuple(a UInt8, b UInt64) CODEC(Delta, LZ4), df UInt64 CODEC(Delta, Default)) ENGINE = MergeTree() ORDER BY (id)`
+        )
+        await waitForTable(executor, codecDatabase, codecTable)
+
+        const exitCode = await command.run({
+          args: [],
+          flags: { '--database': [codecDatabase] },
+          jsonMode: true,
+          options: {},
+          configPath: join(dir, 'clickhouse.config.ts'),
+          config: createResolvedConfig({
+            url: liveEnv.clickhouseUrl,
+            username: liveEnv.clickhouseUser,
+            password: liveEnv.clickhousePassword,
+            database: 'default',
+            secure: liveEnv.clickhouseUrl.startsWith('https://'),
+          }),
+          print() {},
+        })
+        expect(exitCode).toBe(0)
+
+        const pulledSchema = await readFile(pulledSchemaPath, 'utf8')
+        const codecs = Object.fromEntries(
+          [...pulledSchema.matchAll(/\{ name: "(\w+)", type: "[^"]*", codec: (.*) \},?$/gm)].map((match) => [match[1], match[2]])
+        )
+        expect(codecs).toEqual({
+          d: '[{ kind: "Delta", size: 8 }, { kind: "ZSTD", level: 1 }]',
+          g: '{ kind: "Gorilla", size: 8 }',
+          h: '{ kind: "LZ4HC", level: 0 }',
+          f: '{ kind: "FPC", level: 12 }',
+          dd: '{ kind: "DoubleDelta" }',
+          tb: '{ kind: "T64", mode: "bit" }',
+          zw: '{ kind: "ZSTD", level: 3, windowLog: 24 }',
+          tu: '[{ kind: "Delta" }, { kind: "LZ4" }]',
+          df: '[{ kind: "Delta", size: 8 }, { kind: "Default" }]',
+        })
+      } finally {
+        await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(codecDatabase)} SYNC`)
         await rm(dir, { recursive: true, force: true })
       }
     },

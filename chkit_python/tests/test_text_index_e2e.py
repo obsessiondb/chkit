@@ -2,29 +2,48 @@
 
 from __future__ import annotations
 
+import functools
 import json
+import time
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any, TypeAlias
 
 import pytest
+from typer.testing import CliRunner
 
 from chkit import SkipIndexText
-from chkit.cli.commands.drift_compare import compare_table_shape
+from chkit.cli.commands.drift_compare import (
+    MapSqlCanonicalizer,
+    collect_table_sql_fragments,
+    compare_table_shape,
+)
 from chkit.cli.commands.pull_render import render_schema_file
+from chkit.cli.main import app
+from chkit.clickhouse.canonicalize import canonicalize_sql_fragments
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.clickhouse.introspect import IntrospectedTable, list_table_details
-from chkit.core.model import ChxResolvedClickHouseConfig, TableDefinition
+from chkit.core.model import ChxResolvedClickHouseConfig, ColumnDefinition, TableDefinition, table
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.text_index_sql import normalize_text_index_sql
-from tests.e2e_testkit import create_prefix, poll_until, resolve_live_env, run_once_visible
+from tests.e2e_testkit import (
+    create_journal_table_name,
+    create_prefix,
+    format_test_diagnostic,
+    poll_until,
+    resolve_live_env,
+    run_once_visible,
+)
 from tests.test_text_index import docs
 
 CASES = json.loads(
     (Path(__file__).resolve().parents[2] / "test/fixtures/text-index.json").read_text()
+)
+EXPRESSION_PAIRS = json.loads(
+    (Path(__file__).resolve().parents[2] / "test/fixtures/text-index-expressions.json").read_text()
 )
 
 
@@ -41,7 +60,13 @@ def _find_table(client: ClickHouseClient, database: str, name: str) -> Introspec
 def _load_pulled(definition: TableDefinition) -> TableDefinition:
     namespace: dict[str, Any] = {}
     exec(compile(render_schema_file([definition]), "schema.py", "exec"), namespace)
-    return namespace["definitions"][0]
+    pulled = namespace["definitions"][0]
+    assert isinstance(pulled, TableDefinition)
+    return pulled
+
+
+def _shape_matches(target: TableDefinition, item: IntrospectedTable | None) -> bool:
+    return item is not None and compare_table_shape(target, item) is None
 
 
 @pytest.fixture
@@ -138,15 +163,16 @@ def test_live_add_and_change_text_index(text_client: TextClient) -> None:
             plan = plan_diff([before], [after])
             assert plan.operations
             for op in plan.operations:
-                run_once_visible(lambda sql=op.sql: client.execute(sql))
+                run_once_visible(functools.partial(client.execute, op.sql))
             actual = poll_until(
                 lambda: _find_table(client, database, name),
-                lambda item, target=after: item is not None
-                and compare_table_shape(target, item) is None,
+                functools.partial(_shape_matches, after),
             )
             assert actual is not None
             assert compare_table_shape(after, actual) is None
-        assert "index_mismatch" in compare_table_shape(with_index, actual).reason_codes
+        drift = compare_table_shape(with_index, actual)
+        assert drift is not None
+        assert "index_mismatch" in drift.reason_codes
     finally:
         client.execute(f"DROP TABLE IF EXISTS {full_name} SYNC")
 
@@ -183,7 +209,7 @@ def test_tuning_newer_options_and_materializing_existing_rows(text_client: TextC
             )
         )
         for op in plan_diff([without_index], [definition]).operations:
-            run_once_visible(lambda sql=op.sql: client.execute(sql))
+            run_once_visible(functools.partial(client.execute, op.sql))
         run_once_visible(
             lambda: client.execute(
                 f"ALTER TABLE {full_name} MATERIALIZE INDEX idx SETTINGS mutations_sync = 2"
@@ -283,7 +309,9 @@ def test_quoted_null_column_round_trips_and_literal_change_migrates(
         run_once_visible(lambda: client.execute(f"INSERT INTO {full_name} VALUES (1, 'doc ', 'alpha')"))
         actual = settled(definition)
         assert compare_table_shape(definition, actual) is None
-        assert "index_mismatch" in compare_table_shape(changed, actual).reason_codes
+        drift = compare_table_shape(changed, actual)
+        assert drift is not None
+        assert "index_mismatch" in drift.reason_codes
         pulled = _load_pulled(definition.model_copy(update={"indexes": actual.indexes}))
         assert plan_diff([definition], [pulled]).operations == []
         assert poll_until(lambda: search(index.expression), lambda ids: ids == [1]) == [1]
@@ -293,7 +321,7 @@ def test_quoted_null_column_round_trips_and_literal_change_migrates(
             "alter_table_add_index",
         ]
         for op in plan.operations:
-            run_once_visible(lambda sql=op.sql: client.execute(sql))
+            run_once_visible(functools.partial(client.execute, op.sql))
         run_once_visible(
             lambda: client.execute(
                 f"ALTER TABLE {full_name} MATERIALIZE INDEX idx SETTINGS mutations_sync = 2"
@@ -303,3 +331,131 @@ def test_quoted_null_column_round_trips_and_literal_change_migrates(
         assert search(changed_index.expression) == []
     finally:
         client.execute(f"DROP TABLE IF EXISTS {full_name} SYNC")
+
+
+# ClickHouse stores a text index expression the way its formatter prints it:
+# `NOT a AND b` comes back as `(NOT a) AND b`, BETWEEN as two comparisons.
+_EXPRESSION_COLUMNS = [
+    ColumnDefinition(name="id", type="UInt64"),
+    ColumnDefinition(name="s", type="String"),
+    ColumnDefinition(name="x", type="String"),
+    ColumnDefinition(name="a", type="UInt8"),
+    ColumnDefinition(name="b", type="UInt8"),
+    ColumnDefinition(name="c", type="UInt8"),
+    ColumnDefinition(name="d", type="UInt8"),
+]
+
+
+def _text_index(expression: str, name: str = "idx") -> SkipIndexText:
+    return SkipIndexText(name=name, expression=expression, tokenizer="splitByNonAlpha")
+
+
+def _expression_table(
+    indexes: list[SkipIndexText], *, database: str, name: str
+) -> TableDefinition:
+    return table(
+        database=database,
+        name=name,
+        engine="MergeTree()",
+        columns=[*_EXPRESSION_COLUMNS],
+        primary_key=["id"],
+        order_by=["id"],
+        indexes=[*indexes],
+    )
+
+
+def test_text_index_expressions_compare_equal_exactly_when_clickhouse_parses_them_the_same(
+    text_client: TextClient,
+) -> None:
+    client, _ = text_client
+    cases = []
+    for pair in EXPRESSION_PAIRS:
+        expected = _expression_table([_text_index(pair["schema"])], database="app", name="docs")
+        server = _text_index(pair["server"]).model_copy(update={"granularity": 100000000})
+        actual = IntrospectedTable(
+            database="app",
+            name="docs",
+            engine="MergeTree()",
+            primary_key="(id)",
+            order_by="(id)",
+            columns=[*_EXPRESSION_COLUMNS],
+            settings={},
+            indexes=[server],
+            projections=[],
+        )
+        cases.append((f"{pair['schema']} vs {pair['server']}", expected, actual, pair["equal"]))
+    fragments = [
+        fragment
+        for _, expected, actual, _ in cases
+        for fragment in collect_table_sql_fragments(expected, actual).expressions
+    ]
+    canonicalizer = MapSqlCanonicalizer(
+        expressions=canonicalize_sql_fragments(client, fragments, wrap=True), queries={}
+    )
+    for label, expected, actual, equal in cases:
+        detail = compare_table_shape(expected, actual, canonicalizer)
+        assert (detail.index_diffs if detail else []) == ([] if equal else ["idx"]), label
+
+
+def test_generate_migrate_and_drift_read_clean_when_clickhouse_reparenthesizes(
+    text_client: TextClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client, database = text_client
+    env = resolve_live_env()
+    name = create_prefix("py_text_expr") + "docs"
+    expressions = list(dict.fromkeys(p["schema"] for p in EXPRESSION_PAIRS if p["equal"]))
+    # One table holds them all. ClickHouse allows one text index per expression
+    # and several spellings in the fixture parse the same, so each is suffixed.
+    definition = _expression_table(
+        [
+            _text_index(f"concat({expression}, '{i}')", f"idx{i}")
+            for i, expression in enumerate(expressions)
+        ],
+        database=database,
+        name=name,
+    )
+    journal = create_journal_table_name("py_text_expr")
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal)
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path / "xdg"))
+    monkeypatch.setenv("CI", "1")
+    clickhouse = {
+        "url": env.clickhouse_url,
+        "username": env.clickhouse_user,
+        "password": env.clickhouse_password,
+        "database": database,
+    }
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps(
+            {
+                "schema": "./schema.py",
+                "outDir": "./chkit",
+                "migrationsDir": "./chkit/migrations",
+                "metaDir": "./chkit/meta",
+                "clickhouse": clickhouse,
+            }
+        )
+        + ")\n"
+    )
+    (tmp_path / "schema.py").write_text(render_schema_file([definition]))
+    runner = CliRunner()
+    try:
+        generate = runner.invoke(app, ["generate", "--json"])
+        assert generate.exit_code == 0, format_test_diagnostic("generate", generate)
+        migrate = runner.invoke(app, ["migrate", "--execute", "--json"])
+        for _ in range(4):  # like runCliWithRetry in the TS port
+            if migrate.exit_code == 0:
+                break
+            time.sleep(2)
+            migrate = runner.invoke(app, ["migrate", "--execute", "--json"])
+        assert migrate.exit_code == 0, format_test_diagnostic("migrate", migrate)
+        wait_for_table(client, database, name)
+        drift = runner.invoke(app, ["drift", "--table", f"{database}.{name}", "--json"])
+        assert drift.exit_code == 0, format_test_diagnostic("drift", drift)
+        payload = json.loads(drift.stdout)
+        assert payload["tableDrift"] == []
+        assert payload["drifted"] is False
+    finally:
+        client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")
+        client.execute(f"DROP TABLE IF EXISTS {database}.{journal} SYNC")

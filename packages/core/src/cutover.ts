@@ -9,7 +9,14 @@ import {
   type SchemaDefinition,
   type TableDefinition,
 } from './model.js'
-import { renderColumnType, toCreateSQL } from './sql.js'
+import { columnTypeFingerprint, keyFingerprint, renderColumnType, toCreateSQL } from './sql.js'
+import {
+  DEFAULT_INDEX_GRANULARITY,
+  declaredReadonlySettings,
+  readonlySettingsExpectedSQL,
+  readonlySettingsFingerprint,
+  readonlySettingsLayoutSQL,
+} from './table-settings.js'
 
 /**
  * Zero-downtime cutover of a structural table change (`chkit generate
@@ -65,6 +72,8 @@ export interface CutoverOptions {
   cluster?: string
   /** `YYYYMMDDHHMMSS`, makes the temporary object names unique per cutover. */
   stamp: string
+  /** `clickhouse.indexGranularity`: what a table without `index_granularity` stores. Defaults to 8192. */
+  indexGranularity?: number
 }
 
 export interface CutoverNames {
@@ -188,12 +197,24 @@ export function planCutover(input: {
   options: CutoverOptions
   definitions: SchemaDefinition[]
 }): PlannedCutover {
-  const oldDef = canonicalTable(input.oldDef)
-  const newDef = canonicalTable(input.newDef)
   const { request, options } = input
+  const indexGranularity = options.indexGranularity ?? DEFAULT_INDEX_GRANULARITY
+  // Canonical: a MergeTree table has its index_granularity filled in.
+  const oldDef = canonicalTable(input.oldDef, indexGranularity)
+  const newDef = canonicalTable(input.newDef, indexGranularity)
   const names = cutoverNames(request.table, options.stamp)
   const columns = assertCutoverSupported({ oldDef, newDef, request, options, definitions: input.definitions, names })
-  const sql = createCutoverSql({ database: request.database, table: request.table, names, columns, key: request.key, cluster: options.cluster })
+  const sql = createCutoverSql({
+    database: request.database,
+    table: request.table,
+    names,
+    columns,
+    key: request.key,
+    cluster: options.cluster,
+    readonlySettings: declaredReadonlySettings(oldDef.settings, newDef.settings),
+    oldSettings: oldDef.settings,
+    indexGranularity,
+  })
   const metadata: CutoverMetadata = {
     chkitCutover: 1,
     database: request.database,
@@ -429,8 +450,13 @@ function createCutoverSql(input: {
   columns: string[]
   key: string[]
   cluster?: string
+  /** Read-only settings the layout compares, besides engine and keys. */
+  readonlySettings: string[]
+  /** The old table's settings as the migration expects them, index_granularity filled in. */
+  oldSettings: TableDefinition['settings']
+  indexGranularity: number
 }): CutoverSql {
-  const { database, table, names, columns, key, cluster } = input
+  const { database, table, names, columns, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
   const q = (name: string) => renderQualifiedName(database, name)
   const target = `${database}.${table}`
   const columnList = columns.map(quoteColumn).join(', ')
@@ -438,7 +464,18 @@ function createCutoverSql(input: {
   const everyReplica = (query: string) => (cluster ? `clusterAllReplicas(${stringLiteral(cluster)}, view(${query}))` : `(${query})`)
   const tableCount = (name: string) => `(SELECT count() FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
   const layout = (name: string) =>
-    `(SELECT any(tuple(engine, sorting_key, primary_key, partition_key)) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
+    `(SELECT any(tuple(engine, sorting_key, primary_key, partition_key${readonlySettings.length > 0 ? `, ${readonlySettingsLayoutSQL(readonlySettings, indexGranularity)}` : ''})) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
+  // The snapshot table is created from the old definition and must get the
+  // old table's layout, or the EXCHANGE guard stops the cutover after the
+  // copy. Check before anything is created: the old table stores what it was
+  // created with, and a missing index_granularity is the server's default,
+  // which chkit only assumes (clickhouse.indexGranularity).
+  const settingsMatch = readonlySettings.length > 0
+    ? `(${tableCount(table)} = 0 OR (SELECT any(${readonlySettingsLayoutSQL(readonlySettings, indexGranularity)}) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) = ${readonlySettingsExpectedSQL(readonlySettings, oldSettings)}) AS settings`
+    : undefined
+  const expectedSettings = readonlySettings
+    .map((setting) => (oldSettings?.[setting] === undefined ? `${setting} unset` : `${setting} = ${String(oldSettings[setting])}`))
+    .join(', ')
   // Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
   const guard = (condition: string, message: string) =>
     `SELECT throwIf(countIf(ok = 0) > 0 OR count() = 0, ${stringLiteral(message)}) FROM ${everyReplica(`SELECT toUInt8(${condition}) AS ok`)}`
@@ -513,13 +550,19 @@ function createCutoverSql(input: {
       `  throwIf(min(atomic) = 0, ${stringLiteral(`Database ${database} must use the Atomic or Replicated engine: EXCHANGE TABLES needs it.`)}),`,
       `  throwIf(min(present) = 0, ${stringLiteral(`Table ${target} does not exist.`)}),`,
       `  throwIf(max(leftovers) > 0, ${stringLiteral(`Objects of an earlier attempt of this cutover exist (${names.shadow}, ${names.mirror}, ${names.snapshot} or ${names.reconcile}). If the tables were already swapped, ${names.shadow} is the pre-cutover table and may hold rows not yet reconciled into ${table}: do not drop it. Inspect them before you run the migration again.`)}),`,
-      `  throwIf(max(mutations) > 0, ${stringLiteral(`${target} has unfinished mutations. Wait for them to finish: rows they change would not reach the new table.`)})`,
+      `  throwIf(max(mutations) > 0, ${stringLiteral(`${target} has unfinished mutations. Wait for them to finish: rows they change would not reach the new table.`)})${settingsMatch ? ',' : ''}`,
+      ...(settingsMatch
+        ? [
+            `  throwIf(min(settings) = 0, ${stringLiteral(`${target} does not store the read-only settings this migration expects (${expectedSettings}), so the cutover would stop at the EXCHANGE. Nothing was created or copied. A table that does not declare index_granularity stores the server's MergeTree default, which chkit takes as ${indexGranularity}: check it with SELECT value FROM system.merge_tree_settings WHERE name = 'index_granularity', set clickhouse.indexGranularity to it, run chkit drift, and generate the cutover again.`)})`,
+          ]
+        : []),
       `FROM ${everyReplica(
         [
           `SELECT (SELECT count() FROM system.databases WHERE name = ${stringLiteral(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,`,
           `${tableCount(table)} AS present,`,
           `${tableCount(names.shadow)} + ${tableCount(names.mirror)} + ${tableCount(names.snapshot)} + ${tableCount(names.reconcile)} AS leftovers,`,
-          `${pendingMutations} AS mutations`,
+          `${pendingMutations} AS mutations${settingsMatch ? ',' : ''}`,
+          ...(settingsMatch ? [settingsMatch] : []),
         ].join(' ')
       )};`,
     ].join('\n'),
@@ -617,14 +660,16 @@ function assertCutoverSupported(input: {
     }
   }
 
+  const readonlySettings = (def: TableDefinition) => readonlySettingsFingerprint(def.settings)
   const layoutChanged =
     engineName(oldDef.engine) !== engineName(newDef.engine) ||
-    oldDef.orderBy.join(',') !== newDef.orderBy.join(',') ||
-    oldDef.primaryKey.join(',') !== newDef.primaryKey.join(',') ||
-    (oldDef.partitionBy ?? '') !== (newDef.partitionBy ?? '')
+    keyFingerprint(oldDef, oldDef.orderBy) !== keyFingerprint(newDef, newDef.orderBy) ||
+    keyFingerprint(oldDef, oldDef.primaryKey) !== keyFingerprint(newDef, newDef.primaryKey) ||
+    (oldDef.partitionBy ?? '') !== (newDef.partitionBy ?? '') ||
+    readonlySettings(oldDef) !== readonlySettings(newDef)
   if (!layoutChanged) {
     problems.push(
-      'only the engine arguments change. The cutover tells the old table from the new one by engine name, sorting key, primary key and partition key, so at least one of them must change.'
+      'only the engine arguments change. The cutover tells the old table from the new one by engine name, sorting key, primary key, partition key and read-only settings (such as index_granularity), so at least one of them must change.'
     )
   }
 
@@ -704,7 +749,7 @@ function copiedColumns(oldDef: TableDefinition, newDef: TableDefinition, problem
     const newColumn = newColumns.get(oldColumn.name)
     if (!newColumn) continue
     if (!isStored(oldColumn) || !isInsertable(newColumn)) continue
-    if (renderColumnType(oldColumn) !== renderColumnType(newColumn)) {
+    if (columnTypeFingerprint(oldColumn) !== columnTypeFingerprint(newColumn)) {
       problems.push(
         `column ${oldColumn.name} changes type (${renderColumnType(oldColumn)} to ${renderColumnType(newColumn)}). Change column types in a separate migration.`
       )
@@ -779,8 +824,8 @@ function unquoteArgument(value: string): string {
   return value.trim().replace(/^['"`]|['"`]$/g, '')
 }
 
-function canonicalTable(def: TableDefinition): TableDefinition {
-  const canonical = canonicalizeDefinition(def)
+function canonicalTable(def: TableDefinition, indexGranularity: number): TableDefinition {
+  const canonical = canonicalizeDefinition(def, { indexGranularity })
   if (canonical.kind !== 'table') throw new Error(`Expected a table definition for ${definitionKey(def)}.`)
   return canonical
 }

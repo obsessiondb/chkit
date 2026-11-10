@@ -38,8 +38,14 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.0",
+      "version": "0.3.1",
       "changelog": [
+        {
+          "version": "0.3.1",
+          "changes": [
+            "Trim raw-storage notes from the README."
+          ]
+        },
         {
           "version": "0.3.0",
           "changes": [

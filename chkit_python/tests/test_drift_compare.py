@@ -3,12 +3,17 @@
 from __future__ import annotations
 
 import re
+from typing import Literal
+
+import pytest
 
 from chkit.cli.commands.drift_compare import (
     KindMismatch,
     MapSqlCanonicalizer,
     ObjectDriftDetail,
     SchemaObjectShape,
+    TableDriftDetail,
+    collect_table_sql_fragments,
     collect_view_sql_queries,
     compare_schema_objects,
     compare_table_shape,
@@ -24,8 +29,12 @@ from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView
 from chkit.core.codec import parse_codec
 from chkit.core.model import (
     ColumnDefinition,
+    ColumnInput,
     ProjectionDefinition,
+    ProjectionInput,
+    SettingValue,
     SkipIndexBloomFilter,
+    SkipIndexInput,
     SkipIndexMinmax,
     TableDefinition,
     materialized_view,
@@ -126,7 +135,7 @@ def test_compare_objects_identical_returns_empty_buckets() -> None:
 def test_summarize_drift_aggregates_object_and_table_codes() -> None:
     expected = [_so("table", "db", "a")]
     object_result = compare_schema_objects(expected, [])
-    table_drift = []
+    table_drift: list[TableDriftDetail] = []
     summary = summarize_drift_reasons(object_result.object_drift, table_drift)
     assert summary.object == 1
     assert summary.table == 0
@@ -139,13 +148,13 @@ def test_summarize_drift_aggregates_object_and_table_codes() -> None:
 def _t(
     *,
     name: str = "t",
-    columns: list[ColumnDefinition] | None = None,
+    columns: list[ColumnInput] | None = None,
     engine: str = "MergeTree",
     primary_key: list[str] | None = None,
     order_by: list[str] | None = None,
-    settings: dict[str, object] | None = None,
-    indexes: list[object] | None = None,
-    projections: list[ProjectionDefinition] | None = None,
+    settings: dict[str, SettingValue] | None = None,
+    indexes: list[SkipIndexInput] | None = None,
+    projections: list[ProjectionInput] | None = None,
     partition_by: str | None = None,
     ttl: str | None = None,
 ) -> TableDefinition:
@@ -226,6 +235,128 @@ def test_table_shape_detects_engine_mismatch() -> None:
     assert "engine_mismatch" in detail.reason_codes
 
 
+# ObsessionDB and ClickHouse Cloud store Replicated* as Shared*, without the path and replica (#669).
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        ("ReplicatedMergeTree()", "SharedMergeTree", False),
+        ("ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", "SharedMergeTree", False),
+        (
+            "ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', v)",
+            "SharedReplacingMergeTree(v)",
+            False,
+        ),
+        ("ReplicatedReplacingMergeTree(v)", "SharedReplacingMergeTree(v)", False),
+        # ObsessionDB keeps an expression path as written.
+        (
+            "ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+            "SharedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+            False,
+        ),
+        ("ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)", "SharedReplacingMergeTree(v)", False),
+        ("ReplicatedVersionedCollapsingMergeTree(id, v)", "SharedVersionedCollapsingMergeTree(id, v)", False),
+        ("ReplicatedReplacingMergeTree(v)", "SharedMergeTree", True),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', v)", "SharedReplacingMergeTree(id)", True),
+        # A server without Shared engines really has a non-replicated table.
+        ("ReplicatedMergeTree()", "MergeTree", True),
+    ],
+)
+def test_table_shape_replicated_engine_on_shared_server(
+    expected_engine: str, actual_engine: str, mismatch: bool
+) -> None:
+    columns = [ColumnDefinition(name="id", type="UInt64"), ColumnDefinition(name="v", type="UInt64")]
+    detail = compare_table_shape(
+        _t(engine=expected_engine, columns=list(columns)), _it(engine=actual_engine, columns=columns)
+    )
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
+# Column names and string literals in engine arguments are case-sensitive (#673).
+# The server rewrites the case of function names and operator keywords only.
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(sign)", True),
+        ("ReplacingMergeTree(Ver)", "ReplacingMergeTree(ver)", True),
+        ("VersionedCollapsingMergeTree(Sign, Version)", "VersionedCollapsingMergeTree(sign, Version)", True),
+        ("SummingMergeTree((Value, Version))", "SummingMergeTree((value, Version))", True),
+        ("GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", True),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(ver)", True),
+        ("Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", True),
+        ("ReplacingMergeTree(And)", "ReplacingMergeTree(and)", True),
+        ("SummingMergeTree((From, Value))", "SummingMergeTree((from, Value))", True),
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(Sign)", False),
+        ("ReplacingMergeTree( Ver )", "ReplacingMergeTree(Ver)", False),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(Ver)", False),
+        ("Distributed(c, app, t, RAND())", "Distributed('c', 'app', 't', rand())", False),
+        ("Distributed(c, app, t, If(Sign > 1, 1, 0))", "Distributed('c', 'app', 't', if(Sign > 1, 1, 0))", False),
+        (
+            "Distributed(c, app, t, Path is not null and TRUE)",
+            "Distributed('c', 'app', 't', Path IS NOT NULL AND true)",
+            False,
+        ),
+        ("Distributed(c, app, t, id is distinct from 0)", "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", False),
+        ("Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", False),
+    ],
+)
+def test_table_shape_engine_argument_case(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
+# A quoted name compares as the server writes it back (#679).
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        # The server writes the Null engine as `Null`.
+        ("Null", "`Null`", False),
+        ("Null()", "`Null`", False),
+        ("`Null`", "`Null`", False),
+        # It writes a quoted name bare unless the name needs its quotes.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(Ver)", False),
+        ('ReplacingMergeTree("Ver")', "ReplacingMergeTree(Ver)", False),
+        ("`ReplacingMergeTree`(Ver)", "ReplacingMergeTree(Ver)", False),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(from)", False),
+        ("ReplacingMergeTree(`And`)", "ReplacingMergeTree(And)", False),
+        ("SummingMergeTree((`Value`, `my v`))", "SummingMergeTree((Value, `my v`))", False),
+        ("Distributed(c, app, t, sipHash64(`my id`, `id`))", "Distributed('c', 'app', 't', sipHash64(`my id`, id))", False),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my ver`)", False),
+        ('ReplacingMergeTree("my ver")', "ReplacingMergeTree(`my ver`)", False),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(`a.b`)", False),
+        ("ReplacingMergeTree(`1v`)", "ReplacingMergeTree(`1v`)", False),
+        ("ReplacingMergeTree(`a``b`)", "ReplacingMergeTree(`a\\`b`)", False),
+        ("ReplacingMergeTree(`null`)", "ReplacingMergeTree(`null`)", False),
+        ("ReplacingMergeTree(`select`)", "ReplacingMergeTree(`select`)", False),
+        # Newer servers quote `cube` as a keyword, older ones write it bare.
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(cube)", False),
+        ("ReplacingMergeTree(`cube`)", "ReplacingMergeTree(`cube`)", False),
+        # Quoting that changes the name or what it means still counts: a bare `true` or `nan` is a literal.
+        ("ReplacingMergeTree(`Ver`)", "ReplacingMergeTree(ver)", True),
+        ("ReplacingMergeTree(`from`)", "ReplacingMergeTree(From)", True),
+        ("ReplacingMergeTree(`my ver`)", "ReplacingMergeTree(`my Ver`)", True),
+        ("ReplacingMergeTree(`a.b`)", "ReplacingMergeTree(a.b)", True),
+        ("ReplacingMergeTree(`ab`)", "ReplacingMergeTree(`a\\`b`)", True),
+        ("ReplacingMergeTree(`Null`)", "ReplacingMergeTree(`null`)", True),
+        ("ReplacingMergeTree(`true`)", "ReplacingMergeTree(true)", True),
+        ("ReplacingMergeTree(`nan`)", "ReplacingMergeTree(nan)", True),
+        # In an expression, as the server writes a sharding key back.
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(And + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`And` + 1))", "Distributed('c', 'app', 't', cityHash64(and + 1))", True),
+        ("Distributed(c, app, t, if(`And` > 1, 1, 0))", "Distributed('c', 'app', 't', if(And > 1, 1, 0))", False),
+        ("Distributed(c, app, t, if(And > 1, 1, 0))", "Distributed('c', 'app', 't', if(and > 1, 1, 0))", True),
+        ("Distributed(c, app, t, `And` AND `and`)", "Distributed('c', 'app', 't', And AND and)", False),
+        ("Distributed(c, app, t, `and` AND `And`)", "Distributed('c', 'app', 't', And AND and)", True),
+        ("Distributed(c, app, t, cityHash64(`cube` + 1))", "Distributed('c', 'app', 't', cityHash64(cube + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`select` + 1))", "Distributed('c', 'app', 't', cityHash64(`select` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`my v` + 1))", "Distributed('c', 'app', 't', cityHash64(`my v` + 1))", False),
+        ("Distributed(c, app, t, cityHash64(`true` + 1))", "Distributed('c', 'app', 't', cityHash64(true + 1))", True),
+    ],
+)
+def test_table_shape_engine_quoting(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
 def test_table_shape_detects_order_by_mismatch() -> None:
     detail = compare_table_shape(_t(order_by=["id", "ts"]), _it(order_by="(id)"))
     assert detail is not None
@@ -262,6 +393,39 @@ def test_table_shape_ignores_stored_enclosing_index_parens() -> None:
     expected_idx = SkipIndexMinmax(name="idx_x", expression="lower(x)", granularity=1)
     stored_idx = SkipIndexMinmax(name="idx_x", expression="(lower(x))", granularity=1)
     assert compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[stored_idx])) is None
+
+
+# A schema may write more than one pair (``((s))``); ObsessionDB keeps the one
+# chkit renders and stock ClickHouse none, so every enclosing pair is peeled,
+# quote-aware (#512).
+@pytest.mark.parametrize(
+    ("declared", "stored"),
+    [
+        ("((lower(a)))", "lower(a)"),
+        ("((lower(a)))", "(lower(a))"),
+        ("(a = ')(')", "a = ')('"),
+        ("((a, b))", "a, b"),
+    ],
+)
+def test_table_shape_peels_every_enclosing_index_paren(declared: str, stored: str) -> None:
+    expected_idx = SkipIndexMinmax(name="idx_x", expression=declared, granularity=1)
+    stored_idx = SkipIndexMinmax(name="idx_x", expression=stored, granularity=1)
+    assert compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[stored_idx])) is None
+    changed_idx = SkipIndexMinmax(name="idx_x", expression=f"({stored}) || 'x'", granularity=1)
+    detail = compare_table_shape(_t(indexes=[expected_idx]), _it(indexes=[changed_idx]))
+    assert detail is not None
+    assert "index_mismatch" in detail.reason_codes
+
+
+def test_index_paren_peel_reads_heredocs_as_strings() -> None:
+    expected_idx = SkipIndexMinmax(
+        name="idx_x", expression="((equals(x, $$($$)) OR (equals(x, $$)$$)))", granularity=1
+    )
+    stored_idx = SkipIndexMinmax(
+        name="idx_x", expression="equals(x, '(') OR equals(x, ')')", granularity=1
+    )
+    fragments = collect_table_sql_fragments(_t(indexes=[expected_idx]), _it(indexes=[stored_idx]))
+    assert "(equals(x, $$($$)) OR (equals(x, $$)$$))" in fragments.expressions
 
 
 def test_table_shape_keeps_parens_that_do_not_enclose_the_expression() -> None:
@@ -351,12 +515,19 @@ def test_table_shape_default_value_of_type_name_matches_bare_column_only_when_ep
 # #409 (port of #275): introspection unwraps Nullable(T) into type=T plus
 # nullable=True, so an inline Nullable type matches it.
 def test_table_shape_equates_inline_nullable_types_with_the_introspected_nullable_property() -> None:
-    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)", "LowCardinality(String)"]:
+    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)"]:
         inline = ColumnDefinition(name="value", type=f"Nullable({type_})")
         prop = ColumnDefinition(name="value", type=type_, nullable=True)
         assert _changed_columns(inline, prop) is None
         assert _changed_columns(prop, inline) is None
         assert _changed_columns(prop, prop) is None
+
+
+def test_table_shape_equates_nullable_low_cardinality_with_the_stored_type() -> None:
+    stored = ColumnDefinition(name="value", type="LowCardinality(Nullable(String))")
+    prop = ColumnDefinition(name="value", type="LowCardinality(String)", nullable=True)
+    assert _changed_columns(prop, stored) is None
+    assert _changed_columns(stored, prop) is None
 
 
 def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -> None:
@@ -371,7 +542,6 @@ def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -
         (col("String"), nullable("String")),
         (col("Nullable(String)"), nullable("UInt64")),
         (nullable("Nullable(String)"), nullable("String")),
-        (col("LowCardinality(Nullable(String))"), nullable("LowCardinality(String)")),
         (col("Array(Nullable(String))"), col("Array(String)")),
     ]
     for expected, actual in differences:
@@ -431,7 +601,7 @@ _ORDERS_MV = materialized_view(
 
 
 def _live_view(query: str, to: tuple[str, str] | None = None) -> IntrospectedView:
-    kind = "view" if to is None else "materialized_view"
+    kind: Literal["view", "materialized_view"] = "view" if to is None else "materialized_view"
     return IntrospectedView(kind=kind, database="app", name="v", query=query, to=to)
 
 
@@ -569,3 +739,68 @@ def test_table_shape_compares_column_codecs_in_the_form_clickhouse_stores_them()
     ]
     for expected, actual in differences:
         assert _changed_columns(expected, actual) == ["value"]
+
+
+# #466: what ClickHouse stores compares equal to what the schema declares.
+def test_table_shape_compares_a_column_type_in_the_spacing_clickhouse_stores() -> None:
+    pairs = [
+        ("Decimal(10,2)", "Decimal(10, 2)"),
+        ("DateTime64(3,'UTC')", "DateTime64(3, 'UTC')"),
+        ("Map(String,UInt64)", "Map(String, UInt64)"),
+        ("Tuple(a UInt8,b String)", "Tuple(a UInt8, b String)"),
+        ("Enum8('a'=1,'b'=2)", "Enum8('a' = 1, 'b' = 2)"),
+    ]
+    for declared, stored in pairs:
+        assert (
+            _changed_columns(
+                ColumnDefinition(name="value", type=declared),
+                ColumnDefinition(name="value", type=stored),
+            )
+            is None
+        )
+    assert (
+        _changed_columns(
+            ColumnDefinition(name="value", type="Decimal(10,2)", nullable=True),
+            ColumnDefinition(name="value", type="Decimal(10, 2)", nullable=True),
+        )
+        is None
+    )
+    label = _changed_columns(
+        ColumnDefinition(name="value", type="Enum8('a b'=1)"),
+        ColumnDefinition(name="value", type="Enum8('a  b' = 1)"),
+    )
+    assert label == ["value"]
+
+
+def test_table_shape_compares_a_literal_default_by_value_as_generate_does() -> None:
+    same: list[tuple[object, str]] = [
+        (1e21, "1e21"),
+        # ClickHouse stores ``9007199254740993.`` as the Float64 it reads.
+        ("fn:9007199254740993.", "9007199254740992."),
+        (2.0, "2."),
+        ("it's", "'it\\'s'"),
+        # The `)` inside the heredoc is text, so the outer pair still wraps it (#587).
+        ("fn:($$a)$$)", "'a)'"),
+    ]
+    for declared, stored in same:
+        expected = ColumnDefinition(name="value", type="Float64", default=declared)  # type: ignore[arg-type]
+        actual = ColumnDefinition(name="value", type="Float64", default=stored)
+        assert _changed_columns(expected, actual) is None
+    changed: list[tuple[object, str]] = [
+        ("fn:18446744073709551615", "18446744073709551614"),
+        ("e", "'\\e'"),
+    ]
+    for declared, stored in changed:
+        expected = ColumnDefinition(name="value", type="String", default=declared)  # type: ignore[arg-type]
+        actual = ColumnDefinition(name="value", type="String", default=stored)
+        assert _changed_columns(expected, actual) == ["value"]
+
+
+def test_table_shape_takes_a_live_table_without_index_granularity_as_the_configured_default() -> (
+    None
+):
+    expected = _t(settings={"index_granularity": 4096})
+    assert compare_table_shape(expected, _it(), None, 4096) is None
+    detail = compare_table_shape(expected, _it())
+    assert detail is not None
+    assert detail.setting_diffs == ["index_granularity"]

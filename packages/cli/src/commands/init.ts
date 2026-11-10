@@ -1,10 +1,20 @@
 import process from 'node:process'
 import { relative, resolve } from 'node:path'
 
+import { defineFlags, typedFlags } from '@chkit/core'
+import type { ConnectChoice } from '@chkit/plugin-obsessiondb'
+
+import { parseCommandArgs, UnexpectedArgumentsError } from '../runtime/command-dispatch.js'
 import { DEFAULT_CONFIG_FILE, writeIfMissing } from '../runtime/config.js'
 import { ensureProjectDependencies } from '../runtime/deps.js'
 
-type ConnectChoice = 'claim' | 'account' | 'clickhouse' | 'later'
+// @chkit/plugin-obsessiondb is an optional dependency, so its list is mirrored here rather than imported.
+const CONNECT_CHOICES = Object.keys({
+  claim: true,
+  account: true,
+  clickhouse: true,
+  later: true,
+} satisfies Record<ConnectChoice, true>) as ConnectChoice[]
 
 /** The example schema `init` writes to src/db/schema/example.ts. */
 export const INIT_SCHEMA_TEMPLATE = `import { schema, table } from '@chkit/core'\n\n// Offline generation still needs the real schema namespace.\nconst database = process.env.CLICKHOUSE_DB\nif (!database?.trim()) {\n  throw new Error('Set CLICKHOUSE_DB to the intended database before generating migrations.')\n}\n\nconst events = table({\n  database,\n  name: 'events',\n  engine: 'MergeTree',\n  columns: [\n    { name: 'id', type: 'UInt64' },\n    { name: 'source', type: 'String' },\n    { name: 'ingested_at', type: 'DateTime64(3)', default: { expression: 'now64(3)' } },\n  ],\n  primaryKey: ['id'],\n  orderBy: ['id'],\n  partitionBy: 'toYYYYMM(ingested_at)',\n})\n\nexport default schema(events)\n`
@@ -18,7 +28,10 @@ interface InitOptions {
 }
 
 export async function cmdInit(argv: string[] = []): Promise<void> {
-  if (argv.includes('--help') || argv.includes('-h')) {
+  // Only before `--`: what follows it is an argument, which init rejects (#614).
+  const end = argv.indexOf('--')
+  const beforeEnd = end === -1 ? argv : argv.slice(0, end)
+  if (beforeEnd.includes('--help') || beforeEnd.includes('-h')) {
     console.log(`chkit init [options]
 
 Create a TypeScript config and example schema; install project dependencies.
@@ -32,10 +45,11 @@ Create a TypeScript config and example schema; install project dependencies.
 `)
     return
   }
+  const options = parseInitOptions(argv)
+  if (!options) return
   const cwd = process.cwd()
   const configPath = resolve(cwd, DEFAULT_CONFIG_FILE)
   const schemaPath = resolve(cwd, 'src/db/schema/example.ts')
-  const options = parseInitOptions(argv)
 
   const wroteConfig = await writeIfMissing(
     configPath,
@@ -117,21 +131,46 @@ function isPluginNotInstalled(error: unknown): boolean {
   )
 }
 
-function parseInitOptions(argv: string[]): InitOptions {
-  const options: InitOptions = { yes: false }
-  for (let i = 0; i < argv.length; i += 1) {
-    const token = argv[i]
-    if (!token) continue
-    const eq = token.indexOf('=')
-    const name = eq === -1 ? token : token.slice(0, eq)
-    const inlineValue = eq === -1 ? undefined : token.slice(eq + 1)
-    const value = (): string | undefined => inlineValue ?? argv[++i]
+const INIT_FLAGS = defineFlags([
+  { name: '--yes', short: '-y', type: 'boolean', description: 'Skip interactive onboarding' },
+  { name: '--connect', type: 'string', description: 'claim, account, clickhouse, or later', placeholder: '<choice>' },
+  { name: '--email', type: 'string', description: 'Email for account onboarding', placeholder: '<email>' },
+  { name: '--code', type: 'string', description: 'Verification code', placeholder: '<code>' },
+  { name: '--org-name', type: 'string', description: 'Organization name', placeholder: '<name>' },
+] as const)
 
-    if (name === '--yes' || name === '-y') options.yes = true
-    else if (name === '--connect') options.connect = value() as ConnectChoice | undefined
-    else if (name === '--email') options.email = value()
-    else if (name === '--code') options.code = value()
-    else if (name === '--org-name') options.orgName = value()
+/**
+ * Returns null after reporting a usage error, as other commands do (#491): an unknown flag or a
+ * missing value, then an invalid --connect, then a stray argument, in chkit-py's order and words (#569).
+ */
+function parseInitOptions(argv: string[]): InitOptions | null {
+  const parsed = parseCommandArgs('init', argv, INIT_FLAGS)
+  if (!parsed) return null
+  const flags = typedFlags(parsed.flags, INIT_FLAGS)
+  const connect = flags['--connect']
+  if (connect !== undefined && !isConnectChoice(connect)) {
+    const choices = CONNECT_CHOICES.map((choice) => `'${choice}'`).join(', ')
+    return reportUsageError(`Invalid value for '--connect': '${connect}' is not one of ${choices}.`)
   }
-  return options
+  if (parsed.positionals.length > 0) {
+    return reportUsageError(new UnexpectedArgumentsError(parsed.positionals).message)
+  }
+  return {
+    yes: flags['--yes'] === true,
+    connect,
+    email: flags['--email'],
+    code: flags['--code'],
+    orgName: flags['--org-name'],
+  }
+}
+
+function isConnectChoice(value: string): value is ConnectChoice {
+  return CONNECT_CHOICES.some((choice) => choice === value)
+}
+
+/** Reports like parseFlagsOrReport. No envelope: init has no --json, so its flag error comes first. */
+function reportUsageError(message: string): null {
+  console.error(message)
+  process.exitCode = 1
+  return null
 }

@@ -25,18 +25,27 @@ from chkit.cli.command_target import (
     resolve_plugin_executor,
 )
 from chkit.cli.config_loader import load_config, loaded_config_path
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json_error, json_error_code
 from chkit.cli.plugin_runtime import load_plugin_runtime
 from chkit.clickhouse.client import ClickHouseJsonQueryResult, clickhouse_error_message
 from chkit.core.jsnum import js_number_to_string
 from chkit.core.model import ChxConfigEnv
+from chkit.core.sql_lexer import js_regex, js_trim
 from chkit.plugins import ChxPlugin
 
 DEFAULT_SHOWN_ROW_LIMIT = 25
 EXPECTED_TOKEN_CAP = 8
 
-_INJECTED_FORMAT_RE = re.compile(r"\s+FORMAT\s+JSON(?:EachRow)?\b", re.IGNORECASE)
+_INJECTED_FORMAT_RE = re.compile(
+    js_regex(r"\s+FORMAT\s+JSON(?:EachRow)?\b"), re.IGNORECASE
+)
 _EXPECTED_ONE_OF_RE = re.compile(r"Expected one of: ([^.]*)\.")
+
+
+class QueryArgumentError(ValueError):
+    """Missing or extra SQL. As in TS, a plain error of the command: its
+    message on stderr, exit 1 and the ``error`` envelope under ``--json``."""
 
 
 def clean_query_error(error: BaseException) -> BaseException:
@@ -47,7 +56,7 @@ def clean_query_error(error: BaseException) -> BaseException:
     message = _INJECTED_FORMAT_RE.sub("", original)
 
     def _truncate_expected(match: re.Match[str]) -> str:
-        tokens = [t.strip() for t in match.group(1).split(",") if t.strip()]
+        tokens = [t for t in (js_trim(t) for t in match.group(1).split(",")) if t]
         if len(tokens) <= EXPECTED_TOKEN_CAP:
             return f"Expected one of: {', '.join(tokens)}."
         shown = ", ".join(tokens[:EXPECTED_TOKEN_CAP])
@@ -60,7 +69,7 @@ def clean_query_error(error: BaseException) -> BaseException:
     if message == original:
         return error
     # As TS, a plain error: --json reports its code as "error".
-    return RuntimeError(message.strip())
+    return RuntimeError(js_trim(message))
 
 
 # Keys in the order TS prints them: data, meta, the rest of the envelope as
@@ -189,17 +198,17 @@ def run(
     ] = False,
     service: ServiceOption = None,
 ) -> None:
-    if sql is None or len(sql) == 0 or not sql[0].strip():
+    if sql is None or len(sql) == 0 or not js_trim(sql[0]):
         msg = (
             'query requires a SQL string as the first positional argument '
             '(e.g. `chkit query "SELECT 1"`)'
         )
-        raise typer.BadParameter(msg)
+        raise QueryArgumentError(msg)
     if len(sql) > 1:
         msg = (
             "query accepts a single SQL string. Wrap it in quotes if it contains spaces."
         )
-        raise typer.BadParameter(msg)
+        raise QueryArgumentError(msg)
 
     config = load_config(config_path, ChxConfigEnv(command="query"))
     executor = resolve_plugin_executor(
@@ -209,6 +218,14 @@ def run(
         config_path=loaded_config_path(config_path),
         json_mode=output_json,
         service=service,
+        # As in TS, the hooks get the flags that were passed, keyed by long name.
+        flags=passed_flags(
+            {
+                "--config": str(config_path) if config_path is not None else None,
+                "--json": output_json,
+                "--service": service,
+            }
+        ),
     )
     if executor is None and config.clickhouse is None:
         msg = (

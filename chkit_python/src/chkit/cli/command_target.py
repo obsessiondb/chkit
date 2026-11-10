@@ -9,19 +9,29 @@ As in TS (``runtime.resolveContext``), a plugin's ``get_context`` executor
 from __future__ import annotations
 
 import sys
+from collections.abc import Callable
 from typing import Annotated, Any, NoReturn
 
 import typer
 
-from chkit.cli.json_output import emit_json_error, json_error_code
+from chkit.cli import command_lifecycle
+from chkit.cli.json_output import emit_json_error, json_error_code, print_output
 from chkit.cli.plugin_runtime import (
     PluginExecutionError,
     PluginRuntime,
     null_plugin_context,
 )
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.core.model import ChxResolvedClickHouseConfig, ChxResolvedConfig
-from chkit.plugins import ChxGetContextInput, ChxOnInitContext
+from chkit.clickhouse.index_granularity import (
+    IndexGranularityMismatchError,
+    assert_server_index_granularity,
+)
+from chkit.core.model import (
+    ChxResolvedClickHouseConfig,
+    ChxResolvedConfig,
+    configured_index_granularity,
+)
+from chkit.plugins import ChxGetContextInput, ChxOnConfigLoadedContext, ChxOnInitContext
 
 # The TS ObsessionDB plugin adds --service to these commands through
 # extendCommands; Typer commands are static, so each declares it.
@@ -43,17 +53,21 @@ def resolve_plugin_executor(
     json_mode: bool,
     service: str | None,
     flags: dict[str, Any] | None = None,
+    after_init: Callable[[], None] | None = None,
 ) -> ClickHouseClient | None:
     """Run the on_init hooks, then return the first plugin executor, or None.
 
     ``flags`` is the command's parsed-flag dict (``hook_flags.passed_flags``)
-    for both hooks; without it they get only ``--service``.
+    for both hooks; without it they get only ``--service``. ``after_init``
+    runs between the two hooks, where TS runs a plugin command's
+    on_config_loaded hooks.
     """
     # The hooks read --service under the key the TS flag parser produces.
     if flags is None:
         flags = {"--service": service} if service is not None else {}
     # TS onInit: ObsessionDB names the selected service (text mode only).
-    plugin_runtime.run_on_init(
+    command_lifecycle.run_on_init(
+        plugin_runtime,
         ChxOnInitContext(
             command=command,
             config_path=config_path,
@@ -62,8 +76,10 @@ def resolve_plugin_executor(
             flags=flags,
             config=config,
             options={},
-        )
+        ),
     )
+    if after_init is not None:
+        after_init()
     try:
         plugin_context = plugin_runtime.resolve_context(
             ChxGetContextInput(
@@ -82,6 +98,25 @@ def resolve_plugin_executor(
         typer.echo(str(error), err=True)
         raise typer.Exit(code=1) from error
     return plugin_context.executor if plugin_context is not None else None
+
+
+def run_on_config_loaded_or_exit(
+    plugin_runtime: PluginRuntime, context: ChxOnConfigLoadedContext, *, output_json: bool
+) -> None:
+    """Run the on_config_loaded hooks of a plugin command. Report a hook error
+    as the TS dispatcher (``command-dispatch.ts``) reports it, and exit 2.
+
+    With ``--json`` the error goes to stdout as ``{ok: false, error}``.
+    Without it the message goes to stderr.
+    """
+    try:
+        plugin_runtime.run_on_config_loaded(context)
+    except Exception as error:
+        if output_json:
+            print_output({"ok": False, "error": str(error)}, json_mode=True)
+        else:
+            typer.echo(str(error), err=True)
+        raise typer.Exit(code=2) from error
 
 
 def open_client(
@@ -105,3 +140,20 @@ def exit_no_target(command: str, message: str, *, json_mode: bool) -> NoReturn:
         emit_json_error(command, {"code": "error", "message": message})
     typer.echo(message, err=True)
     raise typer.Exit(code=1)
+
+
+def assert_index_granularity_matches_server(
+    command: str, client: Any, config: ChxResolvedConfig, *, json_mode: bool
+) -> None:
+    """Stop a connected command when the server's MergeTree index_granularity
+    default is not ``clickhouse.indexGranularity``: drift, plans and cutovers
+    would all assume the wrong value for tables that do not declare it (#466).
+    The error is reported as TS reports a thrown error: on stderr, plus the JSON
+    error envelope under ``--json``, and exit 1."""
+    try:
+        assert_server_index_granularity(client, configured_index_granularity(config))
+    except IndexGranularityMismatchError as error:
+        if json_mode:
+            emit_json_error(command, {"code": error.code, "message": str(error)})
+        typer.echo(str(error), err=True)
+        raise typer.Exit(code=1) from error

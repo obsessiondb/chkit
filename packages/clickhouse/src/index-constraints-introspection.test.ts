@@ -1,6 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
-import { normalizeIndexFromSystemRow, parseConstraintsFromCreateTableQuery } from './index.js'
+import { normalizeTextIndexSQL } from '@chkit/core'
+
+import {
+  normalizeIndexFromSystemRow,
+  parseConstraintsFromCreateTableQuery,
+  parseDictionaryAttributesFromCreateDictionaryQuery,
+  parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
+  parseProjectionsFromCreateTableQuery,
+} from './index.js'
 
 function indexRow(type: string, granularity = 1) {
   return { database: 'app', table: 'vectors', name: 'idx', expr: 'embedding', type, granularity }
@@ -48,6 +56,24 @@ describe('skip index introspection', () => {
     })
   })
 
+  // ObsessionDB keeps the parentheses chkit renders (`(s)`); stock ClickHouse
+  // stores `s`. Pull writes the stock form from either server (#512).
+  test.each([
+    ['(s)', 's'],
+    ['s', 's'],
+    ['((a + b) * c)', '(a + b) * c'],
+    ['(a + b) * c', '(a + b) * c'],
+    ['(a) + (b)', '(a) + (b)'],
+    ['a, b', 'a, b'],
+    ["(s = ')(')", "s = ')('"],
+    ["(s = '(') OR (t = ')')", "(s = '(') OR (t = ')')"],
+  ])('reads the expression %s back as %s', (expr, expected) => {
+    expect(normalizeIndexFromSystemRow({ ...indexRow('minmax'), expr }).expression).toBe(expected)
+    const text = normalizeIndexFromSystemRow({ ...indexRow("text(tokenizer = 'splitByNonAlpha')"), expr })
+    expect(text.expression).toBe(expected)
+    expect(normalizeTextIndexSQL(expected)).toBe(expected)
+  })
+
   test('still reads the structured types', () => {
     expect(normalizeIndexFromSystemRow(indexRow('set(0)'))).toMatchObject({ type: 'set', maxRows: 0 })
     expect(normalizeIndexFromSystemRow(indexRow('bloom_filter'))).toMatchObject({ type: 'bloom_filter' })
@@ -70,6 +96,22 @@ describe('constraint introspection', () => {
     ])
   })
 
+  test('unescapes a backtick in a quoted projection or constraint name', () => {
+    // create_table_query as ClickHouse 26.3 returns it (#631); chkit-py's
+    // test_create_table_parser.py asserts the same.
+    const query =
+      'CREATE TABLE d.t (`a` UInt8, `b` UInt8, CONSTRAINT `c\\`k` CHECK a > 0, CONSTRAINT `c k2` ASSUME b > 0, PROJECTION `p\\`x` (SELECT a ORDER BY b), PROJECTION `p y` (SELECT b ORDER BY a), PROJECTION `i\\`p` INDEX b TYPE basic) ENGINE = MergeTree ORDER BY a SETTINGS index_granularity = 8192'
+    expect(parseProjectionsFromCreateTableQuery(query)).toEqual([
+      { name: 'p`x', query: 'SELECT a ORDER BY b' },
+      { name: 'p y', query: 'SELECT b ORDER BY a' },
+      { name: 'i`p', index: 'b', type: 'basic' },
+    ])
+    expect(parseConstraintsFromCreateTableQuery(query)).toEqual([
+      { name: 'c`k', check: 'a > 0' },
+      { name: 'c k2', assume: 'b > 0' },
+    ])
+  })
+
   test('reads the multi-line SHOW CREATE form', () => {
     const query = 'CREATE TABLE app.t\n(\n    `id` UInt64,\n    `s` String,\n    CONSTRAINT c CHECK length(s) > 0\n)\nENGINE = MergeTree\nORDER BY id'
     expect(parseConstraintsFromCreateTableQuery(query)).toEqual([{ name: 'c', check: 'length(s) > 0' }])
@@ -78,5 +120,28 @@ describe('constraint introspection', () => {
   test('a table without constraints has none', () => {
     expect(parseConstraintsFromCreateTableQuery('CREATE TABLE app.t (`id` UInt64) ENGINE = MergeTree ORDER BY id')).toEqual([])
     expect(parseConstraintsFromCreateTableQuery(undefined)).toEqual([])
+  })
+})
+
+describe('parsed names trim JavaScript whitespace', () => {
+  // chkit-py's test_name_trim.py asserts the same (#580).
+  test('projection and constraint names', () => {
+    const query =
+      'CREATE TABLE app.t (`id` UInt64, PROJECTION `\x85p\ufeff` (SELECT id ORDER BY id), PROJECTION `\x85ip\ufeff` INDEX id TYPE basic, CONSTRAINT `\x85c\ufeff` CHECK id > 0) ENGINE = MergeTree ORDER BY id'
+    expect(parseProjectionsFromCreateTableQuery(query).map((p) => p.name)).toEqual(['\x85p', '\x85ip'])
+    expect(parseConstraintsFromCreateTableQuery(query).map((c) => c.name)).toEqual(['\x85c'])
+  })
+
+  test('decodes escapes in a quoted projection name as ClickHouse does (#631, #639)', () => {
+    const query =
+      'CREATE TABLE d.t (`a` UInt8, PROJECTION `p\\x41` (SELECT a ORDER BY a)) ENGINE = MergeTree ORDER BY a'
+    expect(parseProjectionsFromCreateTableQuery(query).map((p) => p.name)).toEqual(['pA'])
+  })
+
+  test('dictionary attribute and primary key names', () => {
+    const query =
+      'CREATE DICTIONARY app.d (`\x85k\ufeff` UInt64, `k2` UInt64) PRIMARY KEY k1\x85, \ufeffk2 SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)'
+    expect(parseDictionaryAttributesFromCreateDictionaryQuery(query).map((a) => a.name)).toEqual(['\x85k', 'k2'])
+    expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(query)).toEqual(['k1\x85', 'k2'])
   })
 })

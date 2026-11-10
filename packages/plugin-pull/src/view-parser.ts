@@ -1,20 +1,23 @@
 import {
   inferSchemaKindFromEngine,
-  parseCommentFromCreateDictionaryQuery,
   parseDictionaryAttributesFromCreateDictionaryQuery,
   parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
   parseDictionaryRangeFromCreateDictionaryQuery,
   parseDictionarySettingsFromCreateDictionaryQuery,
   parseLayoutFromCreateDictionaryQuery,
   parseLifetimeFromCreateDictionaryQuery,
+  parseMaterializedViewTarget,
   parseSourceFromCreateDictionaryQuery,
   type IntrospectedTable,
 } from '@chkit/clickhouse'
-import type {
-  DictionaryDefinition,
-  MaterializedViewDefinition,
-  MaterializedViewRefresh,
-  ViewDefinition,
+import {
+  identifierName,
+  isTrivia,
+  tokenizeSQL,
+  type DictionaryDefinition,
+  type MaterializedViewDefinition,
+  type MaterializedViewRefresh,
+  type ViewDefinition,
 } from '@chkit/core'
 
 export interface SystemTableRow {
@@ -22,14 +25,16 @@ export interface SystemTableRow {
   name: string
   engine: string
   create_table_query?: string
+  /** `system.tables.comment`, as ClickHouse decoded it. */
+  comment?: string
 }
 
 export type IntrospectedObject =
   | ({ kind: 'table' } & IntrospectedTable)
-  | ({ kind: 'view' } & Pick<ViewDefinition, 'database' | 'name' | 'as'>)
+  | ({ kind: 'view' } & Pick<ViewDefinition, 'database' | 'name' | 'as' | 'comment'>)
   | ({ kind: 'materialized_view' } & Pick<
       MaterializedViewDefinition,
-      'database' | 'name' | 'to' | 'as' | 'refresh'
+      'database' | 'name' | 'to' | 'as' | 'refresh' | 'comment'
     >)
   | ({ kind: 'dictionary' } & Pick<
       DictionaryDefinition,
@@ -58,7 +63,6 @@ function mapDictionaryRowToDefinition(
   if (attributes.length === 0 || primaryKey.length === 0 || !source || !layout || !lifetime) {
     return null
   }
-  const comment = parseCommentFromCreateDictionaryQuery(query)
   const range = parseDictionaryRangeFromCreateDictionaryQuery(query)
   const settings = parseDictionarySettingsFromCreateDictionaryQuery(query)
   return {
@@ -72,7 +76,7 @@ function mapDictionaryRowToDefinition(
     lifetime,
     ...(range ? { range } : {}),
     ...(settings ? { settings } : {}),
-    ...(comment ? { comment } : {}),
+    ...(row.comment ? { comment: row.comment } : {}),
   }
 }
 
@@ -83,14 +87,21 @@ export function mapSystemTableRowToDefinition(
   if (kind === 'view') {
     const as = parseAsClause(row.create_table_query)
     if (!as) return null
-    return { kind: 'view', database: row.database, name: row.name, as }
+    return { kind: 'view', database: row.database, name: row.name, as, ...(row.comment ? { comment: row.comment } : {}) }
   }
   if (kind === 'materialized_view') {
     const as = parseAsClause(row.create_table_query)
     const to = parseToClause(row.create_table_query, row.database)
     if (!as || !to) return null
     const refresh = parseRefreshClause(row.create_table_query)
-    const base = { kind: 'materialized_view' as const, database: row.database, name: row.name, to, as }
+    const base = {
+      kind: 'materialized_view' as const,
+      database: row.database,
+      name: row.name,
+      to,
+      as,
+      ...(row.comment ? { comment: row.comment } : {}),
+    }
     return refresh ? { ...base, refresh } : base
   }
   if (kind === 'dictionary') {
@@ -110,13 +121,23 @@ function stripDefinerClauses(query: string): string {
     .replace(/\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER|NONE)/gi, '')
 }
 
+/**
+ * The query after the first top-level `AS`. The statement is read with the SQL
+ * lexer, so an `AS` inside a string literal (a `COMMENT`) or a column list is
+ * skipped.
+ */
 export function parseAsClause(query: string | undefined): string | null {
   if (!query) return null
-  const cleaned = stripDefinerClauses(query)
-  const match = /\bAS\b([\s\S]*)$/i.exec(cleaned)
-  if (!match?.[1]) return null
-  const asClause = match[1].trim().replace(/;$/, '').trim()
-  return asClause.length > 0 ? asClause : null
+  let depth = 0
+  for (const token of tokenizeSQL(query)) {
+    if (isTrivia(token)) continue
+    if (token.text === '(') depth++
+    else if (token.text === ')') depth--
+    if (depth !== 0 || token.kind !== 'identifier' || token.text.toUpperCase() !== 'AS') continue
+    const asClause = query.slice(token.end).trim().replace(/;$/, '').trim()
+    return asClause.length > 0 ? asClause : null
+  }
+  return null
 }
 
 const INTERVAL_TOKEN = '\\d+\\s+(?:SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)S?(?:\\s+\\d+\\s+(?:SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)S?)*'
@@ -152,19 +173,44 @@ function parseRefreshSettings(segment: string): Record<string, string | number> 
   return out
 }
 
-function parseDependsOn(segment: string): Array<{ database: string; name: string }> {
-  const out: Array<{ database: string; name: string }> = []
-  for (const entry of segment.split(',')) {
-    const trimmed = entry.trim()
-    if (!trimmed) continue
-    const parts = trimmed.split('.').map((part) => part.replace(/^[`"]|[`"]$/g, '').trim())
-    if (parts.length === 1 && parts[0]) {
-      out.push({ database: 'default', name: parts[0] })
-    } else if (parts.length === 2 && parts[0] && parts[1]) {
-      out.push({ database: parts[0], name: parts[1] })
+/**
+ * The `DEPENDS ON [db.]name, ...` list, read with the SQL lexer so a quoted
+ * name is unescaped and the commas, dots and keywords inside it stay part of
+ * the name. Only the part before the first top-level `AS` is searched.
+ */
+function parseDependsOn(query: string): Array<{ database: string; name: string }> {
+  const tokens = tokenizeSQL(query).filter((token) => !isTrivia(token))
+  const isWord = (i: number, word: string): boolean =>
+    tokens[i]?.kind === 'identifier' && tokens[i]?.text.toUpperCase() === word
+  const nameAt = (i: number): string | undefined => {
+    const token = tokens[i]
+    return token ? identifierName(token)?.trim() : undefined
+  }
+  let depth = 0
+  for (let i = 0; i < tokens.length; i++) {
+    const text = tokens[i]?.text
+    if (text === '(') depth++
+    else if (text === ')') depth--
+    if (depth !== 0) continue
+    if (isWord(i, 'AS')) break
+    if (!isWord(i, 'DEPENDS') || !isWord(i + 1, 'ON')) continue
+    const out: Array<{ database: string; name: string }> = []
+    let j = i + 2
+    while (true) {
+      const first = nameAt(j)
+      if (tokens[j + 1]?.text === '.') {
+        const name = nameAt(j + 2)
+        if (first && name) out.push({ database: first, name })
+        j += 3
+      } else {
+        if (first) out.push({ database: 'default', name: first })
+        j += 1
+      }
+      if (tokens[j]?.text !== ',') return out
+      j++
     }
   }
-  return out
+  return []
 }
 
 /**
@@ -206,13 +252,8 @@ export function parseRefreshClause(
   const randomizeMatch = new RegExp(`\\bRANDOMIZE\\s+FOR\\s+(${INTERVAL_TOKEN})`, 'i').exec(cleaned)
   if (randomizeMatch?.[1]) refresh.randomize = normalizeInterval(randomizeMatch[1])
 
-  // DEPENDS ON runs until the next known keyword or end of refresh block.
-  const dependsMatch =
-    /\bDEPENDS\s+ON\s+([\s\S]*?)(?=\bSETTINGS\b|\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)/i.exec(cleaned)
-  if (dependsMatch?.[1]) {
-    const deps = parseDependsOn(dependsMatch[1])
-    if (deps.length > 0) refresh.dependsOn = deps
-  }
+  const deps = parseDependsOn(cleaned)
+  if (deps.length > 0) refresh.dependsOn = deps
 
   const settingsMatch =
     /\bSETTINGS\s+([\s\S]*?)(?=\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)/i.exec(cleaned)
@@ -230,26 +271,10 @@ export function parseRefreshClause(
   return refresh
 }
 
+/** The `TO [db.]name` target of a materialized view; null for one with an inner table. */
 export function parseToClause(
   query: string | undefined,
   fallbackDatabase: string
 ): { database: string; name: string } | null {
-  if (!query) return null
-  const identifier = /(?:^|\s)TO\s+((?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+)(?:\.(?:`[^`]+`|"[^"]+"|[A-Za-z0-9_]+))?)/i.exec(
-    query
-  )?.[1]
-  if (!identifier) return null
-  const parts = identifier.split('.').map((part) => part.replace(/^[`"]|[`"]$/g, '').trim())
-  if (parts.length === 1) {
-    const name = parts[0] ?? ''
-    if (name.length === 0) return null
-    return { database: fallbackDatabase, name }
-  }
-  if (parts.length === 2) {
-    const database = parts[0] ?? fallbackDatabase
-    const name = parts[1] ?? ''
-    if (database.length === 0 || name.length === 0) return null
-    return { database, name }
-  }
-  return null
+  return parseMaterializedViewTarget(query, fallbackDatabase) ?? null
 }

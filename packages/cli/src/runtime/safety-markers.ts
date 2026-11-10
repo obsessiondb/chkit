@@ -1,4 +1,4 @@
-import { extractExecutableStatements } from '@chkit/core'
+import { extractExecutableStatements, isTrivia, tokenizeSQL, type SQLToken } from '@chkit/core'
 
 export { extractExecutableStatements }
 
@@ -102,6 +102,70 @@ export function extractMigrationOperationSummaries(sql: string): MigrationOperat
   return summaries
 }
 
+export interface NonSelectBarrier {
+  /** 0-based position among the statements. */
+  index: number
+  statement: string
+  /** The `-- operation:` marker text after the prefix. */
+  summary: string
+}
+
+/**
+ * The statements marked `mode=barrier` that are not a SELECT (#634); the
+ * n-th operation marker belongs to the n-th statement. The barrier read runs
+ * its statement as a query, once and then every second, and nothing waits for
+ * a change it makes to reach the other replicas, so migrate refuses any other
+ * statement there.
+ */
+export function findNonSelectBarriers(
+  statements: readonly string[],
+  operations: readonly MigrationOperationSummary[],
+): NonSelectBarrier[] {
+  const found: NonSelectBarrier[] = []
+  for (const [index, statement] of statements.entries()) {
+    const operation = operations[index]
+    if (operation?.mode !== 'barrier' || isSelectStatement(statement)) continue
+    found.push({ index, statement, summary: operation.summary })
+  }
+  return found
+}
+
+/**
+ * A SELECT, possibly in parentheses, a `WITH ... SELECT` or a FROM-first
+ * `FROM ... SELECT`. ClickHouse also reads `WITH ... INSERT INTO`, and runs
+ * the statements joined by `PARALLEL WITH` even when it then rejects a SELECT
+ * among them, so an `INSERT INTO` or a `PARALLEL WITH` outside a subquery
+ * makes it something else. A column or alias named `parallel` followed by a
+ * WITH modifier (`GROUP BY parallel WITH TOTALS`) there has to be quoted.
+ */
+export function isSelectStatement(statement: string): boolean {
+  const tokens = tokenizeSQL(statement).filter((token) => !isTrivia(token))
+  let start = 0
+  while (isPunctuation(tokens[start], '(')) start++
+  const first = keyword(tokens[start])
+  if (first !== 'SELECT' && first !== 'WITH' && first !== 'FROM') return false
+  let depth = 0
+  for (const [index, token] of tokens.entries()) {
+    if (isPunctuation(token, '(')) depth++
+    else if (isPunctuation(token, ')')) depth--
+    else if (depth <= start && isOtherStatementKeyword(token, tokens[index + 1])) return false
+  }
+  return true
+}
+
+function isOtherStatementKeyword(token: SQLToken, next: SQLToken | undefined): boolean {
+  const pair = `${keyword(token)} ${keyword(next)}`
+  return pair === 'INSERT INTO' || pair === 'PARALLEL WITH'
+}
+
+function isPunctuation(token: SQLToken | undefined, text: string): boolean {
+  return token?.kind === 'punctuation' && token.text === text
+}
+
+function keyword(token: SQLToken | undefined): string | undefined {
+  return token?.kind === 'identifier' ? token.text.toUpperCase() : undefined
+}
+
 function describeDestructiveOperation(
   type: string,
   opts: { recreate?: boolean } = {}
@@ -200,8 +264,10 @@ export function collectDestructiveOperationMarkers(
 // Defense-in-depth (#2): planner-emitted `-- operation: risk=danger` markers only
 // exist on generated migrations. A hand-written or hand-edited migration can
 // contain destructive SQL with no marker — so we also scan the executable SQL
-// itself. Comments are stripped first, so a commented-out `-- DROP TABLE` is not
-// flagged, while a real statement is.
+// itself. The statement is read through the lexer (#642): every comment form
+// ClickHouse reads (`--`, `//`, `# `, `#!`, `/* */`) only separates tokens, and
+// text inside a string or quoted name is never a keyword. So a commented-out
+// `DROP TABLE` is not flagged, while `DROP /* x */ TABLE t` is.
 // Each rule requires the statement keyword that follows the verb, so a SQL
 // function such as `truncate(x)` (a ClickHouse math function) is NOT mistaken
 // for a `TRUNCATE TABLE` statement.
@@ -216,15 +282,37 @@ const DESTRUCTIVE_SQL_RULES: Array<{ type: string; re: RegExp }> = [
   { type: 'detach', re: /\bDETACH\s+(?:TABLE|VIEW|DICTIONARY|DATABASE|PARTITION|PART)\b/i },
 ]
 
+// ClickHouse also quotes with U+2018/U+2019 (a string) and U+201C/U+201D (a
+// name), which the lexer does not know: it can read an ASCII quote or comment
+// opener inside one as live and so hide real SQL. Where one of these characters
+// appears, the raw text is matched too.
+const UNICODE_QUOTE = /[\u2018\u2019\u201C\u201D]/
+
 function classifyDestructiveStatement(statement: string): string | null {
+  const texts = [codeText(statement, { blankQuoted: true })]
+  if (UNICODE_QUOTE.test(statement)) texts.push(statement)
   for (const rule of DESTRUCTIVE_SQL_RULES) {
-    if (rule.re.test(statement)) return rule.type
+    if (texts.some((text) => rule.re.test(text))) return rule.type
   }
   return null
 }
 
+// The statement as ClickHouse reads it: each comment becomes one space, since a
+// comment separates tokens (`DROP/**/TABLE` is `DROP TABLE`). With
+// `blankQuoted`, every string literal and quoted name becomes `''`, so the text
+// inside one is not read as a keyword.
+function codeText(statement: string, options: { blankQuoted: boolean }): string {
+  return tokenizeSQL(statement)
+    .map((token) => {
+      if (isTrivia(token)) return ' '
+      if (options.blankQuoted && (token.kind === 'string' || token.kind === 'quoted_identifier')) return "''"
+      return token.text
+    })
+    .join('')
+}
+
 function extractObjectKey(statement: string): string {
-  const match = statement.match(
+  const match = codeText(statement, { blankQuoted: false }).match(
     /\b(?:TABLE|VIEW|DATABASE|DICTIONARY)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?/i,
   )
   return match?.[1] ?? 'unknown'

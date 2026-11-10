@@ -13,6 +13,16 @@ from __future__ import annotations
 import re
 from dataclasses import dataclass
 
+from chkit.clickhouse.introspect import parse_materialized_view_target
+from chkit.core.sql_lexer import (
+    JS_WHITESPACE_RUN,
+    identifier_name,
+    is_trivia,
+    js_regex,
+    js_trim,
+    tokenize_sql,
+)
+
 __all__ = [
     "MaterializedViewRefreshShape",
     "ToClauseShape",
@@ -47,17 +57,11 @@ class MaterializedViewRefreshShape:
 
 
 _DEFINER_RE = re.compile(
-    r"\bDEFINER\s*=\s*(?:CURRENT_USER|`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+)",
+    js_regex(r"\bDEFINER\s*=\s*(?:CURRENT_USER|`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+)"),
     re.IGNORECASE,
 )
 _SQL_SECURITY_RE = re.compile(
-    r"\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER|NONE)", re.IGNORECASE
-)
-_AS_CLAUSE_RE = re.compile(r"\bAS\b(.*)$", re.IGNORECASE | re.DOTALL)
-_TO_CLAUSE_RE = re.compile(
-    r"(?:^|\s)TO\s+((?:`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+)"
-    r"(?:\.(?:`[^`]+`|\"[^\"]+\"|[A-Za-z0-9_]+))?)",
-    re.IGNORECASE,
+    js_regex(r"\bSQL\s+SECURITY\s+(?:DEFINER|INVOKER|NONE)"), re.IGNORECASE
 )
 
 _INTERVAL_TOKEN = (
@@ -65,27 +69,24 @@ _INTERVAL_TOKEN = (
     r"(?:\s+\d+\s+(?:SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)S?)*"
 )
 _REFRESH_RE = re.compile(
-    rf"\bREFRESH\s+(EVERY|AFTER)\s+({_INTERVAL_TOKEN})", re.IGNORECASE
+    js_regex(rf"\bREFRESH\s+(EVERY|AFTER)\s+({_INTERVAL_TOKEN})"), re.IGNORECASE
 )
-_OFFSET_RE = re.compile(rf"\bOFFSET\s+({_INTERVAL_TOKEN})", re.IGNORECASE)
+_OFFSET_RE = re.compile(js_regex(rf"\bOFFSET\s+({_INTERVAL_TOKEN})"), re.IGNORECASE)
 _RANDOMIZE_RE = re.compile(
-    rf"\bRANDOMIZE\s+FOR\s+({_INTERVAL_TOKEN})", re.IGNORECASE
-)
-_DEPENDS_RE = re.compile(
-    r"\bDEPENDS\s+ON\s+(.*?)(?=\bSETTINGS\b|\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)",
-    re.IGNORECASE | re.DOTALL,
+    js_regex(rf"\bRANDOMIZE\s+FOR\s+({_INTERVAL_TOKEN})"), re.IGNORECASE
 )
 _SETTINGS_RE = re.compile(
-    r"\bSETTINGS\s+(.*?)(?=\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)",
+    js_regex(r"\bSETTINGS\s+(.*?)(?=\bAPPEND\b|\bTO\b|\bEMPTY\b|\bAS\b|$)"),
     re.IGNORECASE | re.DOTALL,
 )
-_SETTING_ENTRY_RE = re.compile(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
+_SETTING_ENTRY_RE = re.compile(
+    js_regex(r"^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=\s*(.+?)\s*$")
+)
 _UNIT_RE = re.compile(
     r"\b(second|minute|hour|day|week|month|year)s?\b", re.IGNORECASE
 )
 
 
-_QUALIFIED_TWO_PARTS = 2
 _MIN_QUOTED_LEN = 2
 
 
@@ -94,7 +95,7 @@ def _strip_definer_clauses(query: str) -> str:
 
 
 def _normalize_interval(value: str) -> str:
-    normalized = " ".join(value.split())
+    normalized = JS_WHITESPACE_RUN.sub(" ", js_trim(value))
 
     def _to_singular_upper(match: re.Match[str]) -> str:
         unit = match.group(0).upper()
@@ -104,52 +105,86 @@ def _normalize_interval(value: str) -> str:
 
 
 def parse_as_clause(query: str | None) -> str | None:
-    """Return the SELECT body from a CREATE VIEW / MV statement, or None."""
+    """Return the query after the first top-level ``AS``, or None.
+
+    The statement is read with the SQL lexer, so an ``AS`` inside a string
+    literal (a ``COMMENT``) or a column list is skipped.
+    """
     if not query:
         return None
-    cleaned = _strip_definer_clauses(query)
-    match = _AS_CLAUSE_RE.search(cleaned)
-    if match is None or not match.group(1):
-        return None
-    as_clause = match.group(1).strip().rstrip(";").strip()
-    return as_clause or None
-
-
-def parse_to_clause(query: str | None, fallback_database: str) -> ToClauseShape | None:  # noqa: PLR0911
-    """Extract the ``TO db.t`` target of a CREATE MATERIALIZED VIEW."""
-    if not query:
-        return None
-    match = _TO_CLAUSE_RE.search(query)
-    if match is None:
-        return None
-    identifier = match.group(1)
-    parts = [p.strip().lstrip("`\"").rstrip("`\"") for p in identifier.split(".")]
-    if len(parts) == 1:
-        name = parts[0]
-        if not name:
-            return None
-        return ToClauseShape(database=fallback_database, name=name)
-    if len(parts) == _QUALIFIED_TWO_PARTS:
-        database = parts[0] or fallback_database
-        name = parts[1]
-        if not database or not name:
-            return None
-        return ToClauseShape(database=database, name=name)
+    depth = 0
+    for token in tokenize_sql(query):
+        if is_trivia(token):
+            continue
+        if token.text == "(":
+            depth += 1
+        elif token.text == ")":
+            depth -= 1
+        if depth != 0 or token.kind != "identifier" or token.text.upper() != "AS":
+            continue
+        as_clause = js_trim(js_trim(query[token.end :]).removesuffix(";"))
+        return as_clause or None
     return None
 
 
-def _parse_depends_on(segment: str) -> list[DependsOnEntry]:
-    out: list[DependsOnEntry] = []
-    for entry in segment.split(","):
-        trimmed = entry.strip()
-        if not trimmed:
+def parse_to_clause(query: str | None, fallback_database: str) -> ToClauseShape | None:
+    """The ``TO [db.]name`` target of a materialized view; None for one with an inner table."""
+    target = parse_materialized_view_target(query, fallback_database)
+    return None if target is None else ToClauseShape(database=target[0], name=target[1])
+
+
+def _parse_depends_on(query: str) -> list[DependsOnEntry]:
+    """The ``DEPENDS ON [db.]name, ...`` list.
+
+    Read with the SQL lexer so a quoted name is unescaped and the commas, dots
+    and keywords inside it stay part of the name. Only the part before the
+    first top-level ``AS`` is searched.
+    """
+    tokens = [token for token in tokenize_sql(query) if not is_trivia(token)]
+
+    def is_word(i: int, word: str) -> bool:
+        return (
+            i < len(tokens)
+            and tokens[i].kind == "identifier"
+            and tokens[i].text.upper() == word
+        )
+
+    def name_at(i: int) -> str | None:
+        name = identifier_name(tokens[i]) if i < len(tokens) else None
+        return None if name is None else js_trim(name)
+
+    def text_at(i: int) -> str | None:
+        return tokens[i].text if i < len(tokens) else None
+
+    depth = 0
+    for i, token in enumerate(tokens):
+        if token.text == "(":
+            depth += 1
+        elif token.text == ")":
+            depth -= 1
+        if depth != 0:
             continue
-        parts = [p.strip().lstrip("`\"").rstrip("`\"") for p in trimmed.split(".")]
-        if len(parts) == 1 and parts[0]:
-            out.append(DependsOnEntry(database="default", name=parts[0]))
-        elif len(parts) == _QUALIFIED_TWO_PARTS and parts[0] and parts[1]:
-            out.append(DependsOnEntry(database=parts[0], name=parts[1]))
-    return out
+        if is_word(i, "AS"):
+            break
+        if not is_word(i, "DEPENDS") or not is_word(i + 1, "ON"):
+            continue
+        out: list[DependsOnEntry] = []
+        j = i + 2
+        while True:
+            first = name_at(j)
+            if text_at(j + 1) == ".":
+                name = name_at(j + 2)
+                if first and name:
+                    out.append(DependsOnEntry(database=first, name=name))
+                j += 3
+            else:
+                if first:
+                    out.append(DependsOnEntry(database="default", name=first))
+                j += 1
+            if text_at(j) != ",":
+                return out
+            j += 1
+    return []
 
 
 def _parse_refresh_settings(segment: str) -> dict[str, str | int | float]:
@@ -159,7 +194,7 @@ def _parse_refresh_settings(segment: str) -> dict[str, str | int | float]:
         if match is None:
             continue
         key = match.group(1)
-        raw = match.group(2).strip()
+        raw = js_trim(match.group(2))
         if len(raw) >= _MIN_QUOTED_LEN and raw.startswith("'") and raw.endswith("'"):
             out[key] = raw[1:-1].replace("''", "'")
             continue
@@ -199,12 +234,7 @@ def parse_refresh_clause(query: str | None) -> MaterializedViewRefreshShape | No
         _normalize_interval(randomize_match.group(1)) if randomize_match else None
     )
 
-    depends_on: list[DependsOnEntry] | None = None
-    depends_match = _DEPENDS_RE.search(cleaned)
-    if depends_match is not None:
-        parsed = _parse_depends_on(depends_match.group(1))
-        if parsed:
-            depends_on = parsed
+    depends_on = _parse_depends_on(cleaned) or None
 
     settings: dict[str, str | int | float] | None = None
     settings_match = _SETTINGS_RE.search(cleaned)

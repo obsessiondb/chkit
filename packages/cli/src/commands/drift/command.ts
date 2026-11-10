@@ -1,8 +1,11 @@
 import { join } from 'node:path'
 
+import { assertServerIndexGranularity } from '@chkit/clickhouse'
+import { configuredIndexGranularity } from '@chkit/core'
+
 import { typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { readSnapshot } from '../../runtime/migration-store.js'
 import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table-scope.js'
@@ -11,14 +14,14 @@ import { buildDriftPayload, type DriftPayload } from './payload.js'
 export const driftCommand: ChxPluginCommand = {
   name: 'drift',
   description: 'Compare snapshot state with current ClickHouse objects',
-  flags: [],
+  flags: [TABLE_FLAG],
   async run(context): Promise<undefined | number> {
     const { flags, config, pluginContext } = context
-    const f = typedFlags(flags, GLOBAL_FLAGS)
+    const f = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG] as const)
     const tableSelector = f['--table']
     const jsonMode = f['--json'] === true
     const { metaDir } = resolveDirs(config)
-    const snapshot = await readSnapshot(metaDir)
+    const snapshot = await readSnapshot(metaDir, { indexGranularity: configuredIndexGranularity(config) })
     if (!snapshot) {
       throw new Error('Snapshot not found. Run `chkit generate` before drift checks.')
     }
@@ -49,6 +52,7 @@ export const driftCommand: ChxPluginCommand = {
     if (!pluginContext.hasExecutor) {
       throw new Error('clickhouse config is required for drift checks')
     }
+    await assertServerIndexGranularity(pluginContext.executor, configuredIndexGranularity(config))
     const payload = await buildDriftPayload(config, metaDir, snapshot, scope, pluginContext.executor)
 
     if (jsonMode) {
@@ -91,7 +95,7 @@ export const driftCommand: ChxPluginCommand = {
           )
           continue
         }
-        if (item.code === 'query_mismatch' || item.code === 'target_mismatch') {
+        if (item.code === 'query_mismatch' || item.code === 'target_mismatch' || item.code === 'comment_mismatch') {
           console.log(`- ${item.code} ${item.object}`)
           console.log(`  expected=${item.expected ?? ''}`)
           console.log(`  actual=${item.actual ?? ''}`)

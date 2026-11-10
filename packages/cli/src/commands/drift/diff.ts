@@ -1,4 +1,4 @@
-import { compareCodePoints } from '@chkit/core'
+import { compareCodePoints, settingValueFingerprint } from '@chkit/core'
 
 export function diffByName<T>(
   expectedItems: readonly T[],
@@ -34,13 +34,13 @@ export function diffByName<T>(
 
 export function diffSettings(
   expectedSettings: Record<string, string | number | boolean>,
-  actualSettings: Record<string, string>
+  actualSettings: Record<string, string | number | boolean>
 ): string[] {
   const settingKeys = Object.keys(expectedSettings).sort()
   const diffs: string[] = []
   for (const key of settingKeys) {
-    const left = key in expectedSettings ? String(expectedSettings[key]) : ''
-    const right = key in actualSettings ? String(actualSettings[key]) : ''
+    const left = key in expectedSettings ? settingValueFingerprint(expectedSettings[key] ?? '') : ''
+    const right = key in actualSettings ? settingValueFingerprint(actualSettings[key] ?? '') : ''
     if (left !== right) {
       diffs.push(key)
     }

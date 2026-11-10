@@ -6,13 +6,15 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { applyMigration } from '../../../commands/migrate/apply.js'
+import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
+import { MigrateError } from '../../../commands/migrate/errors.js'
 import type {
   JournalStore,
   MigrationRowState,
   OperationState,
 } from '../../../runtime/journal-store.js'
 import { checksumSQL, type MigrationJournalEntry } from '../../../runtime/migration-store.js'
+import { CLI_VERSION } from '../../../runtime/version.js'
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../../plugins.js'
 
 function createFakeStore(initial: MigrationRowState | null = null) {
@@ -207,8 +209,179 @@ describe('applyMigration sync resume (#6)', () => {
     })
     rmSync(dir, { recursive: true, force: true })
 
-    expect(events).toEqual(['command', 'completed-write', 'propagation-query'])
+    // The second write clears the pending-wait marker once the wait passed (#513).
+    expect(events).toEqual(['command', 'completed-write', 'propagation-query', 'completed-write'])
+    expect(current?.operations[0]?.lastError).toBe('')
   })
+})
+
+describe('applyMigration resume after a propagation wait timeout (#513)', () => {
+  const CREATE = 'CREATE TABLE IF NOT EXISTS default.t (id UInt64) ENGINE = MergeTree ORDER BY id;'
+  const INSERT = 'INSERT INTO default.t VALUES (1);'
+  const SQL = `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n${INSERT}\n`
+
+  // A single-replica target on which default.t is listed in system.tables
+  // only while `visible` is set.
+  function propagationDb(events: string[], visible: { value: boolean }) {
+    return {
+      async command(sql: string) {
+        events.push(`command ${sql}`)
+      },
+      async query(sql: string) {
+        if (sql.includes('system.one')) return []
+        events.push('propagation-query')
+        return visible.value ? [{ x: 1 }] : []
+      },
+    } as unknown as ClickHouseExecutor
+  }
+
+  function recordingStore(events: string[]) {
+    const fake = createFakeStore()
+    const appendEntry = fake.store.appendEntry
+    fake.store.appendEntry = async (entry) => {
+      events.push('append')
+      await appendEntry(entry)
+    }
+    return fake
+  }
+
+  test('waits again for a completed statement whose wait timed out, then runs the next statement and records', async () => {
+    const dir = writeMigration(SQL)
+    const events: string[] = []
+    const visible = { value: false }
+    const { store, state, appended } = recordingStore(events)
+    const args = {
+      db: propagationDb(events, visible),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    expect(events[0]).toBe(`command ${CREATE}`)
+    expect(events.filter((event) => event.startsWith('command'))).toHaveLength(1)
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status, op.lastError])).toEqual([
+      [0, 'completed', PROPAGATION_WAIT_PENDING],
+    ])
+    expect(appended).toEqual([])
+
+    visible.value = true
+    events.length = 0
+    await applyMigration(args)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events).toEqual(['propagation-query', `command ${INSERT}`, 'append'])
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status, op.lastError])).toEqual([
+      [0, 'completed', ''],
+      [1, 'completed', ''],
+    ])
+    expect(appended).toMatchObject([{ name: 'm.sql', checksum: checksumSQL(SQL) }])
+  }, 30_000)
+
+  // --abandon keeps every record as failed, so the next run restarts at
+  // statement 1 with the abandoned record of statement 2 still in the state.
+  test('waits again after a restart from --abandon, although a later statement is recorded', async () => {
+    const dir = writeMigration(SQL)
+    const events: string[] = []
+    const visible = { value: false }
+    const abandoned = (index: number, was: string): OperationState => ({
+      ...operation(index, 'failed'),
+      lastError: `abandoned via chkit migrate --abandon (was ${was})`,
+    })
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(SQL), [
+        { ...abandoned(0, 'completed'), operationType: 'create_table', operationKey: 'table:default.t' },
+        abandoned(1, 'failed'),
+      ]),
+    )
+    const args = {
+      db: propagationDb(events, visible),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    expect(events.filter((event) => event.startsWith('command'))).toEqual([`command ${CREATE}`])
+
+    visible.value = true
+    events.length = 0
+    await applyMigration(args)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events).toEqual(['propagation-query', `command ${INSERT}`])
+    expect(appended).toHaveLength(1)
+  }, 30_000)
+
+  test('does not record the migration when the wait times out again', async () => {
+    const dir = writeMigration(SQL)
+    const events: string[] = []
+    const visible = { value: false }
+    const { store, state, writes, appended } = recordingStore(events)
+    const args = {
+      db: propagationDb(events, visible),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    }
+
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    const writesAfterFirstRun = writes.length
+    events.length = 0
+    await expect(applyMigration(args)).rejects.toThrow('waitForTable: default.t not yet visible')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events.length).toBeGreaterThan(1)
+    expect(events.every((event) => event === 'propagation-query')).toBe(true)
+    expect(writes).toHaveLength(writesAfterFirstRun)
+    expect(state()?.migrationCompleted).toBe(false)
+    expect(state()?.operations.map((op) => [op.operationIndex, op.status])).toEqual([[0, 'completed']])
+    expect(appended).toEqual([])
+  }, 60_000)
+
+  // A completed statement whose wait passed is not waited for again, even
+  // when no later statement is recorded (--retry drops the record of an
+  // edited statement). Here a DROP that ran before its acknowledgement was
+  // lost removed what the CREATE's wait looks for: that wait could never pass.
+  test('does not wait again for a completed statement whose wait passed', async () => {
+    const sql =
+      `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n` +
+      '-- operation: drop_table key=table:default.t risk=danger\nDROP TABLE IF EXISTS default.t;\n'
+    const dir = writeMigration(sql)
+    const events: string[] = []
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(sql), [
+        operation(0, 'completed', { type: 'create_table', key: 'table:default.t' }),
+      ]),
+    )
+
+    await applyMigration({
+      db: propagationDb(events, { value: false }),
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(events).toEqual(['command DROP TABLE IF EXISTS default.t;', 'propagation-query'])
+    expect(appended).toHaveLength(1)
+  }, 30_000)
 })
 
 describe('applyMigration backfill assertions (#274)', () => {
@@ -624,6 +797,178 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
   })
 })
 
+// Releases before #562 cut at a `;` inside a `//` comment: this file was
+// [a, DROP z, b, c] for them, and is [a…b, c] now.
+describe('applyMigration with a state another release split differently (#562)', () => {
+  const SPLIT_SQL =
+    'ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n' +
+    'ALTER TABLE t ADD COLUMN b UInt64;\n' +
+    'ALTER TABLE t ADD COLUMN c UInt64;\n'
+
+  function apply(dir: string, store: JournalStore, db: ClickHouseExecutor) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+  }
+
+  test('refuses to resume when the recorded statements are not the same in this split', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    // The old release ran a and DROP z, then b failed. Resuming by position
+    // would skip c, which never ran.
+    const { store, writes, appended } = createFakeStore(
+      inProgressState(checksumSQL(SPLIT_SQL), [
+        operation(0, 'completed'),
+        operation(1, 'completed'),
+        operation(2, 'failed'),
+      ]),
+    )
+
+    const attempt = apply(dir, store, db)
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow(
+      `Cannot resume m.sql: chkit 0.2.0-test recorded its partial run, and this chkit (${CLI_VERSION}) splits the file into different statements.`,
+    )
+    await expect(attempt).rejects.toThrow('The journal recorded statements 1, 2 as completed or started')
+    await expect(attempt).rejects.toThrow('chkit migrate --apply --abandon m.sql')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+    expect(writes).toEqual([])
+    expect(appended).toEqual([])
+  })
+
+  test('refuses a started statement too, and names a state without a release as an earlier one', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore({
+      ...inProgressState(checksumSQL(SPLIT_SQL), [operation(0, 'completed'), operation(1, 'started')]),
+      chkitVersion: '',
+    })
+
+    const attempt = apply(dir, store, db)
+    await expect(attempt).rejects.toThrow('Cannot resume m.sql: an earlier chkit release recorded its partial run')
+    await expect(attempt).rejects.toThrow('The journal recorded statements 1, 2 as completed or started')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test('resumes a state this release recorded', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore({
+      ...inProgressState(checksumSQL(SPLIT_SQL), [operation(0, 'completed'), operation(1, 'failed')]),
+      chkitVersion: CLI_VERSION,
+    })
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual(['ALTER TABLE t ADD COLUMN c UInt64;'])
+    expect(appended).toHaveLength(1)
+  })
+
+  test('resumes when every recorded statement is the same in both splits', async () => {
+    const sql =
+      'ALTER TABLE t ADD COLUMN a UInt64;\n' +
+      'ALTER TABLE t ADD COLUMN b UInt64;\n' +
+      'ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n' +
+      'ALTER TABLE t ADD COLUMN d UInt64;\n'
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(sql), [operation(0, 'completed'), operation(1, 'failed')]),
+    )
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([
+      'ALTER TABLE t ADD COLUMN b UInt64;',
+      'ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\nALTER TABLE t ADD COLUMN d UInt64;',
+    ])
+    expect(appended).toHaveLength(1)
+  })
+
+  // The journal indexes the statements onBeforeApply returns: once a plugin
+  // removes one, the old and new positions cannot be matched.
+  test('refuses when onBeforeApply removed statements of a file the two splits differ on', async () => {
+    const sql = `SET allow_experimental_x = 1;\n${SPLIT_SQL}`
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(inProgressState(checksumSQL(sql), [operation(0, 'completed')]))
+
+    const attempt = applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime((statements) => statements.filter((s) => !s.startsWith('SET '))),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow('The journal recorded statement 1 as completed or started, which is not')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test('refuses when onBeforeApply moved statements without changing their count', async () => {
+    const sql = `SET allow_experimental_x = 1;\n${SPLIT_SQL}`
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(inProgressState(checksumSQL(sql), [operation(0, 'completed')]))
+
+    const attempt = applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(([first, second, ...rest]) =>
+        first !== undefined && second !== undefined ? [second, first, ...rest] : [],
+      ),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test('runs an abandoned state from statement 1', async () => {
+    const dir = writeMigration(SPLIT_SQL)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended } = createFakeStore(
+      inProgressState(checksumSQL(SPLIT_SQL), [
+        { ...operation(0, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was completed)' },
+        { ...operation(1, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was completed)' },
+        { ...operation(2, 'failed'), lastError: 'abandoned via chkit migrate --abandon (was failed)' },
+      ]),
+    )
+
+    await apply(dir, store, db)
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([
+      'ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\nALTER TABLE t ADD COLUMN b UInt64;',
+      'ALTER TABLE t ADD COLUMN c UInt64;',
+    ])
+    expect(appended).toHaveLength(1)
+  })
+})
+
 describe('applyMigration -- before-retry on sync statements', () => {
   const SQL =
     '-- operation: cutover_validate key=table:default.t:cutover:start risk=caution\n' +
@@ -722,6 +1067,90 @@ describe('applyMigration mode=barrier', () => {
     expect(appended).toHaveLength(1)
     rmSync(dir, { recursive: true, force: true })
   }, 15_000)
+
+  // A two-replica target where no INSERT is running; every other read
+  // (a propagation wait) is recorded.
+  function twoReplicaDb() {
+    const events: string[] = []
+    const db = {
+      async command(statement: string) {
+        events.push(`command ${statement}`)
+      },
+      async query<T>(statement: string): Promise<T[]> {
+        if (statement.includes('system.one')) return [{ replicas: 2 }] as T[]
+        events.push(statement.includes('system.processes') ? 'barrier read' : `query ${statement}`)
+        return [] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    return { db, events }
+  }
+
+  function applyOnTwoReplicas(db: ClickHouseExecutor, dir: string, store: JournalStore) {
+    return applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    })
+  }
+
+  test('a SELECT barrier has no propagation wait', async () => {
+    const sql =
+      '-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier risk=safe mode=barrier\n' +
+      "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n"
+    const dir = writeMigration(sql)
+    const { db, events } = twoReplicaDb()
+    const { store, appended, writes } = createFakeStore()
+    await applyOnTwoReplicas(db, dir, store)
+    expect(events).toEqual(['barrier read'])
+    expect(writes.flatMap((state) => state.operations.map((op) => [op.status, op.lastError]))).toEqual([
+      ['started', ''],
+      ['completed', ''],
+    ])
+    expect(appended).toHaveLength(1)
+    rmSync(dir, { recursive: true, force: true })
+  })
+
+  test('refuses a barrier a plugin rewrote into another statement before anything runs (#634)', async () => {
+    const sql =
+      '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n' +
+      "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n" +
+      '-- operation: drop_table key=table:default.b risk=danger\n' +
+      'DROP TABLE IF EXISTS default.b SYNC;\n'
+    const dir = writeMigration(sql)
+    const { db, events } = twoReplicaDb()
+    const { store, appended, writes } = createFakeStore()
+    const rewrite = fakePluginRuntime((statements) => [
+      'EXCHANGE TABLES default.a AND default.b;',
+      ...statements.slice(1),
+    ])
+    const error = await applyMigration({
+      db,
+      journalStore: store,
+      pluginRuntime: rewrite,
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      log: () => {},
+    }).catch((caught: unknown) => caught)
+    expect(error).toBeInstanceOf(MigrateError)
+    expect(error).toMatchObject({ code: 'barrier_not_select' })
+    expect(String(error)).toContain(
+      '  - m.sql, statement 1 of 2 (-- operation: exchange_tables key=table:default.a risk=caution mode=barrier):\n' +
+        '      EXCHANGE TABLES default.a AND default.b;',
+    )
+    expect(events).toEqual([])
+    expect(writes).toEqual([])
+    expect(appended).toEqual([])
+    rmSync(dir, { recursive: true, force: true })
+  })
 })
 
 

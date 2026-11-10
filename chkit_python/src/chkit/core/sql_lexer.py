@@ -9,6 +9,8 @@ names from numbers; it is not a parser.
 from __future__ import annotations
 
 import re
+from bisect import bisect_left
+from collections.abc import Callable, Iterator
 from dataclasses import dataclass
 from typing import Final, Literal, TypeAlias
 
@@ -47,6 +49,11 @@ JS_WHITESPACE: Final[str] = (
     "\u2007\u2008\u2009\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
 )
 JS_WHITESPACE_RUN: Final[re.Pattern[str]] = re.compile(f"[{JS_WHITESPACE}]+")
+# The same set as regex escapes, for the inside of a character class.
+_JS_SPACE_ESCAPES: Final[str] = (
+    r"\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff"
+)
+_ANY_CHAR: Final[str] = r"[\s\S]"
 
 _WHITESPACE: Final[frozenset[str]] = frozenset(" \t\n\r\f\v")
 _ASCII_LETTERS: Final[str] = "ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz"
@@ -61,20 +68,52 @@ _EXPONENT: Final[re.Pattern[str]] = re.compile(r"[eE][+-]?[0-9]")
 _HEX_EXPONENT: Final[re.Pattern[str]] = re.compile(r"[pP][+-]?[0-9]")
 _HEX_PREFIX: Final[re.Pattern[str]] = re.compile(r"0[xX][0-9A-Fa-f]")
 _BIN_PREFIX: Final[re.Pattern[str]] = re.compile(r"0[bB][01]")
+_HEX_BYTE: Final[re.Pattern[str]] = re.compile(r"[0-9A-Fa-f]{2}")
+_LAST_CONTROL_ASCII: Final[int] = 0x1F
+# ClickHouse's parseEscapeSequence: the escapes that stand for a control byte.
+_CONTROL_ESCAPES: Final[dict[str, str]] = {
+    "0": "\0",
+    "a": "\x07",
+    "b": "\b",
+    "e": "\x1b",
+    "f": "\f",
+    "n": "\n",
+    "r": "\r",
+    "t": "\t",
+    "v": "\v",
+}
+# Escaped characters that lose their backslash; any other escape keeps it, so
+# a LIKE pattern's ``\%`` stays ``\%`` (parseComplexEscapeSequence).
+_PLAIN_ESCAPES: Final[frozenset[str]] = frozenset("\\'\"`/=")
 
 
 def tokenize_sql(sql: str) -> list[SQLToken]:
     tokens: list[SQLToken] = []
+    heredoc_end = _heredoc_reader(sql)
     previous: SQLToken | None = None
     i = 0
     while i < len(sql):
-        kind, end, terminated = _read_token(sql, i, previous)
+        kind, end, terminated = _read_token(sql, i, previous, heredoc_end)
         token = SQLToken(kind=kind, text=sql[i:end], start=i, end=end, terminated=terminated)
         tokens.append(token)
         if not is_trivia(token):
             previous = token
         i = end
     return tokens
+
+
+def iter_sql_tokens(sql: str) -> Iterator[SQLToken]:
+    """The tokens of `tokenize_sql`, one at a time, for a caller that keeps few of them."""
+    heredoc_end = _heredoc_reader(sql)
+    previous: SQLToken | None = None
+    i = 0
+    while i < len(sql):
+        kind, end, terminated = _read_token(sql, i, previous, heredoc_end)
+        token = SQLToken(kind=kind, text=sql[i:end], start=i, end=end, terminated=terminated)
+        yield token
+        if not is_trivia(token):
+            previous = token
+        i = end
 
 
 def is_trivia(token: SQLToken) -> bool:
@@ -88,7 +127,7 @@ def identifier_name(token: SQLToken) -> str | None:
         return token.text
     if token.kind != "quoted_identifier" or not token.terminated:
         return None
-    return _unescape_quoted(token.text)
+    return unescape_quoted(token.text[1:-1], token.text[0])
 
 
 def string_literal_value(token: SQLToken) -> str | None:
@@ -98,7 +137,54 @@ def string_literal_value(token: SQLToken) -> str | None:
     if token.text.startswith("$"):
         tag_length = token.text.index("$", 1) + 1
         return token.text[tag_length : len(token.text) - tag_length]
-    return _unescape_quoted(token.text)
+    return unescape_quoted(token.text[1:-1], "'")
+
+
+def unescape_quoted(body: str, quote: str = "`") -> str:
+    r"""The value ClickHouse reads from the body of a quoted name or string literal.
+
+    As ClickHouse's readQuotedString: a doubled ``quote`` is one quote,
+    ``\xHH`` is a byte, ``\N`` is nothing, ``\n`` and the other control escapes
+    are their byte, ``\\``, ``\'``, ``\"``, ``\```, ``\/`` and ``\=`` drop the
+    backslash, and any other escape keeps it (``\q`` is ``\q``). The bytes read
+    as UTF-8. An invalid ``\x`` (``\xZZ``) stays as written, where ClickHouse
+    reads an arbitrary byte.
+    """
+    out: list[str] = []
+    pending = bytearray()
+    i = 0
+    while i < len(body):
+        char = body[i]
+        nxt = _at(body, i + 1)
+        hex_byte = body[i + 2 : i + 4]
+        if char == "\\" and nxt == "x" and _HEX_BYTE.fullmatch(hex_byte):
+            pending.append(int(hex_byte, 16))
+            i += 4
+            continue
+        # ``\N`` adds no byte, so ``\xC3\N\xA9`` is still ``é``.
+        if char == "\\" and nxt == "N":
+            i += 2
+            continue
+        if pending:
+            out.append(pending.decode("utf-8", "replace"))
+            pending.clear()
+        if char == "\\" and nxt:
+            i += 2
+            decoded = _CONTROL_ESCAPES.get(nxt, nxt)
+            # A raw control character after a backslash drops it too (isControlASCII).
+            if decoded not in _PLAIN_ESCAPES and ord(decoded) > _LAST_CONTROL_ASCII:
+                out.append("\\")
+            out.append(decoded)
+            continue
+        if char == quote and nxt == quote:
+            out.append(quote)
+            i += 2
+            continue
+        out.append(char)
+        i += 1
+    if pending:
+        out.append(pending.decode("utf-8", "replace"))
+    return "".join(out)
 
 
 def is_js_space(char: str) -> bool:
@@ -111,10 +197,56 @@ def js_trim(value: str) -> str:
     return value.strip(JS_WHITESPACE)
 
 
+def js_regex(pattern: str) -> str:
+    r"""``pattern`` with ``\s`` and ``\S`` meaning JavaScript's whitespace.
+
+    Python's ``\s`` also matches \x1c-\x1f and \x85 and misses the BOM, so a
+    regex ported from TS goes through this to match the same text. ``[\s\S]``
+    (any character) is kept as written.
+    """
+    out: list[str] = []
+    in_class = False
+    i = 0
+    while i < len(pattern):
+        if not in_class and pattern.startswith(_ANY_CHAR, i):
+            out.append(_ANY_CHAR)
+            i += len(_ANY_CHAR)
+            continue
+        char = pattern[i]
+        if char == "\\" and i + 1 < len(pattern):
+            escape = pattern[i : i + 2]
+            if escape == r"\s":
+                out.append(_JS_SPACE_ESCAPES if in_class else f"[{_JS_SPACE_ESCAPES}]")
+            elif escape == r"\S":
+                if in_class:
+                    raise ValueError(rf"js_regex: \S inside a character class: {pattern!r}")
+                out.append(f"[^{_JS_SPACE_ESCAPES}]")
+            else:
+                out.append(escape)
+            i += 2
+            continue
+        out.append(char)
+        i += 1
+        if char == "[" and not in_class:
+            in_class = True
+            # A ']' first in a class (after an optional '^') is literal.
+            for literal in ("^", "]"):
+                if pattern.startswith(literal, i):
+                    out.append(literal)
+                    i += 1
+        elif char == "]" and in_class:
+            in_class = False
+    return "".join(out)
+
+
 _TokenEnd: TypeAlias = tuple[SQLTokenKind, int, bool]
+# The end of the heredoc that opens at an offset, or None when none does.
+_HeredocReader: TypeAlias = Callable[[int], int | None]
 
 
-def _read_token(sql: str, i: int, previous: SQLToken | None) -> _TokenEnd:  # noqa: PLR0911
+def _read_token(  # noqa: PLR0911
+    sql: str, i: int, previous: SQLToken | None, read_heredoc: _HeredocReader
+) -> _TokenEnd:
     # ``previous`` is the last token that is not trivia; ClickHouse uses it to
     # tell a qualifier dot from the start of a number.
     char = _at(sql, i)
@@ -137,7 +269,7 @@ def _read_token(sql: str, i: int, previous: SQLToken | None) -> _TokenEnd:  # no
         end, terminated = _read_quoted(sql, i, char)
         return ("quoted_identifier", end, terminated)
     if char == "$":
-        heredoc_end = _read_heredoc(sql, i)
+        heredoc_end = read_heredoc(i)
         if heredoc_end is not None:
             return ("string", heredoc_end, True)
         if nxt in _WORD_CHAR:
@@ -239,39 +371,42 @@ def _read_quoted(sql: str, i: int, quote: str) -> tuple[int, bool]:
     return (len(sql), False)
 
 
-def _read_heredoc(sql: str, i: int) -> int | None:
+def _heredoc_reader(sql: str) -> _HeredocReader:
     # `$tag$ … $tag$` (including `$$ … $$`), where the tag is `[A-Za-z0-9_]*`. It
     # is only a literal when the same tag closes it later; otherwise ClickHouse
-    # reads the `$` as part of an identifier or as punctuation.
-    tag_end = _skip_while(sql, i + 1, _HEREDOC_TAG)
-    if _at(sql, tag_end) != "$":
-        return None
-    tag = sql[i : tag_end + 1]
-    close = sql.find(tag, tag_end + 1)
-    return None if close == -1 else close + len(tag)
+    # reads the `$` as part of an identifier or as punctuation. The closer is
+    # the first later occurrence of the opener's text. Searching the rest of the
+    # input once per opener is quadratic on many unclosed openers (#585), so the
+    # first opener indexes every `$tag$` in the input and each one is a lookup.
+    tag_starts: dict[str, list[int]] | None = None
+
+    def read(i: int) -> int | None:
+        nonlocal tag_starts
+        tag_end = _skip_while(sql, i + 1, _HEREDOC_TAG)
+        if _at(sql, tag_end) != "$":
+            return None
+        if tag_starts is None:
+            tag_starts = _index_heredoc_tags(sql)
+        offsets = tag_starts.get(sql[i + 1 : tag_end], [])
+        k = bisect_left(offsets, tag_end + 1)
+        return None if k == len(offsets) else offsets[k] + tag_end + 1 - i
+
+    return read
 
 
-def _unescape_quoted(text: str) -> str:
-    # Resolves a doubled delimiter and backslash escapes to the escaped
-    # character, which is exact for the quotes and backslashes names and
-    # literals contain.
-    quote = text[0] if text else ""
-    body = text[1:-1]
-    out: list[str] = []
-    i = 0
-    while i < len(body):
-        char = body[i]
-        if char == "\\" and i + 1 < len(body):
-            out.append(body[i + 1])
-            i += 2
-            continue
-        if char == quote and _at(body, i + 1) == quote:
-            out.append(quote)
-            i += 2
-            continue
-        out.append(char)
-        i += 1
-    return "".join(out)
+def _index_heredoc_tags(sql: str) -> dict[str, list[int]]:
+    # Every offset where `$tag$` occurs, in order, by tag. An occurrence is a
+    # `$`, the longest run of tag characters after it, then a `$` (a tag
+    # character is never `$`), so each `$` starts at most one and the scan is
+    # linear.
+    starts: dict[str, list[int]] = {}
+    i = sql.find("$")
+    while i != -1:
+        tag_end = _skip_while(sql, i + 1, _HEREDOC_TAG)
+        if _at(sql, tag_end) == "$":
+            starts.setdefault(sql[i + 1 : tag_end], []).append(i)
+        i = sql.find("$", i + 1)
+    return starts
 
 
 def _at(sql: str, i: int) -> str:

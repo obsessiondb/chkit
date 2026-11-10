@@ -22,7 +22,7 @@ chkit migrate [flags]
 | `--allow-destructive` | boolean | `false` | Allow destructive operations (required in non-interactive mode) |
 | `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` or interactive confirmation |
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
-| `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
+| `-t`, `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
 | `--setting <name=value>` | string[] | — | Send a ClickHouse [query setting](#query-settings) with each migration statement. Repeatable, or comma-separated |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
@@ -51,7 +51,7 @@ Migration files containing `risk=danger` operations (such as `DROP TABLE` or `DR
 - **Non-interactive / CI mode**: `--allow-destructive` must be passed, or `safety.allowDestructive` must be `true` in config. Otherwise the command exits with code 3.
 - **JSON mode**: exits with code 3 and includes details about blocked operations
 
-Destructive statements are detected two ways. Planner-emitted migrations carry a `-- operation:` marker per statement, which sets the risk classification directly. In addition, chkit scans the executable SQL itself for hand-written destructive statements (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DROP VIEW` / `DROP MATERIALIZED VIEW`, `DETACH`, `DROP DATABASE`) that carry no marker — whether a whole migration was hand-written or a statement was appended to a generated one. Such statements previously applied silently in CI; they now require `--allow-destructive` (or `safety.allowDestructive`) like any other destructive operation. Commented-out statements are ignored (comments are stripped before scanning), and planner-marked non-danger statements keep their existing classification, so a generated materialized-view recreate is not blocked.
+Destructive statements are detected two ways. Planner-emitted migrations carry a `-- operation:` marker per statement, which sets the risk classification directly. In addition, chkit scans the executable SQL itself for hand-written destructive statements (`DROP TABLE`, `DROP COLUMN`, `TRUNCATE`, `DROP VIEW` / `DROP MATERIALIZED VIEW`, `DETACH`, `DROP DATABASE`) that carry no marker — whether a whole migration was hand-written or a statement was appended to a generated one. Such statements previously applied silently in CI; they now require `--allow-destructive` (or `safety.allowDestructive`) like any other destructive operation. The scan reads SQL as ClickHouse does: a commented-out statement (`--`, `//`, `# `, `#!` or `/* */`) and text inside a string literal or quoted name are ignored, while a comment between keywords, as in `DROP /* old */ TABLE t`, does not hide a drop. Planner-marked non-danger statements keep their existing classification, so a generated materialized-view recreate is not blocked.
 
 Each destructive operation includes a warning code, reason, impact description, and recommendation:
 
@@ -79,6 +79,10 @@ The settings go with every statement a migration runs: synchronous statements, s
 
 `--setting` takes query settings only. It rejects the ClickHouse HTTP parameters `query`, `database`, `query_id`, `session_id`, `session_check`, `session_timeout`, `user` and `password` with a usage error before anything runs: they would change the database, credentials, query text or query ID that chkit tracks. Set the database and credentials in [`clickhouse`](/configuration/overview/) config instead.
 
+### Server index granularity
+
+Before it checks checksums or applies anything, `migrate` (except `--abandon`) fails when the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default). The message names the value to set. When the server cannot be asked, the check is skipped.
+
 ### Checksum verification
 
 Before applying, the CLI verifies SHA-256 checksums of all previously-applied migrations against the files on disk. If any file has been modified since it was applied, the command aborts with exit code 1.
@@ -98,6 +102,8 @@ Migration 20260929001110_funnel-model.sql has in-progress journal state for chec
   Or discard the partial run, so the next apply starts the file over: chkit migrate --apply --abandon 20260929001110_funnel-model.sql
   Or restore the original file content and re-run chkit migrate --apply.
 ```
+
+chkit reads `//`, `# ` and `#!` comments as ClickHouse does, up to the end of the line, so a `;`, quote or `/*` inside one does not end a statement or open a string. Releases before [#562](https://github.com/obsessiondb/chkit/issues/562) cut a statement at a `;` inside such a comment. When another chkit release applied part of a migration whose file has such a comment, and the statements it recorded as completed (or started) are not the same statements in the current split, `migrate` stops with the code `statement_split_changed` instead of resuming by position. Finish that migration with the release that recorded it, or [abandon](#abandoning-a-failed-migration) the partial run.
 
 :::caution
 Edit a failed migration only if no other environment that runs the same files has applied it, because checksum verification fails there. If the migration succeeded elsewhere, fix the cause in the failing environment and re-run `chkit migrate --apply` with the unchanged file.
@@ -183,7 +189,9 @@ On a service whose endpoint spreads requests over several replicas, such as a mu
 
 When the cluster does not exist, has a single replica, or the user cannot query it, chkit reads the local replica as before.
 
-On any target, a `MODIFY COLUMN` also waits until `system.columns` shows what the statement sets: the default kind, the default expression (as the server formats it), the comment, and a removed default or codec. If the server accepts the statement without applying it, the wait times out after about 10 seconds and `migrate` stops with an error naming the replica and the field that differs. The statement stays marked completed, so fix the column by hand before you re-run. ObsessionDB currently ignores `MODIFY COLUMN ... EPHEMERAL <default>` ([#285](https://github.com/obsessiondb/chkit/issues/285)), so a migration that changes an `EPHEMERAL` column's default fails there with this error.
+When a wait times out, `migrate` stops with an error that names the object, such as `waitForTable: analytics.events not yet visible`, and does not record the migration as applied. The statement stays marked completed, so a re-run does not replay it: the re-run waits for it again before it runs the next statement, and stops with the same error if the change has still not reached every replica. Until its wait passes, the statement's journal entry has `lastError` `executed; waiting for the change to reach every replica`. A chkit release without this check does not write it, so a re-run does not wait again for a statement whose wait timed out under such a release.
+
+On any target, a `MODIFY COLUMN` (or `COMMENT COLUMN`) also waits until `system.columns` shows what the statement sets: the default kind, the default expression (as the server formats it), the comment, and a removed default or codec. If the server accepts the statement without applying it, the wait times out after about 10 seconds and `migrate` stops with an error naming the replica and the field that differs. The statement stays marked completed, so fix the column by hand before you re-run. ObsessionDB currently ignores `MODIFY COLUMN ... EPHEMERAL <default>` ([#285](https://github.com/obsessiondb/chkit/issues/285)), so a migration that changes an `EPHEMERAL` column's default fails there with this error.
 
 ### Table scoping
 
@@ -206,7 +214,7 @@ INSERT INTO default.hits SELECT * FROM s3(...);
 
 When `chkit migrate --apply` encounters an async operation it:
 
-1. Computes a deterministic `query_id` from `sha256(migration_filename + ':' + statement_index)`.
+1. Computes a deterministic `query_id` from `sha256('chkit:' + database + ':' + journal_table + ':' + migration_filename + ':' + statement_index)`, where `database` is the server's `currentDatabase()` and `journal_table` is the [journal](#journal) table (`_chkit_migrations`, or `CHKIT_JOURNAL_TABLE`). Runs of one migration file against other databases, or by other projects that keep their journal in the same database, never share a query id; a re-run against the same database and journal gets the same id. A statement the journal already tracks keeps the `queryId` it recorded, including one an earlier chkit derived from the file name and statement index alone.
 2. Checks `system.processes` for an attempt with that id that is still running, and attaches to it instead of submitting again. On a [multi-replica target](#multi-replica-targets) the check reads every replica. When a replica cannot be read, `migrate` stops with an error before it runs `-- before-retry:` SQL or submits again; re-run it once the replica is back. The polls that follow skip a replica they cannot reach.
 3. Otherwise submits the query without blocking on the HTTP response.
 4. Polls every 5 seconds and prints a one-line progress update (`written=N.NM rows (N.N GiB), elapsed Ns`). Only `system.query_log` entries of queries that started no earlier than this submission, or than the attempt chkit attached to, count. Both are measured on the server clock with a 2-second margin, so an earlier attempt with the same id is never mistaken for this one.
@@ -233,7 +241,7 @@ The annotation is opt-in and forward-compatible: statements without `mode=async`
 
 ### Insert barriers (`mode=barrier`)
 
-A statement marked `mode=barrier` is a `SELECT` over `system.processes` that returns a `query_id` column. chkit runs it once, then again every second until none of the query ids of the first run is listed: it waits for the `INSERT`s that were running when the step started, not for the ones that start later. On a [multi-replica target](#multi-replica-targets) it reads every replica through `clusterAllReplicas`. After 10 minutes it stops with an error that lists the query ids still running; `chkit migrate --apply` then runs the barrier again from a fresh read. A [cutover](/guides/data-preserving-migrations/) uses two barriers: an `INSERT` builds its pipeline, including the materialized views it writes to, when it starts.
+A statement marked `mode=barrier` is a `SELECT` over `system.processes` that returns a `query_id` column. chkit runs it once, then again every second until none of the query ids of the first run is listed: it waits for the `INSERT`s that were running when the step started, not for the ones that start later. On a [multi-replica target](#multi-replica-targets) it reads every replica through `clusterAllReplicas`. After 10 minutes it stops with an error that lists the query ids still running; `chkit migrate --apply` then runs the barrier again from a fresh read. A barrier changes no object, so `migrate` does not wait for DDL propagation after it. `migrate --apply` therefore refuses, before it runs any pending migration, a statement marked `mode=barrier` that is not a `SELECT`, a `WITH ... SELECT` or a `FROM ... SELECT` (ClickHouse also reads `WITH ... INSERT INTO` and statements joined by `PARALLEL WITH`, which are not one), and exits with code 1 (`barrier_not_select` in `--json` mode). The error names the file, the statement and its marker. A [cutover](/guides/data-preserving-migrations/) uses two barriers: an `INSERT` builds its pipeline, including the materialized views it writes to, when it starts.
 
 Before every `exchange_tables` statement, and at a cutover's first step, `migrate` reads `system.query_log` on every replica and stops when asynchronous inserts with `wait_for_async_insert = 0` reached one of the tables in the last 10 minutes: ClickHouse drops the buffered rows of such an insert when its table is swapped, and the writer is never told. A user who cannot read `system.query_log` gets a warning instead.
 
@@ -286,7 +294,7 @@ chkit migrate --abandon 20260929001110_funnel-model.sql --apply
 | Code | Meaning |
 |------|---------|
 | 0 | Success (or no pending migrations) |
-| 1 | Error: checksum mismatch on applied migrations, a pending migration without executable statements, a failed statement, or a rejected `--retry` / `--abandon` request |
+| 1 | Error: checksum mismatch on applied migrations, a pending migration without executable statements or with a `mode=barrier` statement that is not a `SELECT`, a failed statement, or a rejected `--retry` / `--abandon` request |
 | 3 | Destructive operations blocked |
 
 ## JSON output
@@ -437,6 +445,8 @@ A failure that stops the command prints the standard error envelope:
 | Code | When |
 |------|------|
 | `in_progress_checksum_mismatch` | The file of an in-progress migration changed after some of its statements ran, and `--retry` was not given for it |
+| `statement_split_changed` | Another chkit release applied part of the migration, and the statements it recorded are not the same in the current split (a `;`, quote or `/*` inside a `//` or `#` comment, [#562](https://github.com/obsessiondb/chkit/issues/562)) |
+| `barrier_not_select` | A pending migration marks a statement `mode=barrier` that is not a `SELECT` ([insert barriers](#insert-barriers-modebarrier)); nothing was applied |
 | `retry_mismatch` | `--retry`: a statement that completed, or an async statement that may still be running, no longer matches the edited file, or the edit left fewer statements with a marker that a completed statement shares |
 | `migration_not_found` | `--retry` names a file that is not in the migrations directory |
 | `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |

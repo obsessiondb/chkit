@@ -209,7 +209,7 @@ def test_full_backfill_copies_every_source_row_into_the_target(
         chunk_ids=[chunk.id for chunk in exec_ctx.plan.chunks],
         build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
         concurrency=3,
-        poll_interval_ms=1500,
+        poll_interval_ms=250,
     )
 
     assert result.total == len(exec_ctx.plan.chunks)
@@ -242,7 +242,7 @@ def test_resume_skips_already_completed_chunks_without_re_inserting_them(
         chunk_ids=[chunk.id for chunk in exec_ctx.plan.chunks],
         build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
         concurrency=3,
-        poll_interval_ms=1500,
+        poll_interval_ms=250,
         resume_from=resume_from,
     )
 
@@ -283,7 +283,7 @@ def test_replay_failed_re_runs_a_failed_chunk_and_restores_the_full_row_count(
         chunk_ids=chunk_ids,
         build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
         concurrency=3,
-        poll_interval_ms=1500,
+        poll_interval_ms=250,
         resume_from=resume_from,
         replay_failed=True,
     )

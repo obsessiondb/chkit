@@ -42,6 +42,7 @@ from chkit.clickhouse.introspect import (
     list_table_details,
 )
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.jsnum import js_math_round
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.workbench_api import (
     WorkbenchExecuteResult,
@@ -237,6 +238,7 @@ class RemoteClickHouseClient:
         *,
         after_time: str | None = None,
         every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         """Mirror of :meth:`ClickHouseClient.query_status`, proxied via workbench."""
         # after_time bounds the query's start, as in the native client. A
@@ -272,6 +274,8 @@ class RemoteClickHouseClient:
                 status="running",
                 elapsed_ms=_elapsed_ms(running.rows[0].get("elapsed")),
             )
+        if running_only:
+            return QueryStatus(status="unknown")
         log = self.query(
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
             f"FROM {source('system.query_log')} "
@@ -340,7 +344,7 @@ def _quote_string(value: str) -> str:
 
 def _elapsed_ms(value: Any) -> int | None:
     try:
-        return round(float(value) * 1000)
+        return int(js_math_round(float(value) * 1000))
     except (TypeError, ValueError):
         return None
 

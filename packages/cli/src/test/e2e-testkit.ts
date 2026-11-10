@@ -8,7 +8,7 @@
 import { join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { spawnWithTimeout } from './spawn-cli.js'
+import { createIsolatedCliEnv, spawnWithTimeout } from './spawn-cli.js'
 
 // Re-export all shared utilities so CLI tests only need one import
 export {
@@ -47,6 +47,35 @@ export function runCli(
   { timeoutMs }: { timeoutMs?: number } = {}
 ): CliResult {
   return spawnWithTimeout(['bun', CLI_ENTRY, ...args], { cwd, env: extraEnv, timeoutMs })
+}
+
+/**
+ * Starts the CLI without waiting for it, for tests that run several at once.
+ * Like runCli, the child is killed after `timeoutMs`; `kill` ends it earlier.
+ */
+export function startCli(
+  cwd: string,
+  args: string[],
+  extraEnv: Record<string, string> = {},
+  { timeoutMs = 120_000 }: { timeoutMs?: number } = {}
+): { result: Promise<CliResult>; kill: () => void } {
+  const isolated = createIsolatedCliEnv(extraEnv)
+  const proc = Bun.spawn(['bun', CLI_ENTRY, ...args], {
+    cwd,
+    env: isolated.env,
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: timeoutMs,
+    killSignal: 'SIGKILL',
+  })
+  const result = Promise.all([
+    new Response(proc.stdout).text(),
+    new Response(proc.stderr).text(),
+    proc.exited,
+  ])
+    .then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }))
+    .finally(isolated.cleanup)
+  return { result, kill: () => proc.kill('SIGKILL') }
 }
 
 function isValidJson(str: string): boolean {

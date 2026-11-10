@@ -27,6 +27,7 @@ import {
   runOnInit,
   runOnPlanCreated,
   runOnSchemaLoaded,
+  runOnSnapshotLoaded,
 } from './hooks.js'
 
 function resolvePluginOptions(
@@ -154,6 +155,7 @@ export async function loadPluginRuntime(input: {
     runOnComplete: (context) => runOnComplete(loaded, context),
     runOnConfigLoaded: (context) => runOnConfigLoaded(loaded, context),
     runOnSchemaLoaded: (context) => runOnSchemaLoaded(loaded, context),
+    runOnSnapshotLoaded: (context) => runOnSnapshotLoaded(loaded, context),
     runOnPlanCreated: (context, plan) => runOnPlanCreated(loaded, context, plan),
     runOnBeforeApply: (context) => runOnBeforeApply(loaded, context),
     runOnAfterApply: (context) => runOnAfterApply(loaded, context),

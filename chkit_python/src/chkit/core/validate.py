@@ -9,10 +9,11 @@ from collections.abc import Iterable
 from typing import Final
 
 from chkit.core.canonical import definition_key
-from chkit.core.codec import canonicalize_codec, is_general_codec, is_raw_codec
+from chkit.core.codec_rules import column_codec_problem
 from chkit.core.column_default import (
     LEGACY_EXPRESSION_PREFIX,
     column_type_accepts_string_literal,
+    nullable_column_type,
     parse_column_default,
     reads_unparsable_ephemeral_literal_as_null,
     render_default,
@@ -22,6 +23,7 @@ from chkit.core.column_default import (
 )
 from chkit.core.constraint import constraint_problem
 from chkit.core.engine import engine_name, supports_sort_order
+from chkit.core.identifier import describe_invalid_identifier
 from chkit.core.kafka import is_kafka_engine
 from chkit.core.key_clause import (
     is_plain_column_reference,
@@ -31,6 +33,7 @@ from chkit.core.key_clause import (
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefaultKind,
+    ColumnDefaultValue,
     ColumnDefinition,
     DictionaryDefinition,
     MaterializedViewDefinition,
@@ -43,7 +46,13 @@ from chkit.core.model import (
     ValidationIssueCode,
 )
 from chkit.core.projection import is_index_projection, normalize_projection_index
-from chkit.core.sql_lexer import SQLToken, js_trim, tokenize_sql
+from chkit.core.sql_lexer import (
+    SQLToken,
+    js_regex,
+    js_trim,
+    string_literal_value,
+    tokenize_sql,
+)
 from chkit.core.sql_normalizer import normalize_sql_fragment
 from chkit.core.sql_scan import strip_wrapping_parens
 from chkit.core.text_index import render_text_index_type
@@ -73,50 +82,19 @@ def _validate_column_codec(
 ) -> None:
     if column.codec is None:
         return
-    steps = canonicalize_codec(column.codec)
-    if len(steps) == 0:
-        _push(
-            issues,
-            definition,
-            "codec_chain_empty",
-            f'Table {definition.database}.{definition.name} column "{column.name}" '
-            f"codec chain is empty; provide at least one codec or omit the field",
-        )
+    # The type as rendered, like render_column_type.
+    type_ = js_trim(str(column.type))
+    problem = column_codec_problem(
+        column.codec, nullable_column_type(type_) if column.nullable else type_
+    )
+    if problem is None:
         return
-
-    general_count = 0
-    general_index = -1
-    for i, step in enumerate(steps):
-        if is_raw_codec(step):
-            continue
-        if is_general_codec(step):
-            general_count += 1
-            general_index = i
-
-    if general_count > 1:
-        _push(
-            issues,
-            definition,
-            "codec_chain_multiple_general",
-            f'Table {definition.database}.{definition.name} column "{column.name}" '
-            f"codec chain has more than one general codec; only one general codec is "
-            f"allowed at the end of a chain",
-        )
-        return
-
-    # Delta and GCD only transform the data: ClickHouse rejects a chain of nothing else.
-    only_transforms = all(step.kind in {"Delta", "GCD"} for step in steps)
-    if only_transforms or (
-        len(steps) > 1 and general_count == 1 and general_index != len(steps) - 1
-    ):
-        _push(
-            issues,
-            definition,
-            "codec_chain_must_end_with_general",
-            f'Table {definition.database}.{definition.name} column "{column.name}" '
-            f"codec chain must end with a general codec "
-            f"(NONE, LZ4, LZ4HC, ZSTD, ALP)",
-        )
+    _push(
+        issues,
+        definition,
+        problem.code,
+        f'Table {definition.database}.{definition.name} column "{column.name}" {problem.message}',
+    )
 
 
 def _validate_indexes(definition: TableDefinition, issues: list[ValidationIssue]) -> None:
@@ -243,10 +221,10 @@ def _validate_kafka_table(definition: TableDefinition, issues: list[ValidationIs
                 "ALIAS, or EPHEMERAL definition. Compute values in the materialized view.",
             )
     settings = definition.settings or {}
-    if re.fullmatch(r"Kafka\s*(?:\(\s*\))?", definition.engine.strip(), re.IGNORECASE):
+    if re.fullmatch(js_regex(r"Kafka\s*(?:\(\s*\))?"), js_trim(definition.engine), re.IGNORECASE):
         for key in ("kafka_broker_list", "kafka_topic_list", "kafka_group_name", "kafka_format"):
             setting = settings.get(key)
-            if not isinstance(setting, str) or not setting.strip():
+            if not isinstance(setting, str) or not js_trim(setting):
                 _push(
                     issues,
                     definition,
@@ -335,7 +313,7 @@ def _validate_column_default(
     type_ = js_trim(column.type)
     if column_type_accepts_string_literal(type_):
         return
-    effective_type = f"Nullable({type_})" if column.nullable else type_
+    effective_type = nullable_column_type(type_) if column.nullable else type_
     _push(issues, definition, "column_default_looks_like_expression",
           _describe_quoted_function_default(subject, kind, effective_type, parsed.value))
 
@@ -493,7 +471,7 @@ def _js_string(value: str) -> str:
 
 
 def _validate_unstored_column_references(
-    definition: TableDefinition, issues: list[ValidationIssue]
+    definition: TableDefinition, column_set: set[str], issues: list[ValidationIssue]
 ) -> None:
     """Flag ALIAS/EPHEMERAL columns named directly where ClickHouse needs a stored column.
 
@@ -510,8 +488,11 @@ def _validate_unstored_column_references(
     # (plan_diff) check the same fragment text.
     partition = strip_wrapping_parens(normalize_sql_fragment(definition.partition_by or ""))
     references = [
-        *(("orderBy", part) for part in normalize_key_columns(definition.order_by)),
-        *(("primaryKey", part) for part in normalize_key_columns(definition.primary_key)),
+        *(("orderBy", part) for part in normalize_key_columns(definition.order_by, column_set)),
+        *(
+            ("primaryKey", part)
+            for part in normalize_key_columns(definition.primary_key, column_set)
+        ),
         *(("partitionBy", part) for part in split_top_level_comma(partition)),
         *(("engine", part) for part in _engine_arguments(definition.engine)),
         *(
@@ -554,7 +535,7 @@ def _validate_unstored_column_references(
 def _engine_arguments(engine: str) -> list[str]:
     """Bare engine arguments, with one tuple level flattened: ``SummingMergeTree((a, b))``."""
     # Only MergeTree-family parameters name columns; e.g. Distributed takes a cluster name.
-    match = re.fullmatch(r"\s*\w*MergeTree\s*\((.*)\)\s*", engine, re.DOTALL)
+    match = re.fullmatch(js_regex(r"\s*\w*MergeTree\s*\((.*)\)\s*"), engine, re.DOTALL)
     arguments = split_top_level_comma(match.group(1)) if match else []
     parts = [p for arg in arguments for p in split_top_level_comma(strip_wrapping_parens(arg))]
     return [part for part in parts if not part.startswith("'")]
@@ -562,7 +543,7 @@ def _engine_arguments(engine: str) -> list[str]:
 
 def _unquote(name: str) -> str:
     """A column name with its backtick or double-quote identifier quotes removed."""
-    name = name.strip()
+    name = js_trim(name)
     return name[1:-1] if len(name) > 1 and name[0] == name[-1] and name[0] in "`\"" else name
 
 
@@ -636,7 +617,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
                 f'"{projection.name}" has an empty index expression',
             )
 
-    for col in normalize_key_columns(definition.primary_key):
+    for col in normalize_key_columns(definition.primary_key, column_set):
         if is_plain_column_reference(col) and col not in column_set:
             _push(
                 issues,
@@ -646,7 +627,7 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
                 f'references missing column "{col}"',
             )
 
-    for col in normalize_key_columns(definition.order_by):
+    for col in normalize_key_columns(definition.order_by, column_set):
         if is_plain_column_reference(col) and col not in column_set:
             _push(
                 issues,
@@ -656,16 +637,18 @@ def _validate_table(definition: TableDefinition, issues: list[ValidationIssue]) 
                 f'references missing column "{col}"',
             )
 
-    _validate_unstored_column_references(definition, issues)
+    _validate_unstored_column_references(definition, column_set, issues)
 
 
 _INTERVAL_PATTERN: Final[re.Pattern[str]] = re.compile(
-    r"^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)"
-    r"(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$",
+    js_regex(
+        r"^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)"
+        r"(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$"
+    ),
     re.IGNORECASE,
 )
 
-_REPLICATED_ENGINE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^(Shared|Replicated)")
+_REPLICATED_ENGINE_PATTERN: Final[re.Pattern[str]] = re.compile(r"^Replicated")
 
 
 def _validate_interval(
@@ -690,7 +673,6 @@ def _validate_interval(
 def _validate_materialized_view(
     definition: MaterializedViewDefinition,
     issues: list[ValidationIssue],
-    definitions: list[SchemaDefinition],
 ) -> None:
     refresh = definition.refresh
     if refresh is None:
@@ -734,27 +716,6 @@ def _validate_materialized_view(
             f"DEPENDS ON with REFRESH AFTER; ClickHouse only allows DEPENDS ON "
             f"with REFRESH EVERY.",
         )
-
-    if not refresh.append:
-        target: TableDefinition | None = None
-        for other in definitions:
-            if (
-                isinstance(other, TableDefinition)
-                and other.database == definition.to.database
-                and other.name == definition.to.name
-            ):
-                target = other
-                break
-        if target is not None and _REPLICATED_ENGINE_PATTERN.match(target.engine) is not None:
-            _push(
-                issues,
-                definition,
-                "refresh_append_required_for_replicated_target",
-                f"Materialized view {definition.database}.{definition.name} refreshes "
-                f"a replicated target {target.database}.{target.name} ({target.engine}) "
-                f"without APPEND. ClickHouse rejects this combination. Set "
-                f"refresh.append = true, or target a non-replicated table.",
-            )
 
 
 def _validate_dictionary(  # noqa: PLR0912
@@ -813,7 +774,7 @@ def _validate_dictionary(  # noqa: PLR0912
                     f'references missing attribute "{column}"',
                 )
 
-    if len(definition.source.strip()) == 0:
+    if len(js_trim(definition.source)) == 0:
         _push(
             issues,
             definition,
@@ -822,7 +783,7 @@ def _validate_dictionary(  # noqa: PLR0912
             f'requires a non-empty "source"',
         )
 
-    if len(definition.layout.strip()) == 0:
+    if len(js_trim(definition.layout)) == 0:
         _push(
             issues,
             definition,
@@ -831,7 +792,7 @@ def _validate_dictionary(  # noqa: PLR0912
             f'requires a non-empty "layout"',
         )
 
-    if len(definition.lifetime.strip()) == 0:
+    if len(js_trim(definition.lifetime)) == 0:
         _push(
             issues,
             definition,
@@ -852,6 +813,41 @@ def _validate_dictionary(  # noqa: PLR0912
                 )
 
 
+def _collect_identifiers(definition: SchemaDefinition) -> list[tuple[str, str]]:
+    identifiers = [("database name", definition.database), ("name", definition.name)]
+    if isinstance(definition, TableDefinition):
+        identifiers += [("column name", column.name) for column in definition.columns]
+        identifiers += [("index name", index.name) for index in definition.indexes or []]
+        identifiers += [
+            ("constraint name", constraint.name) for constraint in definition.constraints or []
+        ]
+        identifiers += [
+            ("projection name", projection.name) for projection in definition.projections or []
+        ]
+    elif isinstance(definition, DictionaryDefinition):
+        identifiers += [("attribute name", attribute.name) for attribute in definition.attributes]
+    elif isinstance(definition, MaterializedViewDefinition):
+        identifiers.append(("target database name", definition.to.database))
+        identifiers.append(("target name", definition.to.name))
+    return identifiers
+
+
+# Names are quoted and escaped when rendered, so any character is safe except
+# those ClickHouse cannot store in a name. Catching them here gives a clear
+# error instead of a server-side failure (e.g. names from a CDC source catalog).
+def _validate_identifiers(definition: SchemaDefinition, issues: list[ValidationIssue]) -> None:
+    for label, name in _collect_identifiers(definition):
+        problem = describe_invalid_identifier(name)
+        if problem:
+            _push(
+                issues,
+                definition,
+                "invalid_identifier",
+                f"{definition.kind} {_js_string(definition.database)}."
+                f"{_js_string(definition.name)} {label} {_js_string(name)} {problem}",
+            )
+
+
 def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[ValidationIssue]:
     issues: list[ValidationIssue] = []
     object_keys: set[str] = set()
@@ -869,10 +865,11 @@ def validate_definitions(definitions: Iterable[SchemaDefinition]) -> list[Valida
             continue
         object_keys.add(key)
 
+        _validate_identifiers(definition, issues)
         if isinstance(definition, TableDefinition):
             _validate_table(definition, issues)
         elif isinstance(definition, MaterializedViewDefinition):
-            _validate_materialized_view(definition, issues, materialized)
+            _validate_materialized_view(definition, issues)
         elif isinstance(definition, DictionaryDefinition):
             _validate_dictionary(definition, issues)
 
@@ -883,3 +880,121 @@ def assert_valid_definitions(definitions: Iterable[SchemaDefinition]) -> None:
     issues = validate_definitions(definitions)
     if len(issues) > 0:
         raise ChxValidationError(issues)
+
+
+def collect_definition_warnings(definitions: Iterable[SchemaDefinition]) -> list[ValidationIssue]:
+    """Schema issues that are reported but never fail (TS ``collectDefinitionWarnings``).
+
+    A plain string default that is one quoted SQL string literal, such as
+    ``"'standard'"``, renders as ``'''standard'''`` and keeps the quotes in the
+    value, which is usually SQL written without ``SQLExpression``. A value may
+    contain quotes, so it only warns.
+
+    A refreshable materialized view without APPEND whose target is ``Replicated*``
+    also only warns: ClickHouse refuses it in a non-replicated database (Atomic),
+    but ObsessionDB, ClickHouse Cloud and Replicated databases accept it, and
+    chkit cannot see the database engine offline.
+    """
+    materialized: list[SchemaDefinition] = list(definitions)
+    issues: list[ValidationIssue] = []
+    for definition in materialized:
+        if isinstance(definition, TableDefinition):
+            for column in definition.columns:
+                kind = column.default_kind or "DEFAULT"
+                quoted = _quoted_string_default(column.default)
+                if quoted is None or kind not in ("DEFAULT", "EPHEMERAL"):
+                    continue
+                subject = f'Table {definition.database}.{definition.name} column "{column.name}"'
+                _push(
+                    issues,
+                    definition,
+                    "quoted_string_default",
+                    f"{_describe_quoted_string_default(subject, kind, quoted)}, or use default: "
+                    f"{{ expression: {_js_string(js_trim(quoted[0]))} }} for SQL. "
+                    "If the quotes belong to the value, ignore this warning.",
+                )
+        elif isinstance(definition, DictionaryDefinition):
+            for attribute in definition.attributes:
+                quoted = _quoted_string_default(attribute.default)
+                if quoted is None:
+                    continue
+                subject = (
+                    f'Dictionary {definition.database}.{definition.name} '
+                    f'attribute "{attribute.name}"'
+                )
+                _push(
+                    issues,
+                    definition,
+                    "quoted_string_default",
+                    f"{_describe_quoted_string_default(subject, 'DEFAULT', quoted)}; "
+                    "dictionary defaults are literals only. "
+                    "If the quotes belong to the value, ignore this warning.",
+                )
+        elif isinstance(definition, MaterializedViewDefinition):
+            _warn_replace_refresh_of_replicated_target(definition, materialized, issues)
+    return issues
+
+
+def _warn_replace_refresh_of_replicated_target(
+    definition: MaterializedViewDefinition,
+    definitions: list[SchemaDefinition],
+    issues: list[ValidationIssue],
+) -> None:
+    if definition.refresh is None or definition.refresh.append:
+        return
+    target = next(
+        (
+            other
+            for other in definitions
+            if isinstance(other, TableDefinition)
+            and other.database == definition.to.database
+            and other.name == definition.to.name
+        ),
+        None,
+    )
+    if target is None or _REPLICATED_ENGINE_PATTERN.match(target.engine) is None:
+        return
+    _push(
+        issues,
+        definition,
+        "refresh_append_required_for_replicated_target",
+        f"Materialized view {definition.database}.{definition.name} refreshes "
+        f"a replicated target {target.database}.{target.name} ({target.engine}) "
+        f"without APPEND. ClickHouse refuses this in a non-replicated database such "
+        f"as Atomic; ObsessionDB, ClickHouse Cloud and Replicated databases accept "
+        f"it. On a non-replicated database, set refresh.append = true or target a "
+        f"non-replicated table.",
+    )
+
+
+def _quoted_string_default(value: ColumnDefaultValue | None) -> tuple[str, str | None] | None:
+    """A plain string default that is exactly one terminated ``'…'`` literal, as (raw, value).
+
+    The value is None when the literal has backslash escapes (``\\n``,
+    ``\\x41``), which chkit does not decode. ``fn:`` strings are expressions.
+    """
+    if value is None:
+        return None
+    parsed = parse_column_default(value)
+    if parsed.kind != "literal" or not isinstance(parsed.value, str):
+        return None
+    tokens = tokenize_sql(js_trim(parsed.value))
+    if len(tokens) != 1 or not tokens[0].text.startswith("'") or not tokens[0].terminated:
+        return None
+    token = tokens[0]
+    return (parsed.value, None if "\\" in token.text else string_literal_value(token))
+
+
+def _describe_quoted_string_default(
+    subject: str, kind: str, quoted: tuple[str, str | None]
+) -> str:
+    raw, value = quoted
+    as_value = (
+        "Write the value itself, without SQL quotes or escapes, as a plain string"
+        if value is None
+        else f"Use default: {_js_string(value)} for the value"
+    )
+    return (
+        f"{subject} has plain string default {_js_string(raw)}, which renders as "
+        f"{kind} {render_default(raw)} and keeps the quotes in the value. {as_value}"
+    )

@@ -11,7 +11,7 @@ import {
   type ClickHouseSettings,
   type QualifiedTable,
 } from '@chkit/clickhouse'
-import type { ResolvedChxConfig } from '@chkit/core'
+import { extractLegacyExecutableStatements, type ResolvedChxConfig } from '@chkit/core'
 
 import type { ParsedFlags, PluginRuntime, TableScope } from '../../plugins.js'
 import { debug } from '../../runtime/debug.js'
@@ -25,18 +25,27 @@ import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  findNonSelectBarriers,
+  type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
+import { CLI_VERSION } from '../../runtime/version.js'
 import {
   applyAsyncStatement,
   freshMigrationState,
   isoWithoutZone,
   upsertOperation,
 } from './async-apply.js'
-import { inProgressChecksumMismatchError } from './errors.js'
+import {
+  inProgressChecksumMismatchError,
+  nonSelectBarrierError,
+  statementSplitChangedError,
+  type PendingNonSelectBarrier,
+} from './errors.js'
 import {
   hasStatementProgress,
   rebaseInProgressState,
   retryMismatchError,
+  splitChangedStatements,
   statementIdentities,
   statementIdentity,
   verifyRetryEdit,
@@ -51,6 +60,54 @@ function operationIsCompleted(state: MigrationRowState | null, index: number): b
   )
 }
 
+/**
+ * `lastError` of a completed sync statement whose DDL propagation wait has not
+ * passed yet (#513). A statement is recorded completed before its wait, so a
+ * re-run never replays it; while this marker is set, a re-run waits for it
+ * again before it runs the next statement. A write after the wait passes
+ * clears it. --abandon replaces it, and --retry keeps it with the record.
+ */
+export const PROPAGATION_WAIT_PENDING = 'executed; waiting for the change to reach every replica'
+
+function propagationWaitPending(state: MigrationRowState, index: number): boolean {
+  return state.operations.some(
+    (op) => op.operationIndex === index && op.status === 'completed' && op.lastError === PROPAGATION_WAIT_PENDING,
+  )
+}
+
+/**
+ * A barrier changes no object, so it has no wait: migrate refuses a barrier
+ * statement that is not a SELECT before anything runs (#634).
+ */
+function hasPropagationWait(operation: MigrationOperationSummary | undefined): operation is MigrationOperationSummary {
+  return operation !== undefined && operation.mode !== 'barrier'
+}
+
+/**
+ * Waits until a sync statement's DDL reaches every replica, then clears its
+ * pending marker. A resumed run calls it with the same inputs as the first.
+ */
+async function completePropagation(input: {
+  db: ClickHouseExecutor
+  journalStore: JournalStore
+  file: string
+  fallbackState: MigrationRowState
+  index: number
+  identity: { type: string; key: string }
+  operation: MigrationOperationSummary | undefined
+  statement: string
+  cluster: string | undefined
+}): Promise<void> {
+  const { db, journalStore, file, index, identity, operation, statement, cluster } = input
+  if (hasPropagationWait(operation)) {
+    await waitForDDLPropagation(db, operation.type, operation.key, { cluster, statement })
+  }
+  const state = (await journalStore.readMigrationState(file)) ?? input.fallbackState
+  await journalStore.writeMigrationState(
+    upsertOperation(state, syncOperationState(index, identity.type, identity.key, 'completed'), Date.now),
+  )
+}
+
 function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
@@ -59,6 +116,21 @@ function errorMessage(error: unknown): string {
 export function previewStatement(sql: string, max = 120): string {
   const oneLine = sql.replace(/\s+/g, ' ').trim()
   return oneLine.length > max ? `${oneLine.slice(0, max)}…` : oneLine
+}
+
+/** A migration's statements marked `mode=barrier` that are not a SELECT (#634). */
+export function nonSelectBarriers(
+  migration: string,
+  statements: readonly string[],
+  operations: readonly MigrationOperationSummary[],
+): PendingNonSelectBarrier[] {
+  return findNonSelectBarriers(statements, operations).map((barrier) => ({
+    migration,
+    statement: barrier.index + 1,
+    total: statements.length,
+    operation: barrier.summary,
+    preview: previewStatement(barrier.statement),
+  }))
 }
 
 /**
@@ -138,6 +210,11 @@ export async function applyMigration(input: {
     statements: parsedStatements,
   })
 
+  // migrate refused a file's non-SELECT barrier before the run; a plugin may
+  // have rewritten the statements since (#634).
+  const barriers = nonSelectBarriers(file, statements, operationSummaries)
+  if (barriers.length > 0) throw nonSelectBarrierError(barriers)
+
   const migrationChecksum = checksumSQL(sql)
 
   // Resume support (#6): if a prior run left per-statement journal state for
@@ -145,6 +222,30 @@ export async function applyMigration(input: {
   // replayed — so a partial failure no longer bricks the migration on re-run
   // with "column already exists". Resuming across a file edit needs care (#233).
   const initialState = await journalStore.readMigrationState(file)
+  // Releases before #562 did not know `//` and `#` comments, so the statement
+  // positions they recorded do not hold where their split and this one differ.
+  // A state this release recorded is split as now.
+  if (
+    initialState !== null &&
+    !initialState.migrationCompleted &&
+    initialState.chkitVersion !== CLI_VERSION
+  ) {
+    const changed = splitChangedStatements(initialState.operations, {
+      legacy: extractLegacyExecutableStatements(sql),
+      current: parsedStatements,
+      positionsKept:
+        statements.length === parsedStatements.length &&
+        statements.every((statement, index) => statement === parsedStatements[index]),
+    })
+    if (changed.length > 0) {
+      throw statementSplitChangedError({
+        migration: file,
+        statements: changed,
+        recordedBy: initialState.chkitVersion,
+        cliVersion: CLI_VERSION,
+      })
+    }
+  }
   if (
     initialState !== null &&
     !initialState.migrationCompleted &&
@@ -188,11 +289,28 @@ export async function applyMigration(input: {
     // Sync DDL path with per-statement journaling + resume. Re-read state each
     // iteration so async ops written above (or in a prior run) are preserved.
     const stateBefore = await journalStore.readMigrationState(file)
-    if (operationIsCompleted(stateBefore, i)) {
-      debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
+    const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
+    if (stateBefore !== null && operationIsCompleted(stateBefore, i)) {
+      if (propagationWaitPending(stateBefore, i)) {
+        // The run that completed it stopped before its propagation wait
+        // passed (#513): wait again before the next statement runs.
+        debug('migrate', `${file}#${i}: already completed in a prior run — waiting for DDL propagation again`)
+        await completePropagation({
+          db,
+          journalStore,
+          file,
+          fallbackState: stateBefore,
+          index: i,
+          identity: { type: opType, key: opKey },
+          operation,
+          statement,
+          cluster: config.clickhouse?.cluster,
+        })
+      } else {
+        debug('migrate', `${file}#${i}: already completed in a prior run — skipping`)
+      }
       continue
     }
-    const { type: opType, key: opKey } = statementIdentity(operationSummaries, i)
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
     if (priorAttempt !== undefined && operation?.beforeRetry) {
       try {
@@ -239,12 +357,29 @@ export async function applyMigration(input: {
     // DDL propagation. The statement already ran, so if the propagation wait
     // later times out and throws, a re-run must skip this statement rather than
     // replay it into an "already exists" error (the brick this fix prevents).
+    // Until its wait passes, the record carries PROPAGATION_WAIT_PENDING, so a
+    // re-run waits for it again before the next statement (#513).
+    const waits = hasPropagationWait(operation)
     const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
     await journalStore.writeMigrationState(
-      upsertOperation(stateAfter, syncOperationState(i, opType, opKey, 'completed'), Date.now),
+      upsertOperation(
+        stateAfter,
+        syncOperationState(i, opType, opKey, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
+        Date.now,
+      ),
     )
-    if (operation && operation.mode !== 'barrier') {
-      await waitForDDLPropagation(db, operation.type, operation.key, { cluster: config.clickhouse?.cluster, statement })
+    if (waits) {
+      await completePropagation({
+        db,
+        journalStore,
+        file,
+        fallbackState: stateAfter,
+        index: i,
+        identity: { type: opType, key: opKey },
+        operation,
+        statement,
+        cluster: config.clickhouse?.cluster,
+      })
     }
   }
 

@@ -1,6 +1,10 @@
 import {
-  codecFingerprint,
+  canonicalizeTextIndex,
+  columnCodecFingerprint,
+  columnTypeFingerprint,
   compareCodePoints,
+  DEFAULT_INDEX_GRANULARITY,
+  literalDefaultFingerprint,
   constraintExpression,
   constraintKind,
   identifierName,
@@ -13,22 +17,26 @@ import {
   normalizeProjectionIndex,
   normalizeSQLFragment,
   renderDefault,
-  renderColumnType,
   renderKeyClauseColumns,
   splitTopLevelComma,
   sqlExpressionFingerprint,
-  unquoteIdentifiers,
+  isTrivia,
+  keyClauseFingerprint,
   type ColumnDefinition,
   type ProjectionDefinition,
   type SkipIndexDefinition,
+  type SQLToken,
   textIndexFingerprint,
+  type TextSkipIndex,
   tokenizeSQL,
   renderVectorIndexType,
+  replicatedEngineAsShared,
   type MaterializedViewDefinition,
   type TableConstraintDefinition,
   type TableDefinition,
   vectorIndexGranularity,
   type ViewDefinition,
+  withDefaultIndexGranularity,
 } from '@chkit/core'
 import { diffByName, diffNamedShapeMaps, diffSettings } from './diff.js'
 
@@ -71,12 +79,14 @@ type ObjectDriftReasonCode =
   | 'kind_mismatch'
   | 'query_mismatch'
   | 'target_mismatch'
+  | 'comment_mismatch'
 type DriftReasonCode = ObjectDriftReasonCode | TableDriftReasonCode
 
 interface SchemaObjectShape {
   kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
   database: string
   name: string
+  comment?: string
 }
 
 export interface ObjectDriftDetail {
@@ -84,7 +94,7 @@ export interface ObjectDriftDetail {
   object: string
   expectedKind?: SchemaObjectShape['kind']
   actualKind?: SchemaObjectShape['kind']
-  /** query_mismatch / target_mismatch: the compared query or `TO` target. */
+  /** query_mismatch / target_mismatch / comment_mismatch: the compared query, `TO` target or comment. */
   expected?: string
   actual?: string
 }
@@ -211,6 +221,33 @@ export function compareSchemaObjects(
   }
 }
 
+/**
+ * Compares the comment of every table, view, materialized view and dictionary
+ * that exists on both sides with the same kind. The live comment is
+ * `system.tables.comment`, which ClickHouse has already decoded.
+ */
+export function compareObjectComments(
+  expectedObjects: SchemaObjectShape[],
+  actualObjects: SchemaObjectShape[]
+): ObjectDriftDetail[] {
+  const actualComments = new Map(actualObjects.map((item) => [schemaObjectKey(item), item.comment]))
+  return expectedObjects.flatMap((item): ObjectDriftDetail[] => {
+    const actual = actualComments.get(schemaObjectKey(item))
+    if (actual === undefined) return []
+    const expectedComment = item.comment?.trim() ?? ''
+    const actualComment = actual.trim()
+    if (expectedComment === actualComment) return []
+    return [
+      {
+        code: 'comment_mismatch',
+        object: `${item.database}.${item.name}`,
+        expected: expectedComment,
+        actual: actualComment,
+      },
+    ]
+  })
+}
+
 export function summarizeDriftReasons(input: {
   objectDrift: ObjectDriftDetail[]
   tableDrift: TableDriftDetail[]
@@ -247,14 +284,15 @@ function normalizeColumnShape(column: ColumnDefinition): string {
     rendered === undefined ||
     (column.defaultKind === 'EPHEMERAL' && isSyntheticEphemeralDefault(rendered))
       ? ''
-      : sqlExpressionFingerprint(rendered)
+      : (literalDefaultFingerprint(rendered) ?? sqlExpressionFingerprint(rendered))
   const parts = [
-    // Introspection unwraps Nullable(T) into type=T plus nullable=true.
-    `type=${renderColumnType(column)}`,
+    // Introspection unwraps Nullable(T) into type=T plus nullable=true, and
+    // ClickHouse spaces the type its own way (`Decimal(10, 2)`).
+    `type=${columnTypeFingerprint(column)}`,
     `default=${normalizedDefault}`,
     `defaultKind=${column.defaultKind ?? 'DEFAULT'}`,
     `comment=${column.comment?.trim() ?? ''}`,
-    `codec=${codecFingerprint(column.codec)}`,
+    `codec=${columnCodecFingerprint(column)}`,
   ]
   return parts.join('|')
 }
@@ -282,26 +320,43 @@ function renderIndexTypeFingerprint(index: SkipIndexDefinition): string {
   }
 }
 
-// chkit renders `INDEX name (expr)`, and ClickHouse keeps those parentheses in
-// system.data_skipping_indices.expr. Strip one pair only when it encloses the
-// whole expression, so `(a) + (b)` stays intact.
-function stripEnclosingParens(value: string): string {
-  if (!value.startsWith('(') || !value.endsWith(')')) return value
-  let depth = 0
-  for (let i = 0; i < value.length; i++) {
-    if (value[i] === '(') depth++
-    else if (value[i] === ')') depth--
-    if (depth === 0 && i < value.length - 1) return value
+// chkit renders `INDEX name (expr)`. Stock ClickHouse drops the parentheses
+// that enclose the whole expression, ObsessionDB keeps one pair (#512), and a
+// schema may write more (`((s))`). Peel every such pair, reading the SQL with
+// the shared lexer so `(a) + (b)` and the parentheses inside a string, quoted
+// name or heredoc (`$$)$$`) stay intact.
+function indexExpressionBase(index: SkipIndexDefinition): string {
+  let expression = normalizeSQLFragment(index.expression)
+  for (;;) {
+    const tokens = tokenizeSQL(expression).filter((token) => !isTrivia(token))
+    const first = tokens[0]
+    const last = tokens.at(-1)
+    if (first?.text !== '(' || last?.text !== ')') return expression
+    let depth = 0
+    const encloses = tokens.every((token, i) => {
+      if (token.text === '(') depth++
+      else if (token.text === ')') depth--
+      return depth > 0 || i === tokens.length - 1
+    })
+    if (!encloses) return expression
+    expression = expression.slice(first.end, last.start).trim()
   }
-  return value.slice(1, -1).trim()
 }
 
-function indexExpressionBase(index: SkipIndexDefinition): string {
-  return stripEnclosingParens(normalizeSQLFragment(index.expression))
+// ClickHouse re-formats a text index expression when it stores it, e.g.
+// `NOT a AND b` comes back as `(NOT a) AND b`, so the expression goes through
+// the canonicalizer like any other index expression. It is read with the text
+// index lexer rather than normalizeSQLFragment, which would collapse the spaces
+// inside its string literals.
+function textIndexExpressionBase(index: TextSkipIndex): string {
+  return canonicalizeTextIndex(index).expression
 }
 
 function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCanonicalizer): string {
-  if (index.type === 'text') return textIndexFingerprint(index)
+  if (index.type === 'text') {
+    const expression = canonicalizer?.expression(textIndexExpressionBase(index))
+    return textIndexFingerprint(expression == null ? index : { ...index, expression })
+  }
   return [
     `expr=${canonicalizeExpression(indexExpressionBase(index), canonicalizer)}`,
     // A raw type is compared as ClickHouse formats it, so a structured index on
@@ -336,12 +391,12 @@ function normalizeProjectionShape(
 
 // Key and partition clauses are compared as SQL: the schema's keys as chkit
 // renders them, the live clauses as ClickHouse reports them. Comments are
-// removed while quoted names still carry their backticks. Then the names are
-// unquoted, since ClickHouse re-renders identifiers with its own quoting and
-// escaping, and one pair of parentheses around the whole clause is dropped.
-// From there on only whitespace is collapsed: unquoted, `user--id` would read
-// as `user` followed by a comment. For the same reason a canonicalizer sees each
-// element while its names are still quoted.
+// removed while quoted names still carry their backticks. Then each side is
+// compared by its tokens, where a name matches however ClickHouse re-quotes it
+// and keeps its commas and spaces: `` `a, b` `` is one column, not `a` and `b`
+// (#558). One pair of parentheses around the whole clause is dropped. A
+// canonicalizer sees each element while its names are still quoted, since
+// unquoted, `user--id` would read as `user` followed by a comment.
 function normalizeClause(value: string | undefined, canonicalizer?: SqlCanonicalizer): string {
   if (!value) return ''
   const sql = normalizeSQLFragment(value)
@@ -350,9 +405,9 @@ function normalizeClause(value: string | undefined, canonicalizer?: SqlCanonical
         .map((element) => canonicalizeExpression(element, canonicalizer))
         .join(', ')
     : sql
-  const unquoted = unquoteIdentifiers(canonical).replace(/\s+/g, ' ').trim()
-  const wrapped = unquoted.match(/^\((.*)\)$/)
-  return wrapped?.[1] ? wrapped[1].trim() : unquoted
+  const tokens = keyClauseFingerprint(canonical)
+  // Tokens are joined by single spaces, and only a `)` token ends in ` )`.
+  return tokens.match(/^\( (.+) \)$/)?.[1] ?? tokens
 }
 
 /** The elements of a key/partition clause, canonicalized one by one so a
@@ -385,9 +440,90 @@ function tableClauses(expected: TableDefinition, actual: ActualTableShape) {
   } satisfies Record<string, [string | undefined, string | undefined]>
 }
 
+// Keywords the server rewrites in engine arguments: `is null` reads back as
+// `IS NULL`, `TRUE` as `true`. A bare `true`, `false` or `null` is always a literal.
+const ENGINE_LITERAL_KEYWORDS = new Set(['null', 'true', 'false'])
+const ENGINE_OPERATOR_KEYWORDS = new Set(['and', 'or', 'not', 'is', 'in', 'like', 'ilike', 'distinct', 'from', 'global'])
+// The operator keywords that can open an expression (`NOT x`, `count(DISTINCT x)`);
+// the others always follow an operand.
+const ENGINE_PREFIX_KEYWORDS = new Set(['not', 'distinct'])
+// Names the server keeps quoted because they read back as a literal when bare
+// (writeProbablyQuotedStringImpl): `true` is a Bool, `` `true` `` a column.
+const ENGINE_LITERAL_NAMES = new Set(['null', 'true', 'false', 'inf', 'infinity', 'nan'])
+// Keywords the server quotes as names from some version on: 26.3 writes a
+// `cube` column bare, later versions `` `cube` ``.
+const ENGINE_KEYWORD_NAMES = new Set(['distinct', 'all', 'some', 'table', 'select', 'cube', 'rollup', 'recursive'])
+const BARE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Column names and string literals in engine arguments are case-sensitive, so
+ * they keep their case (#673). Function names (`RAND()` reads back as `rand()`)
+ * and operator keywords do not, and whitespace between tokens is insignificant.
+ * An operator keyword where an operand belongs (`if(And > 1, 1, 0)`) can only be
+ * a column. A quoted name compares as the server writes it back (#679).
+ */
 function normalizeEngine(value: string | undefined): string {
   if (!value) return ''
-  return coreNormalizeEngine(normalizeSQLFragment(value)).toLowerCase()
+  const tokens = tokenizeSQL(coreNormalizeEngine(normalizeSQLFragment(value)))
+    .filter((token) => !isTrivia(token))
+    .map((token, index, all) => unquoteEngineName(token, all[index - 1], all[index + 1]))
+  return tokens
+    .map((token, index) => {
+      if (token.kind !== 'identifier') return token.text
+      const lower = token.text.toLowerCase()
+      const previous = tokens[index - 1]
+      const next = tokens[index + 1]
+      const keyword = ENGINE_LITERAL_KEYWORDS.has(lower) || isOperatorKeyword(lower, previous, next)
+      return next?.text === '(' || keyword ? lower : token.text
+    })
+    .join(' ')
+}
+
+/**
+ * The server writes a quoted name bare when the quotes are not needed: `Ver`
+ * for `` `Ver` `` or `"Ver"`, and `Null` for an engine or function name, which
+ * the server itself writes as `` `Null` ``. A name that needs its quotes keeps
+ * them, in backticks, so different names never compare equal. An unquoted name
+ * stays a quoted identifier, so it keeps its case even where a keyword could be.
+ */
+function unquoteEngineName(token: SQLToken, previous: SQLToken | undefined, next: SQLToken | undefined): SQLToken {
+  const name = token.kind === 'quoted_identifier' ? identifierName(token) : undefined
+  if (name === undefined || !BARE_NAME.test(name)) {
+    return name === undefined ? token : { ...token, text: `\`${name.replaceAll('\\', '\\\\').replaceAll('`', '\\`')}\`` }
+  }
+  if (next?.text === '(') return { ...token, kind: 'identifier', text: name }
+  const lower = name.toLowerCase()
+  const keepsQuotes =
+    ENGINE_LITERAL_NAMES.has(lower) || (ENGINE_KEYWORD_NAMES.has(lower) && (endsOperand(previous) || startsOperand(next)))
+  return keepsQuotes ? { ...token, text: `\`${name}\`` } : { ...token, text: name }
+}
+
+function isOperatorKeyword(lower: string, previous: SQLToken | undefined, next: SQLToken | undefined): boolean {
+  if (!ENGINE_OPERATOR_KEYWORDS.has(lower)) return false
+  return endsOperand(previous) || (ENGINE_PREFIX_KEYWORDS.has(lower) && startsOperand(next))
+}
+
+function endsOperand(token: SQLToken | undefined): boolean {
+  return token !== undefined && (isValueToken(token) || token.text === ')' || token.text === ']')
+}
+
+function startsOperand(token: SQLToken | undefined): boolean {
+  return token !== undefined && (isValueToken(token) || token.text === '(')
+}
+
+function isValueToken(token: SQLToken): boolean {
+  return ['identifier', 'quoted_identifier', 'number', 'string'].includes(token.kind)
+}
+
+/**
+ * ObsessionDB and ClickHouse Cloud store a `Replicated*MergeTree` table as
+ * `Shared*MergeTree`, without the Keeper path and replica name (#669).
+ */
+function enginesMatch(expected: string | undefined, actual: string | undefined): boolean {
+  if (normalizeEngine(expected) === normalizeEngine(actual)) return true
+  if (!expected || !actual || !actual.trim().startsWith('Shared')) return false
+  const shared = replicatedEngineAsShared(expected)
+  return shared !== undefined && normalizeEngine(shared) === normalizeEngine(actual)
 }
 
 /**
@@ -405,7 +541,7 @@ export function collectTableSqlFragments(
   const queries: string[] = []
 
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
-    if (index.type !== 'text') expressions.push(indexExpressionBase(index))
+    expressions.push(index.type === 'text' ? textIndexExpressionBase(index) : indexExpressionBase(index))
   }
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
     if (index.type !== 'text') expressions.push(renderIndexTypeFingerprint(index))
@@ -429,7 +565,9 @@ export function collectTableSqlFragments(
 export function compareTableShape(
   expected: TableDefinition,
   actual: ActualTableShape,
-  canonicalizer?: SqlCanonicalizer
+  canonicalizer?: SqlCanonicalizer,
+  /** `clickhouse.indexGranularity`, for a live table that does not show index_granularity. */
+  indexGranularity: number = DEFAULT_INDEX_GRANULARITY
 ): TableDriftDetail | null {
   const columnDiff = diffByName(
     expected.columns,
@@ -453,7 +591,7 @@ export function compareTableShape(
     : expected.settings ?? {}
   const actualSettings = kafka
     ? Object.fromEntries(Object.entries(parseKafkaSettings(actual.settings)).map(([key, value]) => [key, kafkaSettingFingerprint(value)]))
-    : actual.settings
+    : withDefaultIndexGranularity(actual.engine ?? expected.engine, actual.settings, indexGranularity) ?? {}
   const settingDiffs = diffSettings(expectedSettings, actualSettings)
 
   const expectedIndexes = new Map(
@@ -474,7 +612,7 @@ export function compareTableShape(
   )
   const ttlMismatch = expectedTTL !== actualTTL
 
-  const engineMismatch = normalizeEngine(expected.engine) !== normalizeEngine(actual.engine)
+  const engineMismatch = !enginesMatch(expected.engine, actual.engine)
   const clauses = tableClauses(expected, actual)
   const expectedPrimaryKey = normalizeClause(clauses.primaryKey[0], canonicalizer)
   const actualPrimaryKey = normalizeClause(clauses.primaryKey[1], canonicalizer)

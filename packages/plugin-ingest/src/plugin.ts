@@ -84,6 +84,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'run',
         description: 'Execute the selected ingestion streams from their journaled checkpoints',
+        takesArgs: false,
         flags: RUN_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -108,6 +109,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
                     database: target.database,
                     targetId: target.targetId,
                     table: context.options.journalTable,
+                    cluster: target.cluster,
                   }),
                   destination: createClickHouseDestination(target.executor),
                   signal: abort.signal,
@@ -135,6 +137,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'list',
         description: 'List the ingestion streams in the loaded definition graph',
+        takesArgs: false,
         flags: SELECTION_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -157,6 +160,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'doctor',
         description: 'Validate journal evidence and diagnose uncertain run histories',
+        takesArgs: false,
         flags: RECOVERY_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -192,6 +196,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'repair',
         description: 'Review recovery; --apply materializes a verified journal for explicit configuration activation',
+        takesArgs: false,
         flags: REPAIR_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -240,6 +245,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'status',
         description: 'Show the committed checkpoint of each selected stream',
+        takesArgs: false,
         flags: SELECTION_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -371,7 +377,7 @@ function openTarget(context: IngestPluginCommandContext) {
   // bound to one ClickHouse HTTP session (a session allows one in-flight query).
   if (clickhouse) {
     const executor = createStatelessClickHouseExecutor(clickhouse)
-    return { executor, database: clickhouse.database, targetId: targetIdOf(clickhouse.url, clickhouse.database), close: () => executor.close() }
+    return { executor, database: clickhouse.database, cluster: clickhouse.cluster, targetId: targetIdOf(clickhouse.url, clickhouse.database), close: () => executor.close() }
   }
   throw new IngestConfigError('Ingestion requires a direct ClickHouse connection for JSON rows and deduplication settings. Configure clickhouse in your clickhouse.config.ts; a host-provided executor is not supported.')
 }

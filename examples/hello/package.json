@@ -12,7 +12,9 @@
   "devDependencies": {
     "@chkit/core": "0.1.2-beta.7",
     "@chkit/plugin-obsessiondb": "0.1.2-beta.7",
-    "chkit": "0.1.2-beta.7"
+    "@clickhouse/client": "^1.18.0",
+    "chkit": "0.1.2-beta.7",
+    "zod": "^4.3.6"
   },
   "overrides": {
     "@orpc/client": "1.15.4",

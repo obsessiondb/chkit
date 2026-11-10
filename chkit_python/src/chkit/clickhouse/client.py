@@ -11,6 +11,7 @@ import json
 import logging
 import os
 import re
+import threading
 import uuid
 from typing import Any, Literal, NoReturn, Self
 from urllib.parse import unquote, urlparse
@@ -20,9 +21,12 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
+from urllib3 import Timeout
 
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.jsnum import js_math_round
 from chkit.core.model import ChxResolvedClickHouseConfig
+from chkit.core.sql_lexer import js_trim
 
 # chkit prints its own one-line error, as TS silences @clickhouse/client's
 # logger: without a handler, the driver's warnings (``Unexpected Http Driver
@@ -30,6 +34,9 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 logging.getLogger("clickhouse_connect").addHandler(logging.NullHandler())
 
 QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
+
+# TS's PROGRESS_SETTINGS (``@chkit/clickhouse``): a progress header every 30 s.
+PROGRESS_INTERVAL_MS = "30000"
 
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
 # integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
@@ -100,15 +107,24 @@ class QueryStatus(BaseModel):
 class ClickHouseClient:
     """Imperative client wrapper. Use as a context manager."""
 
-    __slots__ = ("_client", "_config")
+    __slots__ = ("_client", "_closed", "_config", "_submit_client", "_submit_client_lock")
 
     def __init__(self, client: Any, config: ChxResolvedClickHouseConfig) -> None:
         self._client: Any = client
         self._config: ChxResolvedClickHouseConfig = config
+        # The driver `submit` sends through, opened on first use.
+        self._submit_client: Any = None
+        self._submit_client_lock = threading.Lock()
+        self._closed = False
 
     @classmethod
     def connect(cls, config: ChxResolvedClickHouseConfig) -> Self:
         """Connect using a resolved config block."""
+        return cls(cls._open_driver(config), config)
+
+    @staticmethod
+    def _open_driver(config: ChxResolvedClickHouseConfig, **options: Any) -> Any:
+        """Open a ``clickhouse-connect`` client; ``options`` go to ``get_client``."""
         parsed = urlparse(config.url)
         # Like the TS client (``@clickhouse/client``): the URL scheme sets the
         # protocol, a URL without a port uses the scheme's default port, and
@@ -142,14 +158,25 @@ class ClickHouseClient:
                 username=username,
                 password=password,
                 secure=secure,
+                connect_timeout=None,
+                **options,
             )
         except Exception as error:
             wrap_connection_error(error, config.url, config.username)
         client.database = config.database
-        return cls(client, config)
+        _use_ts_timeouts(client)
+        return client
 
     def close(self) -> None:
+        # Does not wait for a submit driver still opening (on the thread of an
+        # interrupted async migrate), which has no connect timeout: that
+        # thread sees ``_closed``, closes its driver and sends nothing.
+        self._closed = True
         self._client.close()
+        with self._submit_client_lock:
+            submit_client, self._submit_client = self._submit_client, None
+        if submit_client is not None:
+            submit_client.close()
 
     def __enter__(self) -> Self:
         return self
@@ -209,7 +236,7 @@ class ClickHouseClient:
         """
         query_id = str(uuid.uuid4())
         body = self._client.raw_query(
-            statement.strip().rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
+            js_trim(statement).rstrip(";"), settings={"query_id": query_id}, fmt="JSON"
         )
         return ClickHouseJsonQueryResult.model_validate(
             {**parse_json_result(body), "query_id": query_id}
@@ -221,19 +248,47 @@ class ClickHouseClient:
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
     ) -> str:
-        """Fire-and-forget a query. Returns the assigned query_id.
+        """Send a query that ``query_status`` follows. Returns its query_id.
 
         Used by ``chkit migrate --apply`` for long-running ``ALTER`` /
         ``OPTIMIZE`` statements: the server starts processing immediately
         and the CLI polls ``query_status`` until terminal. ``settings`` are
         sent with the query (TS ``submit(sql, queryId, settings)``).
+
+        Like TS, this returns when the request does, at the end of the query;
+        a caller that polls meanwhile runs it on another thread. The request
+        goes through a driver without a session, as TS's fire-and-forget
+        client does: ClickHouse runs one query at a time per session, so in
+        the session ``query_status`` uses, the polls would be locked out
+        (``Session ... is locked by a concurrent client``) until the query
+        ends, even after a proxy cut the request (HTTP 524).
         """
         qid = query_id or str(uuid.uuid4())
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
-        self._client.command(statement, settings={**(settings or {}), "query_id": qid})
+        self._submit_driver().command(
+            statement, settings={**(settings or {}), "query_id": qid}
+        )
         return qid
+
+    def _submit_driver(self) -> Any:
+        with self._submit_client_lock:
+            submit_client = self._submit_client
+        if submit_client is None and not self._closed:
+            # Opened outside the lock, so close() does not wait for it.
+            opened = self._open_driver(self._config, autogenerate_session_id=False)
+            with self._submit_client_lock:
+                if self._submit_client is None and not self._closed:
+                    self._submit_client = opened
+                submit_client = self._submit_client
+            if submit_client is not opened:
+                opened.close()
+        # close() may have run while the driver opened.
+        if self._closed or submit_client is None:
+            msg = "ClickHouse client is closed."
+            raise RuntimeError(msg)
+        return submit_client
 
     def insert(
         self,
@@ -269,6 +324,7 @@ class ClickHouseClient:
         *,
         after_time: str | None = None,
         every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         """Check whether a previously-submitted query is running / finished / failed.
 
@@ -279,7 +335,10 @@ class ClickHouseClient:
         through ``clusterAllReplicas``. A replica that cannot be read is
         skipped, so a poll keeps going while one is down; ``every_replica``
         fails the read instead, so a status other than ``running`` means that
-        no replica runs the query.
+        no replica runs the query. ``running_only`` reads only
+        ``system.processes``, so the status is ``running`` or ``unknown``: a
+        server creates ``system.query_log`` on its first log flush, so a fresh
+        one has none yet.
         """
         fanout = resolve_replica_fanout(self, self._config.cluster)
 
@@ -303,6 +362,8 @@ class ClickHouseClient:
                 written_bytes=_safe_int(row.get("written_bytes")),
                 elapsed_ms=_safe_round_ms(row.get("elapsed")),
             )
+        if running_only:
+            return QueryStatus(status="unknown")
 
         after = after_time or "1970-01-01 00:00:00"
         log_sql = (
@@ -369,6 +430,23 @@ class ClickHouseClient:
         return list_table_details(self, databases)
 
 
+def _use_ts_timeouts(client: Any) -> None:
+    """Wait for a request as long as the TS client does, with its progress headers.
+
+    TS sets ``request_timeout: 0`` (no timeout at all, connect included) and
+    sends progress headers every 30 s, which keep a long query's connection
+    alive through a proxy with an idle timeout. clickhouse-connect defaults to
+    a 300 s read timeout and derives the progress interval from it (120 s), and
+    rejects ``send_receive_timeout=None`` while it derives it, so both are set
+    on the driver once it is open. The driver sends the interval only when the
+    user may change settings, as TS sends progress settings on reads, and a
+    setting passed with a query still wins, as in TS.
+    """
+    client.timeout = Timeout(connect=None, read=None)
+    if client._progress_interval is not None:
+        client._progress_interval = PROGRESS_INTERVAL_MS
+
+
 def _safe_int(value: object) -> int | None:  # noqa: PLR0911
     if value is None:
         return None
@@ -391,10 +469,10 @@ def _safe_round_ms(value: object) -> int | None:
     if value is None:
         return None
     if isinstance(value, (int, float)):
-        return round(float(value) * 1000)
+        return int(js_math_round(float(value) * 1000))
     if isinstance(value, str):
         try:
-            return round(float(value) * 1000)
+            return int(js_math_round(float(value) * 1000))
         except ValueError:
             return None
     return None

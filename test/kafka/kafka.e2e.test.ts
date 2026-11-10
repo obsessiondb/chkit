@@ -34,7 +34,7 @@ test('Kafka → MV → MergeTree: generate, migrate, consume, pull, drift, check
     includeQueue: boolean,
     consumers = 1,
   ) => `import { schema, table, materializedView } from '@chkit/core'
-const storage = table({ database: '${database}', name: 'events', engine: 'MergeTree', columns: [{ name: 'id', type: 'UInt64' }, { name: 'body', type: 'String' }], primaryKey: ['id'], orderBy: ['id'], settings: { index_granularity: '8192' } })
+const storage = table({ database: '${database}', name: 'events', engine: 'MergeTree', columns: [{ name: 'id', type: 'UInt64' }, { name: 'body', type: 'String' }], primaryKey: ['id'], orderBy: ['id'] })
 ${
   includeQueue
     ? `const queue = table({ database: '${database}', name: 'queue', engine: 'Kafka', columns: storage.columns, settings: { kafka_broker_list: 'kafka:9092', kafka_topic_list: '${topic}', kafka_group_name: '${topic}', kafka_format: 'JSONEachRow', kafka_client_id: ${JSON.stringify(clientId)}, kafka_num_consumers: ${consumers}, kafka_flush_interval_ms: 100, kafka_commit_on_select: false, input_format_skip_unknown_fields: true } })

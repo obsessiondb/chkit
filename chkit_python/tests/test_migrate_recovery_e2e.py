@@ -673,3 +673,91 @@ def test_abandoned_async_load_failing_before_start_is_not_journaled_completed(
         dst_rows(2, "abandon-async: the fixed load added its rows once")
     finally:
         _drop(project, views=[v], tables=[src, dst])
+
+
+def _record_old_release_state(project: Project, migration: str, statuses: list[str]) -> None:
+    """Writes the next version of a migration's row as a release that records
+    ``0.0.1-old`` would, with unmarked statements of the given statuses."""
+    journal = f"{quote_ident(project.database)}.{quote_ident(project.journal_table)}"
+    operations = ", ".join(
+        f"({index}, 'statement:{index}', 'sql_statement', '', '{status}', applied_at, "
+        f"applied_at, '{'boom' if status == 'failed' else ''}')"
+        for index, status in enumerate(statuses)
+    )
+    project.client.execute(
+        f"INSERT INTO {journal} (name, applied_at, checksum, chkit_version, "
+        "migration_completed, operations) "
+        "SELECT name, applied_at + toIntervalMillisecond(1), checksum, '0.0.1-old', false, "
+        f"[{operations}] FROM {journal} FINAL WHERE name = '{migration}' "
+        "SETTINGS select_sequential_consistency = 1"
+    )
+
+
+def test_refuses_to_resume_a_partial_run_another_release_split_differently(
+    make_project: Callable[[str], Project],
+) -> None:
+    """Releases before #562 cut at the ``;`` inside the ``//`` comment: for them
+    this file was [CREATE a, ALTER a ADD x, CREATE b]; ClickHouse reads
+    [CREATE a, CREATE b]."""
+    project = make_project("split")
+    db, prefix = project.database, project.prefix
+    a, b = f"{prefix}a", f"{prefix}b"
+    m = "20990101000000_split.sql"
+    sql = "\n".join(
+        [
+            f"CREATE TABLE IF NOT EXISTS {db}.{a} (id UInt64) ENGINE = MergeTree ORDER BY id "
+            f"// keep; ALTER TABLE {db}.{a} ADD COLUMN x UInt64",
+            ";",
+            f"CREATE TABLE {db}.{b} (id UInt64) ENGINE = MergeTree ORDER BY id;",
+            "",
+        ]
+    )
+    try:
+        _create_table(project, b)
+        _write(project, m, sql)
+        run1 = _migrate(["--execute", "--json"])
+        assert run1.exit_code == 1
+        assert f"Migration {m} failed at statement 2 of 2" in _error_of(run1)["message"]
+        _wait_journal(project, m, lambda r: r.statuses == "completed,failed")
+
+        # A state this release recorded resumes: statement 1 is skipped.
+        run2 = _migrate(["--execute", "--json"])
+        assert run2.exit_code == 1
+        assert f"Migration {m} failed at statement 2 of 2" in _error_of(run2)["message"]
+
+        # An older release's state with nothing completed resumes. The run
+        # writes the state as this release, so after another failure it
+        # resumes again.
+        _record_old_release_state(project, m, ["failed"])
+        _wait_journal(project, m, lambda r: r.statuses == "failed")
+        run3 = _migrate(["--execute", "--json"])
+        assert f"Migration {m} failed at statement 2 of 2" in _error_of(run3)["message"]
+        _wait_journal(project, m, lambda r: r.statuses == "completed,failed")
+        run4 = _migrate(["--execute", "--json"])
+        assert f"Migration {m} failed at statement 2 of 2" in _error_of(run4)["message"]
+
+        # The state an older release would have left: it ran the CREATE and the
+        # commented-out ALTER, then CREATE b failed.
+        _record_old_release_state(project, m, ["completed", "completed", "failed"])
+        _wait_journal(project, m, lambda r: r.statuses == "completed,completed,failed")
+        refused = _migrate(["--execute", "--json"])
+        assert refused.exit_code == 1
+        error = _error_of(refused)
+        assert error["code"] == "statement_split_changed"
+        assert f"Cannot resume {m}: chkit 0.0.1-old recorded its partial run" in error["message"]
+        assert "The journal recorded statements 1, 2 as completed or started" in error["message"]
+        assert f"chkit migrate --apply --abandon {m}" in error["message"]
+        _wait_journal(project, m, lambda r: r.statuses == "completed,completed,failed")
+
+        _parse(_migrate(["--abandon", m, "--apply", "--json"]))
+        project.client.execute(f"DROP TABLE {quote_ident(db)}.{quote_ident(b)}")
+        rerun = _migrate(["--execute", "--json"])
+        assert rerun.exit_code == 0, format_test_diagnostic("apply after abandon", rerun)
+        wait_for_table(project.client, db, b)
+        _wait_journal(
+            project,
+            m,
+            lambda r: r.completed == 1 and r.statuses == "completed,completed,failed",
+        )
+    finally:
+        _drop(project, views=[], tables=[a, b])

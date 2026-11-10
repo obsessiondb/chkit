@@ -80,8 +80,16 @@
   "meta": {
     "chkit": {
       "formatVersion": 1,
-      "version": "0.3.0",
+      "version": "0.3.1",
       "changelog": [
+        {
+          "version": "0.3.1",
+          "changes": [
+            "Deduplicate discovered channel IDs before saving message windows so overlapping discovery pages remain resumable.",
+            "Reject impossible new message windows before Slack requests while preserving frozen unfinished windows.",
+            "Remove detailed raw-storage and identity reference sections from the integration documentation."
+          ]
+        },
         {
           "version": "0.3.0",
           "changes": [

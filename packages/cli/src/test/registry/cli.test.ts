@@ -3,6 +3,7 @@ import { readFile, readdir } from 'node:fs/promises'
 import { join, resolve } from 'node:path'
 
 import { buildRegistry } from '../../registry/build.js'
+import { createIsolatedCliEnv } from '../spawn-cli.js'
 import { fixtureTracker, write, writeManifest } from './fixtures.js'
 
 const CLI_ENTRY = resolve(import.meta.dir, '../../bin/chkit.ts')
@@ -98,6 +99,17 @@ test.serial('build, list and inspect roundtrip through the CLI without importing
   expect(inspectText.stdout).not.toContain('Guide:')
   expect(inspectText.stdout).not.toContain('Logo:')
   expect(inspectText.stdout).not.toContain('Changelog:')
+
+  const [missing, unsupported] = await Promise.all([
+    runCli(fixture.project, ['add', 'nope', '--registry', output, '--json']),
+    runCli(fixture.project, ['add', 'fixture', '--registry', output, '--output', 'x', '--json']),
+  ])
+  expect(missing.exitCode).toBe(1)
+  expect(JSON.parse(missing.stdout).error.message).toBe(
+    `Template nope is not in registry ${output}: ${join(output, 'nope.json')} does not exist. Run chkit registry list --registry ${output} to see its templates.`,
+  )
+  expect(unsupported.exitCode).toBe(1)
+  expect(JSON.parse(unsupported.stdout).error.message).toBe('--output is not supported by chkit add')
 })
 
 test.serial('inspect shows the integration changelog in human and JSON output', async () => {
@@ -296,12 +308,13 @@ test.serial('HTTP catalogs, named pins and item URLs resolve in asynchronous CLI
 })
 
 async function runCli(cwd: string, args: string[]) {
+  const isolated = createIsolatedCliEnv()
   const child = Bun.spawn({
-    cmd: [process.execPath, CLI_ENTRY, ...args], cwd,
+    cmd: [process.execPath, CLI_ENTRY, ...args], cwd, env: isolated.env,
     stdout: 'pipe', stderr: 'pipe', stdin: 'ignore', timeout: 10_000,
   })
   const [stdout, stderr, exitCode] = await Promise.all([
     new Response(child.stdout).text(), new Response(child.stderr).text(), child.exited,
-  ])
+  ]).finally(isolated.cleanup)
   return { stdout, stderr, exitCode }
 }

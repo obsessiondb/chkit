@@ -70,6 +70,7 @@ from chkit.core.model import (
     ValidationIssueCode,
     ViewDefinition,
     collect_definitions_from_module,
+    configured_index_granularity,
     define_config,
     dictionary,
     is_schema_definition,
@@ -103,7 +104,11 @@ from chkit.core.sql_splitter import (
     split_sql_statements,
 )
 from chkit.core.ts_import import ModuleLoadError, import_module_file
-from chkit.core.validate import assert_valid_definitions, validate_definitions
+from chkit.core.validate import (
+    assert_valid_definitions,
+    collect_definition_warnings,
+    validate_definitions,
+)
 
 __all__ = [
     "NO_MATCH_MESSAGE",
@@ -157,7 +162,9 @@ __all__ = [
     "canonicalize_definitions",
     "codec_raw",
     "codecs_equal",
+    "collect_definition_warnings",
     "collect_definitions_from_module",
+    "configured_index_granularity",
     "create_snapshot",
     "define_config",
     "define_flags",

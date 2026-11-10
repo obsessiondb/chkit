@@ -33,6 +33,7 @@ from chkit.core.model import (
     SkipIndexSet,
     SkipIndexTokenBF,
 )
+from chkit.core.text_index_sql import normalize_text_index_sql
 
 # ---------- infer_schema_kind_from_engine ----------
 
@@ -152,6 +153,33 @@ def test_normalize_column_preserves_comment_and_codec() -> None:
 
 
 # ---------- normalize_index_from_system_row ----------
+
+
+# ObsessionDB keeps the parentheses chkit renders (``(s)``); stock ClickHouse
+# stores ``s``. Pull writes the stock form from either server (#512).
+@pytest.mark.parametrize(
+    ("expr", "expected"),
+    [
+        ("(s)", "s"),
+        ("s", "s"),
+        ("((a + b) * c)", "(a + b) * c"),
+        ("(a + b) * c", "(a + b) * c"),
+        ("(a) + (b)", "(a) + (b)"),
+        ("a, b", "a, b"),
+        ("(s = ')(')", "s = ')('"),
+        ("(s = '(') OR (t = ')')", "(s = '(') OR (t = ')')"),
+    ],
+)
+def test_normalize_index_reads_back_the_stock_expression(expr: str, expected: str) -> None:
+    def read(index_type: str) -> str:
+        row = SystemSkippingIndexRow(
+            database="db", table="t", name="idx", expr=expr, type=index_type, granularity=1
+        )
+        return normalize_index_from_system_row(row).expression
+
+    assert read("minmax") == expected
+    assert read("text(tokenizer = 'splitByNonAlpha')") == expected
+    assert normalize_text_index_sql(expected) == expected
 
 
 def test_normalize_index_minmax() -> None:
@@ -374,7 +402,7 @@ def test_list_schema_objects_excludes_chkit_tables_via_sql_text() -> None:
     client = _FakeClient([[]])
     list_schema_objects(client)
     # The SQL should embed the exclusion clauses.
-    assert "name NOT LIKE '_chkit_%'" in client.queries[0]
+    assert "NOT startsWith(name, '_chkit_')" in client.queries[0]
     assert "system" in client.queries[0]
 
 

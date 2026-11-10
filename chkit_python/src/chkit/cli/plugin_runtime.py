@@ -26,11 +26,12 @@ from __future__ import annotations
 
 import contextlib
 from collections.abc import Sequence
-from dataclasses import asdict
+from dataclasses import asdict, replace
 from typing import Any
 
 from chkit import __version__
 from chkit.plugins import (
+    ChxGetContextInput,
     ChxOnAfterApplyContext,
     ChxOnBeforeApplyContext,
     ChxOnBeforePluginCommandContext,
@@ -188,6 +189,31 @@ class PluginRuntime:
             result = self._call_hook(
                 entry, "onSchemaLoaded", hook, updated_ctx
             )
+            if result is not None:
+                definitions = list(result)
+        return definitions
+
+    def run_on_snapshot_loaded(
+        self, context: ChxOnSchemaLoadedContext
+    ) -> Sequence[Any]:
+        """Runs in ``generate`` on the previous snapshot's definitions (TS
+        ``runOnSnapshotLoaded``, #466). A plugin that rewrites the schema in
+        ``on_schema_loaded`` applies the same rewrite here, so a snapshot written
+        before the rewrite existed does not plan a change."""
+        definitions = list(context.definitions)
+        for entry in self._plugins:
+            hook = _get_hook(entry.plugin, "on_snapshot_loaded")
+            if hook is None:
+                continue
+            updated_ctx = ChxOnSchemaLoadedContext(
+                command=context.command,
+                config=context.config,
+                table_scope=context.table_scope,
+                flags=context.flags,
+                definitions=definitions,
+                json_mode=context.json_mode,
+            )
+            result = self._call_hook(entry, "onSnapshotLoaded", hook, updated_ctx)
             if result is not None:
                 definitions = list(result)
         return definitions
@@ -383,12 +409,35 @@ class PluginRuntime:
         if isinstance(before_result, ChxOnBeforePluginCommandHandled):
             return before_result.exit_code
 
+        # As TS runPluginCommand: the get_context hooks run right before the
+        # command, which gets a plugin's executor in place of its default one.
+        defaults = context.plugin_context
+        plugin_context = self.resolve_context(
+            ChxGetContextInput(
+                config=context.config,
+                config_path=context.config_path,
+                command=command_name,
+                flags=dict(context.flags),
+                defaults=defaults,
+            )
+        )
+        if plugin_context is defaults:
+            plugin_context = None
+        if plugin_context is not None:
+            context = replace(context, plugin_context=plugin_context)
         try:
             result = command.run(context)
         except Exception as cause:
             if entry.internal:
                 raise
-            raise PluginExecutionError(plugin_name, "command", cause) from cause
+            # As TS names the command: `failed in command:<name>: ...`.
+            raise PluginExecutionError(
+                plugin_name, f"command:{command_name}", cause
+            ) from cause
+        finally:
+            # The caller owns the default context; this closes only a plugin's own.
+            if plugin_context is not None:
+                self.dispose_context(plugin_context)
         return 0 if result is None else int(result)
 
     # ---------- helpers ----------

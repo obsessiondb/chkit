@@ -20,17 +20,20 @@ obsessiondb plugin port.
 
 from __future__ import annotations
 
+import os
 import re
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
+from typer.exceptions import TyperException
 
 from chkit.cli.command_target import (
     ServiceOption,
     open_client,
     resolve_plugin_executor,
+    run_on_config_loaded_or_exit,
 )
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.cli.commands.pull_view_parser import (
@@ -42,10 +45,10 @@ from chkit.cli.commands.pull_view_parser import (
 from chkit.cli.config_loader import load_config
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
-from chkit.cli.plugin_runtime import load_plugin_runtime
+from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.clickhouse.create_dictionary_parser import (
-    parse_comment_from_create_dictionary_query,
     parse_dictionary_attributes_from_create_dictionary_query,
     parse_dictionary_primary_key_from_create_dictionary_query,
     parse_dictionary_range_from_create_dictionary_query,
@@ -54,16 +57,19 @@ from chkit.clickhouse.create_dictionary_parser import (
     parse_lifetime_from_create_dictionary_query,
     parse_source_from_create_dictionary_query,
 )
+from chkit.clickhouse.index_granularity import assert_server_index_granularity
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
     infer_schema_kind_from_engine,
     list_schema_objects,
     list_table_details,
 )
+from chkit.core.canonical import canonicalize_definitions
 from chkit.core.kafka import is_kafka_engine, parse_kafka_settings
 from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ChxConfigEnv,
+    ChxResolvedConfig,
     DictionaryDefinition,
     MaterializedViewDefinition,
     MaterializedViewRefresh,
@@ -80,13 +86,15 @@ from chkit.core.model import (
     TableDefinition,
     TableRef,
     ViewDefinition,
+    configured_index_granularity,
     dictionary,
     materialized_view,
     table,
     view,
 )
+from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_scan import strip_wrapping_parens
-from chkit.plugins import ChxOnPullIntrospectContext, ChxPlugin
+from chkit.plugins import ChxOnConfigLoadedContext, ChxOnPullIntrospectContext, ChxPlugin
 
 
 def _introspected_table_to_definition(
@@ -127,8 +135,8 @@ def _introspected_table_to_definition(
             if isinstance(column.default, str) else column
             for column in item.columns
         ],
-        primary_key=[] if kafka else _split_clause(item.primary_key) or [item.columns[0].name],
-        order_by=[] if kafka else _split_clause(item.order_by) or [item.columns[0].name],
+        primary_key=_split_clause(item.primary_key) or None,
+        order_by=_split_clause(item.order_by),
         unique_key=_split_clause(item.unique_key) or None,
         partition_by=item.partition_by or None,
         ttl=item.ttl or None,
@@ -136,6 +144,7 @@ def _introspected_table_to_definition(
         indexes=indexes or None,
         projections=list(item.projections) or None,
         constraints=list(item.constraints or []) or None,
+        comment=item.comment or None,
     )
 
 
@@ -181,6 +190,37 @@ def _is_obsessiondb_metadata_table(item: object) -> bool:
     ) in _OBSESSIONDB_METADATA_TABLES
 
 
+def _is_journal_table(item: object) -> bool:
+    # chkit's migration journal (CHKIT_JOURNAL_TABLE, ``_chkit_migrations`` by
+    # default) is chkit's own bookkeeping, not part of the user's schema (#466).
+    kind = getattr(item, "kind", None)
+    journal = js_trim(os.environ.get("CHKIT_JOURNAL_TABLE") or "") or "_chkit_migrations"
+    return (kind is None or kind == "table") and getattr(item, "name", None) == journal
+
+
+def _is_materialized_view_inner_table(item: object) -> bool:
+    """The table that stores the rows of a materialized view without ``TO``.
+
+    ``.inner_id.<uuid>``, or ``.inner.<view>`` in an Ordinary database. It
+    belongs to the view, which pull skips, so it is not a user table either.
+    """
+    kind = getattr(item, "kind", None)
+    name = getattr(item, "name", None)
+    return (
+        (kind is None or kind == "table")
+        and isinstance(name, str)
+        and name.startswith((".inner_id.", ".inner."))
+    )
+
+
+def _is_pulled_object(item: object) -> bool:
+    return (
+        not _is_obsessiondb_metadata_table(item)
+        and not _is_journal_table(item)
+        and not _is_materialized_view_inner_table(item)
+    )
+
+
 def _refresh_shape_to_model(
     shape: MaterializedViewRefreshShape | None,
 ) -> MaterializedViewRefresh | None:
@@ -206,8 +246,11 @@ def _refresh_shape_to_model(
 
 def _pull_definitions(
     client: object, databases: Sequence[str]
-) -> list[SchemaDefinition]:
-    """Combine introspect.list_table_details + view parsing into SchemaDefinitions."""
+) -> tuple[list[SchemaDefinition], list[str]]:
+    """Combine introspect.list_table_details + view parsing into SchemaDefinitions.
+
+    Also returns a warning for each materialized view with an inner table.
+    """
     introspected_tables = list_table_details(client, list(databases))
     table_defs: list[SchemaDefinition] = []
     for it in introspected_tables:
@@ -218,18 +261,20 @@ def _pull_definitions(
     # Now pull views + MVs by querying system.tables for the relevant databases
     # and using view-parser on their create_table_query strings.
     if not databases:
-        return table_defs
+        return table_defs, []
     quoted = ", ".join("'" + d.replace("'", "''") + "'" for d in databases)
     sql = (
-        "SELECT database, name, engine, create_table_query "
+        "SELECT database, name, engine, create_table_query, comment "
         f"FROM system.tables WHERE is_temporary = 0 AND database IN ({quoted})"
     )
     raw_result = client.query(sql)  # type: ignore[attr-defined]
     view_defs: list[SchemaDefinition] = []
+    warnings: list[str] = []
     for row in raw_result.rows:
         kind = infer_schema_kind_from_engine(str(row.get("engine", "")))
         ctq = row.get("create_table_query")
         ctq_str = str(ctq) if ctq is not None else None
+        comment = str(row.get("comment") or "") or None
         if kind == "view":
             as_clause = parse_as_clause(ctq_str)
             if as_clause is None:
@@ -239,11 +284,18 @@ def _pull_definitions(
                     database=str(row["database"]),
                     name=str(row["name"]),
                     as_=as_clause,
+                    comment=comment,
                 )
             )
         elif kind == "materialized_view":
             as_clause = parse_as_clause(ctq_str)
             to_shape = parse_to_clause(ctq_str, str(row["database"]))
+            if to_shape is None:
+                warnings.append(
+                    f'Materialized view "{row["database"]}.{row["name"]}" stores its rows in '
+                    "an inner table (it has no TO table), which the schema DSL does not "
+                    "support. Pull skipped the view and its inner table."
+                )
             if as_clause is None or to_shape is None:
                 continue
             refresh_shape = parse_refresh_clause(ctq_str)
@@ -255,6 +307,7 @@ def _pull_definitions(
                     to=TableRef(database=to_shape.database, name=to_shape.name),
                     as_=as_clause,
                     refresh=refresh_model,
+                    comment=comment,
                 )
             )
         elif kind == "dictionary":
@@ -262,15 +315,16 @@ def _pull_definitions(
                 database=str(row["database"]),
                 name=str(row["name"]),
                 query=ctq_str,
+                comment=comment,
             )
             if dictionary_def is not None:
                 view_defs.append(dictionary_def)
 
-    return table_defs + view_defs
+    return table_defs + view_defs, warnings
 
 
 def _map_dictionary_row_to_definition(
-    *, database: str, name: str, query: str | None
+    *, database: str, name: str, query: str | None, comment: str | None
 ) -> DictionaryDefinition | None:
     """Reconstruct a DictionaryDefinition from a CREATE DICTIONARY query."""
     attributes = parse_dictionary_attributes_from_create_dictionary_query(query)
@@ -280,7 +334,6 @@ def _map_dictionary_row_to_definition(
     lifetime = parse_lifetime_from_create_dictionary_query(query)
     if not attributes or not primary_key or not source or not layout or not lifetime:
         return None
-    comment = parse_comment_from_create_dictionary_query(query)
     range_parts = parse_dictionary_range_from_create_dictionary_query(query)
     settings = parse_dictionary_settings_from_create_dictionary_query(query)
     return dictionary(
@@ -410,58 +463,50 @@ def _kafka_setting_warnings(definitions: Sequence[SchemaDefinition]) -> list[str
     return warnings
 
 
+class PullConfigError(Exception):
+    """A config error, for which pull exits 2 (TS ``PullConfigError``)."""
+
+
 def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None:
     if out_file.exists() and not overwrite:
         msg = (
-            f"Output file already exists: {out_file}. "
-            f"Pass --force / --overwrite to replace it."
+            f"Output file already exists at {out_file}. "
+            "Re-run with --force or set plugin option overwrite=true."
         )
-        raise typer.BadParameter(msg)
+        raise PullConfigError(msg)
     out_file.parent.mkdir(parents=True, exist_ok=True)
     tmp_file = out_file.with_suffix(out_file.suffix + ".tmp")
     tmp_file.write_text(content, encoding="utf-8")
     tmp_file.replace(out_file)
 
 
-def run(  # noqa: PLR0912, PLR0917
+def run(  # noqa: PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
-    out_file: Annotated[
-        Path | None,
-        typer.Option(
-            "--out-file",
-            "-o",
-            help="Where to write the pulled Python schema [default: src/db/schema/pulled.py].",
-        ),
-    ] = None,
-    database: Annotated[
-        list[str] | None,
-        typer.Option(
-            "--database",
-            "-d",
-            help="Restrict pull to these database names. Repeatable.",
-        ),
-    ] = None,
+    dryrun: Annotated[
+        bool,
+        typer.Option("--dryrun", help="Preview without writing files"),
+    ] = False,
     force: Annotated[
         bool,
-        typer.Option(
-            "--force",
-            "-f",
-            help="Overwrite the output file if it already exists.",
-        ),
+        typer.Option("--force", "-f", help="Overwrite existing output file"),
     ] = False,
     overwrite: Annotated[
         bool,
-        typer.Option("--overwrite", help="Alias for --force."),
-    ] = False,
-    dryrun: Annotated[
-        bool,
         typer.Option(
-            "--dryrun", help="Print the rendered schema instead of writing it."
+            "--overwrite", help="Overwrite existing output file (alias for --force)"
         ),
     ] = False,
+    out_file: Annotated[
+        Path | None,
+        typer.Option("--out-file", "-o", metavar="<path>", help="Output file path"),
+    ] = None,
+    database: Annotated[
+        list[str] | None,
+        typer.Option("--database", "-d", metavar="<name>", help="Database names to pull"),
+    ] = None,
     output_json: Annotated[
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
@@ -487,29 +532,74 @@ def run(  # noqa: PLR0912, PLR0917
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
+    resolved_config_path = str(config_path or "clickhouse.config.py")
     executor = resolve_plugin_executor(
         plugin_runtime,
         config,
         command="pull",
-        config_path=str(config_path or "clickhouse.config.py"),
+        config_path=resolved_config_path,
         json_mode=output_json,
         service=service,
         flags=hook_flags,
+        # TS runs on_config_loaded for every plugin command, and pull is one.
+        after_init=lambda: run_on_config_loaded_or_exit(
+            plugin_runtime,
+            ChxOnConfigLoadedContext(
+                command="pull",
+                config=config,
+                table_scope=TableScope(enabled=False),
+                flags=hook_flags,
+                config_path=resolved_config_path,
+                options={},
+            ),
+            output_json=output_json,
+        ),
     )
-    if executor is None and config.clickhouse is None:
+    try:
+        _run(
+            config,
+            plugin_runtime,
+            executor,
+            hook_flags=hook_flags,
+            database=database,
+            out_file=out_file,
+            dryrun=dryrun,
+            overwrite=overwrite,
+            output_json=output_json,
+        )
+    except (typer.Exit, typer.Abort, TyperException):
+        raise
+    except Exception as error:
         # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
-        # a config error on stdout and exits 2.
+        # an error on stdout and exits 2 for a config error, else 1.
+        message = clickhouse_error_message(error)
+        if output_json:
+            print_output({"ok": False, "command": "schema", "error": message}, json_mode=True)
+        else:
+            typer.echo(f"Pull schema failed: {message}")
+        raise typer.Exit(code=2 if isinstance(error, PullConfigError) else 1) from error
+
+
+def _run(
+    config: ChxResolvedConfig,
+    plugin_runtime: PluginRuntime,
+    executor: ClickHouseClient | None,
+    *,
+    hook_flags: dict[str, Any],
+    database: list[str] | None,
+    out_file: Path,
+    dryrun: bool,
+    overwrite: bool,
+    output_json: bool,
+) -> None:
+    if executor is None and config.clickhouse is None:
         msg = (
             "pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service "
             "(chkit obsessiondb service select)"
         )
-        if output_json:
-            print_output({"ok": False, "command": "schema", "error": msg}, json_mode=True)
-        else:
-            typer.echo(f"Pull schema failed: {msg}")
-        raise typer.Exit(code=2)
+        raise PullConfigError(msg)
 
-    selected = sorted({d.strip() for d in (database or []) if d.strip()})
+    selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
 
     # Allow a registered plugin to bypass the SQL-based pull entirely
     # (e.g. ObsessionDB's metadata API). Plugins implement
@@ -525,21 +615,35 @@ def run(  # noqa: PLR0912, PLR0917
         )
     )
     raw_objects: list[object] = []  # objects from system.tables (for skipped count)
+    inner_storage_warnings: list[str] = []
     if custom is not None:
         definitions = list(custom)
     else:
         with open_client(executor, config.clickhouse) as client:
+            # The pulled tables are compared later against definitions
+            # canonicalized with clickhouse.indexGranularity, which must be this
+            # server's default. A custom introspector reads elsewhere.
+            assert_server_index_granularity(client, configured_index_granularity(config))
             # Capture objects so we can summarize what got skipped, even when
             # --database was passed explicitly.
-            raw_objects = [
-                o for o in list_schema_objects(client) if not _is_obsessiondb_metadata_table(o)
-            ]
+            raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
             if not selected:
                 selected = sorted({getattr(o, "database", "") for o in raw_objects})
-            definitions = _pull_definitions(client, selected)
-    definitions = [d for d in definitions if not _is_obsessiondb_metadata_table(d)]
+            definitions, inner_storage_warnings = _pull_definitions(client, selected)
+    definitions = [d for d in definitions if _is_pulled_object(d)]
 
-    content = render_schema_file(definitions)
+    # ObsessionDB reports the engine as Shared*, which rendering canonicalizes away.
+    shared_tables = frozenset(
+        f"{d.database}.{d.name}"
+        for d in definitions
+        if isinstance(d, TableDefinition) and d.engine.startswith("Shared")
+    )
+    # A table that does not declare index_granularity gets the configured
+    # default, as in TS, not the 8192 rendering would assume (#466).
+    definitions = canonicalize_definitions(
+        definitions, index_granularity=configured_index_granularity(config)
+    )
+    content = render_schema_file(definitions, shared_tables=shared_tables)
     out_file_abs = (Path.cwd() / out_file).resolve()
 
     if not dryrun:
@@ -551,8 +655,11 @@ def run(  # noqa: PLR0912, PLR0917
         raw_objects, definitions, selected
     )
 
-    warnings = _dictionary_password_warnings(definitions)
-    warnings.extend(_kafka_setting_warnings(definitions))
+    warnings = [
+        *inner_storage_warnings,
+        *_dictionary_password_warnings(definitions),
+        *_kafka_setting_warnings(definitions),
+    ]
 
     payload: dict[str, object] = {
         "command": "schema",

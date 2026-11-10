@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, type Hash } from 'node:crypto'
 
 import type { CommittedCheckpoint, JournalEvent } from './types.js'
 
@@ -73,14 +73,17 @@ export function canonicalJson(value: unknown): string {
   return JSON.stringify(sortKeys(value)) ?? 'null'
 }
 
-export function digest(parts: readonly string[]): string {
+export function digest(parts: Iterable<string>): string {
   const hash = createHash('sha256')
-  for (const part of parts) {
-    hash.update(String(part.length))
-    hash.update(':')
-    hash.update(part)
-  }
+  for (const part of parts) updateDigest(hash, part)
   return hash.digest('hex')
+}
+
+/** Adds one part to a sha256 hash exactly as digest() does. */
+export function updateDigest(hash: Hash, part: string): void {
+  hash.update(String(part.length))
+  hash.update(':')
+  hash.update(part)
 }
 
 export function emptyCheckpoint(): CommittedCheckpoint {

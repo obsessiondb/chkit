@@ -56,9 +56,9 @@ The lower-level collector: takes a module's `__dict__`-style mapping, walks its 
 
 ## Canonicalization
 
-### `canonicalize_definitions(definitions)`
+### `canonicalize_definitions(definitions, *, index_granularity=None)`
 
-Normalizes definitions into the canonical form the diff engine compares — engine normalization, key-clause splitting, codec canonicalization — deduplicates by identity, and sorts deterministically (tables, then views, then materialized views; then by database and name). Both sides of every diff are canonicalized first, so cosmetic differences (`'MergeTree'` vs `'MergeTree()'`, `['id, org_id']` vs `['id', 'org_id']`) never produce operations.
+Normalizes definitions into the canonical form the diff engine compares — engine normalization, key-clause splitting, codec canonicalization — deduplicates by identity, and sorts deterministically (tables, then views, then materialized views; then by database and name). Both sides of every diff are canonicalized first, so cosmetic differences (`'MergeTree'` vs `'MergeTree()'`, `['id, org_id']` vs `['id', 'org_id']`) never produce operations. A MergeTree table without `index_granularity` gets `index_granularity` (the server's default, [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity)), 8192 when `None`.
 
 ### `definition_key(definition)`
 
@@ -74,11 +74,15 @@ Returns a list of `ValidationIssue` objects — empty when the definitions are v
 
 Same checks, but raises `ChxValidationError` (carrying the issue list as `.issues`) instead of returning them. The planner and SQL renderer call this internally, so invalid definitions cannot reach SQL generation.
 
+### `collect_definition_warnings(definitions)`
+
+Returns the `ValidationIssue` objects that `generate` and `check` print as warnings but never fail on, such as `quoted_string_default` for a plain string default written as a quoted SQL literal (`"'standard'"`).
+
 ## Planning
 
-### `plan_diff(old_definitions, new_definitions)`
+### `plan_diff(old_definitions, new_definitions, *, index_granularity=None)`
 
-Canonicalizes both sides, validates the new side, and returns a `MigrationPlan`:
+Canonicalizes both sides (with `index_granularity`, as `canonicalize_definitions`), validates the new side, and returns a `MigrationPlan`:
 
 - `operations` — ordered `MigrationOperation` list; each has a `type` (e.g. `create_table`, `alter_table_add_column`, `drop_table`), a `key` identifying the object, a `risk` level, and the rendered `sql`.
 - `risk_summary` — counts of `safe` / `caution` / `danger` operations.
@@ -94,9 +98,9 @@ if plan.risk_summary.danger > 0:
 
 ## Snapshots
 
-### `create_snapshot(definitions)`
+### `create_snapshot(definitions, *, index_granularity=None)`
 
-Canonicalizes the definitions and returns a `SnapshotV1` — `version: 1`, a UTC `generated_at` timestamp, and the canonical definition list. Serialized with camelCase aliases it has the same JSON shape as the TypeScript `chkit/meta/snapshot.json`:
+Canonicalizes the definitions (with `index_granularity`, as `canonicalize_definitions`) and returns a `SnapshotV1` — `version: 1`, a UTC `generated_at` timestamp, and the canonical definition list. Serialized with camelCase aliases it has the same JSON shape as the TypeScript `chkit/meta/snapshot.json`:
 
 ```python
 snapshot = create_snapshot(definitions)
@@ -142,7 +146,7 @@ config = define_config(
 
 ### `resolve_config(config)`
 
-Fills in defaults and returns a `ChxResolvedConfig`: `out_dir` defaults to `./chkit`, `migrations_dir` to `<outDir>/migrations`, `meta_dir` to `<outDir>/meta`; the `check` flags default to `true` and `safety.allowDestructive` to `false`; ClickHouse credentials default to `default` / empty password / database `default`. A `clickhouse.cluster` value is validated here (identifier or `{macro}` form) — invalid names fail fast with a `ValueError`.
+Fills in defaults and returns a `ChxResolvedConfig`: `out_dir` defaults to `./chkit`, `migrations_dir` to `<outDir>/migrations`, `meta_dir` to `<outDir>/meta`; the `check` flags default to `true` and `safety.allowDestructive` to `false`; ClickHouse credentials default to `default` / empty password / database `default`. A `clickhouse.cluster` value is validated here (identifier or `{macro}` form) — invalid names fail fast with a `ValueError`. `clickhouse.indexGranularity` defaults to 8192 and must be a positive integer; `configured_index_granularity(config)` reads it.
 
 The option keys and defaults match the TypeScript config — see the [Configuration Overview](/configuration/overview/).
 

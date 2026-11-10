@@ -1,4 +1,5 @@
-import { renderIdentifier, unescapeQuoted } from './identifier.js'
+import { renderIdentifier } from './identifier.js'
+import { unescapeQuoted } from './sql-lexer.js'
 import { findQuoteEnd } from './sql-scan.js'
 import { splitTopLevelComma } from './key-clause.js'
 import type { TableDefinition } from './model-types.js'
@@ -15,13 +16,17 @@ import type { TableDefinition } from './model-types.js'
  */
 export function insertColumnList(table: TableDefinition): string[] | undefined {
   if (!table.columns.some((column) => column.defaultKind === 'EPHEMERAL')) return undefined
+  return insertableColumnNames(table).map(renderIdentifier)
+}
+
+/** Unquoted names of the columns an INSERT accepts, as listed by {@link insertColumnList}. */
+export function insertableColumnNames(table: TableDefinition): string[] {
   return table.columns
     .filter((column) => column.defaultKind !== 'MATERIALIZED' && column.defaultKind !== 'ALIAS')
     .flatMap((column) => {
       const fields = nestedFieldNames(column.type)
       return fields ? fields.map((field) => `${column.name}.${field}`) : [column.name]
     })
-    .map(renderIdentifier)
 }
 
 function nestedFieldNames(type: string): string[] | undefined {

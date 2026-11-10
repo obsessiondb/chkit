@@ -95,7 +95,7 @@ def _render_schema(
     return out + f"\ndefinitions = schema({exports})\n"
 
 
-def _markers(sql: str) -> list[str]:
+def _markers(sql: str) -> list[tuple[str, str]]:
     return re.findall(r"^-- operation: (\S+) key=(.+?) risk=", sql, re.MULTILINE)
 
 

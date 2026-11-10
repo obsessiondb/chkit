@@ -8,20 +8,22 @@ import {
   type IntrospectedTable,
   type SchemaObjectRef,
 } from '@chkit/clickhouse'
-import type {
-  ChxConfig,
-  MaterializedViewDefinition,
-  Snapshot,
-  TableDefinition,
-  ViewDefinition,
+import {
+  compareCodePoints,
+  configuredIndexGranularity,
+  type ChxConfig,
+  type MaterializedViewDefinition,
+  type Snapshot,
+  type TableDefinition,
+  type ViewDefinition,
 } from '@chkit/core'
-import { compareCodePoints } from '@chkit/core'
 
 import { debug } from '../../runtime/debug.js'
 import type { TableScope } from '../../runtime/table-scope.js'
 import {
   collectTableSqlFragments,
   collectViewSqlQueries,
+  compareObjectComments,
   compareSchemaObjects,
   compareTableShape,
   compareViewShape,
@@ -156,6 +158,7 @@ export async function buildDriftPayload(
       kind: def.kind,
       database: def.database,
       name: def.name,
+      comment: def.comment,
     }))
   const expectedDatabases = new Set(expectedObjects.map((def) => def.database))
   const actualInScope = actualObjects.filter((item) => expectedDatabases.has(item.database))
@@ -202,23 +205,24 @@ export async function buildDriftPayload(
     viewPairs.flatMap(({ expected, actual }) => collectViewSqlQueries(expected, actual))
   )
   const tableDrift = pairs
-    .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer))
+    .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer, configuredIndexGranularity(config)))
     .filter((item): item is NonNullable<typeof item> => item !== null)
     .sort((a, b) => compareCodePoints(a.table, b.table))
-  const viewDrift = viewPairs
-    .flatMap(({ expected, actual }) =>
+  const objectShapeDrift = [
+    ...viewPairs.flatMap(({ expected, actual }) =>
       compareViewShape(expected, actual, currentDatabase ?? '', canonicalizer)
-    )
-    .sort((a, b) => compareCodePoints(a.object, b.object))
-  const objectDriftWithViews = [...objectDrift, ...viewDrift]
+    ),
+    ...compareObjectComments(expectedObjects, actualInScope),
+  ].sort((a, b) => compareCodePoints(a.object, b.object))
+  const objectDriftWithViews = [...objectDrift, ...objectShapeDrift]
 
-  debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${viewDrift.length}`)
+  debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${objectShapeDrift.length}`)
 
   const drifted = computeDrifted({
     missingCount: missing.length,
     kindMismatchCount: kindMismatches.length,
     tableDriftCount: tableDrift.length,
-    viewDriftCount: viewDrift.length,
+    viewDriftCount: objectShapeDrift.length,
     extraCount: extra.length,
     failOnExtraObjects: config.check?.failOnExtraObjects === true,
   })

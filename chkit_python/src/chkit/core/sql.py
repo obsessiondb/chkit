@@ -7,13 +7,17 @@ from typing import Any, TypeAlias
 
 from pydantic import TypeAdapter
 
-from chkit.core.codec import render_codec
-from chkit.core.column_default import render_default
+from chkit.core.codec import codec_fingerprint, render_codec
+from chkit.core.column_default import nullable_column_type, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind, render_constraint
 from chkit.core.engine import is_merge_tree_engine, supports_sort_order
 from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine, render_kafka_setting
-from chkit.core.key_clause import is_plain_column_reference, normalize_key_columns
+from chkit.core.key_clause import (
+    is_plain_column_reference,
+    key_clause_fingerprint,
+    normalize_key_columns,
+)
 from chkit.core.model import (
     ColumnDefinition,
     DictionaryAttribute,
@@ -36,7 +40,8 @@ from chkit.core.model import (
 )
 from chkit.core.projection import render_projection_body
 from chkit.core.sql_lexer import js_trim
-from chkit.core.sql_normalizer import normalize_sql_fragment
+from chkit.core.sql_normalizer import normalize_sql_fragment, sql_expression_fingerprint
+from chkit.core.table_settings import render_setting_value
 from chkit.core.text_index import TEXT_INDEX_GRANULARITY, render_text_index_type
 from chkit.core.validate import assert_valid_definitions
 from chkit.core.vector_index import render_vector_index_type
@@ -68,6 +73,16 @@ def _normalize_projection(projection: ProjectionInput) -> ProjectionDefinition:
     return projection
 
 
+def _comment_literal(comment: str) -> str:
+    """A comment as a ClickHouse string literal.
+
+    ClickHouse reads backslash escapes in string literals, so a backslash is
+    doubled as well as a quote; the server then stores exactly the schema's text.
+    """
+    escaped = comment.replace("\\", "\\\\").replace("'", "''")
+    return f"'{escaped}'"
+
+
 def _render_column(col: ColumnDefinition) -> str:
     out = f"{quote_identifier(col.name)} {render_column_type(col)}"
     if col.default is not None:
@@ -75,8 +90,7 @@ def _render_column(col: ColumnDefinition) -> str:
     elif col.default_kind == "EPHEMERAL":
         out += " EPHEMERAL"
     if col.comment is not None and len(col.comment) > 0:
-        escaped = col.comment.replace("'", "''")
-        out += f" COMMENT '{escaped}'"
+        out += f" COMMENT {_comment_literal(col.comment)}"
     if col.codec is not None:
         out += f" {render_codec(col.codec)}"
     return out
@@ -85,7 +99,21 @@ def _render_column(col: ColumnDefinition) -> str:
 def render_column_type(column: ColumnDefinition) -> str:
     """A column's type as chkit renders it in DDL (TS ``renderColumnType``)."""
     type_ = js_trim(str(column.type))
-    return f"Nullable({type_})" if column.nullable else type_
+    return nullable_column_type(type_) if column.nullable else type_
+
+
+def column_codec_fingerprint(column: ColumnInput) -> str:
+    """A column codec compared using its rendered type, including Nullable."""
+    col = _normalize_column(column)
+    return codec_fingerprint(col.codec, render_column_type(col))
+
+
+def column_type_fingerprint(column: ColumnDefinition) -> str:
+    """A column type in comparison form (TS ``columnTypeFingerprint``): its
+    tokens, so ``Decimal(10,2)`` equals the ``Decimal(10, 2)`` ClickHouse stores,
+    while text inside quotes (an Enum label, a time zone) is compared as
+    written. Only for comparing: chkit renders and stores the type as declared."""
+    return sql_expression_fingerprint(render_column_type(column))
 
 
 def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str:
@@ -95,8 +123,21 @@ def render_key_clause_columns(columns: list[str], column_names: set[str]) -> str
     # (e.g. `toStartOfHour(ts)`) are emitted verbatim.
     return ", ".join(
         quote_identifier(c) if c in column_names or is_plain_column_reference(c) else c
-        for c in normalize_key_columns(columns)
+        for c in normalize_key_columns(columns, column_names)
     )
+
+
+def key_fingerprint(definition: TableDefinition, keys: list[str] | None) -> str:
+    """A key (``order_by``, ``primary_key``, ``unique_key``) in comparison form.
+
+    Its tokens as chkit renders them, so whitespace, identifier quoting and how
+    the parts are split across entries (``['cityHash64(a', 'b)']``) carry no
+    meaning (#176, #178), while a declared column named ``a, b`` stays one name
+    rather than reading as columns ``a`` and ``b`` (#558). The planner and the
+    cutover compare keys through it, so they agree on whether a key changed.
+    """
+    column_names = {column.name for column in definition.columns}
+    return key_clause_fingerprint(render_key_clause_columns(keys or [], column_names))
 
 
 def _render_index_type(idx: SkipIndexDefinition) -> str:  # noqa: PLR0911
@@ -122,14 +163,8 @@ def _render_index_type(idx: SkipIndexDefinition) -> str:  # noqa: PLR0911
     )
 
 
-def _render_setting_value(value: str | int | float | bool) -> str:
-    if isinstance(value, bool):
-        return "true" if value else "false"
-    return str(value)
-
-
 def _render_settings_clause(settings: dict[str, str | int | float | bool]) -> str:
-    parts = [f"{k} = {_render_setting_value(v)}" for k, v in settings.items()]
+    parts = [f"{k} = {render_setting_value(v)}" for k, v in settings.items()]
     return ", ".join(parts)
 
 
@@ -187,8 +222,7 @@ def _render_table_sql(definition: TableDefinition) -> str:
         )
         clauses.append(f"SETTINGS {rendered_settings}")
     if definition.comment is not None and len(definition.comment) > 0:
-        escaped = definition.comment.replace("'", "''")
-        clauses.append(f"COMMENT '{escaped}'")
+        clauses.append(f"COMMENT {_comment_literal(definition.comment)}")
 
     return (
         f"CREATE TABLE IF NOT EXISTS "
@@ -203,8 +237,7 @@ def _render_table_sql(definition: TableDefinition) -> str:
 def _render_view_comment(comment: str | None) -> str:
     if comment is None or len(comment) == 0:
         return ""
-    escaped = comment.replace("'", "''")
-    return f" COMMENT '{escaped}'"
+    return f" COMMENT {_comment_literal(comment)}"
 
 
 def _render_view_sql(definition: ViewDefinition) -> str:
@@ -334,8 +367,7 @@ def render_dictionary_sql(definition: DictionaryDefinition, replace: bool = Fals
     if definition.settings is not None and len(definition.settings) > 0:
         clauses.append(f"SETTINGS({_render_dictionary_settings(definition.settings)})")
     if definition.comment:
-        escaped = definition.comment.replace("'", "''")
-        clauses.append(f"COMMENT '{escaped}'")
+        clauses.append(f"COMMENT {_comment_literal(definition.comment)}")
     return (
         f"{verb} {render_qualified_name(definition.database, definition.name)}\n"
         f"(\n  {attrs}\n)\n{chr(10).join(clauses)};"
@@ -366,6 +398,33 @@ def render_alter_modify_column(definition: TableDefinition, column: ColumnInput)
     return (
         f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
         f"MODIFY COLUMN {_render_column(normalized)};"
+    )
+
+
+def render_alter_comment_column(definition: TableDefinition, column: ColumnDefinition) -> str:
+    """Set a column comment without restating the column's type."""
+    return (
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"COMMENT COLUMN {quote_identifier(column.name)} {_comment_literal(column.comment or '')};"
+    )
+
+
+def render_alter_remove_column_comment(definition: TableDefinition, column_name: str) -> str:
+    """MODIFY COLUMN without COMMENT keeps the old comment, so removing it is a statement."""
+    return (
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"MODIFY COLUMN {quote_identifier(column_name)} REMOVE COMMENT;"
+    )
+
+
+def render_alter_modify_comment(definition: SchemaDefinition) -> str:
+    """Set the comment of a table, view, materialized view or dictionary in place.
+
+    ``''`` removes it, so a comment change never recreates the object.
+    """
+    return (
+        f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+        f"MODIFY COMMENT {_comment_literal(definition.comment or '')};"
     )
 
 
@@ -457,7 +516,7 @@ def render_alter_modify_setting(
 ) -> str:
     return (
         f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
-        f"MODIFY SETTING {key} = {_render_setting_value(value)};"
+        f"MODIFY SETTING {key} = {render_setting_value(value)};"
     )
 
 

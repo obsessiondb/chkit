@@ -66,6 +66,9 @@ export interface PluginRuntime {
   runOnSchemaLoaded(
     context: ChxOnSchemaLoadedContext,
   ): Promise<SchemaDefinition[]>
+  runOnSnapshotLoaded(
+    context: ChxOnSchemaLoadedContext,
+  ): Promise<SchemaDefinition[]>
   runOnPlanCreated(
     context: Omit<ChxOnPlanCreatedContext, 'plan' | 'tableScope'> & {
       tableScope?: TableScope
@@ -245,6 +248,12 @@ export interface ChxPluginCommand<TOptions = Record<string, unknown>> {
   flags?: readonly FlagDef[]
   optionsSchema?: SafeParseable<TOptions>
   flagMapping?: FlagMapping
+  /**
+   * `false` when the command takes no positional arguments: the CLI then
+   * rejects any, before or after `--`, as it does for its own commands, and
+   * the command does not run (#659). Unset, the command gets them in `args`.
+   */
+  takesArgs?: boolean
   run: (
     context: ChxPluginCommandContext<TOptions>,
   ) => undefined | number | Promise<undefined | number>
@@ -261,6 +270,16 @@ export interface ChxPluginHooks {
   ) => ChxOnBeforePluginCommandResult | Promise<ChxOnBeforePluginCommandResult>
   onConfigLoaded?: (context: ChxOnConfigLoadedContext) => void | Promise<void>
   onSchemaLoaded?: (
+    context: ChxOnSchemaLoadedContext
+  ) => SchemaDefinition[] | undefined | Promise<SchemaDefinition[] | undefined>
+  /**
+   * Runs in `generate` on the previous snapshot's definitions before they are
+   * compared with the schema. A plugin that rewrites the schema in
+   * `onSchemaLoaded` applies the same rewrite here, so a snapshot written
+   * before the rewrite existed does not plan a change. Must not log or throw
+   * for definitions the schema no longer has.
+   */
+  onSnapshotLoaded?: (
     context: ChxOnSchemaLoadedContext
   ) => SchemaDefinition[] | undefined | Promise<SchemaDefinition[] | undefined>
   onPlanCreated?: (

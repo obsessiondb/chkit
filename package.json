@@ -29,7 +29,7 @@
     "typecheck": "turbo run typecheck",
     "lint": "turbo run lint",
     "test": "turbo run test",
-    "test:obsessiondb": "CHKIT_E2E_TARGET=obsessiondb turbo run test --filter=!@chkit/kafka-e2e",
+    "test:obsessiondb": "CHKIT_E2E_TARGET=obsessiondb turbo run test --force --continue=dependencies-successful --filter=!@chkit/kafka-e2e",
     "infra:up": "bun run scripts/infra-up.ts",
     "infra:down": "docker compose -f test/infra/docker-compose.yml down -v",
     "cluster:up": "docker compose -f test/cluster/docker-compose.yml up -d --wait",

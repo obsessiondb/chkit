@@ -2,6 +2,23 @@ import { splitTopLevelComma } from './key-clause.js'
 import type { ColumnDefaultValue, SQLExpression } from './model.js'
 import { type SQLToken, tokenizeSQL } from './sql-lexer.js'
 import { stripSQLComments } from './sql-normalizer.js'
+import { stripWrappingParens } from './sql-scan.js'
+import { settingValueFingerprint } from './table-settings.js'
+
+const STRING_LITERAL_RE = /^'((?:[^'\\]|\\[\s\S]|'')*)'$/
+// Each digit run has one place to go, so a long failing match cannot backtrack.
+const HEREDOC_RE = /^\$([A-Za-z0-9_]*)\$([\s\S]*)\$\1\$$/
+const NUMBER_LITERAL_RE = /^[+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?$/i
+/**
+ * The backslash escapes of a string literal, as ClickHouse 26.3 decodes them
+ * (checked with `SELECT hex('\e')` and so on). `\xHH` decodes to a byte, so
+ * only ASCII bytes (below 0x80) are decoded. Others, such as `\N` (removed),
+ * `\u0041` (`A`) or `\q` (kept as written), are left to text comparison.
+ */
+const STRING_ESCAPES: Readonly<Record<string, string>> = {
+  n: '\n', t: '\t', r: '\r', b: '\b', f: '\f', '0': '\0', a: '\x07', v: '\v', e: '\x1b',
+  '\\': '\\', "'": "'", '"': '"', '`': '`', '/': '/', '=': '=',
+}
 
 /** Legacy spelling of an expression default: `'fn:now()'` ≡ `{ expression: 'now()' }`. */
 export const LEGACY_EXPRESSION_PREFIX = 'fn:'
@@ -64,6 +81,7 @@ const LOW_CARDINALITY_REJECTED_FAMILIES: ReadonlySet<string> = new Set([
 ])
 
 const FUNCTION_CALL_START = /^[A-Za-z_][A-Za-z0-9_]*\s*\(/
+const LOW_CARDINALITY = /^LowCardinality\s*\(([\s\S]*)\)$/
 
 export type ParsedColumnDefault =
   | { kind: 'expression'; sql: string }
@@ -109,8 +127,63 @@ export function renderDefault(value: ColumnDefaultValue): string {
   return String(parsed.value)
 }
 
+/**
+ * A default that is one number or string literal, by its value: ClickHouse
+ * stores a float as `2.` and a string with backslash escapes (`'it\'s'`,
+ * `'\n'`), so `generate` and `drift` compare what the literal means (#466).
+ * Undefined for any other SQL, and for a string with an escape whose meaning
+ * was not verified on ClickHouse, which then compares as text: a phantom
+ * change is possible, a missed one is not.
+ */
+export function literalDefaultFingerprint(sql: string): string | undefined {
+  let text = sql.trim()
+  for (let inner = stripWrappingParens(text); inner !== text; inner = stripWrappingParens(text)) text = inner
+  if (NUMBER_LITERAL_RE.test(text)) return `number:${settingValueFingerprint(text)}`
+  // A heredoc is its text as written; ClickHouse stores it as a quoted literal.
+  const heredoc = HEREDOC_RE.exec(text)
+  if (heredoc && !(heredoc[2] ?? '').includes(`$${heredoc[1]}$`)) return `string:${JSON.stringify(heredoc[2])}`
+  const body = STRING_LITERAL_RE.exec(text)?.[1]
+  if (body === undefined) return undefined
+  let value = ''
+  for (let i = 0; i < body.length; i += 1) {
+    const char = body[i] ?? ''
+    if (char === "'") {
+      // The literal pattern only lets a quote in as `''`.
+      value += "'"
+      i += 1
+      continue
+    }
+    if (char !== '\\') {
+      value += char
+      continue
+    }
+    const code = body[i + 1] ?? ''
+    const hex = /^x([0-7][0-9a-fA-F])/.exec(body.slice(i + 1))?.[1]
+    if (hex !== undefined) {
+      value += String.fromCharCode(Number.parseInt(hex, 16))
+      i += 3
+      continue
+    }
+    const decoded = STRING_ESCAPES[code]
+    if (decoded === undefined) return undefined
+    value += decoded
+    i += 1
+  }
+  return `string:${JSON.stringify(value)}`
+}
+
 export function isSQLExpression(value: unknown): value is SQLExpression {
   return typeof value === 'object' && value !== null && 'expression' in value && typeof value.expression === 'string'
+}
+
+/**
+ * The type of a column with `nullable: true`. ClickHouse rejects
+ * `Nullable(LowCardinality(T))`, so `LowCardinality(T)` becomes
+ * `LowCardinality(Nullable(T))`, the form ClickHouse stores.
+ */
+export function nullableColumnType(type: string): string {
+  const inner = LOW_CARDINALITY.exec(type)?.[1]
+  return inner === undefined ? `Nullable(${type})` : `LowCardinality(Nullable(${inner.trim()}))`
 }
 
 /** Whether a quoted string literal is a valid value of `type`, whatever its Nullable or LowCardinality wrappers. */

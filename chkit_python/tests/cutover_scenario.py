@@ -28,7 +28,7 @@ from typer.testing import CliRunner
 from chkit.cli.commands.migrate_async_apply import iso_without_zone
 from chkit.cli.journal_store import JournalStore, MigrationRowState
 from chkit.cli.main import app
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_code
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
@@ -149,7 +149,12 @@ def create_cutover_project(
     return project
 
 
-def write_schema(target: CutoverTarget, project: CutoverProject, order_by: list[str]) -> None:
+def write_schema(
+    target: CutoverTarget,
+    project: CutoverProject,
+    order_by: list[str],
+    settings: dict[str, int] | None = None,
+) -> None:
     # The chained source is a MergeTree table here, not Null as in the TS
     # scenario: chkit-py's live drift reports a Null table as engine_mismatch
     # (pre-existing, unrelated to the cutover).
@@ -165,7 +170,7 @@ columns = [
 ]
 
 events = table(database={db!r}, name={project.table!r}, engine={engine!r}, columns=columns,
-               primary_key={order_by!r}, order_by={order_by!r})
+               primary_key={order_by!r}, order_by={order_by!r}, settings={settings!r})
 by_user = table(database={db!r}, name={project.by_user!r}, engine={engine!r},
                 columns=[{{"name": "user_id", "type": "UInt64"}}, {{"name": "id", "type": "UInt64"}}],
                 primary_key=["user_id"], order_by=["user_id", "id"])
@@ -187,7 +192,9 @@ definitions = schema(events, by_user, by_user_mv, ingest, ingest_mv)
 class Writers:
     """Insert batches of fresh ids until stopped, alternating a direct INSERT and
     an INSERT into the chained source, round robin over the writer connections.
-    Only batches that succeeded count."""
+    Only batches that succeeded count. A batch rejected with TABLE_UUID_MISMATCH
+    (741) overlapped the swap and wrote nothing, so it is retried once, as the
+    cutover guide tells writers to; any other error fails the scenario."""
 
     def __init__(self, target: CutoverTarget, project: CutoverProject, parallel: int = 2) -> None:
         self._target = target
@@ -219,11 +226,17 @@ class Writers:
                 client = clients[batch % len(clients)]
                 into = self._project.table if batch % 2 == 0 else self._project.ingest
                 start = 1_000_000_000 + batch * BATCH_ROWS
+                insert = (
+                    f"INSERT INTO {db}.{into} (id, user_id, payload) SELECT {start} + number, "
+                    f"number % 97, 'live-{worker}' FROM numbers({BATCH_ROWS})"
+                )
                 try:
-                    client.execute(
-                        f"INSERT INTO {db}.{into} (id, user_id, payload) SELECT {start} + number, "
-                        f"number % 97, 'live-{worker}' FROM numbers({BATCH_ROWS})"
-                    )
+                    try:
+                        client.execute(insert)
+                    except Exception as error:
+                        if clickhouse_error_code(error) != "741":
+                            raise
+                        client.execute(insert)
                     with self._lock:
                         self.report.batches += 1
                         self.report.rows += BATCH_ROWS
@@ -303,6 +316,37 @@ def assert_cutover_rows(target: CutoverTarget, project: CutoverProject, report: 
     assert actual == want, f"cutover rows: got {actual}, want {want} (writer errors: {len(report.errors)})"
 
 
+@dataclass(frozen=True)
+class CutoverChange:
+    """A cutover's change: the new sort key and settings, and the layout
+    ``layouts`` reports after it."""
+
+    order_by: list[str]
+    layout: str
+    settings: dict[str, int] | None = None
+
+
+ORDER_BY_CHANGE = CutoverChange(order_by=["user_id", "id"], layout="user_id, id|8192")
+# Only a read-only setting changes (#511): the guards must tell the tables apart by it.
+GRANULARITY_CHANGE = CutoverChange(
+    order_by=["id"], layout="id|4096", settings={"index_granularity": 4096}
+)
+
+
+def layouts(target: CutoverTarget, project: CutoverProject) -> dict[str, str]:
+    """Sorting key and index_granularity of the table and every cutover table next to it."""
+    result = target.admin.query(
+        "SELECT name, sorting_key, extract(engine_full, 'index_granularity = ([0-9]+)') "
+        f"AS granularity FROM system.tables WHERE database = '{target.database}' AND "
+        f"(name IN ('{project.table}', '{project.previous}') OR "
+        f"startsWith(name, '{project.table}__cutover_')) ORDER BY name"
+    ).rows
+    return {
+        str(row["name"]): f"{str(row['sorting_key']).strip('()')}|{row['granularity'] or '8192'}"
+        for row in result
+    }
+
+
 def sorting_keys(target: CutoverTarget, project: CutoverProject) -> dict[str, str]:
     result = target.admin.query(
         "SELECT name, sorting_key FROM system.tables "
@@ -367,8 +411,13 @@ def drop_cutover_project(target: CutoverTarget, project: CutoverProject) -> None
     )
 
 
-def _generate_cutover(target: CutoverTarget, project: CutoverProject, *flags: str) -> dict[str, Any]:
-    write_schema(target, project, ["user_id", "id"])
+def _generate_cutover(
+    target: CutoverTarget,
+    project: CutoverProject,
+    *flags: str,
+    change: CutoverChange = ORDER_BY_CHANGE,
+) -> dict[str, Any]:
+    write_schema(target, project, change.order_by, change.settings)
     return json_of(
         cli(
             [
@@ -462,7 +511,12 @@ def run_backfill_scenario(target: CutoverTarget, label: str, directory: Path) ->
         drop_cutover_project(target, project)
 
 
-def run_retry_scenario(target: CutoverTarget, label: str, directory: Path) -> None:
+def run_retry_scenario(
+    target: CutoverTarget,
+    label: str,
+    directory: Path,
+    change: CutoverChange = ORDER_BY_CHANGE,
+) -> None:
     """Fail every statement of the cutover once and resume it with --retry, and
     replay the statements whose acknowledgement can be lost: the snapshot
     (re-taken after a TRUNCATE), the copy (skips what it wrote), the EXCHANGE
@@ -471,7 +525,7 @@ def run_retry_scenario(target: CutoverTarget, label: str, directory: Path) -> No
     project = create_cutover_project(target, label, directory)
     writers: Writers | None = None
     try:
-        _generate_cutover(target, project, "--cutover-old", "drop")
+        _generate_cutover(target, project, "--cutover-old", "drop", change=change)
         writers = Writers(target, project, parallel=1)
         file = cutover_migration(project)
         path = project.dir / "chkit/migrations" / file
@@ -529,8 +583,8 @@ def run_retry_scenario(target: CutoverTarget, label: str, directory: Path) -> No
             if lost == "refuses":
                 assert replay.exit_code != 0, replay.output
                 assert "the EXCHANGE may already have run" in replay.output, replay.output
-                keys = sorting_keys(target, project)
-                assert keys[project.table] == "user_id, id", f"swapped back: {keys}"
+                keys = layouts(target, project)
+                assert keys[project.table] == change.layout, f"swapped back: {keys}"
             elif "the ATTACH may already have run" not in replay.output:
                 # Nothing was staged, so the replayed ATTACH ran and the next statement failed.
                 assert f"injected failure at statement {step + 2}" in replay.output, replay.output
@@ -547,7 +601,7 @@ def run_retry_scenario(target: CutoverTarget, label: str, directory: Path) -> No
         writers = None
         assert not report.errors, report.errors[0]
         assert_cutover_rows(target, project, report)
-        assert sorting_keys(target, project) == {project.table: "user_id, id"}
+        assert layouts(target, project) == {project.table: change.layout}
         assert_chkit_clean()
     finally:
         if writers is not None:

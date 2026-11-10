@@ -117,6 +117,30 @@ def test_pull_uses_custom_introspector_and_skips_clickhouse(
     assert 'name="generated"' in content
 
 
+def test_pull_writes_the_configured_index_granularity_for_a_table_without_one(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The custom introspector's table declares no index_granularity: the pulled
+    # file gets clickhouse.indexGranularity, as in TS, not 8192 (#466).
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _install_custom_plugin_module(tmp_path)
+    config = CONFIG.replace('"database": "default",', '"database": "default",\n            "indexGranularity": 4096,')
+    (tmp_path / "clickhouse.config.py").write_text(config, encoding="utf-8")
+    (tmp_path / "schema.py").write_text(
+        "from chkit import schema\ndefinitions = schema()\n", encoding="utf-8"
+    )
+    out_file = tmp_path / "pulled.py"
+
+    with patch("chkit.clickhouse.client.ClickHouseClient.connect"):
+        result = runner.invoke(app, ["pull", "--out-file", str(out_file)], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    content = out_file.read_text(encoding="utf-8")
+    assert '"index_granularity": 4096,' in content
+    assert "8192" not in content
+
+
 def test_pull_runtime_threads_through_when_hook_returns_none() -> None:
     """If on_pull_introspect returns None, runtime defers to next plugin / default."""
 

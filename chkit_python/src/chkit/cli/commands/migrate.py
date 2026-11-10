@@ -32,6 +32,7 @@ from typer.exceptions import TyperException
 
 from chkit.cli.command_target import (
     ServiceOption,
+    assert_index_granularity_matches_server,
     exit_no_target,
     open_client,
     resolve_plugin_executor,
@@ -44,11 +45,13 @@ from chkit.cli.commands.migrate_abandon import (
     read_abandonable_state,
 )
 from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migration
+from chkit.cli.commands.migrate_barrier import find_pending_non_select_barriers
 from chkit.cli.commands.migrate_empty import find_empty_migrations
 from chkit.cli.commands.migrate_errors import (
     EMPTY_MIGRATIONS_SUMMARY,
     MigrateError,
     empty_migrations_error,
+    non_select_barrier_error,
 )
 from chkit.cli.commands.migrate_output import (
     render_abandon_plan_only_notice,
@@ -73,6 +76,7 @@ from chkit.cli.commands.migrate_retry import (
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
 from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.journal_store import JournalStore
 from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
@@ -98,7 +102,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
-from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
+from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, configured_index_granularity
 from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
 
@@ -157,35 +161,28 @@ def run(  # noqa: PLR0917
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
+    table_selector: Annotated[
+        str | None,
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
+    ] = None,
     apply: Annotated[
         bool,
         typer.Option(
             "--apply",
-            help="Apply pending migrations on ClickHouse (no prompt).",
+            help="Apply pending migrations on ClickHouse (no prompt)",
         ),
     ] = False,
     execute: Annotated[
         bool,
-        typer.Option("--execute", help="Alias for --apply."),
+        typer.Option("--execute", help="Alias for --apply"),
     ] = False,
     allow_destructive: Annotated[
         bool,
         typer.Option(
             "--allow-destructive",
-            help="Allow destructive migrations tagged with risk=danger.",
+            help="Allow destructive migrations tagged with risk=danger",
         ),
     ] = False,
-    table_selector: Annotated[
-        str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help=(
-                "Restrict migrations to those touching the matched tables. "
-                "Examples: events, events_*, analytics.events."
-            ),
-        ),
-    ] = None,
     retry: Annotated[
         str | None,
         typer.Option(
@@ -193,7 +190,7 @@ def run(  # noqa: PLR0917
             metavar="<migration>",
             help=(
                 "Resume a failed migration after editing its file "
-                "(skips completed statements)."
+                "(skips completed statements)"
             ),
         ),
     ] = None,
@@ -204,7 +201,7 @@ def run(  # noqa: PLR0917
             metavar="<migration>",
             help=(
                 "Reset a failed migration so the next apply runs it from "
-                "statement 1 (journal only; previews without --apply)."
+                "statement 1 (journal only; previews without --apply)"
             ),
         ),
     ] = None,
@@ -215,7 +212,7 @@ def run(  # noqa: PLR0917
             metavar="<name=value>",
             help=(
                 "ClickHouse query setting sent with each migration statement, "
-                "e.g. max_table_size_to_drop=0 (repeatable)."
+                "e.g. max_table_size_to_drop=0 (repeatable)"
             ),
         ),
     ] = None,
@@ -315,7 +312,11 @@ def _run(
 
     # --abandon only changes the journal and rejects --table, so it does not
     # read snapshot.json: a conflicted snapshot cannot block it.
-    snapshot = read_snapshot(meta_dir) if targets.abandon_target is None else None
+    snapshot = (
+        read_snapshot(meta_dir, index_granularity=configured_index_granularity(config))
+        if targets.abandon_target is None
+        else None
+    )
     snapshot_defs = list(snapshot.definitions) if snapshot is not None else []
     table_scope = resolve_table_scope(
         table_selector, table_keys_from_definitions(snapshot_defs)
@@ -386,6 +387,9 @@ def _run(
                 ),
             )
             return
+        # A migration generated for another index_granularity default would
+        # create tables unlike the ones chkit planned for (#466).
+        assert_index_granularity_matches_server("migrate", client, config, json_mode=output_json)
 
         _run_checksum_gate(ctx, journal)
         plan = _resolve_pending_plan(ctx)
@@ -395,6 +399,7 @@ def _run(
         if _render_plan(ctx, plan):
             return
         _run_empty_migration_gate(ctx, plan.empty_migrations)
+        _run_barrier_gate(ctx, plan.pending)
         if not _run_confirm_gate(ctx):
             return
         _run_destructive_gate(ctx, plan.pending)
@@ -626,6 +631,20 @@ def _run_empty_migration_gate(ctx: _MigrateContext, empty_migrations: list[str])
     raise typer.Exit(code=1)
 
 
+def _run_barrier_gate(ctx: _MigrateContext, pending: list[str]) -> None:
+    """Refuse to apply when a pending file marks a statement other than a
+    SELECT ``mode=barrier`` (#634), before any migration runs; a plan-only
+    run does not check."""
+    apply_possible = ctx.execute_requested or (
+        not ctx.json_mode and not is_background_or_ci()
+    )
+    if not apply_possible:
+        return
+    barriers = find_pending_non_select_barriers(ctx.migrations_dir, pending)
+    if barriers:
+        raise non_select_barrier_error(barriers)
+
+
 def _run_confirm_gate(ctx: _MigrateContext) -> bool:
     """In plan mode, stop unless the user confirms an interactive apply."""
     if ctx.execute_requested:
@@ -711,10 +730,6 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     def log(line: str) -> None:
         typer.echo(line, err=ctx.json_mode)
 
-    def warn(line: str) -> None:
-        if not ctx.json_mode:
-            typer.secho(line, fg=typer.colors.YELLOW, err=True)
-
     retry = plan.retry
     applied_now: list[MigrationJournalEntry] = []
     for filename in plan.pending:
@@ -724,7 +739,6 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
             )
             if meta.log:
                 typer.echo(f"  {meta.log}")
-            typer.echo(f"  Applying {filename}")
         entry = apply_migration(
             ApplyMigrationInput(
                 client=ctx.client,
@@ -740,7 +754,6 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                     else None
                 ),
                 log=log,
-                warn=warn,
                 settings=ctx.settings,
                 flags=ctx.flags,
             )

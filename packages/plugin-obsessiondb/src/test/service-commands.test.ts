@@ -74,6 +74,7 @@ describe('service alias command', () => {
 				),
 		) as typeof fetch
 
+		// chkit before #624 also passed the command name, as here: still accepted.
 		const exitCode = await SERVICE_COMMAND.run({
 			configPath,
 			args: ['service', 'alias', 'set', 'prod', 'production'],
@@ -89,5 +90,26 @@ describe('service alias command', () => {
 				service_name: 'production',
 			},
 		})
+	})
+
+	test('rejects an alias that starts with a dash before contacting the API (#491)', async () => {
+		await setupAuth()
+		const configPath = join(tempDir, 'project', 'clickhouse.config.ts')
+		const fetchMock = mock(async () => new Response('{}', { status: 500 }))
+		globalThis.fetch = fetchMock as unknown as typeof fetch
+
+		for (const alias of ['-prod', '--prod', '-']) {
+			const printed: unknown[] = []
+			const exitCode = await SERVICE_COMMAND.run({
+				configPath,
+				args: ['alias', 'set', alias, 'production'],
+				flags: {},
+				print: (value) => printed.push(value),
+			})
+			expect(exitCode).toBe(1)
+			expect(printed).toEqual(['Alias cannot start with "-".'])
+		}
+		expect(fetchMock).not.toHaveBeenCalled()
+		expect(await loadServiceAliases(configPath)).toEqual({})
 	})
 })

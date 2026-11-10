@@ -68,6 +68,16 @@ Stop there. The tables are empty.
 
 `src/db/schema/hello.ts` defines both tables. `chkit/migrations/20260928082853_create_hello_schema.sql` creates them.
 
+## Query
+
+`src/db/queries.ts` defines `userEvents`, a typed query over `events`:
+
+```ts
+const rows = await userEvents({ userId: 1 }) // { name: string; n: number }[]
+```
+
+See [Queries](https://chkit.obsessiondb.com/schema/queries/).
+
 ## Dependency security
 
 This example pins published chkit packages. Those releases still depend on vulnerable `@orpc/client` and `@orpc/contract` versions. The `overrides` in `package.json` replace them with `1.15.4`, including when this folder is copied out of the monorepo.

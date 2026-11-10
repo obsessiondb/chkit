@@ -6,14 +6,16 @@ and a monkey-patched ``time.sleep`` so the retry loop runs at zero cost.
 
 from __future__ import annotations
 
-from collections.abc import Iterator
 from typing import Any
 
 import pytest
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+    OperationalError,
+)
 
-from chkit.clickhouse import ddl_propagation
 from chkit.clickhouse.ddl_propagation import (
-    MAX_ATTEMPTS,
+    MAX_RETRIES,
     wait_for_column,
     wait_for_ddl_propagation,
     wait_for_dictionary,
@@ -26,9 +28,8 @@ pytestmark = pytest.mark.usefixtures("single_replica")
 
 
 @pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> Iterator[None]:
-    monkeypatch.setattr(ddl_propagation.time, "sleep", lambda _: None)
-    return
+def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
 
 
 class _FakeResult:
@@ -68,7 +69,7 @@ def test_wait_for_table_retries_until_visible() -> None:
 
 
 def test_wait_for_table_raises_after_max_attempts() -> None:
-    client = _ScriptedClient([[] for _ in range(MAX_ATTEMPTS + 1)])
+    client = _ScriptedClient([[] for _ in range(MAX_RETRIES + 1)])
     with pytest.raises(RuntimeError, match="not yet visible"):
         wait_for_table(client, "db", "ghost")
 
@@ -91,7 +92,7 @@ def test_wait_for_view_requires_view_engine_filter() -> None:
 
 
 def test_wait_for_view_raises_when_never_visible() -> None:
-    client = _ScriptedClient([[] for _ in range(MAX_ATTEMPTS + 1)])
+    client = _ScriptedClient([[] for _ in range(MAX_RETRIES + 1)])
     with pytest.raises(RuntimeError, match="not yet visible"):
         wait_for_view(client, "db", "v")
 
@@ -122,7 +123,7 @@ def test_wait_for_table_absent_retries_until_gone() -> None:
 
 
 def test_wait_for_table_absent_raises_when_still_present() -> None:
-    client = _ScriptedClient([[{"x": 1}] for _ in range(MAX_ATTEMPTS + 1)])
+    client = _ScriptedClient([[{"x": 1}] for _ in range(MAX_RETRIES + 1)])
     with pytest.raises(RuntimeError, match="still present"):
         wait_for_table_absent(client, "db", "t")
 
@@ -199,3 +200,97 @@ def test_dispatch_malformed_key_returns_immediately() -> None:
     client = _ScriptedClient([])
     wait_for_ddl_propagation(client, "create_table", "weird-key")
     assert client.queries == []
+
+
+# ---------- retry budget (#578) ----------
+# TS's p-retry ``{ retries: 20, minTimeout: 500, factor: 1 }``: 21 checks,
+# 0.5 s apart, no delay after the last. ddl-propagation.test.ts pins the same.
+
+
+def _record_sleeps(monkeypatch: pytest.MonkeyPatch) -> list[float]:
+    sleeps: list[float] = []
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", sleeps.append)
+    return sleeps
+
+
+def test_table_that_never_appears_is_checked_21_times(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _ScriptedClient([])
+    with pytest.raises(RuntimeError, match=r"waitForTable: db\.events not yet visible"):
+        wait_for_ddl_propagation(client, "create_table", "table:db.events")
+    assert len(client.queries) == 21
+    assert sleeps == [0.5] * 20
+
+
+def test_table_that_appears_on_the_21st_check_passes(monkeypatch: pytest.MonkeyPatch) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _ScriptedClient([*([] for _ in range(20)), [{"x": 1}]])
+    wait_for_ddl_propagation(client, "create_table", "table:db.events")
+    assert len(client.queries) == 21
+    assert sleeps == [0.5] * 20
+
+
+class _FailingClient:
+    """Raises ``error`` from every catalog query; counts the checks."""
+
+    def __init__(self, error: Exception) -> None:
+        self.error = error
+        self.checks = 0
+
+    def query(self, sql: str) -> _FakeResult:
+        self.checks += 1
+        raise self.error
+
+
+# p-retry gives up at once on a TypeError that is not a fetch network failure:
+# a bug in the check, not lag. TypeError and AttributeError are the Python
+# equivalents. ddl-propagation.test.ts pins the same (#627).
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        TypeError("'NoneType' object is not subscriptable"),
+        AttributeError("'NoneType' object has no attribute 'rows'"),
+    ],
+    ids=["TypeError", "AttributeError"],
+)
+def test_a_programming_error_in_the_check_fails_after_one_check(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _FailingClient(error)
+    with pytest.raises(type(error), match=str(error)):
+        wait_for_ddl_propagation(client, "create_table", "table:db.events")
+    assert client.checks == 1
+    assert sleeps == []
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        DatabaseError("Code: 60. DB::Exception: Unknown table"),
+        OperationalError("Error HTTPConnectionPool: Connection refused"),
+    ],
+    ids=["server", "network"],
+)
+def test_a_server_or_network_error_in_the_check_is_retried(
+    monkeypatch: pytest.MonkeyPatch, error: Exception
+) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _FailingClient(error)
+    with pytest.raises(type(error)):
+        wait_for_ddl_propagation(client, "create_table", "table:db.events")
+    assert client.checks == 21
+    assert sleeps == [0.5] * 20
+
+
+def test_dictionary_that_never_appears_is_checked_21_times(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    sleeps = _record_sleeps(monkeypatch)
+    client = _ScriptedClient([])
+    with pytest.raises(RuntimeError, match=r"waitForDictionary: db\.users not yet visible"):
+        wait_for_ddl_propagation(client, "create_dictionary", "dictionary:db.users")
+    assert len(client.queries) == 21
+    assert sleeps == [0.5] * 20

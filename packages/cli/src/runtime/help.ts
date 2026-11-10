@@ -45,17 +45,21 @@ export function formatGlobalHelp(registry: CommandRegistry, version: string): st
     lines.push(formatFlagLine(flag))
   }
   lines.push(formatFlagLine({ name: '-h, --help', type: 'boolean', description: 'Show help' }))
-  lines.push(formatFlagLine({ name: '-v, --version', type: 'boolean', description: 'Show version' }))
+  lines.push(formatFlagLine({ name: '-v, -V, --version', type: 'boolean', description: 'Show version' }))
 
   appendDocsHelp(lines)
 
   return lines.join('\n')
 }
 
-export function formatCommandHelp(command: RegisteredCommand, globalFlags: readonly FlagDef[]): string {
+export function formatCommandHelp(command: RegisteredCommand, globalFlags: readonly FlagDef[], subcommandName?: string): string {
   const lines: string[] = []
+  const subcommand = command.subcommands?.find((sub) => sub.name === subcommandName)
 
-  if (command.subcommands) {
+  if (subcommand) {
+    lines.push(`chkit ${command.name} ${subcommand.name} [options]`)
+    lines.push(`  ${subcommand.description}`)
+  } else if (command.subcommands) {
     lines.push(`chkit ${command.name} <command> [options]`)
     lines.push(`  ${command.description}`)
     lines.push('')
@@ -68,10 +72,11 @@ export function formatCommandHelp(command: RegisteredCommand, globalFlags: reado
     lines.push(`  ${command.description}`)
   }
 
-  if (command.flags.length > 0) {
+  const flags = subcommand?.flags ?? command.flags
+  if (flags.length > 0) {
     lines.push('')
     lines.push('Options:')
-    for (const flag of command.flags) {
+    for (const flag of flags) {
       lines.push(formatFlagLine(flag))
     }
   }
@@ -104,7 +109,7 @@ function appendDocsHelp(lines: string[]): void {
 }
 
 function formatFlagLine(flag: FlagDef & { name?: string }): string {
-  const nameStr = flag.name ?? ''
+  const nameStr = flag.short ? `${flag.short}, ${flag.name}` : (flag.name ?? '')
   const placeholder = flag.placeholder ? ` ${flag.placeholder}` : ''
   const label = `${nameStr}${placeholder}`
   if (label.length >= 22) {

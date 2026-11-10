@@ -14,6 +14,7 @@ from typing import Any, Literal, TypeAlias, cast
 from chkit.core.canonical import canonicalize_definitions, definition_key
 from chkit.core.conflict_markers import has_conflict_markers
 from chkit.core.model import SchemaDefinition, Snapshot
+from chkit.core.sql_lexer import js_trim
 
 SnapshotUnreadableReason: TypeAlias = Literal["empty", "conflict_markers", "invalid_json"]
 
@@ -45,13 +46,16 @@ class SnapshotDiff:
     changed: list[str] = field(default_factory=list[str])
 
 
-def parse_snapshot_document(raw: str) -> ParsedSnapshotDocument:
+def parse_snapshot_document(
+    raw: str, *, index_granularity: int | None = None
+) -> ParsedSnapshotDocument:
     """Parse the text of a ``snapshot.json``.
 
     JSON is read as leniently as before: missing fields default and definitions
-    are canonicalized. Entries chkit never writes may still raise.
+    are canonicalized (``index_granularity``: ``clickhouse.indexGranularity``).
+    Entries chkit never writes may still raise.
     """
-    if raw.strip() == "":
+    if js_trim(raw) == "":
         return UnreadableSnapshotDocument(reason="empty")
 
     try:
@@ -77,7 +81,7 @@ def parse_snapshot_document(raw: str) -> ParsedSnapshotDocument:
             "definitions": [] if definitions is None else definitions,
         }
     )
-    canonical = canonicalize_definitions(snapshot.definitions)
+    canonical = canonicalize_definitions(snapshot.definitions, index_granularity=index_granularity)
     return ReadableSnapshotDocument(
         snapshot=snapshot.model_copy(update={"definitions": canonical})
     )

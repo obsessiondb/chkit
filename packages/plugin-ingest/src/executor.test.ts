@@ -10,12 +10,18 @@ import { cursorState, timestampWindow } from './incremental.js'
 import { paginate } from './paginate.js'
 import { definePipeline, defineStream, selectStreams } from './registry.js'
 import { createMemoryDestination, createMemoryJournal, createSourceContext } from './testing.js'
-import type { DestinationAdapter } from './types.js'
+import type { DestinationAdapter, SourceContext } from './types.js'
 
 const events = table({
   database: 'app',
   name: 'events',
-  columns: [{ name: 'id', type: 'UInt64' }, ...ingestionColumns],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'label', type: 'String' },
+    { name: 'value', type: 'String' },
+    { name: 'nested', type: 'JSON' },
+    ...ingestionColumns,
+  ],
   engine: 'MergeTree()',
   primaryKey: ['id'],
   orderBy: ['id'],
@@ -716,6 +722,100 @@ describe('runtime contracts', () => {
     expect(sequences).toEqual([1, 2, 3, 4])
   })
 
+  test.each([
+    ['completes', { outcome: 'succeeded', rows: 1, error: undefined }],
+    ['fails', { outcome: 'failed', rows: 0, error: 'reader exploded' }],
+  ] as const)('a custom iterator whose return() throws synchronously keeps the outcome of a reader that %s', async (mode, expected) => {
+    const destination = createMemoryDestination()
+    let returns = 0
+    const stream = defineStream({
+      id: 'app.custom_iterator', destination: events,
+      read: () => ({
+        [Symbol.asyncIterator]() {
+          let pulled = false
+          return {
+            async next() {
+              if (pulled && mode === 'fails') throw new Error('reader exploded')
+              if (pulled) return { value: undefined, done: true as const }
+              pulled = true
+              return { value: { rows: [{ id: 1 }] }, done: false as const }
+            },
+            return(): Promise<IteratorResult<{ rows: Array<{ id: number }> }>> {
+              returns += 1
+              throw new Error('cleanup exploded')
+            },
+          }
+        },
+      }),
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), { journal: createMemoryJournal(), destination })
+    expect(result.streams[0]).toMatchObject(expected)
+    expect(returns).toBe(1)
+  })
+
+  test('retained source services cannot make requests or append retry facts after completion', async () => {
+    const captured = Promise.withResolvers<SourceContext>()
+    const journal = createMemoryJournal()
+    let calls = 0
+    const stream = defineStream({
+      id: 'app.retained_attempt', destination: events,
+      async *read(context) {
+        captured.resolve(context)
+        yield { rows: [{ id: 1 }] }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal, destination: createMemoryDestination(),
+      fetch: async () => { calls += 1; return Response.json({ id: 2 }) },
+    })
+    const context = await captured.promise
+    const facts = journal.events.length
+    expect(result.ok).toBe(true)
+    await expect(context.attempt(async () => { calls += 1; throw new Error('late request') })).rejects.toThrow('Reader attempt has ended')
+    await expect(context.fetch('https://api.example.com/items')).rejects.toThrow('Reader attempt has ended')
+    expect(calls).toBe(0)
+    expect(journal.events).toHaveLength(facts)
+  })
+
+  test('an unawaited source operation cannot start nested requests or retry after its reader completes', async () => {
+    const release = Promise.withResolvers<void>()
+    const started = Promise.withResolvers<void>()
+    const captured = Promise.withResolvers<PromiseSettledResult<unknown>>()
+    const journal = createMemoryJournal()
+    let calls = 0
+    let nestedCalls = 0
+    const stream = defineStream({
+      id: 'app.unawaited_attempt', destination: events,
+      async *read({ attempt }) {
+        const operation = attempt(async () => {
+          calls += 1
+          started.resolve()
+          await release.promise
+          return attempt(async () => {
+            nestedCalls += 1
+            throw connectionReset('late failure')
+          })
+        })
+        void operation.then(
+          (value) => captured.resolve({ status: 'fulfilled', value }),
+          (reason: unknown) => captured.resolve({ status: 'rejected', reason })
+        )
+        await started.promise
+        yield { rows: [{ id: 1 }] }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal, destination: createMemoryDestination(), retry: { retries: 1, minTimeout: 0 },
+    })
+    const facts = journal.events.length
+    release.resolve()
+    expect(result.ok).toBe(true)
+    expect((await captured.promise).status).toBe('rejected')
+    expect(calls).toBe(1)
+    expect(nestedCalls).toBe(0)
+    expect(journal.events).toHaveLength(facts)
+  })
+
   test('a failing loader cleanup does not mask the write failure or stop the retry', async () => {
     const destination = createMemoryDestination()
     let writes = 0
@@ -801,6 +901,22 @@ describe('source services', () => {
     })
     expect(result.ok).toBe(true)
     expect(requested.get('/second')).toBeGreaterThanOrEqual(250)
+  })
+
+  test('a Retry-After past the Date range waits out the budget like any long hint', async () => {
+    const journal = createMemoryJournal()
+    const stream = defineStream({
+      id: 'app.limited', destination: events,
+      async *read(context) {
+        yield { rows: await (await context.fetch('https://api.example.com/items')).json() as Array<{ id: number }> }
+      },
+    })
+    const result = await run(definePipeline({ id: 'app', streams: [stream] }), {
+      journal, maxDurationMs: 100, retry: { minTimeout: 0, maxRetryTime: Number.POSITIVE_INFINITY },
+      fetch: async () => new Response('slow down', { status: 429, headers: { 'retry-after': '1e13' } }),
+    })
+    expect(result.streams[0]?.outcome).toBe('budget_exhausted')
+    expect(journal.events.filter((event) => event.eventKind === 'retry_scheduled')).toMatchObject([{ errorClass: 'rate_limited', retryAt: undefined }])
   })
 
   test('the testing source context handles requests like the runtime', async () => {

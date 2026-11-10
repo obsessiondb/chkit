@@ -33,7 +33,8 @@ const QUOTED_IDENTIFIERS = new Set([
   'values',
 ])
 
-function stringLiteral(body: string): string {
+/** A string literal's body as the canonical literal of the bytes ClickHouse reads from it. */
+export function stringLiteral(body: string): string {
   const bytes: number[] = []
   for (let i = 0; i < body.length; ) {
     const char = body[i] ?? ''
@@ -149,6 +150,32 @@ export function textSQLTokens(sql: string): string[] {
   return tokens
 }
 
+// Keywords that are operators after an operand (`a OR (b)`) but function names
+// in operand position (`or(a, b)`), and keywords that are never function names.
+const BINARY_KEYWORDS = new Set(['and', 'or', 'in', 'is', 'like', 'ilike', 'between', 'div', 'mod', 'regexp'])
+const PREFIX_KEYWORDS = new Set(['not', 'case', 'when', 'then', 'else'])
+
+function endsOperand(token: string | undefined): boolean {
+  if (token === undefined) return false
+  if ([')', ']', '}'].includes(token) || ["'", '"', '`'].includes(token[0] ?? '')) return true
+  const word = token.toLowerCase()
+  // NOT and GLOBAL end an operand for what follows: `x NOT IN (...)`, `x GLOBAL IN (...)`.
+  return (
+    /^[\p{L}\p{N}_$]/u.test(token) &&
+    !BINARY_KEYWORDS.has(word) &&
+    !(PREFIX_KEYWORDS.has(word) && word !== 'not')
+  )
+}
+
+/** Whether `(` at tokens[i] calls the word before it rather than following a keyword. */
+function isCall(tokens: string[], i: number): boolean {
+  const word = tokens[i - 1] ?? ''
+  if (!/^[\p{L}_][\p{L}\p{N}_]*$/u.test(word)) return false
+  const lower = word.toLowerCase()
+  if (PREFIX_KEYWORDS.has(lower)) return false
+  return !(BINARY_KEYWORDS.has(lower) && endsOperand(tokens[i - 2]))
+}
+
 export function formatTextSQL(tokens: string[]): string {
   let sql = ''
   for (const [i, token] of tokens.entries()) {
@@ -157,7 +184,10 @@ export function formatTextSQL(tokens: string[]): string {
       i === 0 ||
       [')', ']', '}', ',', '.'].includes(token) ||
       ['(', '[', '{', '.'].includes(previous ?? '') ||
-      (token === '(' && /^[\p{L}_][\p{L}\p{N}_]*$/u.test(previous ?? ''))
+      (token === '(' && isCall(tokens, i)) ||
+      // `[` after an operand subscripts it, as ClickHouse writes `lower(s)[1]`;
+      // after an operator or keyword it opens an array: `x IN [1]`, `NOT [1]`.
+      (token === '[' && endsOperand(previous) && previous?.toLowerCase() !== 'not')
     sql += (tight ? '' : ' ') + token
   }
   return sql

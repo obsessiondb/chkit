@@ -29,6 +29,7 @@ from chkit.core import (
     apply_on_cluster_to_plan,
     canonicalize_definitions,
     codec_raw,
+    collect_definition_warnings,
     define_config,
     dictionary,
     import_module_file,
@@ -57,7 +58,7 @@ from chkit.core.model import (
     TableConstraintDefinition,
 )
 
-__version__ = "0.2.0"
+__version__ = "0.3.0"
 
 __all__ = [
     "SYNTHESIZED_CONFIG_PATH",
@@ -98,6 +99,7 @@ __all__ = [
     "apply_on_cluster_to_plan",
     "canonicalize_definitions",
     "codec_raw",
+    "collect_definition_warnings",
     "define_config",
     "dictionary",
     "import_module_file",

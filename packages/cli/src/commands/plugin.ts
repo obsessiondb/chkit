@@ -1,7 +1,13 @@
-import { typedFlags, type ChxPluginCommand, type ParsedFlags, type PluginRuntime } from '../plugins.js'
-import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
+import { typedFlags, type ChxPluginCommand, type ParsedFlags } from '../plugins.js'
+import {
+  forwardedCommandFlags,
+  parsePluginCommandArgs,
+  reportStrayArgs,
+  routeForwardedArgs,
+} from '../runtime/command-dispatch.js'
+import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
-import { type FlagDef, parseFlags, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
+import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
 import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
@@ -16,11 +22,12 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   const { flags, args, config, configPath, pluginRuntime } = ctx
   const jsonMode = flags['--json'] === true
 
-  const pluginName = args[0]
-  const commandName = args[1]
-  const commandArgs = args.slice(2)
+  const { pluginName, commandName, commandArgs } = routeForwardedArgs(args)
+  // The built-in plugins (core, skill-hint) only carry chkit's own commands
+  // and hooks: `chkit plugin` covers the plugins of the config, as chkit-py.
+  const plugins = pluginRuntime.plugins.filter((entry) => !entry.internal)
 
-  if (pluginRuntime.plugins.length === 0) {
+  if (plugins.length === 0) {
     if (jsonMode) {
       emitJson('plugin', {
         error: 'No plugins configured. Add entries to config.plugins first.',
@@ -33,7 +40,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
 
   if (!pluginName) {
     const payload = {
-      plugins: pluginRuntime.plugins.map((entry) => ({
+      plugins: plugins.map((entry) => ({
         name: entry.plugin.manifest.name,
         version: entry.plugin.manifest.version ?? null,
         commands: (entry.plugin.commands ?? []).map((command) => ({
@@ -62,11 +69,9 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 0
   }
 
-  const selectedPlugin = pluginRuntime.plugins.find(
-    (entry) => entry.plugin.manifest.name === pluginName
-  )
+  const selectedPlugin = plugins.find((entry) => entry.plugin.manifest.name === pluginName)
   if (!selectedPlugin) {
-    const known = pluginRuntime.plugins.map((entry) => entry.plugin.manifest.name).sort()
+    const known = plugins.map((entry) => entry.plugin.manifest.name).sort()
     throw new Error(
       `Unknown plugin "${pluginName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
     )
@@ -99,8 +104,49 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     return 0
   }
 
-  const gf = typedFlags(flags, GLOBAL_FLAGS)
-  const tableSelector = gf['--table']
+  // Parse plugin-specific flags when the command declares them or another plugin
+  // extends this plugin's namespace (the same flags `chkit <plugin> <command>` accepts).
+  const targetCommand = (selectedPlugin.plugin.commands ?? []).find((cmd) => cmd.name === commandName)
+  if (!targetCommand) {
+    const known = (selectedPlugin.plugin.commands ?? []).map((command) => command.name)
+    const message = `Unknown ${pluginName} command "${commandName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
+    if (jsonMode) {
+      emitJson('plugin', { ok: false, error: message })
+    } else {
+      console.error(message)
+    }
+    return 1
+  }
+  const commandFlags = forwardedCommandFlags(pluginRuntime.plugins, pluginName, targetCommand)
+  // Parse even when the command declares no flags, so an unknown flag is
+  // rejected as in `chkit <plugin> <command>` instead of reaching the args (#491).
+  // As there, the command gets its flags in `flags` and only the positionals
+  // in `args`, and `--` ends its flags (#568).
+  let mergedFlags: ParsedFlags
+  let positionals: string[]
+  try {
+    const parsed = parsePluginCommandArgs(commandArgs, commandFlags)
+    mergedFlags = { ...flags, ...parsed.flags }
+    positionals = parsed.positionals
+  } catch (error) {
+    if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
+      if (jsonMode) {
+        emitJson('plugin', { ok: false, error: error.message })
+      } else {
+        console.error(error.message)
+      }
+      return 1
+    }
+    throw error
+  }
+  // A command that takes no arguments rejects them as core commands do (#659).
+  if (targetCommand.takesArgs === false && positionals.length > 0) {
+    reportStrayArgs('plugin', positionals, jsonMode)
+    return 1
+  }
+
+  // Set only when the target command declares --table (#565).
+  const tableSelector = typedFlags(mergedFlags, [TABLE_FLAG] as const)['--table']
   let tableScope: ReturnType<typeof resolveTableScope>
   try {
     // Without --table the scope is unfiltered, so only a selector needs the schema.
@@ -111,37 +157,12 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
     tableScope = resolveTableScope(tableSelector, [])
   }
 
-  // Parse plugin-specific flags when the command declares them or another plugin
-  // extends this plugin's namespace (the same flags `chkit <plugin> <command>` accepts).
-  const targetCommand = (selectedPlugin.plugin.commands ?? []).find((cmd) => cmd.name === commandName)
-  const commandFlags = [
-    ...(targetCommand?.flags ?? []),
-    ...collectExtensionFlags(pluginRuntime.plugins, pluginName),
-  ]
-  let mergedFlags: ParsedFlags = { ...flags }
-  if (commandFlags.length > 0) {
-    try {
-      const parsed = parseFlags(commandArgs, commandFlags)
-      mergedFlags = { ...flags, ...parsed }
-    } catch (error) {
-      if (error instanceof UnknownFlagError || error instanceof MissingFlagValueError) {
-        if (jsonMode) {
-          emitJson('plugin', { ok: false, error: error.message })
-        } else {
-          console.error(error.message)
-        }
-        return 1
-      }
-      throw error
-    }
-  }
-
   const exitCode = await pluginRuntime.runPluginCommand(pluginName, commandName, {
     config,
     configPath,
     jsonMode,
     tableScope,
-    args: commandArgs,
+    args: positionals,
     flags: mergedFlags,
     print(value) {
       printOutput(value, jsonMode)
@@ -149,16 +170,4 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
   })
 
   return exitCode
-}
-
-function collectExtensionFlags(
-  plugins: PluginRuntime['plugins'],
-  pluginName: string,
-): FlagDef[] {
-  return plugins.flatMap((entry) =>
-    (entry.plugin.extendCommands ?? []).flatMap((extension) => {
-      const targets = Array.isArray(extension.command) ? extension.command : [extension.command]
-      return targets.includes(pluginName) ? [...extension.flags] : []
-    }),
-  )
 }

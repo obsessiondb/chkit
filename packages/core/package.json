@@ -1,6 +1,6 @@
 {
   "name": "@chkit/core",
-  "version": "0.2.0-beta.11",
+  "version": "0.2.0-beta.16",
   "description": "Schema DSL, config, diff engine, and migration planner for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -21,6 +21,7 @@
     "directory": "packages/core"
   },
   "type": "module",
+  "sideEffects": false,
   "main": "./dist/index.js",
   "types": "./dist/index.d.ts",
   "exports": {
@@ -33,6 +34,11 @@
       "source": "./src/schema-loader.ts",
       "types": "./dist/schema-loader.d.ts",
       "default": "./dist/schema-loader.js"
+    },
+    "./loader": {
+      "source": "./src/ts-import.ts",
+      "types": "./dist/ts-import.d.ts",
+      "default": "./dist/ts-import.js"
     }
   },
   "files": [
@@ -41,16 +47,20 @@
   "scripts": {
     "build": "tsc -p tsconfig.json",
     "dev": "tsc -p tsconfig.json --watch",
-    "typecheck": "tsc -p tsconfig.json --noEmit",
+    "typecheck": "tsc -p tsconfig.typecheck.json",
     "lint": "biome lint src",
-    "test": "bun test src",
+    "test": "bun run ../../scripts/infra-up.ts && bun test src",
     "clean": "rm -rf dist"
   },
   "dependencies": {
     "fast-glob": "^3.3.2",
     "jiti": "^2.7.0"
   },
+  "peerDependencies": {
+    "zod": "^4.3.0"
+  },
   "devDependencies": {
-    "@clickhouse/client": "^1.11.0"
+    "@clickhouse/client": "^1.11.0",
+    "zod": "^4.3.6"
   }
 }

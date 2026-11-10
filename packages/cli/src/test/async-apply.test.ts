@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor, QueryStatus } from '@chkit/clickhouse'
 
-import { applyAsyncStatement } from '../commands/migrate/async-apply'
+import { applyAsyncStatement, makeDeterministicQueryId } from '../commands/migrate/async-apply'
 import type { JournalStore, MigrationRowState } from '../runtime/journal-store'
 
 /** Minimal in-memory journal store: applyAsyncStatement only reads/writes migration state. */
@@ -24,7 +24,7 @@ function makeDb(sequence: Array<QueryStatus | 'throw524'>): ClickHouseExecutor {
   return {
     async query() {
       // Server clock reads, before the in-flight check and before each submission.
-      return [{ now_ms: 0 }]
+      return [{ now_ms: 0, database: 'default' }]
     },
     async submit() {
       return 'submitted'
@@ -73,5 +73,17 @@ describe('applyAsyncStatement — transient poll errors', () => {
     await expect(
       applyAsyncStatement({ ...base, db, journalStore: makeJournalStore() }),
     ).rejects.toThrow('re-attach')
+  })
+
+  test('the give-up message says "polling failed 21×", matching chkit-py', async () => {
+    const db = makeDb([{ status: 'unknown' }, 'throw524'])
+
+    const queryId = makeDeterministicQueryId('default', '_chkit_migrations', '20260101_load', 1)
+
+    await expect(
+      applyAsyncStatement({ ...base, db, journalStore: makeJournalStore() }),
+    ).rejects.toMatchObject({
+      message: `Async migration step load_table_data (query_id ${queryId}): polling failed 21× (ClickHouse request failed: error code: 524). The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+    })
   })
 })

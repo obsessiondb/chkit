@@ -17,10 +17,26 @@ import {
   type TableConstraintDefinition,
   type TableDefinition,
   type ViewDefinition,
+  READONLY_MERGE_TREE_SETTINGS,
   supportsSortOrder,
 } from '@chkit/core'
 
-export function renderSchemaFile(definitions: SchemaDefinition[]): string {
+export interface RenderSchemaOptions {
+  /** `database.name` of the tables ObsessionDB stores as `Shared*`. */
+  sharedTables?: ReadonlySet<string>
+}
+
+const READONLY_SETTING_COMMENT = 'read-only: a change recreates the table (DROP + CREATE, or --cutover)'
+const OBSESSIONDB_STORAGE_POLICY_COMMENT = 'set by ObsessionDB on every Shared table; it cannot change'
+
+/** Why a pulled setting cannot be altered in place, written next to it (#466). */
+function tableSettingComment(key: string, shared: boolean): string | undefined {
+  if (READONLY_MERGE_TREE_SETTINGS.includes(key)) return READONLY_SETTING_COMMENT
+  if (key === 'storage_policy' && shared) return OBSESSIONDB_STORAGE_POLICY_COMMENT
+  return undefined
+}
+
+export function renderSchemaFile(definitions: SchemaDefinition[], options: RenderSchemaOptions = {}): string {
   const canonical = canonicalizeDefinitions(definitions)
   const declarationNames = new Map<string, number>()
   const lines: string[] = [
@@ -35,7 +51,7 @@ export function renderSchemaFile(definitions: SchemaDefinition[]): string {
   for (const definition of canonical) {
     const variableName = resolveTableVariableName(definition.database, definition.name, declarationNames)
     references.push(variableName)
-    lines.push(...renderDefinition(definition, variableName))
+    lines.push(...renderDefinition(definition, variableName, options))
     lines.push('')
   }
 
@@ -62,10 +78,10 @@ function renderImportStatement(canonical: SchemaDefinition[]): string {
   return `import { ${imports.join(', ')} } from '@chkit/core'`
 }
 
-function renderDefinition(definition: SchemaDefinition, variableName: string): string[] {
+function renderDefinition(definition: SchemaDefinition, variableName: string, options: RenderSchemaOptions): string[] {
   switch (definition.kind) {
     case 'table':
-      return renderTableDefinition(definition, variableName)
+      return renderTableDefinition(definition, variableName, options.sharedTables?.has(`${definition.database}.${definition.name}`) ?? false)
     case 'view':
       return renderViewDefinition(definition, variableName)
     case 'dictionary':
@@ -75,7 +91,7 @@ function renderDefinition(definition: SchemaDefinition, variableName: string): s
   }
 }
 
-function renderTableDefinition(definition: TableDefinition, variableName: string): string[] {
+function renderTableDefinition(definition: TableDefinition, variableName: string, shared: boolean): string[] {
   const lines = renderDeclarationHeader('table', variableName, definition.database, definition.name)
   lines.push(`  engine: ${renderString(definition.engine)},`)
   lines.push('  columns: [')
@@ -98,7 +114,7 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
     lines.push(`  ttl: ${renderString(definition.ttl)},`)
   }
   if (definition.settings && Object.keys(definition.settings).length > 0) {
-    lines.push(...renderSettingsLines(definition.settings, '  '))
+    lines.push(...renderSettingsLines(definition.settings, '  ', (key) => tableSettingComment(key, shared)))
   }
   if (definition.indexes && definition.indexes.length > 0) {
     lines.push(...renderIndexLines(definition.indexes))
@@ -109,6 +125,7 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
   if (definition.constraints && definition.constraints.length > 0) {
     lines.push(...renderConstraintLines(definition.constraints))
   }
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
 }
@@ -116,6 +133,7 @@ function renderTableDefinition(definition: TableDefinition, variableName: string
 function renderViewDefinition(definition: ViewDefinition, variableName: string): string[] {
   const lines = renderDeclarationHeader('view', variableName, definition.database, definition.name)
   lines.push(`  as: ${renderString(definition.as)},`)
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
 }
@@ -130,6 +148,7 @@ function renderMaterializedViewDefinition(
     lines.push(...renderRefreshLines(definition.refresh))
   }
   lines.push(`  as: ${renderString(definition.as)},`)
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
 }
@@ -160,11 +179,13 @@ function renderDictionaryDefinition(definition: DictionaryDefinition, variableNa
   if (definition.settings && Object.keys(definition.settings).length > 0) {
     lines.push(...renderSettingsLines(definition.settings, '  '))
   }
-  if (definition.comment) {
-    lines.push(`  comment: ${renderString(definition.comment)},`)
-  }
+  lines.push(...renderCommentLines(definition.comment))
   lines.push('})')
   return lines
+}
+
+function renderCommentLines(comment: string | undefined): string[] {
+  return comment ? [`  comment: ${renderString(comment)},`] : []
 }
 
 function renderDictionaryAttribute(attribute: DictionaryAttribute): string {
@@ -326,13 +347,15 @@ function renderRefreshLines(refresh: MaterializedViewRefresh): string[] {
 
 function renderSettingsLines(
   settings: Record<string, string | number | boolean>,
-  indent: string
+  indent: string,
+  comment: (key: string) => string | undefined = () => undefined
 ): string[] {
   const lines: string[] = [`${indent}settings: {`]
   for (const key of Object.keys(settings).sort()) {
     const value = settings[key]
     if (value === undefined) continue
-    lines.push(`${indent}  ${renderKey(key)}: ${renderLiteral(value)},`)
+    const note = comment(key)
+    lines.push(`${indent}  ${renderKey(key)}: ${renderLiteral(value)},${note ? ` // ${note}` : ''}`)
   }
   lines.push(`${indent}},`)
   return lines
@@ -385,11 +408,14 @@ function renderCodecStepSource(step: ColumnCodec): string {
   const parts: string[] = [`kind: ${renderString(step.kind)}`]
   if (step.kind === 'ZSTD' || step.kind === 'LZ4HC') {
     if (step.level !== undefined) parts.push(`level: ${step.level}`)
+    if (step.kind === 'ZSTD' && step.windowLog !== undefined) parts.push(`windowLog: ${step.windowLog}`)
   } else if (step.kind === 'Delta' || step.kind === 'DoubleDelta' || step.kind === 'Gorilla') {
     if (step.size !== undefined) parts.push(`size: ${step.size}`)
+  } else if (step.kind === 'T64') {
+    if (step.mode !== undefined) parts.push(`mode: ${renderString(step.mode)}`)
   } else if (step.kind === 'FPC') {
-    parts.push(`level: ${step.level}`)
-    parts.push(`floatSize: ${step.floatSize}`)
+    if (step.level !== undefined) parts.push(`level: ${step.level}`)
+    if (step.floatSize !== undefined) parts.push(`floatSize: ${step.floatSize}`)
   }
   return `{ ${parts.join(', ')} }`
 }

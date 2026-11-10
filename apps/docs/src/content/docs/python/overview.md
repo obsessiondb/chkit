@@ -31,7 +31,7 @@ chkit status                  # show applied / pending counts
 chkit check --strict          # CI gate (pending, drift, checksum)
 ```
 
-Use the [CLI Reference](/cli/overview/) for shared commands, flags, exit codes, and `--json` output. See the [TypeScript-only features](#differences-from-the-typescript-version) below. Config lives in `clickhouse.config.py` instead of `clickhouse.config.ts`, and schema files are Python modules instead of TypeScript modules.
+Use the [CLI Reference](/cli/overview/) for shared commands, flags, exit codes, and `--json` output. `chkit --help` and `chkit <command> --help` print the same help as the TypeScript CLI, listing chkit-py's own commands and flags. chkit-py declares the ObsessionDB plugin flags on its commands, so `--help-plugins` lists them without loading the config. See the [TypeScript-only features](#differences-from-the-typescript-version) below. Config lives in `clickhouse.config.py` instead of `clickhouse.config.ts`, and schema files are Python modules instead of TypeScript modules.
 
 ## Design
 

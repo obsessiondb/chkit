@@ -11,7 +11,7 @@ on:
 
 jobs:
   verify:
-    runs-on: blacksmith-8vcpu-ubuntu-2404
+    runs-on: blacksmith-16vcpu-ubuntu-2404
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -34,8 +34,9 @@ jobs:
         with:
           sarif_file: fallow-results.sarif
 
-      # Same command as locally: Turbo starts the test stack (test/infra) and
-      # runs typecheck, lint, test and build.
+      # Same command as locally: Turbo runs typecheck, lint, test and build,
+      # restoring unchanged tasks from the remote cache. A test task that runs
+      # starts the test stack (test/infra) first.
       - name: Verify
         env:
           TURBO_TOKEN: ${{ secrets.TURBO_TOKEN }}
@@ -78,13 +79,12 @@ jobs:
 
   deploy:
     runs-on: blacksmith-4vcpu-ubuntu-2404
-    needs: [verify, obsessiondb]
-    # ObsessionDB tests run only on main. PR previews need verify to pass,
-    # while production still requires both test jobs to succeed.
+    needs: verify
+    # Production and PR previews both deploy once verify passes. The
+    # obsessiondb job reports on the managed target and gates nothing.
     if: >-
       !cancelled() && needs.verify.result == 'success' &&
-      ((github.event_name == 'push' && github.ref == 'refs/heads/main' &&
-        needs.obsessiondb.result == 'success') ||
+      ((github.event_name == 'push' && github.ref == 'refs/heads/main') ||
        (github.event_name == 'pull_request' &&
         github.event.pull_request.head.repo.full_name == github.repository &&
         github.actor != 'dependabot[bot]'))

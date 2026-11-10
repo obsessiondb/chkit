@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
 from typing import Any
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -81,7 +82,7 @@ def ch_server_version(ch_client: Any) -> tuple[int, ...]:
 
 
 @pytest.fixture
-def assert_valid_sql(ch_client: _QueryClient):
+def assert_valid_sql(ch_client: _QueryClient) -> Callable[[str], None]:
     """Returns a callable that asserts a SQL statement parses via EXPLAIN AST."""
 
     def _assert(sql: str) -> None:
@@ -116,3 +117,14 @@ def _isolated_user_config_dir(
     (``credentials.json``) ``load_config`` layers ``obsessiondb()`` under each
     project, as in TS. Tests that need a user config dir set their own."""
     monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path_factory.mktemp("xdg")))
+
+
+def pytest_collection_modifyitems(items: list[pytest.Item]) -> None:
+    """Run the cutover scenarios first: each takes over a minute.
+
+    ``bun run test`` runs the suite with ``-n 8 --dist loadgroup``, which hands
+    out one test at a time in this order, so each scenario starts at once on
+    its own worker and the rest of the suite fills the other workers.
+    ``--dist load`` would send them to one worker in a single batch.
+    """
+    items.sort(key=lambda item: item.path.name != "test_cutover_e2e.py")

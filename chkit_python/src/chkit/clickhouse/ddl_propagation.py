@@ -9,8 +9,10 @@ before every replica has the new schema. Migrations that follow up with
 fail. These helpers poll ``system.tables`` / ``system.columns`` until
 the operation is observable, then return.
 
-Retry strategy: 20 attempts x 500 ms delay (~10 s budget). Matches the TS
-``p-retry`` defaults (``factor: 1`` -> fixed delay, no exponential backoff).
+Retry strategy: one check plus 20 retries, 500 ms apart (21 checks, ~10 s
+budget), and no delay after the last check. Matches the TS ``p-retry`` options
+``{ retries: 20, minTimeout: 500, factor: 1 }`` (``factor: 1`` -> fixed delay,
+no exponential backoff).
 
 The polling client is passed in (any object with a ``query(sql) ->
 QueryResult`` method) so this module can be unit-tested without a live
@@ -33,7 +35,8 @@ from chkit.clickhouse.alter_column_statement import (
 )
 from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 
-MAX_ATTEMPTS = 20
+# Retries after the first check, like TS ``retries: 20``: 21 checks in all.
+MAX_RETRIES = 20
 RETRY_DELAY_SECONDS = 0.5
 # Upper bound on a column definition or rename wait.
 DEFINITION_WAIT_DEADLINE_SECONDS = 30.0
@@ -56,6 +59,7 @@ _KEY_SUFFIXES: dict[str, str] = {
     "alter_table_modify_setting": ":setting:",
     "alter_table_reset_setting": ":setting:",
     "alter_table_modify_ttl": ":ttl",
+    "alter_table_modify_comment": ":comment",
     "alter_table_rename_table": ":rename_table",
     "rename_dictionary": ":rename_dictionary",
 }
@@ -86,21 +90,28 @@ def _quote(value: str) -> str:
 def _poll(
     check_fn: Callable[[], bool],
     *,
-    attempts: int = MAX_ATTEMPTS,
+    retries: int = MAX_RETRIES,
     delay: float = RETRY_DELAY_SECONDS,
 ) -> None:
-    """Call ``check_fn`` until it returns truthy or ``attempts`` is exhausted.
+    """Call ``check_fn`` until it returns truthy, at most ``retries + 1`` times.
 
-    Raises the last error from ``check_fn`` if every attempt fails.
+    Sleeps ``delay`` between checks, not after the last one, like TS
+    ``p-retry``. Raises the last error from ``check_fn`` if every check fails.
+    A ``TypeError`` or ``AttributeError`` is a bug in the check, not lag, and is
+    raised at once: p-retry does not retry a ``TypeError`` that is not a fetch
+    network failure, and these are its Python equivalents (#627).
     """
     last_error: BaseException | None = None
-    for _ in range(attempts):
+    for attempt in range(retries + 1):
         try:
             if check_fn():
                 return
+        except (TypeError, AttributeError):
+            raise
         except Exception as error:
             last_error = error
-        time.sleep(delay)
+        if attempt < retries:
+            time.sleep(delay)
     if last_error is not None:
         raise last_error
     msg = "polling exhausted without success or error"
@@ -116,7 +127,7 @@ def wait_for_table(
         source="system.tables",
         where=f"database = '{_quote(database)}' AND name = '{_quote(table_name)}'",
         want="present",
-        label=f"wait_for_table: {database}.{table_name} not yet visible",
+        label=f"waitForTable: {database}.{table_name} not yet visible",
         cluster=cluster,
     )
 
@@ -132,7 +143,7 @@ def wait_for_view(
             "AND engine LIKE '%View%'"
         ),
         want="present",
-        label=f"wait_for_view: {database}.{view_name} not yet visible",
+        label=f"waitForView: {database}.{view_name} not yet visible",
         cluster=cluster,
     )
 
@@ -158,7 +169,7 @@ def wait_for_dictionary(
         f"database = '{_quote(database)}' AND name = '{_quote(dictionary_name)}' "
         "AND engine = 'Dictionary'"
     )
-    label = f"wait_for_dictionary: {database}.{dictionary_name} not yet visible"
+    label = f"waitForDictionary: {database}.{dictionary_name} not yet visible"
     fanout = resolve_replica_fanout(client, cluster)
 
     def _check() -> bool:
@@ -186,7 +197,7 @@ def wait_for_column(
             f"AND name = '{_quote(column_name)}'"
         ),
         want="present",
-        label=f"wait_for_column: {database}.{table_name}.{column_name} not yet visible",
+        label=f"waitForColumn: {database}.{table_name}.{column_name} not yet visible",
         cluster=cluster,
     )
 
@@ -199,7 +210,7 @@ def wait_for_table_absent(
         source="system.tables",
         where=f"database = '{_quote(database)}' AND name = '{_quote(table_name)}'",
         want="absent",
-        label=f"wait_for_table_absent: {database}.{table_name} still present",
+        label=f"waitForTableAbsent: {database}.{table_name} still present",
         cluster=cluster,
     )
 
@@ -221,7 +232,7 @@ def wait_for_column_absent(
             f"AND name = '{_quote(column_name)}'"
         ),
         want="absent",
-        label=f"wait_for_column_absent: {database}.{table_name}.{column_name} still present",
+        label=f"waitForColumnAbsent: {database}.{table_name}.{column_name} still present",
         cluster=cluster,
     )
 
@@ -243,7 +254,7 @@ def wait_for_index(
             f"AND name = '{_quote(index_name)}'"
         ),
         want="present",
-        label=f"wait_for_index: {database}.{table_name}.{index_name} not yet visible",
+        label=f"waitForIndex: {database}.{table_name}.{index_name} not yet visible",
         cluster=cluster,
     )
 
@@ -265,7 +276,7 @@ def wait_for_index_absent(
             f"AND name = '{_quote(index_name)}'"
         ),
         want="absent",
-        label=f"wait_for_index_absent: {database}.{table_name}.{index_name} still present",
+        label=f"waitForIndex: {database}.{table_name}.{index_name} still present",
         cluster=cluster,
     )
 
@@ -287,7 +298,7 @@ def wait_for_projection(
             f"AND name = '{_quote(projection_name)}'"
         ),
         want="present",
-        label=f"wait_for_projection: {database}.{table_name}.{projection_name} not yet visible",
+        label=f"waitForProjection: {database}.{table_name}.{projection_name} not yet visible",
         cluster=cluster,
     )
 
@@ -310,7 +321,7 @@ def wait_for_projection_absent(
         ),
         want="absent",
         label=(
-            f"wait_for_projection_absent: {database}.{table_name}.{projection_name} "
+            f"waitForProjectionAbsent: {database}.{table_name}.{projection_name} "
             "still present"
         ),
         cluster=cluster,
@@ -335,7 +346,7 @@ def wait_for_constraint(
         source="system.tables",
         where=_constraint_where(database, table_name, constraint_name),
         want="present",
-        label=f"wait_for_constraint: {database}.{table_name}.{constraint_name} not yet visible",
+        label=f"waitForConstraint: {database}.{table_name}.{constraint_name} not yet visible",
         cluster=cluster,
     )
 
@@ -355,7 +366,7 @@ def wait_for_constraint_absent(
         where=_constraint_where(database, table_name, constraint_name),
         want="absent",
         label=(
-            f"wait_for_constraint_absent: {database}.{table_name}.{constraint_name} "
+            f"waitForConstraintAbsent: {database}.{table_name}.{constraint_name} "
             "still present"
         ),
         cluster=cluster,
@@ -441,14 +452,14 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
 
     Uses the retry budget of the other waits (21 checks, 0.5 s apart) and stops
     retrying at a 30 s deadline (TS also abandons a check that does not
-    return by then; a synchronous query here is bounded by the client's
-    receive timeout). On timeout the error names what was still different on
-    the last check.
+    return by then; a synchronous query here is not abandoned, and like every
+    chkit-py request it has no read timeout, #661). On timeout the error names
+    what was still different on the last check.
     """
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     detail = ""
     checks = 0
-    for attempt in range(MAX_ATTEMPTS + 1):
+    for attempt in range(MAX_RETRIES + 1):
         checks += 1
         try:
             mismatch = check()
@@ -457,11 +468,11 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
         if mismatch is None:
             return
         detail = mismatch
-        if attempt == MAX_ATTEMPTS or time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+        if attempt == MAX_RETRIES or time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
             break
         time.sleep(RETRY_DELAY_SECONDS)
     msg = (
-        f"wait_for_ddl_propagation: {subject} not applied on every replica "
+        f"waitForDDLPropagation: {subject} not applied on every replica "
         f"after {checks} checks: {detail}"
     )
     raise RuntimeError(msg)
@@ -520,10 +531,8 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
 
 
 _QUOTED_OR_BARE = r"(?:`(?:[^`\\]|\\.)*`|[^\s.`;]+)"
-# Python keeps the ``-- operation:`` / ``-- before-retry:`` marker lines in the
-# statements it executes (TS strips them), so leading line comments are skipped.
 _EXCHANGE_PATTERN = re.compile(
-    rf"^(?:\s*--[^\n]*(?:\n|$))*\s*EXCHANGE\s+TABLES\s+"
+    rf"^\s*EXCHANGE\s+TABLES\s+"
     rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})\s+AND\s+"
     rf"({_QUOTED_OR_BARE})\.({_QUOTED_OR_BARE})",
     re.IGNORECASE,

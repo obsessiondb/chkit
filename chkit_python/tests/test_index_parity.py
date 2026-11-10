@@ -19,6 +19,7 @@ from chkit.core.codec import codec_raw
 from chkit.core.model import (
     ChxValidationError,
     MaterializedViewDefinition,
+    SchemaDefinition,
     TableDefinition,
     collect_definitions_from_module,
     materialized_view,
@@ -28,7 +29,7 @@ from chkit.core.model import (
 )
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
-from chkit.core.validate import validate_definitions
+from chkit.core.validate import collect_definition_warnings, validate_definitions
 
 # =========================================================================
 # @chkit/core smoke
@@ -181,7 +182,7 @@ def test_plans_additive_table_changes_in_stable_order() -> None:
             engine="MergeTree()",
             primaryKey=["id"],
             orderBy=["id"],
-            settings={"index_granularity": 8192},
+            settings={"merge_with_ttl_timeout": 3600},
         )
     ]
     new = [
@@ -196,7 +197,7 @@ def test_plans_additive_table_changes_in_stable_order() -> None:
             engine="MergeTree()",
             primaryKey=["id"],
             orderBy=["id"],
-            settings={"index_granularity": 4096},
+            settings={"merge_with_ttl_timeout": 7200},
             indexes=[
                 {
                     "name": "idx_source",
@@ -235,7 +236,7 @@ def test_plans_non_additive_table_changes_with_risk_classification() -> None:
             primaryKey=["id"],
             orderBy=["id"],
             ttl="toDateTime(id)",
-            settings={"index_granularity": 8192, "old_setting": 1},
+            settings={"merge_with_ttl_timeout": 3600, "old_setting": 1},
             indexes=[
                 {"name": "idx_source", "expression": "source", "type": "set", "maxRows": 0, "granularity": 1},
                 {"name": "idx_old", "expression": "old_col", "type": "set", "maxRows": 0, "granularity": 1},
@@ -253,7 +254,7 @@ def test_plans_non_additive_table_changes_with_risk_classification() -> None:
             engine="MergeTree()",
             primaryKey=["id"],
             orderBy=["id"],
-            settings={"index_granularity": 4096},
+            settings={"merge_with_ttl_timeout": 7200},
             indexes=[
                 {"name": "idx_source", "expression": "lower(source)", "type": "set", "maxRows": 0, "granularity": 2},
             ],
@@ -725,7 +726,7 @@ def test_detects_index_change_when_structured_args_differ() -> None:
 
 
 def test_creates_tables_before_views_and_materialized_views() -> None:
-    new = [
+    new: list[SchemaDefinition] = [
         materialized_view(
             database="app",
             name="mv_events",
@@ -915,7 +916,7 @@ def test_plan_remove_codec_emits_REMOVE_CODEC_when_other_fields_unchanged() -> N
     )
 
 
-def test_plan_drop_codec_plus_other_change_emits_single_modify_no_separate_remove() -> None:
+def test_plan_drop_codec_plus_other_change_emits_remove_codec_then_modify() -> None:
     old = [
         table(
             database="app",
@@ -942,12 +943,138 @@ def test_plan_drop_codec_plus_other_change_emits_single_modify_no_separate_remov
             orderBy=["id"],
         )
     ]
+    # #465: MODIFY COLUMN without a codec keeps the stored one.
     plan = plan_diff(old, new)
-    assert len(plan.operations) == 1
-    assert plan.operations[0].type == "alter_table_modify_column"
-    sql = plan.operations[0].sql
-    assert "LowCardinality(String)" in sql
-    assert "REMOVE CODEC" not in sql
+    assert [(op.type, op.sql) for op in plan.operations] == [
+        ("alter_table_modify_column", "ALTER TABLE app.events MODIFY COLUMN `payload` REMOVE CODEC;"),
+        (
+            "alter_table_modify_column",
+            "ALTER TABLE app.events MODIFY COLUMN `payload` LowCardinality(String);",
+        ),
+    ]
+
+
+def _codec_events(columns: list[dict[str, Any]]) -> TableDefinition:
+    return table(
+        database="app",
+        name="events",
+        columns=[{"name": "id", "type": "UInt64"}, *columns],
+        engine="MergeTree()",
+        primaryKey=["id"],
+        orderBy=["id"],
+    )
+
+
+def test_plan_dropping_a_codec_and_a_comment_plans_the_two_removals_and_nothing_else() -> None:
+    plan = plan_diff(
+        [_codec_events([{"name": "n", "type": "UInt64", "comment": "old", "codec": {"kind": "ZSTD"}}])],
+        [_codec_events([{"name": "n", "type": "UInt64"}])],
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `n` REMOVE COMMENT;",
+        "ALTER TABLE app.events MODIFY COLUMN `n` REMOVE CODEC;",
+    ]
+
+
+def test_plan_bare_delta_gorilla_replaces_the_size_1_of_an_old_snapshot() -> None:
+    old = [_codec_events([
+        {"name": "ts", "type": "UInt64", "codec": [{"kind": "Delta", "size": 1}, {"kind": "ZSTD", "level": 1}]},
+        {"name": "value", "type": "Float64", "codec": {"kind": "Gorilla", "size": 1}},
+        {"name": "small", "type": "UInt8", "codec": [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}]},
+        {"name": "pinned", "type": "UInt64", "codec": [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}]},
+    ])]
+    new = [_codec_events([
+        {"name": "ts", "type": "UInt64", "codec": [{"kind": "Delta"}, {"kind": "ZSTD"}]},
+        {"name": "value", "type": "Float64", "codec": {"kind": "Gorilla"}},
+        {"name": "small", "type": "UInt8", "codec": [{"kind": "Delta"}, {"kind": "LZ4"}]},
+        {"name": "pinned", "type": "UInt64", "codec": [{"kind": "Delta", "size": 1}, {"kind": "LZ4"}]},
+    ])]
+    assert [op.sql for op in plan_diff(old, new).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `ts` UInt64 CODEC(Delta, ZSTD(1));",
+        "ALTER TABLE app.events MODIFY COLUMN `value` Float64 CODEC(Gorilla);",
+    ]
+
+
+@pytest.mark.parametrize("type_", ['Tuple(Float32, Float64)', 'Tuple (Float32, Float64)', 'Tuple(`a\\`x` Float32, b Float64)', 'Tuple(`a b` Float32, b Float64)', 'Tuple("a" Float32, b Float64)'])
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("comment", ["old", "new"])
+def test_plan_mixed_width_fpc_size_changes_survive_codec_and_comment_comparisons(
+    type_: str, raw: bool, comment: str
+) -> None:
+    def events(float_size: int, comment: str) -> TableDefinition:
+        return _codec_events([{
+            "name": "c", "type": type_, "comment": comment,
+            "codec": codec_raw(f"Gorilla, FPC(12, {float_size})") if raw else [
+                {"kind": "Gorilla"}, {"kind": "FPC", "level": 12, "floatSize": float_size}
+            ],
+        }])
+
+    assert [op.sql for op in plan_diff([events(4, "old")], [events(8, comment)]).operations] == [
+        f"ALTER TABLE app.events MODIFY COLUMN `c` {type_} "
+        f"COMMENT '{comment}' CODEC(Gorilla, FPC(12, 8));",
+    ]
+    assert plan_diff([events(4, "old")], [events(4, "old")]).operations == []
+
+
+@pytest.mark.parametrize("general", [False, True])
+@pytest.mark.parametrize("raw", [False, True])
+@pytest.mark.parametrize("comment", ["old", "new"])
+def test_double_delta_preserves_fpc_size_changes(general: bool, raw: bool, comment: str) -> None:
+    def events(float_size: int, comment: str) -> TableDefinition:
+        return _codec_events([{
+            "name": "c", "type": "Tuple(Float32, Float64)", "comment": comment,
+            "codec": codec_raw(f"FPC(12, {float_size}), DoubleDelta" + (", ZSTD" if general else "")) if raw else [
+                {"kind": "FPC", "level": 12, "floatSize": float_size}, {"kind": "DoubleDelta"},
+                *([{"kind": "ZSTD"}] if general else []),
+            ],
+        }])
+    suffix = (", ZSTD" if raw else ", ZSTD(1)") if general else ""
+    assert [op.sql for op in plan_diff([events(4, "old")], [events(8, comment)]).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `c` Tuple(Float32, Float64) "
+        f"COMMENT '{comment}' CODEC(FPC(12, 8), DoubleDelta{suffix});",
+    ]
+    assert plan_diff([events(4, "old")], [events(4, "old")]).operations == []
+
+
+@pytest.mark.parametrize("comment", ["old", "new"])
+def test_raw_verbatim_double_delta_size_change(comment: str) -> None:
+    def events(size: int, comment: str) -> TableDefinition:
+        return _codec_events([{
+            "name": "c", "type": "Tuple(UInt32, UInt64)", "comment": comment,
+            "codec": codec_raw(f"Delta, DoubleDelta({size})"),
+        }])
+    assert [op.sql for op in plan_diff([events(4, "old")], [events(8, comment)]).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `c` Tuple(UInt32, UInt64) "
+        f"COMMENT '{comment}' CODEC(Delta, DoubleDelta(8));",
+    ]
+
+
+def test_plan_codecs_clickhouse_stores_the_same_yield_no_operation() -> None:
+    pairs: list[tuple[str, Any, Any]] = [
+        ("String", {"kind": "ZSTD"}, {"kind": "ZSTD", "level": 1}),
+        ("String", {"kind": "LZ4HC"}, {"kind": "LZ4HC", "level": 0}),
+        ("UInt64", {"kind": "DoubleDelta", "size": 8}, {"kind": "DoubleDelta"}),
+        ("Float64", {"kind": "FPC", "level": 12, "floatSize": 8}, {"kind": "FPC"}),
+        ("String", [{"kind": "LZ4"}], {"kind": "LZ4"}),
+        ("String", codec_raw("NONE"), {"kind": "NONE"}),
+        ("UInt64", [{"kind": "Delta", "size": 8}, {"kind": "LZ4"}], [{"kind": "Delta"}, {"kind": "LZ4"}]),
+        ("UInt64", codec_raw("Delta(8), Default"), codec_raw("Delta, Default")),
+    ]
+    for type_, before, after in pairs:
+        old = [_codec_events([{"name": "c", "type": type_, "codec": before}])]
+        new = [_codec_events([{"name": "c", "type": type_, "codec": after}])]
+        assert plan_diff(old, new).operations == []
+
+
+def test_plan_removing_a_codec_while_changing_the_type_removes_it_first() -> None:
+    old = [_codec_events([
+        {"name": "n", "type": "UInt32", "comment": "c", "codec": [{"kind": "Delta"}, {"kind": "LZ4"}]}
+    ])]
+    new = [_codec_events([{"name": "n", "type": "UInt64", "comment": "c"}])]
+    assert [op.sql for op in plan_diff(old, new).operations] == [
+        "ALTER TABLE app.events MODIFY COLUMN `n` REMOVE CODEC;",
+        "ALTER TABLE app.events MODIFY COLUMN `n` UInt64 COMMENT 'c';",
+    ]
 
 
 def test_plan_equal_codec_across_canonicalization_yields_no_diff() -> None:
@@ -1074,7 +1201,7 @@ def test_flags_chain_of_only_delta_and_gcd() -> None:
     flagged = [
         i.message.split('"')[1]
         for i in validate_definitions(defs)
-        if i.code == "codec_chain_must_end_with_general"
+        if i.code == "codec_chain_no_compression"
     ]
     assert flagged == ["gcd", "delta", "delta_gcd"]
 
@@ -1333,7 +1460,7 @@ def test_diff_equivalent_refresh_yields_no_ops() -> None:
 
 
 def test_MODIFY_REFRESH_ranks_with_other_alters() -> None:
-    old = [
+    old: list[SchemaDefinition] = [
         table(
             database="analytics",
             name="daily_rollup",
@@ -1344,7 +1471,7 @@ def test_MODIFY_REFRESH_ranks_with_other_alters() -> None:
         ),
         _mv(refresh={"every": "1 HOUR"}),
     ]
-    new = [
+    new: list[SchemaDefinition] = [
         table(
             database="analytics",
             name="daily_rollup",
@@ -1448,44 +1575,44 @@ def test_validates_DEPENDS_ON_is_only_allowed_with_REFRESH_EVERY() -> None:
     assert "refresh_depends_on_requires_every" not in {i.code for i in with_every}
 
 
-def test_validates_non_APPEND_RMV_with_replicated_target() -> None:
-    issues = validate_definitions(
-        [
-            table(
-                database="analytics",
-                name="daily_rollup",
-                columns=[{"name": "day", "type": "Date"}],
-                engine="SharedMergeTree",
-                primaryKey=["day"],
-                orderBy=["day"],
-            ),
-            _mv(refresh={"every": "1 HOUR"}),
-        ]
+def _rollup_target(engine: str) -> SchemaDefinition:
+    return table(
+        database="analytics",
+        name="daily_rollup",
+        columns=[{"name": "day", "type": "Date"}],
+        engine=engine,
+        primaryKey=["day"],
+        orderBy=["day"],
     )
-    assert "refresh_append_required_for_replicated_target" in {i.code for i in issues}
 
 
-def test_no_issue_when_APPEND_RMV_targets_replicated_table() -> None:
-    issues = validate_definitions(
-        [
-            table(
-                database="analytics",
-                name="daily_rollup",
-                columns=[{"name": "day", "type": "Date"}],
-                engine="SharedMergeTree",
-                primaryKey=["day"],
-                orderBy=["day"],
-            ),
-            _mv(refresh={"every": "1 HOUR", "append": True}),
-        ]
-    )
-    assert "refresh_append_required_for_replicated_target" not in {
-        i.code for i in issues
+def _warns_replace_refresh(definitions: list[SchemaDefinition]) -> bool:
+    return "refresh_append_required_for_replicated_target" in {
+        i.code for i in collect_definition_warnings(definitions)
     }
 
 
-def test_no_issue_when_target_table_is_external() -> None:
-    issues = validate_definitions([_mv(refresh={"every": "1 HOUR"})])
-    assert "refresh_append_required_for_replicated_target" not in {
-        i.code for i in issues
-    }
+def test_non_APPEND_RMV_with_replicated_target_warns_and_plans() -> None:
+    definitions = [
+        _rollup_target("ReplicatedMergeTree"),
+        _mv(refresh={"every": "1 HOUR"}),
+    ]
+    assert validate_definitions(definitions) == []
+    assert _warns_replace_refresh(definitions)
+    assert "create_materialized_view" in [op.type for op in plan_diff([], definitions).operations]
+
+
+def test_no_warning_when_non_APPEND_RMV_targets_shared_table() -> None:
+    assert not _warns_replace_refresh(
+        [_rollup_target("SharedMergeTree"), _mv(refresh={"every": "1 HOUR"})]
+    )
+
+
+def test_no_warning_when_APPEND_RMV_targets_replicated_table() -> None:
+    assert not _warns_replace_refresh(
+        [_rollup_target("ReplicatedMergeTree"), _mv(refresh={"every": "1 HOUR", "append": True})]
+    )
+
+
+def test_no_warning_when_target_table_is_external() -> None:
+    assert not _warns_replace_refresh([_mv(refresh={"every": "1 HOUR"})])

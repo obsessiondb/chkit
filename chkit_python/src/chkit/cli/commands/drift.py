@@ -16,6 +16,7 @@ import typer
 
 from chkit.cli.command_target import (
     ServiceOption,
+    assert_index_granularity_matches_server,
     exit_no_target,
     open_client,
     resolve_plugin_executor,
@@ -23,6 +24,8 @@ from chkit.cli.command_target import (
 from chkit.cli.commands.drift_compare import ObjectDriftDetail, TableDriftDetail
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import read_snapshot
 from chkit.cli.plugin_runtime import load_plugin_runtime
@@ -32,7 +35,7 @@ from chkit.cli.table_scope import (
     scope_to_payload,
     table_keys_from_definitions,
 )
-from chkit.core.model import ChxConfigEnv
+from chkit.core.model import ChxConfigEnv, configured_index_granularity
 from chkit.plugins import ChxPlugin
 
 
@@ -46,29 +49,26 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     ] = False,
     table_selector: Annotated[
         str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help="Scope drift detection to tables matching the selector.",
-        ),
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
     ] = None,
     live: Annotated[  # noqa: ARG001
         bool,
         typer.Option(
             "--live",
-            help="No-op, kept for existing scripts: drift always reads the live server.",
+            help="No-op, kept for existing scripts: drift always reads the live server",
         ),
     ] = False,
-    # Accepted so existing scripts keep working; only generate and snapshot
-    # rebuild run the on_schema_loaded hooks that read them (as in TS).
-    force_shared_engines: ForceSharedEnginesOption = False,  # noqa: ARG001
-    no_shared_engines: NoSharedEnginesOption = False,  # noqa: ARG001
+    # Accepted so existing scripts keep working, and handed to on_init and
+    # get_context; only generate and snapshot rebuild run the on_schema_loaded
+    # hooks that act on them (as in TS).
+    force_shared_engines: ForceSharedEnginesOption = False,
+    no_shared_engines: NoSharedEnginesOption = False,
     service: ServiceOption = None,
 ) -> None:
     config = load_config(config_path, ChxConfigEnv(command="drift"))
     # Absolute, as TS resolves it, so ``snapshotFile`` reads the same in both CLIs.
     meta_dir = Path(os.path.abspath(config.meta_dir))
-    snapshot = read_snapshot(meta_dir)
+    snapshot = read_snapshot(meta_dir, index_granularity=configured_index_granularity(config))
     if snapshot is None:
         msg = "Snapshot not found. Run `chkit generate` before drift checks."
         if output_json:
@@ -105,11 +105,23 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         config_path=str(config_path or "clickhouse.config.py"),
         json_mode=output_json,
         service=service,
+        # As in TS, the hooks get the flags that were passed, keyed by long name.
+        flags=passed_flags(
+            {
+                "--config": str(config_path) if config_path is not None else None,
+                "--json": output_json,
+                "--table": table_selector,
+                "--force-shared-engines": force_shared_engines,
+                "--no-shared-engines": no_shared_engines,
+                "--service": service,
+            }
+        ),
     )
     if executor is None and config.clickhouse is None:
         msg = "clickhouse config is required for drift checks"
         exit_no_target("drift", msg, json_mode=output_json)
     with open_client(executor, config.clickhouse) as client:
+        assert_index_granularity_matches_server("drift", client, config, json_mode=output_json)
         payload_obj = build_drift_payload(
             client=client,
             meta_dir=meta_dir,
@@ -117,6 +129,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             database=config.clickhouse.database if config.clickhouse else None,
             fail_on_extra_objects=config.check.fail_on_extra_objects,
             scope=table_scope if table_scope.enabled else None,
+            index_granularity=configured_index_granularity(config),
         )
 
     payload_dict: dict[str, object] = {
@@ -181,7 +194,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 )
                 continue
             typer.echo(f"- {d.code} {d.object}")
-            if d.code in ("query_mismatch", "target_mismatch"):
+            if d.code in ("query_mismatch", "target_mismatch", "comment_mismatch"):
                 typer.echo(f"  expected={d.expected or ''}")
                 typer.echo(f"  actual={d.actual or ''}")
     if payload_obj.table_drift:

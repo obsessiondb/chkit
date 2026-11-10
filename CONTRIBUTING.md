@@ -26,7 +26,7 @@ bun run build        # build all packages
 
 E2E tests run against a live ClickHouse instance and require `CLICKHOUSE_HOST` (or `CLICKHOUSE_URL`) and `CLICKHOUSE_PASSWORD` to be set. See [CLAUDE.md](CLAUDE.md#testing) for the full list.
 
-Pull request CI starts its own ClickHouse service and seeds the test fixtures, including for contributions from forks. After changes land on `main`, CI also runs the test suite against ObsessionDB before deployment.
+Pull request CI starts its own ClickHouse service and seeds the test fixtures, including for contributions from forks. After changes land on `main`, CI also runs the test suite against ObsessionDB.
 
 ## Pull requests
 
@@ -38,6 +38,7 @@ Pull request CI starts its own ClickHouse service and seeds the test fixtures, i
   bun run changeset
   ```
 
+- For a user-facing chkit-py change, add a fragment in `chkit_python/changelog.d/` (`<issue>.<type>.md` or `+<slug>.<type>.md`, type `added`, `changed` or `fixed`) instead of editing `chkit_python/CHANGELOG.md`.
 - Registry template-only changes must not add package changesets or bump `chkit`. Use the independent template version, changelog, and generated artifact workflow in [CLAUDE.md](CLAUDE.md#registry-integration-releases). Shared runtime, CLI, plugin, and library behavior changes still need package changesets; mixed PRs release each affected surface separately.
 - `typecheck`, `lint`, `test`, and `build` must all pass.
 - Commit messages are free-form. Changesets capture the user-facing narrative.

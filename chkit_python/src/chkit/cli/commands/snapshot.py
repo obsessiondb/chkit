@@ -18,6 +18,7 @@ from typing import Annotated, Any
 
 import typer
 
+from chkit.cli.command_target import resolve_plugin_executor
 from chkit.cli.commands.generate_cutover import carry_retained_definitions
 from chkit.cli.commands.snapshot_output import (
     PreviousSnapshotReport,
@@ -25,15 +26,12 @@ from chkit.cli.commands.snapshot_output import (
     emit_snapshot_rebuild_output,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
 from chkit.cli.migration_store import read_snapshot, write_snapshot
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.schema_loader import load_schema_definitions_with_hooks
-from chkit.cli.shared_engine_flags import (
-    ForceSharedEnginesOption,
-    NoSharedEnginesOption,
-    shared_engine_hook_flags,
-)
+from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.snapshot_document import (
     ParsedSnapshotDocument,
     UnreadableSnapshotDocument,
@@ -46,6 +44,7 @@ from chkit.core.model import (
     ChxResolvedConfig,
     ChxValidationError,
     SchemaDefinition,
+    configured_index_granularity,
 )
 from chkit.core.snapshot import create_snapshot
 from chkit.core.validate import validate_definitions
@@ -76,7 +75,12 @@ def run(  # noqa: PLR0917 - typer maps each option to a parameter
     ] = None,
     table_selector: Annotated[
         str | None,
-        typer.Option("--table", "-t", help="Not supported: rebuild rewrites the whole snapshot."),
+        typer.Option(
+            "--table",
+            "-t",
+            metavar="<selector>",
+            help="Not supported: rebuild rewrites the whole snapshot",
+        ),
     ] = None,
     dryrun: Annotated[
         bool,
@@ -95,15 +99,35 @@ def run(  # noqa: PLR0917 - typer maps each option to a parameter
         plugin_runtime = load_plugin_runtime(
             [p for p in config.plugins if isinstance(p, ChxPlugin)]
         )
+        resolved_config_path = str(config_path or "clickhouse.config.py")
+        # As in TS, every hook gets the flags that were passed, keyed by long name.
+        hook_flags = passed_flags(
+            {
+                "--config": str(config_path) if config_path is not None else None,
+                "--dryrun": dryrun,
+                "--json": output_json,
+                "--force-shared-engines": force_shared_engines,
+                "--no-shared-engines": no_shared_engines,
+            }
+        )
+        # As in TS, on_init and get_context run, though rebuild sends no SQL.
+        executor = resolve_plugin_executor(
+            plugin_runtime,
+            config,
+            command="snapshot",
+            config_path=resolved_config_path,
+            json_mode=output_json,
+            service=None,
+            flags=hook_flags,
+        )
+        if executor is not None:
+            executor.close()
         exit_code = run_snapshot_rebuild(
             dryrun=dryrun,
             json_mode=output_json,
             config=config,
-            config_path=str(config_path or "clickhouse.config.py"),
-            flags=shared_engine_hook_flags(
-                force_shared_engines=force_shared_engines,
-                no_shared_engines=no_shared_engines,
-            ),
+            config_path=resolved_config_path,
+            flags=hook_flags,
             plugin_runtime=plugin_runtime,
         )
     except typer.Exit:
@@ -127,6 +151,7 @@ def run_snapshot_rebuild(
     """Rewrite snapshot.json from the schema definitions; returns the exit code."""
     meta_dir = Path(os.path.abspath(config.meta_dir))
     snapshot_file = meta_dir / "snapshot.json"
+    index_granularity = configured_index_granularity(config)
 
     loaded = load_schema_definitions_with_hooks(
         command="snapshot",
@@ -141,8 +166,8 @@ def run_snapshot_rebuild(
     # count and write that same list. A table that a keep-mode cutover retained
     # is declared in the snapshot only, so the rebuild keeps it, as `generate` does.
     definitions = carry_retained_definitions(
-        previous_definitions=_read_retained_source(meta_dir),
-        definitions=canonicalize_definitions(loaded),
+        previous_definitions=_read_retained_source(meta_dir, index_granularity),
+        definitions=canonicalize_definitions(loaded, index_granularity=index_granularity),
         drop_retained=[],
     )
 
@@ -162,12 +187,14 @@ def run_snapshot_rebuild(
         msg = f"{ChxValidationError(issues)}\n{details}"
         raise SnapshotCommandError(msg)
 
-    previous = _describe_previous_snapshot(snapshot_file, definitions)
+    previous = _describe_previous_snapshot(snapshot_file, definitions, index_granularity)
     up_to_date = previous.status == "parsed" and previous.change_count == 0
     # An unchanged snapshot is left alone, so a rebuild never churns `generatedAt`.
     written = not dryrun and not up_to_date
     if written:
-        write_snapshot(meta_dir, create_snapshot(definitions))
+        write_snapshot(
+            meta_dir, create_snapshot(definitions, index_granularity=index_granularity)
+        )
 
     emit_snapshot_rebuild_output(
         SnapshotRebuildPayload(
@@ -182,10 +209,10 @@ def run_snapshot_rebuild(
     return 0
 
 
-def _read_retained_source(meta_dir: Path) -> list[SchemaDefinition]:
+def _read_retained_source(meta_dir: Path, index_granularity: int) -> list[SchemaDefinition]:
     """The definitions of the current snapshot, or none when it is missing or unreadable."""
     try:
-        snapshot = read_snapshot(meta_dir)
+        snapshot = read_snapshot(meta_dir, index_granularity=index_granularity)
     except Exception:  # an unreadable snapshot is what rebuild repairs
         return []
     return list(snapshot.definitions) if snapshot is not None else []
@@ -217,7 +244,7 @@ def _assert_rebuild_invocation(args: list[str], table_selector: str | None) -> N
 
 
 def _describe_previous_snapshot(
-    snapshot_file: Path, next_definitions: list[SchemaDefinition]
+    snapshot_file: Path, next_definitions: list[SchemaDefinition], index_granularity: int
 ) -> PreviousSnapshotReport:
     if not snapshot_file.exists():
         return PreviousSnapshotReport(status="missing")
@@ -225,7 +252,7 @@ def _describe_previous_snapshot(
 
     parsed: ParsedSnapshotDocument
     try:
-        parsed = parse_snapshot_document(raw)
+        parsed = parse_snapshot_document(raw, index_granularity=index_granularity)
     except Exception:  # any shape error means "not a chkit snapshot"
         # Valid JSON whose entries cannot be read as chkit definitions. The rebuild
         # replaces it anyway; it just cannot be compared.

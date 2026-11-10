@@ -5,7 +5,12 @@ from __future__ import annotations
 import re
 
 from chkit.core.key_clause import is_plain_column_reference
+from chkit.core.sql_lexer import unescape_quoted
 from chkit.core.sql_scan import find_quote_end
+
+# ASCII control characters (incl. NUL). ClickHouse cannot round-trip them in a
+# name reliably, and they are never intentional in a schema object name.
+_CONTROL_CHARACTER = re.compile(r"[\x00-\x1f\x7f]")
 
 
 def quote_identifier(name: str) -> str:
@@ -31,6 +36,15 @@ def render_qualified_name(database: str, name: str) -> str:
     return f"{render_identifier(database)}.{render_identifier(name)}"
 
 
+def describe_invalid_identifier(name: str) -> str | None:
+    """Return why a name cannot be used as a ClickHouse identifier, if it can't."""
+    if len(name) == 0:
+        return "is empty"
+    if _CONTROL_CHARACTER.search(name):
+        return "contains a control character"
+    return None
+
+
 def unquote_identifiers(sql: str) -> str:
     """Replace every backtick-quoted identifier with its raw, unescaped name.
 
@@ -53,13 +67,3 @@ def unquote_identifiers(sql: str) -> str:
         out.append(char)
         i += 1
     return "".join(out)
-
-
-def unescape_quoted(body: str, quote: str = "`") -> str:
-    """Resolve backslash escapes and doubled quotes inside a quoted body."""
-    escaped_quote = re.escape(quote)
-    return re.sub(
-        rf"\\(.)|{escaped_quote}{escaped_quote}",
-        lambda match: match.group(1) if match.group(1) is not None else quote,
-        body,
-    )

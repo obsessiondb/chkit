@@ -1,5 +1,7 @@
 import { createRequire } from 'node:module'
+import { Readable } from 'node:stream'
 import {
+	AUTO_MINMAX_INDEX_PREFIX,
 	type ChxConfig,
 	compareCodePoints,
 	type ColumnDefinition,
@@ -12,10 +14,12 @@ import {
 	parseTextIndexParams,
 	parseVectorIndexArgs,
 	normalizeTextIndexSQL,
+	parseJsonEachRow,
+	stripWrappingParens,
 } from '@chkit/core'
 import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clickhouse/client'
 import { getLogger } from '@logtape/logtape'
-import { parseJsonEachRow, parseJsonResult } from './exact-json.js'
+import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
 	parseConstraintsFromCreateTableQuery,
@@ -48,6 +52,7 @@ export interface QueryStatus {
 export interface QueryStatusOptions {
 	afterTime?: string
 	everyReplica?: boolean
+	runningOnly?: boolean
 }
 
 export type { ClickHouseSettings }
@@ -55,6 +60,8 @@ export type { ClickHouseSettings }
 export interface ClickHouseInsertParams<T extends Record<string, unknown>> {
 	table: string
 	values: T[]
+	/** Encode rows through a stream instead of joining an entire INSERT into one string. */
+	stream?: boolean
 	compressed?: boolean
 	/** Per-insert settings, e.g. a stable `insert_deduplication_token`. */
 	settings?: ClickHouseSettings
@@ -88,6 +95,9 @@ export interface ClickHouseExecutor {
 	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
 	 *  its digits; the ObsessionDB console API returns every value as a string. */
 	query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]>
+	/** Rows as `query` decodes them, in batches as the response arrives, so a
+	 *  large result is never held whole. */
+	queryBatches?<T>(sql: string, settings?: ClickHouseSettings): AsyncIterable<T[]>
 	queryJson?<T extends Record<string, unknown>>(
 		sql: string,
 		settings?: ClickHouseSettings,
@@ -115,7 +125,9 @@ export interface ClickHouseExecutor {
 	 *    Useful when resubmitting with the same query_id to ignore stale entries from previous attempts.
 	 *  @param options.everyReplica - Fail when a replica cannot be read instead of skipping it, so a
 	 *    status other than 'running' means that no replica runs the query. Polls leave it unset and
-	 *    keep going while a replica is unavailable. */
+	 *    keep going while a replica is unavailable.
+	 *  @param options.runningOnly - Read only system.processes, so the status is 'running' or 'unknown'.
+	 *    A server creates system.query_log on its first log flush, so a fresh one has none yet. */
 	queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus>
 
 	/** Optional capability: FROM-clause source for cluster-aware system table polling.
@@ -145,6 +157,8 @@ export interface SchemaObjectRef {
 	kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
 	database: string
 	name: string
+	/** `system.tables.comment`, as ClickHouse decoded it; `''` when there is none. */
+	comment: string
 }
 
 export interface SystemTableRow {
@@ -153,6 +167,7 @@ export interface SystemTableRow {
 	engine: string
 	create_table_query?: string
 	primary_key?: string
+	comment?: string
 }
 
 export interface SystemColumnRow {
@@ -190,6 +205,7 @@ export interface IntrospectedTable {
 	projections: ProjectionDefinition[]
 	constraints?: TableConstraintDefinition[]
 	ttl?: string
+	comment?: string
 }
 
 type ClickHouseClient = ReturnType<typeof createClient>
@@ -215,7 +231,6 @@ export {
 export { canonicalizeSqlFragments } from './canonicalize.js'
 export { listViewDetails, parseMaterializedViewTarget, type IntrospectedView } from './view-details.js'
 export {
-	parseCommentFromCreateDictionaryQuery,
 	parseDictionaryAttributesFromCreateDictionaryQuery,
 	parseDictionaryPrimaryKeyFromCreateDictionaryQuery,
 	parseDictionaryRangeFromCreateDictionaryQuery,
@@ -334,13 +349,30 @@ function splitArgs(args: string): number[] {
 	return parts.map(Number)
 }
 
+/**
+ * The `add_minmax_index_for_*` settings make ClickHouse create hidden
+ * `auto_minmax_index_<column>` skip indexes. They show in
+ * system.data_skipping_indices but not in the table's CREATE, and recreating
+ * the table with them fails (reserved name), so pull and drift leave them out
+ * (#466). A user index of that name, allowed while those settings are off,
+ * appears in the CREATE and is kept.
+ */
+function isServerGeneratedIndex(name: string, createTableQuery: string | undefined): boolean {
+	if (!name.startsWith(AUTO_MINMAX_INDEX_PREFIX)) return false
+	const escaped = name.replace(/[.*+?^${}()|[\]\\]/g, '\\$&')
+	return !new RegExp(`\\bINDEX\\s+\`?${escaped}\`?\\s`, 'i').test(createTableQuery ?? '')
+}
+
 export function normalizeIndexFromSystemRow(
 	row: SystemSkippingIndexRow,
 ): SkipIndexDefinition {
 	const parsed = parseIndexType(row.type)
+	const expression = parsed.type === 'text' ? normalizeTextIndexSQL(row.expr) : normalizeSQLFragment(row.expr)
 	return {
 		name: row.name,
-		expression: parsed.type === 'text' ? normalizeTextIndexSQL(row.expr) : normalizeSQLFragment(row.expr),
+		// ObsessionDB keeps the parentheses chkit renders around the expression
+		// (`(s)`), stock ClickHouse stores `s`; read back the stock form (#512).
+		expression: stripWrappingParens(expression),
 		// UInt64 arrives as a JSON string when the server quotes 64-bit integers.
 		granularity: Number(row.granularity),
 		...parsed,
@@ -379,7 +411,9 @@ export function buildIntrospectedTables(
 			const columnRows = (columnsByTable.get(key) ?? []).sort(
 				(a, b) => a.position - b.position,
 			)
-			const indexRows = indexesByTable.get(key) ?? []
+			const indexRows = (indexesByTable.get(key) ?? []).filter(
+				(index) => !isServerGeneratedIndex(index.name, row.create_table_query),
+			)
 			return {
 				database: row.database,
 				name: row.name,
@@ -398,6 +432,7 @@ export function buildIntrospectedTables(
 				),
 				constraints: parseConstraintsFromCreateTableQuery(row.create_table_query),
 				ttl: parseTTLFromCreateTableQuery(row.create_table_query),
+				...(row.comment ? { comment: row.comment } : {}),
 			}
 		})
 		.sort((a, b) => {
@@ -588,6 +623,7 @@ export {
 export { allReplicas, resolveReplicaFanout, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
 export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
+export { assertServerIndexGranularity } from './index-granularity.js'
 
 function parseSummaryFromHeaders(
 	headers: Record<string, string | string[] | undefined>,
@@ -845,6 +881,45 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			}
 		},
+		async *queryBatches<T>(sql: string, settings?: ClickHouseSettings): AsyncGenerator<T[]> {
+			try {
+				const clickhouseSettings = await readSettings(settings)
+				const statement = sql.trim()
+				let end = statement.length
+				while (statement[end - 1] === ';') end--
+				// exec, not query: the client's JSONEachRow stream() drops a final
+				// row without a trailing newline, the case query() handles too.
+				const result = await client.exec({
+					query: `${statement.slice(0, end)} \nFORMAT JSONEachRow`,
+					http_headers: { 'X-DDL': '1' },
+					...(clickhouseSettings ? { clickhouse_settings: clickhouseSettings } : {}),
+				})
+				assertStreamedQuerySucceeded({
+					response_headers: result.response_headers,
+					query_id: result.query_id,
+					sql,
+				})
+				const decoder = new TextDecoder()
+				let pending = ''
+				for await (const chunk of result.stream) {
+					const text = pending + decoder.decode(chunk, { stream: true })
+					const end = text.lastIndexOf('\n') + 1
+					pending = text.slice(end)
+					const rows = parseJsonEachRow<T>(text.slice(0, end))
+					if (rows.length > 0) yield rows
+				}
+				const rows = parseJsonEachRow<T>(pending + decoder.decode())
+				if (rows.length > 0) yield rows
+				logProfiling(
+					profiler,
+					sql,
+					result.query_id,
+					parseSummaryFromHeaders(result.response_headers),
+				)
+			} catch (error) {
+				wrapConnectionError(error, config.url, config.username)
+			}
+		},
 		async queryJson<T extends Record<string, unknown>>(
 			sql: string,
 			settings?: ClickHouseSettings,
@@ -896,7 +971,7 @@ export function createExecutorWithClient(
 				}
 				const result = await insertClient.insert({
 					table: params.table,
-					values: params.values,
+					values: params.stream ? Readable.from(params.values) : params.values,
 					format: 'JSONEachRow',
 					...(isNonEmpty(params.columns) ? { columns: params.columns } : {}),
 					clickhouse_settings: { ...WRITE_SETTINGS, ...params.settings },
@@ -977,6 +1052,7 @@ export function createExecutorWithClient(
 						elapsedMs: Math.round(Number(proc.elapsed) * 1000),
 					}
 				}
+				if (options?.runningOnly) return { status: 'unknown' }
 
 				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
 				const queryLogFrom = from('query_log')
@@ -1037,11 +1113,11 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 		},
 		async listSchemaObjects(): Promise<SchemaObjectRef[]> {
 			const rows = await this.query<SystemTableRow>(
-				`SELECT database, name, engine
+				`SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND name NOT LIKE '_chkit_%'`,
+  AND NOT startsWith(name, '_chkit_')`,
 			)
 
 			const out: SchemaObjectRef[] = []
@@ -1052,6 +1128,7 @@ WHERE is_temporary = 0
 					kind,
 					database: row.database,
 					name: row.name,
+					comment: row.comment ?? '',
 				})
 			}
 			return out
@@ -1063,7 +1140,7 @@ WHERE is_temporary = 0
 				.map((dbName) => `'${dbName.replace(/'/g, "''")}'`)
 				.join(', ')
 			const tables = await this.query<SystemTableRow>(
-				`SELECT database, name, engine, create_table_query, primary_key
+				`SELECT database, name, engine, create_table_query, primary_key, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})`,

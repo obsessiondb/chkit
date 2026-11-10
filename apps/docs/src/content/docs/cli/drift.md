@@ -17,7 +17,7 @@ chkit drift [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--table <selector>` | string | — | Scope drift detection to matching tables |
+| `-t`, `--table <selector>` | string | — | Scope drift detection to matching tables |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -25,15 +25,17 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 1. Reads `snapshot.json` from `metaDir`. If no snapshot exists, the command fails with an error: _"Snapshot not found. Run 'chkit generate' before drift checks."_
 2. Requires `clickhouse` config. If missing, fails with: _"clickhouse config is required for drift checks."_
-3. Connects to ClickHouse and introspects the live schema
-4. Compares expected (snapshot) vs actual (live) objects, table shapes, and view and materialized view queries
-5. Reports drift at both the object level and the table level
+3. Connects to ClickHouse. If the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default), fails with a message that names the value to set.
+4. Introspects the live schema
+5. Compares expected (snapshot) vs actual (live) objects, table shapes, and view and materialized view queries
+6. Reports drift at both the object level and the table level
 
 ### What drift compares
 
 - **Objects:** every table, view, materialized view and dictionary in the snapshot exists in ClickHouse with the same kind. An object in the schema's databases that the snapshot does not list reports `extra_object`.
 - **Tables:** columns matched by name, with their type, default, default kind, comment and codec; the engine, `ORDER BY`, `PRIMARY KEY`, `PARTITION BY`, unique key and `TTL`; skip indexes, projections and constraints; and the settings the schema declares.
 - **Views and materialized views:** the query, and a materialized view's `TO` target; see [View and materialized view queries](#view-and-materialized-view-queries).
+- **Comments:** the comment of every table, view, materialized view and dictionary, compared with `system.tables.comment`. A changed comment reports `comment_mismatch` with the schema's comment in `expected` and the live one in `actual`. A changed column comment reports `changed_column`.
 
 ### What drift does not compare
 
@@ -43,7 +45,6 @@ A server-side change to any of these reports no drift, so neither `chkit drift` 
 - The `REFRESH` clause of a refreshable materialized view.
 - Column order: columns are matched by name.
 - Dictionary definitions: attributes, primary key, `SOURCE`, `LAYOUT`, `LIFETIME`, `RANGE` and settings.
-- Table comments.
 - Table settings the schema does not declare.
 
 Check these properties against `SHOW CREATE` output.
@@ -52,13 +53,15 @@ Check these properties against `SHOW CREATE` output.
 
 When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
 
+Whitespace in engine arguments is ignored, and so is the case of function names and operator keywords, which ClickHouse rewrites (`RAND()` reads back as `rand()`). Column names and strings in engine arguments are case-sensitive and compare as written: `CollapsingMergeTree(Sign)` does not match `CollapsingMergeTree(sign)`. Quotes the server leaves out when it stores the engine do not count: ``ReplacingMergeTree(`Ver`)`` matches `ReplacingMergeTree(Ver)`, and `Null` matches the stored `` `Null` ``. A name that needs its quotes, such as `` `my ver` ``, or one that would read as a literal without them, such as `` `true` ``, keeps them.
+
 ### Nullable columns
 
-Column types are compared as rendered SQL types. `type: 'Nullable(String)'` and `type: 'String', nullable: true` both render `Nullable(String)` and do not report drift. Changes to nullability or the underlying type still report `changed_column`.
+Column types are compared as rendered SQL types, in the spacing ClickHouse stores: `Decimal(10,2)` matches the stored `Decimal(10, 2)`, while text in quotes (an `Enum` label, a time zone) is compared as written. `type: 'Nullable(String)'` and `type: 'String', nullable: true` both render `Nullable(String)` and do not report drift. Changes to nullability or the underlying type still report `changed_column`.
 
 ### Expression normalization
 
-ClickHouse rewrites SQL expressions when it stores them — it spaces argument separators and operators, adds precedence parentheses, and rewrites `INTERVAL 5 YEAR` to `toIntervalYear(5)`. So a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` expression written as `cityHash64(a,b)` is stored as `cityHash64(a, b)`. To avoid reporting these as drift, `drift` normalizes expressions through ClickHouse's own formatter before comparing, so equivalent expressions match regardless of spelling. When the connected server can't format an expression, comparison falls back to plain text matching.
+ClickHouse rewrites SQL expressions when it stores them — it spaces argument separators and operators, adds precedence parentheses, and rewrites `INTERVAL 5 YEAR` to `toIntervalYear(5)`. So a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` expression written as `cityHash64(a,b)` is stored as `cityHash64(a, b)`. To avoid reporting these as drift, `drift` normalizes expressions through ClickHouse's own formatter before comparing, so equivalent expressions match regardless of spelling. This includes the expression of a [full-text index](/schema/dsl-reference/#full-text-indexes), so `NOT a AND b` matches the stored `(NOT a) AND b`; its tokenizer and other parameters are compared one by one. When the connected server can't format an expression, comparison falls back to plain text matching.
 
 ### View and materialized view queries
 
@@ -66,17 +69,21 @@ The query of each view and materialized view in the snapshot is compared with th
 
 A changed query reports `query_mismatch` and a changed target `target_mismatch`, with the compared values in `expected` and `actual`. A materialized view recreated on the server with an inner table instead of its `TO` target reports `target_mismatch` with an empty `actual`.
 
+### Keys and partition
+
+`ORDER BY`, `PRIMARY KEY`, the unique key and `PARTITION BY` are compared token by token with the clauses ClickHouse stores, ignoring whitespace, comments, one pair of parentheses around the whole clause, and how a name is quoted (`` `a\x41` `` and `aA` are the same column; a bare `NULL` is the literal, not a column named `null`). A quoted name keeps its commas and spaces: a key on a column named `a, b` is not the key on columns `a` and `b`, and a column named `a b` is not `ab`.
+
 ### SQL comments
 
 ClickHouse does not store SQL comments. chkit removes them from TTL, partition, skip index, and projection expressions, and from expression column defaults, before comparing them with the live table, so a comment that whitespace separates from the rest of the clause, such as one at the end of a line, does not read as drift. Comment markers inside a literal column default (`default: 'a -- b'`) are part of the value. See [SQL fragments](/schema/dsl-reference/#sql-fragments).
 
 ### Expression defaults
 
-Column defaults are compared token by token with `default_expression` in `system.columns`. chkit removes the comments from an expression default (`{ expression }` or `fn:`), then ignores whitespace, outer parentheses, and quotes around plain identifiers, so `now()+1` matches the stored `now() + 1`. A literal default is compared as a value: `default: 'web'` matches the stored `'web'`. ClickHouse stores some expressions in a canonical form, and an expression written another way reports `changed_column` although the default is the same: `NOW()` is stored as `now()`, `x::String` as `CAST(x, 'String')`, and `now() + INTERVAL 1 DAY` as `now() + toIntervalDay(1)`. Write expression defaults in the stored form; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
+Column defaults are compared token by token with `default_expression` in `system.columns`. chkit removes the comments from an expression default (`{ expression }` or `fn:`), then ignores whitespace, outer parentheses, and quotes around plain identifiers, so `now()+1` matches the stored `now() + 1`. A literal default is compared as a value, as `generate` compares it: `default: 'web'` matches the stored `'web'`, `default: 1e21` the stored `1e21`, and a large integer compares exactly. ClickHouse stores some expressions in a canonical form, and an expression written another way reports `changed_column` although the default is the same: `NOW()` is stored as `now()`, `x::String` as `CAST(x, 'String')`, and `now() + INTERVAL 1 DAY` as `now() + toIntervalDay(1)`. Write expression defaults in the stored form; see [`default`](/schema/dsl-reference/#default-string--number--boolean--sqlexpression-optional).
 
 ### Column codecs
 
-Column codecs are compared with `compression_codec` in `system.columns`. ClickHouse fills in some codec arguments and drops others when it stores a codec: `ZSTD` is stored as `ZSTD(1)`, `LZ4HC` as `LZ4HC(0)` (the default level, 9), `DoubleDelta(4)` as `DoubleDelta`, and `FPC(12, 8)` as `FPC(12)`. chkit compares both sides in this stored form, so these spellings do not report drift. A codec added, removed, or changed on the server reports `changed_column`. A [`raw` codec](/schema/dsl-reference/#codec-columncodecspec-optional) is compared as written, without whitespace. ClickHouse sets the size of a bare `Delta` or `Gorilla` from the column type, so a raw codec must give it (`Delta(8)`, not `Delta`).
+Column codecs are compared with `compression_codec` in `system.columns`. ClickHouse fills in some codec arguments and drops others when it stores a codec: `ZSTD` is stored as `ZSTD(1)`, `LZ4HC` as `LZ4HC(0)` (the default level, 9), `DoubleDelta(4)` as `DoubleDelta` outside verbatim chains, `FPC(12, 8)` as `FPC(12)` and `T64('byte')` as `T64`, and a bare `Delta` or `Gorilla` gets the byte width of the column's values (`Delta(8)` on `UInt64`; still bare on a `Tuple` of mixed widths). chkit compares both sides in this stored form, the same way `generate` compares codecs, so these spellings do not report drift. A codec added, removed, or changed on the server reports `changed_column`, including a changed `ZSTD` window (`ZSTD(3, 24)` to `ZSTD(3)`) or `Delta` width. The atoms of a [`raw` codec](/schema/dsl-reference/#codec-columncodecspec-optional) that name a typed codec are compared like it (`codec.raw('Delta, Default')` matches `Delta(8), Default` on a `UInt64` column); other atoms are compared as written, without whitespace.
 
 ### Drift reason codes
 
@@ -89,6 +96,7 @@ Column codecs are compared with `compression_codec` in `system.columns`. ClickHo
 | `kind_mismatch` | Object exists but is a different kind (e.g. table vs view) |
 | `query_mismatch` | A view or materialized view query differs from the snapshot |
 | `target_mismatch` | A materialized view writes to a different `TO` table than the snapshot |
+| `comment_mismatch` | A table, view, materialized view or dictionary comment differs from the snapshot |
 
 **Table-level drift:**
 
@@ -100,7 +108,7 @@ Column codecs are compared with `compression_codec` in `system.columns`. ClickHo
 | `setting_mismatch` | Table setting value differs |
 | `index_mismatch` | Index definition differs |
 | `ttl_mismatch` | TTL expression differs |
-| `engine_mismatch` | Table engine differs (after normalization) |
+| `engine_mismatch` | Table engine differs (after normalization). A `Shared*` engine matches the same engine without the prefix, and a `Replicated*` engine in the schema matches the `Shared*` engine that ObsessionDB and ClickHouse Cloud store it as, which drops the Keeper path and replica name |
 | `primary_key_mismatch` | Primary key expression differs |
 | `order_by_mismatch` | ORDER BY expression differs |
 | `partition_by_mismatch` | PARTITION BY expression differs |

@@ -2,8 +2,8 @@ import { mkdir } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import process from 'node:process'
 
-import type { ClickHouseExecutor, ClickHouseSettings } from '@chkit/clickhouse'
-import type { ResolvedChxConfig } from '@chkit/core'
+import { assertServerIndexGranularity, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
+import { configuredIndexGranularity, type ResolvedChxConfig } from '@chkit/core'
 
 import {
   defineFlags,
@@ -16,7 +16,7 @@ import {
 } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
 import { debug } from '../../runtime/debug.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { createJournalStore } from '../../runtime/journal-store.js'
 import {
   findChecksumMismatches,
@@ -29,9 +29,10 @@ import { resolveTableScope, tableKeysFromDefinitions } from '../../runtime/table
 
 import { abandonMigrationState, abandonReport, readAbandonableState } from './abandon.js'
 import { applyMigration } from './apply.js'
+import { findPendingNonSelectBarriers } from './barrier.js'
 import { scanDestructive } from './destructive.js'
 import { findEmptyMigrations } from './empty.js'
-import { emptyMigrationsError, MigrateError } from './errors.js'
+import { emptyMigrationsError, MigrateError, nonSelectBarrierError } from './errors.js'
 import {
   emitAbandonJson,
   emitApplySummaryJson,
@@ -63,6 +64,7 @@ import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
 
 const MIGRATE_FLAGS = defineFlags([
+  TABLE_FLAG,
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
   { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
   { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
@@ -153,6 +155,9 @@ const TERMINAL_PROMPT: AbandonPrompt = {
 async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | number> {
   const ctx = await prepareMigration(runCtx)
   if (ctx.abandonTarget !== undefined) return runAbandon(ctx, ctx.abandonTarget)
+  // A migration generated for another index_granularity default would create
+  // tables unlike the ones chkit planned for (#466).
+  await assertServerIndexGranularity(ctx.db, configuredIndexGranularity(ctx.config))
 
   const checksumExit = await runChecksumGate(ctx)
   if (checksumExit !== undefined) return checksumExit
@@ -165,6 +170,8 @@ async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | 
 
   const emptyExit = runEmptyMigrationGate(ctx, plan.emptyMigrations)
   if (emptyExit !== undefined) return emptyExit
+
+  await runBarrierGate(ctx, plan.pending)
 
   const confirmExit = await runConfirmGate(ctx)
   if (confirmExit !== undefined) return confirmExit
@@ -200,7 +207,9 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const journalStore = createJournalStore(db, config.clickhouse?.cluster)
   // --abandon only changes the journal and rejects --table, so it does not
   // read snapshot.json: a conflicted snapshot cannot block it.
-  const snapshot = abandonTarget === undefined ? await readSnapshot(metaDir) : null
+  const snapshot = abandonTarget === undefined
+    ? await readSnapshot(metaDir, { indexGranularity: configuredIndexGranularity(config) })
+    : null
   const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
   const mode: MigrateMode = executeRequested ? 'execute' : 'plan'
 
@@ -379,6 +388,19 @@ function runEmptyMigrationGate(ctx: MigrateContext, emptyMigrations: string[]): 
   throw emptyMigrationsError(emptyMigrations)
 }
 
+/**
+ * Gate: refuse to apply when a pending file marks a statement other than a
+ * SELECT `mode=barrier` (#634), before any migration runs; a plan-only run
+ * does not check.
+ */
+async function runBarrierGate(ctx: MigrateContext, pending: string[]): Promise<void> {
+  const { executeRequested, jsonMode, migrationsDir } = ctx
+  const applyPossible = executeRequested || (!jsonMode && !isBackgroundOrCI())
+  if (!applyPossible) return
+  const barriers = await findPendingNonSelectBarriers(migrationsDir, pending)
+  if (barriers.length > 0) throw nonSelectBarrierError(barriers)
+}
+
 /** Gate 2: in plan mode, stop unless the user confirms an interactive apply. */
 async function runConfirmGate(ctx: MigrateContext): Promise<number | undefined> {
   const { executeRequested, jsonMode } = ctx
@@ -401,7 +423,7 @@ async function runConfirmGate(ctx: MigrateContext): Promise<number | undefined> 
 async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promise<number | undefined> {
   const { migrationsDir, allowDestructive, config, jsonMode, tableScope } = ctx
   const destructive = await scanDestructive(migrationsDir, pending)
-  let destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
+  const destructiveAllowed = allowDestructive || config.safety?.allowDestructive === true
 
   if (destructive.migrations.length > 0 && !destructiveAllowed) {
     const error =
@@ -413,23 +435,20 @@ async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promi
 
     if (isBackgroundOrCI()) {
       printDestructiveOperationDetails(destructive.operations)
-      throw new Error(
+      console.error(
         `${error}\nDestructive migrations: ${destructive.migrations.join(', ')}\n` +
           'Non-interactive run detected. Pass --allow-destructive to proceed.',
       )
+      return 3
     }
 
     const confirmed = await confirmDestructiveExecution(destructive.operations)
     if (!confirmed) {
-      throw new Error(
+      console.error(
         `Destructive migration cancelled by user.\nDestructive migrations: ${destructive.migrations.join(', ')}`,
       )
+      return 3
     }
-    destructiveAllowed = true
-  }
-
-  if (destructive.migrations.length > 0 && !destructiveAllowed) {
-    throw new Error('Blocked destructive migration execution.')
   }
 
   return undefined

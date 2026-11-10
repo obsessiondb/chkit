@@ -11,6 +11,7 @@ from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     MigrationPlan,
     TableDefinition,
+    ValidationIssueCode,
     ViewDefinition,
     dictionary,
     materialized_view,
@@ -95,9 +96,8 @@ def test_trailing_comment_no_longer_swallows_the_statement_terminator() -> None:
     )
     statements = extract_executable_statements(render_migration_body(plan))
     assert len(statements) == len(plan.operations)
-    # The Python splitter keeps the leading marker line and drops the `;`.
-    assert any(st.endswith("CREATE VIEW IF NOT EXISTS app.a_first AS\nSELECT 1 AS x") for st in statements)
-    assert any(st.endswith("CREATE VIEW IF NOT EXISTS app.b_second AS\nSELECT 2 AS y") for st in statements)
+    assert "CREATE VIEW IF NOT EXISTS app.a_first AS\nSELECT 1 AS x;" in statements
+    assert "CREATE VIEW IF NOT EXISTS app.b_second AS\nSELECT 2 AS y;" in statements
 
 
 def test_commented_partition_by_and_ttl_keep_create_table_complete() -> None:
@@ -111,7 +111,7 @@ def test_commented_partition_by_and_ttl_keep_create_table_complete() -> None:
     assert len(extract_executable_statements(render_migration_body(plan))) == len(plan.operations)
     create_table = sql_of(plan, "create_table") or ""
     assert "PARTITION BY toYYYYMM(ts)\n" in create_table
-    assert create_table.endswith("\nTTL ts + toIntervalDay(30);")
+    assert create_table.endswith("\nTTL ts + toIntervalDay(30)\nSETTINGS index_granularity = 8192;")
 
 
 def test_commented_ttl_change_renders_complete_modify_ttl() -> None:
@@ -275,7 +275,7 @@ def with_ephemeral(**overrides: Any) -> TableDefinition:
     )
 
 
-def codes(definition: TableDefinition) -> list[str]:
+def codes(definition: TableDefinition) -> list[ValidationIssueCode]:
     # to_create_sql validates the definition as written; plan_diff, generate
     # and snapshot rebuild validate its canonical form. Both must agree.
     raw = [issue.code for issue in validate_definitions([definition])]

@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-obsessiondb",
-  "version": "0.2.0-beta.11",
+  "version": "0.2.0-beta.16",
   "description": "ObsessionDB managed ClickHouse integration plugin for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -37,7 +37,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src",
-    "test": "bun test src",
+    "test": "bun run ../../scripts/infra-up.ts && bun test src",
     "clean": "rm -rf dist"
   },
   "dependencies": {

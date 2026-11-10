@@ -64,7 +64,7 @@ Each transcript has one stable full-content key `[sourceId, meetingId]` and one 
 
 HTTP 200 writes the complete raw segment array and an `available` outcome. HTTP 403 or 404 updates only the outcome to `forbidden` or `not_found`, preserving earlier successful text. A successful empty array replaces the prior content with `[]`. Malformed transcript data fails without marking availability successful. Segments have no synthetic IDs.
 
-Provider fields are retained subject to ClickHouse native JSON normalization: explicit null paths and empty objects may be absent when queried, including a segment's `speaker: null`. These tables are not byte- or shape-exact archives. See [native JSON storage fidelity](/api-sync/destinations/).
+See [destinations](/api-sync/destinations/).
 
 Select successful snapshots with `raw.kind::String = 'transcript'`; join the latest outcome separately:
 

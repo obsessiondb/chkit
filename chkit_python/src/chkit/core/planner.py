@@ -4,9 +4,15 @@ from __future__ import annotations
 
 import json
 import re
+from collections.abc import Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
+from chkit.core.column_default import (
+    literal_default_fingerprint,
+    parse_column_default,
+    render_default,
+)
 from chkit.core.constraint import constraint_kind
 from chkit.core.diff_primitives import diff_by_name, diff_clauses, diff_settings
 from chkit.core.engine import is_distributed_engine
@@ -38,25 +44,33 @@ from chkit.core.object_dependencies import (
     order_by_dependencies,
 )
 from chkit.core.sql import (
+    column_codec_fingerprint,
+    column_type_fingerprint,
+    key_fingerprint,
     render_alter_add_column,
     render_alter_add_constraint,
     render_alter_add_index,
     render_alter_add_projection,
+    render_alter_comment_column,
     render_alter_drop_column,
     render_alter_drop_constraint,
     render_alter_drop_index,
     render_alter_drop_projection,
     render_alter_modify_column,
+    render_alter_modify_comment,
     render_alter_modify_refresh,
     render_alter_modify_setting,
     render_alter_modify_ttl,
     render_alter_remove_codec,
+    render_alter_remove_column_comment,
     render_alter_remove_column_expression,
     render_alter_reset_setting,
-    render_column_type,
     render_dictionary_sql,
     to_create_sql,
 )
+from chkit.core.sql_lexer import js_regex, js_trim
+from chkit.core.sql_normalizer import sql_expression_fingerprint
+from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
 from chkit.core.validate import assert_valid_definitions
 
@@ -171,57 +185,19 @@ def _push_create_database(
     )
 
 
-# Mirrors the JS `\s` class exactly (TS uses /\s/.test(char)); Python's
-# str.isspace() differs on U+0085/U+001C-001F (included) and U+FEFF (excluded),
-# which would let a pathological key expression diff differently across ports.
-_JS_WHITESPACE_RE = re.compile(
-    r"[\t\n\v\f\r \u00a0\u1680\u2000-\u200a\u2028\u2029\u202f\u205f\u3000\ufeff]"
-)
-
-
-def _strip_insignificant_formatting(token: str) -> str:
-    """Drop whitespace and identifier backticks for key-clause comparison.
-
-    ClickHouse normalizes both when it stores a key: ``toStartOfHour( ts )``
-    comes back as ``toStartOfHour(ts)``, and a column written bare as
-    ``user-id`` in config is stored/introspected quoted as ``` `user-id` ```.
-    Single/double-quoted string literals are semantic and preserved.
-    Comparison-only — never used to render DDL, so keyword expressions like
-    ``INTERVAL 1 HOUR`` and real identifier quoting keep their form when
-    emitted.
-    """
-    out: list[str] = []
-    quote: str | None = None
-    for i, char in enumerate(token):
-        if quote is not None:
-            out.append(char)
-            if char == quote and (i == 0 or token[i - 1] != "\\"):
-                quote = None
-            continue
-        if char in ("'", '"'):
-            quote = char
-            out.append(char)
-            continue
-        if char == "`":
-            continue
-        if _JS_WHITESPACE_RE.match(char) is not None:
-            continue
-        out.append(char)
-    return "".join(out)
-
-
-def _join_clause(values: list[str] | None) -> str:
-    return ",".join(_strip_insignificant_formatting(value) for value in values or [])
-
-
 def _requires_table_recreate(old: TableDefinition, new: TableDefinition) -> bool:
     return diff_clauses(
         [
             (old.engine, new.engine),
-            (_join_clause(old.primary_key), _join_clause(new.primary_key)),
-            (_join_clause(old.order_by), _join_clause(new.order_by)),
+            (key_fingerprint(old, old.primary_key), key_fingerprint(new, new.primary_key)),
+            (key_fingerprint(old, old.order_by), key_fingerprint(new, new.order_by)),
             (old.partition_by or "", new.partition_by or ""),
-            (_join_clause(old.unique_key), _join_clause(new.unique_key)),
+            (key_fingerprint(old, old.unique_key), key_fingerprint(new, new.unique_key)),
+            # ClickHouse refuses to change or reset these on an existing table (#466).
+            (
+                readonly_settings_fingerprint(old.settings),
+                readonly_settings_fingerprint(new.settings),
+            ),
         ]
     )
 
@@ -231,12 +207,22 @@ def _normalized_column(column: ColumnDefinition) -> dict[str, Any]:
 
     Compare what the DSL renders: inline ``Nullable(T)`` and ``nullable=True``
     are equivalent, while an additional or differently placed wrapper is not.
+    A literal default compares by the SQL it renders, so the literal ``7`` and
+    the expression ``'7'`` that pull reads back are the same default (#466).
+    An expression keeps its comments, which the snapshot records as written.
     """
     data = column.model_dump(mode="json", by_alias=False)
     data.pop("name", None)
     data.pop("renamed_from", None)
     data.pop("nullable", None)
-    data["type"] = render_column_type(column)
+    # ClickHouse stores ``Decimal(10,2)`` as ``Decimal(10, 2)`` (#466).
+    data["type"] = column_type_fingerprint(column)
+    if column.default is not None:
+        parsed = parse_column_default(column.default)
+        sql = parsed.sql if parsed.kind == "expression" else render_default(column.default)
+        data["default"] = literal_default_fingerprint(sql) or sql
+    # Codecs compare in the form ClickHouse stores them, like drift (#465).
+    data["codec"] = column_codec_fingerprint(column)
     return data
 
 
@@ -245,9 +231,15 @@ def _column_identity(column: ColumnDefinition) -> str:
     return json.dumps(_normalized_column(column), sort_keys=True, default=str)
 
 
-def _column_identity_without_codec(column: ColumnDefinition) -> str:
+def _column_identity_after_removals(column: ColumnDefinition, remove_comment: bool) -> str:
+    """A column without its codec, and without its comment.
+
+    The comment is left out when the plan removes it in its own operation.
+    """
     data = _normalized_column(column)
     data.pop("codec", None)
+    if remove_comment:
+        data.pop("comment", None)
     return json.dumps(data, sort_keys=True, default=str)
 
 
@@ -256,7 +248,14 @@ def _columns_equal(left: ColumnDefinition, right: ColumnDefinition) -> bool:
 
 
 def _index_identity(index: SkipIndexDefinition) -> str:
-    return json.dumps(index.model_dump(mode="json", by_alias=False), sort_keys=True, default=str)
+    # chkit renders ``INDEX name (expr)``. Stock ClickHouse stores ``s`` for
+    # ``(s)``, ObsessionDB keeps ``(s)``, so the parentheses around the whole
+    # expression are not compared (#512). Inside the rendered parentheses
+    # ``(a, b)`` and ``a, b`` are the same tuple, and ``((s))``, ``(s)`` and
+    # ``s`` the same expression.
+    data = index.model_dump(mode="json", by_alias=False)
+    data["expression"] = sql_expression_fingerprint(index.expression)
+    return json.dumps(data, sort_keys=True, default=str)
 
 
 def _indexes_equal(left: SkipIndexDefinition, right: SkipIndexDefinition) -> bool:
@@ -265,10 +264,32 @@ def _indexes_equal(left: SkipIndexDefinition, right: SkipIndexDefinition) -> boo
     return _index_identity(left) == _index_identity(right)
 
 
-def _is_codec_removal(old: ColumnDefinition, new: ColumnDefinition) -> bool:
-    if old.codec is None or new.codec is not None:
-        return False
-    return _column_identity_without_codec(old) == _column_identity_without_codec(new)
+def _is_comment_only_change(old: ColumnDefinition, new: ColumnDefinition) -> bool:
+    old_data = _normalized_column(old)
+    new_data = _normalized_column(new)
+    old_data.pop("comment", None)
+    new_data.pop("comment", None)
+    return json.dumps(old_data, sort_keys=True, default=str) == json.dumps(
+        new_data, sort_keys=True, default=str
+    )
+
+
+def _diff_comment(old: SchemaDefinition, new: SchemaDefinition) -> list[MigrationOperation]:
+    """A comment change on a table, view, materialized view or dictionary.
+
+    It is an ALTER of the object in place: recreating a materialized view would
+    lose the rows its source receives in between.
+    """
+    if old.comment == new.comment:
+        return []
+    return [
+        MigrationOperation(
+            type="alter_table_modify_comment",
+            key=f"{definition_key(new)}:comment",
+            risk="safe",
+            sql=render_alter_modify_comment(new),
+        )
+    ]
 
 
 def _same_default(left: ColumnDefaultValue | None, right: ColumnDefaultValue | None) -> bool:
@@ -357,7 +378,6 @@ def _diff_materialized_view(
 
     structural = (
         new.as_ != old.as_
-        or new.comment != old.comment
         or new.to.database != old.to.database
         or new.to.name != old.to.name
         or has_old_refresh != has_new_refresh
@@ -380,8 +400,8 @@ def _diff_materialized_view(
             ),
         ]
 
-    if has_new_refresh and not _refresh_equal(old.refresh, new.refresh):
-        return [
+    refresh_ops = (
+        [
             MigrationOperation(
                 type="alter_materialized_view_modify_refresh",
                 key=f"materialized_view:{new.database}.{new.name}:refresh",
@@ -389,8 +409,10 @@ def _diff_materialized_view(
                 sql=render_alter_modify_refresh(new),
             )
         ]
-
-    return []
+        if has_new_refresh and not _refresh_equal(old.refresh, new.refresh)
+        else []
+    )
+    return [*refresh_ops, *_diff_comment(old, new)]
 
 
 def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
@@ -400,14 +422,14 @@ def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
     if not is_distributed_engine(old.engine):
         return "danger"
     flush_on_detach = (old.settings or {}).get("flush_on_detach")
-    disabled = flush_on_detach is not None and str(flush_on_detach).strip().lower() in (
+    disabled = flush_on_detach is not None and js_trim(str(flush_on_detach)).lower() in (
         "0",
         "false",
     )
     return "danger" if disabled else "caution"
 
 
-def _diff_tables(
+def _diff_tables(  # noqa: PLR0915 — mirrors TS diffTables
     old: TableDefinition, new: TableDefinition
 ) -> tuple[list[MigrationOperation], list[ColumnRenameSuggestion]]:
     if is_kafka_engine(old.engine) or is_kafka_engine(new.engine):
@@ -504,6 +526,21 @@ def _diff_tables(
         old_kind = column_change.old_item.default_kind or "DEFAULT"
         new_kind = column_change.new_item.default_kind or "DEFAULT"
         key = f"table:{new.database}.{new.name}:column:{column_change.name}"
+        remove_comment = (
+            column_change.old_item.comment is not None and column_change.new_item.comment is None
+        )
+        if _is_comment_only_change(column_change.old_item, column_change.new_item):
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="safe",
+                    sql=render_alter_remove_column_comment(new, column_change.name)
+                    if remove_comment
+                    else render_alter_comment_column(new, column_change.new_item),
+                )
+            )
+            continue
         remove_expression = render_alter_remove_column_expression(
             new, column_change.new_item, column_change.old_item
         )
@@ -514,17 +551,41 @@ def _diff_tables(
                     type="alter_table_modify_column", key=key, risk="caution", sql=remove_expression
                 )
             )
-        sql = (
-            render_alter_remove_codec(new, column_change.name)
-            if _is_codec_removal(column_change.old_item, column_change.new_item)
-            else render_alter_modify_column(new, column_change.new_item)
+        # MODIFY COLUMN without COMMENT keeps the old comment.
+        if remove_comment:
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="safe",
+                    sql=render_alter_remove_column_comment(new, column_change.name),
+                )
+            )
+        # MODIFY COLUMN without a codec keeps the stored one: a removal is always
+        # REMOVE CODEC, its own operation before any other change (#465).
+        codec_removed = (
+            column_change.old_item.codec is not None and column_change.new_item.codec is None
         )
+        if codec_removed:
+            ops.append(
+                MigrationOperation(
+                    type="alter_table_modify_column",
+                    key=key,
+                    risk="caution",
+                    sql=render_alter_remove_codec(new, column_change.name),
+                )
+            )
+        # The removals above already reach the schema when nothing else changed.
+        if codec_removed and _column_identity_after_removals(
+            column_change.old_item, remove_comment
+        ) == _column_identity_after_removals(column_change.new_item, remove_comment):
+            continue
         ops.append(
             MigrationOperation(
                 type="alter_table_modify_column",
                 key=key,
                 risk="caution",
-                sql=sql,
+                sql=render_alter_modify_column(new, column_change.new_item),
                 warning=(
                     f"Changing the expression for {new.database}.{new.name}.{column_change.name} "
                     "does not rewrite stored historical values. "
@@ -685,6 +746,7 @@ def _diff_tables(
                 sql=render_alter_modify_ttl(new, new.ttl),
             )
         )
+    ops.extend(_diff_comment(old, new))
 
     rename_suggestions = _infer_column_rename_suggestions(new, added_columns, dropped_columns)
     return ops, rename_suggestions
@@ -803,9 +865,34 @@ def _dictionary_comparison_shape(
     definition: DictionaryDefinition, omit_source: bool
 ) -> dict[str, object]:
     shape = definition.model_dump(by_alias=True)
+    shape["lifetime"] = _dictionary_lifetime_fingerprint(definition.lifetime)
+    shape.pop("comment", None)
     if omit_source:
         shape.pop("source", None)
     return shape
+
+
+_LIFETIME_RANGE_RE = re.compile(
+    js_regex(r"^MIN\s+(\S+)\s+MAX\s+(\S+)$|^MAX\s+(\S+)\s+MIN\s+(\S+)$"), re.IGNORECASE
+)
+
+
+def _dictionary_lifetime_fingerprint(lifetime: str) -> str:
+    """The stored form of a ``LIFETIME`` (TS ``dictionaryLifetimeFingerprint``).
+
+    ClickHouse stores ``LIFETIME(300)`` as ``LIFETIME(MIN 0 MAX 300)`` and
+    ``LIFETIME(MAX 300 MIN 10)`` as ``LIFETIME(MIN 10 MAX 300)``, so a
+    dictionary pulled back compares by that stored form.
+    """
+    trimmed = js_trim(lifetime)
+    if re.fullmatch(r"\d+", trimmed, re.ASCII):
+        return f"MIN 0 MAX {trimmed}"
+    match = _LIFETIME_RANGE_RE.match(trimmed)
+    if match is None:
+        return trimmed
+    if match.group(1) is not None:
+        return f"MIN {match.group(1)} MAX {match.group(2)}"
+    return f"MIN {match.group(4)} MAX {match.group(3)}"
 
 
 def _diff_dictionary(
@@ -815,7 +902,7 @@ def _diff_dictionary(
     if _dictionary_comparison_shape(old, omit_source) == _dictionary_comparison_shape(
         new, omit_source
     ):
-        return []
+        return _diff_comment(old, new)
 
     return [
         MigrationOperation(
@@ -828,10 +915,13 @@ def _diff_dictionary(
 
 
 def plan_diff(
-    old_definitions: list[SchemaDefinition], new_definitions: list[SchemaDefinition]
+    old_definitions: Sequence[SchemaDefinition],
+    new_definitions: Sequence[SchemaDefinition],
+    *,
+    index_granularity: int | None = None,
 ) -> MigrationPlan:
-    old_canonical = canonicalize_definitions(old_definitions)
-    new_canonical = canonicalize_definitions(new_definitions)
+    old_canonical = canonicalize_definitions(old_definitions, index_granularity=index_granularity)
+    new_canonical = canonicalize_definitions(new_definitions, index_granularity=index_granularity)
     assert_valid_definitions(new_canonical)
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)
@@ -857,9 +947,11 @@ def plan_diff(
             continue
 
         if isinstance(new_def, ViewDefinition) and isinstance(matched, ViewDefinition):
-            if new_def.as_ != matched.as_ or new_def.comment != matched.comment:
+            if new_def.as_ != matched.as_:
                 _push_drop(operations, matched, "caution")
                 _push_create(operations, new_def, "caution")
+            else:
+                operations.extend(_diff_comment(matched, new_def))
             continue
 
         if isinstance(new_def, MaterializedViewDefinition) and isinstance(

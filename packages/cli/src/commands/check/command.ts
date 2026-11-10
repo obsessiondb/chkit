@@ -1,9 +1,12 @@
 import { mkdir } from 'node:fs/promises'
 
+import { assertServerIndexGranularity } from '@chkit/clickhouse'
+import { collectDefinitionWarnings, configuredIndexGranularity } from '@chkit/core'
+
 import { typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
 import { debug } from '../../runtime/debug.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { createJournalStore } from '../../runtime/journal-store.js'
 import { findChecksumMismatches, listMigrations, readSnapshot } from '../../runtime/migration-store.js'
@@ -22,10 +25,10 @@ const STRICT_FLAG = { name: '--strict', type: 'boolean', description: 'Enable al
 export const checkCommand: ChxPluginCommand = {
   name: 'check',
   description: 'Run policy checks for CI and release gates',
-  flags: [STRICT_FLAG],
+  flags: [TABLE_FLAG, STRICT_FLAG],
   async run(context): Promise<undefined | number> {
     const { flags, config, configPath, pluginRuntime, pluginContext } = context
-    const f = typedFlags(flags, [...GLOBAL_FLAGS, STRICT_FLAG] as const)
+    const f = typedFlags(flags, [...GLOBAL_FLAGS, TABLE_FLAG, STRICT_FLAG] as const)
     const strict = f['--strict'] === true
     const jsonMode = f['--json'] === true
     const tableSelector = f['--table']
@@ -38,6 +41,7 @@ export const checkCommand: ChxPluginCommand = {
     }
     const db = pluginContext.executor
     const database = config.clickhouse?.database
+    await assertServerIndexGranularity(db, configuredIndexGranularity(config))
 
     const journalStore = createJournalStore(db, config.clickhouse?.cluster)
     const files = await listMigrations(migrationsDir)
@@ -46,7 +50,7 @@ export const checkCommand: ChxPluginCommand = {
     const appliedNames = new Set(journal.applied.map((entry) => entry.name))
     const pending = files.filter((file) => !appliedNames.has(file))
     const checksumMismatches = await findChecksumMismatches(migrationsDir, journal)
-    const snapshot = await readSnapshot(metaDir)
+    const snapshot = await readSnapshot(metaDir, { indexGranularity: configuredIndexGranularity(config) })
     const tableScope = resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshot?.definitions ?? []))
 
     if (tableScope.enabled && tableScope.matchCount === 0) {
@@ -101,6 +105,7 @@ export const checkCommand: ChxPluginCommand = {
       tableScope,
       databaseMissing,
       database,
+      warnings: collectDefinitionWarnings(snapshot?.definitions ?? []).map((issue) => issue.message),
     }
     const result = evaluateCheck(inputs)
 

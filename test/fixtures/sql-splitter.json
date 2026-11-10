@@ -1,0 +1,297 @@
+{
+  "migration": {
+    "sql": "-- chkit-migration-format: v1\n-- generated-at: 2026-11-08T00:00:00.000Z\n-- operation-count: 2\n-- risk-summary: safe=2, caution=0, danger=0\n\n-- operation: create_table key=table:{database}.{table} risk=safe\nCREATE TABLE IF NOT EXISTS {database}.{table} (\n  id UInt64,\n  note String DEFAULT 'a -- b; it''s \\'c\\'',\n  `odd\\`--;name` String DEFAULT $tag$ -- not a comment; still the string $tag$\n) ENGINE = MergeTree ORDER BY id; -- trailing note\n\n-- operation: alter_table_add_column key=table:{database}.{table}:column:extra risk=safe\nALTER TABLE {database}.{table} /* block; -- kept */ ADD COLUMN extra String DEFAULT 'semi;colon' // don't; DROP TABLE {database}.{table}\n#! it's #562; DROP TABLE {database}.{table}\n-- last comment, no newline after it",
+    "statements": [
+      "CREATE TABLE IF NOT EXISTS {database}.{table} (\n  id UInt64,\n  note String DEFAULT 'a -- b; it''s \\'c\\'',\n  `odd\\`--;name` String DEFAULT $tag$ -- not a comment; still the string $tag$\n) ENGINE = MergeTree ORDER BY id;",
+      "ALTER TABLE {database}.{table} /* block; -- kept */ ADD COLUMN extra String DEFAULT 'semi;colon' // don't; DROP TABLE {database}.{table}\n#! it's #562; DROP TABLE {database}.{table};"
+    ]
+  },
+  "cases": [
+    {
+      "name": "a heredoc keeps its -- and ;",
+      "sql": "SELECT $$a -- b; c$$;",
+      "statements": [
+        "SELECT $$a -- b; c$$;"
+      ]
+    },
+    {
+      "name": "a tagged heredoc is one literal",
+      "sql": "SELECT $tag$x;$$;$tag$, $$y$$; SELECT 2",
+      "statements": [
+        "SELECT $tag$x;$$;$tag$, $$y$$;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a $ inside a name does not start a heredoc",
+      "sql": "SELECT a$$b FROM t; SELECT $$c$$",
+      "statements": [
+        "SELECT a$$b FROM t;",
+        "SELECT $$c$$;"
+      ]
+    },
+    {
+      "name": "an unclosed heredoc is not a literal",
+      "sql": "SELECT $$a; SELECT 1",
+      "statements": [
+        "SELECT $$a;",
+        "SELECT 1;"
+      ]
+    },
+    {
+      "name": "a backslash escapes a backtick in a quoted identifier",
+      "sql": "SELECT `a\\`;--b` FROM t; SELECT 2",
+      "statements": [
+        "SELECT `a\\`;--b` FROM t;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "-- and ; inside a double-quoted identifier",
+      "sql": "SELECT \"a--;b\" FROM t",
+      "statements": [
+        "SELECT \"a--;b\" FROM t;"
+      ]
+    },
+    {
+      "name": "escaped quotes keep the string open",
+      "sql": "SELECT 'it\\'s -- x; y', 'it''s -- z; w';\nSELECT 2;",
+      "statements": [
+        "SELECT 'it\\'s -- x; y', 'it''s -- z; w';",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a quote inside a -- comment opens no string",
+      "sql": "-- don't; split here\nSELECT 1;\nSELECT 2;",
+      "statements": [
+        "SELECT 1;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a -- comment without a trailing newline",
+      "sql": "SELECT 1 -- done",
+      "statements": [
+        "SELECT 1;"
+      ]
+    },
+    {
+      "name": "a -- comment between the lines of one statement",
+      "sql": "SELECT 1, -- one\n  2 -- two\nFROM t;",
+      "statements": [
+        "SELECT 1, \n  2 \nFROM t;"
+      ]
+    },
+    {
+      "name": "-- inside a block comment is kept",
+      "sql": "/* a -- b; c */ SELECT 1;",
+      "statements": [
+        "/* a -- b; c */ SELECT 1;"
+      ]
+    },
+    {
+      "name": "a $ inside a // or # comment starts no heredoc",
+      "sql": "SELECT 1; // costs $$\nSELECT $$a -- b\nc$$;\n# also $$\nSELECT 2;",
+      "statements": [
+        "SELECT 1;",
+        "// costs $$\nSELECT $$a -- b\nc$$;",
+        "# also $$\nSELECT 2;"
+      ]
+    },
+    {
+      "name": "a $$ in a // comment does not join the next statements",
+      "sql": "INSERT INTO t VALUES (1); // $$ example\nINSERT INTO t VALUES (2); -- $$ example\nINSERT INTO t VALUES (3);",
+      "statements": [
+        "INSERT INTO t VALUES (1);",
+        "// $$ example\nINSERT INTO t VALUES (2);",
+        "INSERT INTO t VALUES (3);"
+      ]
+    },
+    {
+      "name": "a quote inside a // comment opens no string",
+      "sql": "SELECT 1 // '; DROP TABLE victims; -- '\n;",
+      "statements": [
+        "SELECT 1 // '; DROP TABLE victims; -- ';"
+      ]
+    },
+    {
+      "name": "a ; or -- inside a // comment is part of the comment",
+      "sql": "// note -- x; DROP TABLE y\nSELECT 1",
+      "statements": [
+        "// note -- x; DROP TABLE y\nSELECT 1;"
+      ],
+      "legacyStatements": [
+        "// note \nSELECT 1;"
+      ]
+    },
+    {
+      "name": "-- inside a nested block comment is kept",
+      "sql": "/* outer /* inner */ -- */ SELECT 1;",
+      "statements": [
+        "/* outer /* inner */ -- */ SELECT 1;"
+      ]
+    },
+    {
+      "name": "a ; inside a nested block comment",
+      "sql": "/* a /* b */ ; */ SELECT 1; SELECT 2",
+      "statements": [
+        "/* a /* b */ ; */ SELECT 1;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a /* inside a // comment opens no block comment",
+      "sql": "// /* /* */\nINSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
+      "statements": [
+        "// /* /* */\nINSERT INTO t VALUES (1);",
+        "INSERT INTO t VALUES (2);"
+      ]
+    },
+    {
+      "name": "a /* inside a # comment opens no block comment",
+      "sql": "# /* /* */\nINSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
+      "statements": [
+        "# /* /* */\nINSERT INTO t VALUES (1);",
+        "INSERT INTO t VALUES (2);"
+      ]
+    },
+    {
+      "name": "a /* inside a #! comment opens no block comment",
+      "sql": "#! /* /* */\nINSERT INTO t VALUES (1); INSERT INTO t VALUES (2);",
+      "statements": [
+        "#! /* /* */\nINSERT INTO t VALUES (1);",
+        "INSERT INTO t VALUES (2);"
+      ]
+    },
+    {
+      "name": "block comment markers inside // comments open nothing",
+      "sql": "// /*\n// */ /* /* */\nSELECT 1; SELECT 2;",
+      "statements": [
+        "// /*\n// */ /* /* */\nSELECT 1;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a statement made only of comments is dropped",
+      "sql": "SELECT 1;\n-- only a comment\n;\n/* and a block */\n",
+      "statements": [
+        "SELECT 1;"
+      ]
+    },
+    {
+      "name": "a ; inside a // comment after code does not run the rest of the line",
+      "sql": "CREATE TABLE t (a UInt8) ENGINE = Memory // keep t; DROP TABLE t;\nSELECT 1;",
+      "statements": [
+        "CREATE TABLE t (a UInt8) ENGINE = Memory // keep t; DROP TABLE t;\nSELECT 1;"
+      ],
+      "legacyStatements": [
+        "CREATE TABLE t (a UInt8) ENGINE = Memory // keep t;",
+        "DROP TABLE t;",
+        "SELECT 1;"
+      ]
+    },
+    {
+      "name": "a ; inside a # comment after code does not run the rest of the line",
+      "sql": "SELECT 1 # x; DROP TABLE t;\nSELECT 2;",
+      "statements": [
+        "SELECT 1 # x; DROP TABLE t;\nSELECT 2;"
+      ],
+      "legacyStatements": [
+        "SELECT 1 # x;",
+        "DROP TABLE t;",
+        "SELECT 2;"
+      ]
+    },
+    {
+      "name": "a ; inside a #! comment does not cut it",
+      "sql": "#! shebang; x\nSELECT 1;",
+      "statements": [
+        "#! shebang; x\nSELECT 1;"
+      ],
+      "legacyStatements": [
+        "#! shebang;",
+        "x\nSELECT 1;"
+      ]
+    },
+    {
+      "name": "a comment-only // line that holds a ; is dropped",
+      "sql": "// DROP TABLE a; DROP TABLE b;\nSELECT 1;\n# old: DROP TABLE c; DROP TABLE d;\n",
+      "statements": [
+        "// DROP TABLE a; DROP TABLE b;\nSELECT 1;"
+      ],
+      "legacyStatements": [
+        "// DROP TABLE a;",
+        "DROP TABLE b;",
+        "SELECT 1;",
+        "# old: DROP TABLE c;",
+        "DROP TABLE d;"
+      ]
+    },
+    {
+      "name": "an apostrophe in a // comment does not join statements",
+      "sql": "ALTER TABLE t ADD COLUMN b UInt8 // don't touch\n;\nALTER TABLE t ADD COLUMN c UInt8;",
+      "statements": [
+        "ALTER TABLE t ADD COLUMN b UInt8 // don't touch;",
+        "ALTER TABLE t ADD COLUMN c UInt8;"
+      ],
+      "legacyStatements": [
+        "ALTER TABLE t ADD COLUMN b UInt8 // don't touch\n;\nALTER TABLE t ADD COLUMN c UInt8;;"
+      ]
+    },
+    {
+      "name": "an apostrophe and /* in a # comment do not join statements",
+      "sql": "SELECT 1 # it's /* a\n; SELECT 2;",
+      "statements": [
+        "SELECT 1 # it's /* a;",
+        "SELECT 2;"
+      ],
+      "legacyStatements": [
+        "SELECT 1 # it's /* a\n; SELECT 2;;"
+      ]
+    },
+    {
+      "name": "a // comment ends at \\n only",
+      "sql": "SELECT 1 // x\r; SELECT 2\n; SELECT 3",
+      "statements": [
+        "SELECT 1 // x\r; SELECT 2;",
+        "SELECT 3;"
+      ],
+      "legacyStatements": [
+        "SELECT 1 // x;",
+        "SELECT 2;",
+        "SELECT 3;"
+      ]
+    },
+    {
+      "name": "# before anything but a space or ! is not a comment",
+      "sql": "SELECT 1 #x; SELECT 2 #\tx; SELECT 3",
+      "statements": [
+        "SELECT 1 #x;",
+        "SELECT 2 #\tx;",
+        "SELECT 3;"
+      ]
+    },
+    {
+      "name": "a // comment without a trailing newline",
+      "sql": "SELECT 1; SELECT 2 // done; really",
+      "statements": [
+        "SELECT 1;",
+        "SELECT 2 // done; really;"
+      ],
+      "legacyStatements": [
+        "SELECT 1;",
+        "SELECT 2 // done;",
+        "really;"
+      ]
+    },
+    {
+      "name": "// and # inside strings and quoted names are text",
+      "sql": "SELECT '// a; b', `# c; d`, \"#! e; f\"; SELECT 2",
+      "statements": [
+        "SELECT '// a; b', `# c; d`, \"#! e; f\";",
+        "SELECT 2;"
+      ]
+    }
+  ]
+}

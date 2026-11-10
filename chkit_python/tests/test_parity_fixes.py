@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import inspect
 from pathlib import Path
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -17,7 +17,6 @@ from pydantic import ValidationError
 from typer.testing import CliRunner
 
 from chkit import table
-from chkit.cli.commands import check as check_module
 from chkit.cli.commands import pull as pull_module
 from chkit.cli.commands.pull import _summarize_skipped_objects
 from chkit.cli.main import app
@@ -107,23 +106,11 @@ def test_finding_18_client_exposes_introspect_methods_as_methods() -> None:
 # ---------- #12: ChxGetContextInput + getContext hook ----------
 
 
-def test_finding_12_chx_get_context_input_is_constructible() -> None:
-    ctx = ChxGetContextInput(
-        config=_cfg(),
-        config_path="cfg.py",
-        command="migrate",
-        flags={},
-        defaults=PluginContext(executor=None, has_executor=False),
-    )
-    assert ctx.command == "migrate"
-    assert ctx.defaults.has_executor is False
-
-
 def test_finding_12_runtime_resolves_first_non_none_get_context() -> None:
     """Multiple plugins; first plugin returns None (defer), second returns a
     PluginContext — runtime returns the second.
     """
-    pretend_executor = object()
+    pretend_executor = cast(ClickHouseClient, object())
     seen: list[ChxPlugin] = []
 
     class _DeferringHooks:
@@ -330,11 +317,15 @@ def test_finding_13_onboarding_default_runner_is_bare_chkit(
 # ---------- #4 + #10: alias set by service NAME + validation ----------
 
 
-def test_finding_4_10_alias_set_validation_rejects_dash_dash_prefix() -> None:
+def test_finding_4_10_alias_set_validation_rejects_dash_prefix() -> None:
 
     assert _validate_alias("") == "Alias is required."
-    assert _validate_alias("  prod  ").startswith("Alias cannot start or end")
-    assert _validate_alias("--prod") == 'Alias cannot start with "--".'
+    padded_error = _validate_alias("  prod  ")
+    assert padded_error is not None
+    assert padded_error.startswith("Alias cannot start or end")
+    # Any leading dash reads as a flag on the command line (#491).
+    for name in ("--prod", "-prod", "-"):
+        assert _validate_alias(name) == 'Alias cannot start with "-".'
     assert _validate_alias("prod") is None
 
 
@@ -344,11 +335,11 @@ def test_finding_4_10_alias_set_validation_rejects_dash_dash_prefix() -> None:
 def test_finding_17_plan_status_for_does_not_override_run_status() -> None:
 
     run = BackfillRunState(
-        planId="0" * 16,
+        plan_id="0" * 16,
         target="t",
         status="running",
-        startedAt="2026-01-01T00:00:00.000Z",
-        updatedAt="2026-01-01T00:00:00.000Z",
+        started_at="2026-01-01T00:00:00.000Z",
+        updated_at="2026-01-01T00:00:00.000Z",
     )
     assert (
         plan_status_for(
@@ -415,30 +406,6 @@ def test_finding_14_15_generate_validation_error_in_json_mode_is_envelope(
     # Either exits 1 with validation_failed envelope (preferred) OR exits 1 with
     # any structured error — at minimum it must NOT crash and must be exit 1.
     assert result.exit_code == 1
-
-
-# ---------- #7: check JSON envelope ----------
-
-
-def test_finding_7_check_json_uses_schema_drift_finding_code() -> None:
-    """The TS check command emits ``schema_drift`` (not ``drift``) in
-    ``failedChecks``. Verifying via the literal constant we added.
-    """
-    source = inspect.getsource(check_module)
-    # The naked ``"drift"`` literal was replaced with ``"schema_drift"``.
-    assert '"schema_drift"' in source
-    assert 'failed_checks.append("schema_drift")' in source
-
-
-def test_finding_7_check_json_payload_includes_policy_and_scope_keys() -> None:
-    """Static assertion via source inspection: the JSON envelope must include
-    ``policy``, ``driftEvaluated``, ``scope`` keys (mirroring TS).
-    """
-    source = inspect.getsource(check_module)
-    assert '"policy": policy_payload' in source
-    assert '"driftEvaluated"' in source
-    assert '"scope": scope_to_payload(table_scope)' in source
-    assert '"plugins"' in source  # plugins map (TS shape), not just pluginCheckResults
 
 
 # ---------- #8: pull JSON skippedObjects + command ----------

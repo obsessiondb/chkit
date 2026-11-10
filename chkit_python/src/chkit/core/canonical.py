@@ -28,8 +28,13 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import canonicalize_projection
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
 from chkit.core.sql_normalizer import normalize_engine, normalize_sql_fragment
+from chkit.core.table_settings import (
+    DEFAULT_INDEX_GRANULARITY,
+    with_default_index_granularity,
+    without_auto_minmax_indexes,
+)
 from chkit.core.text_index import canonicalize_text_index
 
 _T = TypeVar("_T")
@@ -51,18 +56,24 @@ def _sort_kind(kind: SchemaKind) -> int:
     return 3
 
 
+def _canonicalize_comment(comment: str | None) -> str | None:
+    # An empty comment is no comment: ClickHouse stores both as ''. Trimmed as
+    # TS ``String.prototype.trim`` does.
+    return (js_trim(comment) or None) if comment is not None else None
+
+
 def _canonicalize_column(column: ColumnDefinition) -> ColumnDefinition:
     type_value = column.type
     canon_type = js_trim(type_value) if isinstance(type_value, str) else type_value
     return column.model_copy(
         update={
             "default_kind": None if column.default_kind == "DEFAULT" else column.default_kind,
-            "name": column.name.strip(),
-            "renamed_from": column.renamed_from.strip()
+            "name": js_trim(column.name),
+            "renamed_from": js_trim(column.renamed_from)
             if column.renamed_from is not None
             else None,
             "type": canon_type,
-            "comment": column.comment.strip() if column.comment is not None else None,
+            "comment": _canonicalize_comment(column.comment),
             "codec": canonicalize_codec(column.codec) if column.codec is not None else None,
             # `SQLExpression` becomes the legacy `fn:` string, so snapshots,
             # plans, drift and chkit (TS) share one representation (#234).
@@ -102,11 +113,20 @@ def _normalize_optional_clause(value: str | None) -> str | None:
     return normalize_sql_fragment(value) or None
 
 
-def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
-    settings = _sorted_settings(definition.settings)
+def _canonicalize_table(
+    definition: TableDefinition, index_granularity: int | None
+) -> TableDefinition:
+    settings = _sorted_settings(
+        with_default_index_granularity(
+            definition.engine,
+            definition.settings,
+            DEFAULT_INDEX_GRANULARITY if index_granularity is None else index_granularity,
+        )
+    )
+    declared_indexes = without_auto_minmax_indexes(definition.indexes, settings)
     indexes = (
-        [_canonicalize_index(idx) for idx in _sort_by_name(definition.indexes)]
-        if definition.indexes is not None
+        [_canonicalize_index(idx) for idx in _sort_by_name(declared_indexes)]
+        if declared_indexes is not None
         else None
     )
     projections = (
@@ -122,14 +142,15 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
     renamed_from: TableRenamedFrom | None = None
     if definition.renamed_from is not None:
         renamed_from = TableRenamedFrom(
-            database=definition.renamed_from.database.strip()
+            database=js_trim(definition.renamed_from.database)
             if definition.renamed_from.database is not None
             else None,
-            name=definition.renamed_from.name.strip(),
+            name=js_trim(definition.renamed_from.name),
         )
 
-    normalized_order_by = normalize_key_columns(definition.order_by)
-    normalized_primary_key = normalize_key_columns(definition.primary_key)
+    column_names = {js_trim(column.name) for column in definition.columns}
+    normalized_order_by = normalize_key_columns(definition.order_by, column_names)
+    normalized_primary_key = normalize_key_columns(definition.primary_key, column_names)
     # TS canonical.ts: when primary_key is empty, fall back to order_by.
     # Without this, a snapshot written by TS (where omitted PK == order_by)
     # would never match a Python snapshot (where omitted PK == []).
@@ -137,14 +158,14 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
         normalized_primary_key = list(normalized_order_by)
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "renamed_from": renamed_from,
             "engine": normalize_engine(definition.engine),
             "columns": [_canonicalize_column(c) for c in definition.columns],
             "primary_key": normalized_primary_key,
             "order_by": normalized_order_by,
-            "unique_key": normalize_key_columns(definition.unique_key)
+            "unique_key": normalize_key_columns(definition.unique_key, column_names)
             if definition.unique_key is not None
             else None,
             "partition_by": _normalize_optional_clause(definition.partition_by),
@@ -153,7 +174,7 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
             "indexes": indexes,
             "projections": projections,
             "constraints": constraints,
-            "comment": definition.comment.strip() if definition.comment is not None else None,
+            "comment": _canonicalize_comment(definition.comment),
         }
     )
 
@@ -161,10 +182,10 @@ def _canonicalize_table(definition: TableDefinition) -> TableDefinition:
 def _canonicalize_view(definition: ViewDefinition) -> ViewDefinition:
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "as_": normalize_sql_fragment(definition.as_),
-            "comment": definition.comment.strip() if definition.comment is not None else None,
+            "comment": _canonicalize_comment(definition.comment),
         }
     )
 
@@ -177,7 +198,7 @@ _INTERVAL_UNIT_PATTERN: Final[re.Pattern[str]] = re.compile(
 def _canonicalize_interval(value: str | None) -> str | None:
     if value is None:
         return None
-    collapsed = re.sub(r"\s+", " ", value).strip()
+    collapsed = JS_WHITESPACE_RUN.sub(" ", js_trim(value))
 
     def _upper_singular(match: re.Match[str]) -> str:
         token = match.group(0).upper()
@@ -196,7 +217,7 @@ def _canonicalize_refresh(
     if refresh.depends_on is not None:
         depends_on = sorted(
             (
-                TableRef(database=dep.database.strip(), name=dep.name.strip())
+                TableRef(database=js_trim(dep.database), name=js_trim(dep.name))
                 for dep in refresh.depends_on
             ),
             key=lambda ref: f"{ref.database}.{ref.name}",
@@ -244,14 +265,14 @@ def _canonicalize_materialized_view(
     canonical_refresh = _canonicalize_refresh(definition.refresh)
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "to": TableRef(
-                database=definition.to.database.strip(),
-                name=definition.to.name.strip(),
+                database=js_trim(definition.to.database),
+                name=js_trim(definition.to.name),
             ),
             "as_": normalize_sql_fragment(definition.as_),
-            "comment": definition.comment.strip() if definition.comment is not None else None,
+            "comment": _canonicalize_comment(definition.comment),
             "refresh": canonical_refresh,
         }
     )
@@ -263,7 +284,7 @@ def _canonicalize_dictionary_attribute(
     type_value = attribute.type
     canon_type = js_trim(type_value) if isinstance(type_value, str) else type_value
     return attribute.model_copy(
-        update={"name": attribute.name.strip(), "type": canon_type}
+        update={"name": js_trim(attribute.name), "type": canon_type}
     )
 
 
@@ -277,40 +298,46 @@ def _canonicalize_dictionary(definition: DictionaryDefinition) -> DictionaryDefi
     renamed_from: TableRenamedFrom | None = None
     if definition.renamed_from is not None:
         renamed_from = TableRenamedFrom(
-            database=definition.renamed_from.database.strip()
+            database=js_trim(definition.renamed_from.database)
             if definition.renamed_from.database is not None
             else None,
-            name=definition.renamed_from.name.strip(),
+            name=js_trim(definition.renamed_from.name),
         )
 
     return definition.model_copy(
         update={
-            "database": definition.database.strip(),
-            "name": definition.name.strip(),
+            "database": js_trim(definition.database),
+            "name": js_trim(definition.name),
             "renamed_from": renamed_from,
             "attributes": [
                 _canonicalize_dictionary_attribute(a) for a in definition.attributes
             ],
-            "primary_key": normalize_key_columns(definition.primary_key),
+            "primary_key": normalize_key_columns(
+                definition.primary_key,
+                {js_trim(attribute.name) for attribute in definition.attributes},
+            ),
             "source": normalize_sql_fragment(definition.source),
             "layout": normalize_sql_fragment(definition.layout),
             "lifetime": normalize_sql_fragment(definition.lifetime),
             "range": DictionaryRange(
-                min=definition.range.min.strip(), max=definition.range.max.strip()
+                min=js_trim(definition.range.min), max=js_trim(definition.range.max)
             )
             if definition.range is not None
             else None,
             "settings": settings,
-            "comment": definition.comment.strip()
-            if definition.comment is not None
-            else None,
+            "comment": _canonicalize_comment(definition.comment),
         }
     )
 
 
-def canonicalize_definition(definition: SchemaDefinition) -> SchemaDefinition:
+def canonicalize_definition(
+    definition: SchemaDefinition, *, index_granularity: int | None = None
+) -> SchemaDefinition:
+    """``index_granularity`` is what a MergeTree table that does not declare it
+    gets: the server's MergeTree default, ``clickhouse.indexGranularity`` (8192
+    when None)."""
     if isinstance(definition, TableDefinition):
-        return _canonicalize_table(definition)
+        return _canonicalize_table(definition, index_granularity)
     if isinstance(definition, ViewDefinition):
         return _canonicalize_view(definition)
     if isinstance(definition, DictionaryDefinition):
@@ -322,10 +349,12 @@ def definition_key(definition: SchemaDefinition) -> str:
     return f"{definition.kind}:{definition.database}.{definition.name}"
 
 
-def canonicalize_definitions(definitions: Iterable[SchemaDefinition]) -> list[SchemaDefinition]:
+def canonicalize_definitions(
+    definitions: Iterable[SchemaDefinition], *, index_granularity: int | None = None
+) -> list[SchemaDefinition]:
     dedup: dict[str, SchemaDefinition] = {}
     for definition in definitions:
-        normalized = canonicalize_definition(definition)
+        normalized = canonicalize_definition(definition, index_granularity=index_granularity)
         dedup[definition_key(normalized)] = normalized
 
     return sorted(

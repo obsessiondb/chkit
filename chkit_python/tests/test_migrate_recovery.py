@@ -8,6 +8,7 @@ abandon-output,retry-output,empty,apply-resume}.test.ts`` and
 from __future__ import annotations
 
 import json
+import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -27,7 +28,11 @@ from chkit.cli.commands.migrate_abandon import (
     read_abandonable_state,
     status_before_abandon,
 )
-from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migration
+from chkit.cli.commands.migrate_apply import (
+    PROPAGATION_WAIT_PENDING,
+    ApplyMigrationInput,
+    apply_migration,
+)
 from chkit.cli.commands.migrate_empty import find_empty_migrations
 from chkit.cli.commands.migrate_errors import (
     MigrateError,
@@ -931,28 +936,27 @@ def test_split_sql_statements_keeps_comment_only_piece() -> None:
         ("/* only a comment */;", []),
         (
             "CREATE TABLE t (id UInt64) ENGINE = Memory;\n/* TODO */\n",
-            ["CREATE TABLE t (id UInt64) ENGINE = Memory"],
+            ["CREATE TABLE t (id UInt64) ENGINE = Memory;"],
         ),
         ("-- header\n/* block; with semicolon */\n-- more\n", []),
-        ("SELECT 1;\n/* a */ /* b */;\nSELECT 2;", ["SELECT 1", "SELECT 2"]),
+        ("SELECT 1;\n/* a */ /* b */;\nSELECT 2;", ["SELECT 1;", "SELECT 2;"]),
         ("# note\n;", []),
         ("#! shebang\n", []),
         ("// note\n;", []),
         ("/* a /* nested */ b */;", []),
-        ("SELECT 1;\n// trailing note", ["SELECT 1"]),
-        ("SELECT '/* not a comment */';", ["SELECT '/* not a comment */'"]),
-        ("SELECT `/*x*/` FROM t;", ["SELECT `/*x*/` FROM t"]),
-        ("SELECT '# a; b';\n/* end */", ["SELECT '# a; b'"]),
+        ("SELECT 1;\n// trailing note", ["SELECT 1;"]),
+        ("SELECT '/* not a comment */';", ["SELECT '/* not a comment */';"]),
+        ("SELECT `/*x*/` FROM t;", ["SELECT `/*x*/` FROM t;"]),
+        ("SELECT '# a; b';\n/* end */", ["SELECT '# a; b';"]),
         # `#x` is not a comment (ClickHouse needs `# ` or `#!`).
-        ("#x;", ["#x"]),
-        ("SELECT 1;\n/* never closed", ["SELECT 1", "/* never closed"]),
-        # ClickHouse reads the whole line as one comment; the splitter cuts it at
-        # the `;`, so the file keeps its old split.
+        ("#x;", ["#x;"]),
+        ("SELECT 1;\n/* never closed", ["SELECT 1;", "/* never closed;"]),
+        # ClickHouse reads the whole line as one comment, and so does the splitter (#562).
         (
             "// DROP TABLE a; DROP TABLE b;\nSELECT 1;",
-            ["// DROP TABLE a", "DROP TABLE b", "SELECT 1"],
+            ["// DROP TABLE a; DROP TABLE b;\nSELECT 1;"],
         ),
-        ("# old: DROP TABLE a; DROP TABLE b;\n", ["# old: DROP TABLE a", "DROP TABLE b"]),
+        ("# old: DROP TABLE a; DROP TABLE b;\n", []),
         (
             "-- chkit-migration-format: v1\n-- generated-at: 2026-01-01T00:00:00.000Z\n\n"
             "-- Empty migration scaffold. Write your SQL statements below.\n",
@@ -1026,7 +1030,6 @@ def _apply(
             file="m.sql",
             retry=retry,
             log=log or (lambda _line: None),
-            warn=lambda _line: None,
         )
     )
 
@@ -1055,8 +1058,8 @@ def test_apply_skips_completed_statement_after_partial_failure(tmp_path: Path) -
     store = FakeStore()
     with pytest.raises(RuntimeError, match="failed at statement 2 of 2") as info:
         _apply(_write(tmp_path, sql), client, store)
-    assert "boom: ALTER TABLE t ADD COLUMN b UInt64" in str(info.value)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN a UInt64", "ALTER TABLE t ADD COLUMN b UInt64"]
+    assert "boom: ALTER TABLE t ADD COLUMN b UInt64;" in str(info.value)
+    assert client.calls == ["ALTER TABLE t ADD COLUMN a UInt64;", "ALTER TABLE t ADD COLUMN b UInt64;"]
     assert store.state is not None
     assert [(o.operation_index, o.status) for o in store.state.operations] == [
         (0, "completed"),
@@ -1067,7 +1070,7 @@ def test_apply_skips_completed_statement_after_partial_failure(tmp_path: Path) -
     fail_b[0] = False
     client.calls.clear()
     _apply(tmp_path, client, store)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN b UInt64"]
+    assert client.calls == ["ALTER TABLE t ADD COLUMN b UInt64;"]
     assert len(store.appended) == 1
 
 
@@ -1084,8 +1087,245 @@ def test_apply_marks_completed_before_ddl_propagation(tmp_path: Path) -> None:
             if any(o.status == "completed" for o in state.operations):
                 client.events.append("completed-write")
 
-    _apply(_write(tmp_path, sql), client, _OrderStore())
-    assert client.events == ["command", "completed-write", "propagation-query"]
+    store = _OrderStore()
+    _apply(_write(tmp_path, sql), client, store)
+    # The second write clears the pending-wait marker once the wait passed (#513).
+    assert client.events == ["command", "completed-write", "propagation-query", "completed-write"]
+    assert store.state is not None
+    assert store.state.operations[0].last_error == ""
+
+
+# ---------- resume after a propagation wait timeout (#513) ----------
+
+_CREATE_T = "CREATE TABLE IF NOT EXISTS default.t (id UInt64) ENGINE = MergeTree ORDER BY id"
+_INSERT_T = "INSERT INTO default.t VALUES (1)"
+_CREATE_MARKER = "-- operation: create_table key=table:default.t risk=safe\n"
+_WAIT_SQL = f"{_CREATE_MARKER}{_CREATE_T};\n{_INSERT_T};\n"
+# The statement as sent: comments stripped and the `;` kept, as in TS (#486).
+_CREATE_SENT = f"{_CREATE_T};"
+
+
+class _PropagationClient:
+    """A single-replica target on which default.t is listed in system.tables
+    only while ``visible`` is set."""
+
+    def __init__(self, events: list[str], *, visible: bool) -> None:
+        self.events = events
+        self.visible = visible
+
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        self.events.append(f"command {statement}")
+
+    def query(self, _sql: str) -> QueryResult:
+        self.events.append("propagation-query")
+        return QueryResult(column_names=["x"], rows=[{"x": 1}] if self.visible else [])
+
+
+class _EventStore(FakeStore):
+    def __init__(self, events: list[str], state: MigrationRowState | None = None) -> None:
+        super().__init__(state)
+        self.events = events
+
+    def append_entry(self, entry: MigrationJournalEntry, *, chkit_version: str) -> None:
+        self.events.append("append")
+        super().append_entry(entry, chkit_version=chkit_version)
+
+
+@pytest.fixture
+def _fast_waits(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Let a propagation wait time out without sleeping between its checks."""
+    from chkit.clickhouse import ddl_propagation  # noqa: PLC0415
+
+    monkeypatch.setattr(
+        ddl_propagation, "time", SimpleNamespace(sleep=lambda _s: None, monotonic=time.monotonic)
+    )
+
+
+@pytest.mark.usefixtures("_fast_waits")
+def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: Path) -> None:
+    events: list[str] = []
+    client = _PropagationClient(events, visible=False)
+    store = _EventStore(events)
+    _write(tmp_path, _WAIT_SQL)
+
+    with pytest.raises(RuntimeError, match=r"waitForTable: default\.t not yet visible"):
+        _apply(tmp_path, cast(Any, client), store)
+    assert events[0] == f"command {_CREATE_SENT}"
+    assert [e for e in events if e.startswith("command")] == [f"command {_CREATE_SENT}"]
+    assert store.state is not None
+    assert [(o.operation_index, o.status, o.last_error) for o in store.state.operations] == [
+        (0, "completed", PROPAGATION_WAIT_PENDING)
+    ]
+    assert store.appended == []
+
+    client.visible = True
+    events.clear()
+    _apply(tmp_path, cast(Any, client), store)
+    assert events == ["propagation-query", f"command {_INSERT_T};", "append"]
+    assert [(o.operation_index, o.status, o.last_error) for o in store.state.operations] == [
+        (0, "completed", ""),
+        (1, "completed", ""),
+    ]
+    assert [(e.name, e.checksum) for e in store.appended] == [("m.sql", checksum_sql(_WAIT_SQL))]
+
+
+@pytest.mark.usefixtures("_fast_waits")
+def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Path) -> None:
+    # --abandon keeps every record as failed, so the next run restarts at
+    # statement 1 with the abandoned record of statement 2 still in the state.
+    def abandoned(index: int, was: str, marker: Marker | None = None) -> OperationState:
+        return op(
+            index, "failed", marker, last_error=f"abandoned via chkit migrate --abandon (was {was})"
+        )
+
+    events: list[str] = []
+    client = _PropagationClient(events, visible=False)
+    store = _EventStore(
+        events,
+        in_progress(
+            [
+                abandoned(0, "completed", Marker(type="create_table", key="table:default.t")),
+                abandoned(1, "failed"),
+            ],
+            checksum=checksum_sql(_WAIT_SQL),
+        ),
+    )
+    _write(tmp_path, _WAIT_SQL)
+
+    with pytest.raises(RuntimeError, match=r"waitForTable: default\.t not yet visible"):
+        _apply(tmp_path, cast(Any, client), store)
+    assert [e for e in events if e.startswith("command")] == [f"command {_CREATE_SENT}"]
+
+    client.visible = True
+    events.clear()
+    _apply(tmp_path, cast(Any, client), store)
+    assert events == ["propagation-query", f"command {_INSERT_T};", "append"]
+
+
+@pytest.mark.usefixtures("_fast_waits")
+def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None:
+    events: list[str] = []
+    client = _PropagationClient(events, visible=False)
+    store = _EventStore(events)
+    _write(tmp_path, _WAIT_SQL)
+
+    with pytest.raises(RuntimeError, match=r"waitForTable: default\.t not yet visible"):
+        _apply(tmp_path, cast(Any, client), store)
+    writes_after_first_run = len(store.writes)
+    events.clear()
+    with pytest.raises(RuntimeError, match=r"waitForTable: default\.t not yet visible"):
+        _apply(tmp_path, cast(Any, client), store)
+
+    assert len(events) > 1
+    assert all(e == "propagation-query" for e in events)
+    assert len(store.writes) == writes_after_first_run
+    assert store.state is not None
+    assert store.state.migration_completed is False
+    assert [(o.operation_index, o.status) for o in store.state.operations] == [(0, "completed")]
+    assert store.appended == []
+
+
+@pytest.mark.usefixtures("_fast_waits")
+def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
+    tmp_path: Path,
+) -> None:
+    # A completed statement whose wait passed is not waited for again, even
+    # when no later statement is recorded (--retry drops the record of an
+    # edited statement). Here a DROP that ran before its acknowledgement was
+    # lost removed what the CREATE's wait looks for: that wait could never pass.
+    drop = (
+        "-- operation: drop_table key=table:default.t risk=danger\nDROP TABLE IF EXISTS default.t"
+    )
+    sql = f"{_CREATE_MARKER}{_CREATE_T};\n{drop};\n"
+    events: list[str] = []
+    store = _EventStore(
+        events,
+        in_progress(
+            [
+                op(0, "completed", Marker(type="create_table", key="table:default.t")),
+            ],
+            checksum=checksum_sql(sql),
+        ),
+    )
+
+    _apply(_write(tmp_path, sql), cast(Any, _PropagationClient(events, visible=False)), store)
+    assert events == ["command DROP TABLE IF EXISTS default.t;", "propagation-query", "append"]
+
+
+# ---------- a SELECT barrier has no propagation wait ----------
+
+
+class _TwoReplicaClient:
+    """A two-replica target where no INSERT is running; every other read (a
+    propagation wait) is recorded."""
+
+    def __init__(self) -> None:
+        self.events: list[str] = []
+
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        self.events.append(f"command {statement}")
+
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        self.events.append("barrier read" if "system.processes" in sql else f"query {sql}")
+        return QueryResult(column_names=[], rows=[])
+
+
+@pytest.fixture
+def _two_replicas(single_replica: None, monkeypatch: pytest.MonkeyPatch) -> None:
+    # Depends on the module's single_replica pin so that it runs first and
+    # this fanout replaces it.
+    from chkit.clickhouse.replicas import ReplicaFanout  # noqa: PLC0415
+
+    fanout = ReplicaFanout(cluster="default", replicas=2)
+    for target in (
+        "chkit.clickhouse.ddl_propagation.resolve_replica_fanout",
+        "chkit.clickhouse.insert_barrier.resolve_replica_fanout",
+    ):
+        monkeypatch.setattr(target, lambda *_: fanout)
+
+
+@pytest.mark.usefixtures("_two_replicas")
+def test_apply_select_barrier_has_no_propagation_wait(tmp_path: Path) -> None:
+    sql = (
+        "-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier "
+        "risk=safe mode=barrier\n"
+        "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n"
+    )
+    client = _TwoReplicaClient()
+    store = FakeStore()
+    _apply(_write(tmp_path, sql), cast(Any, client), store)
+    assert client.events == ["barrier read"]
+    assert [(o.status, o.last_error) for state in store.writes for o in state.operations] == [
+        ("started", ""),
+        ("completed", ""),
+    ]
+    assert len(store.appended) == 1
+
+
+@pytest.mark.usefixtures("_two_replicas")
+def test_apply_refuses_a_barrier_a_plugin_rewrote(tmp_path: Path) -> None:
+    sql = (
+        "-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n"
+        "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n"
+        "-- operation: drop_table key=table:default.b risk=danger\n"
+        "DROP TABLE IF EXISTS default.b SYNC;\n"
+    )
+    client = _TwoReplicaClient()
+    store = FakeStore()
+    rewrite = _FakeRuntime(
+        lambda statements: ["EXCHANGE TABLES default.a AND default.b;", *statements[1:]]
+    )
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store, runtime=rewrite)
+    assert info.value.code == "barrier_not_select"
+    assert (
+        "  - m.sql, statement 1 of 2 (-- operation: exchange_tables key=table:default.a "
+        "risk=caution mode=barrier):\n"
+        "      EXCHANGE TABLES default.a AND default.b;"
+    ) in info.value.message
+    assert client.events == []
+    assert store.writes == []
+    assert store.appended == []
 
 
 def test_apply_refuses_edited_file_with_completed_statement(tmp_path: Path) -> None:
@@ -1106,7 +1346,7 @@ def test_apply_retry_rekeys_and_skips_completed(tmp_path: Path) -> None:
     store = FakeStore(in_progress([op(0, "completed"), op(1, "failed")], checksum="old"))
     _apply(_write(tmp_path, EDITED_SQL), client, store, retry=_retry_for(EDITED_SQL))
     new = checksum_sql(EDITED_SQL)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64"]
+    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64;"]
     assert store.writes[0].checksum == new
     assert [(o.operation_index, o.status) for o in store.writes[0].operations] == [
         (0, "completed"),
@@ -1154,8 +1394,8 @@ def test_apply_edited_file_without_progress_runs_from_statement_1(
         "completed, so it runs again from statement 1."
     ]
     assert client.calls == [
-        "ALTER TABLE t ADD COLUMN a UInt64",
-        "ALTER TABLE t ADD COLUMN b2 UInt64",
+        "ALTER TABLE t ADD COLUMN a UInt64;",
+        "ALTER TABLE t ADD COLUMN b2 UInt64;",
     ]
     assert store.writes[0].checksum == checksum_sql(EDITED_SQL)
     assert store.appended[0].checksum == checksum_sql(EDITED_SQL)
@@ -1181,7 +1421,7 @@ def test_apply_retry_that_fails_again_resumes_without_retry(tmp_path: Path) -> N
     fail[0] = False
     client.calls.clear()
     _apply(tmp_path, client, store)
-    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64"]
+    assert client.calls == ["ALTER TABLE t ADD COLUMN b2 UInt64;"]
     assert len(store.appended) == 1
 
 
@@ -1211,9 +1451,7 @@ def test_apply_retry_skips_kept_remove_and_runs_modify(tmp_path: Path) -> None:
     client = _RecordingClient()
     store = FakeStore(_remove_failed_state())
     _apply(_write(tmp_path, sql), client, store, retry=_retry_for(sql))
-    # Python keeps the `-- operation:` line in the statement it executes.
-    assert len(client.calls) == 1
-    assert client.calls[0].endswith(_MODIFY.rstrip(";"))
+    assert client.calls == [_MODIFY]
     assert store.appended[0].checksum == checksum_sql(sql)
 
 
@@ -1307,3 +1545,142 @@ def test_cli_abandon_text_mode_prints_usage_error(usage_project: Path) -> None:
     result = CliRunner().invoke(app, ["migrate", "--abandon", "x", "--table", "t"])
     assert result.exit_code == 1
     assert "--abandon cannot be combined with --table" in result.stderr
+
+
+# ---------- apply_migration with a state another release split differently (#562) ----------
+
+# Releases before #562 cut at a `;` inside a `//` comment: this file was
+# [a, DROP z, b, c] for them, and is [a…b, c] now.
+SPLIT_SQL = (
+    "ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+    "ALTER TABLE t ADD COLUMN b UInt64;\n"
+    "ALTER TABLE t ADD COLUMN c UInt64;\n"
+)
+
+
+def test_apply_refuses_a_state_whose_recorded_statements_changed_split(tmp_path: Path) -> None:
+    client = _RecordingClient()
+    # The old release ran a and DROP z, then b failed. Resuming by position
+    # would skip c, which never ran.
+    store = FakeStore(
+        state=in_progress(
+            [op(0, "completed"), op(1, "completed"), op(2, "failed")],
+            checksum=checksum_sql(SPLIT_SQL),
+        )
+    )
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    assert info.value.code == "statement_split_changed"
+    message = str(info.value)
+    assert message.startswith(
+        "Cannot resume m.sql: chkit 0.2.0-test recorded its partial run, and this chkit "
+        "(0.0.0-test) splits the file into different statements."
+    )
+    assert "The journal recorded statements 1, 2 as completed or started" in message
+    assert "chkit migrate --apply --abandon m.sql" in message
+    assert client.calls == []
+    assert store.writes == []
+    assert store.appended == []
+
+
+def test_apply_refuses_a_started_statement_and_names_a_state_without_a_release(
+    tmp_path: Path,
+) -> None:
+    client = _RecordingClient()
+    state = in_progress(
+        [op(0, "completed"), op(1, "started")], checksum=checksum_sql(SPLIT_SQL)
+    ).model_copy(update={"chkit_version": ""})
+    store = FakeStore(state=state)
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    message = str(info.value)
+    assert message.startswith(
+        "Cannot resume m.sql: an earlier chkit release recorded its partial run"
+    )
+    assert "The journal recorded statements 1, 2 as completed or started" in message
+    assert client.calls == []
+
+
+def test_apply_resumes_a_state_this_release_recorded(tmp_path: Path) -> None:
+    client = _RecordingClient()
+    state = in_progress(
+        [op(0, "completed"), op(1, "failed")], checksum=checksum_sql(SPLIT_SQL)
+    ).model_copy(update={"chkit_version": "0.0.0-test"})
+    store = FakeStore(state=state)
+    _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    assert client.calls == ["ALTER TABLE t ADD COLUMN c UInt64;"]
+    assert len(store.appended) == 1
+
+
+def test_apply_resumes_when_recorded_statements_are_the_same_in_both_splits(
+    tmp_path: Path,
+) -> None:
+    sql = (
+        "ALTER TABLE t ADD COLUMN a UInt64;\n"
+        "ALTER TABLE t ADD COLUMN b UInt64;\n"
+        "ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+        "ALTER TABLE t ADD COLUMN d UInt64;\n"
+    )
+    client = _RecordingClient()
+    store = FakeStore(
+        state=in_progress([op(0, "completed"), op(1, "failed")], checksum=checksum_sql(sql))
+    )
+    _apply(_write(tmp_path, sql), client, store)
+    assert client.calls == [
+        "ALTER TABLE t ADD COLUMN b UInt64;",
+        "ALTER TABLE t ADD COLUMN c UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+        "ALTER TABLE t ADD COLUMN d UInt64;",
+    ]
+    assert len(store.appended) == 1
+
+
+def test_apply_runs_an_abandoned_state_from_statement_1(tmp_path: Path) -> None:
+    client = _RecordingClient()
+    store = FakeStore(
+        state=in_progress(
+            [
+                op(0, "failed", last_error="abandoned via chkit migrate --abandon (was completed)"),
+                op(1, "failed", last_error="abandoned via chkit migrate --abandon (was completed)"),
+                op(2, "failed", last_error="abandoned via chkit migrate --abandon (was failed)"),
+            ],
+            checksum=checksum_sql(SPLIT_SQL),
+        )
+    )
+    _apply(_write(tmp_path, SPLIT_SQL), client, store)
+    assert client.calls == [
+        "ALTER TABLE t ADD COLUMN a UInt64 // keep; ALTER TABLE t DROP COLUMN z;\n"
+        "ALTER TABLE t ADD COLUMN b UInt64;",
+        "ALTER TABLE t ADD COLUMN c UInt64;",
+    ]
+    assert len(store.appended) == 1
+
+
+def test_apply_refuses_when_on_before_apply_removed_statements_of_a_file_the_splits_differ_on(
+    tmp_path: Path,
+) -> None:
+    """The journal indexes the statements on_before_apply returns: once a
+    plugin removes one, the old and new positions cannot be matched."""
+    sql = f"SET allow_experimental_x = 1;\n{SPLIT_SQL}"
+    client = _RecordingClient()
+    store = FakeStore(state=in_progress([op(0, "completed")], checksum=checksum_sql(sql)))
+    runtime = _FakeRuntime(lambda statements: [s for s in statements if not s.startswith("SET ")])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert "The journal recorded statement 1 as completed or started, which is not" in str(
+        info.value
+    )
+    assert client.calls == []
+
+
+def test_apply_refuses_when_on_before_apply_moved_statements_without_changing_their_count(
+    tmp_path: Path,
+) -> None:
+    sql = f"SET allow_experimental_x = 1;\n{SPLIT_SQL}"
+    client = _RecordingClient()
+    store = FakeStore(state=in_progress([op(0, "completed")], checksum=checksum_sql(sql)))
+    runtime = _FakeRuntime(lambda statements: [statements[1], statements[0], *statements[2:]])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert client.calls == []

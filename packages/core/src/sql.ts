@@ -11,31 +11,55 @@ import type {
   TableDefinition,
   ViewDefinition,
 } from './model.js'
-import { renderCodec } from './codec.js'
-import { renderDefault } from './column-default.js'
+import { codecFingerprint, renderCodec } from './codec.js'
+import { nullableColumnType, renderDefault } from './column-default.js'
 import { constraintExpression, constraintKind, renderConstraint } from './constraint.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import { isMergeTreeEngine, supportsSortOrder } from './engine.js'
 import { isKafkaEngine, renderKafkaSetting } from './kafka.js'
-import { isPlainColumnReference, normalizeKeyColumns } from './key-clause.js'
+import { isPlainColumnReference, keyClauseFingerprint, normalizeKeyColumns } from './key-clause.js'
 import { renderProjectionBody } from './projection.js'
-import { normalizeSQLFragment } from './sql-normalizer.js'
+import { normalizeSQLFragment, sqlExpressionFingerprint } from './sql-normalizer.js'
 import { TEXT_INDEX_GRANULARITY, renderTextIndexType } from './text-index.js'
 import { assertValidDefinitions } from './validate.js'
 import { renderVectorIndexType, vectorIndexGranularity } from './vector-index.js'
+
+/**
+ * A comment as a ClickHouse string literal. ClickHouse reads backslash escapes
+ * in string literals, so a backslash is doubled as well as a quote; the server
+ * then stores exactly the schema's text.
+ */
+function commentLiteral(comment: string): string {
+  return `'${comment.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
+}
 
 function renderColumn(col: ColumnDefinition): string {
   let out = `${quoteIdentifier(col.name)} ${renderColumnType(col)}`
   if (col.default !== undefined) out += ` ${col.defaultKind ?? 'DEFAULT'} ${renderDefault(col.default)}`
   else if (col.defaultKind === 'EPHEMERAL') out += ' EPHEMERAL'
-  if (col.comment) out += ` COMMENT '${col.comment.replace(/'/g, "''")}'`
+  if (col.comment) out += ` COMMENT ${commentLiteral(col.comment)}`
   if (col.codec) out += ` ${renderCodec(col.codec)}`
   return out
 }
 
 export function renderColumnType(column: Pick<ColumnDefinition, 'type' | 'nullable'>): string {
   const type = String(column.type).trim()
-  return column.nullable ? `Nullable(${type})` : type
+  return column.nullable ? nullableColumnType(type) : type
+}
+
+/** A column codec compared using its rendered type, including Nullable. */
+export function columnCodecFingerprint(column: Pick<ColumnDefinition, 'type' | 'nullable' | 'codec'>): string {
+  return codecFingerprint(column.codec, renderColumnType(column))
+}
+
+/**
+ * A column type in comparison form: its tokens, so `Decimal(10,2)` equals the
+ * `Decimal(10, 2)` ClickHouse stores, while text inside quotes (an Enum label,
+ * a time zone) is compared as written. Only for comparing: chkit renders and
+ * stores the type as declared.
+ */
+export function columnTypeFingerprint(column: Pick<ColumnDefinition, 'type' | 'nullable'>): string {
+  return sqlExpressionFingerprint(renderColumnType(column))
 }
 
 export function renderKeyClauseColumns(
@@ -50,6 +74,19 @@ export function renderKeyClauseColumns(
       columnNames.has(column) || isPlainColumnReference(column) ? quoteIdentifier(column) : column
     )
     .join(', ')
+}
+
+/**
+ * A key (`orderBy`, `primaryKey`, `uniqueKey`) in comparison form: its tokens
+ * as chkit renders them, so whitespace, identifier quoting and how the parts
+ * are split across entries (`['cityHash64(a', 'b)']`) carry no meaning (#176,
+ * #178), while a declared column named `a, b` stays one name rather than
+ * reading as columns `a` and `b` (#558). The planner and the cutover compare
+ * keys through it, so they agree on whether a key changed.
+ */
+export function keyFingerprint(def: TableDefinition, keys: string[] | undefined): string {
+  const columnNames = new Set(def.columns.map((column) => column.name))
+  return keyClauseFingerprint(renderKeyClauseColumns(keys ?? [], columnNames))
 }
 
 function renderIndexType(idx: SkipIndexDefinition): string {
@@ -120,7 +157,7 @@ function renderTableSQL(def: TableDefinition): string {
         .join(', ')}`
     )
   }
-  if (def.comment) clauses.push(`COMMENT '${def.comment.replace(/'/g, "''")}'`)
+  if (def.comment) clauses.push(`COMMENT ${commentLiteral(def.comment)}`)
 
   return `CREATE TABLE IF NOT EXISTS ${renderQualifiedName(def.database, def.name)}\n(\n  ${body}\n) ENGINE = ${def.engine}\n${clauses.join('\n')};`
 }
@@ -128,7 +165,7 @@ function renderTableSQL(def: TableDefinition): string {
 // Before `AS`, where ClickHouse itself stores it: after the query, the parser
 // would read `COMMENT` as an alias of a trailing `FROM <table>`.
 function renderViewComment(comment: string | undefined): string {
-  return comment ? ` COMMENT '${comment.replace(/'/g, "''")}'` : ''
+  return comment ? ` COMMENT ${commentLiteral(comment)}` : ''
 }
 
 function renderViewSQL(def: ViewDefinition): string {
@@ -229,7 +266,7 @@ export function renderDictionarySQL(def: DictionaryDefinition, replace = false):
   if (def.settings && Object.keys(def.settings).length > 0) {
     clauses.push(`SETTINGS(${renderDictionarySettings(def.settings)})`)
   }
-  if (def.comment) clauses.push(`COMMENT '${def.comment.replace(/'/g, "''")}'`)
+  if (def.comment) clauses.push(`COMMENT ${commentLiteral(def.comment)}`)
   return `${verb} ${renderQualifiedName(def.database, def.name)}\n(\n  ${attrs}\n)\n${clauses.join('\n')};`
 }
 
@@ -247,6 +284,24 @@ export function renderAlterAddColumn(def: TableDefinition, column: ColumnDefinit
 
 export function renderAlterModifyColumn(def: TableDefinition, column: ColumnDefinition): string {
   return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${renderColumn(column)};`
+}
+
+/** Sets a column comment without restating the column's type. */
+export function renderAlterCommentColumn(def: TableDefinition, column: ColumnDefinition): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} COMMENT COLUMN ${quoteIdentifier(column.name)} ${commentLiteral(column.comment ?? '')};`
+}
+
+/** MODIFY COLUMN without COMMENT keeps the old comment, so removing it needs its own statement. */
+export function renderAlterRemoveColumnComment(def: TableDefinition, columnName: string): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COLUMN ${quoteIdentifier(columnName)} REMOVE COMMENT;`
+}
+
+/**
+ * Sets the comment of a table, view, materialized view or dictionary in place
+ * (`''` removes it), so a comment change never recreates the object.
+ */
+export function renderAlterModifyComment(def: SchemaDefinition): string {
+  return `ALTER TABLE ${renderQualifiedName(def.database, def.name)} MODIFY COMMENT ${commentLiteral(def.comment ?? '')};`
 }
 
 /**

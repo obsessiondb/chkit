@@ -1,5 +1,73 @@
 # @chkit/plugin-ingest
 
+## 0.2.0-beta.16
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.16`, `@chkit/clickhouse@0.2.0-beta.16`
+
+## 0.2.0-beta.15
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.15`, `@chkit/clickhouse@0.2.0-beta.15`
+
+## 0.2.0-beta.14
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.14`, `@chkit/clickhouse@0.2.0-beta.14`
+
+## 0.2.0-beta.13
+
+### Patch Changes
+
+- 8c01425: `chkit ingest doctor` and `chkit ingest repair` stream the journal table instead of loading it whole, so their memory grows with the selected stream's history rather than with the whole journal.
+- 10c2676: With `clickhouse.cluster` set, `chkit ingest run` creates its journal as one `ReplicatedMergeTree` on every replica and refuses to run on a journal that is not.
+
+  - Breaking: on a cluster, a local journal an earlier version created now fails `ingest run`; copy its rows into a replicated journal and set `journalTable` to it.
+
+- bdf8a2d: A rate-limit hint too far in the future for a `Date` no longer fails the stream with "Invalid time value"; ingestion waits it out like any other long hint.
+- c467d57: Ingestion no longer silently drops row fields the destination has no column for: they land in a `_chkit_rest` JSON column when the table declares one, and the run logs their names.
+
+  - Breaking: without `_chkit_rest`, a yielded field with no column fails the stream; map it to a column or declare `_chkit_rest`.
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.13`, `@chkit/clickhouse@0.2.0-beta.13`
+
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- d48915f: Invalid checkpoint strategy ids or versions and invalid planned timestamp bounds now fail when a stream runs, and `Date` objects from another realm are no longer accepted.
+- 684428d: Invalid ingestion definitions and host limits, such as a missing `read` or a non-integer or out-of-range budget, are reported as configuration errors instead of failing the first run or ending it before the first fetch.
+
+  Breaking: declared tags may no longer start with `stream:` or `pipeline:`.
+
+- 0771d42: A reader's retained `context.fetch` and `context.attempt` now reject once the reader ends, a custom iterator whose `return()` throws no longer replaces the stream's outcome, and a large `Retry-After` no longer causes repeated one-millisecond waits and warnings.
+- 6f8a34c: Streams that yield chunks above roughly 125,000 rows no longer crash Node with "Maximum call stack size exceeded".
+- 9e55a96: Ingestion loading keeps rows and values intact in more cases:
+
+  - Invalid `maxRowsPerInsert` values are rejected instead of hanging or silently dropping rows, and replaying a batch with a different insert size can no longer skip unsaved rows.
+  - DateTime and DateTime64 columns accept ISO timestamps and `Date` objects, and JSONEachRow keeps non-finite floats and `Map`s; a non-finite number aimed at a non-float column now fails or lands as text instead of becoming zero or null.
+  - Missing declared ingestion metadata and unflattened Nested inputs are rejected.
+  - In native JSON columns, space-separated timestamp strings that used to be inferred as DateTime now stay String, so a path can hold both types across older and newer rows.
+  - Upgrade: batch hashes and deduplication tokens changed, so an interrupted run replayed across the upgrade can insert duplicates once; do not recover one run with both old and new loaders.
+
+- 4c0b805: Ingestion retries only transient failures, at the request:
+
+  - Network errors, timeouts and HTTP 408, 425, 429 and 5xx are retried; any other failure fails the stream at once, and the next run resumes from the last checkpoint instead of restarting the stream within the run.
+  - Readers get `context.fetch`, which shares the pipeline's request queue (a `Retry-After` pauses every request of the pipeline), retries transient failures, aborts after 30 seconds and throws `HttpError` for unsuccessful responses.
+  - `HttpError.withStatus(response, status, { retryAfterMs })` marks a failure the classification cannot see, such as a rate limit reported as 403.
+  - An invalid ingestion definition no longer breaks `generate` or `migrate`; it is reported when an ingest command selects the pipeline and by `chkit check` as `ingest_invalid_pipeline`.
+  - `@chkit/plugin-ingest/testing` adds `createSourceContext` and `createReadContext` for testing a client or reader directly.
+  - Breaking: `classifyError` is removed; map rate limits with `HttpError.withStatus`.
+  - Breaking: `FetchContext` is now `SourceContext`, `context.attempt` rejects with the original error, and `retry` moved to `runIngestion` without `shouldRetry`, `shouldConsumeRetry` or `factor`.
+  - Breaking: `FetchFailure`, `IngestConfigError`, `ErrorClassifier` and `FailureClass` are no longer exported.
+
+- 31702ac: `chkit ingest status` only reads, so read-only users can run it; without a journal table it reports `v0 (no checkpoint)` instead of creating one.
+- b58b1d2: New opt-in `stagedLoader` stages each batch, keeps one row per key and inserts only keys missing from a single-server MergeTree destination; `simpleLoader` remains the default.
+- Updated dependencies: `@chkit/core@0.2.0-beta.12`, `@chkit/clickhouse@0.2.0-beta.12`
+
 ## 0.2.0-beta.11
 
 ### Patch Changes

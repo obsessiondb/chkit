@@ -28,6 +28,7 @@ interface FakeExecutor {
 // The server clock differs from the client clock (FIXED_NOW) on purpose: the
 // query_log bound must come from the server.
 const SERVER_NOW_MS = 1_700_000_100_000
+const SERVER_DATABASE = 'analytics'
 // SERVER_NOW_MS minus the 2 s skew margin.
 const SUBMISSION_BOUND = '2023-11-14T22:14:58.000Z'
 // How long the attempt an attach finds has been running.
@@ -38,7 +39,8 @@ const ATTACH_BOUND = '2023-11-14T22:14:28.000Z'
 function createFakeExecutor(
   // An Error is thrown by the queryStatus call it answers.
   statuses: Array<QueryStatus | Error>,
-  options: { failSubmit?: () => Error } = {},
+  // deferSubmit settles the submit only after the polls of a no-sleep test ran.
+  options: { failSubmit?: () => Error; deferSubmit?: boolean } = {},
 ): FakeExecutor {
   const statusCalls: StatusCall[] = []
   const submitCalls: SubmitCall[] = []
@@ -48,11 +50,12 @@ function createFakeExecutor(
   const db = {
     async query(sql: string) {
       events.push(`query: ${sql}`)
-      return [{ now_ms: String(SERVER_NOW_MS) }]
+      return [{ now_ms: String(SERVER_NOW_MS), database: SERVER_DATABASE }]
     },
     async submit(sql: string, queryId?: string, settings?: ClickHouseSettings) {
       events.push('submit')
       submitCalls.push({ sql, queryId, ...(settings ? { settings } : {}) })
+      if (options.deferSubmit) await new Promise((resolve) => setTimeout(resolve, 10))
       if (options.failSubmit) throw options.failSubmit()
       return queryId ?? 'fallback-id'
     },
@@ -100,7 +103,7 @@ function createFakeJournalStore(initial: MigrationRowState | null = null): FakeS
   return { store, writes }
 }
 
-const SERVER_TIME_QUERY = 'query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms'
+const SERVER_TIME_QUERY = 'query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database'
 
 const NO_SLEEP = (_ms: number) => Promise.resolve()
 const FIXED_NOW = () => 1_700_000_000_000
@@ -115,6 +118,14 @@ const BASE_INPUT = {
   beforeRetry: null,
 } as const
 
+// The id a statement with no journal row gets on SERVER_DATABASE.
+const QUERY_ID = makeDeterministicQueryId(
+  SERVER_DATABASE,
+  '_chkit_migrations',
+  BASE_INPUT.migrationName,
+  BASE_INPUT.statementIndex,
+)
+
 function freshStateWith(op: OperationState): MigrationRowState {
   return {
     name: BASE_INPUT.migrationName,
@@ -127,17 +138,24 @@ function freshStateWith(op: OperationState): MigrationRowState {
 }
 
 describe('applyAsyncStatement', () => {
-  test('produces a deterministic UUID-shaped query_id from (migration, statement_index)', () => {
-    const a = makeDeterministicQueryId('20260526_load.sql', 0)
-    const b = makeDeterministicQueryId('20260526_load.sql', 0)
-    const c = makeDeterministicQueryId('20260526_load.sql', 1)
-    expect(a).toBe(b)
-    expect(a).not.toBe(c)
+  test('produces a deterministic UUID-shaped query_id from (database, journal table, migration, statement_index)', () => {
+    const a = makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_load.sql', 0)
+    expect(makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_load.sql', 0)).toBe(a)
+    // chkit-py builds the same id (test_migrate_async_apply.py).
+    expect(a).toBe('ff8138de-dce9-96af-69dc-cd30f8f4a7bb')
+    const others = [
+      makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_load.sql', 1),
+      makeDeterministicQueryId('staging', '_chkit_migrations', '20260526_other.sql', 0),
+      // #463: another database, or another project's journal in the same database.
+      makeDeterministicQueryId('prod', '_chkit_migrations', '20260526_load.sql', 0),
+      makeDeterministicQueryId('staging', '_chkit_migrations_b', '20260526_load.sql', 0),
+    ]
+    expect(new Set([a, ...others]).size).toBe(5)
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   })
 
   test('first attempt: writes started, submits, polls to completion', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
       { status: 'unknown' }, // initial in-flight check
       { status: 'running', writtenRows: 50_000 },
@@ -178,7 +196,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('refuses to resume in-progress async state when the migration checksum changed', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([])
     const { store, writes } = createFakeJournalStore(
       freshStateWith({
@@ -214,7 +232,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('completed-skip: prior operation marked completed → no submit, no command', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([])
     const { store, writes } = createFakeJournalStore(
       freshStateWith({
@@ -248,7 +266,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('in-flight attach: query already running on server → poll without resubmit', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
       { status: 'running', writtenRows: 50, elapsedMs: RUNNING_ELAPSED_MS }, // initial check sees it running
       { status: 'running', writtenRows: 75 },
@@ -294,14 +312,14 @@ describe('applyAsyncStatement', () => {
   // entry can still be missing while an earlier attempt with the same query id
   // (abandoned, or retried after an edit, #233) has its QueryFinish there.
   test('an attach ignores query_log entries of an earlier attempt', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const attachedStartSec = Math.floor((SERVER_NOW_MS - RUNNING_ELAPSED_MS) / 1000)
     const earlierStartSec = attachedStartSec - 3_600
     const phases = ['running', 'running', 'flush gap', 'flush gap', 'flushed']
     const statusCalls: StatusCall[] = []
     const db = {
       async query() {
-        return [{ now_ms: SERVER_NOW_MS }]
+        return [{ now_ms: SERVER_NOW_MS, database: SERVER_DATABASE }]
       },
       async submit() {
         throw new Error('an attach never submits')
@@ -373,8 +391,46 @@ describe('applyAsyncStatement', () => {
     expect(statusCalls.map((call) => call.afterTime)).toEqual([undefined, '1970-01-01 00:00:00'])
   })
 
+  // #463: an older chkit derived the id from the migration alone. A statement
+  // it journaled keeps that id, so an upgrade mid-load still finds the attempt.
+  test('a statement the journal tracks keeps its journaled query id', async () => {
+    const legacyId = 'f2d1c4e0-1111-2222-3333-444455556666'
+    const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
+      { status: 'running', writtenRows: 5, elapsedMs: RUNNING_ELAPSED_MS },
+      { status: 'finished', writtenRows: 12, durationMs: 12_000 },
+    ])
+    const { store, writes } = createFakeJournalStore(
+      freshStateWith({
+        operationIndex: 0,
+        operationKey: BASE_INPUT.operationKey,
+        operationType: BASE_INPUT.operationType,
+        queryId: legacyId,
+        status: 'started',
+        startedAt: '2026-05-26 11:00:00.000',
+        finishedAt: null,
+        lastError: '',
+      }),
+    )
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      beforeRetry: 'TRUNCATE TABLE t',
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(statusCalls.map((call) => call.queryId)).toEqual([legacyId, legacyId])
+    expect(submitCalls).toEqual([])
+    expect(commandCalls).toEqual([])
+    expect(writes.map((state) => state.operations[0]?.queryId)).toEqual([legacyId])
+  })
+
   test('retry: prior failed op + query no longer running → run before-retry, then resubmit', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
       { status: 'unknown' }, // initial check: not running on server anymore
       { status: 'running', writtenRows: 25_000 },
@@ -426,7 +482,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('migrate --setting reaches the before-retry SQL and the resubmission (#321)', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, submitCalls, commandCalls } = createFakeExecutor([
       { status: 'unknown' },
       { status: 'finished', writtenRows: 1, durationMs: 10 },
@@ -461,7 +517,7 @@ describe('applyAsyncStatement', () => {
   })
 
   test('retry without before-retry SQL: still resubmits forward', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, submitCalls, commandCalls } = createFakeExecutor([
       { status: 'unknown' },
       { status: 'finished', writtenRows: 1, durationMs: 100 },
@@ -497,7 +553,7 @@ describe('applyAsyncStatement', () => {
   // Running before-retry SQL (a TRUNCATE) or resubmitting then would race it.
   for (const prior of ['started', 'failed'] as const) {
     test(`an in-flight check that cannot read every replica neither compensates nor resubmits (prior op: ${prior})`, async () => {
-      const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+      const queryId = QUERY_ID
       const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
         new Error('ALL_CONNECTION_TRIES_FAILED: clickhouse-1'),
       ])
@@ -566,6 +622,7 @@ describe('applyAsyncStatement', () => {
       { failSubmit: () => new Error('Syntax error: failed at position 1') },
     )
     const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
 
     await expect(
       applyAsyncStatement({
@@ -573,7 +630,7 @@ describe('applyAsyncStatement', () => {
         sql: 'NOT VALID SQL',
         db,
         journalStore: store,
-        log: () => {},
+        log: (line) => lines.push(line),
         sleep: NO_SLEEP,
         now: FIXED_NOW,
       }),
@@ -583,20 +640,155 @@ describe('applyAsyncStatement', () => {
     // an edited file can then run again without --retry.
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
     expect(writes[1]?.operations[0]?.lastError).toBe('Syntax error: failed at position 1')
+    // The submit error is the command's error; no progress line repeats it (#561).
+    expect(lines).toEqual([`  load_table_data: submitting async (query_id=${QUERY_ID})`])
   })
+
+  // When polling gives up, the submit error is the only trace of e.g. a rejected
+  // statement, so the error names it (#561).
+  // A deferred submit is still pending when the budget runs out.
+  for (const [submitFails, deferSubmit] of [
+    [true, false],
+    [true, true],
+    [false, false],
+  ] as const) {
+    test(`polling that exhausts its budget names the submit error (submit fails: ${submitFails}, deferred: ${deferSubmit})`, async () => {
+      const { db } = createFakeExecutor(
+        [
+          { status: 'unknown' }, // initial in-flight check
+          ...Array.from({ length: 21 }, () => new Error('HTTP 502: bad gateway')),
+        ],
+        submitFails ? { failSubmit: () => new Error('Authentication failed'), deferSubmit } : {},
+      )
+      const { store, writes } = createFakeJournalStore(null)
+
+      const submitTail = submitFails ? ' The submit request failed too (Authentication failed).' : ''
+      await expect(
+        applyAsyncStatement({
+          ...BASE_INPUT,
+          db,
+          journalStore: store,
+          log: () => {},
+          sleep: NO_SLEEP,
+          now: FIXED_NOW,
+        }),
+      ).rejects.toThrow(
+        `Async migration step load_table_data (query_id ${QUERY_ID}): polling failed 21× (HTTP 502: bad gateway).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+      )
+      // The outcome is unknown, so the attempt stays started for a re-run to re-attach.
+      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+    })
+  }
+
+  // A gateway can fail the submit request (e.g. HTTP 524) while the query keeps
+  // running on the server. The poller decides the outcome, and the progress
+  // lines are the poller's only (#561).
+  test('a submit that fails while the query runs completes with the poller lines only', async () => {
+    const { db, submitCalls } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+      ],
+      { failSubmit: () => new Error('HTTP 524: error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: (line) => lines.push(line),
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(submitCalls).toHaveLength(1)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    expect(lines).toEqual([
+      `  load_table_data: submitting async (query_id=${QUERY_ID})`,
+      '  load_table_data: written=9 rows (72 B), elapsed 0s',
+      '  load_table_data: finished — written=16 rows (128 B) in 8s',
+    ])
+  })
+
+  // After the 524, the query can end between two polls. A poll then finds it
+  // neither running nor yet in query_log (flushed on a timer). The server ran
+  // the query, so the submit error does not mean it failed (#657).
+  test('a submit that fails after a poll found the query running waits for query_log', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        { status: 'unknown' },
+        { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+      ],
+      { failSubmit: () => new Error('error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+    const lines: string[] = []
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: (line) => lines.push(line),
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    expect(lines).toEqual([
+      `  load_table_data: submitting async (query_id=${QUERY_ID})`,
+      '  load_table_data: written=9 rows (72 B), elapsed 0s',
+      '  load_table_data: status unknown — still polling (elapsed 0s)',
+      '  load_table_data: finished — written=16 rows (128 B) in 8s',
+    ])
+  })
+
+  test('a submit that fails after a poll found the query running gives up after the poll budget', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        ...Array.from({ length: 21 }, () => ({ status: 'unknown' as const })),
+      ],
+      { failSubmit: () => new Error('error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(
+      `Async migration step load_table_data (query_id ${QUERY_ID}): the submit request failed (error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+    )
+    // The outcome is unknown, so the attempt stays started.
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+  })
+
   // The query id is deterministic, so query_log still holds the earlier
   // attempt's QueryFinish after `migrate --abandon` (#233). A submission that
   // then fails before it starts (no query_log row) must not inherit it.
   for (const prior of ['none', 'abandoned'] as const) {
     test(`a new submission ignores query_log entries of an earlier attempt (prior op: ${prior})`, async () => {
-      const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+      const queryId = QUERY_ID
       // The earlier attempt started one 5 s poll interval before this
       // submission: the youngest it can be once a previous run polled it to its end.
       const staleQueryStartSec = Math.floor((SERVER_NOW_MS - 5_000) / 1000)
       const statusCalls: StatusCall[] = []
       const db = {
         async query() {
-          return [{ now_ms: SERVER_NOW_MS }]
+          return [{ now_ms: SERVER_NOW_MS, database: SERVER_DATABASE }]
         },
         async submit() {
           throw new Error("Unknown table expression identifier 'default.src_typo'")
@@ -644,7 +836,7 @@ describe('applyAsyncStatement', () => {
   }
 
   test('accepts a changed checksum when no statement completed or started (#233)', async () => {
-    const queryId = makeDeterministicQueryId(BASE_INPUT.migrationName, BASE_INPUT.statementIndex)
+    const queryId = QUERY_ID
     const { db, submitCalls, commandCalls } = createFakeExecutor([
       { status: 'unknown' },
       { status: 'finished', writtenRows: 1, durationMs: 100 },
@@ -679,4 +871,76 @@ describe('applyAsyncStatement', () => {
     expect(submitCalls).toHaveLength(1)
     expect(writes.map((state) => state.checksum)).toEqual(['changed-checksum', 'changed-checksum'])
   })
+})
+
+// #556: chkit-py prints the same lines for the same statuses
+// (test_migrate_async_apply.py has this table). toFixed rounds the double's
+// exact value and takes the larger candidate on a tie; Math.round takes the
+// one closer to +∞. Exact ties: 1.25, 1.125, 2.5, 0.5. Just below a decimal
+// tie in binary: 1.15, 1.005, 2.675. Just above: 1.35.
+const ROUNDING_CASES: Array<{
+  rows: number
+  bytes: number
+  durationMs: number
+  progress: string
+  finished: string
+}> = [
+  { rows: 999, bytes: 1000, durationMs: 0, progress: '999 rows (1000 B)', finished: '999 rows (1000 B) in 0s' },
+  { rows: 1000, bytes: 1024, durationMs: 499, progress: '1.0K rows (1.0 KiB)', finished: '1.0K rows (1.0 KiB) in 0s' },
+  { rows: 1005, bytes: 1029, durationMs: 500, progress: '1.0K rows (1.0 KiB)', finished: '1.0K rows (1.0 KiB) in 1s' },
+  { rows: 1050, bytes: 1075, durationMs: 1499, progress: '1.1K rows (1.0 KiB)', finished: '1.1K rows (1.0 KiB) in 1s' },
+  { rows: 1150, bytes: 1177, durationMs: 1500, progress: '1.1K rows (1.1 KiB)', finished: '1.1K rows (1.1 KiB) in 2s' },
+  { rows: 1250, bytes: 1280, durationMs: 2500, progress: '1.3K rows (1.3 KiB)', finished: '1.3K rows (1.3 KiB) in 3s' },
+  { rows: 1350, bytes: 3584, durationMs: 3500, progress: '1.4K rows (3.5 KiB)', finished: '1.4K rows (3.5 KiB) in 4s' },
+  { rows: 999_950, bytes: 1_048_575, durationMs: 123_456_500, progress: '1000.0K rows (1024.0 KiB)', finished: '1000.0K rows (1024.0 KiB) in 123457s' },
+  { rows: 1_005_000, bytes: 1_310_720, durationMs: 4500, progress: '1.00M rows (1.3 MiB)', finished: '1.00M rows (1.3 MiB) in 5s' },
+  { rows: 1_125_000, bytes: 1_079_194_419, durationMs: 5500, progress: '1.13M rows (1.01 GiB)', finished: '1.13M rows (1.01 GiB) in 6s' },
+  { rows: 2_675_000, bytes: 1_207_959_552, durationMs: 6500, progress: '2.67M rows (1.13 GiB)', finished: '2.67M rows (1.13 GiB) in 7s' },
+  { rows: 1, bytes: 1, durationMs: 1_000_000_500, progress: '1 rows (1 B)', finished: '1 rows (1 B) in 1000001s' },
+  // UInt64 max: query_status reads it as the nearest double, and String()
+  // prints the rounded seconds in shortest form.
+  {
+    rows: Number('18446744073709551615'),
+    bytes: Number('18446744073709551615'),
+    durationMs: Number('18446744073709551615'),
+    progress: '18446744073709.55M rows (17179869184.00 GiB)',
+    finished: '18446744073709.55M rows (17179869184.00 GiB) in 18446744073709550s',
+  },
+  // A tie only after the exact integer division; as a double it is just below.
+  {
+    rows: 1,
+    bytes: 1,
+    durationMs: 36_028_797_018_964_500,
+    progress: '1 rows (1 B)',
+    finished: '1 rows (1 B) in 36028797018964s',
+  },
+]
+
+describe('applyAsyncStatement progress rounding', () => {
+  test.each(ROUNDING_CASES)(
+    'rows=$rows bytes=$bytes durationMs=$durationMs',
+    async ({ rows, bytes, durationMs, progress, finished }) => {
+      const { db } = createFakeExecutor([
+        { status: 'unknown' },
+        { status: 'running', writtenRows: rows, writtenBytes: bytes },
+        { status: 'finished', writtenRows: rows, writtenBytes: bytes, durationMs },
+      ])
+      const { store } = createFakeJournalStore(null)
+      const lines: string[] = []
+
+      await applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: (line) => lines.push(line),
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      })
+
+      expect(lines.filter((line) => line.includes('written='))).toEqual([
+        `  load_table_data: written=${progress}, elapsed 0s`,
+        `  load_table_data: finished — written=${finished}`,
+      ])
+    },
+  )
 })

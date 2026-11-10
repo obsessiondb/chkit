@@ -269,6 +269,29 @@ def test_quotes_string_literals_and_renders_numbers_and_booleans() -> None:
     assert "`flag` Bool DEFAULT false" in sql
 
 
+# What TS ``String(value)`` writes for each (#466): plain notation for an
+# exponent in [-7, 20], exponential notation outside it.
+@pytest.mark.parametrize(
+    ("value", "rendered"),
+    [
+        (1e-5, "0.00001"),
+        (1e-6, "0.000001"),
+        (1e-7, "1e-7"),
+        (1.5e-7, "1.5e-7"),
+        (0.1, "0.1"),
+        (123.456, "123.456"),
+        (1e20, "100000000000000000000"),
+        (1e21, "1e+21"),
+        (1.2345e25, "1.2345e+25"),
+        (2.0, "2"),
+        (-0.5, "-0.5"),
+        (-0.0, "0"),
+    ],
+)
+def test_renders_a_float_default_as_ts_does(value: float, rendered: str) -> None:
+    assert render_default(value) == rendered
+
+
 def test_renders_legacy_prefix_like_sql_expression_trimmed() -> None:
     sql = to_create_sql(events([
         {"name": "a", "type": "DateTime", "default": "fn:now()"},
@@ -838,6 +861,13 @@ def test_names_the_ephemeral_clause_and_null_reads() -> None:
         day(type="DateTime", nullable=True, default_kind="EPHEMERAL", default="now()")
     ])
     assert "which ClickHouse accepts for type Nullable(DateTime) but reads as NULL." in message
+    [message] = issue_messages([
+        day(type="LowCardinality(DateTime)", nullable=True, default_kind="EPHEMERAL", default="now()")
+    ])
+    assert (
+        "which ClickHouse accepts for type LowCardinality(Nullable(DateTime)) but reads as NULL."
+        in message
+    )
 
 
 @pytest.mark.parametrize(

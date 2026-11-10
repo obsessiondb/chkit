@@ -55,6 +55,7 @@ from chkit.core.model import (
     ViewDefinition,
 )
 from chkit.core.projection import is_index_projection
+from chkit.core.table_settings import READONLY_MERGE_TREE_SETTINGS
 
 _MIN_QUOTED_LEN = 2
 
@@ -64,10 +65,29 @@ _MULTI_UNDERSCORE_RE = re.compile(r"_+")
 _LEADING_TRAILING_UNDERSCORE_RE = re.compile(r"^_+|_+$")
 
 
+_READONLY_SETTING_COMMENT = "read-only: a change recreates the table (DROP + CREATE, or --cutover)"
+_OBSESSIONDB_STORAGE_POLICY_COMMENT = "set by ObsessionDB on every Shared table; it cannot change"
+
+
+def _table_setting_comment(key: str, *, shared: bool) -> str | None:
+    """Why a pulled setting cannot be altered in place, written next to it (#466)."""
+    if key in READONLY_MERGE_TREE_SETTINGS:
+        return _READONLY_SETTING_COMMENT
+    if key == "storage_policy" and shared:
+        return _OBSESSIONDB_STORAGE_POLICY_COMMENT
+    return None
+
+
 def render_schema_file(  # noqa: PLR0912, PLR0915
     definitions: Sequence[SchemaDefinition],
+    *,
+    shared_tables: frozenset[str] = frozenset(),
 ) -> str:
-    """Render canonical Python schema source from a list of definitions."""
+    """Render canonical Python schema source from a list of definitions.
+
+    ``shared_tables`` holds ``database.name`` of the tables ObsessionDB stores
+    as ``Shared*``, whose storage_policy gets a comment.
+    """
     canonical = canonicalize_definitions(list(definitions))
     declaration_counts: dict[str, int] = {}
 
@@ -175,7 +195,8 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
         references.append(variable_name)
 
         if isinstance(definition, TableDefinition):
-            lines.extend(_render_table(variable_name, definition))
+            shared = f"{definition.database}.{definition.name}" in shared_tables
+            lines.extend(_render_table(variable_name, definition, shared=shared))
         elif isinstance(definition, ViewDefinition):
             lines.extend(_render_view(variable_name, definition))
         elif isinstance(definition, DictionaryDefinition):
@@ -195,7 +216,9 @@ def render_schema_file(  # noqa: PLR0912, PLR0915
 # ---------- table ----------
 
 
-def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
+def _render_table(
+    variable_name: str, definition: TableDefinition, *, shared: bool = False
+) -> list[str]:
     lines: list[str] = [
         f"{variable_name} = table(",
         f"    database={_render_string(definition.database)},",
@@ -219,7 +242,9 @@ def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
         lines.append("    settings={")
         for key in sorted(definition.settings):
             value = definition.settings[key]
-            lines.append(f"        {_render_string(key)}: {_render_literal(value)},")
+            note = _table_setting_comment(key, shared=shared)
+            suffix = f"  # {note}" if note else ""
+            lines.append(f"        {_render_string(key)}: {_render_literal(value)},{suffix}")
         lines.append("    },")
     if definition.indexes:
         lines.append("    indexes=[")
@@ -235,8 +260,13 @@ def _render_table(variable_name: str, definition: TableDefinition) -> list[str]:
         lines.append("    constraints=[")
         lines.extend(f"        {_render_constraint(c)}," for c in definition.constraints)
         lines.append("    ],")
+    lines.extend(_render_comment_lines(definition.comment))
     lines.append(")")
     return lines
+
+
+def _render_comment_lines(comment: str | None) -> list[str]:
+    return [f"    comment={_render_string(comment)},"] if comment else []
 
 
 def _render_constraint(constraint: TableConstraintDefinition) -> str:
@@ -380,8 +410,7 @@ def _render_dictionary(
             value = definition.settings[key]
             lines.append(f"        {_render_string(key)}: {_render_literal(value)},")
         lines.append("    },")
-    if definition.comment:
-        lines.append(f"    comment={_render_string(definition.comment)},")
+    lines.extend(_render_comment_lines(definition.comment))
     lines.append(")")
     return lines
 
@@ -415,6 +444,7 @@ def _render_view(variable_name: str, definition: ViewDefinition) -> list[str]:
         f"    database={_render_string(definition.database)},",
         f"    name={_render_string(definition.name)},",
         f"    as_={_render_string(definition.as_)},",
+        *_render_comment_lines(definition.comment),
         ")",
     ]
 
@@ -437,6 +467,7 @@ def _render_materialized_view(
     if definition.refresh is not None:
         lines.extend(_render_refresh(definition.refresh))
     lines.append(f"    as_={_render_string(definition.as_)},")
+    lines.extend(_render_comment_lines(definition.comment))
     lines.append(")")
     return lines
 
@@ -498,7 +529,10 @@ def _sanitize_identifier(value: str) -> str:
 
 
 def _render_string(value: str) -> str:
-    return json.dumps(value)
+    # Non-ASCII stays as is, as in TS: json.dumps would escape a character
+    # outside the BMP (an emoji) as a surrogate pair, which Python reads back as
+    # two lone surrogates, not the character.
+    return json.dumps(value, ensure_ascii=False)
 
 
 def _render_string_list(values: Sequence[str]) -> str:
@@ -526,13 +560,24 @@ def _render_codec_step(step: ColumnCodec) -> str:
         level = getattr(step, "level", None)
         if level is not None:
             parts.append(f'"level": {level}')
+        window_log = getattr(step, "window_log", None)
+        if window_log is not None:
+            parts.append(f'"windowLog": {window_log}')
     elif step.kind in {"Delta", "DoubleDelta", "Gorilla"}:
         size = getattr(step, "size", None)
         if size is not None:
             parts.append(f'"size": {size}')
+    elif step.kind == "T64":
+        mode = getattr(step, "mode", None)
+        if mode is not None:
+            parts.append(f'"mode": {_render_string(mode)}')
     elif step.kind == "FPC":
-        parts.append(f'"level": {step.level}')
-        parts.append(f'"floatSize": {step.float_size}')
+        level = getattr(step, "level", None)
+        if level is not None:
+            parts.append(f'"level": {level}')
+        float_size = getattr(step, "float_size", None)
+        if float_size is not None:
+            parts.append(f'"floatSize": {float_size}')
     return "{" + ", ".join(parts) + "}"
 
 

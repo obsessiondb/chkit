@@ -24,7 +24,9 @@ from chkit.cli.commands.pull_view_parser import (
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.introspect import IntrospectedTable, SchemaObjectRef
+from chkit.core.codec import parse_codec
 from chkit.core.model import (
+    ColumnInput,
     MaterializedViewRefresh,
     SkipIndexBloomFilter,
     SkipIndexMinmax,
@@ -120,6 +122,54 @@ def test_parse_refresh_after_with_randomize_and_depends_on() -> None:
     ]
 
 
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause reads quoted
+# DEPENDS ON names as ClickHouse means them": create_table_query as ClickHouse
+# 26.3 returns it (#631).
+def test_parse_refresh_depends_on_reads_quoted_names() -> None:
+    ddl = (
+        "CREATE MATERIALIZED VIEW d.mv2 REFRESH EVERY 1 HOUR DEPENDS ON d.r1, "
+        "d.`we\\`ird`, d.`a.b`, d.`x\\``, d.`has AS kw`, d.`q\"d`, `a, b`.`TO` "
+        "TO d.dst (`a` UInt8) DEFINER = default SQL SECURITY DEFINER AS SELECT a FROM d.src"
+    )
+    refresh = parse_refresh_clause(ddl)
+    assert refresh is not None
+    assert refresh.depends_on == [
+        DependsOnEntry(database="d", name="r1"),
+        DependsOnEntry(database="d", name="we`ird"),
+        DependsOnEntry(database="d", name="a.b"),
+        DependsOnEntry(database="d", name="x`"),
+        DependsOnEntry(database="d", name="has AS kw"),
+        DependsOnEntry(database="d", name='q"d'),
+        DependsOnEntry(database="a, b", name="TO"),
+    ]
+
+
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause decodes escapes in
+# quoted DEPENDS ON names as ClickHouse does".
+def test_parse_refresh_depends_on_decodes_escapes() -> None:
+    refresh = parse_refresh_clause(
+        "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR DEPENDS ON d.`x\\ny`, d.`b\\x41` "
+        "TO d.dst AS SELECT 1"
+    )
+    assert refresh is not None
+    assert refresh.depends_on == [
+        DependsOnEntry(database="d", name="x\ny"),
+        DependsOnEntry(database="d", name="bA"),
+    ]
+
+
+# TS packages/plugin-pull/src/index.test.ts "parseRefreshClause ignores DEPENDS
+# ON text inside a string or the SELECT".
+def test_parse_refresh_ignores_depends_on_inside_a_string() -> None:
+    refresh = parse_refresh_clause(
+        "CREATE MATERIALIZED VIEW d.mv REFRESH EVERY 1 HOUR TO d.dst "
+        "AS SELECT 'DEPENDS ON d.x' AS c"
+    )
+    assert refresh is not None
+    assert refresh.every == "1 HOUR"
+    assert refresh.depends_on is None
+
+
 def test_parse_refresh_settings_block() -> None:
     ddl = (
         "CREATE MATERIALIZED VIEW db.mv REFRESH EVERY 1 hour "
@@ -179,6 +229,48 @@ def test_render_emits_columns_with_optional_attrs() -> None:
     assert "nullable=True" in output
     assert 'default="hello"' in output
     assert 'comment="desc"' in output
+
+
+def test_render_pulls_stored_codecs_as_typed_atoms_without_filled_in_sizes() -> None:
+    # #465: the forms system.columns.compression_codec reports, as chkit (TS) pulls them.
+    stored = {
+        "d": ("UInt64", "CODEC(Delta(8), ZSTD(1))"),
+        "g": ("Float64", "CODEC(Gorilla(8))"),
+        "h": ("String", "CODEC(LZ4HC(0))"),
+        "f": ("Float64", "CODEC(FPC(12))"),
+        "dd": ("UInt64", "CODEC(DoubleDelta)"),
+        "widths": ("Tuple(UInt32, UInt64)", "CODEC(Delta, DoubleDelta(8))"),
+        "types": ("Tuple(UInt32, Int32)", "CODEC(DoubleDelta(4), T64, ZSTD)"),
+        "tb": ("UInt64", "CODEC(T64('bit'))"),
+        "zw": ("String", "CODEC(ZSTD(3, 24))"),
+        "tu": ("Tuple(a UInt8, b UInt64)", "CODEC(Delta, LZ4)"),
+        "df": ("UInt64", "CODEC(Delta(8), Default)"),
+    }
+    stored_columns: list[ColumnInput] = [
+        {"name": name, "type": type_, "codec": parse_codec(codec)}
+        for name, (type_, codec) in stored.items()
+    ]
+    t = table(
+        database="db",
+        name="t",
+        engine="MergeTree",
+        columns=[{"name": "id", "type": "UInt64"}, *stored_columns],
+        primary_key=["id"],
+        order_by=["id"],
+    )
+    output = render_schema_file([t])
+    assert 'ColumnDefinition(name="d", type="UInt64", codec=[{"kind": "Delta", "size": 8}, {"kind": "ZSTD", "level": 1}])' in output
+    assert 'codec={"kind": "Gorilla", "size": 8}' in output
+    assert 'codec={"kind": "LZ4HC", "level": 0}' in output
+    assert 'codec={"kind": "FPC", "level": 12}' in output
+    assert 'codec={"kind": "DoubleDelta"}' in output
+    assert '{"kind": "DoubleDelta", "size": 8}' in output
+    assert '{"kind": "DoubleDelta", "size": 4}' in output
+    assert 'codec={"kind": "T64", "mode": "bit"}' in output
+    assert 'codec={"kind": "ZSTD", "level": 3, "windowLog": 24}' in output
+    assert 'codec=[{"kind": "Delta"}, {"kind": "LZ4"}]' in output
+    assert 'codec=[{"kind": "Delta", "size": 8}, {"kind": "Default"}]' in output
+    assert "codec_raw" not in output
 
 
 def test_render_handles_view_and_materialized_view() -> None:
@@ -387,8 +479,10 @@ def test_excludes_obsessiondb_metadata_tables_from_pulled_schema_output(
     def list_objects(client: object) -> list[SchemaObjectRef]:
         return [SchemaObjectRef(kind="table", database="app", name=n) for n in names]
 
-    def pull_definitions(client: object, databases: object) -> list[TableDefinition | None]:
-        return [_introspected_table_to_definition(_introspected(n)) for n in names]
+    def pull_definitions(
+        client: object, databases: object
+    ) -> tuple[list[TableDefinition | None], list[str]]:
+        return [_introspected_table_to_definition(_introspected(n)) for n in names], []
 
     monkeypatch.setattr(ClickHouseClient, "connect", classmethod(connect))
     monkeypatch.setattr(pull_module, "list_schema_objects", list_objects)

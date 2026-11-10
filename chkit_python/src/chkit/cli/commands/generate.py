@@ -27,6 +27,7 @@ import typer
 
 from chkit import __version__
 from chkit.cli.command_target import ServiceOption, resolve_plugin_executor
+from chkit.cli.commands.codec_warnings import detect_experimental_codec_warnings
 from chkit.cli.commands.dictionary_password_warnings import (
     detect_dictionary_password_warnings,
 )
@@ -66,6 +67,7 @@ from chkit.cli.commands.generate_rename_mappings import (
     resolve_active_table_mappings,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import emit_json, emit_json_error
 from chkit.cli.migration_store import (
@@ -93,13 +95,15 @@ from chkit.core.model import (
     ChxValidationError,
     MigrationOperation,
     SchemaDefinition,
+    configured_index_granularity,
 )
 from chkit.core.on_cluster import apply_on_cluster_to_plan
 from chkit.core.planner import plan_diff
 from chkit.core.snapshot import create_snapshot
-from chkit.core.validate import validate_definitions
+from chkit.core.validate import collect_definition_warnings, validate_definitions
 from chkit.plugins import (
     ChxOnPlanCreatedContext,
+    ChxOnSchemaLoadedContext,
     ChxPlugin,
     ChxPluginCommandContext,
     PluginContext,
@@ -277,61 +281,45 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
     ] = None,
+    table_selector: Annotated[
+        str | None,
+        typer.Option("--table", "-t", metavar="<selector>", help=TABLE_FLAG_HELP),
+    ] = None,
     migration_name: Annotated[
         str | None,
-        typer.Option("--name", "-n", help="Migration name (sanitized)."),
+        typer.Option("--name", "-n", metavar="<name>", help="Migration name"),
     ] = None,
     migration_id: Annotated[
         str | None,
         typer.Option(
             "--migration-id",
-            help="Override the default timestamp prefix in the migration filename.",
-        ),
-    ] = None,
-    table_selector: Annotated[
-        str | None,
-        typer.Option(
-            "--table",
-            "-t",
-            help=(
-                "Restrict migration to a single table or trailing-wildcard prefix. "
-                "Examples: events, events_*, analytics.events."
-            ),
+            metavar="<id>",
+            help="Override the default timestamp migration prefix",
         ),
     ] = None,
     rename_table: Annotated[
         list[str] | None,
         typer.Option(
-            "--rename-table",
-            help=(
-                "Explicit table rename mapping old_db.old_table=new_db.new_table. "
-                "Repeatable."
-            ),
+            "--rename-table", metavar="<mapping>", help="Explicit table rename mapping"
         ),
     ] = None,
     rename_column: Annotated[
         list[str] | None,
         typer.Option(
-            "--rename-column",
-            help=(
-                "Explicit column rename mapping db.table.old_column=new_column. "
-                "Repeatable."
-            ),
+            "--rename-column", metavar="<mapping>", help="Explicit column rename mapping"
         ),
     ] = None,
     rename_dictionary: Annotated[
         list[str] | None,
         typer.Option(
             "--rename-dictionary",
-            help=(
-                "Explicit dictionary rename mapping old_db.old_dict=new_db.new_dict. "
-                "Repeatable."
-            ),
+            metavar="<mapping>",
+            help="Explicit dictionary rename mapping",
         ),
     ] = None,
     dryrun: Annotated[
         bool,
-        typer.Option("--dryrun", help="Print plan without writing artifacts."),
+        typer.Option("--dryrun", help="Print plan without writing artifacts"),
     ] = False,
     output_json: Annotated[
         bool,
@@ -341,33 +329,33 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         bool,
         typer.Option(
             "--empty",
-            help="Scaffold a blank manual migration (no schema diff, snapshot untouched).",
+            help="Scaffold a blank manual migration (no schema diff, snapshot untouched)",
         ),
     ] = False,
     cutover: Annotated[
         list[str] | None,
         typer.Option(
             "--cutover",
-            help=(
-                "Cut a structural table change over without downtime, keyed by a unique "
-                "key: database.table=key[,key]. Repeatable."
-            ),
+            metavar="<database.table=key>",
+            help="Cut a structural table change over without downtime, keyed by a unique key",
         ),
     ] = None,
     cutover_copy: Annotated[
         str | None,
         typer.Option(
             "--cutover-copy",
-            help="Where the cutover copies existing rows: migration (default) or backfill.",
+            metavar="<mode>",
+            help="Where the cutover copies existing rows: migration (default) or backfill",
         ),
     ] = None,
     cutover_old: Annotated[
         str | None,
         typer.Option(
             "--cutover-old",
+            metavar="<mode>",
             help=(
                 "What happens to the pre-cutover table: keep (default, as <table>_previous) "
-                "or drop."
+                "or drop"
             ),
         ),
     ] = None,
@@ -375,7 +363,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         list[str] | None,
         typer.Option(
             "--drop-retained",
-            help="Drop a table a cutover retained (database.table). Repeatable.",
+            metavar="<database.table>",
+            help="Drop a table a cutover retained",
         ),
     ] = None,
     force_shared_engines: ForceSharedEnginesOption = False,
@@ -394,20 +383,6 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     # (``migrationFile``, ``snapshotFile``) reads the same in both CLIs.
     meta_dir = Path(os.path.abspath(config.meta_dir))
     migrations_dir = Path(os.path.abspath(config.migrations_dir))
-    # `--empty` scaffolds a blank manual migration: no schema diff, no plugin
-    # pipeline, and the snapshot is left untouched. Short-circuit before any of
-    # that machinery so the file is a pristine stub for hand-editing.
-    if empty:
-        _emit_empty_migration(
-            generate_empty_migration(
-                migrations_dir,
-                migration_name=migration_name,
-                migration_id=migration_id,
-                cli_version=__version__,
-            ).sql_path,
-            output_json=output_json,
-        )
-        return
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
     )
@@ -423,6 +398,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             "--rename-dictionary": rename_dictionary,
             "--dryrun": dryrun,
             "--json": output_json,
+            "--empty": empty,
             "--cutover": cutover,
             "--cutover-copy": cutover_copy,
             "--cutover-old": cutover_old,
@@ -432,20 +408,33 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
             "--service": service,
         }
     )
-    if service is not None:
-        # generate sends no SQL, but as in TS --service still names the
-        # service, and an unknown name fails.
-        executor = resolve_plugin_executor(
-            plugin_runtime,
-            config,
-            command="generate",
-            config_path=str(config_path or "clickhouse.config.py"),
-            json_mode=output_json,
-            service=service,
-            flags=hook_flags,
+    # As in TS, on_init and get_context run, though generate sends no SQL:
+    # --service names the service, and an unknown name fails.
+    executor = resolve_plugin_executor(
+        plugin_runtime,
+        config,
+        command="generate",
+        config_path=str(config_path or "clickhouse.config.py"),
+        json_mode=output_json,
+        service=service,
+        flags=hook_flags,
+    )
+    if executor is not None:
+        executor.close()
+    # `--empty` scaffolds a blank manual migration: no schema diff, no schema
+    # hooks, and the snapshot is left untouched. Short-circuit before any of
+    # that machinery so the file is a pristine stub for hand-editing.
+    if empty:
+        _emit_empty_migration(
+            generate_empty_migration(
+                migrations_dir,
+                migration_name=migration_name,
+                migration_id=migration_id,
+                cli_version=__version__,
+            ).sql_path,
+            output_json=output_json,
         )
-        if executor is not None:
-            executor.close()
+        return
     threaded_defs = load_schema_definitions_with_hooks(
         command="generate",
         config=config,
@@ -455,14 +444,33 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         plugin_runtime=plugin_runtime,
         table_selector=table_selector,
     )
-    schema_canonical = canonicalize_definitions(threaded_defs)
+    # What a MergeTree table that does not declare index_granularity gets.
+    index_granularity = configured_index_granularity(config)
+    schema_canonical = canonicalize_definitions(threaded_defs, index_granularity=index_granularity)
 
     issues = validate_definitions(schema_canonical)
     if issues:
         _exit_validation_failed(ChxValidationError(issues), output_json=output_json)
 
-    previous = read_snapshot(meta_dir)
-    old_defs = list(previous.definitions) if previous is not None else []
+    previous = read_snapshot(meta_dir, index_granularity=index_granularity)
+    snapshot_defs = list(previous.definitions) if previous is not None else []
+    # The schema went through the plugins' rewrites; a snapshot written before
+    # a rewrite existed goes through it too, so it plans no change (#466).
+    old_defs = canonicalize_definitions(
+        plugin_runtime.run_on_snapshot_loaded(
+            ChxOnSchemaLoadedContext(
+                command="generate",
+                config=config,
+                table_scope=resolve_table_scope(
+                    table_selector, table_keys_from_definitions(snapshot_defs)
+                ),
+                flags=hook_flags,
+                definitions=snapshot_defs,
+                json_mode=output_json,
+            )
+        ),
+        index_granularity=index_granularity,
+    )
     try:
         canonical = carry_retained_definitions(
             previous_definitions=old_defs,
@@ -515,7 +523,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
     # letting them escape as a stack trace. ``plan_diff`` itself may raise a
     # ChxValidationError for invariant violations or unsupported changes.
     try:
-        plan = plan_diff(remapped_old_defs, canonical)
+        plan = plan_diff(remapped_old_defs, canonical, index_granularity=index_granularity)
         plan = apply_explicit_table_renames(plan, active_table_mappings)
         plan = apply_explicit_dictionary_renames(plan, active_dictionary_mappings)
         assert_cli_column_mappings_resolvable(cli_column_mappings, plan, canonical)
@@ -563,6 +571,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 cutovers=cutover_flags,
                 cluster=cluster,
                 stamp=_migration_stamp(now),
+                index_granularity=index_granularity,
             )
         except ChxValidationError as error:
             _exit_validation_failed(error, output_json=output_json)
@@ -582,8 +591,11 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         plan, config.clickhouse.cluster if config.clickhouse else None
     )
 
-    dictionary_password_warnings = detect_dictionary_password_warnings(plan) + [
-        op.warning for op in plan.operations if op.warning
+    warnings = [
+        *(issue.message for issue in collect_definition_warnings(schema_canonical)),
+        *detect_dictionary_password_warnings(plan),
+        *detect_experimental_codec_warnings(plan),
+        *(op.warning for op in plan.operations if op.warning),
     ]
 
     if dryrun:
@@ -600,7 +612,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                     "renameSuggestions": [
                         s.model_dump(by_alias=True) for s in plan.rename_suggestions
                     ],
-                    "warnings": dictionary_password_warnings,
+                    "warnings": warnings,
                     **cutover_payload,
                 },
             )
@@ -613,7 +625,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         )
         for op in plan.operations:
             typer.echo(f"- {op.type} [{op.risk}] {op.key}")
-        for warning in dictionary_password_warnings:
+        for warning in warnings:
             typer.echo(f"Warning: {warning}", err=True)
         for line in cutover_text_lines(cutover_summaries):
             typer.echo(line)
@@ -655,7 +667,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         cli_version=__version__,
         now=now,
     )
-    snapshot = create_snapshot(artifact_definitions)
+    snapshot = create_snapshot(artifact_definitions, index_granularity=index_granularity)
     snapshot_path = write_snapshot(meta_dir, snapshot)
 
     _run_codegen_integration(
@@ -679,7 +691,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
                 "definitionCount": len(artifact_definitions),
                 "operationCount": len(plan.operations),
                 "riskSummary": plan.risk_summary.model_dump(),
-                "warnings": dictionary_password_warnings,
+                "warnings": warnings,
                 **cutover_payload,
             },
         )
@@ -705,7 +717,7 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         f"Risk summary:       safe={risks.safe}, caution={risks.caution}, "
         f"danger={risks.danger}"
     )
-    for warning in dictionary_password_warnings:
+    for warning in warnings:
         typer.echo(f"Warning: {warning}", err=True)
     for line in cutover_text_lines(cutover_summaries):
         typer.echo(line)

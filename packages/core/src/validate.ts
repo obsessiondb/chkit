@@ -2,11 +2,12 @@ import { constraintProblem } from './constraint.js'
 import { renderTextIndexType } from './text-index.js'
 import { renderVectorIndexType } from './vector-index.js'
 import { definitionKey } from './canonical.js'
-import { canonicalizeCodec, isGeneralCodec, isRawCodec } from './codec.js'
+import { columnCodecProblem } from './codec-rules.js'
 import {
   LEGACY_EXPRESSION_PREFIX,
   columnTypeAcceptsStringLiteral,
   isSQLExpression,
+  nullableColumnType,
   parseColumnDefault,
   readsUnparsableEphemeralLiteralAsNull,
   renderDefault,
@@ -20,11 +21,12 @@ import { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 import { stripWrappingParens } from './sql-scan.js'
 import { engineName, supportsSortOrder } from './engine.js'
 import { isKafkaEngine } from './kafka.js'
-import { type SQLToken, tokenizeSQL } from './sql-lexer.js'
+import { type SQLToken, stringLiteralValue, tokenizeSQL } from './sql-lexer.js'
 import { normalizeSQLFragment } from './sql-normalizer.js'
 import { textSQLTokens } from './text-index-sql.js'
 import type {
   ColumnDefaultKind,
+  ColumnDefaultValue,
   ColumnDefinition,
   DictionaryDefinition,
   MaterializedViewDefinition,
@@ -57,46 +59,16 @@ function validateColumnCodec(
   issues: ValidationIssue[]
 ): void {
   if (!column.codec) return
-  const steps = canonicalizeCodec(column.codec)
-  if (steps.length === 0) {
-    pushValidationIssue(
-      issues,
-      def,
-      'codec_chain_empty',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain is empty; provide at least one codec or omit the field`
-    )
-    return
-  }
-  let generalCount = 0
-  let generalIndex = -1
-  for (const [i, step] of steps.entries()) {
-    if (isRawCodec(step)) continue
-    if (isGeneralCodec(step)) {
-      generalCount += 1
-      generalIndex = i
-    }
-  }
-
-  if (generalCount > 1) {
-    pushValidationIssue(
-      issues,
-      def,
-      'codec_chain_multiple_general',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain has more than one general codec; only one general codec is allowed at the end of a chain`
-    )
-    return
-  }
-
-  // Delta and GCD only transform the data: ClickHouse rejects a chain of nothing else.
-  const onlyTransforms = steps.every((step) => step.kind === 'Delta' || step.kind === 'GCD')
-  if (onlyTransforms || (steps.length > 1 && generalCount === 1 && generalIndex !== steps.length - 1)) {
-    pushValidationIssue(
-      issues,
-      def,
-      'codec_chain_must_end_with_general',
-      `Table ${def.database}.${def.name} column "${column.name}" codec chain must end with a general codec (NONE, LZ4, LZ4HC, ZSTD, ALP)`
-    )
-  }
+  // The type as rendered, like renderColumnType.
+  const type = String(column.type).trim()
+  const problem = columnCodecProblem(column.codec, column.nullable ? nullableColumnType(type) : type)
+  if (!problem) return
+  pushValidationIssue(
+    issues,
+    def,
+    problem.code,
+    `Table ${def.database}.${def.name} column "${column.name}" ${problem.message}`
+  )
 }
 
 const COLUMN_DEFAULT_KINDS: ReadonlySet<string> = new Set(['DEFAULT', 'MATERIALIZED', 'ALIAS', 'EPHEMERAL'])
@@ -145,7 +117,7 @@ function validateColumnDefault(
   const type = typeof column.type === 'string' ? column.type.trim() : ''
   if (columnTypeAcceptsStringLiteral(type)) return
   pushValidationIssue(issues, def, 'column_default_looks_like_expression',
-    describeQuotedFunctionDefault(subject, kind, column.nullable ? `Nullable(${type})` : type, parsed.value))
+    describeQuotedFunctionDefault(subject, kind, column.nullable ? nullableColumnType(type) : type, parsed.value))
 }
 
 function validateDefaultExpression(
@@ -551,7 +523,7 @@ function unquoteColumnName(token: string): string {
 const INTERVAL_PATTERN =
   /^\s*\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR)(\s+\d+\s+(SECOND|MINUTE|HOUR|DAY|WEEK|MONTH|YEAR))*\s*$/i
 
-const REPLICATED_ENGINE_PATTERN = /^(Shared|Replicated)/
+const REPLICATED_ENGINE_PATTERN = /^Replicated/
 
 function validateInterval(
   def: MaterializedViewDefinition,
@@ -572,8 +544,7 @@ function validateInterval(
 
 function validateMaterializedViewDefinition(
   def: MaterializedViewDefinition,
-  issues: ValidationIssue[],
-  definitions: SchemaDefinition[]
+  issues: ValidationIssue[]
 ): void {
   const { refresh } = def
   if (!refresh) return
@@ -608,23 +579,6 @@ function validateMaterializedViewDefinition(
       'refresh_depends_on_requires_every',
       `Materialized view ${def.database}.${def.name} uses DEPENDS ON with REFRESH AFTER; ClickHouse only allows DEPENDS ON with REFRESH EVERY.`
     )
-  }
-
-  if (!refresh.append) {
-    const target = definitions.find(
-      (other): other is TableDefinition =>
-        other.kind === 'table' &&
-        other.database === def.to.database &&
-        other.name === def.to.name
-    )
-    if (target && REPLICATED_ENGINE_PATTERN.test(target.engine)) {
-      pushValidationIssue(
-        issues,
-        def,
-        'refresh_append_required_for_replicated_target',
-        `Materialized view ${def.database}.${def.name} refreshes a replicated target ${target.database}.${target.name} (${target.engine}) without APPEND. ClickHouse rejects this combination. Set refresh.append = true, or target a non-replicated table.`
-      )
-    }
   }
 }
 
@@ -786,7 +740,7 @@ export function validateDefinitions(definitions: SchemaDefinition[]): Validation
     if (def.kind === 'table') {
       validateTableDefinition(def, issues)
     } else if (def.kind === 'materialized_view') {
-      validateMaterializedViewDefinition(def, issues, definitions)
+      validateMaterializedViewDefinition(def, issues)
     } else if (def.kind === 'dictionary') {
       validateDictionaryDefinition(def, issues)
     }
@@ -798,4 +752,81 @@ export function validateDefinitions(definitions: SchemaDefinition[]): Validation
 export function assertValidDefinitions(definitions: SchemaDefinition[]): void {
   const issues = validateDefinitions(definitions)
   if (issues.length > 0) throw new ValidationError(issues)
+}
+
+/**
+ * Schema issues that are reported but never fail: a plain string default that
+ * is one quoted SQL string literal, such as `"'standard'"`. It renders as
+ * `'''standard'''` and keeps the quotes in the value, which is usually SQL
+ * written without `{ expression }`. A value may contain quotes, so it only warns.
+ *
+ * A refreshable materialized view without APPEND whose target is `Replicated*`
+ * also only warns: ClickHouse refuses it in a non-replicated database (Atomic),
+ * but ObsessionDB, ClickHouse Cloud and Replicated databases accept it, and
+ * chkit cannot see the database engine offline.
+ */
+export function collectDefinitionWarnings(definitions: SchemaDefinition[]): ValidationIssue[] {
+  const issues: ValidationIssue[] = []
+  for (const def of definitions) {
+    if (def.kind === 'table') {
+      for (const column of def.columns) {
+        const kind = column.defaultKind ?? 'DEFAULT'
+        const quoted = quotedStringDefault(column.default)
+        if (quoted === undefined || (kind !== 'DEFAULT' && kind !== 'EPHEMERAL')) continue
+        pushValidationIssue(issues, def, 'quoted_string_default',
+          `${describeQuotedStringDefault(`Table ${def.database}.${def.name} column "${column.name}"`, kind, quoted)}, or use default: { expression: ${JSON.stringify(quoted.raw.trim())} } for SQL. If the quotes belong to the value, ignore this warning.`)
+      }
+    } else if (def.kind === 'materialized_view') {
+      warnReplaceRefreshOfReplicatedTarget(def, definitions, issues)
+    } else if (def.kind === 'dictionary') {
+      for (const attribute of def.attributes) {
+        const quoted = quotedStringDefault(attribute.default)
+        if (quoted === undefined) continue
+        pushValidationIssue(issues, def, 'quoted_string_default',
+          `${describeQuotedStringDefault(`Dictionary ${def.database}.${def.name} attribute "${attribute.name}"`, 'DEFAULT', quoted)}; dictionary defaults are literals only. If the quotes belong to the value, ignore this warning.`)
+      }
+    }
+  }
+  return issues
+}
+
+function warnReplaceRefreshOfReplicatedTarget(
+  def: MaterializedViewDefinition,
+  definitions: SchemaDefinition[],
+  issues: ValidationIssue[]
+): void {
+  if (!def.refresh || def.refresh.append) return
+  const target = definitions.find(
+    (other): other is TableDefinition =>
+      other.kind === 'table' && other.database === def.to.database && other.name === def.to.name
+  )
+  if (!target || !REPLICATED_ENGINE_PATTERN.test(target.engine)) return
+  pushValidationIssue(
+    issues,
+    def,
+    'refresh_append_required_for_replicated_target',
+    `Materialized view ${def.database}.${def.name} refreshes a replicated target ${target.database}.${target.name} (${target.engine}) without APPEND. ClickHouse refuses this in a non-replicated database such as Atomic; ObsessionDB, ClickHouse Cloud and Replicated databases accept it. On a non-replicated database, set refresh.append = true or target a non-replicated table.`
+  )
+}
+
+/**
+ * A plain string default that is exactly one terminated `'…'` literal, with
+ * its value, or no value when the literal has backslash escapes (`\n`,
+ * `\x41`), which chkit does not decode. `fn:` strings are expressions.
+ */
+function quotedStringDefault(value: ColumnDefaultValue | undefined): { raw: string; value: string | undefined } | undefined {
+  if (value === undefined) return undefined
+  const parsed = parseColumnDefault(value)
+  if (parsed.kind !== 'literal' || typeof parsed.value !== 'string') return undefined
+  const tokens = tokenizeSQL(parsed.value.trim())
+  const [token] = tokens
+  if (tokens.length !== 1 || token === undefined || !token.text.startsWith("'") || !token.terminated) return undefined
+  return { raw: parsed.value, value: token.text.includes('\\') ? undefined : stringLiteralValue(token) }
+}
+
+function describeQuotedStringDefault(subject: string, kind: string, quoted: { raw: string; value: string | undefined }): string {
+  const asValue = quoted.value === undefined
+    ? 'Write the value itself, without SQL quotes or escapes, as a plain string'
+    : `Use default: ${JSON.stringify(quoted.value)} for the value`
+  return `${subject} has plain string default ${JSON.stringify(quoted.raw)}, which renders as ${kind} ${renderDefault(quoted.raw)} and keeps the quotes in the value. ${asValue}`
 }

@@ -228,6 +228,10 @@ class ChxPluginCommand:
     run: Callable[[ChxPluginCommandContext], int | None]
     description: str | None = None
     flags: list[dict[str, Any]] | None = None
+    # False when the command takes no positional arguments: the CLI then
+    # rejects any, before or after ``--``, as it does for its own commands,
+    # and the command does not run (#659). True, it gets them in ``args``.
+    takes_args: bool = True
 
 
 # ---------- plugin hooks (Protocol-based, optional methods) ----------

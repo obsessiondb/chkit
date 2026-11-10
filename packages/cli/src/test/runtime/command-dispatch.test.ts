@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
 import type { FlagDef, ResolvedChxConfig } from '@chkit/core'
 import type { PluginRuntime } from '../../plugins.js'
@@ -40,6 +40,73 @@ describe('parseCommandArgs', () => {
 
 		expect(parsed?.flags['--service']).toBe('prod')
 		expect(parsed?.positionals).toEqual(['-- inspect\nSELECT 1'])
+	})
+
+	test('keeps query SQL that starts with a dash and holds whitespace as SQL (#584)', () => {
+		for (const sql of [
+			'-- note\nSELECT a = 1',
+			'--note\nSELECT 1',
+			'--====\nSELECT 1',
+			'--tag=a b\nSELECT 1',
+			'-',
+		]) {
+			const parsed = parseCommandArgs(
+				'query',
+				[sql, '--json'],
+				[...GLOBAL_FLAGS, SERVICE_FLAG],
+			)
+			expect(parsed).toEqual({ flags: { '--json': true }, positionals: [sql] })
+		}
+	})
+
+	test('keeps a dash-leading query flag value as the value (#584)', () => {
+		const parsed = parseCommandArgs(
+			'query',
+			['--service', '-prod', 'SELECT 1', '--', '-1'],
+			[...GLOBAL_FLAGS, SERVICE_FLAG],
+		)
+
+		expect(parsed).toEqual({
+			flags: { '--service': '-prod' },
+			positionals: ['SELECT 1', '-1'],
+		})
+	})
+
+	test('keeps an attached value with spaces on a declared query flag (#584)', () => {
+		const parsed = parseCommandArgs(
+			'query',
+			['-c/my dir/c.py', 'SELECT 1', '--service=a b'],
+			[...GLOBAL_FLAGS, SERVICE_FLAG],
+		)
+
+		expect(parsed).toEqual({
+			flags: { '--config': '/my dir/c.py', '--service': 'a b' },
+			positionals: ['SELECT 1'],
+		})
+	})
+
+	test('a query value flag never takes -- as its value, and --json after -- is not a flag (#614)', () => {
+		const errors = spyOn(console, 'error').mockImplementation(() => {})
+		const writes = spyOn(process.stdout, 'write').mockImplementation(() => true)
+		const previousExitCode = process.exitCode
+		const parsed = parseCommandArgs(
+			'query',
+			['--service', '--', '--json'],
+			[...GLOBAL_FLAGS, SERVICE_FLAG],
+		)
+		const stdout = writes.mock.calls.map((call) => String(call[0])).join('')
+		const stderr = errors.mock.calls.map((call) => String(call[0]))
+		const exitCode = process.exitCode
+		errors.mockRestore()
+		writes.mockRestore()
+		process.exitCode = previousExitCode
+
+		expect([parsed, exitCode, stderr, stdout]).toEqual([
+			null,
+			1,
+			['Missing value for --service'],
+			'',
+		])
 	})
 
 	test('supports query flags after SQL', () => {
@@ -106,6 +173,7 @@ function makeRuntime(): {
 			configLoadedCalls += 1
 		},
 		runOnSchemaLoaded: async (context) => context.definitions,
+		runOnSnapshotLoaded: async (context) => context.definitions,
 		runOnPlanCreated: async (_context, plan) => plan,
 		runOnBeforeApply: async (context) => context.statements,
 		runOnAfterApply: async () => {},
@@ -150,7 +218,7 @@ describe('runResolvedCommand', () => {
 		expect(configLoadedCalls()).toBe(1)
 	})
 
-	test('passes positional args to plugin subcommands', async () => {
+	test('passes positional args to plugin subcommands, without the subcommand name (#624)', async () => {
 		const { runtime } = makeRuntime()
 		let received:
 			| { pluginName: string; commandName: string; args: readonly string[] }
@@ -188,7 +256,7 @@ describe('runResolvedCommand', () => {
 		expect(received).toEqual({
 			pluginName: 'obsessiondb',
 			commandName: 'service',
-			args: ['service', 'alias', 'set', 'prod', 'production'],
+			args: ['alias', 'set', 'prod', 'production'],
 		})
 	})
 
@@ -251,7 +319,49 @@ describe('runResolvedCommand', () => {
 		expect(received).toEqual({
 			pluginName: 'obsessiondb',
 			commandName: 'service',
-			args: ['service', 'alias', 'set', 'login', 'production'],
+			args: ['alias', 'set', 'login', 'production'],
+		})
+	})
+
+	test('keeps the first positional when the only subcommand runs without its name', async () => {
+		const { runtime } = makeRuntime()
+		let received:
+			| { pluginName: string; commandName: string; args: readonly string[] }
+			| undefined
+		runtime.runPluginCommand = async (pluginName, commandName, context) => {
+			received = { pluginName, commandName, args: context.args }
+			return 0
+		}
+
+		await runResolvedCommand({
+			argv: ['echoer', 'alpha', 'beta'],
+			commandName: 'echoer',
+			resolved: {
+				name: 'echoer',
+				description: '',
+				flags: [],
+				pluginFlags: [],
+				pluginName: 'echoer',
+				subcommands: [
+					{
+						name: 'echo',
+						description: '',
+						flags: [],
+						pluginFlags: [],
+						pluginName: 'echoer',
+					},
+				],
+			},
+			registry: makeRegistry(),
+			config: TEST_CONFIG,
+			configPath: '/tmp/clickhouse.config.ts',
+			pluginRuntime: runtime,
+		})
+
+		expect(received).toEqual({
+			pluginName: 'echoer',
+			commandName: 'echo',
+			args: ['alpha', 'beta'],
 		})
 	})
 })

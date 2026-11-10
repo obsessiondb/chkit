@@ -29,6 +29,7 @@ from chkit.cli.snapshot_document import (
     parse_snapshot_document,
 )
 from chkit.core.model import MigrationPlan, SchemaDefinition, Snapshot
+from chkit.core.sql_lexer import js_regex
 
 _MIGRATION_FORMAT_VERSION: Final[str] = "v1"
 _EMPTY_PLAN: Final[MigrationPlan] = MigrationPlan.model_validate(
@@ -81,7 +82,7 @@ class ChecksumMismatch(BaseModel):
 
 
 # A `-- before-retry:` line holds one line of SQL (TS `/\s*[\r\n]+\s*/g`).
-_BEFORE_RETRY_NEWLINES = re.compile(r"\s*[\r\n]+\s*")
+_BEFORE_RETRY_NEWLINES = re.compile(js_regex(r"\s*[\r\n]+\s*"))
 
 
 def _timestamp_id(now: datetime | None = None) -> str:
@@ -134,11 +135,16 @@ class SnapshotReadError(RuntimeError):
     """Raised when ``snapshot.json`` exists but cannot be read as JSON."""
 
 
-def read_snapshot(meta_dir: Path) -> Snapshot | None:
+def read_snapshot(meta_dir: Path, *, index_granularity: int | None = None) -> Snapshot | None:
+    """``index_granularity`` is ``clickhouse.indexGranularity``: a snapshot an
+    older chkit wrote has no index_granularity for a MergeTree table that does
+    not declare it, and gets the server default."""
     snapshot_path = meta_dir / "snapshot.json"
     if not snapshot_path.exists():
         return None
-    parsed = parse_snapshot_document(snapshot_path.read_text(encoding="utf-8"))
+    parsed = parse_snapshot_document(
+        snapshot_path.read_text(encoding="utf-8"), index_granularity=index_granularity
+    )
     if isinstance(parsed, ReadableSnapshotDocument):
         return parsed.snapshot
     raise SnapshotReadError(_describe_unreadable_snapshot(snapshot_path, parsed.reason))

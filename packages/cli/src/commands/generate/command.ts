@@ -1,9 +1,17 @@
 import { generateArtifacts, generateEmptyMigration } from '@chkit/codegen'
-import { applyOnClusterToPlan, ChxValidationError, planDiff, type PlannedCutover } from '@chkit/core'
+import {
+  applyOnClusterToPlan,
+  canonicalizeDefinitions,
+  ChxValidationError,
+  collectDefinitionWarnings,
+  configuredIndexGranularity,
+  planDiff,
+  type PlannedCutover,
+} from '@chkit/core'
 
 import { defineFlags, typedFlags, type ChxPluginCommand } from '../../plugins.js'
 import { resolveDirs } from '../../runtime/config.js'
-import { GLOBAL_FLAGS } from '../../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../../runtime/global-flags.js'
 import { emitJson } from '../../runtime/json-output.js'
 import { readSnapshot } from '../../runtime/migration-store.js'
 import { loadSchemaDefinitionsWithHooks } from '../../runtime/schema-loader.js'
@@ -14,6 +22,7 @@ import {
   resolveTableScope,
   tableKeysFromDefinitions,
 } from '../../runtime/table-scope.js'
+import { detectExperimentalCodecWarnings } from './codec-warnings.js'
 import { detectDictionaryPasswordWarnings } from './dictionary-password-warnings.js'
 import {
   applyExplicitDictionaryRenames,
@@ -45,7 +54,8 @@ import { applyCutovers, carryRetainedDefinitions, resolveCutoverFlags, summarize
 import { debug } from '../../runtime/debug.js'
 
 const GENERATE_FLAGS = defineFlags([
-  { name: '--name', type: 'string', description: 'Migration name', placeholder: '<name>' },
+  TABLE_FLAG,
+  { name: '--name', short: '-n', type: 'string', description: 'Migration name', placeholder: '<name>' },
   { name: '--migration-id', type: 'string', description: 'Override the default timestamp migration prefix', placeholder: '<id>' },
   { name: '--rename-table', type: 'string[]', description: 'Explicit table rename mapping', placeholder: '<mapping>' },
   { name: '--rename-column', type: 'string[]', description: 'Explicit column rename mapping', placeholder: '<mapping>' },
@@ -100,6 +110,8 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     dropRetained: f['--drop-retained'] ?? [],
   })
   const now = new Date()
+  // What a MergeTree table that does not declare index_granularity gets.
+  const indexGranularity = configuredIndexGranularity(config)
 
   const schemaDefinitions = await loadSchemaDefinitionsWithHooks(
     { command: 'generate', config, configPath, flags, jsonMode, tableSelector },
@@ -118,7 +130,17 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   const dictionaryMappings = mergeDictionaryMappings(schemaMappings.dictionaryMappings, cliDictionaryMappings)
 
   const { migrationsDir, metaDir } = dirs
-  const previousDefinitions = (await readSnapshot(metaDir))?.definitions ?? []
+  const snapshotDefinitions = (await readSnapshot(metaDir, { indexGranularity }))?.definitions ?? []
+  // The schema went through the plugins' rewrites; a snapshot written before
+  // a rewrite existed goes through it too, so it plans no change (#466).
+  const previousDefinitions = await pluginRuntime.runOnSnapshotLoaded({
+    command: 'generate',
+    config,
+    tableScope: resolveTableScope(tableSelector, tableKeysFromDefinitions(snapshotDefinitions)),
+    flags,
+    jsonMode,
+    definitions: snapshotDefinitions,
+  })
   const definitions = carryRetainedDefinitions({
     previousDefinitions,
     definitions: schemaDefinitions,
@@ -167,7 +189,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
 
   let plan: ReturnType<typeof planDiff>
   try {
-    plan = planDiff(remappedPreviousDefinitions, definitions)
+    plan = planDiff(remappedPreviousDefinitions, definitions, { indexGranularity })
   } catch (error) {
     return reportValidationError(error, jsonMode)
   }
@@ -206,6 +228,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
         cutovers: cutoverFlags,
         cluster: config.clickhouse?.cluster,
         stamp: migrationStamp(now),
+        indexGranularity,
       }))
     } catch (error) {
       return reportValidationError(error, jsonMode)
@@ -217,13 +240,16 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   // post-pass, after all plan transforms (renames, plugins, scope filtering).
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
-  const dictionaryPasswordWarnings = [
+  const warnings = [
+    // A plugin hook may leave definitions noncanonical; warn on what the planner sees, as chkit-py does.
+    ...collectDefinitionWarnings(canonicalizeDefinitions(schemaDefinitions, { indexGranularity })).map((issue) => issue.message),
     ...detectDictionaryPasswordWarnings(plan),
+    ...detectExperimentalCodecWarnings(plan),
     ...plan.operations.flatMap((operation) => operation.warning ? [operation.warning] : []),
   ]
 
   if (planMode) {
-    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, dictionaryPasswordWarnings, cutoverSummaries)
+    emitGeneratePlanOutput(plan, jsonMode, resolvedScope, warnings, cutoverSummaries)
     return 0
   }
 
@@ -253,6 +279,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     plan,
     cliVersion: CLI_VERSION,
     now,
+    indexGranularity,
   })
 
   const codegenPlugin = pluginRuntime.plugins.find((entry) => entry.plugin.manifest.name === 'codegen')
@@ -272,7 +299,7 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
     }
   }
 
-  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, dictionaryPasswordWarnings, cutoverSummaries)
+  emitGenerateApplyOutput(result, artifactDefinitions, plan, jsonMode, resolvedScope, warnings, cutoverSummaries)
   return 0
 }
 

@@ -17,10 +17,20 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { isoWithoutZone } from '../commands/migrate/async-apply.js'
 import { createJournalStore, type MigrationRowState } from '../runtime/journal-store.js'
-import { CORE_ENTRY, createJournalTableName, createPrefix, formatTestDiagnostic, runCli, type CliResult } from './e2e-testkit.js'
+import {
+  CORE_ENTRY,
+  createJournalTableName,
+  createLiveExecutor,
+  createPrefix,
+  createStatelessLiveExecutor,
+  formatTestDiagnostic,
+  getLiveEnv,
+  runCli,
+  startCli,
+  type CliResult,
+} from './e2e-testkit.js'
 
 const WORKSPACE_ROOT = join(import.meta.dir, '../../../..')
-const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 const BACKFILL_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-backfill/src/index.ts')
 const HISTORIC_ROWS = 20_000
 const BATCH_ROWS = 200
@@ -40,6 +50,27 @@ export interface CutoverTarget {
   readSettings: string
   /** Runs before verification reads, e.g. syncing the replicas of a cluster. */
   settle?: (tables: string[]) => Promise<void>
+}
+
+/** The default test target: the local stack, or ObsessionDB (CHKIT_E2E_TARGET=obsessiondb). */
+export function liveCutoverTarget(): CutoverTarget {
+  const env = getLiveEnv()
+  const remote = env.clickhouseUrl.startsWith('https://')
+  return {
+    database: env.clickhouseDatabase,
+    connection: {
+      url: env.clickhouseUrl,
+      username: env.clickhouseUser,
+      password: env.clickhousePassword,
+      database: env.clickhouseDatabase,
+    },
+    admin: createLiveExecutor(env),
+    writers: [createStatelessLiveExecutor(env), createStatelessLiveExecutor(env)],
+    engine: 'MergeTree',
+    rowsOf: (table) => `${env.clickhouseDatabase}.${table}`,
+    // A SharedMergeTree replica reads the parts every replica committed.
+    readSettings: remote ? ' SETTINGS select_sequential_consistency = 1' : '',
+  }
 }
 
 export interface CutoverProject {
@@ -100,8 +131,13 @@ export async function createCutoverProject(target: CutoverTarget, label: string)
   return project
 }
 
-/** Rewrites the schema so the table sorts by `orderBy`. */
-export async function writeSchema(target: CutoverTarget, project: CutoverProject, orderBy: string[]): Promise<void> {
+/** Rewrites the schema so the table sorts by `orderBy`, with `settings`. */
+export async function writeSchema(
+  target: CutoverTarget,
+  project: CutoverProject,
+  orderBy: string[],
+  settings?: Record<string, number>,
+): Promise<void> {
   const db = target.database
   const local = (name: string) => `${db}.${name}`
   const engine = JSON.stringify(target.engine)
@@ -116,7 +152,7 @@ const columns = [
 ]
 
 export default schema(
-  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)} }),
+  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)}${settings ? `, settings: ${JSON.stringify(settings)}` : ''} }),
   table({ database: '${db}', name: '${project.byUser}', engine: ${engine}, columns: [{ name: 'user_id', type: 'UInt64' }, { name: 'id', type: 'UInt64' }], primaryKey: ['user_id'], orderBy: ['user_id', 'id'] }),
   materializedView({ database: '${db}', name: '${project.byUser}_mv', to: { database: '${db}', name: '${project.byUser}' }, as: 'SELECT user_id, id FROM ${local(project.table)}' }),
   table({ database: '${db}', name: '${project.ingest}', engine: ${engine}, columns, primaryKey: ['id'], orderBy: ['id'] }),
@@ -130,7 +166,9 @@ export default schema(
 /**
  * Inserts batches of fresh ids until stopped, alternating a direct INSERT and
  * an INSERT into the chained source, round robin over the writer executors.
- * Only batches that succeeded count.
+ * Only batches that succeeded count. A batch rejected with TABLE_UUID_MISMATCH
+ * (741) overlapped the swap and wrote nothing, so it is retried once, as the
+ * cutover guide tells writers to; any other error fails the scenario.
  */
 function startWriters(target: CutoverTarget, project: CutoverProject, parallel = 2): { stop: () => Promise<WriterReport> } {
   let stopped = false
@@ -144,10 +182,15 @@ function startWriters(target: CutoverTarget, project: CutoverProject, parallel =
       const executor = target.writers[batch % target.writers.length] as ClickHouseExecutor
       const into = batch % 2 === 0 ? project.table : project.ingest
       const start = 1_000_000_000 + batch * BATCH_ROWS
-      try {
-        await executor.command(
+      const insert = () =>
+        executor.command(
           `INSERT INTO ${db}.${into} (id, user_id, payload) SELECT ${start} + number, number % 97, 'live-${worker}' FROM numbers(${BATCH_ROWS})`,
         )
+      try {
+        await insert().catch((error: unknown) => {
+          if (!(error instanceof Error && 'code' in error && String(error.code) === '741')) throw error
+          return insert()
+        })
         report.batches += 1
         report.rows += BATCH_ROWS
       } catch (error) {
@@ -171,20 +214,9 @@ export function cli(project: CutoverProject, args: string[]): CliResult {
 
 /** Like `cli`, without blocking the event loop, so writers keep inserting meanwhile. */
 async function cliAsync(project: CutoverProject, args: string[]): Promise<CliResult> {
-  const proc = Bun.spawn(['bun', CLI_ENTRY, ...args, '--config', project.configPath], {
-    cwd: project.dir,
-    env: { ...process.env, ...project.env },
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  const timer = setTimeout(() => proc.kill(), MIGRATE_TIMEOUT_MS)
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
-  clearTimeout(timer)
-  return { exitCode, stdout, stderr }
+  return startCli(project.dir, [...args, '--config', project.configPath], project.env, {
+    timeoutMs: MIGRATE_TIMEOUT_MS,
+  }).result
 }
 
 function expectOk(result: CliResult, label: string): CliResult {
@@ -239,6 +271,27 @@ async function assertCutoverRows(
     throw new Error(`cutover rows: expected ${JSON.stringify(want)}, got ${JSON.stringify(actual)} (writer errors: ${writers.errors.length})`)
   }
   return { total: expected }
+}
+
+/** A cutover's change: the new sort key and settings, and the layout `layouts` reports after it. */
+export interface CutoverChange {
+  orderBy: string[]
+  settings?: Record<string, number>
+  layout: string
+}
+
+const ORDER_BY_CHANGE: CutoverChange = { orderBy: ['user_id', 'id'], layout: 'user_id, id|8192' }
+/** Only a read-only setting changes (#511): the guards must tell the tables apart by it. */
+export const GRANULARITY_CHANGE: CutoverChange = { orderBy: ['id'], settings: { index_granularity: 4096 }, layout: 'id|4096' }
+
+/** Sorting key and index_granularity of the table and every cutover table next to it. */
+async function layouts(target: CutoverTarget, project: CutoverProject): Promise<Record<string, string>> {
+  const result = await target.admin.query<{ name: string; sorting_key: string; granularity: string }>(
+    `SELECT name, sorting_key, extract(engine_full, 'index_granularity = ([0-9]+)') AS granularity FROM system.tables WHERE database = '${target.database}' AND (name IN ('${project.table}', '${project.previous}') OR startsWith(name, '${project.table}__cutover_')) ORDER BY name`,
+  )
+  return Object.fromEntries(
+    result.map((row) => [row.name, `${row.sorting_key.replace(/^\(|\)$/g, '')}|${row.granularity || '8192'}`]),
+  )
 }
 
 async function sortingKeys(target: CutoverTarget, project: CutoverProject): Promise<Record<string, string>> {
@@ -400,12 +453,16 @@ export async function runBackfillScenario(target: CutoverTarget, label: string):
  * (refuses: it must never swap back) and the drop of the old table. Writers
  * insert the whole time; no row may be lost or duplicated.
  */
-export async function runRetryScenario(target: CutoverTarget, label: string): Promise<void> {
+export async function runRetryScenario(
+  target: CutoverTarget,
+  label: string,
+  change: CutoverChange = ORDER_BY_CHANGE,
+): Promise<void> {
   const project = await createCutoverProject(target, label)
   const writers = startWriters(target, project, 1)
   let stopped: WriterReport | undefined
   try {
-    await writeSchema(target, project, ['user_id', 'id'])
+    await writeSchema(target, project, change.orderBy, change.settings)
     expectOk(
       cli(project, ['generate', '--name', 'cutover', '--cutover', `${target.database}.${project.table}=id`, '--cutover-old', 'drop', '--json']),
       'generate --cutover drop',
@@ -455,8 +512,8 @@ export async function runRetryScenario(target: CutoverTarget, label: string): Pr
         if (replay.exitCode === 0 || !output.includes('the EXCHANGE may already have run')) {
           throw new Error(formatTestDiagnostic('a replayed EXCHANGE must be refused', replay))
         }
-        const keys = await sortingKeys(target, project)
-        if (keys[project.table] !== 'user_id, id') throw new Error(`the refused replay swapped the tables back: ${JSON.stringify(keys)}`)
+        const keys = await layouts(target, project)
+        if (keys[project.table] !== change.layout) throw new Error(`the refused replay swapped the tables back: ${JSON.stringify(keys)}`)
       } else if (!output.includes('the ATTACH may already have run')) {
         // Nothing was staged, so the replayed ATTACH ran and the next statement failed.
         if (!output.includes(`injected failure at statement ${step + 2}`)) {
@@ -476,8 +533,8 @@ export async function runRetryScenario(target: CutoverTarget, label: string): Pr
     stopped = await writers.stop()
     if (stopped.errors.length > 0) throw new Error(`writers failed during the cutover: ${stopped.errors[0]}`)
     await assertCutoverRows(target, project, stopped)
-    const keys = await sortingKeys(target, project)
-    if (JSON.stringify(keys) !== JSON.stringify({ [project.table]: 'user_id, id' })) {
+    const keys = await layouts(target, project)
+    if (JSON.stringify(keys) !== JSON.stringify({ [project.table]: change.layout })) {
       throw new Error(`only the cut-over table may remain, found ${JSON.stringify(keys)}`)
     }
     assertChkitClean(project)

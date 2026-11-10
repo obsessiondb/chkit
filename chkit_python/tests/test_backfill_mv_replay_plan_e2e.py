@@ -396,7 +396,7 @@ def test_plans_from_the_source_then_execute_backfill_populates_the_empty_target(
             chunk_ids=chunk_ids,
             build_query=build_query,
             concurrency=3,
-            poll_interval_ms=1500,
+            poll_interval_ms=250,
         )
 
     result = run_chunks(plan.plan_id, [chunk.id for chunk in plan.chunk_plan.chunks])

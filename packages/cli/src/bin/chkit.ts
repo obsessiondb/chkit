@@ -1,18 +1,18 @@
 #!/usr/bin/env node
 import process from 'node:process'
 import { format } from 'node:util'
-import type { ParsedFlags } from '@chkit/core'
+import { expandShortFlags, type FlagDef, MissingFlagValueError, type ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
 import { cmdSkills } from '../commands/skills.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
 import { normalizeGlobalArgs } from '../runtime/argv.js'
-import { parseCommandArgs, runResolvedCommand } from '../runtime/command-dispatch.js'
+import { parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { loadConfig } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
 import { extractConfigPath } from '../runtime/extract-config-path.js'
-import { GLOBAL_FLAGS } from '../runtime/global-flags.js'
+import { GLOBAL_FLAGS, TABLE_FLAG } from '../runtime/global-flags.js'
 import { formatCommandHelp, formatGlobalHelp } from '../runtime/help.js'
 import {
   emitJsonError,
@@ -27,8 +27,12 @@ import { CLI_VERSION } from '../runtime/version.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
+  ingest: 'Ingest',
   pull: 'Pull',
 }
+
+/** Commands that parse their own arguments before any config is loaded. */
+const OWN_PARSER_COMMANDS = new Set(['init', 'skills', 'add', 'registry'])
 
 const PROJECT_ONLY_COMMANDS = new Set([
   'generate',
@@ -43,15 +47,24 @@ const PROJECT_ONLY_COMMANDS = new Set([
 
 let activeCommand = 'chkit'
 
+/** The tokens before the first `--`: after it, `--help` or `--json` is an argument, not an option (#568). */
+function optionArgs(argv: string[]): string[] {
+  const end = argv.indexOf('--')
+  return end === -1 ? argv : argv.slice(0, end)
+}
+
 function firstPluginPositional(argv: string[]): string | undefined {
-  const globalFlags = new Map<string, (typeof GLOBAL_FLAGS)[number]>(
-    GLOBAL_FLAGS.map((flag) => [flag.name, flag]),
+  // --table's value is never the plugin name, also where the target rejects the flag (#565).
+  const globalFlags = new Map<string, FlagDef>(
+    [...GLOBAL_FLAGS, TABLE_FLAG].map((flag) => [flag.name, flag]),
   )
   for (let i = 1; i < argv.length; i += 1) {
     const token = argv[i]
     if (!token) continue
     const eqIdx = token.startsWith('--') ? token.indexOf('=') : -1
     const name = eqIdx === -1 ? token : token.slice(0, eqIdx)
+    // `chkit plugin -- <plugin> ...` names the plugin after the `--` (#568).
+    if (token === '--') return argv[i + 1]
     const flag = globalFlags.get(name)
     if (flag) {
       if (flag.type !== 'boolean' && eqIdx === -1) i += 1
@@ -158,19 +171,28 @@ async function run(): Promise<void> {
   // to drain instead of losing what did not fit in the pipe buffer.
   console.log = (...args: unknown[]) => writeStdout(format(...args))
 
-  const argv = normalizeGlobalArgs(process.argv.slice(2))
-  const commandName = argv[0]
+  const normalized = normalizeGlobalArgs(process.argv.slice(2))
+  const commandName = normalized[0]
+  // Short flags (`-c`, `-t`, `generate -n`) read as their long form from here on,
+  // so config lookup, help and dispatch see only long flags (#491). Commands with
+  // their own parser expand their own short flags; plugin commands expand theirs
+  // once the config has registered them.
+  const argv =
+    commandName === undefined || OWN_PARSER_COMMANDS.has(commandName)
+      ? normalized
+      : [commandName, ...expandShortFlags(normalized.slice(1), createInternalRegistry().resolveFlags(commandName))]
   activeCommand = commandName ?? 'chkit'
+  const options = optionArgs(argv)
   debug('cli', `chkit ${CLI_VERSION} — argv: [${argv.join(', ')}]`)
-  const includePluginHelp = argv.includes('--help-plugins')
-  const wantsHelp = includePluginHelp || argv.includes('--help') || argv.includes('-h')
+  const includePluginHelp = options.includes('--help-plugins')
+  const wantsHelp = includePluginHelp || options.includes('--help') || options.includes('-h')
 
   if (!commandName || commandName === '-h' || commandName === '--help') {
     await printGlobalHelp(argv)
     return
   }
 
-  if (commandName === '-v' || commandName === '--version') {
+  if (commandName === '-v' || commandName === '-V' || commandName === '--version') {
     console.log(CLI_VERSION)
     return
   }
@@ -206,7 +228,14 @@ async function run(): Promise<void> {
     }
   }
 
-  const configPathArg = extractConfigPath(argv)
+  let configPathArg: string | undefined
+  try {
+    configPathArg = extractConfigPath(argv)
+  } catch (error) {
+    if (!(error instanceof MissingFlagValueError)) throw error
+    reportUsageError({ command: commandName, code: 'usage', message: error.message, jsonMode: options.includes('--json') })
+    return
+  }
   const env = { command: commandName, mode: process.env.NODE_ENV }
   const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {
     command: commandName,
@@ -220,7 +249,7 @@ async function run(): Promise<void> {
       message:
         `Command "${commandName}" requires a project config (clickhouse.config.ts) in the current directory.\n` +
         `You are running chkit from a user profile (no local config found).`,
-      jsonMode: argv.includes('--json'),
+      jsonMode: options.includes('--json'),
     })
     return
   }
@@ -240,35 +269,36 @@ async function run(): Promise<void> {
 
   const resolved = registry.get(commandName)
   let initFlags: ParsedFlags = {}
-  if (
-    resolved &&
-    !resolved.subcommands &&
-    commandName !== 'plugin' &&
-    !wantsHelp
-  ) {
-    const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
+  if (resolved && !wantsHelp) {
+    const parsed = parseInitFlags({
+      argv,
+      commandName,
+      resolved,
+      registry,
+      plugins: pluginRuntime.plugins,
+    })
     if (!parsed) return
-    initFlags = parsed.flags
+    initFlags = parsed
   }
 
   const initCtx = {
     command: commandName,
     configPath,
     isInteractive: process.stdin.isTTY === true && process.stderr.isTTY === true,
-    jsonMode: argv.includes('--json'),
+    jsonMode: options.includes('--json'),
     flags: initFlags,
     config,
   }
 
   if (wantsHelp) {
     if (resolved) {
-      console.log(formatCommandHelp(resolved, registry.globalFlags))
+      console.log(formatCommandHelp(resolved, registry.globalFlags, firstPluginPositional(argv)))
     } else {
       reportUsageError({
         command: commandName,
         code: 'unknown_command',
         message: `Unknown command: ${commandName}`,
-        jsonMode: argv.includes('--json'),
+        jsonMode: options.includes('--json'),
         onText: () => console.log(formatGlobalHelp(registry, CLI_VERSION)),
       })
     }
@@ -296,7 +326,7 @@ async function run(): Promise<void> {
           command: commandName,
           code: 'plugin_not_configured',
           message: `${wellKnown} plugin is not configured. Add it to config.plugins first.`,
-          jsonMode: argv.includes('--json'),
+          jsonMode: options.includes('--json'),
         })
         return
       }
@@ -304,7 +334,7 @@ async function run(): Promise<void> {
         command: commandName,
         code: 'unknown_command',
         message: `Unknown command: ${commandName}`,
-        jsonMode: argv.includes('--json'),
+        jsonMode: options.includes('--json'),
         onText: () => {
           console.log('')
           console.log(formatGlobalHelp(registry, CLI_VERSION))
@@ -321,8 +351,18 @@ async function run(): Promise<void> {
       config,
       configPath,
       pluginRuntime,
-      onAmbiguousPluginSubcommand() {
-        console.log(formatCommandHelp(resolved, registry.globalFlags))
+      onAmbiguousPluginSubcommand(token) {
+        if (token === undefined) {
+          console.log(formatCommandHelp(resolved, registry.globalFlags))
+          return
+        }
+        reportUsageError({
+          command: commandName,
+          code: 'unknown_subcommand',
+          message: `Unknown ${commandName} command "${token}". Available: ${(resolved.subcommands ?? []).map((sub) => sub.name).join(', ')}.`,
+          jsonMode: options.includes('--json'),
+          onText: () => console.log(formatCommandHelp(resolved, registry.globalFlags)),
+        })
       },
     })
   } catch (error) {
@@ -339,7 +379,7 @@ async function run(): Promise<void> {
 
 async function printGlobalHelp(argv: string[]): Promise<void> {
   let registry = createInternalRegistry()
-  if (argv.includes('--help-plugins')) {
+  if (optionArgs(argv).includes('--help-plugins')) {
     const configPathArg = extractConfigPath(argv)
     const { config, path: configPath } = await loadConfig(configPathArg)
     const pluginRuntime = await loadPluginRuntime({
@@ -374,8 +414,7 @@ run()
           }
         : error,
     )
-    const argv = process.argv.slice(2)
-    const jsonMode = argv.includes('--json')
+    const jsonMode = optionArgs(process.argv.slice(2)).includes('--json')
     // In --json mode emit a machine-readable envelope to stdout (so a pipe to
     // jq doesn't break on the first error) unless a command already wrote a
     // structured JSON payload. The human-readable message always goes to

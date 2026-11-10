@@ -1,6 +1,11 @@
 import { describe, expect, test } from 'bun:test'
 
-import { extractExecutableStatements, splitSqlStatements } from './sql-splitter.js'
+import fixture from '../../../test/fixtures/sql-splitter.json'
+import {
+  extractExecutableStatements,
+  extractLegacyExecutableStatements,
+  splitSqlStatements,
+} from './sql-splitter.js'
 
 describe('splitSqlStatements', () => {
   test('splits multiple statements and re-appends the terminating semicolon', () => {
@@ -177,14 +182,20 @@ describe('extractExecutableStatements with comment-only statements', () => {
     ])
   })
 
-  test('keeps a `#` or `//` comment that holds a semicolon, so the text after it never runs alone', () => {
-    // ClickHouse reads the whole line as one comment; the splitter cuts it at the `;`.
+  test('reads a `#` or `//` comment that holds a semicolon as one comment, as ClickHouse does (#562)', () => {
     expect(extractExecutableStatements('// DROP TABLE a; DROP TABLE b;\nSELECT 1;')).toEqual([
+      '// DROP TABLE a; DROP TABLE b;\nSELECT 1;',
+    ])
+    expect(extractExecutableStatements('# old: DROP TABLE a; DROP TABLE b;\n')).toEqual([])
+  })
+
+  test('the legacy split keeps cutting such a comment at the semicolon, as before #562', () => {
+    expect(extractLegacyExecutableStatements('// DROP TABLE a; DROP TABLE b;\nSELECT 1;')).toEqual([
       '// DROP TABLE a;',
       'DROP TABLE b;',
       'SELECT 1;',
     ])
-    expect(extractExecutableStatements('# old: DROP TABLE a; DROP TABLE b;\n')).toEqual([
+    expect(extractLegacyExecutableStatements('# old: DROP TABLE a; DROP TABLE b;\n')).toEqual([
       '# old: DROP TABLE a;',
       'DROP TABLE b;',
     ])
@@ -206,4 +217,34 @@ describe('extractExecutableStatements with comment-only statements', () => {
     ].join('\n')
     expect(extractExecutableStatements(scaffold)).toEqual([])
   })
+})
+
+// test/fixtures/sql-splitter.json is shared with chkit-py
+// (tests/test_sql_splitter_parity.py): both ports must split each input into
+// the same statements, comments stripped and the `;` kept (#486).
+describe('extractExecutableStatements shared fixture', () => {
+  test('splits a migration file with markers, strings, a heredoc and comments', () => {
+    const render = (text: string): string =>
+      text.replaceAll('{database}', 'app').replaceAll('{table}', 'events')
+    expect(extractExecutableStatements(render(fixture.migration.sql))).toEqual(
+      fixture.migration.statements.map(render),
+    )
+  })
+
+  for (const { name, sql, statements } of fixture.cases) {
+    test(name, () => {
+      expect(extractExecutableStatements(sql)).toEqual(statements)
+    })
+  }
+})
+
+// The split before #562, which resume compares against: `legacyStatements`
+// where it differs from `statements`.
+describe('extractLegacyExecutableStatements shared fixture', () => {
+  for (const testCase of fixture.cases) {
+    const expected = 'legacyStatements' in testCase ? testCase.legacyStatements : testCase.statements
+    test(testCase.name, () => {
+      expect(extractLegacyExecutableStatements(testCase.sql)).toEqual(expected)
+    })
+  }
 })

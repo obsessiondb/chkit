@@ -1,5 +1,35 @@
 # @chkit/codegen
 
+## 0.2.0-beta.16
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.16`
+
+## 0.2.0-beta.15
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.15`
+
+## 0.2.0-beta.14
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.14`
+
+## 0.2.0-beta.13
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.13`
+
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.12`
+
 ## 0.2.0-beta.11
 
 ### Patch Changes

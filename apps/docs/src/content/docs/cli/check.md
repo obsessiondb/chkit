@@ -18,6 +18,7 @@ chkit check [flags]
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
 | `--strict` | boolean | `false` | Force all check policies on, regardless of config |
+| `-t`, `--table <selector>` | string | — | Scope the drift and plugin checks to matching tables; pending and checksum checks still cover all migrations ([details](/cli/overview/#table-scope)) |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
@@ -40,6 +41,8 @@ Policies can be disabled in config. The `--strict` flag forces `failOnPending`, 
 
 Drift is only evaluated when both a `snapshot.json` and a `clickhouse` config block are present. If either is missing, drift is skipped (not treated as a failure).
 
+`check` fails before any policy runs when the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default). The message names the value to set.
+
 ### Plugin check integration
 
 Plugins can register `onCheck` hooks that return findings with severity levels. If a plugin check has `evaluated: true`, `ok: false`, and at least one finding with `severity: 'error'`, it adds `plugin:<name>` to the list of failed checks.
@@ -47,6 +50,10 @@ Plugins can register `onCheck` hooks that return findings with severity levels. 
 Built-in plugins that integrate with check:
 - [Codegen plugin](/plugins/codegen/#ci--check-integration) — checks generated type freshness
 - [Backfill plugin](/plugins/backfill/#ci--check-integration) — checks pending backfill state
+
+### Schema warnings
+
+`check` reports the snapshot's schema warnings, such as a [quoted string default](/cli/generate/#quoted-string-defaults), as `Warning:` lines and in the `warnings` array of `--json` output. Warnings never fail the check.
 
 ### CI gate pattern
 
@@ -111,7 +118,8 @@ chkit check --json
       "ok": false,
       "findingCodes": ["codegen_stale_output"]
     }
-  }
+  },
+  "warnings": []
 }
 ```
 

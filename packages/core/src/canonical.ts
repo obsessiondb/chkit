@@ -15,10 +15,20 @@ import { canonicalizeCodec } from './codec.js'
 import { canonicalizeConstraint } from './constraint.js'
 import { canonicalizeColumnDefault } from './column-default.js'
 import { canonicalizeProjection } from './projection.js'
+import { withDefaultIndexGranularity, withoutAutoMinmaxIndexes } from './table-settings.js'
 import { canonicalizeTextIndex } from './text-index.js'
 import { normalizeEngine, normalizeSQLFragment } from './sql-normalizer.js'
 import { canonicalizeVectorIndex } from './vector-index.js'
 import { compareCodePoints } from './order.js'
+
+export interface CanonicalizeOptions {
+  /**
+   * The `index_granularity` a MergeTree table that does not declare it gets:
+   * the server's MergeTree default, `clickhouse.indexGranularity` (8192 when
+   * unset).
+   */
+  indexGranularity?: number
+}
 
 function sortByName<T extends { name: string }>(items: T[]): T[] {
   return [...items].sort((a, b) => compareCodePoints(a.name, b.name))
@@ -31,6 +41,11 @@ function sortKind(kind: SchemaDefinition['kind']): number {
   return 3
 }
 
+// An empty comment is no comment: ClickHouse stores both as ''.
+function canonicalizeComment(comment: string | undefined): string | undefined {
+  return comment?.trim() || undefined
+}
+
 function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
   const { defaultKind, ...rest } = column
   return {
@@ -39,7 +54,7 @@ function canonicalizeColumn(column: ColumnDefinition): ColumnDefinition {
     name: column.name.trim(),
     renamedFrom: column.renamedFrom?.trim(),
     type: typeof column.type === 'string' ? column.type.trim() : column.type,
-    comment: column.comment?.trim(),
+    comment: canonicalizeComment(column.comment),
     codec: column.codec ? canonicalizeCodec(column.codec) : undefined,
     // `{ expression }` becomes the legacy `fn:` string, so snapshots, plans,
     // drift and chkit-py share one representation (#234). A column without a
@@ -68,14 +83,16 @@ function normalizeOptionalClause(value: string | undefined): string | undefined 
   return normalizeSQLFragment(value) || undefined
 }
 
-function canonicalizeTable(def: TableDefinition): TableDefinition {
-  const settings = def.settings
+function canonicalizeTable(def: TableDefinition, options: CanonicalizeOptions): TableDefinition {
+  const declaredSettings = withDefaultIndexGranularity(def.engine, def.settings, options.indexGranularity)
+  const settings = declaredSettings
     ? Object.fromEntries(
-        Object.entries(def.settings).sort(([a], [b]) => compareCodePoints(a, b))
+        Object.entries(declaredSettings).sort(([a], [b]) => compareCodePoints(a, b))
       )
     : undefined
 
-  const indexes = def.indexes ? sortByName(def.indexes).map(canonicalizeIndex) : undefined
+  const declaredIndexes = withoutAutoMinmaxIndexes(def.indexes, settings)
+  const indexes = declaredIndexes ? sortByName(declaredIndexes).map(canonicalizeIndex) : undefined
   const projections = def.projections
     ? sortByName(def.projections).map(canonicalizeProjection)
     : undefined
@@ -111,7 +128,7 @@ function canonicalizeTable(def: TableDefinition): TableDefinition {
     indexes,
     projections,
     constraints,
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
 }
 
@@ -121,7 +138,7 @@ function canonicalizeView(def: ViewDefinition): ViewDefinition {
     database: def.database.trim(),
     name: def.name.trim(),
     as: normalizeSQLFragment(def.as),
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
 }
 
@@ -182,7 +199,7 @@ function canonicalizeMaterializedView(def: MaterializedViewDefinition): Material
       name: def.to.name.trim(),
     },
     as: normalizeSQLFragment(def.as),
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
   const refresh = canonicalizeRefresh(def.refresh)
   if (refresh) {
@@ -228,12 +245,12 @@ function canonicalizeDictionary(def: DictionaryDefinition): DictionaryDefinition
       ? { min: def.range.min.trim(), max: def.range.max.trim() }
       : undefined,
     settings: settings && Object.keys(settings).length > 0 ? settings : undefined,
-    comment: def.comment?.trim(),
+    comment: canonicalizeComment(def.comment),
   }
 }
 
-export function canonicalizeDefinition(def: SchemaDefinition): SchemaDefinition {
-  if (def.kind === 'table') return canonicalizeTable(def)
+export function canonicalizeDefinition(def: SchemaDefinition, options: CanonicalizeOptions = {}): SchemaDefinition {
+  if (def.kind === 'table') return canonicalizeTable(def, options)
   if (def.kind === 'view') return canonicalizeView(def)
   if (def.kind === 'dictionary') return canonicalizeDictionary(def)
   return canonicalizeMaterializedView(def)
@@ -243,10 +260,13 @@ export function definitionKey(def: SchemaDefinition): string {
   return `${def.kind}:${def.database}.${def.name}`
 }
 
-export function canonicalizeDefinitions(definitions: SchemaDefinition[]): SchemaDefinition[] {
+export function canonicalizeDefinitions(
+  definitions: SchemaDefinition[],
+  options: CanonicalizeOptions = {}
+): SchemaDefinition[] {
   const dedup = new Map<string, SchemaDefinition>()
   for (const def of definitions) {
-    const normalized = canonicalizeDefinition(def)
+    const normalized = canonicalizeDefinition(def, options)
     dedup.set(definitionKey(normalized), normalized)
   }
 
@@ -259,7 +279,10 @@ export function canonicalizeDefinitions(definitions: SchemaDefinition[]): Schema
   })
 }
 
-export function collectDefinitionsFromModule(mod: Record<string, unknown>): SchemaDefinition[] {
+export function collectDefinitionsFromModule(
+  mod: Record<string, unknown>,
+  options: CanonicalizeOptions = {}
+): SchemaDefinition[] {
   const out: SchemaDefinition[] = []
 
   const walk = (value: unknown) => {
@@ -275,5 +298,5 @@ export function collectDefinitionsFromModule(mod: Record<string, unknown>): Sche
   }
 
   for (const value of Object.values(mod)) walk(value)
-  return canonicalizeDefinitions(out)
+  return canonicalizeDefinitions(out, options)
 }

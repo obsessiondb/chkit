@@ -27,20 +27,25 @@ the parser and the splitter together.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
+from chkit.core.sql_lexer import SQLToken, is_trivia, tokenize_sql
 from chkit.core.sql_splitter import extract_executable_statements
 
 __all__ = [
     "DestructiveOperationMarker",
     "MigrationOperationMode",
     "MigrationOperationSummary",
+    "NonSelectBarrier",
     "ScannedDestructiveStatement",
     "collect_destructive_operation_markers",
     "collect_unmarked_destructive_statements",
     "extract_executable_statements",
     "extract_migration_operation_summaries",
+    "find_non_select_barriers",
+    "is_select_statement",
     "migration_contains_danger_operation",
     "migration_contains_destructive_sql",
     "scan_destructive_sql_statements",
@@ -65,7 +70,11 @@ _OBJECT_KEY_RE = re.compile(
 
 # Destructive SQL keyword rules. Each requires the noun keyword that
 # follows the verb, so a `truncate(x)` function call is NOT mistaken for
-# `TRUNCATE TABLE`.
+# `TRUNCATE TABLE`. They match the statement as read through the lexer
+# (#642): every comment form ClickHouse reads (`--`, `//`, `# `, `#!`,
+# `/* */`) only separates tokens, and text inside a string or quoted name is
+# never a keyword. So a commented-out `DROP TABLE` is not flagged, while
+# `DROP /* x */ TABLE t` is.
 _DESTRUCTIVE_SQL_RULES: tuple[tuple[str, re.Pattern[str]], ...] = (
     ("drop_database", re.compile(r"\bDROP\s+DATABASE\b", re.IGNORECASE)),
     (
@@ -194,6 +203,77 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
     return summaries
 
 
+@dataclass(frozen=True, slots=True)
+class NonSelectBarrier:
+    # 0-based position among the statements.
+    index: int
+    statement: str
+    # The ``-- operation:`` marker text after the prefix.
+    summary: str
+
+
+def find_non_select_barriers(
+    statements: Sequence[str], operations: Sequence[MigrationOperationSummary]
+) -> list[NonSelectBarrier]:
+    """The statements marked ``mode=barrier`` that are not a SELECT (#634); the
+    n-th operation marker belongs to the n-th statement.
+
+    The barrier read runs its statement as a query, once and then every
+    second, and nothing waits for a change it makes to reach the other
+    replicas, so migrate refuses any other statement there.
+    """
+    found: list[NonSelectBarrier] = []
+    for index, statement in enumerate(statements):
+        operation = operations[index] if index < len(operations) else None
+        if operation is None or operation.mode != "barrier" or is_select_statement(statement):
+            continue
+        found.append(NonSelectBarrier(index=index, statement=statement, summary=operation.summary))
+    return found
+
+
+def is_select_statement(statement: str) -> bool:
+    """A SELECT, possibly in parentheses, a ``WITH ... SELECT`` or a FROM-first
+    ``FROM ... SELECT``.
+
+    ClickHouse also reads ``WITH ... INSERT INTO``, and runs the statements
+    joined by ``PARALLEL WITH`` even when it then rejects a SELECT among them,
+    so an ``INSERT INTO`` or a ``PARALLEL WITH`` outside a subquery makes it
+    something else. A column or alias named ``parallel`` followed by a WITH
+    modifier (``GROUP BY parallel WITH TOTALS``) there has to be quoted.
+    """
+    tokens = [token for token in tokenize_sql(statement) if not is_trivia(token)]
+    start = 0
+    while start < len(tokens) and _is_punctuation(tokens[start], "("):
+        start += 1
+    first = _keyword(tokens[start]) if start < len(tokens) else None
+    if first not in ("SELECT", "WITH", "FROM"):
+        return False
+    depth = 0
+    for index, token in enumerate(tokens):
+        if _is_punctuation(token, "("):
+            depth += 1
+        elif _is_punctuation(token, ")"):
+            depth -= 1
+        elif depth <= start and _is_other_statement_keyword(
+            token, tokens[index + 1] if index + 1 < len(tokens) else None
+        ):
+            return False
+    return True
+
+
+def _is_other_statement_keyword(token: SQLToken, following: SQLToken | None) -> bool:
+    pair = (_keyword(token), _keyword(following) if following is not None else None)
+    return pair in (("INSERT", "INTO"), ("PARALLEL", "WITH"))
+
+
+def _is_punctuation(token: SQLToken, text: str) -> bool:
+    return token.kind == "punctuation" and token.text == text
+
+
+def _keyword(token: SQLToken) -> str | None:
+    return token.text.upper() if token.kind == "identifier" else None
+
+
 def _describe_destructive_operation(
     type_: str, *, recreate: bool = False
 ) -> _OperationDetail:
@@ -312,67 +392,43 @@ def collect_destructive_operation_markers(
     return markers
 
 
-_LINE_COMMENT_RE = re.compile(r"^\s*--.*$", re.MULTILINE)
-
-
-def _strip_line_comments(statement: str) -> str:  # noqa: PLR0912
-    """Remove `-- ...` line comments outside string literals.
-
-    The Python sql_splitter preserves comments inside the statement text;
-    the TS equivalent strips them in ``extractExecutableStatements``. To
-    keep destructive-SQL classification identical across the two ports
-    we strip line comments here too. A more thorough rewrite of the
-    splitter is tracked in DRIFT.md.
-    """
-    out: list[str] = []
-    in_single = in_double = in_backtick = False
-    i = 0
-    n = len(statement)
-    while i < n:
-        ch = statement[i]
-        nxt = statement[i + 1] if i + 1 < n else ""
-        if in_single:
-            out.append(ch)
-            if ch == "'" and statement[i - 1 : i] != "\\":
-                in_single = False
-        elif in_double:
-            out.append(ch)
-            if ch == '"' and statement[i - 1 : i] != "\\":
-                in_double = False
-        elif in_backtick:
-            out.append(ch)
-            if ch == "`":
-                in_backtick = False
-        elif ch == "-" and nxt == "-":
-            # Skip until end of line (or end of string).
-            while i < n and statement[i] != "\n":
-                i += 1
-            continue
-        elif ch == "'":
-            in_single = True
-            out.append(ch)
-        elif ch == '"':
-            in_double = True
-            out.append(ch)
-        elif ch == "`":
-            in_backtick = True
-            out.append(ch)
-        else:
-            out.append(ch)
-        i += 1
-    return "".join(out)
+# ClickHouse also quotes with U+2018/U+2019 (a string) and U+201C/U+201D (a
+# name), which the lexer does not know: it can read an ASCII quote or comment
+# opener inside one as live and so hide real SQL. Where one of these characters
+# appears, the raw text is matched too.
+_UNICODE_QUOTE = re.compile("[\u2018\u2019\u201c\u201d]")
 
 
 def _classify_destructive_statement(statement: str) -> str | None:
-    cleaned = _strip_line_comments(statement)
+    texts = [_code_text(statement, blank_quoted=True)]
+    if _UNICODE_QUOTE.search(statement):
+        texts.append(statement)
     for type_, pattern in _DESTRUCTIVE_SQL_RULES:
-        if pattern.search(cleaned):
+        if any(pattern.search(text) for text in texts):
             return type_
     return None
 
 
+def _code_text(statement: str, *, blank_quoted: bool) -> str:
+    """The statement as ClickHouse reads it: each comment becomes one space.
+
+    A comment separates tokens (``DROP/**/TABLE`` is ``DROP TABLE``). With
+    ``blank_quoted``, every string literal and quoted name becomes ``''``, so
+    the text inside one is not read as a keyword.
+    """
+    parts: list[str] = []
+    for token in tokenize_sql(statement):
+        if is_trivia(token):
+            parts.append(" ")
+        elif blank_quoted and token.kind in {"string", "quoted_identifier"}:
+            parts.append("''")
+        else:
+            parts.append(token.text)
+    return "".join(parts)
+
+
 def _extract_object_key(statement: str) -> str:
-    match = _OBJECT_KEY_RE.search(statement)
+    match = _OBJECT_KEY_RE.search(_code_text(statement, blank_quoted=False))
     return match.group(1) if match is not None else "unknown"
 
 

@@ -1,7 +1,7 @@
 export * from './flags.js'
 export * from './model.js'
 export { isKafkaEngine, parseKafkaSettings, kafkaSettingFingerprint } from './kafka.js'
-export { engineName, isDistributedEngine, isMergeTreeEngine, supportsSortOrder } from './engine.js'
+export { engineName, isDistributedEngine, isMergeTreeEngine, replicatedEngineAsShared, supportsSortOrder } from './engine.js'
 export {
   findQuoteEnd,
   findTopLevelSQLPattern,
@@ -17,8 +17,16 @@ export {
   canonicalizeDefinitions,
   collectDefinitionsFromModule,
   definitionKey,
+  type CanonicalizeOptions,
 } from './canonical.js'
 export { planDiff } from './planner.js'
+export {
+  AUTO_MINMAX_INDEX_PREFIX,
+  DEFAULT_INDEX_GRANULARITY,
+  READONLY_MERGE_TREE_SETTINGS,
+  settingValueFingerprint,
+  withDefaultIndexGranularity,
+} from './table-settings.js'
 export { createSnapshot } from './snapshot.js'
 export {
   TEXT_INDEX_GRANULARITY,
@@ -42,15 +50,15 @@ export {
   renderConstraint,
   type ConstraintKind,
 } from './constraint.js'
-export { splitTopLevelComma } from './key-clause.js'
-export { insertColumnList } from './insert-columns.js'
+export { keyClauseFingerprint, splitTopLevelComma } from './key-clause.js'
+export { insertColumnList, insertableColumnNames } from './insert-columns.js'
 export {
   quoteIdentifier,
   renderIdentifier,
   renderQualifiedName,
   unquoteIdentifiers,
 } from './identifier.js'
-export { parseColumnDefault, renderDefault, type ParsedColumnDefault } from './column-default.js'
+export { literalDefaultFingerprint, parseColumnDefault, renderDefault, type ParsedColumnDefault } from './column-default.js'
 export { isIndexProjection, normalizeProjectionIndex } from './projection.js'
 export {
   isSyntheticEphemeralDefault,
@@ -58,7 +66,7 @@ export {
   normalizeSQLFragment,
   sqlExpressionFingerprint,
 } from './sql-normalizer.js'
-export { renderColumnType, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
+export { columnCodecFingerprint, columnTypeFingerprint, renderColumnType, renderDictionarySQL, renderKeyClauseColumns, toCreateSQL } from './sql.js'
 export { applyOnClusterToPlan, onClusterClause } from './on-cluster.js'
 export {
   CUTOVER_COPY_MODES,
@@ -88,7 +96,27 @@ export {
   parseCodec,
   renderCodec,
 } from './codec.js'
-export { assertValidDefinitions, validateDefinitions } from './validate.js'
+export { assertValidDefinitions, collectDefinitionWarnings, validateDefinitions } from './validate.js'
 export { createPluginRunner, wrapPluginRun, type PluginRunContext } from './plugin-error.js'
-export { splitSqlStatements, extractExecutableStatements } from './sql-splitter.js'
-export { importModuleFile } from './ts-import.js'
+export {
+  splitSqlStatements,
+  extractExecutableStatements,
+  extractLegacyExecutableStatements,
+} from './sql-splitter.js'
+export { parseJsonEachRow, parseJsonEachRowLine, roundTripNumber } from './exact-json.js'
+export { t } from './clickhouse-type.js'
+export { p, type NamedParam } from './query-param.js'
+export {
+  createQuery,
+  query,
+  type CreateQueryOptions,
+  type Query,
+  type QueryCallOptions,
+  type QueryClient,
+  type QueryDefinition,
+  type QueryInterpolation,
+  type QueryObjectRef,
+  type QueryOptions,
+  type QueryResult,
+  type QueryTag,
+} from './query.js'

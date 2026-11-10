@@ -5,7 +5,8 @@ Direct ports of the #176/#178 tests in ``packages/core/src/index.test.ts``.
 
 from __future__ import annotations
 
-from chkit.core.model import table
+from chkit.core.key_clause import normalize_key_columns
+from chkit.core.model import ColumnInput, table
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
 from chkit.core.validate import validate_definitions
@@ -52,7 +53,7 @@ def test_quotes_declared_columns_even_when_the_name_needs_quoting() -> None:
 
 
 def test_no_recreate_when_key_expression_differs_only_by_whitespace() -> None:
-    columns = [
+    columns: list[ColumnInput] = [
         {"name": "sso_id", "type": "String"},
         {"name": "session_end", "type": "DateTime"},
     ]
@@ -82,7 +83,7 @@ def test_no_recreate_when_key_expression_differs_only_by_whitespace() -> None:
 
 
 def test_no_recreate_when_key_column_differs_only_by_identifier_quoting() -> None:
-    columns = [
+    columns: list[ColumnInput] = [
         {"name": "user-id", "type": "String"},
         {"name": "ts", "type": "DateTime"},
     ]
@@ -128,3 +129,10 @@ def test_allows_function_expressions_in_primary_key_and_order_by() -> None:
 
     issues = validate_definitions(defs)
     assert issues == []
+
+
+def test_key_entries_trim_javascript_whitespace_like_ts() -> None:
+    # TS ``normalizeKeyColumns`` trims with String.prototype.trim(), which strips
+    # U+FEFF but not U+001C or U+0085 (#523); identifier-quoting.test.ts asserts
+    # the same.
+    assert normalize_key_columns(["﻿id\x1c", " \x85ts﻿ "]) == ["id\x1c", "\x85ts"]

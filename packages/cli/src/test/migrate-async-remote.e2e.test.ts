@@ -42,6 +42,12 @@ interface WorkbenchResult {
   rows: number
 }
 
+interface WorkbenchOptions {
+  /** Fail system.query_log reads until a statement is submitted, as on a
+   *  fresh server, which creates the table on its first log flush. */
+  queryLogAfterSubmit?: boolean
+}
+
 describe('async migrate statements through the ObsessionDB remote executor (live)', () => {
   test('a submission completes, and a re-run skips it', async () => {
     const run = startRun('remote_submit')
@@ -63,6 +69,26 @@ describe('async migrate statements through the ObsessionDB remote executor (live
     }
   }, TIMEOUT_MS)
 
+  // The in-flight check runs before the first submission, when a fresh server
+  // can still lack system.query_log (OBS-176).
+  test('a first submission completes on a server that has not created system.query_log yet', async () => {
+    const run = startRun('remote_fresh', { queryLogAfterSubmit: true })
+    const journal = createMemoryJournal(null)
+    const statement = run.statement({
+      migrationName: `20990101000000_${run.prefix}fresh.sql`,
+      journalStore: journal.store,
+      sql: `INSERT INTO ${run.table} SELECT number FROM numbers(3)`,
+    })
+    try {
+      await run.createTable()
+      expect((await applyAsyncStatement(statement)).kind).toBe('completed')
+      expect(journal.statuses()).toEqual(['started', 'completed'])
+      expect(await run.countRows(3)).toBe(3)
+    } finally {
+      await run.cleanup()
+    }
+  }, TIMEOUT_MS)
+
   // A run that lost its connection leaves the statement 'started' while its
   // query runs on, and a re-run attaches to it. An earlier attempt with the
   // same query id (one that was abandoned) finished before. query_log is
@@ -71,7 +97,7 @@ describe('async migrate statements through the ObsessionDB remote executor (live
   test('an attach counts only query_log entries of the attempt it attaches to', async () => {
     const run = startRun('remote_attach')
     const migrationName = `20990101000000_${run.prefix}attach.sql`
-    const queryId = makeDeterministicQueryId(migrationName, 0)
+    const queryId = makeDeterministicQueryId(getLiveEnv().clickhouseDatabase, '_chkit_migrations', migrationName, 0)
     try {
       await run.createTable()
       await run.remote.submit(`INSERT INTO ${run.table} SELECT number FROM numbers(2)`, queryId)
@@ -141,9 +167,9 @@ describe('async migrate statements through the ObsessionDB remote executor (live
   }, TIMEOUT_MS)
 })
 
-function startRun(label: string) {
+function startRun(label: string, workbenchOptions: WorkbenchOptions = {}) {
   const env = getLiveEnv()
-  const workbench = startWorkbench(env)
+  const workbench = startWorkbench(env, workbenchOptions)
   const live = createLiveExecutor(env)
   const remote = createRemoteExecutor({
     credentials: { access_token: 'test', base_url: workbench.url },
@@ -193,14 +219,20 @@ function startRun(label: string) {
 
 // Stands in for the ObsessionDB workbench API: runs each query on the live
 // ClickHouse and returns every cell as a string, as the API does.
-function startWorkbench(env: LiveEnv): { url: string; stop: () => void } {
+function startWorkbench(env: LiveEnv, options: WorkbenchOptions): { url: string; stop: () => void } {
   const authorization = `Basic ${btoa(`${env.clickhouseUser}:${env.clickhousePassword}`)}`
+  let submitted = false
   const server = Bun.serve({
     port: 0,
     // A submitted query holds its request open until it ends.
     idleTimeout: 60,
     async fetch(request) {
       const { json: input } = (await request.json()) as { json: WorkbenchInput }
+      if (input.queryId) submitted = true
+      if (options.queryLogAfterSubmit && !submitted && input.query.includes('system.query_log')) {
+        const error = "Code: 60. DB::Exception: Unknown table expression identifier 'system.query_log'. (UNKNOWN_TABLE)"
+        return Response.json({ json: { data: [], meta: [], rows: 0, error } })
+      }
       const url = new URL(env.clickhouseUrl)
       url.searchParams.set('default_format', 'JSONCompactStrings')
       // Like the real API: the query runs under the top-level queryId, and a

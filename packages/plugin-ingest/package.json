@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-ingest",
-  "version": "0.2.0-beta.11",
+  "version": "0.2.0-beta.16",
   "description": "Scheduled pull ingestion into ClickHouse with journaled checkpoints for chkit",
   "license": "MIT",
   "author": "ObsessionDB",
@@ -42,7 +42,7 @@
     "dev": "tsc -p tsconfig.json --watch",
     "typecheck": "tsc -p tsconfig.json --noEmit",
     "lint": "biome lint src test",
-    "test": "env -u CLICKHOUSE_URL -u CLICKHOUSE_HOST bun run ../../scripts/infra-up.ts && bun test src test",
+    "test": "env -u CLICKHOUSE_URL -u CLICKHOUSE_HOST bun run ../../scripts/infra-up.ts && bun test src test --parallel",
     "clean": "rm -rf dist"
   },
   "dependencies": {

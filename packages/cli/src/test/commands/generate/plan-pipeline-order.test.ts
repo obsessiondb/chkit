@@ -141,3 +141,27 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
     ])
   })
 })
+
+describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {
+  const EMPTY_PLAN: MigrationPlan = { operations: [], riskSummary: { safe: 0, caution: 0, danger: 0 }, renameSuggestions: [] }
+
+  test('table rename', () => {
+    const plan = applyExplicitTableRenames(EMPTY_PLAN, [
+      { oldDatabase: 'repro', oldName: 't', newDatabase: 'repro-old', newName: 't', source: 'cli' },
+    ])
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'CREATE DATABASE IF NOT EXISTS `repro-old`;',
+      'RENAME TABLE IF EXISTS repro.t TO `repro-old`.t;',
+    ])
+  })
+
+  test('dictionary rename', () => {
+    const plan = applyExplicitDictionaryRenames(EMPTY_PLAN, [
+      { oldDatabase: 'repro', oldName: 'd', newDatabase: 'repro-old', newName: 'd', source: 'cli' },
+    ])
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'CREATE DATABASE IF NOT EXISTS `repro-old`;',
+      'RENAME DICTIONARY IF EXISTS repro.d TO `repro-old`.d;',
+    ])
+  })
+})

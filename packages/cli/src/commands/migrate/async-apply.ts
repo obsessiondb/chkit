@@ -4,10 +4,11 @@ import { setTimeout as defaultSleep } from 'node:timers/promises'
 import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit/clickhouse'
 
 import { debug } from '../../runtime/debug.js'
-import type {
-  JournalStore,
-  MigrationRowState,
-  OperationState,
+import {
+  type JournalStore,
+  type MigrationRowState,
+  type OperationState,
+  resolveJournalTableName,
 } from '../../runtime/journal-store.js'
 import { inProgressChecksumMismatchError } from './errors.js'
 import { hasStatementProgress } from './recovery.js'
@@ -30,6 +31,7 @@ const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
 // A poll request can fail transiently (gateway 504/524, network blip) while the
 // server-side async query keeps running. Tolerate a bounded number of these so a
 // momentary timeout doesn't abort a long-running load; only give up after the budget.
+// The same budget limits `unknown` polls after a failed submit (#657).
 const MAX_TRANSIENT_POLL_ERRORS = 20
 
 function describeError(error: unknown): string {
@@ -76,12 +78,6 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     now = Date.now,
   } = input
 
-  const queryId = makeDeterministicQueryId(migrationName, statementIndex)
-  debug(
-    'migrate:async',
-    `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
-  )
-
   const initialMigrationState = acceptChangedChecksum(
     await journalStore.readMigrationState(migrationName),
     migrationName,
@@ -94,7 +90,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // 1. Already completed → skip entirely
   if (priorOpState?.status === 'completed') {
     log(
-      `  ${operationType}: query_id=${queryId} already completed in prior run — skipping`,
+      `  ${operationType}: query_id=${priorOpState.queryId} already completed in prior run — skipping`,
     )
     return { kind: 'skipped', operation: priorOpState }
   }
@@ -102,7 +98,17 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // 2. Currently in flight on the server → attach. The server clock is read
   // before the check, so the start derived from it and the attempt's elapsed
   // time never falls after the start that query_log records for the attempt.
-  const serverNowMs = await readServerNowMs(db)
+  const { nowMs: serverNowMs, database } = await readServerState(db)
+  // A statement the journal already tracks keeps the id it was submitted
+  // with, which an older chkit derived from the migration alone (#463): a
+  // new id would miss that attempt while it still runs.
+  const queryId =
+    priorOpState?.queryId ||
+    makeDeterministicQueryId(database, resolveJournalTableName(), migrationName, statementIndex)
+  debug(
+    'migrate:async',
+    `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
+  )
   const inFlight = await checkInFlight(db, queryId, operationType)
   if (inFlight.status === 'running') {
     log(
@@ -249,6 +255,10 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
 
   const pollStartedAt = now()
   let transientPollErrors = 0
+  // Once a poll found the query running, the server has it, so a failed
+  // submit request (a gateway 524, a timeout) says nothing about its outcome (#657).
+  let seenRunning = false
+  let unknownPollsAfterSubmitError = 0
   try {
     for (;;) {
       await sleep(pollIntervalMs)
@@ -263,8 +273,15 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         transientPollErrors += 1
         const failedElapsed = Math.floor((now() - pollStartedAt) / 1000)
         if (transientPollErrors > MAX_TRANSIENT_POLL_ERRORS) {
+          // A submit error is the only trace of e.g. a rejected statement (#561).
+          // The finally block waits for the submit anyway; wait here so its error
+          // makes it into the message.
+          if (submitPromiseGuarded) await submitPromiseGuarded
+          const submitTail = submitError
+            ? ` The submit request failed too (${describeError(submitError)}).`
+            : ''
           throw new Error(
-            `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}). The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+            `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
           )
         }
         log(
@@ -319,15 +336,20 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       }
 
       if (status.status === 'running') {
+        seenRunning = true
+        unknownPollsAfterSubmitError = 0
         log(progressLine(operationType, status, elapsedSec))
         continue
       }
 
       // status === 'unknown'
-      // If submit has already rejected, the query never made it server-side
-      // (e.g. SQL parse error) — record the attempt as failed and surface that
-      // error. Otherwise it's a transient gap (just-submitted or just-finished); loop.
-      if (submitError) {
+      // If submit has already rejected and no poll found the query running, it
+      // never made it server-side (e.g. SQL parse error) — record the attempt as
+      // failed and surface that error. Known gap: a load that ends before the
+      // first poll, with a transport error on its submit, also lands here (#657).
+      // Otherwise it's a transient gap (just-submitted, or just-finished before
+      // query_log has it); loop.
+      if (submitError && !seenRunning) {
         const failedOp: OperationState = {
           operationIndex: statementIndex,
           operationKey,
@@ -342,6 +364,14 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
         await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
         throw submitError
+      }
+      if (submitError) {
+        unknownPollsAfterSubmitError += 1
+        if (unknownPollsAfterSubmitError > MAX_TRANSIENT_POLL_ERRORS) {
+          throw new Error(
+            `Async migration step ${operationType} (query_id ${queryId}): the submit request failed (${describeError(submitError)}) and polling found no outcome ${unknownPollsAfterSubmitError}×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+          )
+        }
       }
       log(
         `  ${operationType}: status unknown — still polling (elapsed ${elapsedSec}s)`,
@@ -379,14 +409,16 @@ function acceptChangedChecksum(
 // (e.g. a TRUNCATE) and resubmits, so the answer must cover every replica: the
 // attempt runs on the replica that received it (#246). A replica that cannot be
 // read fails the check instead of being skipped, and a failed check stops here,
-// before anything is compensated or resubmitted.
+// before anything is compensated or resubmitted. Only system.processes is read:
+// the check needs no outcome, and a fresh server has no system.query_log until
+// its first log flush.
 async function checkInFlight(
   db: ClickHouseExecutor,
   queryId: string,
   operationType: string,
 ): Promise<QueryStatus> {
   try {
-    return await db.queryStatus(queryId, { everyReplica: true })
+    return await db.queryStatus(queryId, { everyReplica: true, runningOnly: true })
   } catch (error) {
     throw new Error(
       `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,
@@ -397,7 +429,7 @@ async function checkInFlight(
 
 // Read just before a submission, as an ISO UTC string for queryStatus.
 async function readSubmissionLowerBound(db: ClickHouseExecutor): Promise<string> {
-  return queryLogLowerBound(await readServerNowMs(db), 0)
+  return queryLogLowerBound((await readServerState(db)).nowMs, 0)
 }
 
 // The attached attempt had run for elapsedMs when the in-flight check, which
@@ -411,15 +443,15 @@ function queryLogLowerBound(serverNowMs: number, startedMsAgo: number): string {
   return new Date(serverNowMs - startedMsAgo - QUERY_LOG_SKEW_MARGIN_MS).toISOString()
 }
 
-async function readServerNowMs(db: ClickHouseExecutor): Promise<number> {
-  const [row] = await db.query<{ now_ms: number | string }>(
-    'SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms',
+async function readServerState(db: ClickHouseExecutor): Promise<{ nowMs: number; database: string }> {
+  const [row] = await db.query<{ now_ms: number | string; database: string }>(
+    'SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database',
   )
-  const serverNowMs = Number(row?.now_ms)
-  if (!Number.isFinite(serverNowMs)) {
-    throw new Error('Could not read the ClickHouse server time for an async statement.')
+  const nowMs = Number(row?.now_ms)
+  if (!Number.isFinite(nowMs) || typeof row?.database !== 'string' || row.database === '') {
+    throw new Error('Could not read the ClickHouse server time and database for an async statement.')
   }
-  return serverNowMs
+  return { nowMs, database: row.database }
 }
 
 export function upsertOperation(
@@ -456,12 +488,20 @@ export function freshMigrationState(
   }
 }
 
+/**
+ * The id of an async statement's query. It names the database and journal
+ * table too, so runs of one migration file against other databases, or by
+ * other projects in the same database, never share it (#463), while a re-run
+ * against the same target gets the same id and attaches to its attempt.
+ */
 export function makeDeterministicQueryId(
+  database: string,
+  journalTable: string,
   migrationName: string,
   statementIndex: number,
 ): string {
   const hex = createHash('sha256')
-    .update(`chkit:${migrationName}:${statementIndex}`)
+    .update(`chkit:${database}:${journalTable}:${migrationName}:${statementIndex}`)
     .digest('hex')
   return [
     hex.slice(0, 8),

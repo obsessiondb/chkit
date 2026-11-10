@@ -54,8 +54,10 @@ from chkit.core.model import (
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
 )
-from chkit.core.sql_lexer import identifier_name, is_trivia, tokenize_sql
+from chkit.core.sql_lexer import identifier_name, is_trivia, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import is_synthetic_ephemeral_default, normalize_sql_fragment
+from chkit.core.sql_scan import strip_wrapping_parens
+from chkit.core.table_settings import AUTO_MINMAX_INDEX_PREFIX
 from chkit.core.text_index import parse_text_index_params
 from chkit.core.text_index_sql import normalize_text_index_sql
 from chkit.core.vector_index import parse_vector_index_args
@@ -86,6 +88,8 @@ class SchemaObjectRef:
     kind: SchemaObjectKind
     database: str
     name: str
+    # ``system.tables.comment``, as ClickHouse decoded it; ``''`` when there is none.
+    comment: str = ""
 
 
 @dataclass(frozen=True, slots=True)
@@ -94,6 +98,7 @@ class SystemTableRow:
     name: str
     engine: str
     create_table_query: str | None = None
+    comment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -134,6 +139,7 @@ class IntrospectedTable:
     unique_key: str | None = None
     partition_by: str | None = None
     ttl: str | None = None
+    comment: str | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -176,7 +182,7 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
         raise ValueError(f"Unsupported column default kind: {kind}")
     if row.default_expression and kind:
         # Preserve whitespace inside SQL string literals when pulling expressions.
-        default_value = row.default_expression.strip()
+        default_value = js_trim(row.default_expression)
 
     # ClickHouse synthesizes defaultValueOfTypeName('<type as written>') for a
     # bare EPHEMERAL column, keeping alias spellings such as BIGINT or TEXT.
@@ -187,7 +193,7 @@ def normalize_column_from_system_row(row: SystemColumnRow) -> ColumnDefinition:
     ):
         default_value = None
     codec_steps = parse_codec(row.compression_codec)
-    comment = row.comment.strip() if row.comment is not None else None
+    comment = js_trim(row.comment) if row.comment is not None else None
 
     return ColumnDefinition.model_validate({
         "name": row.name,
@@ -207,10 +213,23 @@ def _numeric_args(args: str | None) -> list[float] | None:
     """Every argument as a number, or None when any is not a plain number."""
     if args is None:
         return None
-    parts = [part.strip() for part in args.split(",")]
+    parts = [js_trim(part) for part in args.split(",")]
     if not all(_NUMBER_ARG_RE.match(part) for part in parts):
         return None
     return [float(part) for part in parts]
+
+
+def _is_server_generated_index(name: str, create_table_query: str | None) -> bool:
+    """The ``add_minmax_index_for_*`` settings make ClickHouse create hidden
+    ``auto_minmax_index_<column>`` skip indexes. They show in
+    system.data_skipping_indices but not in the table's CREATE, and recreating
+    the table with them fails (reserved name), so pull and drift leave them out
+    (#466). A user index of that name, allowed while those settings are off,
+    appears in the CREATE and is kept."""
+    if not name.startswith(AUTO_MINMAX_INDEX_PREFIX):
+        return False
+    pattern = js_regex(rf"\bINDEX\s+`?{re.escape(name)}`?\s")
+    return re.search(pattern, create_table_query or "", re.IGNORECASE) is None
 
 
 def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
@@ -224,15 +243,17 @@ def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
     carrying ``type_full`` verbatim, so pull and drift never rewrite an index
     into a different one (TS parity).
     """
+    # ObsessionDB keeps the parentheses chkit renders around the expression
+    # (``(s)``), stock ClickHouse stores ``s``; read back the stock form (#512).
     base_payload: dict[str, Any] = {
         "name": row.name,
-        "expression": normalize_sql_fragment(row.expr),
+        "expression": strip_wrapping_parens(normalize_sql_fragment(row.expr)),
         "granularity": int(row.granularity),
     }
     raw = SkipIndexRaw(**base_payload, raw_type=normalize_sql_fragment(row.type))
 
     match = _INDEX_TYPE_RE.match(row.type)
-    base_name = match.group(1) if match is not None else row.type.strip()
+    base_name = match.group(1) if match is not None else js_trim(row.type)
     args_str = match.group(2) if match is not None else None
     numbers = _numeric_args(args_str)
 
@@ -247,7 +268,11 @@ def normalize_index_from_system_row(  # noqa: PLR0911, PLR0912
         except ValueError:
             return raw
         return SkipIndexText.model_validate(
-            {**base_payload, "expression": normalize_text_index_sql(row.expr), **params}
+            {
+                **base_payload,
+                "expression": strip_wrapping_parens(normalize_text_index_sql(row.expr)),
+                **params,
+            }
         )
     if base_name == "vector_similarity":
         vector = parse_vector_index_args(args_str) if args_str is not None else None
@@ -323,7 +348,11 @@ def build_introspected_tables(
         col_rows = sorted(
             columns_by_table.get(key, []), key=lambda c: c.position
         )
-        idx_rows = indexes_by_table.get(key, [])
+        idx_rows = [
+            idx
+            for idx in indexes_by_table.get(key, [])
+            if not _is_server_generated_index(idx.name, table_row.create_table_query)
+        ]
         out.append(
             IntrospectedTable(
                 database=table_row.database,
@@ -360,6 +389,7 @@ def build_introspected_tables(
                     table_row.create_table_query
                 ),
                 ttl=parse_ttl_from_create_table_query(table_row.create_table_query),
+                comment=table_row.comment or None,
             )
         )
 
@@ -374,11 +404,11 @@ def _quote_str_list(items: list[str]) -> str:
 
 
 _LIST_SCHEMA_OBJECTS_SQL = """\
-SELECT database, name, engine
+SELECT database, name, engine, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database NOT IN ('system', 'information_schema', 'INFORMATION_SCHEMA')
-  AND name NOT LIKE '_chkit_%'\
+  AND NOT startsWith(name, '_chkit_')\
 """
 
 
@@ -395,6 +425,7 @@ def list_schema_objects(client: Any) -> list[SchemaObjectRef]:
                 kind=kind,
                 database=str(raw["database"]),
                 name=str(raw["name"]),
+                comment=str(raw.get("comment") or ""),
             )
         )
     return out
@@ -407,7 +438,7 @@ def list_table_details(client: Any, databases: list[str]) -> list[IntrospectedTa
     quoted = _quote_str_list(databases)
 
     table_rows_raw = client.query(
-        f"SELECT database, name, engine, create_table_query "
+        f"SELECT database, name, engine, create_table_query, comment "
         f"FROM system.tables "
         f"WHERE is_temporary = 0 AND database IN ({quoted})"
     ).rows
@@ -431,6 +462,7 @@ def list_table_details(client: Any, databases: list[str]) -> list[IntrospectedTa
                 if r.get("create_table_query") is not None
                 else None
             ),
+            comment=str(r["comment"]) if r.get("comment") else None,
         )
         for r in table_rows_raw
     ]

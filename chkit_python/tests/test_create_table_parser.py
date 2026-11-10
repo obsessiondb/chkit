@@ -9,6 +9,7 @@ from __future__ import annotations
 
 from chkit.clickhouse.create_table_parser import (
     ProjectionDefinitionShape,
+    parse_constraints_from_create_table_query,
     parse_engine_from_create_table_query,
     parse_order_by_from_create_table_query,
     parse_partition_by_from_create_table_query,
@@ -18,6 +19,7 @@ from chkit.clickhouse.create_table_parser import (
     parse_ttl_from_create_table_query,
     parse_unique_key_from_create_table_query,
 )
+from chkit.core.model import TableConstraintDefinition
 
 SIMPLE_DDL = (
     "CREATE TABLE default.events\n"
@@ -188,6 +190,15 @@ def test_projections_extracts_both_quoted_and_bare_names() -> None:
     assert "daily_count" in names
 
 
+def test_projection_name_decodes_escapes_as_clickhouse_does() -> None:
+    # TS index-constraints-introspection.test.ts asserts the same (#631, #639).
+    ddl = (
+        "CREATE TABLE d.t (`a` UInt8, PROJECTION `p\\x41` (SELECT a ORDER BY a)) "
+        "ENGINE = MergeTree ORDER BY a"
+    )
+    assert [p.name for p in parse_projections_from_create_table_query(ddl)] == ["pA"]
+
+
 def test_projection_query_normalises_whitespace() -> None:
     projections = parse_projections_from_create_table_query(WITH_PROJECTIONS_DDL)
     by_country = next(p for p in projections if p.name == "by_country")
@@ -215,6 +226,7 @@ def test_projection_with_nested_parens() -> None:
     projections = parse_projections_from_create_table_query(ddl)
     assert len(projections) == 1
     assert projections[0].name == "nested"
+    assert projections[0].query is not None
     assert "WHERE id IN (1, 2, 3)" in projections[0].query
 
 
@@ -267,3 +279,25 @@ def test_keeps_backtick_identifiers_intact_inside_key_clauses() -> None:
     )
 
     assert parse_order_by_from_create_table_query(query) == "(`w)x`, id)"
+
+
+# TS packages/clickhouse/src/index-constraints-introspection.test.ts "unescapes a
+# backtick in a quoted projection or constraint name": create_table_query as
+# ClickHouse 26.3 returns it (#631).
+def test_unescapes_a_backtick_in_a_quoted_projection_or_constraint_name() -> None:
+    query = (
+        "CREATE TABLE d.t (`a` UInt8, `b` UInt8, CONSTRAINT `c\\`k` CHECK a > 0, "
+        "CONSTRAINT `c k2` ASSUME b > 0, PROJECTION `p\\`x` (SELECT a ORDER BY b), "
+        "PROJECTION `p y` (SELECT b ORDER BY a), PROJECTION `i\\`p` INDEX b TYPE basic) "
+        "ENGINE = MergeTree ORDER BY a SETTINGS index_granularity = 8192"
+    )
+
+    assert parse_projections_from_create_table_query(query) == [
+        ProjectionDefinitionShape(name="p`x", query="SELECT a ORDER BY b"),
+        ProjectionDefinitionShape(name="p y", query="SELECT b ORDER BY a"),
+        ProjectionDefinitionShape(name="i`p", index="b", type="basic"),
+    ]
+    assert parse_constraints_from_create_table_query(query) == [
+        TableConstraintDefinition(name="c`k", check="a > 0"),
+        TableConstraintDefinition(name="c k2", assume="b > 0"),
+    ]

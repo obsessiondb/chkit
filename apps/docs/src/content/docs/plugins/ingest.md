@@ -41,6 +41,8 @@ export default defineConfig({
 
 The target needs CREATE, SELECT, and INSERT permissions for the journal and destination tables. ChKit stores checkpoints entirely in ClickHouse journal evidence.
 
+With `clickhouse.cluster` set, `ingest run` creates the journal `ON CLUSTER` as one `ReplicatedMergeTree` shared by every replica and waits until each replica has it. A journal that is local to a node, replicated per shard, or missing on a replica fails the run before ingestion; chkit does not convert it.
+
 Every run records its starting checkpoint and local event sequence. Event identity includes the run, so overlapping executions and stale reads cannot reuse another run's identities. Complete snapshot validation selects acknowledged progress from valid histories. Malformed tails are diagnosed and excluded; normal overlapping runs need no repair. A stale valid snapshot may replay work, so destination keys and versioning must reconcile repeats.
 
 See [Scheduling and recovery](/api-sync/operations/#overlapping-runs-and-checkpoint-recovery) for execution and recovery behavior.
@@ -212,6 +214,8 @@ Ingestion is at-least-once. The loader inserts batches with stable `insert_dedup
 Successful syncs start a new batch identity cycle, recorded by the existing journal. Failed or interrupted syncs retain their cycle for replay. This also applies to full syncs, which have no incremental bookmark.
 
 The duration budget bounds journal operations as well as readers. Shutdown gives unfinished readers or writes up to five seconds to settle. Terminal journal appends are bounded by the duration budget while the run is live. After cancellation or budget exhaustion, each one gets a separate five-second limit. Interrupted writes never count as successful ingestion.
+
+Stopping the wait does not cancel foreign code that ignores its signal. Such requests or loads retain their pipeline permits until they settle, so a sibling can exhaust its budget while waiting for capacity. Source services belong to their reader: retained `context.fetch` and `context.attempt` calls reject after it ends, and unfinished operations cannot schedule further retries after that point.
 
 Overlapping processes record independent histories. Scheduler concurrency controls limit resource use; a stale valid read may replay acknowledged work. ChKit validates journal facts before using their checkpoint.
 

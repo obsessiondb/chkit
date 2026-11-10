@@ -1,5 +1,94 @@
 # chkit
 
+## 0.2.0-beta.16
+
+### Patch Changes
+
+- 0.2.0-beta.15 was never published to npm, so upgrading from 0.2.0-beta.14 also brings the changes in its release notes (#531).
+- 3421760: `drift`, `check` and `pull` no longer skip tables such as `xchkit_events`; only names that start with `_chkit_` are skipped (#490).
+- b740a75: `migrate --apply` exits with code 3, as documented, when it blocks a destructive migration in a non-interactive run or when you cancel it at the prompt. It exited with code 1 before (#486).
+- 92deddc: Plugin `onInit` hooks now get the parsed flags for `pull`, `chkit plugin` and other plugin subcommands, so `chkit pull --service <name>` shows the banner for the service it connects to (#488).
+- 3421760: A table or dictionary rename into another database now quotes that database in its `CREATE DATABASE` statement, so a name such as `repro-old` no longer fails with a syntax error (#490).
+- Updated dependencies: `@chkit/core@0.2.0-beta.16`, `@chkit/clickhouse@0.2.0-beta.16`, `@chkit/codegen@0.2.0-beta.16`
+
+## 0.2.0-beta.15
+
+### Patch Changes
+
+- acc8f8c: Column codecs follow ClickHouse's rules and stored forms, and `generate` reports codecs ClickHouse would reject instead of failing the migration partway (#465).
+
+  After upgrading, `generate` plans a codec change for every `Delta` or `Gorilla` column written without `size`, which chkit used to render as `Delta(1)` or `Gorilla(1)`.
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.15`, `@chkit/clickhouse@0.2.0-beta.15`, `@chkit/codegen@0.2.0-beta.15`
+
+## 0.2.0-beta.14
+
+### Patch Changes
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.14`, `@chkit/clickhouse@0.2.0-beta.14`, `@chkit/codegen@0.2.0-beta.14`
+
+## 0.2.0-beta.13
+
+### Patch Changes
+
+- 262fbb1: Async `migrate` statements no longer fail on a fresh ClickHouse server that has not created `system.query_log` yet.
+- c523ef2: Comments work end to end (#464). Comments escape backslashes, so ClickHouse stores the exact text (a trailing `\` no longer breaks the statement), and an empty comment is the same as none. A table comment change plans `ALTER TABLE ... MODIFY COMMENT`; a view, materialized view or dictionary comment change is the same `MODIFY COMMENT` instead of a drop and recreate (or `CREATE OR REPLACE DICTIONARY`). A column comment change alone is `COMMENT COLUMN`, and a removed column comment runs `MODIFY COLUMN ... REMOVE COMMENT`, so it no longer stays on the server. `drift` reports a changed table, view, materialized view or dictionary comment as `comment_mismatch`, with both values. `pull` writes the comments of tables, views and materialized views, reads every comment from `system.tables.comment` (decoded by ClickHouse), finds the `AS` and `TO` of a view outside its `COMMENT`, and skips a materialized view with an inner table, and that table, with a warning. The same comments reach `drift` and `pull` when they run through the ObsessionDB console API.
+- 81dffea: `pull` then `generate` plans nothing, and `drift` reports nothing, on a database chkit migrated (#466).
+
+  - `pull` keeps every setting the server stores, including `index_granularity`, with a comment on the ones that cannot be altered on an existing table, and leaves out chkit's migration journal (`_chkit_migrations` or `CHKIT_JOURNAL_TABLE`) and the hidden `auto_minmax_index_*` skip indexes ClickHouse creates for the `add_minmax_index_for_*` settings.
+  - A MergeTree table without `index_granularity` is treated as having the server's default, the value ClickHouse stores, so new `CREATE TABLE` statements write `SETTINGS index_granularity = 8192`. Existing projects plan nothing for it. A server with another `<merge_tree><index_granularity>` sets it in the new `clickhouse.indexGranularity` config value (default 8192). `drift`, `check`, `migrate` and `pull` stop when the server's default differs from it, with a message that names the value to set.
+  - Setting values compare by value (`4096` and `"4096"`, `2.0` and `2.`, `true` and `1`), exactly, so a change between two large integers is not lost. A literal column default compares by value with the expression pull reads back (`7` and `{ expression: '7' }`, `"it's"` and `'it\'s'`, `1e21` and `1e+21`, newlines and tabs as ClickHouse escapes them), in `generate` and in `drift`. A string escape chkit does not know for certain (`\N`, `\u0041`) compares as text.
+  - A column type compares in the spacing ClickHouse stores (`Decimal(10,2)` and `Decimal(10, 2)`) in `generate` and `drift`; text in quotes compares as written. Skip indexes, projections, constraints and columns compare whatever order their keys are written in.
+  - A change to a setting ClickHouse cannot alter on an existing table (`index_granularity`, `index_granularity_bytes`, the `add_minmax_index_for_*` settings and others) plans `DROP TABLE` and `CREATE TABLE`, like an `ORDER BY` change, instead of an `ALTER` the server rejects. `--cutover` supports such a change: its swap guards now also tell the old table from the new one by these settings, and its first statement checks that the table stores the read-only settings the migration expects before anything is created or copied.
+  - On an ObsessionDB host, the ObsessionDB plugin treats a table without `storage_policy` as `storage_policy: "'s3'"`, the policy ObsessionDB writes into every `Shared` table, in the schema and the snapshot, and `generate` rejects a schema that changes it. A new `onSnapshotLoaded` plugin hook applies a plugin's schema rewrite to the previous snapshot, so a snapshot written before the rewrite plans no change, and dropping `--force-shared-engines` no longer plans a `RESET SETTING storage_policy`.
+  - A dictionary `lifetime` compares in the form ClickHouse stores (`300` and `MIN 0 MAX 300`), and dictionaries compare whatever order their keys are written in.
+
+- dc813e4: `chkit generate` and `chkit check` warn when a plain string default is written as a quoted SQL literal, such as `default: "'standard'"`, which stores the quotes in the value.
+- Updated dependencies: `@chkit/core@0.2.0-beta.13`, `@chkit/clickhouse@0.2.0-beta.13`, `@chkit/codegen@0.2.0-beta.13`
+
+## 0.2.0-beta.12
+
+### Patch Changes
+
+- a1d85d7: Async `migrate` runs of the same migration against different databases or journal tables on one server no longer share a query id, so one run can no longer pick up the other's result and record `Applied` without loading its rows (#463).
+- efe9da4: On multi-replica targets such as multi-replica ObsessionDB services, async `migrate` checks every replica for a running attempt, so it no longer resubmits a statement or runs its `-- before-retry:` SQL while an earlier attempt is still writing (#246). Async statements sent through ObsessionDB now run under chkit's query id, so status checks and re-runs can find them.
+- 1c8852b: `migrate --apply` of a migration that creates the configured database no longer writes a stray journal row into the server's default database or fails there with `UNKNOWN_TABLE`.
+- d9d6762: `chkit check` prints `Database ""` instead of `Database "undefined"` when the target database is missing and none is configured.
+- 6936791: An unknown `chkit ingest` subcommand now exits 1 with `unknown_subcommand` instead of printing help, flag errors under `--json` print a JSON error envelope, and `chkit ingest <command> --help` lists that subcommand's flags. `chkit add` errors name the missing template or the network cause instead of a bare ENOENT or "fetch failed".
+- 0e22b16: `migrate` waits until every replica reflects a column's new type, default, comment and codec, a column rename, or an added or dropped index before running the next statement; a timeout names the replica and field that still differ (#290).
+- 7f206d9: Connection errors and `CHKIT_DEBUG` logs no longer print credentials embedded in `clickhouse.url`, and such a URL no longer triggers `@clickhouse/client` override warnings on every run.
+- b1289cb: With `CHKIT_DEBUG=1`, `queryJson` calls no longer drop their ClickHouse settings.
+- e1a9d05: `migrate` no longer times out after `CREATE OR REPLACE DICTIONARY` while the dictionary reloads; it waits for the dictionary in every replica's catalog instead.
+- 105c99e: `chkit drift` and `chkit check` now report a column codec added, removed or changed on the server as `changed_column`, treating equivalent spellings such as `ZSTD` and `ZSTD(1)` as equal.
+- 72d93ae: `chkit drift` and `chkit check` now compare each view's and materialized view's query and `TO` target with the live ones, reporting `query_mismatch` or `target_mismatch` (#382). `drift` no longer falls back to plain text matching after "Session is locked by a concurrent client".
+- bce7e5c: `--json` output over 64 KiB is no longer cut off when piped to a slow reader such as `jq`.
+- 2a7e698: New `chkit migrate --setting <name=value>` sends ClickHouse query settings with every statement a migration runs, for example `--setting max_table_size_to_drop=0` to drop a table larger than the server's drop limit (#321).
+- 61ea1dd: `chkit migrate --setting` rejects ClickHouse HTTP parameters such as `database`, `query_id` and `password` with a usage error before anything runs (#353).
+- 28762f3: Equivalent nullable column types no longer report drift or generate migrations, a JSONEachRow response without a trailing newline keeps its last row, and a passing `assert_backfill` guard no longer waits for a nonexistent table (#274).
+- 2e21682: `chkit query` no longer rounds 64-bit and wider integers and Decimals, in the table or in `--json` (#381).
+
+  Breaking: `--json` prints these values as strings instead of numbers.
+
+  Breaking: `chkit` and `@chkit/clickhouse` now require Node.js 22 or later (or Bun).
+
+- f1228a5: In `JSON`, `Object` and `Dynamic` columns, `chkit query` returns a number as a string only when a double cannot hold it exactly; other numbers stay numbers (#438).
+- 2e21682: chkit works with a read-only ClickHouse user (`readonly = 1` or `2`, granted `SELECT`) for `query`, `status`, `check`, `drift`, `pull` and `migrate` without `--apply` (#402).
+
+  Upgrade: a journal table created before per-operation tracking needs a one-time `ALTER` by a user allowed to run it; until then read-only users get an error.
+
+- 429a0e2: Statements running longer than about 10 seconds no longer fail with `HPE_HEADER_OVERFLOW`, and long reads keep their connection open through a proxy with an idle timeout, except for `readonly = 1` users.
+- 17f9033: `migrate` is safe on multi-replica targets such as multi-replica ObsessionDB services: it waits for each DDL change on every replica and reads the newest journal row across replicas, so a lagging replica can no longer lose a change or replay a completed statement (#265).
+- eeb8f22: Text output over 64 KiB, such as a wide `chkit query` table, is no longer cut off when piped to a slow reader.
+- 44c6e06: Add zero-downtime cutovers for structural table changes (#202):
+
+  - `chkit generate --cutover db.table=<unique key>` turns an engine, ORDER BY, PRIMARY KEY or PARTITION BY change into a migration that copies rows into a shadow table and swaps it in while writers keep inserting, instead of DROP and CREATE.
+  - `--cutover-copy backfill` leaves the copy to `chkit plugin backfill plan|submit --cutover`, and `--cutover-old keep|drop` keeps the old table as `<table>_previous` (remove it later with `generate --drop-retained`) or drops it.
+  - The cutover refuses changes it cannot carry over safely, such as a TTL, a rename or a Replicated table without `clickhouse.cluster`, and `migrate` stops before a swap while async inserts with `wait_for_async_insert = 0` reach the table.
+  - `migrate` now also runs `-- before-retry:` SQL for synchronous statements and supports `mode=barrier` statements.
+  - `chkit plugin backfill plan` no longer fails with "Session is locked by a concurrent client".
+
+- Updated dependencies: `@chkit/core@0.2.0-beta.12`, `@chkit/clickhouse@0.2.0-beta.12`, `@chkit/codegen@0.2.0-beta.12`
+
 ## 0.2.0-beta.11
 
 ### Patch Changes

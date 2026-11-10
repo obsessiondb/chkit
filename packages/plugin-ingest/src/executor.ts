@@ -4,8 +4,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import { SpanStatusCode, trace, type Span } from '@opentelemetry/api'
 import pLimit, { type LimitFunction } from 'p-limit'
 import pRetry, { AbortError } from 'p-retry'
+import { z } from 'zod'
 
-import { toJsonRows } from './destination.js'
+import { ingestionColumns, moveUnknownFields, REST_COLUMN, toJsonRow } from './destination.js'
 import { BudgetExhausted, classifyFailure, describeError } from './errors.js'
 import { canonicalJson, digest, emptyCheckpoint } from './journal.js'
 import { simpleLoader } from './loader.js'
@@ -46,6 +47,7 @@ const DEFAULT_MAX_CHUNK_ROWS = 100_000
 // How long a failed stream waits for an uncooperative reader before abandoning it.
 const READER_SHUTDOWN_GRACE_MS = 5000
 const tracer = trace.getTracer('@chkit/plugin-ingest')
+const StrategyIdentitySchema = z.object({ id: z.string().min(1), version: z.int().min(1) })
 
 export interface BackfillRequest {
   /** Stable identity: resuming the same backfill reuses its isolated checkpoint namespace. */
@@ -109,6 +111,8 @@ interface StreamProgress {
   rows: number
   batches: number
   chunks: number
+  /** Unknown fields committed into `_chkit_rest` during this run. */
+  restFields: Set<string>
 }
 
 type AppendInput = { namespaceId: string; runId: string; progress: StreamProgress; env: ResolvedEnv }
@@ -171,7 +175,7 @@ async function executeSelectedStream(
 ): Promise<StreamResult> {
   const { stream, pipeline } = entry
   const namespaceId = backfill ? `${stream.id}#backfill:${backfill.id}` : stream.id
-  const progress: StreamProgress = { base: emptyCheckpoint(), startedAt: cutoff.toISOString(), seq: 0, appendChain: Promise.resolve(), version: 0, checkpointId: '', successId: '', envelope: undefined, rows: 0, batches: 0, chunks: 0 }
+  const progress: StreamProgress = { base: emptyCheckpoint(), startedAt: cutoff.toISOString(), seq: 0, appendChain: Promise.resolve(), version: 0, checkpointId: '', successId: '', envelope: undefined, rows: 0, batches: 0, chunks: 0, restFields: new Set() }
   const result = (outcome: StreamOutcome, error: string | undefined): StreamResult => ({
     streamId: stream.id,
     pipelineId: pipeline.id,
@@ -233,6 +237,10 @@ async function executeStream(input: {
   let failure: unknown
 
   try {
+    const missing = ingestionColumns.filter((required) => !stream.destination.columns.some((column) => column.name === required.name))
+    if (missing.length > 0) {
+      throw new Error(`Stream "${stream.id}" destination ${stream.destination.database}.${stream.destination.name} is missing ${missing.map((column) => column.name).join(', ')}. Spread ingestionColumns into its columns.`)
+    }
     const state = restoreState(stream, progress.envelope, namespaceId)
     const selection: unknown = stream.incremental.plan({
       state,
@@ -255,6 +263,9 @@ async function executeStream(input: {
     }
   }
 
+  if (progress.restFields.size > 0) {
+    env.log?.(`${namespaceId}: kept fields without a column in ${REST_COLUMN}: ${[...progress.restFields].sort().join(', ')}`)
+  }
   await append(input, 'work_finished', {
     workId,
     workState: failure === undefined ? outcome : outcome === 'cancelled' ? 'cancelled' : 'failed',
@@ -307,15 +318,18 @@ async function readAndLoad(input: {
         fetch: env.fetch,
         retry: env.retry,
         queue: input.permits.requests,
-        onRetry: (context, retryAfterMs, options) =>
-          append(input, 'retry_scheduled', {
+        onRetry: (context, retryAfterMs, options) => {
+          // p-retry owns the randomized backoff; record only a provider's known not-before time,
+          // and none when it lies beyond the range of a Date.
+          const retryAt = new Date(env.now().getTime() + (retryAfterMs ?? Number.NaN))
+          return append(input, 'retry_scheduled', {
             workId: input.workId,
             attemptNo: input.attemptNo,
-            // p-retry owns the randomized backoff; record only a provider's known not-before time.
-            retryAt: retryAfterMs === undefined ? undefined : new Date(env.now().getTime() + retryAfterMs),
+            retryAt: Number.isNaN(retryAt.getTime()) ? undefined : retryAt,
             errorClass: context.error.classification.kind,
             detail: { label: options?.label ?? 'source', sourceAttempt: context.attemptNumber, error: context.error.message },
-          }),
+          })
+        },
       }),
     })
 
@@ -337,7 +351,7 @@ async function readAndLoad(input: {
           await queue.push(pending, signal)
           pending = emptyBatch()
         }
-        pending.rows.push(...chunk.rows)
+        for (const row of chunk.rows) pending.rows.push(row)
         if (pending.intervalIds) {
           if (chunk.id === undefined) pending.intervalIds = undefined
           else pending.intervalIds.push(chunk.id)
@@ -351,7 +365,7 @@ async function readAndLoad(input: {
       }
     } finally {
       // Never await an uncooperative reader: cleanup is best effort once we leave.
-      void Promise.resolve(iterator.return?.()).catch(() => undefined)
+      void (async () => iterator.return?.())().catch(() => undefined)
     }
 
     // Only a fully consumed selection may claim the strategy's completion state.
@@ -372,9 +386,10 @@ async function readAndLoad(input: {
     // that changed between attempts.
     let sinceBoundary = 0
     for (let batch = await queue.pop(signal); batch !== undefined; batch = await queue.pop(signal)) {
-      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${canonicalJson(toJsonRows(batch.rows))}`
+      const shaped = moveUnknownFields(stream.id, stream.destination, batch.rows)
+      const discriminator = batch.intervalIds ? `interval:${canonicalJson(batch.intervalIds)}` : `content:${digest(rowContents(shaped.rows))}`
       const batchId = digest([namespaceId, progress.successId, progress.checkpointId, String(sinceBoundary), discriminator]).slice(0, 32)
-      const receipt = await loadBatch(input, batchId, batch.rows, signal)
+      const receipt = await loadBatch(input, batchId, shaped.rows, signal)
       if (abandoned) return
       const envelope: CheckpointEnvelope | undefined = batch.state
         ? { strategy: stream.incremental.id, version: stream.incremental.version, state: batch.state.value }
@@ -397,6 +412,7 @@ async function readAndLoad(input: {
       progress.envelope = envelope
       progress.rows += receipt.rows
       progress.batches += 1
+      for (const field of shaped.fields) progress.restFields.add(field)
     }
   }
 
@@ -413,15 +429,19 @@ async function readAndLoad(input: {
   )
   // After a failure, a source operation that ignores its signal must not pin
   // the stream (and its permits) forever.
-  await Promise.race([settled, graceAfterAbort(signal, READER_SHUTDOWN_GRACE_MS)])
-  abandoned = true
-  if (rootCause) throw rootCause.error
-  signal.throwIfAborted()
-  if (budgetExhausted) {
-    env.log?.(`${namespaceId}: ${new BudgetExhausted('execution budget exhausted; committed progress is preserved').message}`)
-    return 'budget_exhausted'
+  try {
+    await Promise.race([settled, graceAfterAbort(signal, READER_SHUTDOWN_GRACE_MS)])
+    if (rootCause) throw rootCause.error
+    signal.throwIfAborted()
+    if (budgetExhausted) {
+      env.log?.(`${namespaceId}: ${new BudgetExhausted('execution budget exhausted; committed progress is preserved').message}`)
+      return 'budget_exhausted'
+    }
+    return 'succeeded'
+  } finally {
+    abandoned = true
+    local.abort(new DOMException('Reader attempt has ended', 'AbortError'))
   }
-  return 'succeeded'
 }
 
 // A fresh Loader instance per attempt. An ambiguous acknowledgement replays the
@@ -478,6 +498,9 @@ async function loadBatch(
 }
 
 function restoreState(stream: AnyStreamDefinition, envelope: CheckpointEnvelope | undefined, namespaceId: string): unknown {
+  if (!StrategyIdentitySchema.safeParse(stream.incremental).success) {
+    throw new Error(`Stream "${stream.id}": incremental strategy must have a non-empty id and a safe integer version of at least 1, otherwise its checkpoints can never be read back.`)
+  }
   if (!envelope) return undefined
   if (envelope.strategy !== stream.incremental.id || envelope.version !== stream.incremental.version) {
     throw new Error(
@@ -603,6 +626,10 @@ function emptyBatch(): PendingBatch {
   return { rows: [], intervalIds: [], state: undefined }
 }
 
+function* rowContents(rows: readonly Row[]): Iterable<string> {
+  for (const row of rows) yield canonicalJson(toJsonRow(row))
+}
+
 /** Resolves a fixed grace period after the signal aborts; never resolves otherwise. */
 function graceAfterAbort(signal: AbortSignal, graceMs: number): Promise<void> {
   return new Promise((resolve) => {
@@ -671,4 +698,3 @@ function recordFailure(span: Span, error: unknown): void {
   span.setStatus({ code: SpanStatusCode.ERROR, message: describeError(error) })
   if (error instanceof Error) span.recordException(error)
 }
-

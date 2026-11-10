@@ -3,6 +3,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { createJournalStore, type MigrationRowState } from '../../runtime/journal-store.js'
+import { CLI_VERSION } from '../../runtime/version.js'
 
 interface ScriptedExecutor {
   db: ClickHouseExecutor
@@ -345,7 +346,7 @@ describe('createJournalStore', () => {
         name: 'm.sql',
         appliedAt,
         checksum: 'abc',
-        chkitVersion: '0.0.0',
+        chkitVersion: CLI_VERSION,
         migrationCompleted: false,
         operations: [
           {
@@ -394,6 +395,23 @@ describe('createJournalStore', () => {
       await store.writeMigrationState(written)
 
       expect(await store.readMigrationState('m.sql')).toEqual(written)
+    })
+
+    // migrate resumes a state without checking its split only when this
+    // release wrote it last (#562), so every write records this release, read
+    // back from the server or from the last write.
+    test('records this release on every write', async () => {
+      const { db, commandCalls } = createScriptedExecutor(
+        new Map<string | RegExp, unknown[]>([
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
+          [/FROM .* FINAL WHERE name = /, []],
+        ]),
+      )
+      const store = createJournalStore(db)
+      await store.writeMigrationState({ ...writtenState('2026-10-09T12:00:00.200'), chkitVersion: '0.0.1-old' })
+
+      expect(commandCalls.find((sql) => sql.startsWith('INSERT'))).toContain(`'abc', '${CLI_VERSION}', false`)
+      expect((await store.readMigrationState('m.sql'))?.chkitVersion).toBe(CLI_VERSION)
     })
 
     test('appendEntry keeps the completed operations of the last write', async () => {
