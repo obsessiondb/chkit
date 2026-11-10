@@ -773,6 +773,55 @@ describe('@chkit/cli drift comparer', () => {
     })
   }
 
+  // Column names and string literals in engine arguments are case-sensitive (#673).
+  // The server rewrites the case of function names and operator keywords only.
+  const engineArgumentCase: Array<[string, string, boolean]> = [
+    ['CollapsingMergeTree(Sign)', 'CollapsingMergeTree(sign)', true],
+    ['ReplacingMergeTree(Ver)', 'ReplacingMergeTree(ver)', true],
+    ['VersionedCollapsingMergeTree(Sign, Version)', 'VersionedCollapsingMergeTree(sign, Version)', true],
+    ['SummingMergeTree((Value, Version))', 'SummingMergeTree((value, Version))', true],
+    ["GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", true],
+    ["ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", 'SharedReplacingMergeTree(ver)', true],
+    ["Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", true],
+    ['ReplacingMergeTree(And)', 'ReplacingMergeTree(and)', true],
+    ['SummingMergeTree((From, Value))', 'SummingMergeTree((from, Value))', true],
+    ['CollapsingMergeTree(Sign)', 'CollapsingMergeTree(Sign)', false],
+    ['ReplacingMergeTree( Ver )', 'ReplacingMergeTree(Ver)', false],
+    ["ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", 'SharedReplacingMergeTree(Ver)', false],
+    ['Distributed(c, app, t, RAND())', "Distributed('c', 'app', 't', rand())", false],
+    ['Distributed(c, app, t, If(Sign > 1, 1, 0))', "Distributed('c', 'app', 't', if(Sign > 1, 1, 0))", false],
+    ['Distributed(c, app, t, Path is not null and TRUE)', "Distributed('c', 'app', 't', Path IS NOT NULL AND true)", false],
+    ['Distributed(c, app, t, id is distinct from 0)', "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", false],
+    ["Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", false],
+  ]
+  for (const [expectedEngine, actualEngine, mismatch] of engineArgumentCase) {
+    test(`engine ${expectedEngine} against ${actualEngine} ${mismatch ? 'is' : 'is not'} a mismatch`, () => {
+      const expected = table({
+        database: 'app',
+        name: 'events',
+        engine: expectedEngine,
+        columns: [{ name: 'id', type: 'UInt64' }],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      })
+
+      const result = compareTableShape(expected, {
+        engine: actualEngine,
+        primaryKey: '(id)',
+        orderBy: '(id)',
+        uniqueKey: undefined,
+        partitionBy: undefined,
+        columns: [{ name: 'id', type: 'UInt64' }],
+        settings: {},
+        indexes: [],
+        projections: [],
+        ttl: undefined,
+      })
+
+      expect(result?.engineMismatch ?? false).toBe(mismatch)
+    })
+  }
+
   test('emits reason codes for semantic drift', () => {
     const expected = table({
       database: 'app',
