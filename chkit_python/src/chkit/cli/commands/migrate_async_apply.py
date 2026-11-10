@@ -310,32 +310,16 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     # server when query_log has its QueryFinish (#672): its run ended before
     # it journaled the outcome. Record it, without compensating or resubmitting.
     if attempt_outcome == "finished" and initial_state is not None and prior_op is not None:
-        finished_op = prior_op.model_copy(
-            update={
-                "query_id": query_id,
-                "status": "completed",
-                "finished_at": iso_without_zone(datetime.now(tz=UTC)),
-                "last_error": "",
-            }
+        return _record_finished_attempt(
+            input_, initial_state, prior_op.model_copy(update={"query_id": query_id}), in_flight
         )
-        journal_store.write_migration_state(
-            upsert_operation(initial_state, finished_op, iso_without_zone(datetime.now(tz=UTC)))
-        )
-        # TS reads the duration as a double and prints the result as String(n).
-        finished_sec = js_number_to_string(
-            js_math_round(float(in_flight.duration_ms or 0) / 1000)
-        )
-        input_.log(
-            f"  {input_.operation_type}: previous attempt of query_id={query_id} "
-            f"finished on the server — written={_format_rows(in_flight.written_rows)} "
-            f"({_format_bytes(in_flight.written_bytes)}) in {finished_sec}s, "
-            f"recording it as completed"
-        )
-        return AsyncApplyResult(kind="completed", operation=finished_op)
 
     # 4 / 5. Submit (with optional before-retry on resubmit). A started
     # attempt that failed on the server is retried the same way, reported
     # with its error.
+    # When the attempt was journaled failed, the time of that write; the
+    # 'started' write that follows must carry a newer version (#672).
+    invalidated_at: datetime | None = None
     if prior_op is not None:
         prior_status: str = prior_op.status
         prior_error = prior_op.last_error
@@ -348,27 +332,22 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             f"no longer running (status={prior_status}{err_tail}) — "
             f"running before-retry then resubmitting"
         )
-        # The checked attempt is journaled failed before anything is
-        # compensated. Its QueryFinish can still reach query_log after this
-        # check (query_log is flushed on a timer), and a run that stops between
-        # the compensation and the next 'started' write must not take it for
-        # this statement's outcome on its re-run (#672).
-        if attempt_lower_bound is not None and initial_state is not None:
-            journal_store.write_migration_state(
-                upsert_operation(
-                    initial_state,
-                    prior_op.model_copy(
-                        update={
-                            "query_id": query_id,
-                            "status": "failed",
-                            "finished_at": iso_without_zone(datetime.now(tz=UTC)),
-                            "last_error": prior_error
-                            if attempt_outcome == "failed"
-                            else NO_OUTCOME_ERROR,
-                        }
-                    ),
-                    iso_without_zone(datetime.now(tz=UTC)),
-                )
+        # The checked attempt is journaled failed before it is compensated.
+        # Its QueryFinish can still reach query_log after this check (query_log
+        # is flushed on a timer), and a run that stops between the compensation
+        # and the next 'started' write must not take it for this statement's
+        # outcome on its re-run (#672). Without compensation the record stays
+        # started, so that a re-run can still find that QueryFinish.
+        if (
+            attempt_lower_bound is not None
+            and initial_state is not None
+            and input_.before_retry is not None
+        ):
+            invalidated_at = _journal_attempt_failed(
+                journal_store,
+                initial_state,
+                prior_op.model_copy(update={"query_id": query_id}),
+                prior_error if attempt_outcome == "failed" else NO_OUTCOME_ERROR,
             )
         if input_.before_retry is not None:
             input_.log(f"  {input_.operation_type}: running before-retry SQL")
@@ -387,6 +366,9 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     base_state = initial_state or fresh_migration_state(
         input_.migration_name, input_.migration_checksum
     )
+    started_written_at = datetime.now(tz=UTC)
+    if invalidated_at is not None:
+        started_written_at = max(started_written_at, invalidated_at + timedelta(milliseconds=1))
     journal_store.write_migration_state(
         upsert_operation(
             base_state,
@@ -401,7 +383,9 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
                 last_error="",
                 fingerprint=input_.fingerprint,
             ),
-            iso_without_zone(datetime.now(tz=UTC)),
+            # ReplacingMergeTree(applied_at) keeps the newest version, and the
+            # replicated read keeps either row of a tie.
+            iso_without_zone(started_written_at),
         )
     )
 
@@ -678,6 +662,58 @@ def _check_in_flight(
             f"before-retry SQL ran — re-run `chkit migrate --apply`."
         )
         raise RuntimeError(msg) from error
+
+
+def _record_finished_attempt(
+    input_: AsyncApplyInput,
+    state: MigrationRowState,
+    op: OperationState,
+    status: QueryStatus,
+) -> AsyncApplyResult:
+    """Journal a started attempt that finished on the server as completed (#672)."""
+    finished_op = op.model_copy(
+        update={
+            "status": "completed",
+            "finished_at": iso_without_zone(datetime.now(tz=UTC)),
+            "last_error": "",
+        }
+    )
+    input_.journal_store.write_migration_state(
+        upsert_operation(state, finished_op, iso_without_zone(datetime.now(tz=UTC)))
+    )
+    # TS reads the duration as a double and prints the result as String(n).
+    finished_sec = js_number_to_string(js_math_round(float(status.duration_ms or 0) / 1000))
+    input_.log(
+        f"  {input_.operation_type}: previous attempt of query_id={op.query_id} "
+        f"finished on the server — written={_format_rows(status.written_rows)} "
+        f"({_format_bytes(status.written_bytes)}) in {finished_sec}s, "
+        f"recording it as completed"
+    )
+    return AsyncApplyResult(kind="completed", operation=finished_op)
+
+
+def _journal_attempt_failed(
+    journal_store: JournalStore,
+    state: MigrationRowState,
+    op: OperationState,
+    last_error: str,
+) -> datetime:
+    """Journal a checked started attempt failed; return the time of the write."""
+    written_at = datetime.now(tz=UTC)
+    journal_store.write_migration_state(
+        upsert_operation(
+            state,
+            op.model_copy(
+                update={
+                    "status": "failed",
+                    "finished_at": iso_without_zone(written_at),
+                    "last_error": last_error,
+                }
+            ),
+            iso_without_zone(written_at),
+        )
+    )
+    return written_at
 
 
 def _started_attempt_lower_bound(

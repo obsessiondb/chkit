@@ -1158,6 +1158,31 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
     expect(submitCalls).toHaveLength(1)
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
+    // The 'started' write is a newer journal version, also on a frozen clock.
+    expect(writes[1]?.appliedAt).toBe('2023-11-14T22:13:20.001')
+    expect(writes[0]?.appliedAt).toBe('2023-11-14T22:13:20.000')
+  })
+
+  test('without before-retry SQL a started attempt without a query_log entry stays started until it is resubmitted', async () => {
+    const { db, submitCalls } = createFakeExecutor([
+      { status: 'unknown' },
+      { status: 'finished', writtenRows: 16, durationMs: 8000 },
+    ])
+    const { store, writes } = createFakeJournalStore(startedRecord())
+
+    await applyAsyncStatement({
+      ...BASE_INPUT,
+      fingerprint: 'v1:load',
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    // Nothing is compensated, so a re-run may still find its QueryFinish.
+    expect(submitCalls).toHaveLength(1)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
   })
 
   // The attempt's QueryFinish can reach query_log only after the check (it is

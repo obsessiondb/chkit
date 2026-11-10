@@ -1255,6 +1255,53 @@ def test_rerun_of_a_started_attempt_without_a_query_log_entry_resubmits() -> Non
     assert len(client.submitted) == 1
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
+    # The 'started' write is a newer journal version.
+    assert journal.writes[1].applied_at > journal.writes[0].applied_at
+
+
+def test_rerun_without_before_retry_keeps_the_attempt_started_until_resubmitted() -> None:
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    journal = _FakeJournalStore(state=_started_record())
+    apply_async_statement(_rerun_input(client, journal, before_retry=None))
+
+    # Nothing is compensated, so a re-run may still find its QueryFinish.
+    assert len(client.submitted) == 1
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+
+
+def test_rerun_journals_the_started_write_after_the_failed_one_on_a_frozen_clock(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    frozen = datetime(2026, 5, 26, 10, 0, 0, 123_900, tzinfo=UTC)
+
+    class _FrozenDatetime(datetime):
+        @classmethod
+        def now(cls, tz: Any = None) -> _FrozenDatetime:
+            return cls.fromtimestamp(frozen.timestamp(), tz=tz)
+
+    monkeypatch.setattr(migrate_async_apply, "datetime", _FrozenDatetime)
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    journal = _FakeJournalStore(state=_started_record())
+    apply_async_statement(_rerun_input(client, journal))
+
+    assert journal.writes is not None
+    assert [w.applied_at for w in journal.writes[:2]] == [
+        "2026-05-26T10:00:00.123",
+        "2026-05-26T10:00:00.124",
+    ]
 
 
 class _LostResponseClient(_ScriptedClient):

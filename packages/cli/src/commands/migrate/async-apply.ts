@@ -186,6 +186,9 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // that failed on the server is retried the same way, reported with its error.
   // 5. No prior row → FIRST attempt. Skip compensation, submit forward.
   // (priorOpState.status === 'completed' was already returned above.)
+  // When the attempt was journaled failed, the version of that write; the
+  // 'started' write that follows must carry a newer one (#672).
+  let invalidatedAt: number | undefined
   if (priorOpState !== undefined) {
     const prior =
       attemptOutcome === 'failed'
@@ -195,12 +198,15 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     log(
       `  ${operationType}: previous attempt of query_id=${queryId} is no longer running (status=${prior.status}${errorTail}) — running before-retry then resubmitting`,
     )
-    // The checked attempt is journaled failed before anything is compensated.
-    // Its QueryFinish can still reach query_log after this check (query_log
-    // is flushed on a timer), and a run that stops between the compensation
-    // and the next 'started' write must not take it for this statement's
-    // outcome on its re-run (#672).
-    if (attemptLowerBound !== undefined && initialMigrationState !== null) {
+    // The checked attempt is journaled failed before it is compensated. Its
+    // QueryFinish can still reach query_log after this check (query_log is
+    // flushed on a timer), and a run that stops between the compensation and
+    // the next 'started' write must not take it for this statement's outcome
+    // on its re-run (#672). Without compensation the record stays started, so
+    // that a re-run can still find that QueryFinish.
+    if (attemptLowerBound !== undefined && initialMigrationState !== null && beforeRetry !== null) {
+      const invalidatedAtMs = now()
+      invalidatedAt = invalidatedAtMs
       await journalStore.writeMigrationState(
         upsertOperation(
           initialMigrationState,
@@ -211,7 +217,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
             finishedAt: isoWithoutZone(new Date(now())),
             lastError: attemptOutcome === 'failed' ? prior.lastError : NO_OUTCOME_ERROR,
           },
-          now,
+          () => invalidatedAtMs,
         ),
       )
     }
@@ -245,7 +251,9 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
         lastError: '',
         fingerprint,
       },
-      now,
+      // ReplacingMergeTree(applied_at) keeps the newest version, and the
+      // replicated read keeps either row of a tie.
+      startedWriteClock(now, invalidatedAt),
     ),
   )
 
@@ -512,6 +520,10 @@ async function checkInFlight(
       { cause: error },
     )
   }
+}
+
+function startedWriteClock(now: () => number, invalidatedAt: number | undefined): () => number {
+  return invalidatedAt === undefined ? now : () => Math.max(now(), invalidatedAt + 1)
 }
 
 // Only a started attempt of this statement's SQL can have finished without
