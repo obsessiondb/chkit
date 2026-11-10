@@ -271,6 +271,35 @@ def test_table_shape_replicated_engine_on_shared_server(
     assert (detail is not None and detail.engine_mismatch) is mismatch
 
 
+# Column names and string literals in engine arguments are case-sensitive (#673).
+# The server rewrites the case of function names and operator keywords only.
+@pytest.mark.parametrize(
+    ("expected_engine", "actual_engine", "mismatch"),
+    [
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(sign)", True),
+        ("ReplacingMergeTree(Ver)", "ReplacingMergeTree(ver)", True),
+        ("VersionedCollapsingMergeTree(Sign, Version)", "VersionedCollapsingMergeTree(sign, Version)", True),
+        ("SummingMergeTree((Value, Version))", "SummingMergeTree((value, Version))", True),
+        ("GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", True),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(ver)", True),
+        ("Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", True),
+        ("CollapsingMergeTree(Sign)", "CollapsingMergeTree(Sign)", False),
+        ("ReplacingMergeTree( Ver )", "ReplacingMergeTree(Ver)", False),
+        ("ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", "SharedReplacingMergeTree(Ver)", False),
+        ("Distributed(c, app, t, RAND())", "Distributed('c', 'app', 't', rand())", False),
+        ("Distributed(c, app, t, If(Sign > 1, 1, 0))", "Distributed('c', 'app', 't', if(Sign > 1, 1, 0))", False),
+        (
+            "Distributed(c, app, t, Path is not null and TRUE)",
+            "Distributed('c', 'app', 't', Path IS NOT NULL AND true)",
+            False,
+        ),
+    ],
+)
+def test_table_shape_engine_argument_case(expected_engine: str, actual_engine: str, mismatch: bool) -> None:
+    detail = compare_table_shape(_t(engine=expected_engine), _it(engine=actual_engine))
+    assert (detail is not None and detail.engine_mismatch) is mismatch
+
+
 def test_table_shape_detects_order_by_mismatch() -> None:
     detail = compare_table_shape(_t(order_by=["id", "ts"]), _it(order_by="(id)"))
     assert detail is not None
