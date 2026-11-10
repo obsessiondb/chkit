@@ -173,6 +173,7 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
                 migration_name=migration_name,
                 migration_checksum=_MIGRATION_CHECKSUM,
                 statement_index=0,
+                fingerprint="",
                 operation_type="load_table_data",
                 operation_key=operation_key,
                 before_retry=f"TRUNCATE TABLE {table}",

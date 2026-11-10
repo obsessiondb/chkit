@@ -178,4 +178,51 @@ describe('read-only commands (#402)', () => {
       180_000,
     )
   }
+
+  // A user that cannot ALTER a journal an older release created migrates
+  // without fingerprints and says so, once, on stderr only (#599).
+  test.skipIf(onObsessionDB)(
+    'a user without ALTER on an older journal migrates with one warning on stderr and one JSON document',
+    async () => {
+      const executor = createLiveExecutor(env)
+      const user: User = { name: `${createPrefix('noalter')}user`, password: crypto.randomUUID() }
+      const project = await createProject('noalter', [admin, user])
+      const database = quoteIdent(env.clickhouseDatabase)
+      try {
+        await executor.command(`CREATE USER ${quoteIdent(user.name)} IDENTIFIED BY '${user.password}'`)
+        await executor.command(`GRANT SELECT, INSERT, CREATE DATABASE, CREATE TABLE ON ${database}.* TO ${quoteIdent(user.name)}`)
+        await executor.command(
+          `CREATE TABLE ${database}.${quoteIdent(project.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String, migration_completed Bool DEFAULT true, operations Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), finished_at Nullable(DateTime64(3, 'UTC')), last_error String)) DEFAULT []) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`,
+        )
+        json(project.cli(admin, ['generate', '--name', 'init', '--json']), 'generate')
+
+        const apply = project.cli(user, ['migrate', '--apply', '--json'])
+
+        expect(apply.exitCode, formatTestDiagnostic('migrate --apply (no ALTER)', apply)).toBe(0)
+        expect(JSON.parse(apply.stdout)).toMatchObject({ mode: 'execute' })
+        expect(apply.stdout).not.toContain('operation_fingerprints')
+        const warnings = apply.stderr.split('\n').filter((line) => line.includes('operation_fingerprints'))
+        expect(warnings).toHaveLength(1)
+        expect(warnings[0]).toStartWith(
+          `⚠ Could not add the operation_fingerprints column to ${project.journalTable} (${user.name}: Not enough privileges.`,
+        )
+        expect(warnings[0]).toEndWith(
+          'so this run records no statement fingerprints: a later --retry or resume checks the statements it completes by position and "-- operation:" marker only, not by their SQL. ' +
+            `The next migration applied by a user that can ALTER ${project.journalTable} adds the column.`,
+        )
+        const columns = await executor.query<{ name: string }>(
+          `SELECT name FROM system.columns WHERE database = '${env.clickhouseDatabase}' AND table = '${project.journalTable}' AND name = 'operation_fingerprints'`,
+        )
+        expect(columns).toEqual([])
+      } finally {
+        await rm(project.dir, { recursive: true, force: true })
+        await executor.command(`DROP USER IF EXISTS ${quoteIdent(user.name)}`).catch(() => {})
+        for (const name of [project.table, project.journalTable]) {
+          await executor.command(`DROP TABLE IF EXISTS ${database}.${quoteIdent(name)} SYNC`).catch(() => {})
+        }
+        await executor.close()
+      }
+    },
+    120_000,
+  )
 })

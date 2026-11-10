@@ -9,6 +9,7 @@ the migration would apply without ever being journaled.
 from __future__ import annotations
 
 from dataclasses import dataclass, field
+from types import SimpleNamespace
 from typing import Any
 
 import pytest
@@ -28,14 +29,17 @@ _UNKNOWN_DATABASE = (
 
 @dataclass
 class _ProbeFailingClient:
-    """Fails the journal probe with ``probe_error``; ``create_error`` fails the CREATE."""
+    """Fails every query with ``probe_error`` until a CREATE ran, as a server
+    does; ``create_error`` fails the CREATE."""
 
     probe_error: str
     create_error: str | None = None
     executed: list[str] = field(default_factory=list[str])
 
     def query(self, sql: str) -> Any:
-        raise RuntimeError(self.probe_error)
+        if not any(executed.startswith("CREATE TABLE") for executed in self.executed):
+            raise RuntimeError(self.probe_error)
+        return SimpleNamespace(rows=[])
 
     def execute(self, sql: str) -> None:
         if sql.startswith("CREATE TABLE") and self.create_error is not None:

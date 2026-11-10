@@ -970,6 +970,7 @@ def _op_state(index: int, status: str, type_: str, key: str) -> OperationState:
         started_at="2026-10-24 00:00:00.000",
         finished_at=None if status == "started" else "2026-10-24 00:00:01.000",
         last_error="",
+        fingerprint="",
     )
 
 

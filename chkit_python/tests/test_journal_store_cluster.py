@@ -71,12 +71,13 @@ def test_ensure_schema_upgraded_stamps_on_cluster_on_both_alter_statements() -> 
     store._ensure_schema_upgraded()
 
     executed = _captured_sql(fake)
-    assert len(executed) == 2
+    assert len(executed) == 3
     for sql in executed:
         assert sql.startswith("ALTER TABLE _chkit_migrations ON CLUSTER 'prod-eu-1'")
         assert "ADD COLUMN IF NOT EXISTS" in sql
     assert "migration_completed" in executed[0]
     assert "operations" in executed[1]
+    assert "operation_fingerprints Array(String) DEFAULT []" in executed[2]
 
 
 def test_ensure_schema_upgraded_omits_on_cluster_when_no_cluster() -> None:

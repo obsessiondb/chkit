@@ -122,7 +122,9 @@ def test_a_journal_without_the_per_operation_columns_is_upgraded() -> None:
 
     store.read_journal()
 
-    assert len([sql for sql in client.executed if sql.startswith("ALTER TABLE")]) == 2
+    alters = [sql for sql in client.executed if sql.startswith("ALTER TABLE")]
+    assert len(alters) == 3
+    assert "ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []" in alters[2]
 
 
 def test_a_read_fails_on_an_error_other_than_a_missing_journal() -> None:

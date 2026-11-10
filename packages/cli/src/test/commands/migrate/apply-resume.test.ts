@@ -5,6 +5,7 @@ import { join } from 'node:path'
 import { describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { statementFingerprint } from '@chkit/core'
 
 import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
 import { MigrateError } from '../../../commands/migrate/errors.js'
@@ -66,6 +67,7 @@ function operation(
     startedAt: '2026-09-29 00:11:10.000',
     finishedAt: status === 'started' ? null : '2026-09-29 00:11:11.000',
     lastError: status === 'failed' ? 'Code: 60. Unknown table' : '',
+    fingerprint: '',
   }
 }
 
@@ -966,6 +968,186 @@ describe('applyMigration with a state another release split differently (#562)',
       'ALTER TABLE t ADD COLUMN c UInt64;',
     ])
     expect(appended).toHaveLength(1)
+  })
+})
+
+// The journal records each statement's fingerprint, so a resume checks that a
+// statement it skips is the one that ran, whatever its position (#599).
+describe('applyMigration with statement fingerprints (#599)', () => {
+  const A = 'CREATE TABLE p_a (id UInt64) ENGINE = MergeTree ORDER BY id;'
+  const B = 'CREATE TABLE p_b (id UInt64) ENGINE = MergeTree ORDER BY id;'
+  const C_BROKEN = 'CREATE TABLE p_c (id UInt64) ENGINE = MergeTree ORDER BY missing_col;'
+  const C = 'CREATE TABLE p_c (id UInt64) ENGINE = MergeTree ORDER BY id;'
+  const D = 'CREATE TABLE p_d (id UInt64) ENGINE = MergeTree ORDER BY id;'
+  const ORIGINAL = [A, B, C_BROKEN, D].join('\n')
+
+  function args(dir: string, store: JournalStore, db: ClickHouseExecutor, retry?: { previousChecksum: string; checksum: string }) {
+    return {
+      db,
+      journalStore: store,
+      pluginRuntime: fakePluginRuntime(),
+      config: CONFIG,
+      tableScope: TABLE_SCOPE,
+      flags: FLAGS,
+      migrationsDir: dir,
+      file: 'm.sql',
+      retry,
+    }
+  }
+
+  // Run ORIGINAL until statement 3 fails; returns the recorded state.
+  async function failedRun(): Promise<MigrationRowState> {
+    const dir = writeMigration(ORIGINAL)
+    const { db } = recordingDb({ fail: (sql) => sql.includes('missing_col') })
+    const { store, state } = createFakeStore()
+    await expect(applyMigration(args(dir, store, db))).rejects.toThrow('failed at statement 3 of 4')
+    rmSync(dir, { recursive: true, force: true })
+    const recorded = state()
+    expect(recorded).not.toBeNull()
+    return recorded as MigrationRowState
+  }
+
+  test('records the fingerprint of the statement with every write', async () => {
+    const recorded = await failedRun()
+    expect(recorded.operations.map((op) => [op.operationIndex, op.status, op.fingerprint])).toEqual([
+      [0, 'completed', statementFingerprint(A)],
+      [1, 'completed', statementFingerprint(B)],
+      [2, 'failed', statementFingerprint(C_BROKEN)],
+    ])
+  })
+
+  test('--retry after a comment-only edit runs exactly the statements that never ran', async () => {
+    const recorded = await failedRun()
+    const edited = [`-- created first\n${A.replace('ENGINE', '/* the engine */ ENGINE')}`, `  ${B.replace(';', ' // b; with a semicolon\n;')}`, C, D].join('\n\n')
+    const dir = writeMigration(edited)
+    const { db, commandCalls } = recordingDb()
+    const { store, appended, state } = createFakeStore(recorded)
+
+    await applyMigration(args(dir, store, db, { previousChecksum: recorded.checksum, checksum: checksumSQL(edited) }))
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([C, D])
+    expect(appended).toHaveLength(1)
+    expect(state()?.operations.map((op) => op.fingerprint)).toEqual([A, B, C, D].map(statementFingerprint))
+  })
+
+  test('--retry refuses an edit that changed the SQL of a completed statement', async () => {
+    const recorded = await failedRun()
+    // The completed statement 2 (p_b) was removed and p_c fixed: by position
+    // the fixed statement would be skipped as completed.
+    const edited = [A, C, D].join('\n')
+    const dir = writeMigration(edited)
+    const { db, commandCalls } = recordingDb()
+    const { store, writes, appended } = createFakeStore(recorded)
+
+    const attempt = applyMigration(args(dir, store, db, { previousChecksum: recorded.checksum, checksum: checksumSQL(edited) }))
+    await expect(attempt).rejects.toMatchObject({ code: 'retry_mismatch' })
+    await expect(attempt).rejects.toThrow(
+      'statement 2: completed as sql_statement statement:1, but the edited file has different SQL there',
+    )
+    await expect(attempt).rejects.toThrow('must keep their position, operation marker and SQL (comments and whitespace may change)')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+    expect(writes).toEqual([])
+    expect(appended).toEqual([])
+  })
+
+  test('a state without fingerprints still resumes by position and marker', async () => {
+    const recorded = await failedRun()
+    const legacy = { ...recorded, operations: recorded.operations.map((op) => ({ ...op, fingerprint: '' })) }
+    const edited = [A, C, D].join('\n')
+    const dir = writeMigration(edited)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(legacy)
+
+    await applyMigration(args(dir, store, db, { previousChecksum: recorded.checksum, checksum: checksumSQL(edited) }))
+    rmSync(dir, { recursive: true, force: true })
+
+    // What every release before #599 does with this state.
+    expect(commandCalls).toEqual([D])
+  })
+
+  test('refuses to resume an unchanged file whose statements no longer match the recorded ones', async () => {
+    const recorded = await failedRun()
+    const dir = writeMigration(ORIGINAL)
+    const { db, commandCalls } = recordingDb()
+    const { store, writes } = createFakeStore(recorded)
+
+    // A plugin that now drops the first statement moves every other one.
+    const attempt = applyMigration({ ...args(dir, store, db), pluginRuntime: fakePluginRuntime((all) => all.slice(1)) })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow(
+      'Cannot resume m.sql: the journal recorded statements 1, 2 as completed or started, but this run gets different SQL from the file at those positions.',
+    )
+    await expect(attempt).rejects.toThrow('chkit migrate --apply --abandon m.sql')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+    expect(writes).toEqual([])
+  })
+
+  test('an unchanged file resumes when its statements match the recorded fingerprints', async () => {
+    const recorded = await failedRun()
+    const dir = writeMigration(ORIGINAL)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(recorded)
+
+    await expect(applyMigration(args(dir, store, db))).resolves.toBeDefined()
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([C_BROKEN, D])
+  })
+
+  test('checks the record of every skip, not only the state the run started with', async () => {
+    const recorded = await failedRun()
+    const dir = writeMigration(ORIGINAL)
+    const { db, commandCalls } = recordingDb()
+    // The first read sees no state (a stale replica); a later one returns the
+    // recorded run, whose statement 1 is not the one this run gets.
+    let reads = 0
+    const store: JournalStore = {
+      databaseMissing: false,
+      async readJournal() {
+        return { version: 1, applied: [] }
+      },
+      async readMigrationState() {
+        reads += 1
+        return reads === 1 ? null : recorded
+      },
+      async writeMigrationState() {},
+      async appendEntry() {},
+    }
+
+    const attempt = applyMigration({
+      ...args(dir, store, db),
+      pluginRuntime: fakePluginRuntime((all) => [all[0]?.replace('p_a', 'p_x') ?? '', ...all.slice(1)]),
+    })
+    await expect(attempt).rejects.toMatchObject({ code: 'statement_split_changed' })
+    await expect(attempt).rejects.toThrow('the journal recorded statement 1 as completed or started')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual([])
+  })
+
+  test("another release's state with fingerprints is checked by them, not by the split before #562", async () => {
+    // The two splits differ on statement 1; its fingerprint shows the
+    // statement there is the one that ran.
+    const sql = 'SELECT 1 // x; SELECT 2\n;\nALTER TABLE t ADD COLUMN b UInt64;\nALTER TABLE t ADD COLUMN c UInt64;\n'
+    const ran = 'SELECT 1 // x; SELECT 2\n;'
+    const dir = writeMigration(sql)
+    const { db, commandCalls } = recordingDb()
+    const { store } = createFakeStore(
+      inProgressState(checksumSQL(sql), [
+        { ...operation(0, 'completed'), fingerprint: statementFingerprint(ran) },
+        operation(1, 'failed'),
+      ]),
+    )
+
+    await applyMigration(args(dir, store, db))
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commandCalls).toEqual(['ALTER TABLE t ADD COLUMN b UInt64;', 'ALTER TABLE t ADD COLUMN c UInt64;'])
   })
 })
 

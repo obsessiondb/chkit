@@ -52,6 +52,9 @@ type AbandonPayload = { abandon: { completedStatements: number; operations: Arra
 
 const TIMEOUT_MS = 240_000
 
+const OLD_OPERATIONS_TYPE =
+  "Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), finished_at Nullable(DateTime64(3, 'UTC')), last_error String))"
+
 describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
   test('--retry resumes an edited migration; a retry that fails again resumes without --retry', async () => {
     const project = await createProject('retry')
@@ -95,6 +98,7 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
         completedStatements: 1,
         resumeAtStatement: 2,
         unmarkedCompletedStatements: 0,
+        positionOnlyCompletedStatements: 0,
       })
       // The preview wrote nothing.
       await waitForJournal(project, M, (row) => row.checksum === checksumSQL(v1) && row.completed === 0)
@@ -294,6 +298,104 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
       await waitForJournal(project, M, (row) => row.completed === 1 && row.statuses === 'completed,completed,failed')
     } finally {
       await dropProject(project, { views: [], tables: [a, b] })
+    }
+  }, TIMEOUT_MS)
+
+  // The journal records each statement's fingerprint, so --retry checks that a
+  // statement it skips as completed is the one that ran (#599).
+  test('--retry resumes a comment-only edit at the statements that never ran, and refuses an SQL edit to a completed one (#599)', async () => {
+    const project = await createProject('fingerprint')
+    const { database: db, prefix, executor } = project
+    const [a, b, c, d] = [`${prefix}a`, `${prefix}b`, `${prefix}c`, `${prefix}d`]
+    const M = '20990101000000_fingerprint.sql'
+    const create = (table: string, order = 'id') =>
+      `CREATE TABLE ${db}.${table} (id UInt64) ENGINE = MergeTree ORDER BY ${order};`
+    const v1 = [create(a), create(b), create(c, 'missing_col'), create(d)].join('\n')
+
+    try {
+      await writeMigration(project, M, v1)
+      const run1 = migrate(project, ['--execute', '--json'])
+      expect(run1.exitCode).toBe(1)
+      expect(errorOf(run1).message).toContain(`Migration ${M} failed at statement 3 of 4`)
+      await waitForFingerprints(project, M, (row) => row.statuses === 'completed,completed,failed' && row.fingerprints === 3)
+
+      // The completed statement 2 was removed and statement 3 fixed: by
+      // position, the fixed statement would be skipped as completed.
+      await writeMigration(project, M, [create(a), create(c), create(d)].join('\n'))
+      const refused = migrate(project, ['--execute', '--json', '--retry', M])
+      expect(refused.exitCode).toBe(1)
+      expect(errorOf(refused).code).toBe('retry_mismatch')
+      expect(errorOf(refused).message).toContain(
+        'statement 2: completed as sql_statement statement:1, but the edited file has different SQL there',
+      )
+      await waitForJournal(project, M, (row) => row.checksum === checksumSQL(v1) && row.completed === 0)
+
+      // Comments and whitespace changed, and the failed statement was fixed.
+      // Statements 1 and 2 are not idempotent: running them again would fail.
+      const v3 = [
+        '-- the first table',
+        create(a).replace('ENGINE', '/* the engine */ ENGINE'),
+        `  ${create(b).replace(';', ' // b; still the comment\n;')}`,
+        create(c),
+        create(d),
+      ].join('\n')
+      await writeMigration(project, M, v3)
+      const resumed = migrate(project, ['--execute', '--json', '--retry', M])
+      expect(resumed.exitCode, formatTestDiagnostic('--retry after a comment-only edit', resumed)).toBe(0)
+      expect(parseJson<{ retry: unknown }>(resumed).retry).toMatchObject({
+        action: 'resume',
+        completedStatements: 2,
+        resumeAtStatement: 3,
+      })
+      await waitForTable(executor, db, c)
+      await waitForTable(executor, db, d)
+      await waitForFingerprints(
+        project,
+        M,
+        (row) => row.completed === 1 && row.statuses === 'completed,completed,completed,completed' && row.fingerprints === 4,
+      )
+    } finally {
+      await dropProject(project, { views: [], tables: [a, b, c, d] })
+    }
+  }, TIMEOUT_MS)
+
+  test('a journal an older release created gets the fingerprint column; a state an older release wrote resumes by position (#599)', async () => {
+    const project = await createProject('fp_old')
+    const { database: db, prefix, executor } = project
+    const [a, b, c, d] = [`${prefix}a`, `${prefix}b`, `${prefix}c`, `${prefix}d`]
+    const M = '20990101000000_fp_old.sql'
+    const create = (table: string, order = 'id') =>
+      `CREATE TABLE ${db}.${table} (id UInt64) ENGINE = MergeTree ORDER BY ${order};`
+
+    try {
+      // The journal as releases before #599 create it.
+      await executor.command(
+        `CREATE TABLE ${quoteIdent(db)}.${quoteIdent(project.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String, migration_completed Bool DEFAULT true, operations ${OLD_OPERATIONS_TYPE} DEFAULT []) ENGINE = ReplacingMergeTree(applied_at) ORDER BY (name) SETTINGS index_granularity = 1`,
+      )
+      await waitForTable(executor, db, project.journalTable)
+      await writeMigration(project, M, [create(a), create(b), create(c, 'missing_col'), create(d)].join('\n'))
+      const run1 = migrate(project, ['--execute', '--json'])
+      expect(run1.exitCode).toBe(1)
+      expect(errorOf(run1).message).toContain(`Migration ${M} failed at statement 3 of 4`)
+      await waitForColumn(executor, db, project.journalTable, 'operation_fingerprints')
+      await waitForFingerprints(project, M, (row) => row.statuses === 'completed,completed,failed' && row.fingerprints === 3)
+
+      // An older release writes the row without the column: no fingerprints.
+      await recordOldReleaseState(project, M, ['completed', 'completed', 'failed'])
+      await waitForFingerprints(project, M, (row) => row.statuses === 'completed,completed,failed' && row.fingerprints === 0)
+
+      await writeMigration(
+        project,
+        M,
+        ['-- edited', create(a), `${create(b)} -- b`, create(c), create(d)].join('\n'),
+      )
+      const resumed = migrate(project, ['--execute', '--json', '--retry', M])
+      expect(resumed.exitCode, formatTestDiagnostic('--retry of an older release state', resumed)).toBe(0)
+      await waitForTable(executor, db, c)
+      await waitForTable(executor, db, d)
+      await waitForJournal(project, M, (row) => row.completed === 1)
+    } finally {
+      await dropProject(project, { views: [], tables: [a, b, c, d] })
     }
   }, TIMEOUT_MS)
 
@@ -610,6 +712,35 @@ async function recordOldReleaseState(project: Project, migration: string, status
     `INSERT INTO ${journal} (name, applied_at, checksum, chkit_version, migration_completed, operations) ` +
       `SELECT name, applied_at + toIntervalMillisecond(1), checksum, '0.0.1-old', false, [${operations}] ` +
       `FROM ${journal} FINAL WHERE name = '${migration}' SETTINGS select_sequential_consistency = 1`,
+  )
+}
+
+// The journal row with how many of its operations carry a fingerprint (#599).
+async function waitForFingerprints(
+  project: Project,
+  migration: string,
+  predicate: (row: JournalRow & { fingerprints: number }) => boolean,
+): Promise<void> {
+  await waitForRows<{ completed: string; statuses: string; fingerprints: string }>(
+    project.executor,
+    `SELECT toString(toUInt8(migration_completed)) AS completed, ` +
+      `arrayStringConcat(arrayMap(o -> o.status, operations), ',') AS statuses, ` +
+      `toString(if(length(operation_fingerprints) = length(operations), arrayCount(f -> f != '', operation_fingerprints), 0)) AS fingerprints ` +
+      `FROM ${quoteIdent(project.database)}.${quoteIdent(project.journalTable)} FINAL ` +
+      `WHERE name = '${migration}' SETTINGS select_sequential_consistency = 1`,
+    (found) => {
+      const row = found[0]
+      return (
+        row !== undefined &&
+        predicate({
+          checksum: '',
+          completed: Number(row.completed),
+          statuses: row.statuses,
+          fingerprints: Number(row.fingerprints),
+        })
+      )
+    },
+    `fingerprints of ${migration}`,
   )
 }
 

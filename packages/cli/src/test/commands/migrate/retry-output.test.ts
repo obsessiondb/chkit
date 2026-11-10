@@ -26,6 +26,7 @@ const RESUME: RetryResume = {
   completedStatements: 1,
   resumeAtStatement: 2,
   unmarkedCompletedStatements: 0,
+  positionOnlyCompletedStatements: 0,
 }
 
 const SCOPE = resolveTableScope(undefined, [])
@@ -68,8 +69,14 @@ describe('renderPlanText with --retry', () => {
     expect(lines.some((line) => line.includes('matched by position only'))).toBe(false)
   })
 
-  test('warns about completed statements matched by position only', async () => {
+  test('does not warn about unmarked statements whose fingerprints were checked', async () => {
     const lines = await planLines({ ...RESUME, unmarkedCompletedStatements: 1 })
+
+    expect(lines.some((line) => line.includes('matched by position only'))).toBe(false)
+  })
+
+  test('warns about completed statements matched by position only', async () => {
+    const lines = await planLines({ ...RESUME, unmarkedCompletedStatements: 1, positionOnlyCompletedStatements: 1 })
 
     expect(lines).toContain(
       '⚠ 1 completed statement(s) have no "-- operation:" marker and were matched by position only. ' +

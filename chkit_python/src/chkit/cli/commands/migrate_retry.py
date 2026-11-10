@@ -20,6 +20,7 @@ from chkit.cli.commands.migrate_recovery import (
 from chkit.cli.journal_store import MigrationRowState
 from chkit.cli.migration_store import checksum_sql
 from chkit.cli.safety_markers import extract_migration_operation_summaries
+from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_splitter import extract_executable_statements
 
 RetryNoopReason = Literal[
@@ -42,9 +43,14 @@ class RetryResume(BaseModel):
     completed_statements: int = Field(..., serialization_alias="completedStatements")
     # 1-based number of the first statement that runs; None when every statement completed.
     resume_at_statement: int | None = Field(..., serialization_alias="resumeAtStatement")
-    # Completed statements without an ``-- operation:`` marker, matched by position only.
+    # Completed statements without an ``-- operation:`` marker.
     unmarked_completed_statements: int = Field(
         ..., serialization_alias="unmarkedCompletedStatements"
+    )
+    # The unmarked completed statements the journal recorded without a
+    # fingerprint, so nothing checks their SQL: matched by position only.
+    position_only_completed_statements: int = Field(
+        ..., serialization_alias="positionOnlyCompletedStatements"
     )
 
 
@@ -71,6 +77,7 @@ def resolve_retry(  # noqa: PLR0911 - one return per TS no-op reason
     empty_migrations: Sequence[str],
     applied_names: Collection[str],
     journal_store: _ReadsMigrationState,
+    plugins_rewrite_statements: bool,
 ) -> RetryResolution:
     """Decide what --retry does, before anything is applied.
 
@@ -95,9 +102,15 @@ def resolve_retry(  # noqa: PLR0911 - one return per TS no-op reason
         return RetryNoop(migration=migration, reason="checksum_unchanged")
     # The file's statements before on_before_apply; apply checks again against
     # the statements the plugins return.
+    # When a plugin's on_before_apply may rewrite the statements, the SQL of
+    # the statements that ran is checked by apply, against what the plugins
+    # return, instead of here (#599).
     identities = statement_identities(
         extract_migration_operation_summaries(sql),
-        len(extract_executable_statements(sql)),
+        [
+            None if plugins_rewrite_statements else statement_fingerprint(statement)
+            for statement in extract_executable_statements(sql)
+        ],
     )
     check = verify_retry_edit(state.operations, identities)
     if isinstance(check, RetryEditMismatch):
@@ -110,6 +123,7 @@ def resolve_retry(  # noqa: PLR0911 - one return per TS no-op reason
         completed_statements=check.completed,
         resume_at_statement=None if check.resume_index is None else check.resume_index + 1,
         unmarked_completed_statements=check.unmarked_completed,
+        position_only_completed_statements=check.position_only_completed,
     )
 
 
