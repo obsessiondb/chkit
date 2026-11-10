@@ -492,6 +492,19 @@ def test_excludes_obsessiondb_metadata_tables_from_pulled_schema_output(
 
     assert result.exit_code == 0, result.output
     payload = json.loads(result.stdout)
+    # The same keys, in the same order, as the TS pull plugin (#487).
+    assert list(payload) == [
+        "ok",
+        "command",
+        "outFile",
+        "definitionCount",
+        "tableCount",
+        "databases",
+        "skippedObjects",
+        "dryrun",
+        "warnings",
+        "content",
+    ]
     assert payload["definitionCount"] == 1
     assert payload["tableCount"] == 1
     assert payload["skippedObjects"] == []
