@@ -7,6 +7,7 @@ import {
   LEGACY_EXPRESSION_PREFIX,
   columnTypeAcceptsStringLiteral,
   isSQLExpression,
+  nullableColumnType,
   parseColumnDefault,
   readsUnparsableEphemeralLiteralAsNull,
   renderDefault,
@@ -58,9 +59,9 @@ function validateColumnCodec(
   issues: ValidationIssue[]
 ): void {
   if (!column.codec) return
-  // The type as rendered (`nullable: true` is `Nullable(T)`), like renderColumnType.
+  // The type as rendered, like renderColumnType.
   const type = String(column.type).trim()
-  const problem = columnCodecProblem(column.codec, column.nullable ? `Nullable(${type})` : type)
+  const problem = columnCodecProblem(column.codec, column.nullable ? nullableColumnType(type) : type)
   if (!problem) return
   pushValidationIssue(
     issues,
@@ -116,7 +117,7 @@ function validateColumnDefault(
   const type = typeof column.type === 'string' ? column.type.trim() : ''
   if (columnTypeAcceptsStringLiteral(type)) return
   pushValidationIssue(issues, def, 'column_default_looks_like_expression',
-    describeQuotedFunctionDefault(subject, kind, column.nullable ? `Nullable(${type})` : type, parsed.value))
+    describeQuotedFunctionDefault(subject, kind, column.nullable ? nullableColumnType(type) : type, parsed.value))
 }
 
 function validateDefaultExpression(

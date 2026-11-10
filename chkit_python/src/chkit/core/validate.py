@@ -13,6 +13,7 @@ from chkit.core.codec_rules import column_codec_problem
 from chkit.core.column_default import (
     LEGACY_EXPRESSION_PREFIX,
     column_type_accepts_string_literal,
+    nullable_column_type,
     parse_column_default,
     reads_unparsable_ephemeral_literal_as_null,
     render_default,
@@ -81,9 +82,11 @@ def _validate_column_codec(
 ) -> None:
     if column.codec is None:
         return
-    # The type as rendered (`nullable=True` is `Nullable(T)`), like render_column_type.
+    # The type as rendered, like render_column_type.
     type_ = js_trim(str(column.type))
-    problem = column_codec_problem(column.codec, f"Nullable({type_})" if column.nullable else type_)
+    problem = column_codec_problem(
+        column.codec, nullable_column_type(type_) if column.nullable else type_
+    )
     if problem is None:
         return
     _push(
@@ -310,7 +313,7 @@ def _validate_column_default(
     type_ = js_trim(column.type)
     if column_type_accepts_string_literal(type_):
         return
-    effective_type = f"Nullable({type_})" if column.nullable else type_
+    effective_type = nullable_column_type(type_) if column.nullable else type_
     _push(issues, definition, "column_default_looks_like_expression",
           _describe_quoted_function_default(subject, kind, effective_type, parsed.value))
 
