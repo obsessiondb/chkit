@@ -4,10 +4,10 @@ Port of ``packages/core/src/sql-scan.ts``. Characters inside a single-quoted
 string, a double-quoted identifier, or a backtick-quoted identifier are literal
 text, not structure: parens and commas there must be ignored.
 
-Every scanner skips quoted regions through ``find_quote_end``, so the escaping
-rule lives in exactly one place and the copies cannot drift apart again (#197).
-``find_matching_paren`` reads with the SQL lexer instead, which also knows
-heredocs and comments (#587).
+A scanner that skips only quoted regions does so through ``find_quote_end``, so
+the escaping rule lives in exactly one place (#197). ``find_matching_paren``,
+``find_top_level_sql_pattern`` and ``split_top_level_comma`` read with the SQL
+lexer instead, which also knows heredocs and comments (#587, #596).
 """
 
 from __future__ import annotations
@@ -74,21 +74,25 @@ def find_matching_paren(text: str, open_index: int) -> int | None:
 
 
 def find_top_level_sql_pattern(sql: str, pattern: re.Pattern[str]) -> re.Match[str] | None:
-    """Find a clause/delimiter outside quoted strings, identifiers and parentheses."""
+    """Find a clause/delimiter outside parentheses, strings, quoted identifiers,
+    heredocs and comments.
+
+    The input is read with the SQL lexer (#596); the pattern is tried at every
+    position of the other tokens, and may run on past the token it starts in.
+    """
     depth = 0
-    i = 0
-    while i < len(sql):
-        char = sql[i]
-        if char in _QUOTE_CHARS:
-            i = find_quote_end(sql, i, char) + 1
-            continue
-        if char == "(":
+    for token in iter_sql_tokens(sql):
+        if token.kind == "punctuation" and token.text == "(":
             depth += 1
-        elif char == ")":
+        elif token.kind == "punctuation" and token.text == ")":
             depth -= 1
-        elif depth == 0:
-            match = pattern.match(sql, i)
-            if match is not None:
-                return match
-        i += 1
+        elif depth == 0 and token.kind not in _TEXT_TOKEN_KINDS:
+            for i in range(token.start, token.end):
+                match = pattern.match(sql, i)
+                if match is not None:
+                    return match
     return None
+
+
+# A string, heredoc, quoted name or comment: its characters are never structure.
+_TEXT_TOKEN_KINDS = frozenset({"string", "quoted_identifier", "line_comment", "block_comment"})
