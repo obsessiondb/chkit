@@ -103,6 +103,7 @@ export {
   extractExecutableStatements,
   extractLegacyExecutableStatements,
 } from './sql-splitter.js'
+export { statementFingerprint } from './sql-fingerprint.js'
 export { parseJsonEachRow, parseJsonEachRowLine, roundTripNumber } from './exact-json.js'
 export { t } from './clickhouse-type.js'
 export { p, type NamedParam } from './query-param.js'

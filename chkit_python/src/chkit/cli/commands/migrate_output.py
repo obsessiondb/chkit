@@ -54,9 +54,9 @@ def format_retry_notice(retry: RetryResolution) -> list[str]:
         )
     )
     lines = [f"Retry {migration}: the file changed after a failed apply. {progress}"]
-    if retry.unmarked_completed_statements > 0:
+    if retry.position_only_completed_statements > 0:
         lines.append(
-            f"⚠ {retry.unmarked_completed_statements} completed statement(s) have no "
+            f"⚠ {retry.position_only_completed_statements} completed statement(s) have no "
             '"-- operation:" marker and were matched by position only. Do not add, '
             "remove, or reorder statements above the first statement that did not "
             "complete."

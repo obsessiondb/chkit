@@ -299,9 +299,9 @@ function formatRetryNotice(retry: RetryResolution): string[] {
       ? `All ${retry.totalStatements} statements already completed; the migration will be recorded as applied.`
       : `${retry.completedStatements} completed statement(s) will be skipped; resuming at statement ${retry.resumeAtStatement} of ${retry.totalStatements}.`
   const lines = [`Retry ${migration}: the file changed after a failed apply. ${progress}`]
-  if (retry.unmarkedCompletedStatements > 0) {
+  if (retry.positionOnlyCompletedStatements > 0) {
     lines.push(
-      `⚠ ${retry.unmarkedCompletedStatements} completed statement(s) have no "-- operation:" marker and were matched by position only. ` +
+      `⚠ ${retry.positionOnlyCompletedStatements} completed statement(s) have no "-- operation:" marker and were matched by position only. ` +
         'Do not add, remove, or reorder statements above the first statement that did not complete.',
     )
   }

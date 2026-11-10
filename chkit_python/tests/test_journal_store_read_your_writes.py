@@ -49,6 +49,7 @@ def _op(index: int, status: str) -> OperationState:
             "startedAt": "2026-10-09T12:00:00.000",
             "finishedAt": None,
             "lastError": "",
+            "fingerprint": "",
         }
     )
 

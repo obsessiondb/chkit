@@ -94,6 +94,7 @@ def test_upsert_operation_replaces_existing_index() -> None:
                 started_at="x",
                 finished_at=None,
                 last_error="",
+                fingerprint="",
             )
         ],
     )
@@ -106,6 +107,7 @@ def test_upsert_operation_replaces_existing_index() -> None:
         started_at="x",
         finished_at="y",
         last_error="",
+        fingerprint="",
     )
     out = upsert_operation(state, replacement, "now")
     assert len(out.operations) == 1
@@ -123,6 +125,7 @@ def test_upsert_operation_inserts_new_index() -> None:
         started_at="x",
         finished_at=None,
         last_error="",
+        fingerprint="",
     )
     out = upsert_operation(state, new, "now")
     assert out.operations == [new]
@@ -141,6 +144,7 @@ def test_upsert_operation_sorts_by_index() -> None:
             started_at="x",
             finished_at=None,
             last_error="",
+            fingerprint="",
         ),
         "now",
     )
@@ -155,6 +159,7 @@ def test_upsert_operation_sorts_by_index() -> None:
             started_at="x",
             finished_at=None,
             last_error="",
+            fingerprint="",
         ),
         "now",
     )
@@ -259,6 +264,7 @@ def _input(
         "statement_index": 0,
         "operation_type": "alter_table_modify_column",
         "operation_key": "table:db.t:column:x",
+        "fingerprint": "",
         "before_retry": None,
         "log": lambda _msg: None,
         "poll_interval_seconds": 0.0,
@@ -345,6 +351,7 @@ def test_apply_async_already_completed_skips_entirely() -> None:
         started_at="2026-01-01T00:00:00.000",
         finished_at="2026-01-01T00:00:10.000",
         last_error="",
+        fingerprint="",
     )
     state = MigrationRowState(
         name="20260101_000000_async.sql",
@@ -438,6 +445,7 @@ def test_apply_async_resubmit_runs_before_retry() -> None:
         started_at="2026-01-01T00:00:00.000",
         finished_at="2026-01-01T00:00:01.000",
         last_error="connection lost",
+        fingerprint="",
     )
     state = MigrationRowState(
         name="20260101_000000_async.sql",
@@ -518,6 +526,7 @@ def _op(status: str, *, last_error: str = "", index: int = 0) -> OperationState:
         started_at="2023-11-14 22:14:00.000",
         finished_at=None if status == "started" else "2023-11-14 22:14:01.000",
         last_error=last_error,
+        fingerprint="",
     )
 
 
@@ -1032,3 +1041,68 @@ def test_apply_async_progress_ignores_the_ambient_decimal_context() -> None:
         "  load_table_data: written=1.13M rows (1.3 KiB), elapsed 0s",
         "  load_table_data: finished — written=1.13M rows (1.3 KiB) in 3s",
     ]
+
+
+# ---------- recorded fingerprints (#599) ----------
+
+
+def _abandoned_running(fingerprint: str) -> MigrationRowState:
+    op = OperationState(
+        operation_index=0,
+        operation_key="table:db.t:column:x",
+        operation_type="alter_table_modify_column",
+        query_id=_QUERY_ID,
+        status="failed",
+        started_at="2026-05-26 11:00:00.000",
+        finished_at="2026-05-26 11:00:01.000",
+        last_error="abandoned via chkit migrate --abandon (was started)",
+        fingerprint=fingerprint,
+    )
+    return MigrationRowState(
+        name="20260101_000000_async.sql",
+        applied_at="2026-01-01T00:00:10.000",
+        checksum="abc",
+        chkit_version="0.1",
+        migration_completed=False,
+        operations=[op],
+    )
+
+
+def test_apply_async_refuses_to_attach_to_a_running_attempt_of_other_sql() -> None:
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="running", elapsed_ms=RUNNING_ELAPSED_MS)]
+    )
+    journal = _FakeJournalStore(state=_abandoned_running("v1:old"))
+    with pytest.raises(RuntimeError) as info:
+        apply_async_statement(_input(client=client, journal=journal, fingerprint="v1:new"))
+    assert (
+        "an earlier attempt with different SQL is still running on the server. Wait for "
+        f"it to finish or run KILL QUERY WHERE query_id = '{_QUERY_ID}'"
+    ) in str(info.value)
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_apply_async_attach_records_the_fingerprint_of_the_attempt() -> None:
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="running", elapsed_ms=RUNNING_ELAPSED_MS),
+            QueryStatus(status="finished", written_rows=1, duration_ms=1000),
+        ]
+    )
+    journal = _FakeJournalStore(state=_abandoned_running(""))
+    apply_async_statement(_input(client=client, journal=journal, fingerprint="v1:new"))
+    assert journal.writes
+    last = journal.writes[-1].operations[0]
+    assert (last.status, last.fingerprint) == ("completed", "")
+
+
+def test_apply_async_refuses_to_skip_a_completed_record_of_other_sql() -> None:
+    state = _abandoned_running("v1:old")
+    completed = state.operations[0].model_copy(update={"status": "completed", "last_error": ""})
+    journal = _FakeJournalStore(state=state.model_copy(update={"operations": [completed]}))
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _input(client=_ScriptedClient(statuses=[]), journal=journal, fingerprint="v1:new")
+        )
+    assert info.value.code == "statement_split_changed"

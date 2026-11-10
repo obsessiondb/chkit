@@ -287,6 +287,7 @@ def _statement(
         statement_index=0,
         operation_type="load_table_data",
         operation_key=operation_key,
+        fingerprint="",
         before_retry=None,
         log=log,
         poll_interval_seconds=0.25,
@@ -450,6 +451,7 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
                 "startedAt": "2026-10-02 00:00:00.000",
                 "finishedAt": None,
                 "lastError": "",
+                "fingerprint": "",
             }
         )
         journal = _MemoryJournal(
