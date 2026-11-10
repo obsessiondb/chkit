@@ -182,7 +182,8 @@ function quote(value: string): string {
 }
 
 /** ClickHouse has no Nullable(LowCardinality(T)), so a nullable LowCardinality(T) is LowCardinality(Nullable(T)). */
-function nullable(type: string): string {
+function nullable(raw: string): string {
+  const type = raw.trim()
   if (NULLABLE.test(type)) return type
   if (NOT_NULLABLE.test(type)) {
     throw new Error(`ClickHouse has no Nullable(${type}); use .default() instead of .optional() or .nullable()`)

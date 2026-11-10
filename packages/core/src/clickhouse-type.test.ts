@@ -17,6 +17,7 @@ const types: Array<[string, z.ZodType, string]> = [
   ['region', t.lowCardinality(t.string()).nullable(), 'LowCardinality(Nullable(String))'],
   ['country', t.nullable(t.lowCardinality(t.string())), 'LowCardinality(Nullable(String))'],
   ['area', t.lowCardinality(t.nullable(t.string())).nullable(), 'LowCardinality(Nullable(String))'],
+  ['zone', t.string().meta({ clickhouse: ' LowCardinality(String) ' }).optional(), 'LowCardinality(Nullable(String))'],
   ['pair', t.tuple([t.string(), t.uint8()]), 'Tuple(String, UInt8)'],
   ['point', t.tuple({ x: t.float64(), y: t.float64() }), 'Tuple(x Float64, y Float64)'],
   ['items', t.nested({ sku: t.string(), qty: t.uint16() }), 'Nested(sku String, qty UInt16)'],
