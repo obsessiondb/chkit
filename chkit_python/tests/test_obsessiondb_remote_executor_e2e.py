@@ -483,11 +483,11 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
         worker.join(timeout=60)
         assert "attached attempt failed" in attached_outcome[0]
 
-        # The in-flight check looks for any running query with the id. Every
-        # poll after it counts only queries that started after the earlier
-        # attempt had ended.
+        # The in-flight check of a started attempt also reads its outcome,
+        # bounded by the start its record holds (#672). Every poll after it
+        # counts only queries that started after the earlier attempt had ended.
         in_flight_check, *polls = recording.after_times
-        assert in_flight_check is None
+        assert in_flight_check == "2026-10-01T23:59:58.000Z"
         assert polls
         assert len(set(polls)) == 1
         assert polls[0] is not None

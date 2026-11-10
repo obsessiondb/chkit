@@ -17,6 +17,9 @@ Key invariants:
   query.
 - ``before_retry`` SQL (parsed from the migration's ``-- before-retry:``
   line) runs only on resubmit, never on first attempt.
+- A re-run of a step journaled ``started`` that no replica runs any more
+  reads that attempt's outcome from ``system.query_log`` (#672): a
+  ``QueryFinish`` is recorded as completed instead of resubmitted.
 - Status ``unknown`` is a transient state (just-submitted or
   just-finished gap); loop until ``running`` / ``finished`` / ``failed``
   unless the submit itself rejected before any poll found the query
@@ -36,7 +39,7 @@ import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from chkit import __version__
@@ -64,6 +67,7 @@ UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
 # Poll request failures in a row, and `unknown` polls after a failed submit (#657).
 MAX_TRANSIENT_POLL_ERRORS = 20
 SUBMIT_THREAD_NAME = "chkit-async-submit"
+_EPOCH = datetime(1970, 1, 1, tzinfo=UTC)
 _BYTES_KIB = 1024
 _BYTES_MIB = _BYTES_KIB * 1024
 _BYTES_GIB = _BYTES_MIB * 1024
@@ -263,7 +267,12 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         input_.migration_name,
         input_.statement_index,
     )
-    in_flight = _check_in_flight(client, query_id, input_.operation_type)
+    attempt_lower_bound = _started_attempt_lower_bound(prior_op, input_.fingerprint)
+    in_flight = _check_in_flight(
+        client, query_id, input_.operation_type, attempt_lower_bound
+    )
+    # Only the outcome read of a started attempt can tell that it ended.
+    attempt_outcome = "unknown" if attempt_lower_bound is None else in_flight.status
     if in_flight.status == "running":
         # The running attempt is the SQL its record names (#599): an attempt
         # of other SQL, kept by --abandon and an edit, must not finish as this one.
@@ -294,14 +303,46 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             else iso_without_zone(datetime.now(tz=UTC)),
         )
 
-    # 3 / 4. Submit (with optional before-retry on resubmit).
-    if prior_op is not None:
-        err_tail = (
-            f": {_first_line(prior_op.last_error)}" if prior_op.last_error else ""
+    # 3. A started attempt that no replica runs any more finished on the
+    # server when query_log has its QueryFinish (#672): its run ended before
+    # it journaled the outcome. Record it, without compensating or resubmitting.
+    if attempt_outcome == "finished" and initial_state is not None and prior_op is not None:
+        finished_op = prior_op.model_copy(
+            update={
+                "query_id": query_id,
+                "status": "completed",
+                "finished_at": iso_without_zone(datetime.now(tz=UTC)),
+                "last_error": "",
+            }
+        )
+        journal_store.write_migration_state(
+            upsert_operation(initial_state, finished_op, iso_without_zone(datetime.now(tz=UTC)))
+        )
+        # TS reads the duration as a double and prints the result as String(n).
+        finished_sec = js_number_to_string(
+            js_math_round(float(in_flight.duration_ms or 0) / 1000)
         )
         input_.log(
+            f"  {input_.operation_type}: previous attempt of query_id={query_id} "
+            f"finished on the server — written={_format_rows(in_flight.written_rows)} "
+            f"({_format_bytes(in_flight.written_bytes)}) in {finished_sec}s, "
+            f"recording it as completed"
+        )
+        return AsyncApplyResult(kind="completed", operation=finished_op)
+
+    # 4 / 5. Submit (with optional before-retry on resubmit). A started
+    # attempt that failed on the server is retried the same way, reported
+    # with its error.
+    if prior_op is not None:
+        prior_status: str = prior_op.status
+        prior_error = prior_op.last_error
+        if attempt_outcome == "failed":
+            prior_status = "failed"
+            prior_error = in_flight.error or "<unknown>"
+        err_tail = f": {_first_line(prior_error)}" if prior_error else ""
+        input_.log(
             f"  {input_.operation_type}: previous attempt of query_id={query_id} is "
-            f"no longer running (status={prior_op.status}{err_tail}) — "
+            f"no longer running (status={prior_status}{err_tail}) — "
             f"running before-retry then resubmitting"
         )
         if input_.before_retry is not None:
@@ -312,7 +353,11 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             f"  {input_.operation_type}: submitting async (query_id={query_id})"
         )
 
-    started_at = iso_without_zone(datetime.now(tz=UTC))
+    # The attempt's start on the server clock, which also stamps query_log,
+    # read before the attempt is journaled and submitted. This run's polls and
+    # a re-run's outcome check (#672) bound the attempt's query_log entry by it.
+    submission_now_ms = _read_server_state(client)[0]
+    started_at = iso_without_zone(_EPOCH + timedelta(milliseconds=submission_now_ms))
 
     base_state = initial_state or fresh_migration_state(
         input_.migration_name, input_.migration_checksum
@@ -337,7 +382,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
 
     state_after_start = journal_store.read_migration_state(input_.migration_name)
 
-    poll_after_time = _query_log_lower_bound(_read_server_state(client)[0], 0)
+    poll_after_time = _query_log_lower_bound(submission_now_ms, 0)
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
     submission = _Submission(
@@ -577,7 +622,10 @@ def _accept_changed_checksum(
 
 
 def _check_in_flight(
-    client: ClickHouseClient, query_id: str, operation_type: str
+    client: ClickHouseClient,
+    query_id: str,
+    operation_type: str,
+    attempt_lower_bound: str | None,
 ) -> QueryStatus:
     """Whether a previous attempt still runs, read on every replica (#246).
 
@@ -585,12 +633,18 @@ def _check_in_flight(
     (e.g. a TRUNCATE) and resubmits, so the answer must cover every replica:
     the attempt runs on the replica that received it. A replica that cannot be
     read fails the check instead of being skipped, and a failed check stops
-    here, before anything is compensated or resubmitted. Only
-    ``system.processes`` is read: the check needs no outcome, and a fresh
-    server has no ``system.query_log`` until its first log flush.
+    here, before anything is compensated or resubmitted. Without a started
+    attempt only ``system.processes`` is read: the check needs no outcome, and
+    a fresh server has no ``system.query_log`` until its first log flush. With
+    one, the check also reads the attempt's outcome from ``system.query_log``
+    (#672), and fails like an unreadable replica when query_log cannot be read.
     """
     try:
-        return client.query_status(query_id, every_replica=True, running_only=True)
+        if attempt_lower_bound is None:
+            return client.query_status(query_id, every_replica=True, running_only=True)
+        return client.query_status(
+            query_id, every_replica=True, after_time=attempt_lower_bound
+        )
     except Exception as error:
         msg = (
             f"Async migration step {operation_type} (query_id {query_id}): could "
@@ -599,6 +653,29 @@ def _check_in_flight(
             f"before-retry SQL ran — re-run `chkit migrate --apply`."
         )
         raise RuntimeError(msg) from error
+
+
+def _started_attempt_lower_bound(
+    op: OperationState | None, fingerprint: str
+) -> str | None:
+    """The query_log bound of a started attempt whose outcome a re-run reads (#672).
+
+    Only a started attempt of this statement's SQL can have finished without
+    its run journaling the outcome: a failed attempt has its outcome, a record
+    without a query id never ran under one, and a finished attempt of other
+    SQL (kept by --abandon and an edit) did not run this statement. Its
+    query_log entry is bounded by the start the attempt recorded, on the
+    server clock, so an earlier attempt's entry does not count.
+    """
+    if op is None or op.status != "started" or op.query_id == "":
+        return None
+    if op.fingerprint not in ("", fingerprint):
+        return None
+    started = datetime.fromisoformat(op.started_at.strip().replace(" ", "T")).replace(
+        tzinfo=UTC
+    )
+    started_ms = (started - _EPOCH) // timedelta(milliseconds=1)
+    return _query_log_lower_bound(started_ms, 0)
 
 
 def _attach_lower_bound(server_now_ms: int, elapsed_ms: int | None) -> str:

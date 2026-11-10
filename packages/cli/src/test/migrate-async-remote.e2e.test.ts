@@ -153,11 +153,11 @@ describe('async migrate statements through the ObsessionDB remote executor (live
       expect(journal.statuses()).toEqual(['failed'])
       expect(await attached).toContain('attached attempt failed')
 
-      // The in-flight check looks for any running query with the id. Every
-      // poll after it counts only queries that started after the earlier
-      // attempt had ended.
+      // The in-flight check of a started attempt also reads its outcome,
+      // bounded by the start its record holds (#672). Every poll after it
+      // counts only queries that started after the earlier attempt had ended.
       const [inFlightCheck, ...polls] = afterTimes
-      expect(inFlightCheck).toBeUndefined()
+      expect(inFlightCheck).toBe('2026-10-01T23:59:58.000Z')
       expect(polls.length).toBeGreaterThan(0)
       expect(new Set(polls).size).toBe(1)
       expect(Date.parse(polls[0] ?? '')).toBeGreaterThan(earlierAttemptEndedMs)

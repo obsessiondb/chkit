@@ -119,7 +119,10 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     'migrate:async',
     `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
   )
-  const inFlight = await checkInFlight(db, queryId, operationType)
+  const attemptLowerBound = startedAttemptLowerBound(priorOpState, fingerprint)
+  const inFlight = await checkInFlight(db, queryId, operationType, attemptLowerBound)
+  // Only the outcome read of a started attempt can tell that it ended.
+  const attemptOutcome = attemptLowerBound === undefined ? 'unknown' : inFlight.status
   if (inFlight.status === 'running') {
     // The running attempt is the SQL its record names (#599): an attempt of
     // other SQL, kept by --abandon and an edit, must not finish as this one.
@@ -157,16 +160,37 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     })
   }
 
-  // 3. Prior in-progress row exists but no replica runs the query → RETRY.
-  // Run before-retry compensation, then resubmit forward.
-  // 4. No prior row → FIRST attempt. Skip compensation, submit forward.
+  // 3. A started attempt that no replica runs any more finished on the server
+  // when query_log has its QueryFinish (#672): its run ended before it
+  // journaled the outcome. Record it, without compensating or resubmitting.
+  if (attemptOutcome === 'finished' && initialMigrationState !== null && priorOpState !== undefined) {
+    const finishedOp: OperationState = {
+      ...priorOpState,
+      queryId,
+      status: 'completed',
+      finishedAt: isoWithoutZone(new Date(now())),
+      lastError: '',
+    }
+    await journalStore.writeMigrationState(upsertOperation(initialMigrationState, finishedOp, now))
+    log(
+      `  ${operationType}: previous attempt of query_id=${queryId} finished on the server — written=${formatRows(inFlight.writtenRows)} (${formatBytes(inFlight.writtenBytes)}) in ${Math.round((inFlight.durationMs ?? 0) / 1000)}s, recording it as completed`,
+    )
+    return { kind: 'completed', operation: finishedOp }
+  }
+
+  // 4. Prior in-progress row exists but no replica runs the query → RETRY.
+  // Run before-retry compensation, then resubmit forward. A started attempt
+  // that failed on the server is retried the same way, reported with its error.
+  // 5. No prior row → FIRST attempt. Skip compensation, submit forward.
   // (priorOpState.status === 'completed' was already returned above.)
   if (priorOpState !== undefined) {
-    const errorTail = priorOpState.lastError
-      ? `: ${firstLine(priorOpState.lastError)}`
-      : ''
+    const prior =
+      attemptOutcome === 'failed'
+        ? { status: 'failed', lastError: inFlight.error ?? '<unknown>' }
+        : priorOpState
+    const errorTail = prior.lastError ? `: ${firstLine(prior.lastError)}` : ''
     log(
-      `  ${operationType}: previous attempt of query_id=${queryId} is no longer running (status=${priorOpState.status}${errorTail}) — running before-retry then resubmitting`,
+      `  ${operationType}: previous attempt of query_id=${queryId} is no longer running (status=${prior.status}${errorTail}) — running before-retry then resubmitting`,
     )
     if (beforeRetry !== null) {
       log(`  ${operationType}: running before-retry SQL`)
@@ -176,7 +200,11 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     log(`  ${operationType}: submitting async (query_id=${queryId})`)
   }
 
-  const startedAt = isoWithoutZone(new Date(now()))
+  // The attempt's start on the server clock, which also stamps query_log, read
+  // before the attempt is journaled and submitted. This run's polls and a
+  // re-run's outcome check (#672) bound the attempt's query_log entry by it.
+  const { nowMs: submissionNowMs } = await readServerState(db)
+  const startedAt = isoWithoutZone(new Date(submissionNowMs))
 
   // Persist the "started" intent BEFORE submitting, so a crash between here
   // and the next event still leaves chkit able to detect "this op was tried."
@@ -202,7 +230,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // subsequent ReplacingMergeTree writes during polling).
   const stateAfterStart = await journalStore.readMigrationState(migrationName)
 
-  const pollAfterTime = await readSubmissionLowerBound(db)
+  const pollAfterTime = queryLogLowerBound(submissionNowMs, 0)
   const submitPromise = db.submit(sql, queryId, settings)
 
   return await pollUntilTerminal({
@@ -437,16 +465,24 @@ function acceptChangedChecksum(
 // (e.g. a TRUNCATE) and resubmits, so the answer must cover every replica: the
 // attempt runs on the replica that received it (#246). A replica that cannot be
 // read fails the check instead of being skipped, and a failed check stops here,
-// before anything is compensated or resubmitted. Only system.processes is read:
-// the check needs no outcome, and a fresh server has no system.query_log until
-// its first log flush.
+// before anything is compensated or resubmitted. Without a started attempt
+// only system.processes is read: the check needs no outcome, and a fresh server
+// has no system.query_log until its first log flush. With one, the check also
+// reads the attempt's outcome from system.query_log (#672), and fails like an
+// unreadable replica when query_log cannot be read.
 async function checkInFlight(
   db: ClickHouseExecutor,
   queryId: string,
   operationType: string,
+  attemptLowerBound: string | undefined,
 ): Promise<QueryStatus> {
   try {
-    return await db.queryStatus(queryId, { everyReplica: true, runningOnly: true })
+    return await db.queryStatus(
+      queryId,
+      attemptLowerBound === undefined
+        ? { everyReplica: true, runningOnly: true }
+        : { everyReplica: true, afterTime: attemptLowerBound },
+    )
   } catch (error) {
     throw new Error(
       `Async migration step ${operationType} (query_id ${queryId}): could not check whether a previous attempt is still running (${describeError(error)}). Nothing was resubmitted and no before-retry SQL ran — re-run \`chkit migrate --apply\`.`,
@@ -455,9 +491,16 @@ async function checkInFlight(
   }
 }
 
-// Read just before a submission, as an ISO UTC string for queryStatus.
-async function readSubmissionLowerBound(db: ClickHouseExecutor): Promise<string> {
-  return queryLogLowerBound((await readServerState(db)).nowMs, 0)
+// Only a started attempt of this statement's SQL can have finished without
+// its run journaling the outcome: a failed attempt has its outcome, a record
+// without a query id never ran under one, and a finished attempt of other SQL
+// (kept by --abandon and an edit) did not run this statement. Its query_log
+// entry is bounded by the start the attempt recorded, on the server clock, so
+// an earlier attempt's entry does not count.
+function startedAttemptLowerBound(op: OperationState | undefined, fingerprint: string): string | undefined {
+  if (op?.status !== 'started' || op.queryId === '') return undefined
+  if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return undefined
+  return queryLogLowerBound(Date.parse(`${op.startedAt.trim().replace(' ', 'T')}Z`), 0)
 }
 
 // The attached attempt had run for elapsedMs when the in-flight check, which
