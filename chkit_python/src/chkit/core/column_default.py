@@ -101,6 +101,7 @@ _FUNCTION_CALL_START: Final[re.Pattern[str]] = re.compile(
     js_regex(r"[A-Za-z_][A-Za-z0-9_]*\s*\(")
 )
 _BLANK_HASH_COMMENT: Final[re.Pattern[str]] = re.compile(f"#[{JS_WHITESPACE}]*")
+_LOW_CARDINALITY: Final[re.Pattern[str]] = re.compile(js_regex(r"LowCardinality\s*\(([\s\S]*)\)"))
 
 
 @dataclass(frozen=True, slots=True)
@@ -220,6 +221,18 @@ def literal_default_fingerprint(sql: str) -> str | None:
         value.append(decoded)
         i += 2
     return f"string:{json.dumps(''.join(value), ensure_ascii=False)}"
+
+
+def nullable_column_type(type_: str) -> str:
+    """The type of a column with ``nullable=True``.
+
+    ClickHouse rejects ``Nullable(LowCardinality(T))``, so ``LowCardinality(T)``
+    becomes ``LowCardinality(Nullable(T))``, the form ClickHouse stores.
+    """
+    low_cardinality = _LOW_CARDINALITY.fullmatch(type_)
+    if low_cardinality is None:
+        return f"Nullable({type_})"
+    return f"LowCardinality(Nullable({js_trim(low_cardinality.group(1))}))"
 
 
 def column_type_accepts_string_literal(type_: str) -> bool:

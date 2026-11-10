@@ -8,7 +8,7 @@ from typing import Any, TypeAlias
 from pydantic import TypeAdapter
 
 from chkit.core.codec import codec_fingerprint, render_codec
-from chkit.core.column_default import render_default
+from chkit.core.column_default import nullable_column_type, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind, render_constraint
 from chkit.core.engine import is_merge_tree_engine, supports_sort_order
 from chkit.core.identifier import quote_identifier, render_qualified_name
@@ -99,7 +99,7 @@ def _render_column(col: ColumnDefinition) -> str:
 def render_column_type(column: ColumnDefinition) -> str:
     """A column's type as chkit renders it in DDL (TS ``renderColumnType``)."""
     type_ = js_trim(str(column.type))
-    return f"Nullable({type_})" if column.nullable else type_
+    return nullable_column_type(type_) if column.nullable else type_
 
 
 def column_codec_fingerprint(column: ColumnInput) -> str:

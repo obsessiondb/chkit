@@ -429,12 +429,19 @@ def test_table_shape_default_value_of_type_name_matches_bare_column_only_when_ep
 # #409 (port of #275): introspection unwraps Nullable(T) into type=T plus
 # nullable=True, so an inline Nullable type matches it.
 def test_table_shape_equates_inline_nullable_types_with_the_introspected_nullable_property() -> None:
-    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)", "LowCardinality(String)"]:
+    for type_ in ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)"]:
         inline = ColumnDefinition(name="value", type=f"Nullable({type_})")
         prop = ColumnDefinition(name="value", type=type_, nullable=True)
         assert _changed_columns(inline, prop) is None
         assert _changed_columns(prop, inline) is None
         assert _changed_columns(prop, prop) is None
+
+
+def test_table_shape_equates_nullable_low_cardinality_with_the_stored_type() -> None:
+    stored = ColumnDefinition(name="value", type="LowCardinality(Nullable(String))")
+    prop = ColumnDefinition(name="value", type="LowCardinality(String)", nullable=True)
+    assert _changed_columns(prop, stored) is None
+    assert _changed_columns(stored, prop) is None
 
 
 def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -> None:
@@ -449,7 +456,6 @@ def test_table_shape_preserves_real_type_nullability_and_wrapper_differences() -
         (col("String"), nullable("String")),
         (col("Nullable(String)"), nullable("UInt64")),
         (nullable("Nullable(String)"), nullable("String")),
-        (col("LowCardinality(Nullable(String))"), nullable("LowCardinality(String)")),
         (col("Array(Nullable(String))"), col("Array(String)")),
     ]
     for expected, actual in differences:

@@ -193,7 +193,7 @@ describe('@chkit/cli drift comparer', () => {
   })
 
   test('equates inline Nullable types with the introspected nullable property', () => {
-    for (const type of ['String', "DateTime64(3, 'UTC')", 'Decimal(12, 3)', 'LowCardinality(String)']) {
+    for (const type of ['String', "DateTime64(3, 'UTC')", 'Decimal(12, 3)']) {
       const inline = { name: 'value', type: `Nullable(${type})` }
       const property = { name: 'value', type, nullable: true }
       expect(compareColumn(inline, property)).toBeNull()
@@ -202,13 +202,19 @@ describe('@chkit/cli drift comparer', () => {
     }
   })
 
+  test('equates a nullable LowCardinality column with the stored LowCardinality(Nullable(T))', () => {
+    const stored = { name: 'value', type: 'LowCardinality(Nullable(String))' }
+    const property = { name: 'value', type: 'LowCardinality(String)', nullable: true }
+    expect(compareColumn(property, stored)).toBeNull()
+    expect(compareColumn(stored, property)).toBeNull()
+  })
+
   test('preserves real type, nullability and wrapper differences', () => {
     const differences: Array<[ColumnDefinition, ColumnDefinition]> = [
       [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'String' }],
       [{ name: 'value', type: 'String' }, { name: 'value', type: 'String', nullable: true }],
       [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'UInt64', nullable: true }],
       [{ name: 'value', type: 'Nullable(String)', nullable: true }, { name: 'value', type: 'String', nullable: true }],
-      [{ name: 'value', type: 'LowCardinality(Nullable(String))' }, { name: 'value', type: 'LowCardinality(String)', nullable: true }],
       [{ name: 'value', type: 'Array(Nullable(String))' }, { name: 'value', type: 'Array(String)' }],
     ]
     for (const [expected, actual] of differences) {
