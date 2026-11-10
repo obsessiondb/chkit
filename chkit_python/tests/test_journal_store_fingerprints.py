@@ -341,9 +341,18 @@ def test_a_column_no_replica_has_is_read_as_missing() -> None:
 
 
 TABLES_PROBE = (
-    "countIf(position(create_table_query, '`operation_fingerprints` ') > 0) "
-    "AS with_column FROM clusterAllReplicas('default', system.tables)"
+    "SELECT hostName() AS replica, create_table_query FROM "
+    "clusterAllReplicas('default', system.tables)"
 )
+
+
+def _definition(fingerprints: bool) -> str:
+    column = ", `operation_fingerprints` Array(String) DEFAULT []" if fingerprints else ""
+    return (
+        "CREATE TABLE default._chkit_migrations (`name` String, "
+        f"`operations` Array(Tuple(operation_index Int32)) DEFAULT []{column}) "
+        "ENGINE = ReplacingMergeTree(applied_at) ORDER BY name"
+    )
 
 
 @dataclass
@@ -356,6 +365,7 @@ class _DeniedColumnsClient:
 
     with_column: list[int]
     listed: int = 2
+    render: Callable[[bool], str] = _definition
     queries: list[str] = field(default_factory=list[str])
     executed: list[str] = field(default_factory=list[str])
     probes: int = 0
@@ -367,7 +377,12 @@ class _DeniedColumnsClient:
         if TABLES_PROBE in sql:
             seen = self.with_column[min(self.probes, len(self.with_column) - 1)]
             self.probes += 1
-            return _Result([{"replicas": self.listed, "with_column": seen}])
+            return _Result(
+                [
+                    {"replica": f"replica-{index}", "create_table_query": self.render(index < seen)}
+                    for index in range(self.listed)
+                ]
+            )
         if "system.columns" in sql:
             raise Exception(
                 "u: Not enough privileges. To execute this query, it's necessary to have "
@@ -406,6 +421,64 @@ def test_without_system_columns_a_column_every_replica_has_is_read() -> None:
     assert read is not None
     assert [op.fingerprint for op in read.operations] == ["v1:a"]
     assert _tables_probes(client) == 2
+
+
+@pytest.mark.usefixtures("two_replicas")
+@pytest.mark.parametrize(
+    "render",
+    [
+        lambda fingerprints: (
+            'CREATE TABLE "default"."_chkit_migrations" ("name" String'
+            + (', "operation_fingerprints" Array(String) DEFAULT []' if fingerprints else "")
+            + ') ENGINE = ReplacingMergeTree(applied_at) ORDER BY "name"'
+        ),
+        lambda fingerprints: (
+            "CREATE TABLE default._chkit_migrations (`name` String"
+            + (", operation_fingerprints Array(String) DEFAULT []" if fingerprints else "")
+            + ") ENGINE = ReplacingMergeTree(applied_at) ORDER BY `name`"
+        ),
+    ],
+    ids=["double_quotes", "bare"],
+)
+def test_without_system_columns_a_column_is_read_whatever_identifier_quoting(
+    render: Callable[[bool], str],
+) -> None:
+    client = _DeniedColumnsClient(with_column=[2], render=render)
+    store = _denied_store(client)
+    read = store.read_migration_state("m.sql")
+    store.write_migration_state(_state(["v1:a"]))
+    assert read is not None
+    assert [op.fingerprint for op in read.operations] == ["v1:a"]
+    insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
+    assert insert.endswith(", ['v1:a'])")
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_a_comment_that_mentions_the_column_does_not_define_it() -> None:
+    client = _DeniedColumnsClient(
+        with_column=[2],
+        render=lambda _fingerprints: (
+            "CREATE TABLE default._chkit_migrations (`name` String COMMENT "
+            "'`operation_fingerprints` Array(String)') ENGINE = "
+            "ReplacingMergeTree(applied_at) ORDER BY name"
+        ),
+    )
+    read = _denied_store(client).read_migration_state("m.sql")
+    assert read is not None
+    assert [op.fingerprint for op in read.operations] == [""]
+
+
+@pytest.mark.usefixtures("two_replicas")
+def test_without_system_columns_a_definition_chkit_cannot_read_stops_the_read() -> None:
+    client = _DeniedColumnsClient(with_column=[2], render=lambda _fingerprints: "")
+    with pytest.raises(
+        RuntimeError,
+        match=re.escape(
+            "Cannot tell whether the journal table _chkit_migrations has the "
+            "operation_fingerprints column: cannot read its definition on replica replica-0."
+        ),
+    ):
+        _denied_store(client).read_migration_state("m.sql")
 
 
 @pytest.mark.usefixtures("two_replicas", "no_poll_delay")

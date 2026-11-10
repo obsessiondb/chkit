@@ -12,6 +12,7 @@ import {
 import { onClusterClause } from '@chkit/core'
 import pRetry from 'p-retry'
 
+import { createTableElementNames } from './create-table-columns.js'
 import type { MigrationJournal, MigrationJournalEntry } from './migration-store.js'
 import { CLI_VERSION } from './version.js'
 import { debug } from './debug.js'
@@ -429,13 +430,26 @@ SETTINGS index_granularity = 1`
    * answers per replica, as system.columns does. A probe through the journal
    * itself cannot, because a remote query takes its columns from one replica,
    * and `hasColumnInTable` is folded into a constant on the replica that
-   * runs the query.
+   * runs the query. The CREATE statement is read whatever identifier quoting
+   * the user's settings choose; one chkit cannot read stops the run.
    */
   async function replicasWithFingerprintColumn(fanout: ReplicaFanout): Promise<{ replicas: number; withColumn: number }> {
-    const [row] = await db.query<{ replicas: number | string; with_column: number | string }>(
-      `SELECT count(DISTINCT hostName()) AS replicas, countIf(position(create_table_query, '\`${FINGERPRINTS_COLUMN}\` ') > 0) AS with_column FROM ${allReplicas(fanout, 'system.tables')} WHERE database = currentDatabase() AND name = '${journalTable}'`,
+    const rows = await db.query<{ replica: string; create_table_query: string }>(
+      `SELECT hostName() AS replica, create_table_query FROM ${allReplicas(fanout, 'system.tables')} WHERE database = currentDatabase() AND name = '${journalTable}'`,
     )
-    return { replicas: Number(row?.replicas ?? 0), withColumn: Number(row?.with_column ?? 0) }
+    const replicas = new Set<string>()
+    const withColumn = new Set<string>()
+    for (const row of rows) {
+      replicas.add(row.replica)
+      const names = createTableElementNames(row.create_table_query)
+      if (!names) {
+        throw new Error(
+          `Cannot tell whether the journal table ${journalTable} has the ${FINGERPRINTS_COLUMN} column: cannot read its definition on replica ${row.replica}.`,
+        )
+      }
+      if (names.includes(FINGERPRINTS_COLUMN)) withColumn.add(row.replica)
+    }
+    return { replicas: replicas.size, withColumn: withColumn.size }
   }
 
   /**

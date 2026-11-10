@@ -893,10 +893,12 @@ describe('createJournalStore', () => {
       // A user without SHOW COLUMNS on system.columns (#402) reads the column
       // from each replica's CREATE statement in system.tables.
       describe('for a user that cannot read system.columns', () => {
-        const TABLES_PROBE = /countIf\(position\(create_table_query, '`operation_fingerprints` '\) > 0\) AS with_column FROM clusterAllReplicas\('default', system\.tables\)/
+        const TABLES_PROBE = /^SELECT hostName\(\) AS replica, create_table_query FROM clusterAllReplicas\('default', system\.tables\)/
+        const definition = (fingerprints: boolean) =>
+          `CREATE TABLE default._chkit_migrations (\`name\` String, \`operations\` Array(Tuple(operation_index Int32)) DEFAULT []${fingerprints ? ', `operation_fingerprints` Array(String) DEFAULT []' : ''}) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name`
 
         // `withColumn[n]` replicas define the column on the nth probe; `listed` list the journal.
-        function deniedStore(withColumn: number[], listed = 2) {
+        function deniedStore(withColumn: number[], listed = 2, render = definition) {
           let probes = 0
           const queries: string[] = []
           const commands: string[] = []
@@ -911,7 +913,10 @@ describe('createJournalStore', () => {
               if (TABLES_PROBE.test(sql)) {
                 const seen = withColumn[Math.min(probes, withColumn.length - 1)]
                 probes += 1
-                return [{ replicas: listed, with_column: seen }] as T[]
+                return Array.from({ length: listed }, (_, index) => ({
+                  replica: `replica-${index}`,
+                  create_table_query: render(index < (seen ?? 0)),
+                })) as T[]
               }
               if (sql.includes('system.tables') && sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
               if (sql.includes('system.columns')) {
@@ -936,6 +941,40 @@ describe('createJournalStore', () => {
 
           expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a'])
           expect(queries.filter((sql) => TABLES_PROBE.test(sql))).toHaveLength(2)
+        })
+
+        test('a column is read whatever identifier quoting the settings choose', async () => {
+          const doubleQuotes = (fingerprints: boolean) =>
+            `CREATE TABLE "default"."_chkit_migrations" ("name" String${fingerprints ? ', "operation_fingerprints" Array(String) DEFAULT []' : ''}) ENGINE = ReplacingMergeTree(applied_at) ORDER BY "name"`
+          const bare = (fingerprints: boolean) =>
+            `CREATE TABLE default._chkit_migrations (\`name\` String${fingerprints ? ', operation_fingerprints Array(String) DEFAULT []' : ''}) ENGINE = ReplacingMergeTree(applied_at) ORDER BY \`name\``
+          for (const render of [doubleQuotes, bare]) {
+            const { store, commands } = deniedStore([2], 2, render)
+
+            const read = await store.readMigrationState('m.sql')
+            await store.writeMigrationState(state(['v1:a']))
+
+            expect(read?.operations.map((op) => op.fingerprint)).toEqual(['v1:a'])
+            expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toContain(", ['v1:a'])")
+          }
+        })
+
+        test('a comment that mentions the column does not define it', async () => {
+          const { store } = deniedStore([2], 2, () =>
+            "CREATE TABLE default._chkit_migrations (`name` String COMMENT '`operation_fingerprints` Array(String)') ENGINE = ReplacingMergeTree(applied_at) ORDER BY name",
+          )
+
+          const read = await store.readMigrationState('m.sql')
+
+          expect(read?.operations.map((op) => op.fingerprint)).toEqual([''])
+        })
+
+        test('a definition chkit cannot read stops the read', async () => {
+          const { store } = deniedStore([2], 2, () => '')
+
+          await expect(store.readMigrationState('m.sql')).rejects.toThrow(
+            'Cannot tell whether the journal table _chkit_migrations has the operation_fingerprints column: cannot read its definition on replica replica-0.',
+          )
         })
 
         test('a column a lagging replica lacks is waited for, never read as missing', async () => {

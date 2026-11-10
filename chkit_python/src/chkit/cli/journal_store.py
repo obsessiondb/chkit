@@ -33,6 +33,7 @@ import typer
 from pydantic import BaseModel, ConfigDict, Field
 
 from chkit import __version__
+from chkit.cli.create_table_columns import create_table_element_names
 from chkit.cli.logging_setup import debug
 from chkit.cli.migration_store import (
     ChecksumMismatch,
@@ -497,17 +498,30 @@ class JournalStore:
         system.columns does. A probe through the journal itself cannot,
         because a remote query takes its columns from one replica, and
         ``hasColumnInTable`` is folded into a constant on the replica that runs
-        the query.
+        the query. The CREATE statement is read whatever identifier quoting the
+        user's settings choose; one chkit cannot read stops the run.
         """
         rows = self._client.query(
-            "SELECT count(DISTINCT hostName()) AS replicas, "
-            f"countIf(position(create_table_query, '`{_FINGERPRINTS_COLUMN}` ') > 0) "
-            f"AS with_column FROM {all_replicas(fanout, 'system.tables')} "
+            "SELECT hostName() AS replica, create_table_query FROM "
+            f"{all_replicas(fanout, 'system.tables')} "
             f"WHERE database = currentDatabase() AND name = '{self._table}'"
         ).rows
-        if not rows:
-            return 0, 0
-        return int(rows[0]["replicas"]), int(rows[0]["with_column"])
+        replicas: set[str] = set()
+        with_column: set[str] = set()
+        for row in rows:
+            replica = str(row["replica"])
+            replicas.add(replica)
+            names = create_table_element_names(str(row["create_table_query"]))
+            if names is None:
+                msg = (
+                    f"Cannot tell whether the journal table {self._table} has the "
+                    f"{_FINGERPRINTS_COLUMN} column: cannot read its definition on replica "
+                    f"{replica}."
+                )
+                raise RuntimeError(msg)
+            if _FINGERPRINTS_COLUMN in names:
+                with_column.add(replica)
+        return len(replicas), len(with_column)
 
     def _detect_fingerprint_column_from_tables(self, fanout: ReplicaFanout) -> bool:
         """``_detect_fingerprint_column`` without system.columns.
