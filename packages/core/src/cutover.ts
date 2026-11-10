@@ -685,7 +685,7 @@ function assertCutoverSupported(input: {
       problems.push(`key column ${name} must be a stored column of both the old and the new table.`)
       continue
     }
-    if (column.nullable || /^\s*Nullable\s*\(/.test(column.type)) {
+    if (column.nullable || /^\s*(LowCardinality\s*\(\s*)?Nullable\s*\(/.test(column.type)) {
       problems.push(`key column ${name} is Nullable; NOT IN never matches NULL, so such rows could not be told apart.`)
     }
   }

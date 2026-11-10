@@ -1,5 +1,7 @@
 import { z } from 'zod'
 
+import { nullableColumnType } from './column-default.js'
+
 /** Type-only brand of a type ClickHouse can't take as a query param, such as a Tuple. */
 export interface ColumnOnly {
   readonly '~columnOnly': true
@@ -27,7 +29,9 @@ const NUMBER_TYPES: Record<string, string> = {
   float64: 'Float64',
 }
 const BIGINT_TYPES: Record<string, string> = { int64: 'Int64', uint64: 'UInt64' }
-const NOT_NULLABLE = /^(Array|Map|Tuple|LowCardinality|Nested|JSON|Variant|Dynamic)\b/
+const NOT_NULLABLE = /^(Array|Map|Tuple|Nested|JSON|Variant|Dynamic)\b/
+const LOW_CARDINALITY = /^\s*LowCardinality\s*\(/
+const LOW_CARDINALITY_NULLABLE = /^\s*LowCardinality\s*\(\s*Nullable\s*\(/
 const COLUMN_ONLY = /(?:^|[(,]\s*)(Tuple|Nested|Variant|Dynamic|AggregateFunction)\b/
 const DECIMAL = /^-?\d+(\.\d+)?$/
 
@@ -178,8 +182,10 @@ function quote(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
 }
 
+/** ClickHouse has no Nullable(LowCardinality(T)), so a nullable LowCardinality(T) is LowCardinality(Nullable(T)). */
 function nullable(type: string): string {
-  if (type.startsWith('Nullable(')) return type
+  if (type.startsWith('Nullable(') || LOW_CARDINALITY_NULLABLE.test(type)) return type
+  if (LOW_CARDINALITY.test(type)) return nullableColumnType(type.trim())
   if (NOT_NULLABLE.test(type)) {
     throw new Error(`ClickHouse has no Nullable(${type}); use .default() instead of .optional() or .nullable()`)
   }

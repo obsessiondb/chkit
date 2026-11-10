@@ -92,7 +92,7 @@ _STREAMING_ENGINES: Final = frozenset(
 )
 _COMMENT_PREFIX: Final = "chkit cutover "
 _REPLICATED_PATH: Final = re.compile(r"^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'")
-_NULLABLE: Final = re.compile(r"^\s*Nullable\s*\(")
+_NULLABLE: Final = re.compile(r"^\s*(LowCardinality\s*\(\s*)?Nullable\s*\(")
 
 @dataclass(frozen=True)
 class CutoverRequest:

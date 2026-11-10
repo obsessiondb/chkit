@@ -452,6 +452,18 @@ def test_refuses_missing_or_nullable_keys() -> None:
     )
     assert len(found) == 1
     assert "key column id is Nullable" in found[0]
+    for type_ in [
+        "Nullable(UInt64)",
+        "LowCardinality(Nullable(String))",
+        " LowCardinality ( Nullable (String))",
+    ]:
+        inline: list[Any] = [{"name": "id", "type": type_}, *COLUMNS[1:]]
+        found = messages(
+            old_def=events(["id"], columns=inline),
+            new_def=events(["user_id"], columns=inline),
+        )
+        assert len(found) == 1, type_
+        assert "key column id is Nullable" in found[0], type_
 
 
 def test_refuses_a_column_type_change() -> None:
