@@ -1,3 +1,5 @@
+import { compareCodePoints } from '@chkit/core'
+
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { errorEnvelope, serviceListEnvelope } from '../json-envelope.js'
 import { listServiceOrganizations, listServices } from './api.js'
@@ -63,6 +65,8 @@ async function runServiceSelect(
 	return 0
 }
 
+// chkit before #624 passed the command name in args on `chkit obsessiondb service ...`;
+// dropping it keeps this plugin working with those CLIs.
 function serviceArgs(args: string[]): string[] {
 	return args[0] === 'service' ? args.slice(1) : args
 }
@@ -181,7 +185,8 @@ function validateAlias(alias: string): string | null {
 	if (alias.trim().length === 0) return 'Alias is required.'
 	if (alias !== alias.trim())
 		return 'Alias cannot start or end with whitespace.'
-	if (alias.startsWith('--')) return 'Alias cannot start with "--".'
+	// A leading dash reads as a flag on the command line (#491).
+	if (alias.startsWith('-')) return 'Alias cannot start with "-".'
 	return null
 }
 
@@ -197,7 +202,7 @@ async function runServiceAlias(context: PluginCommandContext): Promise<number> {
 	if (action === 'list' || action === 'ls') {
 		const aliases = await loadServiceAliases(context.configPath)
 		const entries = Object.entries(aliases).sort(([a], [b]) =>
-			a.localeCompare(b),
+			compareCodePoints(a, b),
 		)
 		if (entries.length === 0) {
 			print('No service aliases defined.')

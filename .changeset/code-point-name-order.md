@@ -3,6 +3,8 @@
 "@chkit/core": patch
 "@chkit/clickhouse": patch
 "@chkit/plugin-codegen": patch
+"@chkit/plugin-obsessiondb": patch
+"@chkit/plugin-pull": patch
 ---
 
-Sort schema names by Unicode code point in the TypeScript implementation, matching chkit-py (#489). `localeCompare` consults the host's ICU data and ordered `_`, digits and case differently, so migrations, rename suggestions, canonical snapshots and drift output could come out in a different order than the Python implementation. `compareCodePoints` in `@chkit/core` now defines the shared order, and the planner, canonicalizer, drift output, table scope, ClickHouse introspection, codegen and generate pipeline use it.
+Names now sort by Unicode code point, as in chkit-py, so `generate`, `drift`, snapshots and codegen use the same order in both (#489). After upgrading, run `chkit codegen` once (`codegen --check` and `check` report the reordered output as stale), and check imports where two tables map to the same type name, since which one gets the `_2` suffix can change.

@@ -4,6 +4,7 @@ import { dirname, join, resolve } from 'node:path'
 
 import { z } from 'zod'
 import {
+  assertServerIndexGranularity,
   type ClickHouseExecutor,
   createClickHouseExecutor,
   type IntrospectedTable,
@@ -11,6 +12,8 @@ import {
 import {
   canonicalizeDefinitions,
   type ChxInlinePluginRegistration,
+  compareCodePoints,
+  configuredIndexGranularity,
   type ColumnDefaultValue,
   createPluginRunner,
   defineFlags,
@@ -81,12 +84,14 @@ export interface PullPlugin {
   commands: Array<{
     name: 'schema'
     description: string
+    takesArgs?: boolean
     flags?: ReadonlyArray<{
       name: string
       type: 'boolean' | 'string' | 'string[]'
       description: string
       placeholder?: string
       negation?: boolean
+      short?: string
     }>
     optionsSchema?: SafeParseable<PullOptions>
     flagMapping?: FlagMapping
@@ -105,10 +110,10 @@ export type PullPluginRegistration = ChxInlinePluginRegistration<PullPlugin, Pul
 
 const PULL_SCHEMA_FLAGS = defineFlags([
   { name: '--dryrun', type: 'boolean', description: 'Preview without writing files' },
-  { name: '--force', type: 'boolean', description: 'Overwrite existing output file' },
+  { name: '--force', short: '-f', type: 'boolean', description: 'Overwrite existing output file' },
   { name: '--overwrite', type: 'boolean', description: 'Overwrite existing output file (alias for --force)' },
-  { name: '--out-file', type: 'string', description: 'Output file path', placeholder: '<path>' },
-  { name: '--database', type: 'string[]', description: 'Database names to pull', placeholder: '<name>' },
+  { name: '--out-file', short: '-o', type: 'string', description: 'Output file path', placeholder: '<path>' },
+  { name: '--database', short: '-d', type: 'string[]', description: 'Database names to pull', placeholder: '<name>' },
 ] as const)
 
 // ───── Flag mapping ─────
@@ -197,6 +202,7 @@ export function createPullPlugin(options: PullPluginOptions = {}): PullPlugin {
       {
         name: 'schema',
         description: 'Pull live ClickHouse table schema and write chkit schema file',
+        takesArgs: false,
         flags: PULL_SCHEMA_FLAGS,
         optionsSchema,
         flagMapping: PULL_FLAG_MAP,
@@ -298,6 +304,25 @@ function isObsessionDbMetadataTable(object: { kind?: string; name: string }): bo
   return isTable && OBSESSIONDB_METADATA_TABLES.has(object.name)
 }
 
+// chkit's migration journal (CHKIT_JOURNAL_TABLE, `_chkit_migrations` by
+// default) is chkit's own bookkeeping, not part of the user's schema (#466).
+function isJournalTable(object: { kind?: string; name: string }): boolean {
+  const isTable = object.kind == null || object.kind === 'table'
+  return isTable && object.name === (process.env.CHKIT_JOURNAL_TABLE?.trim() || '_chkit_migrations')
+}
+
+// The table that stores the rows of a materialized view without `TO`
+// (`.inner_id.<uuid>`, or `.inner.<view>` in an Ordinary database). It belongs
+// to the view, which pull skips, so it is not a user table either.
+function isMaterializedViewInnerTable(object: { kind?: string; name: string }): boolean {
+  const isTable = object.kind == null || object.kind === 'table'
+  return isTable && (object.name.startsWith('.inner_id.') || object.name.startsWith('.inner.'))
+}
+
+function isPulledObject(object: { kind?: string; name: string }): boolean {
+  return !isObsessionDbMetadataTable(object) && !isJournalTable(object) && !isMaterializedViewInnerTable(object)
+}
+
 async function pullSchema(input: {
   config: ResolvedChxConfig
   executor?: ClickHouseExecutor | null
@@ -322,6 +347,11 @@ async function pullSchema(input: {
     )
   }
 
+  // The pulled tables are compared later against definitions canonicalized
+  // with clickhouse.indexGranularity, which must be this server's default. A
+  // custom introspector reads elsewhere, so ClickHouse is not asked.
+  if (db && !customIntrospector) await assertServerIndexGranularity(db, configuredIndexGranularity(input.config))
+
   const outFile = resolve(process.cwd(), input.options.outFile)
   let objects: Array<{
     kind: 'table' | 'view' | 'materialized_view' | 'dictionary'
@@ -331,28 +361,38 @@ async function pullSchema(input: {
   let selectedDatabases = input.options.databases
 
   if (db && (!customIntrospector || selectedDatabases.length === 0)) {
-    objects = (await db.listSchemaObjects()).filter(
-      (item) => !isObsessionDbMetadataTable(item)
-    )
+    objects = (await db.listSchemaObjects()).filter(isPulledObject)
     if (selectedDatabases.length === 0) {
       selectedDatabases = [...new Set(objects.map((item) => item.database))].sort()
     }
   }
 
-  const introspected = (
-    customIntrospector
-      ? await customIntrospector({
+  const introspection = customIntrospector
+    ? {
+        objects: await customIntrospector({
           config: input.config.clickhouse as NonNullable<ResolvedChxConfig['clickhouse']>,
           databases: selectedDatabases,
-        })
-      : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
-  ).filter((object) => !isObsessionDbMetadataTable(object))
+        }),
+        warnings: [],
+      }
+    : await introspectWithExecutor(db as ClickHouseExecutor, selectedDatabases)
+  const introspected = introspection.objects.filter(isPulledObject)
 
-  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition))
-  const content = renderSchemaFile(definitions)
+  const definitions = canonicalizeDefinitions(introspected.map(mapIntrospectedObjectToDefinition), {
+    indexGranularity: configuredIndexGranularity(input.config),
+  })
+  // ObsessionDB reports the engine as Shared*, which canonicalization strips.
+  const sharedTables = new Set(
+    introspected
+      .filter((object) => !('kind' in object) || object.kind === 'table')
+      .filter((object) => ((object as { engine?: string }).engine ?? '').startsWith('Shared'))
+      .map((object) => `${object.database}.${object.name}`)
+  )
+  const content = renderSchemaFile(definitions, { sharedTables })
   const tableCount = definitions.filter((definition) => definition.kind === 'table').length
   const skippedObjects = summarizeSkippedObjects(objects, definitions, selectedDatabases)
   const warnings = [
+    ...introspection.warnings,
     ...dictionaryPasswordWarnings(definitions),
     ...definitions.flatMap((def) => def.kind === 'table' && isKafkaEngine(def.engine)
       ? Object.entries(def.settings ?? {}).filter(([key]) => /password|secret|token/i.test(key)).map(([key, value]) =>
@@ -376,13 +416,23 @@ async function pullSchema(input: {
 async function introspectWithExecutor(
   db: ClickHouseExecutor,
   databases: string[]
-): Promise<IntrospectedObject[]> {
+): Promise<{ objects: IntrospectedObject[]; warnings: string[] }> {
   const tables = await db.listTableDetails(databases)
   const nonTableRows = await listNonTableRows(db, databases)
   const nonTableObjects = nonTableRows
     .map(mapSystemTableRowToDefinition)
     .filter((definition): definition is Exclude<IntrospectedObject, IntrospectedTable> => definition !== null)
-  return [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects]
+  return {
+    objects: [...tables.map((table) => ({ kind: 'table' as const, ...table })), ...nonTableObjects],
+    warnings: nonTableRows.flatMap(innerStorageWarning),
+  }
+}
+
+function innerStorageWarning(row: SystemTableRow): string[] {
+  if (row.engine !== 'MaterializedView' || parseToClause(row.create_table_query, row.database)) return []
+  return [
+    `Materialized view "${row.database}.${row.name}" stores its rows in an inner table (it has no TO table), which the schema DSL does not support. Pull skipped the view and its inner table.`,
+  ]
 }
 
 function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefinition {
@@ -404,6 +454,7 @@ function mapIntrospectedTableToDefinition(table: IntrospectedTable): TableDefini
     ...(table.indexes.length > 0 ? { indexes: table.indexes } : {}),
     ...(table.projections.length > 0 ? { projections: table.projections } : {}),
     ...(table.constraints && table.constraints.length > 0 ? { constraints: table.constraints } : {}),
+    ...(table.comment ? { comment: table.comment } : {}),
   }
 }
 
@@ -416,6 +467,7 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
         database: introspected.database,
         name: introspected.name,
         as: introspected.as,
+        ...(introspected.comment ? { comment: introspected.comment } : {}),
       }
     }
     if (introspected.kind === 'dictionary') {
@@ -440,6 +492,7 @@ function mapIntrospectedObjectToDefinition(introspected: IntrospectedObject): Sc
       to: introspected.to,
       as: introspected.as,
       ...(introspected.refresh ? { refresh: introspected.refresh } : {}),
+      ...(introspected.comment ? { comment: introspected.comment } : {}),
     }
   }
   return mapIntrospectedTableToDefinition(introspected)
@@ -476,7 +529,7 @@ function summarizeSkippedObjects(
   }
   return [...counts.entries()]
     .map(([kind, count]) => ({ kind, count }))
-    .sort((a, b) => a.kind.localeCompare(b.kind))
+    .sort((a, b) => compareCodePoints(a.kind, b.kind))
 }
 
 function splitTopLevelCommaSeparated(input: string | undefined): string[] {
@@ -491,7 +544,7 @@ async function listNonTableRows(
   if (databases.length === 0) return []
   const quotedDatabases = databases.map((dbName) => `'${dbName.replace(/'/g, "''")}'`).join(', ')
   return db.query<SystemTableRow>(
-    `SELECT database, name, engine, create_table_query
+    `SELECT database, name, engine, create_table_query, comment
 FROM system.tables
 WHERE is_temporary = 0
   AND database IN (${quotedDatabases})
