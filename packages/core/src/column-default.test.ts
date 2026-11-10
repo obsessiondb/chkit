@@ -798,6 +798,9 @@ describe('column default kinds', () => {
     expect(issueMessages([day({ type: 'DateTime', nullable: true, defaultKind: 'EPHEMERAL', default: 'now()' })])[0]).toContain(
       'which ClickHouse accepts for type Nullable(DateTime) but reads as NULL.'
     )
+    expect(issueMessages([day({ type: 'LowCardinality(DateTime)', nullable: true, defaultKind: 'EPHEMERAL', default: 'now()' })])[0]).toContain(
+      'which ClickHouse accepts for type LowCardinality(Nullable(DateTime)) but reads as NULL.'
+    )
   })
 
   // An EPHEMERAL column is never stored, so ClickHouse skips its stored-type

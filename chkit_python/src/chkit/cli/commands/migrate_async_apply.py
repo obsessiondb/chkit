@@ -19,7 +19,8 @@ Key invariants:
   line) runs only on resubmit, never on first attempt.
 - Status ``unknown`` is a transient state (just-submitted or
   just-finished gap); loop until ``running`` / ``finished`` / ``failed``
-  unless the submit itself rejected, which is recorded as failed.
+  unless the submit itself rejected before any poll found the query
+  running, which is recorded as failed.
 - The query id is deterministic, so ``system.query_log`` can still hold
   entries of an earlier attempt of the same statement (abandoned, or
   retried after an edit). A new submission only trusts entries of queries
@@ -56,6 +57,7 @@ POLL_INTERVAL_SECONDS = 5.0
 QUERY_LOG_SKEW_MARGIN_MS = 2_000
 # query_status's own default: every query_log entry for the id counts.
 UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
+# Poll request failures in a row, and `unknown` polls after a failed submit (#657).
 MAX_TRANSIENT_POLL_ERRORS = 20
 SUBMIT_THREAD_NAME = "chkit-async-submit"
 _BYTES_KIB = 1024
@@ -366,6 +368,10 @@ def _poll(
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
     transient_errors = 0
+    # Once a poll found the query running, the server has it, so a failed
+    # submit request (a gateway 524, a timeout) says nothing about its outcome (#657).
+    seen_running = False
+    unknown_polls_after_submit_error = 0
 
     while True:
         time.sleep(input_.poll_interval_seconds)
@@ -458,14 +464,19 @@ def _poll(
             raise RuntimeError(msg)
 
         if status.status == "running":
+            seen_running = True
+            unknown_polls_after_submit_error = 0
             input_.log(_progress_line(input_.operation_type, status, elapsed_sec))
             continue
 
-        # status is "unknown" here. If submit already raised, the query never
-        # made it server-side (e.g. SQL parse error): record the attempt as
-        # failed and surface that error. Otherwise it's a transient gap.
+        # status is "unknown" here. If submit already raised and no poll found
+        # the query running, it never made it server-side (e.g. SQL parse
+        # error): record the attempt as failed and surface that error. Known
+        # gap: a load that ends before the first poll, with a transport error
+        # on its submit, also lands here (#657). Otherwise it's a transient gap
+        # (just-submitted, or just-finished before query_log has it).
         submit_error = submission.error if submission is not None else None
-        if submit_error is not None:
+        if submit_error is not None and not seen_running:
             input_.journal_store.write_migration_state(
                 upsert_operation(
                     base_state,
@@ -485,6 +496,18 @@ def _poll(
                 )
             )
             raise submit_error
+        if submit_error is not None:
+            unknown_polls_after_submit_error += 1
+            if unknown_polls_after_submit_error > MAX_TRANSIENT_POLL_ERRORS:
+                msg = (
+                    f"Async migration step {input_.operation_type} "
+                    f"(query_id {query_id}): the submit request failed "
+                    f"({_describe_error(submit_error)}) and polling found no outcome "
+                    f"{unknown_polls_after_submit_error}\u00d7. A re-run of `chkit migrate "
+                    f"--apply` attaches to the query if it still runs and runs the statement "
+                    f"again if not."
+                )
+                raise RuntimeError(msg) from submit_error
         input_.log(
             f"  {input_.operation_type}: status unknown — still polling "
             f"(elapsed {elapsed_sec}s)"

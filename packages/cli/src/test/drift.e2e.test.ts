@@ -168,6 +168,7 @@ export default schema(table({
     { name: 'fpc4', type: 'Float32', codec: [{ kind: 'FPC', level: 5, floatSize: 4 }, { kind: 'LZ4HC' }] },
     { name: 'nullable_delta', type: 'Nullable(Int64)', codec: [{ kind: 'Delta', size: 8 }, { kind: 'LZ4' }] },
     { name: 'low_cardinality', type: 'LowCardinality(String)', codec: { kind: 'ZSTD' } },
+    { name: 'low_cardinality_nullable', type: 'LowCardinality(String)', nullable: true, codec: { kind: 'ZSTD' } },
     { name: 'raw', type: 'String', codec: codec.raw('ZSTD') },
     { name: 'raw_chain', type: 'Int64', codec: codec.raw('Delta(8),ZSTD(3)') },
     { name: 'raw_fpc', type: 'Float64', codec: codec.raw('FPC, LZ4') },
