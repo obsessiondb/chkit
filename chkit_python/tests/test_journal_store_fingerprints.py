@@ -36,7 +36,7 @@ class _Client:
     queries: list[str] = field(default_factory=list[str])
     executed: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: Any = None) -> _Result:
         self.queries.append(sql)
         error = self.query_error(sql, self.executed)
         if error is not None:
@@ -297,7 +297,7 @@ class _ReplicatedClient:
     queries: list[str] = field(default_factory=list[str])
     polls: int = 0
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: Any = None) -> _Result:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Result([{"replicas": 2}])
@@ -370,7 +370,7 @@ class _DeniedColumnsClient:
     executed: list[str] = field(default_factory=list[str])
     probes: int = 0
 
-    def query(self, sql: str) -> _Result:
+    def query(self, sql: str, settings: Any = None) -> _Result:
         self.queries.append(sql)
         if "currentDatabase() AS database" in sql:
             return _Result([{"database": "default"}])
@@ -542,7 +542,7 @@ def test_without_system_columns_the_column_this_run_adds_is_waited_for_through_s
 @pytest.mark.usefixtures("two_replicas")
 def test_a_system_columns_probe_that_fails_for_another_reason_stops_the_read() -> None:
     class _Unavailable(_ReplicatedClient):
-        def query(self, sql: str) -> _Result:
+        def query(self, sql: str, settings: Any = None) -> _Result:
             if "system.columns" in sql:
                 raise Exception("HTTP 503 Service Unavailable")
             return super().query(sql)

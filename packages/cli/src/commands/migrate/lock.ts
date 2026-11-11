@@ -6,9 +6,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import type { ClickHouseExecutor, ClickHouseSettings, ReplicaFanout } from '@chkit/clickhouse'
 
-import { MigrateError } from './errors.js'
 import { debug } from '../../runtime/debug.js'
 import { CLI_VERSION } from '../../runtime/version.js'
+import { MigrateError } from './errors.js'
 
 /**
  * The migrate lock (#716): one `migrate --apply` (or `--abandon --apply`) at
@@ -17,35 +17,46 @@ import { CLI_VERSION } from '../../runtime/version.js'
  *
  * - A claim is a journal row named `LOCK_ROW_PREFIX<uuid>`, with
  *   `migration_completed = false`, so every release reads past it as it reads
- *   past an in-progress migration. Its `applied_at` is the server time of its
- *   last heartbeat; a released claim gets `RELEASED_AT`, which wins over every
+ *   past an in-progress migration. Its `applied_at` is its version: the server
+ *   time of the claim, and of each heartbeat after it, but always above the
+ *   version the holder last read back, so it grows whatever the replicas'
+ *   clocks. A released claim gets `RELEASED_AT`, which wins over every
  *   heartbeat in `ReplacingMergeTree(applied_at)` and in the argMax read.
  * - A run holds the lock when, after its claim is acknowledged, it reads no
- *   other live claim (not released, last heartbeat younger than the lease).
- *   Otherwise it releases its claim, waits and tries again, and gives up with
- *   the holder's details. Of two runs that claim at once, at least one reads
- *   the other's acknowledged claim, so at most one proceeds; both may back off.
+ *   other claim that is not released. Of two runs that claim at once, at
+ *   least one reads the other's acknowledged claim, so at most one proceeds;
+ *   both may back off, release their claim and try again.
  * - The read must see every acknowledged claim: on several replicas it reads
- *   every replica (`clusterAllReplicas`), where the replica that took an
- *   INSERT has it once acknowledged; on one, it reads with
- *   `select_sequential_consistency`, after quorum inserts. A run that cannot
- *   read its own claim back stops, rather than take a lock it cannot check.
- * - The holder renews its claim every `heartbeatMs`. A crashed holder's claim
- *   expires `leaseMs` after its last heartbeat. A holder stops before its next
- *   request when no renewal was acknowledged for `validMs` (half the lease),
- *   or when its claim reads released (--break-lock), so it never runs on
- *   while another run may take its expired claim.
+ *   every replica (`clusterAllReplicas`, failing when one does not answer),
+ *   where the replica that took an INSERT has it once acknowledged; on one, it
+ *   reads with `select_sequential_consistency`, after quorum inserts. A run
+ *   that cannot read its own claim back stops, rather than take a lock it
+ *   cannot check.
+ * - The holder renews its claim every `heartbeatMs`. A renewal counts only
+ *   when the holder reads its version back higher than before, within
+ *   `validMs` of the previous renewal it counted. Every request of the run
+ *   first checks that the last counted renewal was sent less than `validMs`
+ *   ago, and that the claim was not released by --break-lock.
+ * - A claim whose last heartbeat the server dates more than `leaseMs` back
+ *   may belong to a run that stopped. Server clocks of different replicas can
+ *   disagree, so another run takes it for stopped only after it read the
+ *   same version for `validMs + OBSERVE_MARGIN_MS` by its own clock: by then
+ *   that run counts no renewal and makes no request. It then releases it.
  */
 
 export const LOCK_ROW_PREFIX = '__chkit_migrate_lock__/'
 /** The version of a released claim: newer than any heartbeat. */
 export const RELEASED_AT = '2299-12-31 23:59:59.000'
 const RELEASED_FROM = "toDateTime64('2299-01-01 00:00:00', 3, 'UTC')"
+/** How long release() waits for a heartbeat in flight. */
+const RELEASE_WAIT_MS = 5_000
 
 export const LOCK_TIMINGS = {
   leaseMs: 120_000,
   validMs: 60_000,
   heartbeatMs: 10_000,
+  /** Added to validMs while watching a claim that looks stopped. */
+  observeMarginMs: 5_000,
   attempts: 5,
   backoffMinMs: 500,
   backoffMaxMs: 2_000,
@@ -74,7 +85,9 @@ export interface LockClaim {
   /** The holder JSON as stored, for a claim chkit cannot parse. */
   rawHolder: string
   released: boolean
-  /** Milliseconds since the last heartbeat, by the server's clock. */
+  /** The claim's newest `applied_at`, as `YYYY-MM-DD hh:mm:ss.sss`. */
+  version: string
+  /** Milliseconds since the last heartbeat, by the server's clocks. */
   ageMs: number
 }
 
@@ -115,12 +128,25 @@ function quoteName(value: string): string {
   return `\`${value.replace(/\\/g, '\\\\').replace(/`/g, '\\`')}\``
 }
 
-export function claimInsertSql(target: LockTarget, name: string, holderJson: string, released: boolean): string {
-  const version = released ? `toDateTime64('${RELEASED_AT}', 3, 'UTC')` : 'now64(3)'
+/**
+ * A claim row. `released` writes the release version; otherwise the version
+ * is the server time, and above `after` (the version last read back) when set.
+ */
+export function claimInsertSql(
+  target: LockTarget,
+  name: string,
+  holderJson: string,
+  version: { released: true } | { released: false; after?: string },
+): string {
+  const expression = version.released
+    ? `toDateTime64('${RELEASED_AT}', 3, 'UTC')`
+    : version.after === undefined
+      ? 'now64(3)'
+      : `greatest(now64(3), toDateTime64('${escapeSqlString(version.after)}', 3, 'UTC') + toIntervalMillisecond(1))`
   return (
     `INSERT INTO ${quoteName(target.database)}.${target.journalTable} ` +
     '(name, applied_at, checksum, chkit_version, migration_completed, operations) ' +
-    `SELECT '${escapeSqlString(name)}', ${version}, '${escapeSqlString(holderJson)}', '${escapeSqlString(CLI_VERSION)}', false, []`
+    `SELECT '${escapeSqlString(name)}', ${expression}, '${escapeSqlString(holderJson)}', '${escapeSqlString(CLI_VERSION)}', false, []`
   )
 }
 
@@ -130,7 +156,7 @@ export function claimsSelectSql(target: LockTarget, own: string): string {
     ? `clusterAllReplicas('${escapeSqlString(target.fanout.cluster)}', '${escapeSqlString(target.database)}', '${target.journalTable}')`
     : `${quoteName(target.database)}.${target.journalTable}`
   return (
-    'SELECT name, latest.2 AS holder, latest.1 >= ' + RELEASED_FROM + ' AS released, ' +
+    `SELECT name, latest.2 AS holder, latest.1 >= ${RELEASED_FROM} AS released, toString(latest.1) AS version, ` +
     'toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms ' +
     `FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest FROM ${source} ` +
     `WHERE startsWith(name, '${LOCK_ROW_PREFIX}') GROUP BY name) ` +
@@ -148,8 +174,12 @@ function writeSettings(target: LockTarget): ClickHouseSettings | undefined {
   return target.fanout ? undefined : { insert_quorum: 'auto', insert_quorum_parallel: 0 }
 }
 
-function readSettings(target: LockTarget): ClickHouseSettings | undefined {
-  return target.fanout ? undefined : { select_sequential_consistency: '1' }
+/**
+ * A read that misses a replica could miss the claim on it, so a fanned-out
+ * read fails instead of skipping an unavailable replica.
+ */
+function readSettings(target: LockTarget): ClickHouseSettings {
+  return target.fanout ? { skip_unavailable_shards: 0 } : { select_sequential_consistency: '1' }
 }
 
 function parseBool(value: unknown): boolean {
@@ -172,7 +202,7 @@ function parseHolder(raw: string): LockHolder | null {
 }
 
 async function readClaims(db: ClickHouseExecutor, target: LockTarget, own: string): Promise<LockClaim[]> {
-  const rows = await db.query<{ name: string; holder: string; released: unknown; age_ms: string | number }>(
+  const rows = await db.query<{ name: string; holder: string; released: unknown; version: string; age_ms: string | number }>(
     claimsSelectSql(target, own),
     readSettings(target),
   )
@@ -181,14 +211,36 @@ async function readClaims(db: ClickHouseExecutor, target: LockTarget, own: strin
     holder: parseHolder(row.holder),
     rawHolder: row.holder,
     released: parseBool(row.released),
+    version: row.version,
     ageMs: Number(row.age_ms),
   }))
 }
 
+async function writeClaim(
+  db: ClickHouseExecutor,
+  target: LockTarget,
+  name: string,
+  holderJson: string,
+  version: { released: true } | { released: false; after?: string },
+): Promise<void> {
+  await db.command(claimInsertSql(target, name, holderJson, version), writeSettings(target))
+}
+
+/** The id `--break-lock` takes: the claim name without its prefix. */
+function claimId(claim: LockClaim): string {
+  return claim.name.slice(LOCK_ROW_PREFIX.length)
+}
+
 export function describeHolder(claim: LockClaim): string {
   const { holder } = claim
-  if (!holder) return `claim ${claim.name} (${claim.rawHolder || 'no holder details'})`
-  return `pid ${holder.pid} on host ${holder.host} (chkit ${holder.chkitVersion}), started ${holder.startedAt}`
+  const who = holder
+    ? `pid ${holder.pid} on host ${holder.host} (chkit ${holder.chkitVersion}), started ${holder.startedAt}`
+    : claim.rawHolder || 'no holder details'
+  return `claim ${claimId(claim)}: ${who}`
+}
+
+function seconds(ms: number): number {
+  return Math.max(0, Math.round(ms / 1000))
 }
 
 function lockedError(target: LockTarget, others: LockClaim[], timings: LockTimings): MigrateError {
@@ -199,17 +251,17 @@ function lockedError(target: LockTarget, others: LockClaim[], timings: LockTimin
         'reading the claim back took too long. Run again.',
     )
   }
-  const lines = others.map((claim) => {
-    const ago = Math.max(0, Math.round(claim.ageMs / 1000))
-    const left = Math.max(0, Math.round((timings.leaseMs - claim.ageMs) / 1000))
-    return `  ${describeHolder(claim)}; last heartbeat ${ago}s ago, expires in ${left}s unless renewed`
-  })
+  const lines = others.map(
+    (claim) =>
+      `  ${describeHolder(claim)}; last heartbeat ${seconds(claim.ageMs)}s ago, free in ${seconds(timings.leaseMs - claim.ageMs)}s unless renewed`,
+  )
+  const first = others[0] as LockClaim
   return new MigrateError(
     'migrate_locked',
     `Another chkit migrate run holds the migrate lock on ${target.database}.${target.journalTable}:\n${lines.join('\n')}\n` +
       'Wait for it to finish and run again. A run that stopped without releasing the lock (killed, crashed) ' +
       `loses it ${timings.leaseMs / 1000}s after its last heartbeat. If you are sure that run is no longer running, ` +
-      're-run with --break-lock.',
+      `re-run with --break-lock ${claimId(first)}.`,
   )
 }
 
@@ -223,25 +275,61 @@ function unverifiableError(target: LockTarget): MigrateError {
 }
 
 /**
- * Releases every claim that is not released and has not expired, for
- * --break-lock. Returns the claims it released.
+ * --break-lock <claim>: releases that claim, which the user checked belongs
+ * to a run that is no longer running. Any other claim still holds the lock.
  */
-async function breakClaims(db: ClickHouseExecutor, target: LockTarget, deps: LockDeps): Promise<LockClaim[]> {
-  const claims = (await readClaims(db, target, '')).filter(
-    (claim) => !claim.released && claim.ageMs < deps.timings.leaseMs,
+async function breakClaim(db: ClickHouseExecutor, target: LockTarget, id: string, deps: LockDeps): Promise<void> {
+  const claim = (await readClaims(db, target, '')).find(
+    (item) => !item.released && (claimId(item) === id || item.name === id),
   )
-  for (const claim of claims) {
-    await db.command(claimInsertSql(target, claim.name, claim.rawHolder, true), writeSettings(target))
-    deps.log(`Broke the migrate lock held by ${describeHolder(claim)}.`)
+  if (!claim) {
+    deps.log(`--break-lock: claim ${id} does not hold the migrate lock; taking the lock as usual.`)
+    return
   }
-  return claims
+  await writeClaim(db, target, claim.name, claim.rawHolder, { released: true })
+  deps.log(`Broke the migrate lock of ${describeHolder(claim)}.`)
+}
+
+/**
+ * Claims whose last heartbeat the server dates past the lease: reads them
+ * again after `validMs + observeMarginMs` and releases each whose version did
+ * not change. A run with such a claim counts no renewal any more, so it
+ * makes no request. Returns the claims whose version changed: their run is
+ * alive, with a server clock behind.
+ */
+async function releaseStoppedClaims(
+  db: ClickHouseExecutor,
+  target: LockTarget,
+  stale: LockClaim[],
+  deps: LockDeps,
+): Promise<LockClaim[]> {
+  const { validMs, observeMarginMs } = deps.timings
+  deps.log(
+    `The migrate lock is held by ${stale.map(describeHolder).join('; ')}, with no heartbeat for ${seconds(Math.min(...stale.map((claim) => claim.ageMs)))}s; ` +
+      `checking for ${seconds(validMs + observeMarginMs)}s that it stopped.`,
+  )
+  await deps.sleep(validMs + observeMarginMs)
+  const current = await readClaims(db, target, '')
+  const alive: LockClaim[] = []
+  for (const claim of stale) {
+    const now = current.find((item) => item.name === claim.name)
+    if (!now || now.released) continue
+    if (now.version !== claim.version) {
+      alive.push(now)
+      continue
+    }
+    await writeClaim(db, target, claim.name, claim.rawHolder, { released: true })
+    deps.log(`Released the migrate lock of ${describeHolder(claim)}, which stopped without releasing it.`)
+  }
+  return alive
 }
 
 export async function acquireMigrateLock(
   db: ClickHouseExecutor,
   target: LockTarget,
   options: {
-    breakLock: boolean
+    /** The claim id --break-lock names. */
+    breakLock?: string
     log: (line: string) => void
     /**
      * Renews the claim while the run's own requests are in flight: an
@@ -260,25 +348,35 @@ export async function acquireMigrateLock(
     startedAt: new Date().toISOString(),
   }
   const holderJson = JSON.stringify(holder)
-  if (options.breakLock) await breakClaims(db, target, deps)
+  if (options.breakLock !== undefined) await breakClaim(db, target, options.breakLock, deps)
 
-  for (let attempt = 1; ; attempt++) {
+  for (let attempt = 1; ; ) {
     const name = `${LOCK_ROW_PREFIX}${deps.newId()}`
     const sentAt = deps.now()
-    await db.command(claimInsertSql(target, name, holderJson, false), writeSettings(target))
+    await writeClaim(db, target, name, holderJson, { released: false })
     const claims = await readClaims(db, target, name)
     const own = claims.find((claim) => claim.name === name)
-    const others = claims.filter(
-      (claim) => claim.name !== name && !claim.released && claim.ageMs < timings.leaseMs,
-    )
+    const others = claims.filter((claim) => claim.name !== name && !claim.released)
     if (own && !own.released && others.length === 0 && deps.now() - sentAt <= timings.validMs) {
       debug('migrate-lock', `acquired ${name} (attempt ${attempt})`)
-      return startHolding({ db, heartbeatDb: options.heartbeatDb ?? db }, target, { name, holderJson, confirmedAt: sentAt }, deps)
+      return startHolding(
+        { db, heartbeatDb: options.heartbeatDb ?? db },
+        target,
+        { name, holderJson, confirmedAt: sentAt, version: own.version },
+        deps,
+      )
     }
-    await db.command(claimInsertSql(target, name, holderJson, true), writeSettings(target))
+    await writeClaim(db, target, name, holderJson, { released: true })
     if (!own) throw unverifiableError(target)
-    if (attempt >= timings.attempts) throw lockedError(target, others, timings)
-    debug('migrate-lock', `lock taken (attempt ${attempt}) by ${others.map(describeHolder).join('; ')} — retrying`)
+    const live = others.filter((claim) => claim.ageMs < timings.leaseMs)
+    if (live.length === 0 && others.length > 0) {
+      const alive = await releaseStoppedClaims(db, target, others, deps)
+      if (alive.length > 0) throw lockedError(target, alive, timings)
+      continue
+    }
+    if (attempt >= timings.attempts) throw lockedError(target, live, timings)
+    attempt++
+    debug('migrate-lock', `lock taken by ${live.map(describeHolder).join('; ')} — retrying`)
     const { backoffMinMs, backoffMaxMs } = timings
     await deps.sleep(backoffMinMs + deps.random() * (backoffMaxMs - backoffMinMs))
   }
@@ -287,11 +385,12 @@ export async function acquireMigrateLock(
 function startHolding(
   { db, heartbeatDb }: { db: ClickHouseExecutor; heartbeatDb: ClickHouseExecutor },
   target: LockTarget,
-  claim: { name: string; holderJson: string; confirmedAt: number },
+  claim: { name: string; holderJson: string; confirmedAt: number; version: string },
   deps: LockDeps,
 ): MigrateLock {
   const { timings } = deps
   let confirmedAt = claim.confirmedAt
+  let version = claim.version
   let lost: string | undefined
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -301,29 +400,34 @@ function startHolding(
     return at - confirmedAt > timings.validMs
   }
 
-  // A renewal counts only when it was acknowledged within the validity of the
-  // previous one, so two heartbeats are never further apart on the server
-  // than validMs, and no reader takes a claim this run still acts on for
-  // expired.
+  function lapsedReason(at: number): string {
+    return `no heartbeat was acknowledged for ${seconds(at - confirmedAt)}s`
+  }
+
+  // A renewal counts when the claim reads back with a newer version, within
+  // the validity of the previous one. Another run that reads the same
+  // version for longer than validMs knows this run counts no renewal.
   async function heartbeat(): Promise<void> {
     const sentAt = deps.now()
     if (lapsed(sentAt)) {
-      lost ??= `no heartbeat was acknowledged for ${Math.round((sentAt - confirmedAt) / 1000)}s`
+      lost ??= lapsedReason(sentAt)
       return
     }
     try {
-      await heartbeatDb.command(claimInsertSql(target, claim.name, claim.holderJson, false), writeSettings(target))
+      await writeClaim(heartbeatDb, target, claim.name, claim.holderJson, { released: false, after: version })
       const own = (await readClaims(heartbeatDb, target, claim.name)).find((item) => item.name === claim.name)
-      if (stopped) return
-      if (own?.released) {
+      if (stopped || !own) return
+      if (own.released) {
         lost ??= 'another run released it (--break-lock)'
         return
       }
-      if (!own) return
-      if (lapsed(deps.now())) {
-        lost ??= `no heartbeat was acknowledged for ${Math.round((deps.now() - confirmedAt) / 1000)}s`
+      if (own.version <= version) return
+      const ackedAt = deps.now()
+      if (lapsed(ackedAt)) {
+        lost ??= lapsedReason(ackedAt)
         return
       }
+      version = own.version
       confirmedAt = sentAt
     } catch (error) {
       debug('migrate-lock', `heartbeat failed: ${error instanceof Error ? error.message : String(error)}`)
@@ -341,9 +445,7 @@ function startHolding(
 
   return {
     assertHeld() {
-      if (lost === undefined && lapsed(deps.now())) {
-        lost = `no heartbeat was acknowledged for ${Math.round((deps.now() - confirmedAt) / 1000)}s`
-      }
+      if (lost === undefined && lapsed(deps.now())) lost = lapsedReason(deps.now())
       if (lost === undefined) return
       throw new MigrateError(
         'migrate_lock_lost',
@@ -354,10 +456,11 @@ function startHolding(
     async release() {
       stopped = true
       if (timer) clearTimeout(timer)
-      // A heartbeat still in flight would race the release write.
-      await inFlight.catch(() => undefined)
+      // A heartbeat still in flight would race the release write. A hung one
+      // is left behind: the release then goes first, and still wins.
+      await Promise.race([inFlight.catch(() => undefined), sleep(RELEASE_WAIT_MS, undefined, { ref: false })])
       try {
-        await db.command(claimInsertSql(target, claim.name, claim.holderJson, true), writeSettings(target))
+        await writeClaim(db, target, claim.name, claim.holderJson, { released: true })
         debug('migrate-lock', `released ${claim.name}`)
       } catch (error) {
         deps.log(

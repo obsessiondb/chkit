@@ -83,8 +83,9 @@ const MIGRATE_FLAGS = defineFlags([
   },
   {
     name: '--break-lock',
-    type: 'boolean',
-    description: 'Release the migrate lock another run holds before taking it (only when that run is no longer running)',
+    type: 'string',
+    description: 'Release the migrate lock claim of a run that is no longer running, then take the lock',
+    placeholder: '<claim>',
   },
   {
     name: '--setting',
@@ -219,7 +220,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const rawDb = pluginContext.executor
   const db = guardExecutor(rawDb, () => heldLock?.assertHeld())
   const journalStore = createJournalStore(db, config.clickhouse?.cluster)
-  const breakLock = f['--break-lock'] === true
+  const breakLock = f['--break-lock']
   // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
   const log = jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
   const withLock: WithLock = async (fn) => {
@@ -229,7 +230,10 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     }
     const target = await journalStore.lockTarget()
     if (target === null) {
-      debug('migrate', 'database missing — running without the migrate lock until a migration creates it')
+      console.error(
+        '⚠ The target database does not exist yet, so the journal cannot hold the migrate lock: this run takes none. ' +
+          'Do not start another migrate against this target until it finishes.',
+      )
       return await fn()
     }
     const heartbeatDb = rawDb.openConcurrent?.()
@@ -238,6 +242,11 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       heldLock = lock
       try {
         return await fn()
+      } catch (error) {
+        // A step that retries or wraps the guard's error (a poll loop, a
+        // statement error) reports the lost lock, with its code (#716).
+        lock.assertHeld()
+        throw error
       } finally {
         heldLock = undefined
         await lock.release()

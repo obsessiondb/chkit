@@ -35,7 +35,14 @@ from tests.e2e_testkit import (
     wait_for_table_on_every_replica,
 )
 
-SHORT = replace(LOCK_TIMINGS, lease_ms=12_000, valid_ms=6_000, heartbeat_ms=1_000, attempts=1)
+SHORT = replace(
+    LOCK_TIMINGS,
+    lease_ms=12_000,
+    valid_ms=6_000,
+    heartbeat_ms=1_000,
+    observe_margin_ms=2_000,
+    attempts=1,
+)
 
 
 def _connect() -> ClickHouseClient:
@@ -95,7 +102,7 @@ def _acquire(client: ClickHouseClient, target: LockTarget, **timings: float) -> 
     return acquire_migrate_lock(
         client,
         target,
-        break_lock=False,
+        break_lock=None,
         log=lambda _line: None,
         deps=LockDeps(timings=replace(SHORT, **timings)),  # type: ignore[arg-type]
     )

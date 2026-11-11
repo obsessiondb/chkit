@@ -23,7 +23,7 @@ chkit migrate [flags]
 | `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` or interactive confirmation |
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
 | `-t`, `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
-| `--break-lock` | boolean | `false` | Release the [migrate lock](#concurrent-runs) another run holds, then take it. Only for a run that is no longer running |
+| `--break-lock <claim>` | string | — | Release the [migrate lock](#concurrent-runs) claim of a run that is no longer running, then take the lock |
 | `--setting <name=value>` | string[] | — | Send a ClickHouse [query setting](#query-settings) with each migration statement. Repeatable, or comma-separated |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
@@ -191,22 +191,26 @@ Only one `migrate --apply` (or `migrate --abandon --apply`) works on a journal a
 
 ```
 Another chkit migrate run holds the migrate lock on analytics._chkit_migrations:
-  pid 70784 on host ci-runner-7 (chkit 0.2.0), started 2026-11-11T09:03:01.959Z; last heartbeat 11s ago, expires in 109s unless renewed
+  claim 3f1c…: pid 70784 on host ci-runner-7 (chkit 0.2.0), started 2026-11-11T09:03:01.959Z; last heartbeat 11s ago, free in 109s unless renewed
 ```
 
 Plan runs, `status` and `check` take no lock and need no write access.
 
 How it works:
 
-- The lock is a row of the journal named `__chkit_migrate_lock__/<id>`, with `migration_completed = false`, so every chkit release reads past it. A run writes its own claim, then reads every claim back; it holds the lock when no other live claim is there. Two runs that claim at the same moment can both back off; each retries a few times within about 10 seconds before it gives up.
+- The lock is a row of the journal named `__chkit_migrate_lock__/<claim>`, with `migration_completed = false`, so every chkit release reads past it. A run writes its own claim, then reads every claim back; it holds the lock when no other claim is there. Two runs that claim at the same moment can both back off; each retries a few times within about 10 seconds before it gives up.
 - After taking the lock, a run reads the journal again. A migration that another run applied in the meantime is skipped (`Skipping …: another migrate run applied it meanwhile.`); any other change to what the run showed stops it with `journal_changed` before it applies anything.
-- The holder renews its claim every 10 seconds. A run that is killed or crashes keeps the lock until 120 seconds after its last renewal; then the next run takes it. A holder whose renewals have not gone through for 60 seconds (a paused process, a lost connection) stops before its next request with `migrate_lock_lost`, so it never keeps running once another run could take its lock. A statement it already sent keeps running on the server; the next run handles it as it handles a statement of a crashed run.
-- On a multi-replica target the claims are read from every replica (see below), where the replica that accepted a claim always has it. On a single endpoint without that fan-out, claims are written with `insert_quorum = 'auto'` and read with `select_sequential_consistency = 1`. A run that cannot read its own claim back right after writing it stops with `migrate_lock_unverifiable` instead of taking a lock it cannot check.
-- While the database in `clickhouse.database` does not exist yet, there is no journal to hold the lock: a first run that creates the database runs without it.
+- The holder renews its claim every 10 seconds. A renewal counts when the holder reads its claim back with a newer version. A holder whose renewals have not counted for 60 seconds (a paused process, a lost connection), or whose claim was released with `--break-lock`, stops before its next request with `migrate_lock_lost`.
+- A run that is killed or crashes keeps its claim. Once the server dates the claim's last heartbeat more than 120 seconds back, the next run watches it for 65 seconds; when it did not change, that run has stopped, so the next run releases the claim (and says so) and takes the lock. Watching makes this safe when the clocks of the replicas differ.
+- On a multi-replica target the claims are read from every replica (see below), where the replica that accepted a claim always has it; a replica that does not answer fails the read. On a single endpoint without that fan-out, claims are written with `insert_quorum = 'auto'` and read with `select_sequential_consistency = 1`. A run that cannot read its own claim back right after writing it stops with `migrate_lock_unverifiable` instead of taking a lock it cannot check.
 
-To release the lock of a run you know has stopped, without waiting for it to expire, run `chkit migrate --apply --break-lock`: it releases every live claim, prints whose, and takes the lock. Breaking the lock of a run that is still running lets both runs apply statements; that run notices at its next renewal and stops.
+What the lock does not cover:
 
-`CHKIT_MIGRATE_LOCK=off` turns the lock off, as before this release; `migrate` then prints a warning on stderr. Releases before the lock do not take or check it, so the lock only keeps apart runs of releases that have it.
+- A statement a run already sent keeps running on the server when that run is killed or loses the lock; ClickHouse cannot fence it. The next run handles it as it handles any statement of a stopped run (an [async](#async-operations-modeasync) statement is attached to; a sync one runs again). A process paused for more than its remaining 60 seconds between its check and its next request can still send that request.
+- While the database in `clickhouse.database` does not exist yet, there is no journal to hold the lock: a first run that creates the database takes none, and says so on stderr.
+- Releases before the lock do not take or check it, so the lock only keeps apart runs of releases that have it. `CHKIT_MIGRATE_LOCK=off` turns the lock off, as before this release; `migrate` then prints a warning on stderr.
+
+To free the lock of a run you know has stopped, without waiting for it to expire, pass the claim from the error: `chkit migrate --apply --break-lock 3f1c…`. It releases only that claim and takes the lock; when another run holds the lock by then, it stops with `migrate_locked` as usual. Breaking the claim of a run that is still running lets both runs apply statements until that run's next renewal.
 
 ### Multi-replica targets
 
@@ -487,7 +491,7 @@ A failure that stops the command prints the standard error envelope:
 | `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |
 | `migration_already_applied` | `--abandon`: the migration is already applied |
 | `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
-| `migrate_lock_lost` | This run's lock renewals did not go through for 60 seconds, or another run broke the lock; the run stopped before its next request |
+| `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, or another run broke its claim; the run stopped before its next request |
 | `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |
 | `journal_changed` | Another run changed the journal between the plan and the lock in a way the plan does not cover; nothing was applied |
 | `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`, or an empty migration name |

@@ -227,15 +227,16 @@ def run(  # noqa: PLR0917
         ),
     ] = None,
     break_lock: Annotated[
-        bool,
+        str | None,
         typer.Option(
             "--break-lock",
+            metavar="<claim>",
             help=(
-                "Release the migrate lock another run holds before taking it "
-                "(only when that run is no longer running)"
+                "Release the migrate lock claim of a run that is no longer running, "
+                "then take the lock"
             ),
         ),
-    ] = False,
+    ] = None,
     setting: Annotated[
         list[str] | None,
         typer.Option(
@@ -310,7 +311,7 @@ def _run(
     table_selector: str | None,
     retry: str | None,
     abandon: str | None,
-    break_lock: bool,
+    break_lock: str | None,
     setting: list[str] | None,
     output_json: bool,
     service: str | None,
@@ -854,7 +855,7 @@ class _MigrateLockRunner(WithLock):
         raw_client: Any,
         journal_store: JournalStore,
         holder: _LockHolder,
-        break_lock: bool,
+        break_lock: str | None,
         json_mode: bool,
     ) -> None:
         self._raw_client = raw_client
@@ -873,8 +874,12 @@ class _MigrateLockRunner(WithLock):
             return fn()
         found = self._journal_store.lock_target()
         if found is None:
-            # The database is missing: no journal to hold the lock in until a
-            # migration creates it.
+            typer.echo(
+                "⚠ The target database does not exist yet, so the journal cannot hold the "
+                "migrate lock: this run takes none. Do not start another migrate against "
+                "this target until it finishes.",
+                err=True,
+            )
             return fn()
         database, table, fanout = found
         # The heartbeat runs while the run's own requests are in flight; a
@@ -896,6 +901,11 @@ class _MigrateLockRunner(WithLock):
             self._holder.lock = lock
             try:
                 return fn()
+            except BaseException:
+                # A step that retries or wraps the guard's error (a poll loop,
+                # a statement error) reports the lost lock, with its code.
+                lock.assert_held()
+                raise
             finally:
                 self._holder.lock = None
                 lock.release()

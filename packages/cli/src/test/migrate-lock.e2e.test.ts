@@ -11,8 +11,8 @@ import { createLiveExecutor, createPrefix, getLiveEnv, quoteIdent, waitForTable 
 // request, so these runs check that every acknowledged claim is read back.
 
 const TIMEOUT_MS = 180_000
-const SHORT = { ...LOCK_TIMINGS, leaseMs: 12_000, validMs: 6_000, heartbeatMs: 1_000, attempts: 1 }
-const quiet = { breakLock: false, log: () => {} }
+const SHORT = { ...LOCK_TIMINGS, leaseMs: 12_000, validMs: 6_000, heartbeatMs: 1_000, observeMarginMs: 2_000, attempts: 1 }
+const quiet = { log: () => {} }
 
 async function withTarget(
   label: string,

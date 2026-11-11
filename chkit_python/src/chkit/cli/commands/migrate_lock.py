@@ -8,25 +8,32 @@ the journal and reads every claim back:
 
 - A claim is a journal row named ``LOCK_ROW_PREFIX<uuid>``, with
   ``migration_completed = false``, so every release reads past it as it reads
-  past an in-progress migration. Its ``applied_at`` is the server time of its
-  last heartbeat; a released claim gets ``RELEASED_AT``, which wins over every
+  past an in-progress migration. Its ``applied_at`` is its version: the server
+  time of the claim, and of each heartbeat after it, but always above the
+  version the holder last read back, so it grows whatever the replicas'
+  clocks. A released claim gets ``RELEASED_AT``, which wins over every
   heartbeat in ``ReplacingMergeTree(applied_at)`` and in the argMax read.
 - A run holds the lock when, after its claim is acknowledged, it reads no
-  other live claim (not released, last heartbeat younger than the lease).
-  Otherwise it releases its claim, waits and tries again, and gives up with
-  the holder's details. Of two runs that claim at once, at least one reads the
-  other's acknowledged claim, so at most one proceeds; both may back off.
+  other claim that is not released. Of two runs that claim at once, at least
+  one reads the other's acknowledged claim, so at most one proceeds; both may
+  back off, release their claim and try again.
 - The read must see every acknowledged claim: on several replicas it reads
-  every replica (``clusterAllReplicas``), where the replica that took an
-  INSERT has it once acknowledged; on one, it reads with
-  ``select_sequential_consistency``, after quorum inserts. A run that cannot
-  read its own claim back stops, rather than take a lock it cannot check.
+  every replica (``clusterAllReplicas``, failing when one does not answer),
+  where the replica that took an INSERT has it once acknowledged; on one, it
+  reads with ``select_sequential_consistency``, after quorum inserts. A run
+  that cannot read its own claim back stops, rather than take a lock it
+  cannot check.
 - The holder renews its claim every ``heartbeat_ms``, on a thread with its own
-  client. A crashed holder's claim expires ``lease_ms`` after its last
-  heartbeat. A holder stops before its next request when no renewal was
-  acknowledged for ``valid_ms`` (half the lease), or when its claim reads
-  released (--break-lock), so it never runs on while another run may take its
-  expired claim.
+  client. A renewal counts only when the holder reads its version back
+  higher than before, within ``valid_ms`` of the previous renewal it counted.
+  Every request of the run first checks that the last counted renewal was
+  sent less than ``valid_ms`` ago, and that the claim was not released by
+  --break-lock.
+- A claim whose last heartbeat the server dates more than ``lease_ms`` back
+  may belong to a run that stopped. Server clocks of different replicas can
+  disagree, so another run takes it for stopped only after it read the same
+  version for ``valid_ms + observe_margin_ms`` by its own clock: by then that
+  run counts no renewal and makes no request. It then releases it.
 """
 
 from __future__ import annotations
@@ -58,6 +65,8 @@ class LockTimings:
     lease_ms: float = 120_000
     valid_ms: float = 60_000
     heartbeat_ms: float = 10_000
+    # Added to valid_ms while watching a claim that looks stopped.
+    observe_margin_ms: float = 5_000
     attempts: int = 5
     backoff_min_ms: float = 500
     backoff_max_ms: float = 2_000
@@ -90,7 +99,9 @@ class LockClaim:
     # The holder JSON as stored, for a claim chkit cannot parse.
     raw_holder: str
     released: bool
-    # Milliseconds since the last heartbeat, by the server's clock.
+    # The claim's newest ``applied_at``, as ``YYYY-MM-DD hh:mm:ss.sss``.
+    version: str
+    # Milliseconds since the last heartbeat, by the server's clocks.
     age_ms: float
 
 
@@ -117,8 +128,26 @@ def _quote_name(value: str) -> str:
     return "`" + value.replace("\\", "\\\\").replace("`", "\\`") + "`"
 
 
-def claim_insert_sql(target: LockTarget, name: str, holder_json: str, *, released: bool) -> str:
-    version = f"toDateTime64('{RELEASED_AT}', 3, 'UTC')" if released else "now64(3)"
+def claim_insert_sql(
+    target: LockTarget,
+    name: str,
+    holder_json: str,
+    *,
+    released: bool,
+    after: str | None = None,
+) -> str:
+    """A claim row. ``released`` writes the release version; otherwise the
+    version is the server time, and above ``after`` (the version last read
+    back) when set."""
+    if released:
+        version = f"toDateTime64('{RELEASED_AT}', 3, 'UTC')"
+    elif after is None:
+        version = "now64(3)"
+    else:
+        version = (
+            f"greatest(now64(3), toDateTime64('{_escape(after)}', 3, 'UTC') "
+            "+ toIntervalMillisecond(1))"
+        )
     return (
         f"INSERT INTO {_quote_name(target.database)}.{target.journal_table} "
         "(name, applied_at, checksum, chkit_version, migration_completed, operations) "
@@ -138,6 +167,7 @@ def claims_select_sql(target: LockTarget, own: str) -> str:
         source = f"{_quote_name(target.database)}.{target.journal_table}"
     return (
         f"SELECT name, latest.2 AS holder, latest.1 >= {_RELEASED_FROM} AS released, "
+        "toString(latest.1) AS version, "
         "toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms "
         "FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest "
         f"FROM {source} WHERE startsWith(name, '{LOCK_ROW_PREFIX}') GROUP BY name) "
@@ -154,8 +184,12 @@ def _write_settings(target: LockTarget) -> dict[str, Any] | None:
     return {"insert_quorum": "auto", "insert_quorum_parallel": 0}
 
 
-def _read_settings(target: LockTarget) -> dict[str, Any] | None:
-    return None if target.fanout is not None else {"select_sequential_consistency": "1"}
+def _read_settings(target: LockTarget) -> dict[str, Any]:
+    """A read that misses a replica could miss the claim on it, so a fanned-out
+    read fails instead of skipping an unavailable replica."""
+    if target.fanout is not None:
+        return {"skip_unavailable_shards": 0}
+    return {"select_sequential_consistency": "1"}
 
 
 def _parse_bool(value: Any) -> bool:
@@ -188,6 +222,7 @@ def _read_claims(client: Any, target: LockTarget, own: str) -> list[LockClaim]:
             holder=_parse_holder(str(row["holder"])),
             raw_holder=str(row["holder"]),
             released=_parse_bool(row["released"]),
+            version=str(row["version"]),
             age_ms=float(row["age_ms"]),
         )
         for row in rows
@@ -195,21 +230,35 @@ def _read_claims(client: Any, target: LockTarget, own: str) -> list[LockClaim]:
 
 
 def _write_claim(
-    client: Any, target: LockTarget, name: str, holder_json: str, *, released: bool
+    client: Any,
+    target: LockTarget,
+    name: str,
+    holder_json: str,
+    *,
+    released: bool,
+    after: str | None = None,
 ) -> None:
     client.execute(
-        claim_insert_sql(target, name, holder_json, released=released), _write_settings(target)
+        claim_insert_sql(target, name, holder_json, released=released, after=after),
+        _write_settings(target),
     )
+
+
+def _claim_id(claim: LockClaim) -> str:
+    """The id ``--break-lock`` takes: the claim name without its prefix."""
+    return claim.name[len(LOCK_ROW_PREFIX) :]
 
 
 def describe_holder(claim: LockClaim) -> str:
     holder = claim.holder
     if holder is None:
-        return f"claim {claim.name} ({claim.raw_holder or 'no holder details'})"
-    return (
-        f"pid {holder.pid} on host {holder.host} (chkit {holder.chkit_version}), "
-        f"started {holder.started_at}"
-    )
+        who = claim.raw_holder or "no holder details"
+    else:
+        who = (
+            f"pid {holder.pid} on host {holder.host} (chkit {holder.chkit_version}), "
+            f"started {holder.started_at}"
+        )
+    return f"claim {_claim_id(claim)}: {who}"
 
 
 def _js_round(value: float) -> int:
@@ -227,22 +276,25 @@ def _locked_error(
             f"Could not take the migrate lock on {where} in {timings.attempts} attempts: "
             "reading the claim back took too long. Run again.",
         )
-    lines = []
-    for claim in others:
-        ago = max(0, _js_round(claim.age_ms / 1000))
-        left = max(0, _js_round((timings.lease_ms - claim.age_ms) / 1000))
-        lines.append(
-            f"  {describe_holder(claim)}; last heartbeat {ago}s ago, "
-            f"expires in {left}s unless renewed"
-        )
+    lines = [
+        f"  {describe_holder(claim)}; last heartbeat {_s(claim.age_ms)}s ago, "
+        f"free in {_s(timings.lease_ms - claim.age_ms)}s unless renewed"
+        for claim in others
+    ]
     body = "\n".join(lines)
     return MigrateError(
         "migrate_locked",
         f"Another chkit migrate run holds the migrate lock on {where}:\n{body}\n"
         "Wait for it to finish and run again. A run that stopped without releasing the lock "
         f"(killed, crashed) loses it {_seconds(timings.lease_ms)}s after its last heartbeat. "
-        "If you are sure that run is no longer running, re-run with --break-lock.",
+        "If you are sure that run is no longer running, re-run with "
+        f"--break-lock {_claim_id(others[0])}.",
     )
+
+
+def _s(ms: float) -> int:
+    """Whole seconds, at least 0 (TS ``seconds``)."""
+    return max(0, _js_round(ms / 1000))
 
 
 def _seconds(ms: float) -> str:
@@ -260,18 +312,64 @@ def _unverifiable_error(target: LockTarget) -> MigrateError:
     )
 
 
-def _break_claims(
-    client: Any, target: LockTarget, deps: LockDeps, log: Callable[[str], None]
+def _break_claim(
+    client: Any, target: LockTarget, claim_id: str, log: Callable[[str], None]
 ) -> None:
-    """Releases every claim that is not released and has not expired, for --break-lock."""
-    claims = [
-        claim
-        for claim in _read_claims(client, target, "")
-        if not claim.released and claim.age_ms < deps.timings.lease_ms
-    ]
-    for claim in claims:
+    """--break-lock <claim>: releases that claim, which the user checked belongs
+    to a run that is no longer running. Any other claim still holds the lock."""
+    claim = next(
+        (
+            item
+            for item in _read_claims(client, target, "")
+            if not item.released and claim_id in (_claim_id(item), item.name)
+        ),
+        None,
+    )
+    if claim is None:
+        log(
+            f"--break-lock: claim {claim_id} does not hold the migrate lock; "
+            "taking the lock as usual."
+        )
+        return
+    _write_claim(client, target, claim.name, claim.raw_holder, released=True)
+    log(f"Broke the migrate lock of {describe_holder(claim)}.")
+
+
+def _release_stopped_claims(
+    client: Any,
+    target: LockTarget,
+    stale: list[LockClaim],
+    deps: LockDeps,
+    log: Callable[[str], None],
+) -> list[LockClaim]:
+    """Claims whose last heartbeat the server dates past the lease: reads them
+    again after ``valid_ms + observe_margin_ms`` and releases each whose version
+    did not change. A run with such a claim counts no renewal any more, so it
+    makes no request. Returns the claims whose version changed: their run is
+    alive, with a server clock behind."""
+    timings = deps.timings
+    holders = "; ".join(describe_holder(claim) for claim in stale)
+    log(
+        f"The migrate lock is held by {holders}, with no heartbeat for "
+        f"{_s(min(claim.age_ms for claim in stale))}s; checking for "
+        f"{_s(timings.valid_ms + timings.observe_margin_ms)}s that it stopped."
+    )
+    deps.sleep(timings.valid_ms + timings.observe_margin_ms)
+    current = {claim.name: claim for claim in _read_claims(client, target, "")}
+    alive: list[LockClaim] = []
+    for claim in stale:
+        now = current.get(claim.name)
+        if now is None or now.released:
+            continue
+        if now.version != claim.version:
+            alive.append(now)
+            continue
         _write_claim(client, target, claim.name, claim.raw_holder, released=True)
-        log(f"Broke the migrate lock held by {describe_holder(claim)}.")
+        log(
+            f"Released the migrate lock of {describe_holder(claim)}, "
+            "which stopped without releasing it."
+        )
+    return alive
 
 
 class MigrateLock:
@@ -286,6 +384,7 @@ class MigrateLock:
         name: str,
         holder_json: str,
         confirmed_at: float,
+        version: str,
         deps: LockDeps,
         log: Callable[[str], None],
     ) -> None:
@@ -295,6 +394,7 @@ class MigrateLock:
         self._name = name
         self._holder_json = holder_json
         self._confirmed_at = confirmed_at
+        self._version = version
         self._deps = deps
         self._log = log
         self._lost: str | None = None
@@ -306,7 +406,7 @@ class MigrateLock:
         return at - self._confirmed_at > self._deps.timings.valid_ms
 
     def _lapsed_reason(self, at: float) -> str:
-        return f"no heartbeat was acknowledged for {_js_round((at - self._confirmed_at) / 1000)}s"
+        return f"no heartbeat was acknowledged for {_s(at - self._confirmed_at)}s"
 
     def _run(self) -> None:
         while not self._stop.wait(self._deps.timings.heartbeat_ms / 1000):
@@ -315,10 +415,10 @@ class MigrateLock:
             self._heartbeat()
 
     def _heartbeat(self) -> None:
-        # A renewal counts only when it was acknowledged within the validity
-        # of the previous one, so two heartbeats are never further apart on
-        # the server than valid_ms, and no reader takes a claim this run still
-        # acts on for expired.
+        # A renewal counts when the claim reads back with a newer version,
+        # within the validity of the previous one. Another run that reads the
+        # same version for longer than valid_ms knows this run counts no
+        # renewal.
         sent_at = self._deps.now()
         if self._lapsed(sent_at):
             if self._lost is None:
@@ -326,7 +426,12 @@ class MigrateLock:
             return
         try:
             _write_claim(
-                self._heartbeat_client, self._target, self._name, self._holder_json, released=False
+                self._heartbeat_client,
+                self._target,
+                self._name,
+                self._holder_json,
+                released=False,
+                after=self._version,
             )
             own = next(
                 (
@@ -344,11 +449,14 @@ class MigrateLock:
             if self._lost is None:
                 self._lost = "another run released it (--break-lock)"
             return
+        if own.version <= self._version:
+            return
         acked = self._deps.now()
         if self._lapsed(acked):
             if self._lost is None:
                 self._lost = self._lapsed_reason(acked)
             return
+        self._version = own.version
         self._confirmed_at = sent_at
 
     def assert_held(self) -> None:
@@ -384,15 +492,16 @@ def acquire_migrate_lock(
     client: Any,
     target: LockTarget,
     *,
-    break_lock: bool,
+    break_lock: str | None,
     log: Callable[[str], None],
     heartbeat_client: Any = None,
     deps: LockDeps | None = None,
 ) -> MigrateLock:
     """Takes the migrate lock, or raises ``migrate_locked`` naming the holder.
 
-    ``heartbeat_client`` renews the claim from another thread; a client with
-    an HTTP session cannot send it while the run's statement is in flight.
+    ``break_lock`` is the claim id --break-lock names. ``heartbeat_client``
+    renews the claim from another thread; a client with an HTTP session cannot
+    send it while the run's statement is in flight.
     """
     deps = deps or LockDeps()
     timings = deps.timings
@@ -403,8 +512,8 @@ def acquire_migrate_lock(
         "startedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
     }
     holder_json = json.dumps(holder, separators=(",", ":"), ensure_ascii=False)
-    if break_lock:
-        _break_claims(client, target, deps, log)
+    if break_lock is not None:
+        _break_claim(client, target, break_lock, log)
 
     attempt = 1
     while True:
@@ -413,11 +522,7 @@ def acquire_migrate_lock(
         _write_claim(client, target, name, holder_json, released=False)
         claims = _read_claims(client, target, name)
         own = next((claim for claim in claims if claim.name == name), None)
-        others = [
-            claim
-            for claim in claims
-            if claim.name != name and not claim.released and claim.age_ms < timings.lease_ms
-        ]
+        others = [claim for claim in claims if claim.name != name and not claim.released]
         if (
             own is not None
             and not own.released
@@ -431,17 +536,24 @@ def acquire_migrate_lock(
                 name=name,
                 holder_json=holder_json,
                 confirmed_at=sent_at,
+                version=own.version,
                 deps=deps,
                 log=log,
             )
         _write_claim(client, target, name, holder_json, released=True)
         if own is None:
             raise _unverifiable_error(target)
+        live = [claim for claim in others if claim.age_ms < timings.lease_ms]
+        if not live and others:
+            alive = _release_stopped_claims(client, target, others, deps, log)
+            if alive:
+                raise _locked_error(target, alive, timings)
+            continue
         if attempt >= timings.attempts:
-            raise _locked_error(target, others, timings)
+            raise _locked_error(target, live, timings)
+        attempt += 1
         spread = timings.backoff_max_ms - timings.backoff_min_ms
         deps.sleep(timings.backoff_min_ms + deps.random() * spread)
-        attempt += 1
 
 
 class GuardedClient:
