@@ -687,10 +687,13 @@ export default schema(orders, byDay('${byDay}'), byDay('${byDayAlt}'), statuses,
       expect(cleanCheck.exitCode).toBe(0)
 
       // DROP + CREATE rather than CREATE OR REPLACE, which ObsessionDB does not
-      // apply on every replica.
+      // apply on every replica. Each CREATE waits for its DROP on every replica,
+      // or it can land on one that still lists the view (#712).
       await executor.command(`DROP VIEW ${q(report)} SYNC`)
+      await waitForDDLPropagation(executor, 'drop_view', `view:${database}.${report}`)
       await executor.command(`CREATE VIEW ${q(report)} AS SELECT day, sum(amount) AS revenue FROM ${q(orders)} WHERE status != 'Refunded' GROUP BY day`)
       await executor.command(`DROP VIEW ${q(ordersMv)} SYNC`)
+      await waitForDDLPropagation(executor, 'drop_materialized_view', `materialized_view:${database}.${ordersMv}`)
       await executor.command(`CREATE MATERIALIZED VIEW ${q(ordersMv)} TO ${q(byDayAlt)} AS ${mvQuery} AND amount > 0`)
 
       const expectedDrift = [
