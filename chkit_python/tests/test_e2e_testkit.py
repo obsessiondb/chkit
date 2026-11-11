@@ -2,6 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Callable
+
 import pytest
 
 from tests.e2e_testkit import (
@@ -10,6 +12,7 @@ from tests.e2e_testkit import (
     get_required_env,
     live_env_to_client_kwargs,
     resolve_live_env,
+    run_once_visible,
 )
 
 # ---------- get_required_env (hard-fail variant) ----------
@@ -150,3 +153,38 @@ def test_live_env_to_client_kwargs_honors_explicit_port() -> None:
         clickhouse_database="d",
     )
     assert live_env_to_client_kwargs(env)["port"] == 9440
+
+
+# ---------- run_once_visible (#712) ----------
+
+
+def _failing_then(errors: list[Exception], value: str) -> tuple[list[int], Callable[[], str]]:
+    calls = [0]
+
+    def run() -> str:
+        error = errors[calls[0]] if calls[0] < len(errors) else None
+        calls[0] += 1
+        if error is not None:
+            raise error
+        return value
+
+    return calls, run
+
+
+def test_run_once_visible_reruns_while_a_replica_answers_unknown_table_or_database() -> None:
+    calls, run = _failing_then(
+        [
+            RuntimeError("Code: 60. Table db.t does not exist. (UNKNOWN_TABLE)"),
+            RuntimeError("Code: 81. Database db does not exist. (UNKNOWN_DATABASE)"),
+        ],
+        "done",
+    )
+    assert run_once_visible(run, interval=0.001) == "done"
+    assert calls[0] == 3
+
+
+def test_run_once_visible_raises_any_other_error_at_once() -> None:
+    calls, run = _failing_then([RuntimeError("Table already exists. (TABLE_ALREADY_EXISTS)")], "done")
+    with pytest.raises(RuntimeError, match="TABLE_ALREADY_EXISTS"):
+        run_once_visible(run, interval=0.001)
+    assert calls[0] == 1

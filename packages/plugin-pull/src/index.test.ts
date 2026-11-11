@@ -3,6 +3,7 @@ import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { type ColumnDefinition, parseCodec, table } from '@chkit/core'
 
 import { __testUtils, createPullPlugin, PullSchema, renderSchemaFile } from './index.js'
@@ -751,6 +752,78 @@ describe('@chkit/plugin-pull schema command', () => {
     expect(payload.content).not.toContain('metadata_folder')
     expect(payload.content).not.toContain('metadata_table_folder')
     expect(payload.content).not.toContain('metadata_table_tag')
+  })
+
+  test('without --database, a custom introspector gets the target databases and pull reports skipped objects (#698)', async () => {
+    const received: string[][] = []
+    const plugin = createPullPlugin({
+      introspect: async ({ databases }) => {
+        received.push(databases)
+        return [
+          {
+            database: 'app',
+            name: 'events',
+            engine: 'MergeTree()',
+            primaryKey: '(id)',
+            orderBy: '(id)',
+            columns: [{ name: 'id', type: 'UInt64' }],
+            settings: {},
+            indexes: [],
+            projections: [],
+          },
+        ]
+      },
+    })
+    const executor: Pick<ClickHouseExecutor, 'listSchemaObjects'> = {
+      listSchemaObjects: async () => [
+        { kind: 'table', database: 'logs', name: 'raw' },
+        { kind: 'table', database: 'app', name: 'events' },
+        { kind: 'view', database: 'app', name: 'recent' },
+      ],
+    }
+
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const logs: unknown[] = []
+    const code = await command.run({
+      args: [],
+      flags: { '--dryrun': true },
+      jsonMode: true,
+      options: PullSchema.parse({}),
+      rawOptions: {},
+      configPath: '/tmp/clickhouse.config.ts',
+      config: {
+        schema: ['./schema.ts'],
+        outDir: './chkit',
+        migrationsDir: './chkit/migrations',
+        metaDir: './chkit/meta',
+        plugins: [],
+        check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+        safety: { allowDestructive: false },
+        clickhouse: {
+          url: 'http://localhost:8123',
+          username: 'default',
+          password: '',
+          database: 'default',
+          secure: false,
+        },
+      },
+      pluginContext: { executor: executor as ClickHouseExecutor, hasExecutor: true },
+      print(value) {
+        logs.push(value)
+      },
+    })
+
+    expect(code).toBe(0)
+    expect(received).toEqual([['app', 'logs']])
+    const payload = logs[0] as { databases: string[]; skippedObjects: unknown[]; definitionCount: number }
+    expect(payload.databases).toEqual(['app', 'logs'])
+    expect(payload.definitionCount).toBe(1)
+    expect(payload.skippedObjects).toEqual([
+      { kind: 'table', count: 1 },
+      { kind: 'view', count: 1 },
+    ])
   })
 
   test('supports introspected view and materialized_view objects', async () => {
