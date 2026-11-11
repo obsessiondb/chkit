@@ -462,6 +462,11 @@ def test_refuses_missing_or_nullable_keys() -> None:
         "`Nullable`(UInt64)",
         '"Nullable" /* c */ (UInt64)',
         "-- c\nLowCardinality(`Nullable`(String))",
+        # ClickHouse reads Unicode whitespace and “…” quotes too.
+        "Nullable\u00a0(UInt64)",
+        "LowCardinality(\u3000Nullable(String))",
+        "\u201cNullable\u201d(UInt64)",
+        "LowCardinality(\u201cNullable\u201d (String))",
     ]:
         inline: list[Any] = [{"name": "id", "type": type_}, *COLUMNS[1:]]
         found = messages(

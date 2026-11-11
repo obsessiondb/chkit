@@ -763,19 +763,28 @@ function copiedColumns(oldDef: TableDefinition, newDef: TableDefinition, problem
 
 /**
  * Whether a column type is `Nullable(T)` or `LowCardinality(Nullable(T))`.
- * ClickHouse skips comments and reads quoted type names, so a type with a
- * comment before `Nullable` or `` `Nullable`(UInt64) `` is Nullable too (#699).
- * Type names are case-sensitive.
+ * ClickHouse skips comments and Unicode whitespace, and reads type names quoted
+ * in backticks, double quotes or `“…”`, so a type with a comment before
+ * `Nullable` or `` `Nullable`(UInt64) `` is Nullable too (#699). The shared
+ * lexer reads Unicode whitespace and `“`, `”` as punctuation, so they are
+ * handled here. Type names are case-sensitive.
  */
 function isNullableType(type: string): boolean {
-  const tokens = tokenizeSQL(type).filter((token) => !isTrivia(token))
+  const tokens = tokenizeSQL(type).filter((token) => !isTrivia(token) && !/^\s$/.test(token.text))
   const isOpen = (index: number) => tokens[index]?.kind === 'punctuation' && tokens[index]?.text === '('
-  const nameAt = (index: number) => {
+  // The name at `index` and the index after it.
+  const nameAt = (index: number): [string | undefined, number] => {
     const token = tokens[index]
-    return token === undefined ? undefined : identifierName(token)
+    if (token === undefined) return [undefined, index]
+    if (token.text === '\u201c' && tokens[index + 2]?.text === '\u201d') {
+      const inner = tokens[index + 1]
+      return [inner?.kind === 'identifier' ? inner.text : undefined, index + 3]
+    }
+    return [identifierName(token), index + 1]
   }
-  const start = nameAt(0) === 'LowCardinality' && isOpen(1) ? 2 : 0
-  return nameAt(start) === 'Nullable' && isOpen(start + 1)
+  let [name, next] = nameAt(0)
+  if (name === 'LowCardinality' && isOpen(next)) [name, next] = nameAt(next + 1)
+  return name === 'Nullable' && isOpen(next)
 }
 
 function isStored(column: ColumnDefinition): boolean {

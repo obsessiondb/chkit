@@ -57,7 +57,7 @@ from chkit.core.sql import (
     render_column_type,
     to_create_sql,
 )
-from chkit.core.sql_lexer import identifier_name, is_trivia, js_trim, tokenize_sql
+from chkit.core.sql_lexer import identifier_name, is_js_space, is_trivia, js_trim, tokenize_sql
 from chkit.core.table_settings import (
     DEFAULT_INDEX_GRANULARITY,
     declared_readonly_settings,
@@ -1069,11 +1069,17 @@ def _copied_columns(
 def _is_nullable_type(type_: str) -> bool:
     """Whether a column type is ``Nullable(T)`` or ``LowCardinality(Nullable(T))``.
 
-    ClickHouse skips comments and reads quoted type names, so a type with a comment
-    before ``Nullable`` or ```Nullable`(UInt64)`` is Nullable too (#699). Type names
+    ClickHouse skips comments and Unicode whitespace, and reads type names quoted in
+    backticks, double quotes or ``“…”``, so a type with a comment before ``Nullable``
+    or ```Nullable`(UInt64)`` is Nullable too (#699). The shared lexer reads Unicode
+    whitespace and ``“``, ``”`` as punctuation, so they are handled here. Type names
     are case-sensitive.
     """
-    tokens = [token for token in tokenize_sql(type_) if not is_trivia(token)]
+    tokens = [
+        token
+        for token in tokenize_sql(type_)
+        if not is_trivia(token) and not is_js_space(token.text)
+    ]
 
     def is_open(index: int) -> bool:
         return (
@@ -1082,11 +1088,21 @@ def _is_nullable_type(type_: str) -> bool:
             and tokens[index].text == "("
         )
 
-    def name_at(index: int) -> str | None:
-        return identifier_name(tokens[index]) if index < len(tokens) else None
+    def name_at(index: int) -> tuple[str | None, int]:
+        """The name at ``index`` and the index after it."""
+        if index >= len(tokens):
+            return None, index
+        token = tokens[index]
+        closed = index + 2 < len(tokens) and tokens[index + 2].text == "\u201d"
+        if token.text == "\u201c" and closed:
+            inner = tokens[index + 1]
+            return (inner.text if inner.kind == "identifier" else None), index + 3
+        return identifier_name(token), index + 1
 
-    start = 2 if name_at(0) == "LowCardinality" and is_open(1) else 0
-    return name_at(start) == "Nullable" and is_open(start + 1)
+    name, after = name_at(0)
+    if name == "LowCardinality" and is_open(after):
+        name, after = name_at(after + 1)
+    return name == "Nullable" and is_open(after)
 
 
 def _is_stored(column: ColumnDefinition) -> bool:
