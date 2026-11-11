@@ -326,8 +326,15 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   const stateAfterStart = await journalStore.readMigrationState(migrationName)
 
   // A retry's id is this attempt's alone, so every entry of it counts (#701).
+  // The statement's first id counts only queries that started after the
+  // server time read right before the submission, after the journal writes:
+  // the recorded start can lie before an earlier attempt's entry by as long
+  // as they took. That read can land on a replica whose clock is behind the
+  // one that gave the recorded start, so the bound never lies before it.
   const pollAfterTime =
-    attemptQueryId === baseQueryId ? queryLogLowerBound(serverNowMs, 0) : retryQueryLogLowerBound(serverNowMs)
+    attemptQueryId === baseQueryId
+      ? queryLogLowerBound(Math.max(serverNowMs, (await readServerState(db)).nowMs), 0)
+      : retryQueryLogLowerBound(serverNowMs)
   const submitPromise = db.submit(sql, attemptQueryId, settings)
 
   return await pollUntilTerminal({

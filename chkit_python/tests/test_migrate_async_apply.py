@@ -330,9 +330,11 @@ def test_apply_async_happy_path_writes_started_then_completed() -> None:
     # The in-flight check looks for any running query with this id; the polls
     # after submitting only count queries started after the server-time bound.
     assert client.after_times == [None, SUBMISSION_BOUND, SUBMISSION_BOUND]
-    # The server time is read once, before the in-flight check: an attach
-    # needs it, and a first attempt records it as its start.
-    assert client.events == [SERVER_TIME_QUERY, "status", "submit", "status", "status"]
+    # The server time is read before the in-flight check (an attach would
+    # need it) and again right before the submission.
+    assert client.events == [
+        SERVER_TIME_QUERY, "status", SERVER_TIME_QUERY, "submit", "status", "status"
+    ]
 
 
 def test_apply_async_already_running_skips_submit() -> None:
@@ -837,6 +839,7 @@ def test_apply_async_polls_while_the_submit_request_is_open(
     assert client.events == [
         SERVER_TIME_QUERY,
         "status",
+        SERVER_TIME_QUERY,
         "status",
         "status",
         "status",
@@ -1846,3 +1849,52 @@ def test_a_rerun_finds_a_retried_attempt_that_ran_on_a_replica_3s_behind(
     assert result.kind == "completed"
     assert journal.writes[-1].operations[0].status == "completed"
     assert journal.writes[-1].operations[0].query_id == retried.query_id
+
+
+class _EarlierFinishClient(_ScriptedClient):
+    """query_log holds an earlier attempt's QueryFinish of the id; the submit is rejected."""
+
+    def __init__(self, earlier_start_sec: int) -> None:
+        super().__init__(
+            statuses=[],
+            submit_raises=RuntimeError("Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING"),
+        )
+        self._earlier_start_sec = earlier_start_sec
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+    ) -> QueryStatus:
+        if running_only:
+            return QueryStatus(status="unknown")
+        if self._earlier_start_sec >= _whole_seconds(after_time):
+            return QueryStatus(status="finished", written_rows=2, duration_ms=10)
+        return QueryStatus(status="unknown")
+
+
+class _SlowJournalStore(_FakeJournalStore):
+    """Each write takes 6 s of the client's server clock."""
+
+    client: Any = None
+
+    def write_migration_state(self, state: MigrationRowState) -> None:
+        self.client.now_ms += 6_000
+        super().write_migration_state(state)
+
+
+def test_a_first_attempts_polls_ignore_an_earlier_attempt_that_finished_during_the_writes() -> None:
+    """Codex review of #701: the statement's first id is shared with an
+    attempt whose record was lost. Its polls are bounded by the server time
+    read after the journal writes, which can take long, so that attempt's
+    QueryFinish is not taken for a rejected submission's."""
+    client = _EarlierFinishClient((SERVER_NOW_MS - 1_000) // 1000)
+    journal = _SlowJournalStore()
+    journal.client = client
+    with pytest.raises(RuntimeError, match="QUERY_WITH_SAME_ID"):
+        apply_async_statement(_rerun_input(client, journal, before_retry=None))
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]

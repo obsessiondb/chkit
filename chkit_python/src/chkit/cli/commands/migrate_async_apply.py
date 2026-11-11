@@ -461,8 +461,13 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     state_after_start = journal_store.read_migration_state(input_.migration_name)
 
     # A retry's id is this attempt's alone, so every entry of it counts (#701).
+    # The statement's first id counts only queries that started after the
+    # server time read right before the submission, after the journal writes:
+    # the recorded start can lie before an earlier attempt's entry by as long
+    # as they took. That read can land on a replica whose clock is behind the
+    # one that gave the recorded start, so the bound never lies before it.
     poll_after_time = (
-        _query_log_lower_bound(server_now_ms, 0)
+        _query_log_lower_bound(max(server_now_ms, _read_server_state(client)[0]), 0)
         if attempt_query_id == base_query_id
         else _retry_query_log_lower_bound(server_now_ms)
     )

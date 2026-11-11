@@ -10,6 +10,7 @@ import {
   type ClickHouseExecutor,
   type ClickHouseSettings,
   type QualifiedTable,
+  type QueryStatus,
 } from '@chkit/clickhouse'
 import { extractLegacyExecutableStatements, statementFingerprint, type ResolvedChxConfig } from '@chkit/core'
 
@@ -37,6 +38,7 @@ import {
 } from './async-apply.js'
 import {
   inProgressChecksumMismatchError,
+  MigrateError,
   nonSelectBarrierError,
   recordedStatementsChangedError,
   statementSplitChangedError,
@@ -283,6 +285,7 @@ export async function applyMigration(input: {
     initialState.checksum !== migrationChecksum
   ) {
     await acceptEditedMigration({
+      db,
       file,
       state: initialState,
       checksum: migrationChecksum,
@@ -483,6 +486,7 @@ async function runBeforeRetry(
 // the file then runs again from statement 1. The state is re-keyed to the new
 // checksum before anything runs, so a later failure resumes without --retry.
 async function acceptEditedMigration(input: {
+  db: ClickHouseExecutor
   file: string
   state: MigrationRowState
   checksum: string
@@ -512,7 +516,39 @@ async function acceptEditedMigration(input: {
       `${file} changed since its last failed attempt; no statement is recorded as completed, so it runs again from statement 1.`,
     )
   }
-  await journalStore.writeMigrationState(
-    rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) }),
+  const rebased = rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) })
+  await assertDroppedAttemptsStopped(input.db, file, state, rebased)
+  await journalStore.writeMigrationState(rebased)
+}
+
+// An async retry runs under a random query id (#701), so the record a rebase
+// drops is the only trace of an attempt that may still run (a submit that
+// failed while the server ran it, an attempt kept by --abandon): the next run
+// would not find it. Every replica is read, and an edit stops while one runs.
+async function assertDroppedAttemptsStopped(
+  db: ClickHouseExecutor,
+  file: string,
+  state: MigrationRowState,
+  rebased: MigrationRowState,
+): Promise<void> {
+  const dropped = state.operations.filter(
+    (op) => op.status !== 'completed' && op.queryId !== '' && !rebased.operations.includes(op),
   )
+  for (const op of dropped) {
+    let status: QueryStatus
+    try {
+      status = await db.queryStatus(op.queryId, { everyReplica: true, runningOnly: true })
+    } catch (error) {
+      throw new Error(
+        `Cannot apply the edited ${file}: could not check whether the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running (${error instanceof Error ? error.message : String(error)}). Nothing ran — re-run chkit migrate --apply.`,
+        { cause: error },
+      )
+    }
+    if (status.status === 'running') {
+      throw new MigrateError(
+        'retry_mismatch',
+        `Cannot apply the edited ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and the edit changed that statement's operation. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
+      )
+    }
+  }
 }

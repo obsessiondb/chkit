@@ -645,6 +645,55 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     expect(appended[0]?.checksum).toBe(checksumSQL(EDITED_SQL))
   })
 
+  // #701: an async retry runs under a random query id, so a record the edit
+  // drops is the only trace of an attempt that may still run (a submit that
+  // failed while the server ran it). The edit stops while it runs.
+  for (const running of [true, false]) {
+    test(`an edit that drops the record of an async attempt ${running ? 'stops while it still runs' : 'runs once it stopped'}`, async () => {
+      const dir = writeMigration(EDITED_SQL)
+      const { db: recording, commandCalls } = recordingDb()
+      const statusCalls: Array<{ queryId: string; everyReplica?: boolean; runningOnly?: boolean }> = []
+      const db = {
+        ...recording,
+        async queryStatus(queryId: string, options?: { everyReplica?: boolean; runningOnly?: boolean }) {
+          statusCalls.push({ queryId, ...options })
+          return { status: running ? 'running' : 'unknown' }
+        },
+      } as unknown as ClickHouseExecutor
+      const { store, writes } = createFakeStore(
+        inProgressState('old', [
+          operation(0, 'failed'),
+          { ...operation(1, 'failed', { type: 'load_table_data', key: 'table:t' }), queryId: 'retry-query-id' },
+        ]),
+      )
+
+      const run = applyMigration({
+        db,
+        journalStore: store,
+        pluginRuntime: fakePluginRuntime(),
+        config: CONFIG,
+        tableScope: TABLE_SCOPE,
+        flags: FLAGS,
+        migrationsDir: dir,
+        file: 'm.sql',
+        log: () => {},
+      })
+      if (running) {
+        await expect(run).rejects.toMatchObject({
+          code: 'retry_mismatch',
+          message: expect.stringContaining("KILL QUERY WHERE query_id = 'retry-query-id'"),
+        })
+      } else {
+        await run
+      }
+      rmSync(dir, { recursive: true, force: true })
+
+      expect(statusCalls).toEqual([{ queryId: 'retry-query-id', everyReplica: true, runningOnly: true }])
+      expect(commandCalls).toHaveLength(running ? 0 : 2)
+      expect(writes.length > 0).toBe(!running)
+    })
+  }
+
   test('a started statement still requires --retry: it may have run', async () => {
     const dir = writeMigration(EDITED_SQL)
     const { db, commandCalls } = recordingDb()

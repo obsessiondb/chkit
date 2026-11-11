@@ -214,9 +214,9 @@ describe('applyAsyncStatement', () => {
       SUBMISSION_BOUND,
       SUBMISSION_BOUND,
     ])
-    // The server time is read once, before the in-flight check: an attach
-    // needs it, and a first attempt records it as its start.
-    expect(events).toEqual([SERVER_TIME_QUERY, 'status', 'submit', 'status', 'status'])
+    // The server time is read before the in-flight check (an attach would
+    // need it) and again right before the submission.
+    expect(events).toEqual([SERVER_TIME_QUERY, 'status', SERVER_TIME_QUERY, 'submit', 'status', 'status'])
     // Two writes: started + completed.
     expect(writes).toHaveLength(2)
     expect(writes[0]?.operations[0]?.status).toBe('started')
@@ -1580,5 +1580,40 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(submitCalls).toEqual([])
     expect(result.kind).toBe('completed')
     expect(writes.at(-1)?.operations[0]).toMatchObject({ status: 'completed', queryId: retriedQueryId })
+  })
+
+  // Codex review of #701: the statement's first id is shared with an attempt
+  // whose record was lost. Its polls are bounded by the server time read
+  // after the journal writes, which can take long, so that attempt's
+  // QueryFinish is not taken for a rejected submission's.
+  test("a first attempt's polls ignore an earlier attempt of its id that finished during the journal writes", async () => {
+    const earlierStartSec = Math.floor((SERVER_NOW_MS - 1_000) / 1000)
+    const clock = { ms: SERVER_NOW_MS }
+    const db = {
+      async query() {
+        return [{ now_ms: String(clock.ms), database: SERVER_DATABASE }]
+      },
+      async queryStatus(_id: string, opts?: QueryStatusOptions): Promise<QueryStatus> {
+        if (opts?.runningOnly) return { status: 'unknown' }
+        const afterSec = Math.floor(Date.parse(opts?.afterTime ?? '') / 1000)
+        return earlierStartSec >= afterSec ? { status: 'finished', writtenRows: 2, durationMs: 10 } : { status: 'unknown' }
+      },
+      async command() {},
+      async submit() {
+        throw new Error('Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING')
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, writes } = createFakeJournalStore(null)
+    // Each journal write takes 6 s.
+    const write = store.writeMigrationState.bind(store)
+    store.writeMigrationState = async (state) => {
+      clock.ms += 6_000
+      await write(state)
+    }
+
+    await expect(
+      applyAsyncStatement({ ...input, beforeRetry: null, db, journalStore: store, sleep: NO_SLEEP }),
+    ).rejects.toThrow(/QUERY_WITH_SAME_ID/)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
   })
 })

@@ -69,7 +69,7 @@ from chkit.cli.safety_markers import (
     extract_migration_operation_summaries,
 )
 from chkit.cli.table_scope import TableScope
-from chkit.clickhouse.client import QueryResult
+from chkit.clickhouse.client import QueryResult, QueryStatus
 from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_splitter import extract_executable_statements, split_sql_statements
 
@@ -1418,6 +1418,60 @@ def test_apply_edited_file_without_progress_runs_from_statement_1(
     ]
     assert store.writes[0].checksum == checksum_sql(EDITED_SQL)
     assert store.appended[0].checksum == checksum_sql(EDITED_SQL)
+
+
+class _StatusClient(_RecordingClient):
+    """Answers the in-flight check of a dropped async attempt."""
+
+    def __init__(self, running: bool) -> None:
+        super().__init__()
+        self._running = running
+        self.status_calls: list[tuple[str, bool, bool]] = []
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+    ) -> QueryStatus:
+        self.status_calls.append((query_id, every_replica, running_only))
+        return QueryStatus(status="running" if self._running else "unknown")
+
+
+@pytest.mark.parametrize("running", [True, False], ids=["running", "stopped"])
+def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
+    tmp_path: Path, running: bool
+) -> None:
+    """#701: an async retry runs under a random query id, so a record the edit
+    drops is the only trace of an attempt that may still run (a submit that
+    failed while the server ran it). The edit stops while it runs."""
+    client = _StatusClient(running)
+    store = FakeStore(
+        in_progress(
+            [
+                op(0, "failed"),
+                op(
+                    1,
+                    "failed",
+                    Marker(type="load_table_data", key="table:t"),
+                    query_id="retry-query-id",
+                ),
+            ],
+            checksum="old",
+        )
+    )
+    if running:
+        with pytest.raises(MigrateError) as raised:
+            _apply(_write(tmp_path, EDITED_SQL), client, store)
+        assert raised.value.code == "retry_mismatch"
+        assert "KILL QUERY WHERE query_id = 'retry-query-id'" in raised.value.message
+    else:
+        _apply(_write(tmp_path, EDITED_SQL), client, store)
+    assert client.status_calls == [("retry-query-id", True, True)]
+    assert len(client.calls) == (0 if running else 2)
+    assert (len(store.writes) > 0) is not running
 
 
 def test_apply_started_statement_still_requires_retry(tmp_path: Path) -> None:
