@@ -35,7 +35,7 @@ class _ReplicaClient:
     replicas: int = 2
     queries: list[str] = field(default_factory=list[str])
 
-    def query(self, sql: str, settings: Any = None) -> _Result:
+    def query(self, sql: str) -> _Result:
         self.queries.append(sql)
         if "system.one" in sql:
             return _Result([{"replicas": self.replicas}])
@@ -76,7 +76,7 @@ def test_uses_the_configured_cluster_name() -> None:
 class _ColumnReplicaClient(_ReplicaClient):
     """A column wait reads every replica's definition: one row per replica."""
 
-    def query(self, sql: str, settings: Any = None) -> _Result:
+    def query(self, sql: str) -> _Result:
         result = super().query(sql)
         if "system.columns" not in sql:
             return result
@@ -170,14 +170,14 @@ def test_waits_until_every_replica_lists_the_journal_table_before_reading_it() -
     client = _ReplicaClient([1, 2])
     real_query = client.query
 
-    def query(sql: str, settings: Any = None) -> _Result:
+    def query(sql: str) -> _Result:
         if sql.startswith("SELECT currentDatabase()"):
             client.queries.append(sql)
             return _Result([{"database": "default"}])
         if "LIMIT 0" in sql:
             client.queries.append(sql)
             return _Result([])
-        return real_query(sql, settings)
+        return real_query(sql)
 
     client.query = query  # type: ignore[method-assign]
     store = JournalStore(client)  # type: ignore[arg-type]

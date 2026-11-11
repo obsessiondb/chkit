@@ -32,9 +32,10 @@ import { MigrateError } from './errors.js'
  *   reads with `select_sequential_consistency`, after quorum inserts. A run
  *   that cannot read its own claim back stops, rather than take a lock it
  *   cannot check.
- * - The holder renews its claim every `heartbeatMs`. A renewal counts only
- *   when the holder reads its version back higher than before, within
- *   `validMs` of the previous renewal it counted. Every request of the run
+ * - The holder renews its claim every `heartbeatMs`, numbering each write in
+ *   the holder JSON. A renewal counts from the send time of the heartbeat
+ *   whose row reads back as the claim's newest version, within `validMs` of
+ *   the previous renewal it counted. Every request of the run
  *   first checks that the last counted renewal was sent less than `validMs`
  *   ago, and that the claim was not released by --break-lock.
  * - A claim whose last heartbeat the server dates more than `leaseMs` back
@@ -77,6 +78,8 @@ export interface LockHolder {
   pid: number
   chkitVersion: string
   startedAt: string
+  /** Which write of the holder the row is: 0 for the claim, then one per heartbeat. */
+  beat: number
 }
 
 export interface LockClaim {
@@ -194,6 +197,7 @@ function parseHolder(raw: string): LockHolder | null {
       pid: value.pid,
       chkitVersion: String(value.chkitVersion ?? ''),
       startedAt: String(value.startedAt ?? ''),
+      beat: typeof value.beat === 'number' ? value.beat : -1,
     }
   } catch {
     return null
@@ -345,6 +349,7 @@ export async function acquireMigrateLock(
     pid: process.pid,
     chkitVersion: CLI_VERSION,
     startedAt: new Date().toISOString(),
+    beat: 0,
   }
   const holderJson = JSON.stringify(holder)
   if (options.breakLock !== undefined) await breakClaim(db, target, options.breakLock, deps)
@@ -361,7 +366,7 @@ export async function acquireMigrateLock(
       return startHolding(
         { db, heartbeatDb: options.heartbeatDb ?? db },
         target,
-        { name, holderJson, confirmedAt: sentAt, version: own.version },
+        { name, holder, confirmedAt: sentAt, version: own.version },
         deps,
       )
     }
@@ -384,15 +389,19 @@ export async function acquireMigrateLock(
 function startHolding(
   { db, heartbeatDb }: { db: ClickHouseExecutor; heartbeatDb: ClickHouseExecutor },
   target: LockTarget,
-  claim: { name: string; holderJson: string; confirmedAt: number; version: string },
+  claim: { name: string; holder: LockHolder; confirmedAt: number; version: string },
   deps: LockDeps,
 ): MigrateLock {
   const { timings } = deps
   let confirmedAt = claim.confirmedAt
   let version = claim.version
-  // The send time of the first heartbeat since the last counted one: a newer
-  // version read back may come from any of them, so it is counted from there.
-  let firstUncountedAt: number | undefined
+  let beat = 0
+  // The send time of each heartbeat not counted yet, by beat: the row read
+  // back may be any earlier heartbeat's, even one whose request failed and
+  // reached the server later, so a renewal counts from the send time of the
+  // heartbeat that wrote it.
+  const sentAtByBeat = new Map<number, number>()
+  const holderJson = (n: number) => JSON.stringify({ ...claim.holder, beat: n })
   let lost: string | undefined
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -406,33 +415,36 @@ function startHolding(
     return `no heartbeat was acknowledged for ${seconds(at - confirmedAt)}s`
   }
 
-  // A renewal counts when the claim reads back with a newer version, within
-  // the validity of the previous one. Another run that reads the same
-  // version for longer than validMs knows this run counts no renewal.
+  // A renewal counts from the send time of the heartbeat whose row reads
+  // back as the claim's newest version, acknowledged within the validity of
+  // the previous renewal. Another run that reads the same version for longer
+  // than validMs knows this run counts no renewal.
   async function heartbeat(): Promise<void> {
     const sentAt = deps.now()
-    firstUncountedAt ??= sentAt
     if (lapsed(sentAt)) {
       lost ??= lapsedReason(sentAt)
       return
     }
+    beat += 1
+    sentAtByBeat.set(beat, sentAt)
     try {
-      await writeClaim(heartbeatDb, target, claim.name, claim.holderJson, { released: false, after: version })
+      await writeClaim(heartbeatDb, target, claim.name, holderJson(beat), { released: false, after: version })
       const own = (await readClaims(heartbeatDb, target, claim.name)).find((item) => item.name === claim.name)
       if (stopped || !own) return
       if (own.released) {
         lost ??= 'another run released it (--break-lock)'
         return
       }
-      if (own.version <= version) return
+      if (own.version > version) version = own.version
+      const wroteAt = sentAtByBeat.get(own.holder?.beat ?? -1)
+      if (wroteAt === undefined || wroteAt <= confirmedAt) return
       const ackedAt = deps.now()
       if (lapsed(ackedAt)) {
         lost ??= lapsedReason(ackedAt)
         return
       }
-      version = own.version
-      confirmedAt = firstUncountedAt
-      firstUncountedAt = undefined
+      confirmedAt = wroteAt
+      for (const [n, at] of sentAtByBeat) if (at <= confirmedAt) sentAtByBeat.delete(n)
     } catch (error) {
       debug('migrate-lock', `heartbeat failed: ${error instanceof Error ? error.message : String(error)}`)
     }
@@ -464,7 +476,7 @@ function startHolding(
       // is left behind: the release then goes first, and still wins.
       await Promise.race([inFlight.catch(() => undefined), sleep(RELEASE_WAIT_MS, undefined, { ref: false })])
       try {
-        await writeClaim(db, target, claim.name, claim.holderJson, { released: true })
+        await writeClaim(db, target, claim.name, holderJson(beat), { released: true })
         debug('migrate-lock', `released ${claim.name}`)
       } catch (error) {
         deps.log(

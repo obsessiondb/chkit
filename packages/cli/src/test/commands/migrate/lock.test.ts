@@ -37,6 +37,14 @@ interface FakeServer {
   dropped: Set<string>
   /** When set, the next read fails, after calling it. */
   failNextRead?: () => void
+  /**
+   * Decides each heartbeat write by its beat: `hold` fails the request but
+   * keeps the row in `held`, for the test to commit later.
+   */
+  onBeat?: (beat: number) => 'write' | 'drop' | 'hold'
+  held: Row[]
+  /** When set, runs once after the next read. */
+  afterRead?: () => void
 }
 
 const UNQUOTE = (value: string) => value.replace(/\\(.)/g, '$1')
@@ -58,6 +66,7 @@ function fakeServer(): FakeServer {
     clock: { now: Date.parse('2026-11-11T08:00:00Z') },
     hidden: new Set(),
     dropped: new Set(),
+    held: [],
     db: undefined as never,
   }
   const command = async (sql: string) => {
@@ -68,7 +77,15 @@ function fakeServer(): FakeServer {
     let version = server.clock.now
     if (match[3] !== undefined) version = RELEASED
     if (match[4] !== undefined) version = Math.max(server.clock.now, parseVersion(match[4]) + 1)
-    server.rows.push({ name, version, holder: UNQUOTE(match[5] as string) })
+    const row = { name, version, holder: UNQUOTE(match[5] as string) }
+    const beat = (JSON.parse(row.holder) as { beat?: number }).beat ?? -1
+    const decision = version === RELEASED || beat < 1 ? 'write' : (server.onBeat?.(beat) ?? 'write')
+    if (decision === 'drop') return
+    if (decision === 'hold') {
+      server.held.push(row)
+      throw new Error('connection lost')
+    }
+    server.rows.push(row)
   }
   const query = async (sql: string) => {
     const fail = server.failNextRead
@@ -84,7 +101,9 @@ function fakeServer(): FakeServer {
       const seen = latest.get(row.name)
       if (!seen || row.version >= seen.version) latest.set(row.name, row)
     }
-    return [...latest.values()]
+    const after = server.afterRead
+    server.afterRead = undefined
+    const result = [...latest.values()]
       .filter((row) => row.version !== RELEASED || row.name === UNQUOTE(own))
       .map((row) => ({
         name: row.name,
@@ -93,6 +112,8 @@ function fakeServer(): FakeServer {
         version: row.version === RELEASED ? '2299-12-31 23:59:59.000' : formatVersion(row.version),
         age_ms: String(row.version === RELEASED ? -1 : server.clock.now - row.version),
       }))
+    after?.()
+    return result
   }
   server.db = { command, query } as unknown as ClickHouseExecutor
   return server
@@ -303,6 +324,42 @@ describe('holding the migrate lock', () => {
     expect(() => lock.assertHeld()).toThrow('lost the migrate lock')
     server.dropped.clear()
     await lock.release()
+  })
+
+  test('a heartbeat that reaches the server after a later one counted does not renew the claim', async () => {
+    const server = fakeServer()
+    const name = `${LOCK_ROW_PREFIX}run-1`
+    const { overrides, local } = deps({ heartbeatMs: 1 })
+    let lostWrites = 0
+    // Beat 1, sent at 10 s, loses its connection but reaches the server after
+    // beat 2 (sent at 20 s) counted, stamped by a replica whose clock is
+    // ahead. Every later write, from 30 s, is lost, and its read returns
+    // beat 1's row.
+    server.onBeat = (beat) => {
+      if (beat === 1) {
+        local.now = 20_000
+        return 'hold'
+      }
+      if (beat === 2) {
+        server.afterRead = () => {
+          for (const row of server.held.splice(0)) server.rows.push({ ...row, version: server.clock.now + 100_000 })
+          local.now = 30_000
+        }
+        return 'write'
+      }
+      lostWrites += 1
+      return 'drop'
+    }
+    local.now = 10_000
+    const lock = await acquireMigrateLock(server.db, TARGET, quiet, overrides)
+    await waitFor(() => lostWrites >= 3)
+    local.now = 20_000 + LOCK_TIMINGS.validMs
+    lock.assertHeld()
+    local.now = 20_000 + LOCK_TIMINGS.validMs + 1
+    expect(() => lock.assertHeld()).toThrow('lost the migrate lock')
+    server.onBeat = undefined
+    await lock.release()
+    expect(claimsOf(server, name).at(-1)?.version).toBe(RELEASED)
   })
 
   test('a heartbeat sent after the claim lapsed does not renew it', async () => {

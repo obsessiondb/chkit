@@ -760,7 +760,7 @@ class JournalStore:
         # The fingerprints come from the same row version as the operations.
         latest = f", latest.6 AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
         versioned = f", {fingerprint_select}" if fingerprints else ""
-        fanout_sql = (
+        return self._client.query(
             "SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, "
             "latest.3 AS chkit_version, latest.4 AS migration_completed, "
             f"latest.5 AS operations{latest} FROM (SELECT name, argMax(tuple(applied_at, "
@@ -768,16 +768,7 @@ class JournalStore:
             "applied_at) AS latest FROM clusterAllReplicas("
             f"'{_escape_sql_string(fanout.cluster)}', currentDatabase(), '{self._table}') "
             f"GROUP BY name) WHERE {where} ORDER BY name{limit}"
-        )
-        try:
-            # A replica that does not answer fails the read, rather than drop
-            # the rows only it has (#716).
-            return self._client.query(f"{fanout_sql} SETTINGS skip_unavailable_shards = 0").rows
-        except Exception as exc:
-            # A readonly = 1 user cannot change any setting (#402); it only reads.
-            if not _is_clickhouse_error(exc, _READONLY):
-                raise
-            return self._client.query(fanout_sql).rows
+        ).rows
 
     def _try_sync_replica(self) -> None:
         # Non-replicated/single-node setups don't support SYSTEM SYNC REPLICA.

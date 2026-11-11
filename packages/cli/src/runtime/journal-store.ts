@@ -668,16 +668,9 @@ SETTINGS index_granularity = 1`
     // The fingerprints come from the same row version as the operations.
     const latest = fingerprints ? `, latest.6 AS ${FINGERPRINTS_COLUMN}` : ''
     const versioned = fingerprints ? `, ${fingerprintSelect}` : ''
-    const sql = `SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations${latest} FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, ${OPERATIONS_SELECT}${versioned}), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`
-    try {
-      // A replica that does not answer fails the read, rather than drop the
-      // rows only it has (#716).
-      return await db.query<MigrationRow>(`${sql} SETTINGS skip_unavailable_shards = 0`)
-    } catch (error) {
-      // A readonly = 1 user cannot change any setting (#402); it only reads.
-      if (!isClickHouseError(error, READONLY)) throw error
-      return await db.query<MigrationRow>(sql)
-    }
+    return await db.query<MigrationRow>(
+      `SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations${latest} FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, ${OPERATIONS_SELECT}${versioned}), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
+    )
   }
 
   async function insertState(state: MigrationRowState, fingerprints: boolean): Promise<void> {

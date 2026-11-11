@@ -24,8 +24,9 @@ the journal and reads every claim back:
   that cannot read its own claim back stops, rather than take a lock it
   cannot check.
 - The holder renews its claim every ``heartbeat_ms``, on a thread with its own
-  client. A renewal counts only when the holder reads its version back
-  higher than before, within ``valid_ms`` of the previous renewal it counted.
+  client, numbering each write in the holder JSON. A renewal counts from the
+  send time of the heartbeat whose row reads back as the claim's newest
+  version, within ``valid_ms`` of the previous renewal it counted.
   Every request of the run first checks that the last counted renewal was
   sent less than ``valid_ms`` ago, and that the claim was not released by
   --break-lock.
@@ -90,6 +91,8 @@ class LockHolder:
     pid: int
     chkit_version: str
     started_at: str
+    # Which write of the holder the row is: 0 for the claim, then one per heartbeat.
+    beat: int
 
 
 @dataclass(frozen=True, slots=True)
@@ -211,7 +214,12 @@ def _parse_holder(raw: str) -> LockHolder | None:
         pid=pid,
         chkit_version=str(value.get("chkitVersion", "")),
         started_at=str(value.get("startedAt", "")),
+        beat=_beat(value.get("beat")),
     )
+
+
+def _beat(value: Any) -> int:
+    return value if isinstance(value, int) and not isinstance(value, bool) else -1
 
 
 def _read_claims(client: Any, target: LockTarget, own: str) -> list[LockClaim]:
@@ -382,7 +390,7 @@ class MigrateLock:
         target: LockTarget,
         *,
         name: str,
-        holder_json: str,
+        holder: dict[str, Any],
         confirmed_at: float,
         version: str,
         deps: LockDeps,
@@ -392,19 +400,24 @@ class MigrateLock:
         self._heartbeat_client = heartbeat_client
         self._target = target
         self._name = name
-        self._holder_json = holder_json
+        self._holder = holder
         self._confirmed_at = confirmed_at
         self._version = version
-        # The send time of the first heartbeat since the last counted one: a
-        # newer version read back may come from any of them, so it is counted
-        # from there.
-        self._first_uncounted_at: float | None = None
+        self._beat = 0
+        # The send time of each heartbeat not counted yet, by beat: the row
+        # read back may be any earlier heartbeat's, even one whose request
+        # failed and reached the server later, so a renewal counts from the
+        # send time of the heartbeat that wrote it.
+        self._sent_at_by_beat: dict[int, float] = {}
         self._deps = deps
         self._log = log
         self._lost: str | None = None
         self._stop = threading.Event()
         self._thread = threading.Thread(target=self._run, name="chkit-migrate-lock", daemon=True)
         self._thread.start()
+
+    def _holder_json(self, beat: int) -> str:
+        return json.dumps({**self._holder, "beat": beat}, separators=(",", ":"), ensure_ascii=False)
 
     def _lapsed(self, at: float) -> bool:
         return at - self._confirmed_at > self._deps.timings.valid_ms
@@ -419,23 +432,23 @@ class MigrateLock:
             self._heartbeat()
 
     def _heartbeat(self) -> None:
-        # A renewal counts when the claim reads back with a newer version,
-        # within the validity of the previous one. Another run that reads the
-        # same version for longer than valid_ms knows this run counts no
-        # renewal.
+        # A renewal counts from the send time of the heartbeat whose row reads
+        # back as the claim's newest version, acknowledged within the validity
+        # of the previous renewal. Another run that reads the same version for
+        # longer than valid_ms knows this run counts no renewal.
         sent_at = self._deps.now()
-        if self._first_uncounted_at is None:
-            self._first_uncounted_at = sent_at
         if self._lapsed(sent_at):
             if self._lost is None:
                 self._lost = self._lapsed_reason(sent_at)
             return
+        self._beat += 1
+        self._sent_at_by_beat[self._beat] = sent_at
         try:
             _write_claim(
                 self._heartbeat_client,
                 self._target,
                 self._name,
-                self._holder_json,
+                self._holder_json(self._beat),
                 released=False,
                 after=self._version,
             )
@@ -455,16 +468,19 @@ class MigrateLock:
             if self._lost is None:
                 self._lost = "another run released it (--break-lock)"
             return
-        if own.version <= self._version:
+        self._version = max(self._version, own.version)
+        wrote_at = self._sent_at_by_beat.get(own.holder.beat if own.holder else -1)
+        if wrote_at is None or wrote_at <= self._confirmed_at:
             return
         acked = self._deps.now()
         if self._lapsed(acked):
             if self._lost is None:
                 self._lost = self._lapsed_reason(acked)
             return
-        self._version = own.version
-        self._confirmed_at = self._first_uncounted_at
-        self._first_uncounted_at = None
+        self._confirmed_at = wrote_at
+        self._sent_at_by_beat = {
+            n: at for n, at in self._sent_at_by_beat.items() if at > self._confirmed_at
+        }
 
     def assert_held(self) -> None:
         """Raises when the lock may no longer be held."""
@@ -487,7 +503,13 @@ class MigrateLock:
         # is left behind: the release then goes first, and still wins.
         self._thread.join(timeout=5)
         try:
-            _write_claim(self._client, self._target, self._name, self._holder_json, released=True)
+            _write_claim(
+                self._client,
+                self._target,
+                self._name,
+                self._holder_json(self._beat),
+                released=True,
+            )
         except Exception as error:
             self._log(
                 f"⚠ Could not release the migrate lock ({error}); other runs can take it "
@@ -517,6 +539,7 @@ def acquire_migrate_lock(
         "pid": os.getpid(),
         "chkitVersion": __version__,
         "startedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
+        "beat": 0,
     }
     holder_json = json.dumps(holder, separators=(",", ":"), ensure_ascii=False)
     if break_lock is not None:
@@ -541,7 +564,7 @@ def acquire_migrate_lock(
                 heartbeat_client if heartbeat_client is not None else client,
                 target,
                 name=name,
-                holder_json=holder_json,
+                holder=holder,
                 confirmed_at=sent_at,
                 version=own.version,
                 deps=deps,

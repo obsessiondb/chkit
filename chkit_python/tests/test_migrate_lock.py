@@ -85,6 +85,12 @@ class FakeServer:
     dropped: set[str] = field(default_factory=set)
     # When set, the next read fails, after calling it.
     fail_next_read: Callable[[], None] | None = None
+    # Decides each heartbeat write by its beat: "hold" fails the request but
+    # keeps the row in ``held``, for the test to commit later.
+    on_beat: Callable[[int], str] | None = None
+    held: list[Row] = field(default_factory=list)
+    # When set, runs once after the next read.
+    after_read: Callable[[], None] | None = None
 
     def execute(self, sql: str, settings: dict[str, Any] | None = None) -> None:
         match = _INSERT.search(sql)
@@ -97,7 +103,17 @@ class FakeServer:
             version = RELEASED
         if match[4] is not None:
             version = max(self.clock, _parse_version(match[4]) + 1)
-        self.rows.append(Row(name=name, version=version, holder=_unquote(match[5])))
+        row = Row(name=name, version=version, holder=_unquote(match[5]))
+        beat = json.loads(row.holder).get("beat", -1)
+        decision = "write"
+        if version != RELEASED and beat >= 1 and self.on_beat is not None:
+            decision = self.on_beat(beat)
+        if decision == "drop":
+            return
+        if decision == "hold":
+            self.held.append(row)
+            raise RuntimeError("connection lost")
+        self.rows.append(row)
 
     def query(self, sql: str, settings: dict[str, Any] | None = None) -> SimpleNamespace:
         fail, self.fail_next_read = self.fail_next_read, None
@@ -126,6 +142,9 @@ class FakeServer:
             for row in latest.values()
             if row.version != RELEASED or row.name == own
         ]
+        after, self.after_read = self.after_read, None
+        if after is not None:
+            after()
         return SimpleNamespace(rows=rows)
 
     def claims_of(self, name: str) -> list[Row]:
@@ -352,6 +371,46 @@ def test_a_newer_version_read_back_counts_from_the_first_heartbeat_that_may_have
         lock.assert_held()
     server.dropped.clear()
     lock.release()
+
+
+def test_a_heartbeat_that_reaches_the_server_after_a_later_one_counted_does_not_renew() -> None:
+    server = FakeServer()
+    name = f"{LOCK_ROW_PREFIX}run-1"
+    clock = Clock()
+    lost_writes = [0]
+
+    def commit_held() -> None:
+        for row in server.held:
+            server.rows.append(Row(name=row.name, version=server.clock + 100_000, holder=row.holder))
+        server.held.clear()
+        clock.now = 30_000
+
+    # Beat 1, sent at 10 s, loses its connection but reaches the server after
+    # beat 2 (sent at 20 s) counted, stamped by a replica whose clock is
+    # ahead. Every later write, from 30 s, is lost, and its read returns beat
+    # 1's row.
+    def on_beat(beat: int) -> str:
+        if beat == 1:
+            clock.now = 20_000
+            return "hold"
+        if beat == 2:
+            server.after_read = commit_held
+            return "write"
+        lost_writes[0] += 1
+        return "drop"
+
+    server.on_beat = on_beat
+    clock.now = 10_000
+    lock = _acquire(server, _deps(clock, [], heartbeat_ms=1))
+    _wait_for(lambda: lost_writes[0] >= 3)
+    clock.now = 20_000 + LOCK_TIMINGS.valid_ms
+    lock.assert_held()
+    clock.now = 20_000 + LOCK_TIMINGS.valid_ms + 1
+    with pytest.raises(MigrateError, match="lost the migrate lock"):
+        lock.assert_held()
+    server.on_beat = None
+    lock.release()
+    assert server.claims_of(name)[-1].version == RELEASED
 
 
 def test_a_heartbeat_sent_after_the_claim_lapsed_does_not_renew_it() -> None:
