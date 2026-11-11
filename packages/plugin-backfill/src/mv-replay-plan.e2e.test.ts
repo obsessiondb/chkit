@@ -246,6 +246,9 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
     // intra-partition range splitting) — the same shape the copy e2e uses. This
     // keeps the test on the part the fix touches (source introspection + the
     // per-partition INSERT…SELECT) rather than the sort-key splitter.
+    // Planning reads the source's parts on any replica: wait until every
+    // replica sees the inserted rows first, as chkit-py's port does (#718).
+    await waitUntilSourceVisible()
     // Poll until every partition is listed: the read can land on a replica that
     // has not loaded the inserted parts yet (#718), as chkit-py's port does.
     const [bytesRow] = await pollUntil(
