@@ -22,6 +22,7 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
+    drop_database,
     format_test_diagnostic,
     poll_until,
     quote_ident,
@@ -430,4 +431,4 @@ definitions = schema(
                 secure=env.clickhouse_url.startswith("https:"),
             )
         ) as client:
-            client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+            drop_database(client, database)
