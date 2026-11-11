@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
@@ -222,6 +222,17 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
   const INSERT = 'INSERT INTO default.t VALUES (1);'
   const SQL = `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n${INSERT}\n`
 
+  // The clock is frozen and each check takes 10 s, so a wait gives up after
+  // 3 checks of its 30 s instead of 30 s of real time (#719).
+  let now = 0
+  beforeEach(() => {
+    now = Date.parse('2026-01-01T00:00:00Z')
+    setSystemTime(new Date(now))
+  })
+  afterEach(() => {
+    setSystemTime()
+  })
+
   // A single-replica target on which default.t is listed in system.tables
   // only while `visible` is set.
   function propagationDb(events: string[], visible: { value: boolean }) {
@@ -232,6 +243,8 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
       async query(sql: string) {
         if (sql.includes('system.one')) return []
         events.push('propagation-query')
+        now += 10_000
+        setSystemTime(new Date(now))
         return visible.value ? [{ x: 1 }] : []
       },
     } as unknown as ClickHouseExecutor
