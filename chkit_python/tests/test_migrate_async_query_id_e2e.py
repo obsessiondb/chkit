@@ -37,7 +37,8 @@ from tests.e2e_testkit import (
 )
 
 _ROWS = 16
-# About 8 s at 0.5 s per row, so the other run starts while it still runs.
+# About 16 s at 1 s per row, so the other run starts, and a re-run takes the
+# migrate lock, while it still runs.
 # It fails on row _FAIL_AT in a database whose fail_marker has a row.
 _FAIL_AT = 12
 _CLI_TIMEOUT_SECONDS = 120.0
@@ -101,7 +102,7 @@ def make_fixture() -> Iterator[Fixture]:
         "-- before-retry: TRUNCATE TABLE events\n"
         f"INSERT INTO events SELECT number + throwIf(number = {_FAIL_AT} AND "
         "(SELECT count() FROM fail_marker) > 0, 'failure in this database') "
-        f"FROM numbers({_ROWS}) WHERE sleepEachRow(0.5) = 0 SETTINGS max_block_size = 1;\n",
+        f"FROM numbers({_ROWS}) WHERE sleepEachRow(1) = 0 SETTINGS max_block_size = 1;\n",
         encoding="utf-8",
     )
     for target, database in databases.items():
