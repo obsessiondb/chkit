@@ -1,15 +1,14 @@
 import { afterAll, describe, expect, test } from 'bun:test'
-import { mkdtemp, rm, writeFile } from 'node:fs/promises'
+import { mkdtemp, rm } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
-import { pathToFileURL } from 'node:url'
 
 import { createClient } from '@clickhouse/client'
 import { createPrefix, createStatelessLiveExecutor, LOCAL_STACK_ENV, quoteIdent, waitForTable } from '@chkit/clickhouse/e2e-testkit'
 import { type QueryClient, toCreateSQL } from '@chkit/core'
 
 import { type ChkitSide, compareParity, type OracleSnapshot } from '../parity/compare.js'
-import { renderEndpointSql } from '../parity/endpoint-render.js'
+import { callValues, type GeneratedQuery, loadGeneratedQueries, renderEndpoints } from '../parity/endpoint-render.js'
 import recorded from '../test/fixtures/synthetic.oracle.json'
 import { importTinybirdProject, type TinybirdImport } from './index.js'
 
@@ -51,7 +50,11 @@ describe('@chkit/plugin-tinybird fixture parity (test stack)', () => {
       await waitForTable(executor, database, definition.name)
     }
 
-    const entries = await compareParity(oracle, await readChkitSide(imported), imported.report, {
+    // The generated module compiles; endpoint params go through each query's own validation, as a caller's do.
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-tinybird-queries-'))
+    dirs.push(dir)
+    const generated = await loadGeneratedQueries(imported.queriesSource ?? '', dir, CORE_ENTRY)
+    const entries = await compareParity(oracle, await readChkitSide(imported, generated), imported.report, {
       formatQuery: async (sql) => {
         const [row] = await executor.query<{ q: string }>(`SELECT formatQuerySingleLine(${stringLiteral(sql)}) AS q`)
         return row?.q ?? ''
@@ -72,29 +75,20 @@ describe('@chkit/plugin-tinybird fixture parity (test stack)', () => {
       ...Array(4).fill('materialized'),
     ])
 
-    // The generated module compiles, and every query runs with each param set.
-    const dir = await mkdtemp(join(tmpdir(), 'chkit-tinybird-queries-'))
-    dirs.push(dir)
-    const file = join(dir, 'queries.ts')
-    await writeFile(file, (imported.queriesSource ?? '').replace("from '@chkit/core'", `from ${JSON.stringify(CORE_ENTRY)}`))
-    const queries: Record<string, (params: Record<string, unknown>, options: { client: QueryClient }) => Promise<unknown[]>> = await import(
-      pathToFileURL(file).href
-    )
+    // Every query runs on ClickHouse with each param set, omitted params taking the generated defaults.
+    const queries = generated as unknown as Record<string, (params: Record<string, unknown>, options: { client: QueryClient }) => Promise<unknown[]>>
     expect(imported.endpoints.map((endpoint) => endpoint.exportName).sort()).toEqual(['events_by_type', 'flagged_users', 'static_counts'])
     for (const endpoint of imported.endpoints) {
       const run = queries[endpoint.exportName]
       expect(typeof run).toBe('function')
       for (const params of endpoint.paramSets) {
-        const values = Object.fromEntries(
-          Object.entries(params).map(([name, value]) => [name, /Int|Float/.test(endpoint.params.find((param) => param.name === name)?.type ?? '') ? Number(value) : value])
-        )
-        expect(await run?.(values, { client })).toEqual([])
+        expect(await run?.(callValues(endpoint, params), { client })).toEqual([])
       }
     }
   }, 120_000)
 })
 
-async function readChkitSide(imported: TinybirdImport): Promise<ChkitSide> {
+async function readChkitSide(imported: TinybirdImport, generated: Record<string, GeneratedQuery>): Promise<ChkitSide> {
   const [server] = await executor.query<{ version: string; timezone: string }>('SELECT version() AS version, timezone() AS timezone')
   const rows = await executor.query<{ name: string; create_table_query: string; as_select: string; created: string }>(
     `SELECT name, create_table_query, as_select, toString(metadata_modification_time) AS created FROM system.tables WHERE database = ${stringLiteral(database)}`
@@ -108,7 +102,7 @@ async function readChkitSide(imported: TinybirdImport): Promise<ChkitSide> {
     serverTimezone: server?.timezone ?? '',
     objects: new Map(rows.map((row) => [row.name, { createTableQuery: row.create_table_query, asSelect: row.as_select, createdAt: row.created }])),
     refreshes: new Map(refreshes.map((row) => [row.view, { nextRefreshTime: row.next }])),
-    endpoints: new Map(imported.endpoints.map((endpoint) => [endpoint.pipe, endpoint.paramSets.map((params) => ({ params, sql: renderEndpointSql(endpoint, params) }))])),
+    endpoints: renderEndpoints(imported.endpoints, generated),
   }
 }
 

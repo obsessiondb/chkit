@@ -1,8 +1,21 @@
-import { describe, expect, test } from 'bun:test'
+import { afterAll, describe, expect, test } from 'bun:test'
+import { mkdtemp, rm } from 'node:fs/promises'
+import { tmpdir } from 'node:os'
+import { join } from 'node:path'
 
+import { loadGeneratedQueries } from '../parity/endpoint-render.js'
 import { parseDatafile } from './datafile.js'
 import { identifier, renderQueriesFile, translateEndpoint } from './endpoints.js'
 import type { PipeScope } from './pipes.js'
+
+// The generated queries import '@chkit/core', which does not resolve from a temp dir.
+const CORE_ENTRY = join(import.meta.dir, '../../core/src/index.ts')
+
+/** The translated value; a failed translation fails the test with its reasons. */
+function translationValue<T>(translation: { ok: true; value: T } | { ok: false; reasons: string[] }): T {
+  if (!translation.ok) throw new Error(`not translated: ${translation.reasons.join('; ')}`)
+  return translation.value
+}
 
 const scope: PipeScope = {
   database: 'analytics',
@@ -28,23 +41,23 @@ describe('translateEndpoint', () => {
       'LIMIT {{ Int32(limit, default=100) }}',
     ])
     expect(translated.ok).toBe(true)
-    if (!translated.ok) return
-    expect(translated.value.sql).toBe(
+    const translatedValue = translationValue(translated)
+    expect(translatedValue.sql).toBe(
       // Tinybird does not dedent templated (%) SQL.
       'SELECT count() FROM analytics.events AS events\n    WHERE type = {kind:String}\n      AND ts >= {start:String}\n      AND user_id > toUInt64({min_user:String})\n      AND day = {day:String}\n    LIMIT toInt32({limit:String})'
     )
-    expect(translated.value.params).toEqual([
+    expect(translatedValue.params).toEqual([
       { name: 'kind', type: 'String', required: false, default: 'click' },
       { name: 'start', type: 'DateTime', required: false, default: '2024-01-01 00:00:00' },
       { name: 'min_user', type: 'UInt64', required: false, default: 0 },
       { name: 'day', type: 'Date', required: true },
       { name: 'limit', type: 'Int32', required: false, default: 100 },
     ])
-    expect(translated.value.paramSets).toEqual([
+    expect(translatedValue.paramSets).toEqual([
       { day: '2025-01-02' },
       { kind: 'chkit', start: '2025-01-02 03:04:05', min_user: '7', day: '2025-01-02', limit: '-7' },
     ])
-    expect(translated.value.source).toBe(
+    expect(translatedValue.source).toBe(
       [
         'export const top = query({ name: "top" })`',
         'SELECT count() FROM analytics.events AS events',
@@ -80,8 +93,8 @@ describe('translateEndpoint', () => {
       { name: 'a', type: 'String', required: true, default: 'x' },
       { name: 'n', type: 'Int32', required: true, default: 5 },
     ])
-    // biome-ignore lint/suspicious/noTemplateCurlyInString: the expected TypeScript source contains template interpolations
-    expect(translated.ok && translated.value.source).toContain('${p("a", t.string()).default("x")}')
+    // Used twice: hoisted to one const, so the default survives (see 'repeated params').
+    expect(translated.ok && translated.value.source).toContain('const top_a = p("a", t.string()).default("x")\n')
     expect(translated.ok && translated.value.paramSets[0]).toEqual({})
     const differing = endpoint(['%', "SELECT {{ String(a, 'x', required=True) }}, {{ String(a, 'y', required=True) }} FROM events"])
     expect(!differing.ok && differing.reasons.join(' | ')).toContain('param a is declared twice with different types or defaults')
@@ -196,8 +209,8 @@ describe('renderQueriesFile', () => {
   test('imports p, query and t and declares only the patterns it uses', () => {
     const translated = endpoint(['%', "SELECT {{ Date(d, '2024-01-01') }} FROM events"])
     expect(translated.ok).toBe(true)
-    if (!translated.ok) return
-    const source = renderQueriesFile([translated.value], 'analytics')
+    const translatedValue = translationValue(translated)
+    const source = renderQueriesFile([translatedValue], 'analytics')
     expect(source.startsWith("import { p, query, t } from '@chkit/core'\n")).toBe(true)
     expect(source).toContain('const DATE = /^\\d\\d\\d\\d-\\d\\d-\\d\\d$/\n')
     expect(source).not.toContain('const DATE_TIME =')
@@ -209,5 +222,40 @@ describe('identifier', () => {
     expect(['default', 'delete', 'new', 'p', 't', 'query', 'pythonFloat', 'DATE', 'top_users', '1st'].map(identifier)).toEqual([
       'default_endpoint', 'delete_endpoint', 'new_endpoint', 'p_endpoint', 't_endpoint', 'query_endpoint', 'pythonFloat_endpoint', 'DATE_endpoint', 'top_users', '_1st',
     ])
+  })
+})
+
+describe('repeated params', () => {
+  const dirs: string[] = []
+  afterAll(async () => {
+    await Promise.all(dirs.map((dir) => rm(dir, { recursive: true, force: true })))
+  })
+
+  test('a param used at several sites keeps its default when the call omits it', async () => {
+    const sql = [
+      '%',
+      "SELECT * FROM events WHERE owner = {{ String(address, 'user_abc') }} OR sender = {{ String(address, 'user_abc') }}",
+      '  AND id > {{ Int32(n, 5) }} AND id < {{ Int32(n, 5) }} + 100 AND x = {{ Float64(f, 1) }} AND y = {{ Float64(f, 1) }}',
+      "  AND kind = {{ String(once, 'z') }}",
+    ]
+    const translated = endpoint(sql)
+    expect(translated.ok).toBe(true)
+    const translatedValue = translationValue(translated)
+    // A second endpoint whose export name is the first hoisted const name must not collide with it.
+    const otherFile = parseDatafile('endpoints/top_address.pipe', ['NODE e', 'SQL >', '    SELECT 1 FROM events', '', 'TYPE endpoint'].join('\n'))
+    const other = translateEndpoint(otherFile, otherFile.nodes[0], scope)
+    expect(other.ok && other.value.exportName).toBe('top_address')
+    const source = renderQueriesFile([translatedValue, translationValue(other)], 'analytics')
+    expect(source).toContain('const top_address_2 = p("address", t.string()).default("user_abc")\n')
+    expect(source).toContain('const top_n = p("n", t.int32().meta({ clickhouse: \'String\' })).default(5)\n')
+    expect(source.match(/p\("address"/g)).toHaveLength(1)
+    expect(source.match(/p\("once"/g)).toHaveLength(1)
+    expect(() => new Bun.Transpiler({ loader: 'ts' }).transformSync(source)).not.toThrow()
+
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-tinybird-repeated-'))
+    dirs.push(dir)
+    const queries = await loadGeneratedQueries(source, dir, CORE_ENTRY)
+    const parsed = queries.top?.params.safeParse({}) as { success: boolean; data?: Record<string, unknown> }
+    expect(parsed).toMatchObject({ success: true, data: { address: 'user_abc', n: 5, f: '1.0', once: 'z' } })
   })
 })

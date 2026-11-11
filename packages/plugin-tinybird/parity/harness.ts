@@ -17,7 +17,7 @@ import { parseArgs } from 'node:util'
 
 import { importTinybirdProject } from '../src/index.js'
 import { type ChkitSide, compareParity, type EndpointRender, NORMALIZATIONS, type OracleSnapshot, type ParityEntry, summarize } from './compare.js'
-import { renderEndpointSql } from './endpoint-render.js'
+import { type GeneratedQuery, loadGeneratedQueries, renderEndpoints } from './endpoint-render.js'
 import { captureOracle, DEFAULT_TARGET, formatQuery, localCommand, localQuery, type LocalTarget, run, startProxy, tbBuild, workspaceToken } from './tinybird-local.js'
 
 const REPO = resolve(import.meta.dir, '../../..')
@@ -86,7 +86,9 @@ async function main(): Promise<void> {
     // The scratch database is chkit's connection database too, so its migration journal goes with it.
     await localCommand(target, `CREATE DATABASE \`${database}\``)
     await applyWithChkit({ workDir, schemaSource: imported.schemaSource, url: proxy.url, database })
-    const chkit = await readChkitSide(target, database, imported.endpoints)
+    // Endpoint params go through the generated queries' own validation, as a caller's would.
+    const queries = imported.queriesSource ? await loadGeneratedQueries(imported.queriesSource, workDir) : {}
+    const chkit = await readChkitSide(target, database, imported.endpoints, queries)
     const entries = await compareParity(oracle, chkit, imported.report, { formatQuery: (sql) => formatQuery(target, sql) })
     await writeReport({ reportDir, projectDir, database, oracle, entries, imported: imported.report })
   } finally {
@@ -118,7 +120,8 @@ export default defineConfig({
 async function readChkitSide(
   target: LocalTarget,
   database: string,
-  endpoints: Awaited<ReturnType<typeof importTinybirdProject>>['endpoints']
+  endpoints: Awaited<ReturnType<typeof importTinybirdProject>>['endpoints'],
+  queries: Record<string, GeneratedQuery>
 ): Promise<ChkitSide> {
   const [server] = await localQuery<{ version: string; timezone: string }>(target, 'SELECT version() AS version, timezone() AS timezone')
   const rows = await localQuery<{ name: string; create_table_query: string; as_select: string; metadata_modification_time: string }>(
@@ -131,10 +134,7 @@ async function readChkitSide(
     'SELECT view, toString(next_refresh_time) AS next_refresh_time FROM system.view_refreshes WHERE database = {db:String}',
     { db: database }
   )
-  const rendered = new Map<string, EndpointRender[]>()
-  for (const endpoint of endpoints) {
-    rendered.set(endpoint.pipe, endpoint.paramSets.map((params) => ({ params, sql: renderEndpointSql(endpoint, params) })))
-  }
+  const rendered: Map<string, EndpointRender[]> = renderEndpoints(endpoints, queries)
   return {
     database,
     clickhouseVersion: server?.version ?? '',

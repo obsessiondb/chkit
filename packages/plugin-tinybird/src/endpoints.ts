@@ -116,7 +116,7 @@ export function translateEndpoint(file: Datafile, output: DatafileNode | undefin
       exportName,
       sql,
       params: used,
-      source: renderEndpoint(file.name, exportName, sql, params),
+      source: renderEndpoint({ pipe: file.name, exportName, sql, params: used }, new Set([...UNAVAILABLE_NAMES, exportName])),
       paramSets: paramSets(used),
     },
     notes: used.length > 0 ? [`params: ${used.map((param) => `${param.name} (${param.type}${param.required ? ', required' : ''})`).join(', ')}`] : [],
@@ -125,6 +125,8 @@ export function translateEndpoint(file: Datafile, output: DatafileNode | undefin
 
 export function renderQueriesFile(endpoints: TranslatedEndpoint[], database: string): string {
   const patterns = Object.keys(PATTERNS).filter((key) => endpoints.some((endpoint) => endpoint.source.includes(`.regex(${key})`))) as Array<keyof typeof PATTERNS>
+  // Hoisted param consts get names no export and no module name uses.
+  const taken = new Set([...UNAVAILABLE_NAMES, ...endpoints.map((endpoint) => endpoint.exportName)])
   const lines = [
     `import { p, query, t } from '@chkit/core'`,
     '',
@@ -136,7 +138,7 @@ export function renderQueriesFile(endpoints: TranslatedEndpoint[], database: str
     ...patterns.map((key) => `const ${key} = /${PATTERNS[key]}/`),
     ...(patterns.length > 0 ? [''] : []),
     ...(endpoints.some((endpoint) => endpoint.params.some((param) => isFloat(param.type))) ? [PYTHON_FLOAT_SOURCE, ''] : []),
-    endpoints.map((endpoint) => endpoint.source).join('\n\n'),
+    endpoints.map((endpoint) => renderEndpoint(endpoint, taken)).join('\n\n'),
   ]
   return `${lines.join('\n')}\n`
 }
@@ -274,12 +276,37 @@ function pythonLiteral(text: string): string | undefined {
   return undefined
 }
 
-function renderEndpoint(pipe: string, exportName: string, sql: string, params: ReadonlyMap<string, EndpointParam>): string {
-  const body = escapeTemplate(sql).replace(PLACEHOLDER, (placeholder, name: string) => {
+/**
+ * The query source of an endpoint. A param used more than once is hoisted to
+ * one const and interpolated at every site: chkit merges two separate `p()`
+ * schemas of the same name by intersecting them, which drops their default.
+ * Const names are taken from `taken` and added to it.
+ */
+function renderEndpoint(
+  endpoint: Pick<TranslatedEndpoint, 'pipe' | 'exportName' | 'sql' | 'params'>,
+  taken: Set<string>
+): string {
+  const params = new Map(endpoint.params.map((param) => [param.name, param]))
+  const uses = new Map<string, number>()
+  for (const [, name] of endpoint.sql.matchAll(PLACEHOLDER)) if (name) uses.set(name, (uses.get(name) ?? 0) + 1)
+  const hoisted = new Map<string, string>()
+  for (const param of endpoint.params) {
+    if ((uses.get(param.name) ?? 0) < 2) continue
+    let name = `${endpoint.exportName}_${param.name}`
+    for (let n = 2; taken.has(name); n++) name = `${endpoint.exportName}_${param.name}_${n}`
+    taken.add(name)
+    hoisted.set(param.name, name)
+  }
+  const body = escapeTemplate(endpoint.sql).replace(PLACEHOLDER, (placeholder, name: string) => {
     const param = params.get(name)
-    return param ? `\${${paramSource(param)}}` : placeholder
+    if (!param) return placeholder
+    return `\${${hoisted.get(name) ?? paramSource(param)}}`
   })
-  return `export const ${exportName} = query({ name: ${JSON.stringify(pipe)} })\`\n${body}\n\``
+  const consts = [...hoisted].map(([name, constName]) => {
+    const param = params.get(name)
+    return param ? `const ${constName} = ${paramSource(param)}\n` : ''
+  })
+  return `${consts.join('')}export const ${endpoint.exportName} = query({ name: ${JSON.stringify(endpoint.pipe)} })\`\n${body}\n\``
 }
 
 function paramSource(param: EndpointParam): string {

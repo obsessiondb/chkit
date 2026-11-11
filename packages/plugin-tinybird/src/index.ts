@@ -254,10 +254,8 @@ export async function importTinybirdProject(input: { projectDir: string; databas
       if (translated.ok) {
         let exportName = translated.value.exportName
         for (let n = 2; endpoints.some((endpoint) => endpoint.exportName === exportName); n++) exportName = `${translated.value.exportName}_${n}`
-        if (exportName !== translated.value.exportName) {
-          translated.value.source = translated.value.source.replace(`export const ${translated.value.exportName} =`, `export const ${exportName} =`)
-          translated.value.exportName = exportName
-        }
+        // The queries file is rendered from exportName, with its param consts named after it.
+        translated.value.exportName = exportName
         endpoints.push(translated.value)
         entries.push({ kind: 'endpoint', name: file.name, file: file.path, status: 'translated', chkit: { kind: 'query', name: translated.value.exportName }, notes: translated.notes })
       } else {
