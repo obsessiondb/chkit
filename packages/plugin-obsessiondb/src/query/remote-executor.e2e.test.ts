@@ -1,7 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { randomUUID } from 'node:crypto'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, IntrospectedTable } from '@chkit/clickhouse'
 import {
 	createLiveExecutor,
 	createPrefix,
@@ -11,6 +11,7 @@ import {
 	quoteIdent,
 	waitForTable,
 } from '@chkit/clickhouse/e2e-testkit'
+import { settingValueFingerprint, withDefaultIndexGranularity } from '@chkit/core'
 
 import { createRemoteExecutor } from './remote-executor.js'
 
@@ -130,7 +131,11 @@ describe('createRemoteExecutor listTableDetails (live)', () => {
 				[{ kind: 'Delta', size: 4 }, { kind: 'ZSTD', level: 3 }],
 				undefined,
 			])
-			expect(viaApi).toEqual(direct)
+			// Each read can land on another replica, and ObsessionDB replicas store
+			// different CREATE text for one table: one writes the default
+			// index_granularity = 8192 into it, the other leaves it out (#708).
+			// Drift reads both as the same table, so compare them as it does.
+			expect(viaApi && withServerDefaults(viaApi)).toEqual(direct && withServerDefaults(direct))
 		} finally {
 			await live.command(`DROP TABLE IF EXISTS ${table}`)
 			await live.close()
@@ -138,6 +143,18 @@ describe('createRemoteExecutor listTableDetails (live)', () => {
 		}
 	}, TIMEOUT_MS)
 })
+
+// The table with index_granularity filled in as drift does when the stored
+// CREATE leaves it out, and every setting in comparison form.
+function withServerDefaults(table: IntrospectedTable): IntrospectedTable {
+	const settings = withDefaultIndexGranularity(table.engine ?? '', table.settings) ?? {}
+	return {
+		...table,
+		settings: Object.fromEntries(
+			Object.entries(settings).map(([key, value]) => [key, settingValueFingerprint(value)]),
+		),
+	}
+}
 
 function connect(baseUrl: string): ClickHouseExecutor {
 	return createRemoteExecutor({
