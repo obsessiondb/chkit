@@ -579,27 +579,15 @@ def run(  # noqa: PLR0917
         raise typer.Exit(code=2 if isinstance(error, PullConfigError) else 1) from error
 
 
-def _run(
+def _introspect(
     config: ChxResolvedConfig,
     plugin_runtime: PluginRuntime,
     executor: ClickHouseClient | None,
     *,
     hook_flags: dict[str, Any],
-    database: list[str] | None,
-    out_file: Path,
-    dryrun: bool,
-    overwrite: bool,
-    output_json: bool,
-) -> None:
-    if executor is None and config.clickhouse is None:
-        msg = (
-            "pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service "
-            "(chkit obsessiondb service select)"
-        )
-        raise PullConfigError(msg)
-
-    selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
-
+    selected: list[str],
+) -> tuple[list[str], list[object], list[SchemaDefinition], list[str]]:
+    """Return the databases, the listed objects, the definitions and warnings."""
     raw_objects: list[object] = []  # objects from system.tables (for skipped count)
     inner_storage_warnings: list[str] = []
     with contextlib.ExitStack() as stack:
@@ -647,6 +635,33 @@ def _run(
                 if not selected:
                     selected = sorted({getattr(o, "database", "") for o in raw_objects})
             definitions, inner_storage_warnings = _pull_definitions(client, selected)
+    return selected, raw_objects, definitions, inner_storage_warnings
+
+
+def _run(
+    config: ChxResolvedConfig,
+    plugin_runtime: PluginRuntime,
+    executor: ClickHouseClient | None,
+    *,
+    hook_flags: dict[str, Any],
+    database: list[str] | None,
+    out_file: Path,
+    dryrun: bool,
+    overwrite: bool,
+    output_json: bool,
+) -> None:
+    if executor is None and config.clickhouse is None:
+        msg = (
+            "pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service "
+            "(chkit obsessiondb service select)"
+        )
+        raise PullConfigError(msg)
+
+    selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
+
+    selected, raw_objects, definitions, inner_storage_warnings = _introspect(
+        config, plugin_runtime, executor, hook_flags=hook_flags, selected=selected
+    )
     definitions = [d for d in definitions if _is_pulled_object(d)]
 
     # ObsessionDB reports the engine as Shared*, which rendering canonicalizes away.

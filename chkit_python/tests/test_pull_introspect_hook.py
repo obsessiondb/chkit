@@ -7,8 +7,9 @@ ClickHouseClient.connect() call).
 
 from __future__ import annotations
 
-from pathlib import Path
+import importlib
 import json
+from pathlib import Path
 from typing import Any
 from unittest.mock import patch
 
@@ -162,15 +163,14 @@ def test_pull_without_database_lists_the_target_databases_for_the_custom_introsp
         "from chkit import schema\ndefinitions = schema()\n", encoding="utf-8"
     )
     received: list[list[str]] = []
-    import custom_introspector_plugin  # type: ignore[import-not-found]
-
-    original = custom_introspector_plugin._Hooks.on_pull_introspect
+    hooks = importlib.import_module("custom_introspector_plugin")._Hooks
+    original = hooks.on_pull_introspect
 
     def recording_hook(self: Any, ctx: Any) -> Any:
         received.append(list(ctx.databases))
         return original(self, ctx)
 
-    monkeypatch.setattr(custom_introspector_plugin._Hooks, "on_pull_introspect", recording_hook)
+    monkeypatch.setattr(hooks, "on_pull_introspect", recording_hook)
     objects = [
         SchemaObjectRef(kind="table", database="logs", name="raw"),
         SchemaObjectRef(kind="table", database="custom", name="generated"),
