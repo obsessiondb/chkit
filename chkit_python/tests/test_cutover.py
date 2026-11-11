@@ -467,6 +467,9 @@ def test_refuses_missing_or_nullable_keys() -> None:
         "LowCardinality(\u3000Nullable(String))",
         "\u201cNullable\u201d(UInt64)",
         "LowCardinality(\u201cNullable\u201d (String))",
+        "Nullable\u0085\u180e(UInt64)",
+        "\u200bNullable\u200c(UInt64)",
+        "LowCardinality(\u200dNullable\u2060(String))",
     ]:
         inline: list[Any] = [{"name": "id", "type": type_}, *COLUMNS[1:]]
         found = messages(

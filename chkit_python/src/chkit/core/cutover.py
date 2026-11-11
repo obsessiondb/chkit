@@ -91,6 +91,7 @@ _STREAMING_ENGINES: Final = frozenset(
     }
 )
 _COMMENT_PREFIX: Final = "chkit cutover "
+_CLICKHOUSE_EXTRA_SPACE: Final = frozenset("\u0085\u180e\u200b\u200c\u200d\u2060")
 _REPLICATED_PATH: Final = re.compile(r"^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'")
 
 @dataclass(frozen=True)
@@ -1066,6 +1067,15 @@ def _copied_columns(
     return columns
 
 
+def _is_clickhouse_space(char: str) -> bool:
+    """One character ClickHouse skips as whitespace (skipWhitespacesUTF8).
+
+    JavaScript's whitespace plus the ones it lacks. A character only JavaScript reads
+    as whitespace makes a type ClickHouse rejects anyway.
+    """
+    return is_js_space(char) or char in _CLICKHOUSE_EXTRA_SPACE
+
+
 def _is_nullable_type(type_: str) -> bool:
     """Whether a column type is ``Nullable(T)`` or ``LowCardinality(Nullable(T))``.
 
@@ -1078,7 +1088,7 @@ def _is_nullable_type(type_: str) -> bool:
     tokens = [
         token
         for token in tokenize_sql(type_)
-        if not is_trivia(token) and not is_js_space(token.text)
+        if not is_trivia(token) and not _is_clickhouse_space(token.text)
     ]
 
     def is_open(index: int) -> bool:

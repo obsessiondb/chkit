@@ -387,6 +387,9 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
       'LowCardinality(\u3000Nullable(String))',
       '\u201cNullable\u201d(UInt64)',
       'LowCardinality(\u201cNullable\u201d (String))',
+      'Nullable\u0085\u180e(UInt64)',
+      '\u200bNullable\u200c(UInt64)',
+      'LowCardinality(\u200dNullable\u2060(String))',
     ]) {
       const inline = [{ name: 'id', type }, columns[1], columns[2]] as TableDefinition['columns']
       expect(

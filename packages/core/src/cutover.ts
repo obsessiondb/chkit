@@ -769,8 +769,13 @@ function copiedColumns(oldDef: TableDefinition, newDef: TableDefinition, problem
  * lexer reads Unicode whitespace and `“`, `”` as punctuation, so they are
  * handled here. Type names are case-sensitive.
  */
+// One character ClickHouse skips as whitespace (skipWhitespacesUTF8): JavaScript's
+// \s plus the ones it lacks. A character only JavaScript reads as whitespace makes
+// a type ClickHouse rejects anyway.
+const CLICKHOUSE_SPACE = /^[\s\u0085\u180e\u200b-\u200d\u2060]$/
+
 function isNullableType(type: string): boolean {
-  const tokens = tokenizeSQL(type).filter((token) => !isTrivia(token) && !/^\s$/.test(token.text))
+  const tokens = tokenizeSQL(type).filter((token) => !isTrivia(token) && !CLICKHOUSE_SPACE.test(token.text))
   const isOpen = (index: number) => tokens[index]?.kind === 'punctuation' && tokens[index]?.text === '('
   // The name at `index` and the index after it.
   const nameAt = (index: number): [string | undefined, number] => {
