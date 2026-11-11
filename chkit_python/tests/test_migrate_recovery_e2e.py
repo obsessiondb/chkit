@@ -27,7 +27,12 @@ from chkit.cli.journal_store import JournalStore
 from chkit.cli.main import app
 from chkit.cli.migration_store import checksum_sql
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_column, wait_for_table, wait_for_view
+from chkit.clickhouse.ddl_propagation import (
+    wait_for_column,
+    wait_for_table,
+    wait_for_table_absent,
+    wait_for_view,
+)
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
@@ -892,6 +897,9 @@ def test_old_release_journal_gets_the_column_and_old_state_resumes_by_position(
     try:
         # The journal as releases before #599 create it.
         project.client.execute(f"DROP TABLE {journal}")
+        # The CREATE may land on a replica that has not dropped the journal
+        # yet, where it would fail with TABLE_ALREADY_EXISTS.
+        wait_for_table_absent(project.client, db, project.journal_table)
         project.client.execute(
             f"CREATE TABLE {journal} (name String, applied_at DateTime64(3, 'UTC'), "
             "checksum String, chkit_version String, migration_completed Bool DEFAULT true, "
