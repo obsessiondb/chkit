@@ -93,8 +93,6 @@ class FakeServer:
     # keeps the row in ``held``, for the test to commit later.
     on_beat: Callable[[int], str] | None = None
     held: list[Row] = field(default_factory=list)
-    # When set, runs once after the next read.
-    after_read: Callable[[], None] | None = None
 
     def execute(self, sql: str, settings: dict[str, Any] | None = None) -> None:
         match = _INSERT.search(sql)
@@ -147,9 +145,6 @@ class FakeServer:
             for row in latest.values()
             if row.version != RELEASED or row.name == own
         ]
-        after, self.after_read = self.after_read, None
-        if after is not None:
-            after()
         return SimpleNamespace(rows=rows)
 
     def claims_of(self, name: str) -> list[Row]:
@@ -353,88 +348,64 @@ def test_a_heartbeat_renews_the_claim_with_a_newer_version_and_keeps_the_lock_he
     lock.release()
 
 
-def test_a_heartbeat_whose_version_does_not_read_back_newer_does_not_renew_the_claim() -> None:
+def _is_lost(lock: MigrateLock) -> bool:
+    try:
+        lock.assert_held()
+    except MigrateError:
+        return True
+    return False
+
+
+def test_a_heartbeat_whose_row_does_not_read_back_stops_the_run() -> None:
     server = FakeServer()
-    clock = Clock()
-    lock = _acquire(server, _deps(clock, [], heartbeat_ms=1))
-    server.dropped.add(f"{LOCK_ROW_PREFIX}run-1")
-    clock.now = 50_000
-    time.sleep(0.03)
-    clock.now = LOCK_TIMINGS.valid_ms + 1
-    with pytest.raises(MigrateError, match="lost the migrate lock"):
+    name = f"{LOCK_ROW_PREFIX}run-1"
+    lock = _acquire(server, _deps(Clock(), [], heartbeat_ms=1))
+    server.dropped.add(name)
+    _wait_for(lambda: _is_lost(lock))
+    with pytest.raises(MigrateError, match="its heartbeat did not read back"):
         lock.assert_held()
     server.dropped.clear()
     lock.release()
 
 
-def test_a_newer_version_read_back_counts_from_the_first_heartbeat_that_may_have_written_it() -> (
-    None
-):
+def test_a_failed_read_of_a_heartbeat_is_tried_again_and_counts_from_its_send_time() -> None:
     server = FakeServer()
     name = f"{LOCK_ROW_PREFIX}run-1"
     clock = Clock()
-    lock = _acquire(server, _deps(clock, [], heartbeat_ms=1))
-    # The heartbeat sent at 10 s writes a newer version, but its read fails.
-    # The next one, sent at 20 s, reaches a replica that drops its write and
-    # reads the version the first one wrote.
+    sleeps: list[float] = []
+    lock = _acquire(server, _deps(clock, sleeps, heartbeat_ms=1))
     failed = [False]
 
     def fail() -> None:
         failed[0] = True
-        server.dropped.add(name)
         clock.now = 20_000
 
     server.fail_next_read = fail
     clock.now = 10_000
-    _wait_for(lambda: failed[0] and len(server.claims_of(name)) == 2)
-    time.sleep(0.03)
-    clock.now = 10_000 + LOCK_TIMINGS.valid_ms
-    lock.assert_held()
-    clock.now = 10_000 + LOCK_TIMINGS.valid_ms + 1
-    with pytest.raises(MigrateError, match="lost the migrate lock"):
-        lock.assert_held()
-    server.dropped.clear()
-    lock.release()
-
-
-def test_a_heartbeat_that_reaches_the_server_after_a_later_one_counted_does_not_renew() -> None:
-    server = FakeServer()
-    name = f"{LOCK_ROW_PREFIX}run-1"
-    clock = Clock()
-    lost_writes = [0]
-
-    def commit_held() -> None:
-        for row in server.held:
-            server.rows.append(Row(name=row.name, version=server.clock + 100_000, holder=row.holder))
-        server.held.clear()
-        clock.now = 30_000
-
-    # Beat 1, sent at 10 s, loses its connection but reaches the server after
-    # beat 2 (sent at 20 s) counted, stamped by a replica whose clock is
-    # ahead. Every later write, from 30 s, is lost, and its read returns beat
-    # 1's row.
-    def on_beat(beat: int) -> str:
-        if beat == 1:
-            clock.now = 20_000
-            return "hold"
-        if beat == 2:
-            server.after_read = commit_held
-            return "write"
-        lost_writes[0] += 1
-        return "drop"
-
-    server.on_beat = on_beat
-    clock.now = 10_000
-    lock = _acquire(server, _deps(clock, [], heartbeat_ms=1))
-    _wait_for(lambda: lost_writes[0] >= 3)
+    _wait_for(lambda: failed[0] and len(server.claims_of(name)) >= 3)
+    assert 1_000 in sleeps
     clock.now = 20_000 + LOCK_TIMINGS.valid_ms
     lock.assert_held()
-    clock.now = 20_000 + LOCK_TIMINGS.valid_ms + 1
-    with pytest.raises(MigrateError, match="lost the migrate lock"):
+    lock.release()
+
+
+def test_a_heartbeat_whose_request_fails_and_does_not_read_back_stops_the_run() -> None:
+    server = FakeServer()
+    name = f"{LOCK_ROW_PREFIX}run-1"
+    # Beat 1 loses its connection; the server may still commit it later.
+    server.on_beat = lambda beat: "hold" if beat == 1 else "write"
+    lock = _acquire(server, _deps(Clock(), [], heartbeat_ms=1))
+    _wait_for(lambda: _is_lost(lock))
+    with pytest.raises(
+        MigrateError,
+        match=r"a heartbeat failed \(connection lost\) and may still reach the server",
+    ):
         lock.assert_held()
+    assert len(server.held) == 1
+    # No heartbeat after it.
+    assert len(server.claims_of(name)) == 1
     server.on_beat = None
     lock.release()
-    assert server.claims_of(name)[-1].version == RELEASED
 
 
 def test_a_heartbeat_sent_after_the_claim_lapsed_does_not_renew_it() -> None:

@@ -25,8 +25,9 @@ the journal and reads every claim back:
   cannot check.
 - The holder renews its claim every ``heartbeat_ms``, on a thread with its own
   client, numbering each write in the holder JSON. A renewal counts from the
-  send time of the heartbeat whose row reads back as the claim's newest
-  version, within ``valid_ms`` of the previous renewal it counted.
+  heartbeat's send time once its row reads back as the claim's newest, within
+  ``valid_ms`` of the previous renewal; a heartbeat that does not read back
+  stops the run, since it may still reach the server later.
   Every request of the run first checks that the last counted renewal was
   sent less than ``valid_ms`` ago, and that the claim was not released by
   --break-lock.
@@ -53,9 +54,13 @@ from typing import Any
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.clickhouse.client import clickhouse_error_message
 from chkit.clickhouse.replicas import ReplicaFanout
 
 LOCK_ROW_PREFIX = "__chkit_migrate_lock__/"
+# Reads of a heartbeat's row, and the wait between two (ms).
+_READ_ATTEMPTS = 3
+_READ_RETRY_MS = 1_000
 # The version of a released claim: newer than any heartbeat.
 RELEASED_AT = "2299-12-31 23:59:59.000"
 _RELEASED_FROM = "toDateTime64('2299-01-01 00:00:00', 3, 'UTC')"
@@ -407,11 +412,6 @@ class MigrateLock:
         self._confirmed_at = confirmed_at
         self._version = version
         self._beat = 0
-        # The send time of each heartbeat not counted yet, by beat: the row
-        # read back may be any earlier heartbeat's, even one whose request
-        # failed and reached the server later, so a renewal counts from the
-        # send time of the heartbeat that wrote it.
-        self._sent_at_by_beat: dict[int, float] = {}
         self._deps = deps
         self._log = log
         self._lost: str | None = None
@@ -434,18 +434,45 @@ class MigrateLock:
                 return
             self._heartbeat()
 
+    def _read_own(self) -> LockClaim | None:
+        """The claim as read back, retrying a failed read a few times."""
+        attempt = 1
+        while True:
+            try:
+                return next(
+                    (
+                        claim
+                        for claim in _read_claims(self._heartbeat_client, self._target, self._name)
+                        if claim.name == self._name
+                    ),
+                    None,
+                )
+            except Exception:
+                if attempt >= _READ_ATTEMPTS:
+                    raise
+                attempt += 1
+                self._deps.sleep(_READ_RETRY_MS)
+
+    def _lose(self, reason: str) -> None:
+        if self._lost is None:
+            self._lost = reason
+
     def _heartbeat(self) -> None:
-        # A renewal counts from the send time of the heartbeat whose row reads
-        # back as the claim's newest version, acknowledged within the validity
-        # of the previous renewal. Another run that reads the same version for
-        # longer than valid_ms knows this run counts no renewal.
+        # Each heartbeat must read back as the claim's newest row before the
+        # next one is sent, so the heartbeats' versions grow one after the
+        # other, and a merge, which keeps the newest version, keeps the newest
+        # heartbeat. A heartbeat whose row does not read back may still reach
+        # the server later, with a version a later heartbeat could tie: the run
+        # stops instead. A renewal counts from the heartbeat's send time, when
+        # it was acknowledged within the validity of the previous one. Another
+        # run that reads the same row for longer than valid_ms knows this run
+        # counts no renewal.
         sent_at = self._deps.now()
         if self._lapsed(sent_at):
-            if self._lost is None:
-                self._lost = self._lapsed_reason(sent_at)
+            self._lose(self._lapsed_reason(sent_at))
             return
         self._beat += 1
-        self._sent_at_by_beat[self._beat] = sent_at
+        write_error: Exception | None = None
         try:
             _write_claim(
                 self._heartbeat_client,
@@ -455,35 +482,32 @@ class MigrateLock:
                 released=False,
                 after=self._version,
             )
-            own = next(
-                (
-                    claim
-                    for claim in _read_claims(self._heartbeat_client, self._target, self._name)
-                    if claim.name == self._name
-                ),
-                None,
+        except Exception as error:
+            write_error = error
+        try:
+            own = self._read_own()
+        except Exception as error:
+            self._lose(f"cannot read its claim back ({clickhouse_error_message(error)})")
+            return
+        if self._stop.is_set():
+            return
+        if own is not None and own.released:
+            self._lose("another run released it (--break-lock)")
+            return
+        if own is None or own.holder is None or own.holder.beat != self._beat:
+            self._lose(
+                "its heartbeat did not read back"
+                if write_error is None
+                else f"a heartbeat failed ({clickhouse_error_message(write_error)}) "
+                "and may still reach the server"
             )
-        except Exception:
-            return
-        if self._stop.is_set() or own is None:
-            return
-        if own.released:
-            if self._lost is None:
-                self._lost = "another run released it (--break-lock)"
-            return
-        self._version = max(self._version, own.version)
-        wrote_at = self._sent_at_by_beat.get(own.holder.beat if own.holder else -1)
-        if wrote_at is None or wrote_at <= self._confirmed_at:
             return
         acked = self._deps.now()
         if self._lapsed(acked):
-            if self._lost is None:
-                self._lost = self._lapsed_reason(acked)
+            self._lose(self._lapsed_reason(acked))
             return
-        self._confirmed_at = wrote_at
-        self._sent_at_by_beat = {
-            n: at for n, at in self._sent_at_by_beat.items() if at > self._confirmed_at
-        }
+        self._version = own.version
+        self._confirmed_at = sent_at
 
     def assert_held(self) -> None:
         """Raises when the lock may no longer be held."""

@@ -33,9 +33,10 @@ import { MigrateError } from './errors.js'
  *   that cannot read its own claim back stops, rather than take a lock it
  *   cannot check.
  * - The holder renews its claim every `heartbeatMs`, numbering each write in
- *   the holder JSON. A renewal counts from the send time of the heartbeat
- *   whose row reads back as the claim's newest version, within `validMs` of
- *   the previous renewal it counted. Every request of the run
+ *   the holder JSON. A renewal counts from the heartbeat's send time once its
+ *   row reads back as the claim's newest, within `validMs` of the previous
+ *   renewal; a heartbeat that does not read back stops the run, since it may
+ *   still reach the server later. Every request of the run
  *   first checks that the last counted renewal was sent less than `validMs`
  *   ago, and that the claim was not released by --break-lock.
  * - A claim whose last heartbeat the server dates more than `leaseMs` back
@@ -51,6 +52,9 @@ const RELEASED_AT = '2299-12-31 23:59:59.000'
 const RELEASED_FROM = "toDateTime64('2299-01-01 00:00:00', 3, 'UTC')"
 /** How long release() waits for a heartbeat in flight. */
 const RELEASE_WAIT_MS = 5_000
+/** Reads of a heartbeat's row, and the wait between two. */
+const READ_ATTEMPTS = 3
+const READ_RETRY_MS = 1_000
 
 export const LOCK_TIMINGS = {
   leaseMs: 120_000,
@@ -246,6 +250,10 @@ function describeHolder(claim: LockClaim): string {
   return `claim ${claimId(claim)}: ${who}`
 }
 
+function errorText(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
+}
+
 function seconds(ms: number): number {
   return Math.max(0, Math.round(ms / 1000))
 }
@@ -400,11 +408,6 @@ function startHolding(
   let confirmedAt = claim.confirmedAt
   let version = claim.version
   let beat = 0
-  // The send time of each heartbeat not counted yet, by beat: the row read
-  // back may be any earlier heartbeat's, even one whose request failed and
-  // reached the server later, so a renewal counts from the send time of the
-  // heartbeat that wrote it.
-  const sentAtByBeat = new Map<number, number>()
   const holderJson = (n: number) => JSON.stringify({ ...claim.holder, beat: n })
   let lost: string | undefined
   let stopped = false
@@ -419,10 +422,26 @@ function startHolding(
     return `no heartbeat was acknowledged for ${seconds(at - confirmedAt)}s`
   }
 
-  // A renewal counts from the send time of the heartbeat whose row reads
-  // back as the claim's newest version, acknowledged within the validity of
-  // the previous renewal. Another run that reads the same version for longer
-  // than validMs knows this run counts no renewal.
+  /** The claim as read back, retrying a failed read a few times. */
+  async function readOwn(): Promise<LockClaim | undefined> {
+    for (let attempt = 1; ; attempt++) {
+      try {
+        return (await readClaims(heartbeatDb, target, claim.name)).find((item) => item.name === claim.name)
+      } catch (error) {
+        if (attempt >= READ_ATTEMPTS) throw error
+        await deps.sleep(READ_RETRY_MS)
+      }
+    }
+  }
+
+  // Each heartbeat must read back as the claim's newest row before the next
+  // one is sent, so the heartbeats' versions grow one after the other, and a
+  // merge, which keeps the newest version, keeps the newest heartbeat. A
+  // heartbeat whose row does not read back may still reach the server later,
+  // with a version a later heartbeat could tie: the run stops instead. A
+  // renewal counts from the heartbeat's send time, when it was acknowledged
+  // within the validity of the previous one. Another run that reads the same
+  // row for longer than validMs knows this run counts no renewal.
   async function heartbeat(): Promise<void> {
     const sentAt = deps.now()
     if (lapsed(sentAt)) {
@@ -430,28 +449,37 @@ function startHolding(
       return
     }
     beat += 1
-    sentAtByBeat.set(beat, sentAt)
+    let writeError: unknown
     try {
       await writeClaim(heartbeatDb, target, claim.name, holderJson(beat), { released: false, after: version })
-      const own = (await readClaims(heartbeatDb, target, claim.name)).find((item) => item.name === claim.name)
-      if (stopped || !own) return
-      if (own.released) {
-        lost ??= 'another run released it (--break-lock)'
-        return
-      }
-      if (own.version > version) version = own.version
-      const wroteAt = sentAtByBeat.get(own.holder?.beat ?? -1)
-      if (wroteAt === undefined || wroteAt <= confirmedAt) return
-      const ackedAt = deps.now()
-      if (lapsed(ackedAt)) {
-        lost ??= lapsedReason(ackedAt)
-        return
-      }
-      confirmedAt = wroteAt
-      for (const [n, at] of sentAtByBeat) if (at <= confirmedAt) sentAtByBeat.delete(n)
     } catch (error) {
-      debug('migrate-lock', `heartbeat failed: ${error instanceof Error ? error.message : String(error)}`)
+      writeError = error
     }
+    let own: LockClaim | undefined
+    try {
+      own = await readOwn()
+    } catch (error) {
+      lost ??= `cannot read its claim back (${errorText(error)})`
+      return
+    }
+    if (stopped) return
+    if (own?.released) {
+      lost ??= 'another run released it (--break-lock)'
+      return
+    }
+    if (own?.holder?.beat !== beat) {
+      lost ??= writeError === undefined
+        ? 'its heartbeat did not read back'
+        : `a heartbeat failed (${errorText(writeError)}) and may still reach the server`
+      return
+    }
+    const ackedAt = deps.now()
+    if (lapsed(ackedAt)) {
+      lost ??= lapsedReason(ackedAt)
+      return
+    }
+    version = own.version
+    confirmedAt = sentAt
   }
 
   function schedule(): void {

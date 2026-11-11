@@ -43,8 +43,6 @@ interface FakeServer {
    */
   onBeat?: (beat: number) => 'write' | 'drop' | 'hold'
   held: Row[]
-  /** When set, runs once after the next read. */
-  afterRead?: () => void
 }
 
 const UNQUOTE = (value: string) => value.replace(/\\(.)/g, '$1')
@@ -108,9 +106,7 @@ function fakeServer(): FakeServer {
         latest.set(row.name, row)
       }
     }
-    const after = server.afterRead
-    server.afterRead = undefined
-    const result = [...latest.values()]
+    return [...latest.values()]
       .filter((row) => row.version !== RELEASED || row.name === UNQUOTE(own))
       .map((row) => ({
         name: row.name,
@@ -119,8 +115,6 @@ function fakeServer(): FakeServer {
         version: row.version === RELEASED ? '2299-12-31 23:59:59.000' : formatVersion(row.version),
         age_ms: String(row.version === RELEASED ? -1 : server.clock.now - row.version),
       }))
-    after?.()
-    return result
   }
   server.db = { command, query } as unknown as ClickHouseExecutor
   return server
@@ -309,78 +303,48 @@ describe('holding the migrate lock', () => {
     await lock.release()
   })
 
-  test('a heartbeat whose version does not read back newer does not renew the claim', async () => {
+  test('a heartbeat whose row does not read back stops the run', async () => {
     const server = fakeServer()
-    const { overrides, local } = deps({ heartbeatMs: 1 })
-    const lock = await acquireMigrateLock(server.db, TARGET, quiet, overrides)
-    server.dropped.add(`${LOCK_ROW_PREFIX}run-1`)
-    local.now = 50_000
-    await Bun.sleep(30)
-    local.now = LOCK_TIMINGS.validMs + 1
-    expect(() => lock.assertHeld()).toThrow('lost the migrate lock')
+    const name = `${LOCK_ROW_PREFIX}run-1`
+    const lock = await acquireMigrateLock(server.db, TARGET, quiet, deps({ heartbeatMs: 1 }).overrides)
+    server.dropped.add(name)
+    await waitFor(() => isLost(lock))
+    expect(() => lock.assertHeld()).toThrow('its heartbeat did not read back')
     server.dropped.clear()
     await lock.release()
   })
 
-  test('a newer version read back counts from the first heartbeat that may have written it', async () => {
+  test('a failed read of a heartbeat is tried again, and the heartbeat counts from its send time', async () => {
     const server = fakeServer()
     const name = `${LOCK_ROW_PREFIX}run-1`
-    const { overrides, local } = deps({ heartbeatMs: 1 })
+    const { overrides, local, sleeps } = deps({ heartbeatMs: 1 })
     const lock = await acquireMigrateLock(server.db, TARGET, quiet, overrides)
-    // The heartbeat sent at 10 s writes a newer version, but its read fails.
-    // The next one, sent at 20 s, reaches a replica that drops its write and
-    // reads the version the first one wrote.
     let failed = false
     server.failNextRead = () => {
       failed = true
-      server.dropped.add(name)
       local.now = 20_000
     }
     local.now = 10_000
-    await waitFor(() => failed && claimsOf(server, name).length === 2)
-    await Bun.sleep(30)
-    local.now = 10_000 + LOCK_TIMINGS.validMs
+    await waitFor(() => failed && claimsOf(server, name).length >= 3)
+    expect(sleeps).toContain(1_000)
+    local.now = 20_000 + LOCK_TIMINGS.validMs
     lock.assertHeld()
-    local.now = 10_000 + LOCK_TIMINGS.validMs + 1
-    expect(() => lock.assertHeld()).toThrow('lost the migrate lock')
-    server.dropped.clear()
     await lock.release()
   })
 
-  test('a heartbeat that reaches the server after a later one counted does not renew the claim', async () => {
+  test('a heartbeat whose request fails and that does not read back stops the run, as it may reach the server later', async () => {
     const server = fakeServer()
     const name = `${LOCK_ROW_PREFIX}run-1`
-    const { overrides, local } = deps({ heartbeatMs: 1 })
-    let lostWrites = 0
-    // Beat 1, sent at 10 s, loses its connection but reaches the server after
-    // beat 2 (sent at 20 s) counted, stamped by a replica whose clock is
-    // ahead. Every later write, from 30 s, is lost, and its read returns
-    // beat 1's row.
-    server.onBeat = (beat) => {
-      if (beat === 1) {
-        local.now = 20_000
-        return 'hold'
-      }
-      if (beat === 2) {
-        server.afterRead = () => {
-          for (const row of server.held.splice(0)) server.rows.push({ ...row, version: server.clock.now + 100_000 })
-          local.now = 30_000
-        }
-        return 'write'
-      }
-      lostWrites += 1
-      return 'drop'
-    }
-    local.now = 10_000
-    const lock = await acquireMigrateLock(server.db, TARGET, quiet, overrides)
-    await waitFor(() => lostWrites >= 3)
-    local.now = 20_000 + LOCK_TIMINGS.validMs
-    lock.assertHeld()
-    local.now = 20_000 + LOCK_TIMINGS.validMs + 1
-    expect(() => lock.assertHeld()).toThrow('lost the migrate lock')
+    // Beat 1 loses its connection; the server may still commit it later.
+    server.onBeat = (beat) => (beat === 1 ? 'hold' : 'write')
+    const lock = await acquireMigrateLock(server.db, TARGET, quiet, deps({ heartbeatMs: 1 }).overrides)
+    await waitFor(() => isLost(lock))
+    expect(() => lock.assertHeld()).toThrow('a heartbeat failed (connection lost) and may still reach the server')
+    expect(server.held).toHaveLength(1)
+    // No heartbeat after it.
+    expect(claimsOf(server, name)).toHaveLength(1)
     server.onBeat = undefined
     await lock.release()
-    expect(claimsOf(server, name).at(-1)?.version).toBe(RELEASED)
   })
 
   test('a heartbeat sent after the claim lapsed does not renew it', async () => {
@@ -465,6 +429,15 @@ describe('guardExecutor', () => {
     expect(calls).toEqual(['check', 'query', 'check', 'close'])
   })
 })
+
+function isLost(lock: { assertHeld(): void }): boolean {
+  try {
+    lock.assertHeld()
+    return false
+  } catch {
+    return true
+  }
+}
 
 async function waitFor(condition: () => boolean): Promise<void> {
   for (let i = 0; i < 200 && !condition(); i++) await Bun.sleep(5)

@@ -200,7 +200,7 @@ How it works:
 
 - The lock is a row of the journal named `__chkit_migrate_lock__/<claim>`, with `migration_completed = false`, so every chkit release reads past it. A run writes its own claim, then reads every claim back; it holds the lock when no other claim is there. Two runs that claim at the same moment can both back off; each retries a few times within about 10 seconds before it gives up.
 - After taking the lock, a run reads the journal again. A migration that another run applied in the meantime is skipped (`Skipping …: another migrate run applied it meanwhile.`); any other change to what the run showed stops it with `journal_changed` before it applies anything.
-- The holder renews its claim every 10 seconds, and a renewal counts from the time that heartbeat was sent once the holder reads its row back as the claim's newest version. A holder whose renewals have not counted for 60 seconds (a paused process, a lost connection), or whose claim was released with `--break-lock`, stops before its next request with `migrate_lock_lost`.
+- The holder renews its claim every 10 seconds. A renewal counts from the time the heartbeat was sent, once the holder reads it back as the claim's newest row. A holder whose renewals have not counted for 60 seconds (a paused process, a lost connection), whose heartbeat does not read back (a heartbeat request that failed may still reach the server later), or whose claim was released with `--break-lock`, stops before its next request with `migrate_lock_lost`; run `migrate` again to resume.
 - A run that is killed or crashes keeps its claim. Once the server dates the claim's last heartbeat more than 120 seconds back, the next run watches it for 65 seconds; when it did not change, that run has stopped, so the next run releases the claim (and says so) and takes the lock. Watching makes this safe when the clocks of the replicas differ.
 - On a multi-replica target the claims are read from every replica (see below), where the replica that accepted a claim always has it; a replica that does not answer fails the read. On a single endpoint without that fan-out, claims are written with `insert_quorum = 'auto'` and read with `select_sequential_consistency = 1`. A run that cannot read its own claim back right after writing it stops with `migrate_lock_unverifiable` instead of taking a lock it cannot check.
 
@@ -491,7 +491,7 @@ A failure that stops the command prints the standard error envelope:
 | `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |
 | `migration_already_applied` | `--abandon`: the migration is already applied |
 | `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
-| `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, or another run broke its claim; the run stopped before its next request |
+| `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, a heartbeat did not read back, or another run broke its claim; the run stopped before its next request |
 | `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |
 | `journal_changed` | Another run changed the journal between the plan and the lock in a way the plan does not cover; nothing was applied |
 | `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`, or an empty migration name |
