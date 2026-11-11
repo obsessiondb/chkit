@@ -511,3 +511,70 @@ def test_excludes_obsessiondb_metadata_tables_from_pulled_schema_output(
     assert "metadata_folder" not in payload["content"]
     assert "metadata_table_folder" not in payload["content"]
     assert "metadata_table_tag" not in payload["content"]
+
+
+# ---------- code-point order (#703) ----------
+
+# The TS plugin sorted these with a bare sort(), which compares UTF-16 units
+# and puts U+1F600 (a surrogate pair) before U+FF5E. Both ports sort by code
+# point, which puts U+FF5E first.
+EMOJI = "\U0001f600"
+FULLWIDTH_TILDE = "\uff5e"
+
+
+def _pull_payload(
+    runner: CliRunner,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tables: list[IntrospectedTable],
+    args: list[str],
+) -> dict[str, Any]:
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "clickhouse.config.py").write_text(CONFIG_WITH_CH, encoding="utf-8")
+
+    def connect(cls: object, config: object) -> nullcontext[None]:
+        return nullcontext()
+
+    def list_objects(client: object) -> list[SchemaObjectRef]:
+        return [SchemaObjectRef(kind="table", database=t.database, name=t.name) for t in tables]
+
+    def pull_definitions(
+        client: object, databases: object
+    ) -> tuple[list[TableDefinition | None], list[str]]:
+        return [_introspected_table_to_definition(t) for t in tables], []
+
+    monkeypatch.setattr(ClickHouseClient, "connect", classmethod(connect))
+    monkeypatch.setattr(pull_module, "list_schema_objects", list_objects)
+    monkeypatch.setattr(pull_module, "_pull_definitions", pull_definitions)
+
+    result = runner.invoke(app, ["pull", "--dryrun", "--json", *args])
+    assert result.exit_code == 0, result.output
+    payload: dict[str, Any] = json.loads(result.stdout)
+    return payload
+
+
+def test_orders_database_flags_by_code_point(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tables = [_introspected("t", database=EMOJI), _introspected("t", database=FULLWIDTH_TILDE)]
+    payload = _pull_payload(
+        runner, tmp_path, monkeypatch, tables, ["--database", EMOJI, "--database", FULLWIDTH_TILDE]
+    )
+    assert payload["databases"] == [FULLWIDTH_TILDE, EMOJI]
+
+
+def test_orders_server_databases_by_code_point(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tables = [_introspected("t", database=EMOJI), _introspected("t", database=FULLWIDTH_TILDE)]
+    payload = _pull_payload(runner, tmp_path, monkeypatch, tables, [])
+    assert payload["databases"] == [FULLWIDTH_TILDE, EMOJI]
+
+
+def test_renders_table_settings_in_code_point_order() -> None:
+    definition = _introspected_table_to_definition(
+        _introspected("t", settings={f"a{EMOJI}": "1", f"a{FULLWIDTH_TILDE}": "2"})
+    )
+    assert definition is not None
+    content = render_schema_file([definition])
+    assert -1 < content.index(f"a{FULLWIDTH_TILDE}") < content.index(f"a{EMOJI}")

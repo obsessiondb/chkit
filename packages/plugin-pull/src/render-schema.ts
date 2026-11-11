@@ -17,6 +17,7 @@ import {
   type TableConstraintDefinition,
   type TableDefinition,
   type ViewDefinition,
+  compareCodePoints,
   READONLY_MERGE_TREE_SETTINGS,
   supportsSortOrder,
 } from '@chkit/core'
@@ -351,7 +352,7 @@ function renderSettingsLines(
   comment: (key: string) => string | undefined = () => undefined
 ): string[] {
   const lines: string[] = [`${indent}settings: {`]
-  for (const key of Object.keys(settings).sort()) {
+  for (const key of Object.keys(settings).sort(compareCodePoints)) {
     const value = settings[key]
     if (value === undefined) continue
     const note = comment(key)
