@@ -1,5 +1,4 @@
-import { access, mkdir, rename, writeFile } from 'node:fs/promises'
-import { constants } from 'node:fs'
+import { lstat, mkdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import { z } from 'zod'
@@ -580,9 +579,10 @@ async function writeSchemaFile(input: {
   await rename(tempPath, input.outFile)
 }
 
+// lstat, not access: a dangling symlink is an existing entry that rename would replace (#702).
 async function pathExists(path: string): Promise<boolean> {
   try {
-    await access(path, constants.F_OK)
+    await lstat(path)
     return true
   } catch {
     return false

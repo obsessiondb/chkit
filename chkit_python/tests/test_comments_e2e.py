@@ -16,6 +16,9 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit.cli.main import app
+from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.ddl_propagation import wait_for_table, wait_for_view
+from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
@@ -23,6 +26,7 @@ from tests.e2e_testkit import (
     poll_until,
     quote_ident,
     resolve_live_env,
+    run_once_visible,
 )
 
 _ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
@@ -366,14 +370,29 @@ def test_object_comments(project: _Project, ch_client: Any) -> None:
 def test_pull_skips_an_inner_storage_view(project: _Project, ch_client: Any) -> None:
     database = project.database
     client = ch_client._client
+    env = resolve_live_env()
+    config = ChxResolvedClickHouseConfig(
+        url=env.clickhouse_url,
+        username=env.clickhouse_user,
+        password=env.clickhouse_password,
+        database=env.clickhouse_database,
+        secure=env.clickhouse_url.startswith("https:"),
+    )
+    # Each request can land on another replica: wait for every CREATE on all of
+    # them before the next statement needs it (#712).
     client.command(f"CREATE DATABASE IF NOT EXISTS {quote_ident(database)}")
-    client.command(
-        f"CREATE TABLE {quote_ident(database)}.src (id UInt64) ENGINE = MergeTree ORDER BY id"
+    run_once_visible(
+        lambda: client.command(
+            f"CREATE TABLE {quote_ident(database)}.src (id UInt64) ENGINE = MergeTree ORDER BY id"
+        )
     )
-    client.command(
-        f"CREATE MATERIALIZED VIEW {quote_ident(database)}.inner_mv ENGINE = MergeTree "
-        f"ORDER BY id COMMENT 'maps src TO nothing' AS SELECT id FROM {quote_ident(database)}.src"
-    )
+    with ClickHouseClient.connect(config) as waiter:
+        wait_for_table(waiter, database, "src")
+        client.command(
+            f"CREATE MATERIALIZED VIEW {quote_ident(database)}.inner_mv ENGINE = MergeTree "
+            f"ORDER BY id COMMENT 'maps src TO nothing' AS SELECT id FROM {quote_ident(database)}.src"
+        )
+        wait_for_view(waiter, database, "inner_mv")
     content, warnings = project.pull()
     assert warnings == [
         f'Materialized view "{database}.inner_mv" stores its rows in an inner table (it has '
