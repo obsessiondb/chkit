@@ -167,6 +167,15 @@ class ClickHouseClient:
         _use_ts_timeouts(client)
         return client
 
+    def open_concurrent(self) -> ClickHouseClient:
+        """A new client to the same target without an HTTP session, for requests
+        sent while one of this client's requests is in flight (ClickHouse runs
+        one query at a time per session). The caller closes it. TS
+        ``openConcurrent``."""
+        return ClickHouseClient(
+            self._open_driver(self._config, autogenerate_session_id=False), self._config
+        )
+
     def close(self) -> None:
         # Does not wait for a submit driver still opening (on the thread of an
         # interrupted async migrate), which has no connect timeout: that

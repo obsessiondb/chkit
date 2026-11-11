@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar, cast
 
 import typer
 from typer.exceptions import TyperException
@@ -51,7 +51,15 @@ from chkit.cli.commands.migrate_errors import (
     EMPTY_MIGRATIONS_SUMMARY,
     MigrateError,
     empty_migrations_error,
+    journal_changed_error,
     non_select_barrier_error,
+)
+from chkit.cli.commands.migrate_lock import (
+    GuardedClient,
+    LockTarget,
+    MigrateLock,
+    acquire_migrate_lock,
+    migrate_lock_disabled,
 )
 from chkit.cli.commands.migrate_output import (
     render_abandon_plan_only_notice,
@@ -78,7 +86,7 @@ from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
 from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
-from chkit.cli.journal_store import JournalStore
+from chkit.cli.journal_store import JournalStore, MigrationRowState
 from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
 from chkit.cli.migration_metadata import extract_migration_metadata
 from chkit.cli.migration_store import (
@@ -129,6 +137,18 @@ class _MigrateContext:
     applied_names: set[str]
     pending_all: list[str]
     retry_target: str | None
+    # Runs ``fn`` holding the migrate lock (#716).
+    with_lock: WithLock
+
+
+_T = TypeVar("_T")
+
+
+class WithLock:
+    """Runs a function holding the migrate lock (#716)."""
+
+    def __call__(self, fn: Callable[[], _T]) -> _T:
+        return fn()
 
 
 @dataclass(frozen=True, slots=True)
@@ -142,6 +162,7 @@ class AbandonContext:
     applied_names: set[str]
     files: list[str]
     meta_dir: Path
+    with_lock: WithLock | None = None
 
 
 @dataclass(slots=True)
@@ -205,6 +226,16 @@ def run(  # noqa: PLR0917
             ),
         ),
     ] = None,
+    break_lock: Annotated[
+        bool,
+        typer.Option(
+            "--break-lock",
+            help=(
+                "Release the migrate lock another run holds before taking it "
+                "(only when that run is no longer running)"
+            ),
+        ),
+    ] = False,
     setting: Annotated[
         list[str] | None,
         typer.Option(
@@ -236,6 +267,7 @@ def run(  # noqa: PLR0917
             "--table": table_selector,
             "--retry": retry,
             "--abandon": abandon,
+            "--break-lock": break_lock,
             "--setting": setting,
             "--json": output_json,
             "--force-shared-engines": force_shared_engines,
@@ -251,6 +283,7 @@ def run(  # noqa: PLR0917
             table_selector=table_selector,
             retry=retry,
             abandon=abandon,
+            break_lock=break_lock,
             setting=setting,
             output_json=output_json,
             service=service,
@@ -277,6 +310,7 @@ def _run(
     table_selector: str | None,
     retry: str | None,
     abandon: str | None,
+    break_lock: bool,
     setting: list[str] | None,
     output_json: bool,
     service: str | None,
@@ -346,7 +380,11 @@ def _run(
         )
         raise MigrateError("migration_not_found", msg)
 
-    with open_client(executor, config.clickhouse) as client:
+    with open_client(executor, config.clickhouse) as raw_client:
+        # Every request of the run, journal writes included, first checks
+        # that the run still holds the migrate lock, once it took it (#716).
+        lock_holder = _LockHolder()
+        client = cast(ClickHouseClient, GuardedClient(raw_client, lock_holder.check))
         # ``cluster`` opts the journal into ReplicatedReplacingMergeTree
         # created ``ON CLUSTER`` so history stays consistent across nodes.
         journal_store = JournalStore(
@@ -372,6 +410,13 @@ def _run(
             applied_names=applied_names,
             pending_all=[f for f in files if f not in applied_names],
             retry_target=targets.retry_target,
+            with_lock=_MigrateLockRunner(
+                raw_client=raw_client,
+                journal_store=journal_store,
+                holder=lock_holder,
+                break_lock=break_lock,
+                json_mode=output_json,
+            ),
         )
         if targets.abandon_target is not None:
             run_abandon(
@@ -384,6 +429,7 @@ def _run(
                     applied_names=applied_names,
                     files=files,
                     meta_dir=meta_dir,
+                    with_lock=ctx.with_lock,
                 ),
             )
             return
@@ -442,17 +488,39 @@ def run_abandon(
         if not confirm(migration):
             typer.echo("Abandon cancelled by user.")
             return
-        abandon_migration_state(state, journal_store=ctx.journal_store)
+        _abandon_under_lock(ctx, migration, state)
         typer.echo(f"Abandoned in-progress migration {migration}.")
         return
 
-    abandon_migration_state(state, journal_store=ctx.journal_store)
+    _abandon_under_lock(ctx, migration, state)
     if ctx.json_mode:
         _emit_abandon_json("execute", ctx.table_scope, report)
         return
     render_abandon_text(
         report, performed=True, file_exists=file_exists, snapshot_file=snapshot_file
     )
+
+
+def _abandon_under_lock(ctx: AbandonContext, migration: str, state: MigrationRowState) -> None:
+    """Resets the state the user saw, holding the migrate lock, so --abandon
+    never rewrites a migration that a running apply is recording (#716)."""
+
+    def abandon() -> None:
+        current = read_abandonable_state(
+            migration=migration,
+            applied_names=ctx.applied_names,
+            journal_store=ctx.journal_store,
+        )
+        if current.applied_at != state.applied_at:
+            raise journal_changed_error(
+                f"the journal state of {migration} is no longer the one shown"
+            )
+        abandon_migration_state(current, journal_store=ctx.journal_store)
+
+    if ctx.with_lock is None:
+        abandon()
+    else:
+        ctx.with_lock(abandon)
 
 
 def _run_checksum_gate(ctx: _MigrateContext, journal: MigrationJournal) -> None:
@@ -726,7 +794,117 @@ def _run_destructive_gate(ctx: _MigrateContext, pending: list[str]) -> None:
 
 
 def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
-    """Apply each pending migration, journal it, and emit the final summary."""
+    """Apply each pending migration holding the migrate lock (#716), journal
+    it, and emit the final summary."""
+    ctx.with_lock(lambda: _apply_plan(ctx, _replan_under_lock(ctx, plan)))
+
+
+def _replan_under_lock(ctx: _MigrateContext, plan: _PendingPlan) -> _PendingPlan:
+    """The plan again, from the journal as it is now that this run holds the
+    lock: a run that held it meanwhile may have applied some of the pending
+    migrations, which this run then skips. Anything the plan the user saw
+    does not cover stops the run."""
+    journal = ctx.journal_store.read_journal(project_files=ctx.files)
+    applied_names = {entry.name for entry in journal.applied}
+    mismatches = find_checksum_mismatches(ctx.migrations_dir, journal)
+    if mismatches:
+        names = ", ".join(item.name for item in mismatches)
+        raise journal_changed_error(f"the journal now records {names} with another checksum")
+    current = _resolve_pending_plan(
+        replace(
+            ctx,
+            applied_names=applied_names,
+            pending_all=[f for f in ctx.files if f not in applied_names],
+        )
+    )
+    added = [f for f in current.pending if f not in plan.pending]
+    if added:
+        raise journal_changed_error(f"{', '.join(added)} became pending")
+    if current.retry != plan.retry:
+        raise journal_changed_error(f"--retry {ctx.retry_target} now resolves differently")
+    skipped = [f for f in plan.pending if f not in current.pending]
+    if skipped:
+        pronoun = "it" if len(skipped) == 1 else "them"
+        typer.echo(
+            f"Skipping {', '.join(skipped)}: another migrate run applied {pronoun} meanwhile.",
+            err=ctx.json_mode,
+        )
+    return current
+
+
+class _LockHolder:
+    """The migrate lock this run holds, if any, checked before each request."""
+
+    __slots__ = ("lock",)
+
+    def __init__(self) -> None:
+        self.lock: MigrateLock | None = None
+
+    def check(self) -> None:
+        if self.lock is not None:
+            self.lock.assert_held()
+
+
+class _MigrateLockRunner(WithLock):
+    """Runs a function holding the migrate lock, as TS's ``withLock``."""
+
+    def __init__(
+        self,
+        *,
+        raw_client: Any,
+        journal_store: JournalStore,
+        holder: _LockHolder,
+        break_lock: bool,
+        json_mode: bool,
+    ) -> None:
+        self._raw_client = raw_client
+        self._journal_store = journal_store
+        self._holder = holder
+        self._break_lock = break_lock
+        self._json_mode = json_mode
+
+    def __call__(self, fn: Callable[[], _T]) -> _T:
+        if migrate_lock_disabled():
+            typer.echo(
+                "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "
+                "concurrent migrate can apply the same statements.",
+                err=True,
+            )
+            return fn()
+        found = self._journal_store.lock_target()
+        if found is None:
+            # The database is missing: no journal to hold the lock in until a
+            # migration creates it.
+            return fn()
+        database, table, fanout = found
+        # The heartbeat runs while the run's own requests are in flight; a
+        # client with an HTTP session takes one query at a time.
+        open_concurrent = getattr(self._raw_client, "open_concurrent", None)
+        heartbeat_client = open_concurrent() if callable(open_concurrent) else None
+
+        def log(line: str) -> None:
+            typer.echo(line, err=self._json_mode)
+
+        try:
+            lock = acquire_migrate_lock(
+                self._raw_client,
+                LockTarget(database=database, journal_table=table, fanout=fanout),
+                break_lock=self._break_lock,
+                log=log,
+                heartbeat_client=heartbeat_client,
+            )
+            self._holder.lock = lock
+            try:
+                return fn()
+            finally:
+                self._holder.lock = None
+                lock.release()
+        finally:
+            if heartbeat_client is not None:
+                heartbeat_client.close()
+
+
+def _apply_plan(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     # Progress lines go to stderr in --json mode, so stdout stays one JSON document.
     def log(line: str) -> None:
         typer.echo(line, err=ctx.json_mode)

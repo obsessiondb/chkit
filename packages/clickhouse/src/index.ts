@@ -139,6 +139,12 @@ export interface ClickHouseExecutor {
 	 *  user may not. Native executors look it up once, with their first read. */
 	canChangeSettings?(): Promise<boolean>
 
+	/** Optional capability: a new executor to the same target without an HTTP session,
+	 *  for requests sent while one of this executor's requests is in flight (ClickHouse
+	 *  runs one query at a time per session). The caller closes it. Executors without
+	 *  a session omit it and take concurrent requests themselves. */
+	openConcurrent?(): ClickHouseExecutor
+
 	close(): Promise<void>
 }
 
@@ -1017,6 +1023,7 @@ export function createExecutorWithClient(
 			return `system.${table}`
 		},
 		canChangeSettings: settingsChangeableOnce,
+		openConcurrent: () => createStatelessClickHouseExecutor(config),
 		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
 			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
 			// runs the query on one replica only (#246).

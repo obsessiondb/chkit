@@ -34,9 +34,11 @@ export function wrapExecutorWithDebug(
   const queryJson = executor.queryJson?.bind(executor)
 
   const systemTableSource = executor.systemTableSource?.bind(executor)
+  const openConcurrent = executor.openConcurrent?.bind(executor)
 
   return {
     ...(systemTableSource ? { systemTableSource } : {}),
+    ...(openConcurrent ? { openConcurrent: () => wrapExecutorWithDebug(openConcurrent()) } : {}),
     command(sql: string, settings?: ClickHouseSettings): Promise<void> {
       debug('clickhouse', `command: ${truncate(sql)}`)
       return trace('command', null, () => executor.command(sql, settings))
