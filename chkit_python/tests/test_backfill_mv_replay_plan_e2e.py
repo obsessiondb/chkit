@@ -25,6 +25,7 @@ import pytest
 
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table
+from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.model import ChxResolvedClickHouseConfig, ChxUserConfig, resolve_config
 from chkit_plugin_backfill.async_backfill import BackfillResult, execute_backfill
 from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
@@ -326,19 +327,31 @@ def test_plans_from_the_source_then_execute_backfill_populates_the_empty_target(
     # intra-partition range splitting) — the same shape the copy e2e uses. This
     # keeps the test on the part the fix touches (source introspection + the
     # per-partition INSERT...SELECT) rather than the sort-key splitter.
+    # Planning reads the source's parts on whichever replica answers, so poll
+    # until every replica lists every partition (#718). One replica that has
+    # not loaded the inserted parts yet would otherwise size or plan too few.
+    fanout = resolve_replica_fanout(mv_ctx.ddl)
+    replicas = fanout.replicas if fanout else 1
+    # Through view(): reading system.parts itself across replicas needs a grant
+    # on every column, which ObsessionDB users lack.
+    parts_sql = (
+        "SELECT hostName() AS replica, data_uncompressed_bytes, partition FROM system.parts "
+        f"WHERE database = '{mv_ctx.db}' AND table = '{mv_ctx.source_table}' AND active = 1"
+    )
+    parts_source = all_replicas(fanout, f"view({parts_sql})") if fanout else f"({parts_sql})"
     bytes_rows = poll_until(
         lambda: mv_ctx.ddl.query(
-            "SELECT toString(sum(data_uncompressed_bytes)) AS total,\n"
+            "SELECT replica,\n"
+            "      toString(sum(data_uncompressed_bytes)) AS total,\n"
             "      toString(uniqExact(partition)) AS partitions\n"
-            "      FROM system.parts\n"
-            f"      WHERE database = '{mv_ctx.db}' AND table = '{mv_ctx.source_table}'"
-            " AND active = 1\n"
-            "      SETTINGS select_sequential_consistency = 1"
+            f"      FROM {parts_source}\n"
+            "      GROUP BY replica"
         ).rows,
-        lambda rows: bool(rows) and int(rows[0]["partitions"]) == BUCKETS,
+        lambda rows: (
+            len(rows) == replicas and all(int(row["partitions"]) == BUCKETS for row in rows)
+        ),
     )
-    assert bytes_rows
-    assert int(bytes_rows[0]["partitions"]) == BUCKETS
+    assert [int(row["partitions"]) for row in bytes_rows] == [BUCKETS] * replicas
     uncompressed_bytes = int(float(bytes_rows[0]["total"])) if bytes_rows else 0
     assert uncompressed_bytes > 0
 
