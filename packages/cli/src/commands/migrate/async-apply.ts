@@ -308,7 +308,9 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // This run's polls count only queries that started after the server time
   // read right before the submission, after the journal writes: the recorded
   // start can lie before an earlier attempt's entry by as long as they took.
-  const pollAfterTime = await readSubmissionLowerBound(db)
+  // That read can land on a replica whose clock is behind the one that gave
+  // the recorded start, so the bound never lies before the recorded start.
+  const pollAfterTime = queryLogLowerBound(Math.max(startedAtMs, (await readServerState(db)).nowMs), 0)
   const submitPromise = db.submit(sql, queryId, settings)
 
   return await pollUntilTerminal({
@@ -597,10 +599,6 @@ async function serverTimeAtLeast(
   )
 }
 
-// Read just before a submission, as an ISO UTC string for queryStatus.
-async function readSubmissionLowerBound(db: ClickHouseExecutor): Promise<string> {
-  return queryLogLowerBound((await readServerState(db)).nowMs, 0)
-}
 
 // Only a started attempt of this statement's SQL can have finished without
 // its run journaling the outcome: a failed attempt has its outcome, a record

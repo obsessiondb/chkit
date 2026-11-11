@@ -1585,6 +1585,36 @@ def test_an_attach_journals_the_attempt_started_and_a_rerun_records_its_finish()
     assert second.submitted == []
 
 
+class _AlternatingReplicaClient(_ScriptedClient):
+    """Each server-time read lands on the next replica's clock."""
+
+    def __init__(self, reads: list[int], statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses=statuses, strict=True)
+        self._reads = list(reads)
+
+    def query(self, statement: str) -> QueryResult:
+        self.now_ms = self._reads.pop(0)
+        return super().query(statement)
+
+
+def test_a_retrys_poll_bound_never_lies_before_its_recorded_start() -> None:
+    """Behind a load balancer each server-time read can land on another
+    replica. A retry's polls must not count queries from before its recorded start."""
+    client = _AlternatingReplicaClient(
+        [SERVER_NOW_MS, SERVER_NOW_MS + 5_000, SERVER_NOW_MS + 3_100],
+        [
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, duration_ms=1),
+        ],
+    )
+    journal = _FakeJournalStore(state=_started_record())
+    apply_async_statement(_rerun_input(client, journal))
+
+    assert journal.writes is not None
+    assert journal.writes[1].operations[0].started_at == _iso_ms(SERVER_NOW_MS + 5_000)
+    assert client.after_times[1] == _iso_ms(SERVER_NOW_MS + 3_000) + "Z"
+
+
 def test_an_attach_keeps_the_start_a_record_of_this_release_holds() -> None:
     """The elapsed time is observed after the server time the attach reads, so
     a start derived from both can lie earlier than the attempt's own."""

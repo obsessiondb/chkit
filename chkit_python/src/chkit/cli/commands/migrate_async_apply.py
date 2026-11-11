@@ -439,7 +439,11 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     # This run's polls count only queries that started after the server time
     # read right before the submission, after the journal writes: the recorded
     # start can lie before an earlier attempt's entry by as long as they took.
-    poll_after_time = _query_log_lower_bound(_read_server_state(client)[0], 0)
+    # That read can land on a replica whose clock is behind the one that gave
+    # the recorded start, so the bound never lies before the recorded start.
+    poll_after_time = _query_log_lower_bound(
+        max(started_at_ms, _read_server_state(client)[0]), 0
+    )
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
     submission = _Submission(

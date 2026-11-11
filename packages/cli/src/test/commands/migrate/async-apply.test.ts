@@ -1432,6 +1432,32 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(second.submitCalls).toEqual([])
   })
 
+  // Behind a load balancer each server-time read can land on another replica.
+  // A retry's polls must not count queries from before its recorded start.
+  test("a retry's poll bound never lies before its recorded start when the next read lands on a slower replica", async () => {
+    const reads = [SERVER_NOW_MS, SERVER_NOW_MS + 5_000, SERVER_NOW_MS + 3_100]
+    const statusCalls: StatusCall[] = []
+    const db = {
+      async query() {
+        return [{ now_ms: String(reads.shift()), database: SERVER_DATABASE }]
+      },
+      async queryStatus(id: string, opts?: QueryStatusOptions): Promise<QueryStatus> {
+        statusCalls.push({ queryId: id, afterTime: opts?.afterTime })
+        return statusCalls.length === 1 ? { status: 'unknown' } : { status: 'finished', writtenRows: 16, durationMs: 1 }
+      },
+      async command() {},
+      async submit() {
+        return QUERY_ID
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, writes } = createFakeJournalStore(startedRecord())
+
+    await applyAsyncStatement({ ...input, db, journalStore: store, sleep: NO_SLEEP })
+
+    expect(writes[1]?.operations[0]?.startedAt).toBe(iso(SERVER_NOW_MS + 5_000))
+    expect(statusCalls[1]?.afterTime).toBe(new Date(SERVER_NOW_MS + 3_000).toISOString())
+  })
+
   // The elapsed time is observed after the server time the attach reads, so
   // a start derived from both can lie earlier than the attempt's own.
   test('an attach keeps the start a record of this release holds for the attempt', async () => {
