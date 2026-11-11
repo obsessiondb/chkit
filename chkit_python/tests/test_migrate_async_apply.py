@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import decimal
+import re
 import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
@@ -17,7 +18,6 @@ from chkit.cli.commands.migrate_async_apply import (
     fresh_migration_state,
     iso_without_zone,
     make_deterministic_query_id,
-    make_retry_query_id,
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import MigrateError
@@ -34,8 +34,18 @@ SUBMISSION_BOUND = "2023-11-14T22:14:58.000Z"
 RUNNING_ELAPSED_MS = 30_000
 # SERVER_NOW_MS minus RUNNING_ELAPSED_MS and the 2 s skew margin.
 ATTACH_BOUND = "2023-11-14T22:14:28.000Z"
-# Every query_log entry of a retry's own id counts (#701).
-UNBOUNDED = "1970-01-01 00:00:00"
+# A retry's id is its own (#701): its polls count every query_log entry from
+# an hour before SERVER_NOW_MS, a bound that only lets query_log prune.
+RETRY_BOUND = "2023-11-14T21:15:00.000Z"
+_UUID_SHAPE = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
+
+
+def _retry_query_id(submitted: list[tuple[str, str | None]]) -> str:
+    """The id a retry submitted under: a random one, never the statement's first id (#701)."""
+    assert len(submitted) == 1
+    query_id = submitted[0][1] or ""
+    assert _UUID_SHAPE.match(query_id), query_id
+    return query_id
 SERVER_TIME_QUERY = (
     "query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database"
 )
@@ -55,24 +65,6 @@ def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ---------- pure helpers ----------
-
-
-def test_make_retry_query_id_derives_from_the_record_it_retries() -> None:
-    """#701: a retry's id differs from every earlier attempt's, and two runs
-    that read the same record derive the same one, whichever way the record's
-    start is written."""
-    base = "459ff8d9-18e9-6949-941f-bfc3524d0d17"
-    retry = make_retry_query_id(base, base, "2026-05-26 10:00:00.000")
-    # TS builds the same id (async-apply.test.ts).
-    assert retry == "469d259b-f4c3-cd1e-d366-d3a1897fa280"
-    assert make_retry_query_id(base, base, "2026-05-26T10:00:00.000") == retry
-    others = [
-        base,
-        make_retry_query_id(base, retry, "2026-05-26 10:00:00.000"),
-        # A journal dropped and rebuilt starts its attempts at other times.
-        make_retry_query_id(base, base, "2026-05-26 10:00:00.001"),
-    ]
-    assert len({retry, *others}) == 4
 
 
 def test_make_deterministic_query_id_is_stable() -> None:
@@ -514,16 +506,11 @@ def test_apply_async_resubmit_runs_before_retry(monkeypatch: pytest.MonkeyPatch)
     ]
     # The check reads the recorded attempt's id; the retry submits and polls
     # under an id of its own, so every query_log entry of it counts (#701).
-    retry_id = make_retry_query_id(
-        make_deterministic_query_id(
-            SERVER_DATABASE, "_chkit_migrations", "20260101_000000_async.sql", 0
-        ),
-        prior.query_id,
-        prior.started_at,
-    )
+    retry_id = _retry_query_id(client.submitted)
+    assert retry_id != prior.query_id
     assert client.status_ids == [prior.query_id, retry_id]
     assert client.submitted == [("ALTER TABLE db.t MODIFY COLUMN x UInt64", retry_id)]
-    assert client.after_times == [None, UNBOUNDED]
+    assert client.after_times == [None, RETRY_BOUND]
     # The retry submits right after the check, without waiting on the server clock.
     assert client.events == [SERVER_TIME_QUERY, "status", "submit", "status"]
     assert journal.writes is not None
@@ -1009,8 +996,9 @@ def test_apply_async_new_submission_ignores_earlier_attempt(
     poll = (
         (_QUERY_ID, SUBMISSION_BOUND)
         if prior == "none"
-        else (make_retry_query_id(_QUERY_ID, _QUERY_ID, earlier.started_at), UNBOUNDED)
+        else (client.status_ids[1], RETRY_BOUND)
     )
+    assert _UUID_SHAPE.match(poll[0])
     assert all(
         call == poll for call in zip(client.status_ids[1:], client.after_times[1:], strict=True)
     )
@@ -1196,10 +1184,6 @@ def test_apply_async_refuses_to_skip_a_completed_record_of_other_sql() -> None:
 _RERUN_QUERY_ID = make_deterministic_query_id(SERVER_DATABASE, "_chkit_migrations", "m.sql", 0)
 _MARKER = migrate_async_apply.STARTED_RECORD_MARKER
 _ATTEMPT_MARKER = migrate_async_apply.ATTEMPT_RECORD_MARKER
-# The id a retry of a _RERUN_QUERY_ID attempt started at 2026-05-26 10:00:00 submits under.
-_RERUN_RETRY_QUERY_ID = make_retry_query_id(
-    _RERUN_QUERY_ID, _RERUN_QUERY_ID, "2026-05-26 10:00:00.000"
-)
 # The statement's first id is bounded by the record's start minus the skew margin.
 _RECORD_BOUND = "2026-05-26T09:59:58.000Z"
 # A started attempt without a query_log entry: the check, then 5 rechecks
@@ -1317,11 +1301,12 @@ def test_rerun_of_a_started_attempt_that_failed_on_the_server_resubmits(
     assert client.after_times[0] == _RECORD_BOUND
     assert client.running_only[0] is False
     assert client.executed == ["TRUNCATE TABLE db.t"]
-    assert [query_id for _, query_id in client.submitted] == [_RERUN_RETRY_QUERY_ID]
+    retry_id = _retry_query_id(client.submitted)
+    assert retry_id != _RERUN_QUERY_ID
     assert lines[0] == (
         f"  alter_table_modify_column: previous attempt of query_id={_RERUN_QUERY_ID} is no "
         "longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — "
-        f"running before-retry then resubmitting as query_id={_RERUN_RETRY_QUERY_ID}"
+        f"running before-retry then resubmitting as query_id={retry_id}"
     )
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
@@ -1472,8 +1457,9 @@ def test_a_rerun_never_takes_an_earlier_attempts_finish_for_the_retry_that_follo
         apply_async_statement(_rerun_input(second, journal))
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["failed", "started"]
-    retry_query_id = make_retry_query_id(_RERUN_QUERY_ID, _RERUN_QUERY_ID, run_one_start)
-    assert journal.writes[1].operations[0].query_id == retry_query_id
+    run_two_query_id = journal.writes[1].operations[0].query_id
+    assert _UUID_SHAPE.match(run_two_query_id)
+    assert journal.writes[1].operations[0].started_at == _iso_ms(SERVER_NOW_MS)
     assert journal.writes[1].operations[0].last_error == _ATTEMPT_MARKER
 
     assert second.submitted == []
@@ -1486,14 +1472,80 @@ def test_a_rerun_never_takes_an_earlier_attempts_finish_for_the_retry_that_follo
     _advance_clock(monkeypatch, third)
     result = apply_async_statement(_rerun_input(third, rerun_journal))
 
-    # Every check reads run 2's id, unbounded.
-    assert third.status_ids[:6] == [retry_query_id] * 6
-    assert third.after_times[:6] == [UNBOUNDED] * 6
+    # Every check reads run 2's id, from an hour before its recorded start.
+    assert third.status_ids[:6] == [run_two_query_id] * 6
+    assert third.after_times[:6] == [_iso_ms(SERVER_NOW_MS - 3_600_000) + "Z"] * 6
     assert third.executed == ["TRUNCATE TABLE db.t"]
-    assert [query_id for _, query_id in third.submitted] == [
-        make_retry_query_id(_RERUN_QUERY_ID, retry_query_id, _iso_ms(SERVER_NOW_MS))
-    ]
+    assert _retry_query_id(third.submitted) not in (_RERUN_QUERY_ID, run_two_query_id)
     assert result.operation.status == "completed"
+
+
+class _RunAFinishClient(_ScriptedClient):
+    """query_log holds run A's QueryFinish; other ids answer as scripted."""
+
+    def __init__(self, run_a_query_id: str, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses=statuses, strict=True)
+        self._run_a_query_id = run_a_query_id
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+    ) -> QueryStatus:
+        answer = super().query_status(
+            query_id, after_time=after_time, every_replica=every_replica, running_only=running_only
+        )
+        if query_id == self._run_a_query_id:
+            return QueryStatus(status="finished", written_rows=16, duration_ms=8000)
+        return answer
+
+
+def test_a_rerun_never_takes_a_concurrent_runs_finished_retry_for_its_own_attempt(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Codex review of #701: two runs that read the same failed record. Run A
+    retries and records its attempt completed; run B, delayed after its check,
+    compensates (deleting A's rows), journals its own attempt and stops before
+    its submit. A re-run must not take A's QueryFinish for B's attempt: each
+    run's retry has an id no other run submits."""
+    failed = _started_record(
+        status="failed", finished_at="2026-05-26 10:05:00.000", last_error="boom"
+    )
+    run_a = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, run_a)
+    apply_async_statement(_rerun_input(run_a, _FakeJournalStore(state=failed)))
+    run_a_query_id = _retry_query_id(run_a.submitted)
+    # Run B read the same failed record.
+    journal_b = _KilledBeforeSubmitJournal(state=failed)
+    run_b = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    _advance_clock(monkeypatch, run_b)
+    with pytest.raises(KeyboardInterrupt, match="killed"):
+        apply_async_statement(_rerun_input(run_b, journal_b))
+    assert run_b.executed == ["TRUNCATE TABLE db.t"]
+    assert journal_b.writes is not None
+    run_b_record = journal_b.writes[-1].operations[0]
+    assert run_b_record.status == "started"
+    assert run_b_record.query_id != run_a_query_id
+
+    # The re-run: query_log has run A's QueryFinish only.
+    rerun = _RunAFinishClient(
+        run_a_query_id,
+        [*_NO_ENTRY_CHECKS, QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
+    )
+    _advance_clock(monkeypatch, rerun)
+    apply_async_statement(_rerun_input(rerun, _FakeJournalStore(state=journal_b.state)))
+
+    assert rerun.executed == ["TRUNCATE TABLE db.t"]
+    assert len(rerun.submitted) == 1
 
 
 def test_a_started_record_of_the_release_before_701_keeps_the_bounded_check(
@@ -1513,10 +1565,10 @@ def test_a_started_record_of_the_release_before_701_keeps_the_bounded_check(
     journal = _FakeJournalStore(state=_started_record(last_error=_MARKER))
     apply_async_statement(_rerun_input(client, journal))
 
-    assert client.status_ids == [_RERUN_QUERY_ID, _RERUN_RETRY_QUERY_ID]
-    assert client.after_times == [_RECORD_BOUND, UNBOUNDED]
+    retry_id = _retry_query_id(client.submitted)
+    assert client.status_ids == [_RERUN_QUERY_ID, retry_id]
+    assert client.after_times == [_RECORD_BOUND, RETRY_BOUND]
     assert client.executed == ["TRUNCATE TABLE db.t"]
-    assert [query_id for _, query_id in client.submitted] == [_RERUN_RETRY_QUERY_ID]
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
     assert journal.writes[1].operations[0].last_error == _ATTEMPT_MARKER
@@ -1709,7 +1761,7 @@ def test_a_rerun_before_query_log_has_the_finished_attempt_waits_for_it(
         ],
         strict=True,
     )
-    with pytest.raises(RuntimeError, match="polling failed 21×"):
+    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal))
 
     # Run 2: the load ended; its QueryFinish reaches query_log on the third check.
@@ -1776,7 +1828,7 @@ def test_a_rerun_finds_a_retried_attempt_that_ran_on_a_replica_3s_behind(
         strict=True,
     )
     _advance_clock(monkeypatch, first)
-    with pytest.raises(RuntimeError, match="polling failed 21×"):
+    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal))
     assert journal.writes is not None
     retried = journal.writes[-1].operations[0]

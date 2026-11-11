@@ -4,8 +4,8 @@
 
 Submits the statement via ``ClickHouseClient.submit`` with a ``query_id`` of
 its own (a statement's first attempt derives it from ``(database, journal
-table, migration_name, statement_index)``, a retry from the record it
-retries) and, without waiting for its response, polls
+table, migration_name, statement_index)``, a retry gets a random one) and,
+without waiting for its response, polls
 ``query_status`` until terminal. The per-statement journal state
 is written before submit (intent), after each progress poll (heartbeat),
 and on terminal (completed | failed) so a CLI crash or kill mid-migration
@@ -14,8 +14,8 @@ can resume on the next run.
 Key invariants:
 
 - A re-run attaches to an in-flight server-side query by the id the journal
-  records. Each retry submits under a new id (#701), derived from the record
-  it retries, so two runs that read the same record derive the same one.
+  records. Each retry submits under a new random id (#701), which no other
+  attempt or run submits.
 - ``before_retry`` SQL (parsed from the migration's ``-- before-retry:``
   line) runs only on resubmit, never on first attempt.
 - A re-run of a step journaled ``started`` that no replica runs any more
@@ -39,6 +39,7 @@ import hashlib
 import re
 import threading
 import time
+import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -60,17 +61,21 @@ from chkit.clickhouse.client import ClickHouseClient, QueryStatus, clickhouse_er
 from chkit.core.jsnum import js_math_round, js_number_to_string, js_to_fixed
 
 POLL_INTERVAL_SECONDS = 5.0
-# Every retry submits under a query id of its own (#701), so the
-# system.query_log entries of a retried attempt's id are that attempt's only.
-# The first attempt of a statement uses the statement's deterministic id,
-# which an earlier attempt can share only when the journal lost its record (a
-# dropped journal, a database the journal could not be written to yet). Its
-# entries, and those of an id an older release reused for every attempt,
-# count only from the attempt's start on the server clock, which also stamps
-# query_log, minus a margin for clock skew between replicas. query_status
-# compares whole seconds, so the margin stays more than a second below
-# POLL_INTERVAL_SECONDS.
+# Every retry submits under a random query id of its own (#701), so the
+# system.query_log entries of a retried attempt's id are that attempt's only
+# (see RETRY_QUERY_LOG_MARGIN_MS). The first attempt of a statement uses the
+# statement's deterministic id, which an earlier attempt can share only when
+# the journal lost its record (a dropped journal, a database the journal could
+# not be written to yet). Its entries, and those of an id an older release
+# reused for every attempt, count only from the attempt's start on the server
+# clock, which also stamps query_log, minus a margin for clock skew between
+# replicas. query_status compares whole seconds, so the margin stays more than
+# a second below POLL_INTERVAL_SECONDS.
 QUERY_LOG_SKEW_MARGIN_MS = 2_000
+# A retry's id is its own, so the bound on its query_log entries only lets
+# query_log prune its partitions (event_date), and leaves replica clocks an
+# hour of skew.
+RETRY_QUERY_LOG_MARGIN_MS = 3_600_000
 # query_status's own default: every query_log entry for the id counts.
 UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
 # Poll request failures in a row, and `unknown` polls after a failed submit (#657).
@@ -79,8 +84,8 @@ MAX_TRANSIENT_POLL_ERRORS = 20
 # outcome in system.query_log, journaled before it is retried (#672).
 NO_OUTCOME_ERROR = "no longer running and no outcome in system.query_log; retried"
 # The last_error of a 'started' record this release writes (#701). Its query id
-# names this attempt alone: a retry submits under a new one, derived from the
-# record it retries. A retry by this release journals the attempt failed
+# names this attempt alone: a retry submits under a new random one. A retry by
+# this release journals the attempt failed
 # before its before-retry SQL runs, so a QueryFinish of the id is the
 # statement's outcome. Older releases do not know this marker and check such
 # a record in system.processes only, as they do their own.
@@ -158,37 +163,12 @@ def make_deterministic_query_id(
     The id of a statement's first attempt. The database and journal table
     keep runs of one migration file against other databases, or by other
     projects in the same database, from sharing the id (#463). A re-run
-    attaches to the attempt by the id its record names; a retry submits under
-    ``make_retry_query_id``'s.
+    attaches to an attempt by the id its record names; a retry submits under
+    a random id (#701).
     """
-    return _uuid_shaped(
-        hashlib.sha256(
-            f"chkit:{database}:{journal_table}:{migration_name}:{statement_index}".encode()
-        ).hexdigest()
-    )
-
-
-def make_retry_query_id(base_query_id: str, prior_query_id: str, prior_started_at: str) -> str:
-    """The id a retry of the attempt recorded as ``prior_*`` submits under (#701).
-
-    It differs from every earlier attempt's, so query_log entries of it are
-    this attempt's alone, while two runs that read the same record still
-    derive the same id, and the server refuses the second submission while
-    the first runs. The prior start keeps the ids of a statement whose
-    journal was dropped and rebuilt apart from those it had before.
-    """
-    try:
-        start = str((_journal_time(prior_started_at) - _EPOCH) // timedelta(milliseconds=1))
-    except ValueError:
-        start = prior_started_at
-    return _uuid_shaped(
-        hashlib.sha256(
-            f"chkit-retry:{base_query_id}:{prior_query_id}:{start}".encode()
-        ).hexdigest()
-    )
-
-
-def _uuid_shaped(digest: str) -> str:
+    digest = hashlib.sha256(
+        f"chkit:{database}:{journal_table}:{migration_name}:{statement_index}".encode()
+    ).hexdigest()
     return (
         f"{digest[:8]}-{digest[8:12]}-{digest[12:16]}-{digest[16:20]}-{digest[20:32]}"
     )
@@ -393,7 +373,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             migration_state=journal_store.read_migration_state(input_.migration_name),
             query_id=query_id,
             poll_after_time=(
-                UNBOUNDED_POLL_AFTER_TIME
+                _retry_query_log_lower_bound(_journal_time_ms(attached_started_at))
                 if attached_marker == ATTEMPT_RECORD_MARKER and query_id != base_query_id
                 else _attach_lower_bound(server_now_ms, in_flight.elapsed_ms)
             ),
@@ -410,14 +390,11 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     if attempt_outcome == "finished" and initial_state is not None and prior_op is not None:
         return _record_finished_attempt(input_, initial_state, prior_op, in_flight)
 
-    # 4 / 5. Submit (with optional before-retry on resubmit) under a new id
-    # for a retry. A started attempt that failed on the server is retried the
-    # same way, reported with its error.
-    attempt_query_id = (
-        base_query_id
-        if prior_op is None
-        else make_retry_query_id(base_query_id, prior_op.query_id, prior_op.started_at)
-    )
+    # 4 / 5. Submit (with optional before-retry on resubmit) under a new
+    # random id for a retry, which no other attempt or run ever submits
+    # (#701). A started attempt that failed on the server is retried the same
+    # way, reported with its error.
+    attempt_query_id = base_query_id if prior_op is None else str(uuid.uuid4())
     if prior_op is not None:
         prior_status: str = prior_op.status
         prior_error = prior_op.last_error
@@ -487,7 +464,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     poll_after_time = (
         _query_log_lower_bound(server_now_ms, 0)
         if attempt_query_id == base_query_id
-        else UNBOUNDED_POLL_AFTER_TIME
+        else _retry_query_log_lower_bound(server_now_ms)
     )
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
@@ -890,7 +867,7 @@ def _started_attempt_check(
     SQL (kept by --abandon and an edit) did not run this statement. Only a
     record with a marker counts. A record of this release
     (ATTEMPT_RECORD_MARKER) names an id of this attempt alone: every entry of
-    a retry's id counts, and those of the statement's first id from its
+    a retry's id counts (RETRY_QUERY_LOG_MARGIN_MS), and those of the statement's first id from its
     recorded start (see QUERY_LOG_SKEW_MARGIN_MS). A record of the release
     before (#672, STARTED_RECORD_MARKER) keeps that release's check: its id
     can be an earlier attempt's too, so its entries count from the recorded
@@ -900,11 +877,15 @@ def _started_attempt_check(
         return None
     if op.fingerprint not in ("", fingerprint):
         return None
-    started_ms = (_journal_time(op.started_at) - _EPOCH) // timedelta(milliseconds=1)
+    started_ms = _journal_time_ms(op.started_at)
     bounded = _query_log_lower_bound(started_ms, 0)
     if op.last_error == ATTEMPT_RECORD_MARKER:
         return _StartedAttemptCheck(
-            after_time=bounded if op.query_id == base_query_id else UNBOUNDED_POLL_AFTER_TIME,
+            after_time=(
+                bounded
+                if op.query_id == base_query_id
+                else _retry_query_log_lower_bound(started_ms)
+            ),
             awaits_flush=True,
         )
     if op.last_error == STARTED_RECORD_MARKER:
@@ -916,6 +897,14 @@ def _journal_time(value: str) -> datetime:
     """The journal returns DateTime64 without a zone, all of it UTC."""
     parsed = datetime.fromisoformat(value.strip().replace(" ", "T"))
     return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed
+
+
+def _journal_time_ms(value: str) -> int:
+    return (_journal_time(value) - _EPOCH) // timedelta(milliseconds=1)
+
+
+def _retry_query_log_lower_bound(started_ms: int) -> str:
+    return _iso_bound(started_ms - RETRY_QUERY_LOG_MARGIN_MS)
 
 
 def _attach_lower_bound(server_now_ms: int, elapsed_ms: int | None) -> str:
@@ -930,7 +919,10 @@ def _attach_lower_bound(server_now_ms: int, elapsed_ms: int | None) -> str:
 
 
 def _query_log_lower_bound(server_now_ms: int, started_ms_ago: int) -> str:
-    bound_ms = server_now_ms - started_ms_ago - QUERY_LOG_SKEW_MARGIN_MS
+    return _iso_bound(server_now_ms - started_ms_ago - QUERY_LOG_SKEW_MARGIN_MS)
+
+
+def _iso_bound(bound_ms: int) -> str:
     return (
         datetime.fromtimestamp(bound_ms / 1000, tz=UTC)
         .isoformat(timespec="milliseconds")

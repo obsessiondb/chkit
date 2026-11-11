@@ -6,7 +6,6 @@ import {
   applyAsyncStatement,
   ATTEMPT_RECORD_MARKER,
   makeDeterministicQueryId,
-  makeRetryQueryId,
   STARTED_RECORD_MARKER,
 } from '../../../commands/migrate/async-apply.js'
 import type {
@@ -40,8 +39,10 @@ const SUBMISSION_BOUND = '2023-11-14T22:14:58.000Z'
 const RUNNING_ELAPSED_MS = 30_000
 // SERVER_NOW_MS minus RUNNING_ELAPSED_MS and the 2 s skew margin.
 const ATTACH_BOUND = '2023-11-14T22:14:28.000Z'
-// Every query_log entry of a retry's own id counts (#701).
-const UNBOUNDED = '1970-01-01 00:00:00'
+// A retry's id is its own (#701): its polls count every query_log entry from
+// an hour before SERVER_NOW_MS, a bound that only lets query_log prune.
+const RETRY_BOUND = '2023-11-14T21:15:00.000Z'
+const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function createFakeExecutor(
   // An Error is thrown by the queryStatus call it answers.
@@ -146,8 +147,13 @@ const QUERY_ID = makeDeterministicQueryId(
   BASE_INPUT.statementIndex,
 )
 
-// The id a retry of a QUERY_ID attempt started at 2026-05-26 10:00:00 submits under.
-const RETRY_QUERY_ID = makeRetryQueryId(QUERY_ID, { queryId: QUERY_ID, startedAt: '2026-05-26 10:00:00.000' })
+// The id a retry submitted under: a random one, never the statement's first id (#701).
+function retryQueryId(submitCalls: Array<{ queryId?: string }>): string {
+  const id = submitCalls[0]?.queryId ?? ''
+  expect(id).toMatch(UUID_SHAPE)
+  expect(id).not.toBe(QUERY_ID)
+  return id
+}
 
 function freshStateWith(op: OperationState): MigrationRowState {
   return {
@@ -175,24 +181,6 @@ describe('applyAsyncStatement', () => {
     ]
     expect(new Set([a, ...others]).size).toBe(5)
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
-  })
-
-  // #701: a retry's id differs from every earlier attempt's, and two runs
-  // that read the same record derive the same one, whichever way the record's
-  // start is written.
-  test("a retry's query id derives from the record it retries", () => {
-    const base = '459ff8d9-18e9-6949-941f-bfc3524d0d17'
-    const retry = makeRetryQueryId(base, { queryId: base, startedAt: '2026-05-26 10:00:00.000' })
-    // chkit-py builds the same id (test_migrate_async_apply.py).
-    expect(retry).toBe('469d259b-f4c3-cd1e-d366-d3a1897fa280')
-    expect(makeRetryQueryId(base, { queryId: base, startedAt: '2026-05-26T10:00:00.000' })).toBe(retry)
-    const others = [
-      base,
-      makeRetryQueryId(base, { queryId: retry, startedAt: '2026-05-26 10:00:00.000' }),
-      // A journal dropped and rebuilt starts its attempts at other times.
-      makeRetryQueryId(base, { queryId: base, startedAt: '2026-05-26 10:00:00.001' }),
-    ]
-    expect(new Set([retry, ...others]).size).toBe(4)
   })
 
   test('first attempt: writes started, submits, polls to completion', async () => {
@@ -512,11 +500,11 @@ describe('applyAsyncStatement', () => {
     // under an id of its own, so every query_log entry of it counts (#701).
     expect(statusCalls[0]?.queryId).toBe(queryId)
     expect(submitCalls).toHaveLength(1)
-    expect(submitCalls[0]?.queryId).toBe(RETRY_QUERY_ID)
+    const retryId = retryQueryId(submitCalls)
     expect(statusCalls).toHaveLength(3)
     expect(statusCalls.slice(1)).toMatchObject([
-      { queryId: RETRY_QUERY_ID, afterTime: UNBOUNDED },
-      { queryId: RETRY_QUERY_ID, afterTime: UNBOUNDED },
+      { queryId: retryId, afterTime: RETRY_BOUND },
+      { queryId: retryId, afterTime: RETRY_BOUND },
     ])
     // The retry submits right after the check, without waiting on the server clock.
     expect(events).toEqual([SERVER_TIME_QUERY, 'status', 'submit', 'status', 'status'])
@@ -529,10 +517,10 @@ describe('applyAsyncStatement', () => {
     expect(writes).toHaveLength(2)
     expect(writes[0]?.operations[0]).toMatchObject({
       status: 'started',
-      queryId: RETRY_QUERY_ID,
+      queryId: retryId,
       lastError: ATTEMPT_RECORD_MARKER,
     })
-    expect(writes[1]?.operations[0]).toMatchObject({ status: 'completed', queryId: RETRY_QUERY_ID })
+    expect(writes[1]?.operations[0]).toMatchObject({ status: 'completed', queryId: retryId })
   })
 
   test('migrate --setting reaches the before-retry SQL and the resubmission (#321)', async () => {
@@ -567,7 +555,7 @@ describe('applyAsyncStatement', () => {
     })
 
     expect(commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t', settings }])
-    expect(submitCalls).toEqual([{ sql: BASE_INPUT.sql, queryId: RETRY_QUERY_ID, settings }])
+    expect(submitCalls).toEqual([{ sql: BASE_INPUT.sql, queryId: retryQueryId(submitCalls), settings }])
   })
 
   test('retry without before-retry SQL: still resubmits forward', async () => {
@@ -893,10 +881,8 @@ describe('applyAsyncStatement', () => {
       const poll =
         prior === 'none'
           ? { queryId, afterTime: SUBMISSION_BOUND }
-          : {
-              queryId: makeRetryQueryId(queryId, { queryId, startedAt: '2023-11-14 22:14:00.000' }),
-              afterTime: UNBOUNDED,
-            }
+          : { queryId: statusCalls[1]?.queryId ?? '', afterTime: RETRY_BOUND }
+      expect(poll.queryId).toMatch(UUID_SHAPE)
       expect(statusCalls.slice(1).every((call) => call.queryId === poll.queryId && call.afterTime === poll.afterTime)).toBe(true)
       // Recorded as a failed attempt, never as completed.
       expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
@@ -1201,9 +1187,10 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(result.kind).toBe('completed')
     expect(fake.statusCalls[0]).toEqual({ queryId: QUERY_ID, afterTime: RECORD_BOUND, everyReplica: true })
     expect(fake.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    expect(fake.submitCalls).toEqual([{ sql: input.sql, queryId: RETRY_QUERY_ID }])
+    const retryId = retryQueryId(fake.submitCalls)
+    expect(fake.submitCalls).toEqual([{ sql: input.sql, queryId: retryId }])
     expect(lines[0]).toBe(
-      `  load_table_data: previous attempt of query_id=${QUERY_ID} is no longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — running before-retry then resubmitting as query_id=${RETRY_QUERY_ID}`,
+      `  load_table_data: previous attempt of query_id=${QUERY_ID} is no longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — running before-retry then resubmitting as query_id=${retryId}`,
     )
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
     expect(writes[0]?.operations[0]?.lastError).toBe('Code: 241. DB::Exception: Memory limit exceeded\nstack')
@@ -1287,8 +1274,9 @@ describe('applyAsyncStatement re-run of a started step', () => {
       applyAsyncStatement({ ...input, db: killedBeforeSubmit, journalStore: store, sleep: second.sleep }),
     ).rejects.toThrow('killed')
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started'])
-    const retryQueryId = makeRetryQueryId(QUERY_ID, { queryId: QUERY_ID, startedAt: iso(SERVER_NOW_MS - 1_000) })
-    expect(writes[1]?.operations[0]).toMatchObject({ queryId: retryQueryId, lastError: ATTEMPT_RECORD_MARKER })
+    const runTwoQueryId = writes[1]?.operations[0]?.queryId ?? ''
+    expect(runTwoQueryId).toMatch(UUID_SHAPE)
+    expect(writes[1]?.operations[0]).toMatchObject({ startedAt: iso(SERVER_NOW_MS), lastError: ATTEMPT_RECORD_MARKER })
 
     // Run 3: query_log now holds run 1's QueryFinish, and nothing of run 2's attempt.
     const third = clockedExecutor([...NO_ENTRY_CHECKS, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
@@ -1302,13 +1290,58 @@ describe('applyAsyncStatement re-run of a started step', () => {
     } as unknown as ClickHouseExecutor
     const result = await applyAsyncStatement({ ...input, db, journalStore: store, sleep: third.sleep })
 
-    // Every check reads run 2's id, unbounded.
-    expect(third.statusCalls.slice(0, 6).every((call) => call.queryId === retryQueryId && call.afterTime === UNBOUNDED)).toBe(true)
+    // Every check reads run 2's id, from an hour before its recorded start.
+    const runTwoBound = new Date(SERVER_NOW_MS - 3_600_000).toISOString()
+    expect(third.statusCalls.slice(0, 6).every((call) => call.queryId === runTwoQueryId && call.afterTime === runTwoBound)).toBe(true)
     expect(third.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    expect(third.submitCalls).toEqual([
-      { sql: input.sql, queryId: makeRetryQueryId(QUERY_ID, { queryId: retryQueryId, startedAt: iso(SERVER_NOW_MS) }) },
-    ])
+    expect(third.submitCalls).toHaveLength(1)
+    expect([QUERY_ID, runTwoQueryId]).not.toContain(third.submitCalls[0]?.queryId)
     expect(result.operation.status).toBe('completed')
+  })
+
+  // Codex review of #701: two runs that read the same failed record. Run A
+  // retries and records its attempt completed; run B, delayed after its
+  // check, compensates (deleting A's rows), journals its own attempt and
+  // stops before its submit. A re-run must not take A's QueryFinish for B's
+  // attempt: each run's retry has an id no other run submits.
+  test("a re-run never takes a concurrent run's finished retry for its own compensated attempt", async () => {
+    const failed = startedRecord({ status: 'failed', finishedAt: '2026-05-26 10:05:00.000', lastError: 'boom' })
+    // Run A.
+    const runA = clockedExecutor([{ status: 'unknown' }, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
+    const journalA = createFakeJournalStore(failed)
+    await applyAsyncStatement({ ...input, db: runA.db, journalStore: journalA.store, sleep: runA.sleep })
+    const runAQueryId = retryQueryId(runA.submitCalls)
+    // Run B read the same failed record.
+    const runB = clockedExecutor([{ status: 'unknown' }])
+    const journalB = createFakeJournalStore(failed)
+    const killedBeforeSubmit = {
+      ...runB.db,
+      submit: () => {
+        throw new Error('killed')
+      },
+    } as unknown as ClickHouseExecutor
+    await expect(
+      applyAsyncStatement({ ...input, db: killedBeforeSubmit, journalStore: journalB.store, sleep: runB.sleep }),
+    ).rejects.toThrow('killed')
+    expect(runB.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
+    const runBRecord = journalB.writes.at(-1)?.operations[0]
+    expect(runBRecord?.status).toBe('started')
+    expect(runBRecord?.queryId).not.toBe(runAQueryId)
+
+    // The re-run: query_log has run A's QueryFinish only.
+    const rerun = clockedExecutor([...NO_ENTRY_CHECKS, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
+    const answers = rerun.db.queryStatus.bind(rerun.db)
+    const db = {
+      ...rerun.db,
+      async queryStatus(id: string, opts?: QueryStatusOptions): Promise<QueryStatus> {
+        const answer = await answers(id, opts)
+        return id === runAQueryId ? { status: 'finished', writtenRows: 16, durationMs: 8000 } : answer
+      },
+    } as unknown as ClickHouseExecutor
+    await applyAsyncStatement({ ...input, db, journalStore: journalB.store, sleep: rerun.sleep })
+
+    expect(rerun.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
+    expect(rerun.submitCalls).toHaveLength(1)
   })
 
   // A record of the release before #701 names an id that earlier attempts may
@@ -1322,8 +1355,8 @@ describe('applyAsyncStatement re-run of a started step', () => {
 
     expect(fake.statusCalls[0]).toEqual({ queryId: QUERY_ID, afterTime: RECORD_BOUND, everyReplica: true })
     expect(fake.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    expect(fake.submitCalls).toEqual([{ sql: input.sql, queryId: RETRY_QUERY_ID }])
-    expect(fake.statusCalls[1]).toMatchObject({ queryId: RETRY_QUERY_ID, afterTime: UNBOUNDED })
+    const retryId = retryQueryId(fake.submitCalls)
+    expect(fake.statusCalls[1]).toMatchObject({ queryId: retryId, afterTime: RETRY_BOUND })
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
     expect(writes[1]?.operations[0]?.lastError).toBe(ATTEMPT_RECORD_MARKER)
   })

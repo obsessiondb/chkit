@@ -1,4 +1,4 @@
-import { createHash } from 'node:crypto'
+import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as defaultSleep } from 'node:timers/promises'
 
 import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit/clickhouse'
@@ -15,8 +15,9 @@ import { inProgressChecksumMismatchError } from './errors.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
 
 const POLL_INTERVAL_MS = 5_000
-// Every retry submits under a query id of its own (#701), so the system.query_log
-// entries of a retried attempt's id are that attempt's only. The first attempt
+// Every retry submits under a random query id of its own (#701), so the
+// system.query_log entries of a retried attempt's id are that attempt's only
+// (see RETRY_QUERY_LOG_MARGIN_MS). The first attempt
 // of a statement uses the statement's deterministic id, which an earlier
 // attempt can share only when the journal lost its record (a dropped journal,
 // a database the journal could not be written to yet). Its entries, and those
@@ -25,6 +26,10 @@ const POLL_INTERVAL_MS = 5_000
 // margin for clock skew between replicas. queryStatus compares whole seconds,
 // so the margin stays more than a second below POLL_INTERVAL_MS.
 const QUERY_LOG_SKEW_MARGIN_MS = 2_000
+// A retry's id is its own, so the bound on its query_log entries only lets
+// query_log prune its partitions (event_date), and leaves replica clocks an
+// hour of skew.
+const RETRY_QUERY_LOG_MARGIN_MS = 3_600_000
 // queryStatus's own default: every query_log entry for the id counts.
 const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
 // A poll request can fail transiently (gateway 504/524, network blip) while the
@@ -36,8 +41,7 @@ const MAX_TRANSIENT_POLL_ERRORS = 20
 // outcome in system.query_log, journaled before it is retried (#672).
 const NO_OUTCOME_ERROR = 'no longer running and no outcome in system.query_log; retried'
 // The lastError of a 'started' record this release writes (#701). Its query id
-// names this attempt alone: a retry submits under a new one, derived from the
-// record it retries. A retry by this release journals the attempt failed
+// names this attempt alone: a retry submits under a new random one. A retry by this release journals the attempt failed
 // before its before-retry SQL runs, so a QueryFinish of the id is the
 // statement's outcome. Older releases do not know this marker and check such
 // a record in system.processes only, as they do their own.
@@ -217,7 +221,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       queryId,
       pollAfterTime:
         attachedMarker === ATTEMPT_RECORD_MARKER && queryId !== baseQueryId
-          ? UNBOUNDED_POLL_AFTER_TIME
+          ? retryQueryLogLowerBound(journalTimeMs(attachedStartedAt))
           : attachLowerBound(serverNowMs, inFlight.elapsedMs),
       log,
       pollIntervalMs,
@@ -248,12 +252,13 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   }
 
   // 4. Prior in-progress row exists but no replica runs the query → RETRY.
-  // Run before-retry compensation, then resubmit forward under a new id. A
+  // Run before-retry compensation, then resubmit forward under a new random
+  // id, which no other attempt or run ever submits (#701). A
   // started attempt that failed on the server is retried the same way,
   // reported with its error.
   // 5. No prior row → FIRST attempt. Skip compensation, submit forward.
   // (priorOpState.status === 'completed' was already returned above.)
-  const attemptQueryId = priorOpState === undefined ? baseQueryId : makeRetryQueryId(baseQueryId, priorOpState)
+  const attemptQueryId = priorOpState === undefined ? baseQueryId : randomUUID()
   if (priorOpState !== undefined) {
     const prior =
       attemptOutcome === 'failed'
@@ -322,7 +327,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
 
   // A retry's id is this attempt's alone, so every entry of it counts (#701).
   const pollAfterTime =
-    attemptQueryId === baseQueryId ? queryLogLowerBound(serverNowMs, 0) : UNBOUNDED_POLL_AFTER_TIME
+    attemptQueryId === baseQueryId ? queryLogLowerBound(serverNowMs, 0) : retryQueryLogLowerBound(serverNowMs)
   const submitPromise = db.submit(sql, attemptQueryId, settings)
 
   return await pollUntilTerminal({
@@ -605,7 +610,8 @@ interface StartedAttemptCheck {
 // without a query id never ran under one, and a finished attempt of other SQL
 // (kept by --abandon and an edit) did not run this statement. Only a record
 // with a marker counts. A record of this release (ATTEMPT_RECORD_MARKER)
-// names an id of this attempt alone: every entry of a retry's id counts, and
+// names an id of this attempt alone: every entry of a retry's id counts
+// (RETRY_QUERY_LOG_MARGIN_MS), and
 // those of the statement's first id from its recorded start (see
 // QUERY_LOG_SKEW_MARGIN_MS). A record of the release before (#672,
 // STARTED_RECORD_MARKER) keeps that release's check: its id can be an earlier
@@ -618,11 +624,14 @@ function startedAttemptCheck(
 ): StartedAttemptCheck | undefined {
   if (op?.status !== 'started' || op.queryId === '') return undefined
   if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return undefined
-  const bounded = queryLogLowerBound(journalTimeMs(op.startedAt), 0)
+  const startedMs = journalTimeMs(op.startedAt)
   if (op.lastError === ATTEMPT_RECORD_MARKER) {
-    return { afterTime: op.queryId === baseQueryId ? bounded : UNBOUNDED_POLL_AFTER_TIME, awaitsFlush: true }
+    return {
+      afterTime: op.queryId === baseQueryId ? queryLogLowerBound(startedMs, 0) : retryQueryLogLowerBound(startedMs),
+      awaitsFlush: true,
+    }
   }
-  if (op.lastError === STARTED_RECORD_MARKER) return { afterTime: bounded, awaitsFlush: false }
+  if (op.lastError === STARTED_RECORD_MARKER) return { afterTime: queryLogLowerBound(startedMs, 0), awaitsFlush: false }
   return undefined
 }
 
@@ -641,6 +650,10 @@ function journalTimeMs(value: string): number {
 // is unknown, and only the unbounded lookup still finds its entry.
 function attachLowerBound(serverNowMs: number, elapsedMs: number | undefined): string {
   return elapsedMs === undefined ? UNBOUNDED_POLL_AFTER_TIME : queryLogLowerBound(serverNowMs, elapsedMs)
+}
+
+function retryQueryLogLowerBound(startedMs: number): string {
+  return new Date(startedMs - RETRY_QUERY_LOG_MARGIN_MS).toISOString()
 }
 
 function queryLogLowerBound(serverNowMs: number, startedMsAgo: number): string {
@@ -696,8 +709,8 @@ export function freshMigrationState(
  * The id of an async statement's first attempt. It names the database and
  * journal table too, so runs of one migration file against other databases,
  * or by other projects in the same database, never share it (#463). A re-run
- * attaches to the attempt by the id its record names; a retry submits under
- * makeRetryQueryId's.
+ * attaches to an attempt by the id its record names; a retry submits under a
+ * random id (#701).
  */
 export function makeDeterministicQueryId(
   database: string,
@@ -705,27 +718,16 @@ export function makeDeterministicQueryId(
   migrationName: string,
   statementIndex: number,
 ): string {
-  return uuidShaped(
-    createHash('sha256').update(`chkit:${database}:${journalTable}:${migrationName}:${statementIndex}`).digest('hex'),
-  )
-}
-
-/**
- * The id a retry of the attempt `prior` records submits under (#701). It
- * differs from every earlier attempt's, so query_log entries of it are this
- * attempt's alone, while two runs that read the same record still derive the
- * same id, and the server refuses the second submission while the first
- * runs. The prior start keeps the ids of a statement whose journal was
- * dropped and rebuilt apart from those it had before.
- */
-export function makeRetryQueryId(baseQueryId: string, prior: Pick<OperationState, 'queryId' | 'startedAt'>): string {
-  const startedMs = journalTimeMs(prior.startedAt)
-  const start = Number.isFinite(startedMs) ? String(startedMs) : prior.startedAt
-  return uuidShaped(createHash('sha256').update(`chkit-retry:${baseQueryId}:${prior.queryId}:${start}`).digest('hex'))
-}
-
-function uuidShaped(hex: string): string {
-  return [hex.slice(0, 8), hex.slice(8, 12), hex.slice(12, 16), hex.slice(16, 20), hex.slice(20, 32)].join('-')
+  const hex = createHash('sha256')
+    .update(`chkit:${database}:${journalTable}:${migrationName}:${statementIndex}`)
+    .digest('hex')
+  return [
+    hex.slice(0, 8),
+    hex.slice(8, 12),
+    hex.slice(12, 16),
+    hex.slice(16, 20),
+    hex.slice(20, 32),
+  ].join('-')
 }
 
 function progressLine(
