@@ -592,7 +592,7 @@ def test_migrate_json_has_the_ts_envelope_scope_and_keys(
 def test_abandoned_async_load_failing_before_start_is_not_journaled_completed(
     make_project: Callable[[str], Project],
 ) -> None:
-    """The deterministic query id keeps the first run's QueryFinish in query_log.
+    """query_log keeps the first run's QueryFinish.
 
     An edited load that fails before it starts must not inherit that success,
     and the abandoned load's ``-- before-retry:`` line runs before every later

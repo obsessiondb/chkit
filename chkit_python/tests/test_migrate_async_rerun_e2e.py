@@ -217,3 +217,48 @@ def test_a_rerun_records_the_finished_load_of_its_killed_run_without_loading_it_
         f"SELECT count() AS n FROM {quote_ident(fixture.database)}.events"
     ).rows[0]["n"]
     assert int(count) == _ROWS
+
+
+def test_a_rerun_right_after_the_load_of_its_killed_run_ended_waits_for_its_query_log_entry(
+    make_fixture: Fixture,
+) -> None:
+    """#701: query_log is flushed on a timer (7.5 s by default), so right after
+    the load ends it is neither running nor in query_log. The re-run checks
+    again while query_log is flushed instead of loading the rows again."""
+    fixture = make_fixture
+    killed = _start(fixture)
+    started = poll_until(
+        lambda: _journal(fixture),
+        lambda value: value[0] == "started",
+        timeout=_POLL_TIMEOUT_SECONDS,
+        interval=0.25,
+    )
+    assert started[0] == "started", started
+    query_id = started[1]
+    running = poll_until(
+        lambda: fixture.client.query_status(query_id, every_replica=True, running_only=True),
+        lambda found: found.status == "running",
+        timeout=10.0,
+        interval=0.1,
+    )
+    assert running.status == "running"
+    killed.kill()
+    assert _wait(killed).exit_code != 0
+    # The load ends; re-run as soon as no replica runs it.
+    ended = poll_until(
+        lambda: fixture.client.query_status(query_id, every_replica=True, running_only=True),
+        lambda found: found.status != "running",
+        timeout=60.0,
+        interval=0.1,
+    )
+    assert ended.status != "running"
+
+    rerun = _wait(_start(fixture))
+    assert rerun.exit_code == 0, _diagnostic("re-run", rerun)
+    assert f"previous attempt of query_id={query_id} finished on the server" in rerun.stderr
+    assert "resubmitting" not in rerun.stderr
+    assert _journal(fixture)[0] == "completed"
+    count = fixture.client.query(
+        f"SELECT count() AS n FROM {quote_ident(fixture.database)}.events"
+    ).rows[0]["n"]
+    assert int(count) == _ROWS
