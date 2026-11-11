@@ -226,6 +226,7 @@ describe('query execution', () => {
       [p('v', t.enum8({ view: 1, "it's": 2 })), "it's", "Enum8('view' = 1, 'it\\'s' = 2)", "it's"],
       [p('v', t.json()), { a: 'x', b: [true] }, 'JSON', '{"a":"x","b":[true]}'],
       [p('v', t.lowCardinality(t.nullable(t.string()))), null, 'LowCardinality(Nullable(String))', null],
+      [p('v', t.lowCardinality(t.string()).nullable()), 'Berlin', 'LowCardinality(Nullable(String))', 'Berlin'],
       [p('v', t.array(t.int128())), [1n, -2], 'Array(Int128)', '[1,-2]'],
       [p('v', t.map(t.uint32(), t.nullable(t.string()))), { 7: 'a', 8: null }, 'Map(UInt32, Nullable(String))', "{7:'a',8:NULL}"],
       [p('v', t.map(t.decimal(8, 2), t.string())), { '1.25': 'a', '-3.50': 'b' }, 'Map(Decimal(8, 2), String)', "{1.25:'a',-3.5:'b'}"],

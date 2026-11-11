@@ -90,6 +90,7 @@ export const cityEvents = query`
 - A column-only type is a type error, and `p` throws for it.
 - Plain Zod maps by default: `z.string()` → String, `z.int()` → Int64, `z.number()` → Float64, `z.date()` → DateTime64(3), `z.uuid()`/`z.ipv4()`/`z.ipv6()` → UUID/IPv4/IPv6, `z.array(T)` → Array(T), `z.record(z.string(), T)` → Map(String, T). Set another type with `schema.meta({ clickhouse: 'LowCardinality(String)' })`.
 - `.default()` makes a param optional. `.optional()` makes it `Nullable(T)`, sent as NULL when omitted.
+- `.nullable()`, `.optional()` and `t.nullable()` make `LowCardinality(T)` into `LowCardinality(Nullable(T))`, because ClickHouse has no `Nullable(LowCardinality(T))`.
 - Values are validated strictly: `"10"` fails `p.uint32`.
 - A param used twice is hoisted to a const:
 

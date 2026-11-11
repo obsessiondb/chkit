@@ -602,6 +602,19 @@ describe('@chkit/plugin-pull schema command', () => {
       content: string
     }
 
+    // chkit-py emits the same keys in the same order (#487).
+    expect(Object.keys(payload)).toEqual([
+      'ok',
+      'command',
+      'outFile',
+      'definitionCount',
+      'tableCount',
+      'databases',
+      'skippedObjects',
+      'dryrun',
+      'warnings',
+      'content',
+    ])
     expect(payload.ok).toBe(true)
     expect(payload.command).toBe('schema')
     expect(payload.dryrun).toBe(true)

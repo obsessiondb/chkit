@@ -71,7 +71,6 @@ from chkit.core.model import (
     ChxConfigEnv,
     ChxResolvedConfig,
     DictionaryDefinition,
-    MaterializedViewDefinition,
     MaterializedViewRefresh,
     SchemaDefinition,
     SkipIndexBloomFilter,
@@ -85,7 +84,6 @@ from chkit.core.model import (
     SQLExpression,
     TableDefinition,
     TableRef,
-    ViewDefinition,
     configured_index_granularity,
     dictionary,
     materialized_view,
@@ -661,22 +659,16 @@ def _run(
         *_kafka_setting_warnings(definitions),
     ]
 
+    # The same keys, in the same order, as the TS pull plugin (#487).
     payload: dict[str, object] = {
-        "command": "schema",
         "ok": True,
+        "command": "schema",
         "outFile": str(out_file_abs),
         "definitionCount": len(definitions),
         "tableCount": sum(1 for d in definitions if isinstance(d, TableDefinition)),
-        "viewCount": sum(1 for d in definitions if isinstance(d, ViewDefinition)),
-        "materializedViewCount": sum(
-            1 for d in definitions if isinstance(d, MaterializedViewDefinition)
-        ),
-        "dictionaryCount": sum(
-            1 for d in definitions if isinstance(d, DictionaryDefinition)
-        ),
         "databases": selected,
-        "dryrun": dryrun,
         "skippedObjects": skipped_objects,
+        "dryrun": dryrun,
         "warnings": warnings,
     }
     if dryrun:
