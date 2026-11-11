@@ -236,23 +236,32 @@ export default schema(table({
       }
       expectNoDrift()
 
+      // One out-of-band ALTER at a time, each on every replica before the next:
+      // on ObsessionDB an ALTER on a replica that has not applied the previous
+      // one writes back its stale schema and loses that change (#709).
+      const modifyColumn = async (column: string, change: string) => {
+        const statement = `ALTER TABLE ${object} MODIFY COLUMN ${column} ${change}`
+        await executor.command(statement)
+        await waitForDDLPropagation(executor, 'alter_table_modify_column', `table:${database}.${codecTable}:column:${column}`, { statement })
+      }
+
       // The same codecs, spelled the way ClickHouse fills in itself.
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN lz4hc CODEC(LZ4HC)`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN double_delta4 CODEC(DoubleDelta(8), ZSTD(2))`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN gorilla8 CODEC(Gorilla, ZSTD(2))`)
+      await modifyColumn('lz4hc', 'CODEC(LZ4HC)')
+      await modifyColumn('double_delta4', 'CODEC(DoubleDelta(8), ZSTD(2))')
+      await modifyColumn('gorilla8', 'CODEC(Gorilla, ZSTD(2))')
       await waitForRows<{ name: string; compression_codec: string }>(executor, codecsSql,
         (rows) => rows.find((row) => row.name === 'lz4hc')?.compression_codec === 'CODEC(LZ4HC(0))',
         'equivalent codec respelling'
       )
       expectNoDrift()
 
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN zstd3 String CODEC(LZ4)`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN plain String CODEC(ZSTD(3))`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN lz4 REMOVE CODEC`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN zstd_window CODEC(ZSTD(3))`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN delta8 CODEC(Delta(4), LZ4)`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN fpc12 CODEC(FPC(5))`)
-      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN t64 CODEC(T64('bit'))`)
+      await modifyColumn('zstd3', 'String CODEC(LZ4)')
+      await modifyColumn('plain', 'String CODEC(ZSTD(3))')
+      await modifyColumn('lz4', 'REMOVE CODEC')
+      await modifyColumn('zstd_window', 'CODEC(ZSTD(3))')
+      await modifyColumn('delta8', 'CODEC(Delta(4), LZ4)')
+      await modifyColumn('fpc12', 'CODEC(FPC(5))')
+      await modifyColumn('t64', `CODEC(T64('bit'))`)
       await waitForRows<{ name: string; compression_codec: string }>(executor, codecsSql,
         (rows) => {
           const codecs = new Map(rows.map((row) => [row.name, row.compression_codec]))
