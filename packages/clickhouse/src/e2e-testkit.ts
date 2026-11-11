@@ -216,6 +216,7 @@ export async function runOnceVisible<T>(run: () => Promise<T>, options: PollUnti
 
 export {
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   waitForColumn,
   waitForDictionary,
