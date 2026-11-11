@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { resolveConfig } from '@chkit/core'
-import { allReplicas, resolveReplicaFanout, type ClickHouseExecutor } from '@chkit/clickhouse'
+import { allReplicas, resolveReplicaFanoutOrThrow, type ClickHouseExecutor } from '@chkit/clickhouse'
 import {
   createLiveExecutor,
   createPrefix,
@@ -249,7 +249,7 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
     // Planning reads the source's parts on whichever replica answers, so poll
     // until every replica lists every partition (#718). One replica that has
     // not loaded the inserted parts yet would otherwise size or plan too few.
-    const fanout = await resolveReplicaFanout(ddl)
+    const fanout = await resolveReplicaFanoutOrThrow(ddl)
     const replicas = fanout?.replicas ?? 1
     // Through view(): reading system.parts itself across replicas needs a
     // grant on every column, which ObsessionDB users lack.

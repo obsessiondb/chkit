@@ -25,7 +25,7 @@ import pytest
 
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table
-from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout_or_raise
 from chkit.core.model import ChxResolvedClickHouseConfig, ChxUserConfig, resolve_config
 from chkit_plugin_backfill.async_backfill import BackfillResult, execute_backfill
 from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
@@ -330,7 +330,7 @@ def test_plans_from_the_source_then_execute_backfill_populates_the_empty_target(
     # Planning reads the source's parts on whichever replica answers, so poll
     # until every replica lists every partition (#718). One replica that has
     # not loaded the inserted parts yet would otherwise size or plan too few.
-    fanout = resolve_replica_fanout(mv_ctx.ddl)
+    fanout = resolve_replica_fanout_or_raise(mv_ctx.ddl)
     replicas = fanout.replicas if fanout else 1
     # Through view(): reading system.parts itself across replicas needs a grant
     # on every column, which ObsessionDB users lack.
