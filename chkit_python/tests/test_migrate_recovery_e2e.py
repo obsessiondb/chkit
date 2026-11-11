@@ -27,7 +27,12 @@ from chkit.cli.journal_store import JournalStore
 from chkit.cli.main import app
 from chkit.cli.migration_store import checksum_sql
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_column, wait_for_table, wait_for_view
+from chkit.clickhouse.ddl_propagation import (
+    wait_for_column,
+    wait_for_table,
+    wait_for_table_absent,
+    wait_for_view,
+)
 from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
@@ -752,6 +757,9 @@ def test_refuses_to_resume_a_partial_run_another_release_split_differently(
 
         _parse(_migrate(["--abandon", m, "--apply", "--json"]))
         project.client.execute(f"DROP TABLE {quote_ident(db)}.{quote_ident(b)}")
+        # The next request may land on a replica that has not dropped b yet,
+        # where the rerun's CREATE TABLE b would fail.
+        wait_for_table_absent(project.client, db, b)
         rerun = _migrate(["--execute", "--json"])
         assert rerun.exit_code == 0, format_test_diagnostic("apply after abandon", rerun)
         wait_for_table(project.client, db, b)

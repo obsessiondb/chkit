@@ -158,6 +158,7 @@ export async function pollUntil<T>(
 
 export {
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   waitForColumn,
   waitForDictionary,

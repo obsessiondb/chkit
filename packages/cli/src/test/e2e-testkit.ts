@@ -19,6 +19,7 @@ export {
   createPrefix,
   createJournalTableName,
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   waitForColumn,
   waitForDictionary,
