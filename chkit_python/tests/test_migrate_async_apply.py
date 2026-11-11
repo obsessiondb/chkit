@@ -33,6 +33,9 @@ SUBMISSION_BOUND = "2023-11-14T22:14:58.000Z"
 RUNNING_ELAPSED_MS = 30_000
 # SERVER_NOW_MS minus RUNNING_ELAPSED_MS and the 2 s skew margin.
 ATTACH_BOUND = "2023-11-14T22:14:28.000Z"
+# A retry first waits until the server clock is 5 s past its in-flight check
+# (#672); its polls' bound is that time minus the 2 s skew margin.
+RETRY_SUBMISSION_BOUND = "2023-11-14T22:15:03.000Z"
 SERVER_TIME_QUERY = (
     "query: SELECT toUnixTimestamp64Milli(now64(3)) AS now_ms, currentDatabase() AS database"
 )
@@ -449,7 +452,7 @@ def test_apply_async_gives_up_after_poll_error_budget_with_ts_message() -> None:
     )
 
 
-def test_apply_async_resubmit_runs_before_retry() -> None:
+def test_apply_async_resubmit_runs_before_retry(monkeypatch: pytest.MonkeyPatch) -> None:
     prior = OperationState(
         operation_index=0,
         operation_key="table:db.t:column:x",
@@ -477,6 +480,7 @@ def test_apply_async_resubmit_runs_before_retry() -> None:
             QueryStatus(status="finished", duration_ms=1000),
         ]
     )
+    _advance_clock(monkeypatch, client)
     journal = _FakeJournalStore(state=state)
     apply_async_statement(
         _input(
@@ -492,7 +496,7 @@ def test_apply_async_resubmit_runs_before_retry() -> None:
         ("execute", {"max_table_size_to_drop": "0"}),
         ("submit", {"max_table_size_to_drop": "0"}),
     ]
-    assert client.after_times == [None, SUBMISSION_BOUND]
+    assert client.after_times == [None, RETRY_SUBMISSION_BOUND]
     # #246: only the in-flight check, which decides on the retry, must read
     # every replica; a poll skips a replica it cannot reach.
     assert client.every_replica == [True, False]
@@ -579,7 +583,9 @@ def test_apply_async_rejects_checksum_mismatch_on_in_progress_state() -> None:
     assert client.after_times == []
 
 
-def test_apply_async_accepts_changed_checksum_without_progress() -> None:
+def test_apply_async_accepts_changed_checksum_without_progress(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
     """No statement completed or started (#233): the edited file runs again."""
     journal = _FakeJournalStore(state=_state(_op("failed", last_error="Memory limit")))
     client = _ScriptedClient(
@@ -588,6 +594,7 @@ def test_apply_async_accepts_changed_checksum_without_progress() -> None:
             QueryStatus(status="finished", written_rows=1, duration_ms=100),
         ]
     )
+    _advance_clock(monkeypatch, client)
     result = apply_async_statement(
         _input(
             client=client,
@@ -934,7 +941,9 @@ def test_apply_async_attach_ignores_earlier_attempt_query_log_entries() -> None:
 
 
 @pytest.mark.parametrize("prior", ["none", "abandoned"])
-def test_apply_async_new_submission_ignores_earlier_attempt(prior: str) -> None:
+def test_apply_async_new_submission_ignores_earlier_attempt(
+    prior: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """After --abandon, query_log still holds the earlier attempt's QueryFinish."""
     # The earlier attempt started one 5 s poll interval before this submission.
     stale_start = (SERVER_NOW_MS - 5_000) // 1000
@@ -944,6 +953,7 @@ def test_apply_async_new_submission_ignores_earlier_attempt(prior: str) -> None:
         earlier_start=stale_start,
         submit_raises=RuntimeError("Unknown table expression identifier 'default.src_typo'"),
     )
+    _advance_clock(monkeypatch, client)
     state = (
         None
         if prior == "none"
@@ -955,7 +965,9 @@ def test_apply_async_new_submission_ignores_earlier_attempt(prior: str) -> None:
     journal = _FakeJournalStore(state=state)
     with pytest.raises(RuntimeError, match="src_typo"):
         apply_async_statement(_input(client=client, journal=journal))
-    assert all(after == SUBMISSION_BOUND for after in client.after_times[1:])
+    # A retry's bound lies 5 s later still (#672).
+    bound = SUBMISSION_BOUND if prior == "none" else RETRY_SUBMISSION_BOUND
+    assert all(after == bound for after in client.after_times[1:])
     assert journal.writes is not None
     # Recorded as a failed attempt, never as completed.
     assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
@@ -1143,9 +1155,9 @@ def _iso_ms(ms: int) -> str:
     return iso_without_zone(datetime.fromtimestamp(ms / 1000, tz=UTC))
 
 
-# The start a retry records: 3 s after the server time of its check, the 2 s
-# skew margin plus the whole second query_log compares.
-_RETRY_STARTED_AT = _iso_ms(SERVER_NOW_MS + 3_000)
+# The start a retry records: 5 s after the server time of its check, the 2 s
+# skew margin twice plus the whole second query_log compares.
+_RETRY_STARTED_AT = _iso_ms(SERVER_NOW_MS + 5_000)
 
 
 def _started_record(**overrides: Any) -> MigrationRowState:
@@ -1396,8 +1408,9 @@ class _RunOneFinishClient(_ScriptedClient):
 def test_a_retry_soon_after_an_attempt_that_may_have_finished_unseen_excludes_it(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    """query_log compares whole seconds and the bound has a 2 s skew margin, so
-    a retry recorded within about 3 s of an attempt that finished unseen would
+    """query_log compares whole seconds and the bound has a 2 s skew margin,
+    and the earlier attempt's replica clock can be up to that margin ahead, so
+    a retry recorded within about 5 s of an attempt that finished unseen would
     count that attempt's QueryFinish as its own on a later re-run."""
     journal = _FakeJournalStore(state=_started_record(started_at=_iso_ms(SERVER_NOW_MS - 1_000)))
     # Run 2, a second after run 1's attempt: no outcome yet; it compensates,
@@ -1407,7 +1420,7 @@ def test_a_retry_soon_after_an_attempt_that_may_have_finished_unseen_excludes_it
     sleeps = _advance_clock(monkeypatch, second)
     with pytest.raises(KeyboardInterrupt, match="killed"):
         apply_async_statement(_rerun_input(second, journal))
-    assert sleeps[0] == 3.0
+    assert sleeps[0] == 5.0
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["failed", "started"]
     assert journal.writes[1].operations[0].started_at == _RETRY_STARTED_AT
@@ -1420,7 +1433,7 @@ def test_a_retry_soon_after_an_attempt_that_may_have_finished_unseen_excludes_it
     result = apply_async_statement(_rerun_input(third, journal))
 
     # Bounded by run 2's start minus the margin, which run 1's attempt precedes.
-    assert third.after_times[0] == _iso_ms(SERVER_NOW_MS + 1_000) + "Z"
+    assert third.after_times[0] == _iso_ms(SERVER_NOW_MS + 3_000) + "Z"
     assert third.executed == ["TRUNCATE TABLE db.t"]
     assert len(third.submitted) == 1
     assert result.operation.status == "completed"
@@ -1480,12 +1493,13 @@ def test_a_resubmissions_polls_ignore_an_earlier_failure_before_its_submission(
     assert len(client.submitted) == 1
 
 
-def test_an_older_releases_started_record_with_before_retry_reads_processes_only(
-    monkeypatch: pytest.MonkeyPatch,
+@pytest.mark.parametrize("before_retry", ["TRUNCATE TABLE db.t", None], ids=["with", "without"])
+def test_an_older_releases_started_record_is_checked_in_processes_only(
+    before_retry: str | None, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """A retry by an older release ran before-retry SQL without journaling the
-    attempt failed first, so the QueryFinish of an older release's started
-    record is not the statement's outcome when the statement has before-retry SQL."""
+    """An older release's started record has a client-clock start, and a retry
+    by that release may have run before-retry SQL without journaling the
+    attempt failed first, so its QueryFinish is not the statement's outcome."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="finished", written_rows=16, duration_ms=8000),
@@ -1495,27 +1509,12 @@ def test_an_older_releases_started_record_with_before_retry_reads_processes_only
     )
     _advance_clock(monkeypatch, client)
     journal = _FakeJournalStore(state=_started_record(last_error=""))
-    apply_async_statement(_rerun_input(client, journal))
+    apply_async_statement(_rerun_input(client, journal, before_retry=before_retry))
 
     assert client.after_times[0] is None
     assert client.running_only[0] is True
-    assert client.executed == ["TRUNCATE TABLE db.t"]
+    assert client.executed == ([] if before_retry is None else [before_retry])
     assert len(client.submitted) == 1
-
-
-def test_an_older_releases_started_record_without_before_retry_reads_query_log() -> None:
-    client = _ScriptedClient(
-        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
-        strict=True,
-    )
-    journal = _FakeJournalStore(state=_started_record(last_error="", fingerprint=""))
-    apply_async_statement(_rerun_input(client, journal, before_retry=None))
-
-    assert client.submitted == []
-    # As an attach does, the record keeps what is known about the attempt.
-    assert journal.writes is not None
-    assert journal.writes[-1].operations[0].status == "completed"
-    assert journal.writes[-1].operations[0].fingerprint == ""
 
 
 # Only a started attempt of this statement's SQL can have finished unseen: a
@@ -1584,6 +1583,24 @@ def test_an_attach_journals_the_attempt_started_and_a_rerun_records_its_finish()
     assert result.kind == "completed"
     assert second.after_times[0] == ATTACH_BOUND
     assert second.submitted == []
+
+
+def test_an_attach_keeps_the_start_a_record_of_this_release_holds() -> None:
+    """The elapsed time is observed after the server time the attach reads, so
+    a start derived from both can lie earlier than the attempt's own."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="running", written_rows=5, elapsed_ms=RUNNING_ELAPSED_MS),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    journal = _FakeJournalStore(state=_started_record(started_at="2023-11-14 22:14:59.000"))
+    apply_async_statement(_rerun_input(client, journal))
+
+    assert journal.writes is not None
+    assert journal.writes[0].operations[0].status == "started"
+    assert journal.writes[0].operations[0].started_at == "2023-11-14 22:14:59.000"
 
 
 def test_a_user_that_cannot_read_query_log_is_told_which_grant_it_lacks() -> None:

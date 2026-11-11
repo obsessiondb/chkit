@@ -26,9 +26,9 @@ const POLL_INTERVAL_MS = 5_000
 // compares whole seconds, so the margin stays more than a second below
 // POLL_INTERVAL_MS: an earlier attempt that a previous run polled to its end
 // started at least one poll interval ago and always falls before the bound.
-// One that may have finished unseen is kept out of a retry's bound by the
-// wait in serverTimeAtLeast; one that started within the margin of a new
-// submission's bound for any other reason can still count (#672).
+// A retry's recorded start lies far enough after its in-flight check that
+// every earlier attempt falls before a re-run's bound (#672), as long as
+// replica clocks differ by less than the margin.
 const QUERY_LOG_SKEW_MARGIN_MS = 2_000
 // queryStatus's own default: every query_log entry for the id counts.
 const UNBOUNDED_POLL_AFTER_TIME = '1970-01-01 00:00:00'
@@ -40,14 +40,18 @@ const MAX_TRANSIENT_POLL_ERRORS = 20
 // The lastError of a started attempt that no replica runs and that has no
 // outcome in system.query_log, journaled before it is retried (#672).
 const NO_OUTCOME_ERROR = 'no longer running and no outcome in system.query_log; retried'
-// The lastError of a 'started' record this release writes (#672). A retry by
-// this release journals such an attempt failed before its before-retry SQL
-// runs, so a QueryFinish of it is the statement's outcome. A retry by an older
-// release compensated without that record, so an older release's started
-// record with before-retry SQL is only checked in system.processes.
+// The lastError of a 'started' record this release writes (#672). Its start
+// is on the server clock, and a retry by this release journals the attempt
+// failed before its before-retry SQL runs, so a QueryFinish of it is the
+// statement's outcome. An older release's started record has neither: its
+// start is the client's, and a retry by that release may have compensated the
+// attempt without a record, so it is only checked in system.processes.
 export const STARTED_RECORD_MARKER = 'submitted; a retry reads its outcome from system.query_log'
-// Reads of the server clock while a retry waits for it to pass the bound
-// below. The wait is about 3 s, so the clock passes it on the first read after it.
+// How long after its in-flight check a retry's recorded start lies (see
+// startedAtMs in applyAsyncStatement).
+const RETRY_START_DELAY_MS = 2 * QUERY_LOG_SKEW_MARGIN_MS + 1_000
+// Reads of the server clock while a retry waits for it to pass that start.
+// The wait is about 5 s, so the clock passes it on the first read after it.
 const MAX_SERVER_CLOCK_READS = 10
 
 function describeError(error: unknown): string {
@@ -134,7 +138,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     'migrate:async',
     `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
   )
-  const attemptLowerBound = startedAttemptLowerBound(priorOpState, fingerprint, beforeRetry)
+  const attemptLowerBound = startedAttemptLowerBound(priorOpState, fingerprint)
   const inFlight = await checkInFlight(db, queryId, operationType, attemptLowerBound)
   // Only the outcome read of a started attempt can tell that it ended.
   const attemptOutcome = attemptLowerBound === undefined ? 'unknown' : inFlight.status
@@ -153,10 +157,15 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // The attached attempt is journaled started, also under a failed record:
     // a run that stops while it polls leaves a record whose QueryFinish a
     // re-run finds (#672). Its start is the server's, from its elapsed time.
+    // A record this release wrote for the attempt keeps its start: the
+    // elapsed time is observed after serverNowMs was read, so the start
+    // derived from both can lie earlier than the attempt's by that delay.
     const attachedStartedAt =
-      inFlight.elapsedMs === undefined
-        ? (priorOpState?.startedAt ?? isoWithoutZone(new Date(serverNowMs)))
-        : isoWithoutZone(new Date(serverNowMs - inFlight.elapsedMs))
+      priorOpState?.status === 'started' && priorOpState.lastError === STARTED_RECORD_MARKER
+        ? priorOpState.startedAt
+        : inFlight.elapsedMs === undefined
+          ? (priorOpState?.startedAt ?? isoWithoutZone(new Date(serverNowMs)))
+          : isoWithoutZone(new Date(serverNowMs - inFlight.elapsedMs))
     await journalStore.writeMigrationState(
       upsertOperation(
         initialMigrationState ?? freshMigrationState(migrationName, migrationChecksum),
@@ -260,13 +269,16 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
 
   // The attempt's start on the server clock, which also stamps query_log,
   // recorded before the attempt is journaled and submitted: a re-run bounds
-  // the attempt's query_log entry by it (#672). An earlier attempt that may
-  // have finished unseen started no later than the in-flight check, so a
-  // retry of one first waits until that start falls outside the bound.
+  // the attempt's query_log entry by it (#672). An earlier attempt can have
+  // finished without any check seeing it (a killed run, a submit error
+  // journaled failed, --abandon), but it started no later than the in-flight
+  // check. A retry waits until the server clock is past that by the skew
+  // margin twice (the earlier attempt's replica, and this bound's) plus the
+  // whole second query_log compares, so that start falls before the bound.
   const startedAtMs =
-    priorOpState !== undefined && mayHaveFinishedUnseen(priorOpState)
-      ? await serverTimeAtLeast(db, serverNowMs + QUERY_LOG_SKEW_MARGIN_MS + 1_000, sleep, operationType, queryId)
-      : serverNowMs
+    priorOpState === undefined
+      ? serverNowMs
+      : await serverTimeAtLeast(db, serverNowMs + RETRY_START_DELAY_MS, sleep, operationType, queryId)
   const startedAt = isoWithoutZone(new Date(startedAtMs))
 
   // Persist the "started" intent BEFORE submitting, so a crash between here
@@ -567,12 +579,6 @@ async function checkInFlight(
 // and the ObsessionDB console relay it.
 const QUERY_LOG_ACCESS_DENIED = /(ACCESS_DENIED|Code: 497|Not enough privileges)[\s\S]*query_log|query_log[\s\S]*(ACCESS_DENIED|Code: 497)/
 
-// Whether an earlier attempt may have a QueryFinish that no check of it saw:
-// one journaled started, or failed by a retry that found no outcome.
-function mayHaveFinishedUnseen(op: OperationState): boolean {
-  return op.status === 'started' || op.lastError === NO_OUTCOME_ERROR
-}
-
 // The server time once it reached targetMs.
 async function serverTimeAtLeast(
   db: ClickHouseExecutor,
@@ -599,21 +605,15 @@ async function readSubmissionLowerBound(db: ClickHouseExecutor): Promise<string>
 // Only a started attempt of this statement's SQL can have finished without
 // its run journaling the outcome: a failed attempt has its outcome, a record
 // without a query id never ran under one, and a finished attempt of other SQL
-// (kept by --abandon and an edit) did not run this statement. With
-// before-retry SQL, only a record this release wrote counts: a retry by an
-// older release may have compensated the attempt without recording it, so
-// its QueryFinish is no longer the statement's outcome. Its query_log entry is
-// bounded by the start the attempt recorded, on the server clock; a retry that
-// follows an attempt that may have finished unseen waits until that attempt
-// falls before its own start's bound (serverTimeAtLeast).
-function startedAttemptLowerBound(
-  op: OperationState | undefined,
-  fingerprint: string,
-  beforeRetry: string | null,
-): string | undefined {
+// (kept by --abandon and an edit) did not run this statement. Only a record
+// this release wrote counts (STARTED_RECORD_MARKER). Its query_log entry is
+// bounded by the start the attempt recorded, on the server clock; a retry
+// waits until every earlier attempt falls before its own start's bound
+// (startedAtMs in applyAsyncStatement).
+function startedAttemptLowerBound(op: OperationState | undefined, fingerprint: string): string | undefined {
   if (op?.status !== 'started' || op.queryId === '') return undefined
   if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return undefined
-  if (beforeRetry !== null && op.lastError !== STARTED_RECORD_MARKER) return undefined
+  if (op.lastError !== STARTED_RECORD_MARKER) return undefined
   return queryLogLowerBound(journalTimeMs(op.startedAt), 0)
 }
 

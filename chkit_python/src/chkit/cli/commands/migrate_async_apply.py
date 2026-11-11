@@ -62,9 +62,9 @@ POLL_INTERVAL_SECONDS = 5.0
 # query_status compares whole seconds, so the margin stays more than a second
 # below POLL_INTERVAL_SECONDS: an earlier attempt that a previous run polled to
 # its end started at least one poll interval ago and always falls before the bound.
-# One that may have finished unseen is kept out of a retry's bound by the wait
-# in _server_time_at_least; one that started within the margin of a new
-# submission's bound for any other reason can still count (#672).
+# A retry's recorded start lies far enough after its in-flight check that every
+# earlier attempt falls before a re-run's bound (#672), as long as replica
+# clocks differ by less than the margin.
 QUERY_LOG_SKEW_MARGIN_MS = 2_000
 # query_status's own default: every query_log entry for the id counts.
 UNBOUNDED_POLL_AFTER_TIME = "1970-01-01 00:00:00"
@@ -73,14 +73,18 @@ MAX_TRANSIENT_POLL_ERRORS = 20
 # The last_error of a started attempt that no replica runs and that has no
 # outcome in system.query_log, journaled before it is retried (#672).
 NO_OUTCOME_ERROR = "no longer running and no outcome in system.query_log; retried"
-# The last_error of a 'started' record this release writes (#672). A retry by
-# this release journals such an attempt failed before its before-retry SQL
-# runs, so a QueryFinish of it is the statement's outcome. A retry by an older
-# release compensated without that record, so an older release's started
-# record with before-retry SQL is only checked in system.processes.
+# The last_error of a 'started' record this release writes (#672). Its start
+# is on the server clock, and a retry by this release journals the attempt
+# failed before its before-retry SQL runs, so a QueryFinish of it is the
+# statement's outcome. An older release's started record has neither: its
+# start is the client's, and a retry by that release may have compensated the
+# attempt without a record, so it is only checked in system.processes.
 STARTED_RECORD_MARKER = "submitted; a retry reads its outcome from system.query_log"
-# Reads of the server clock while a retry waits for it to pass the bound
-# below. The wait is about 3 s, so the clock passes it on the first read after it.
+# How long after its in-flight check a retry's recorded start lies (see
+# started_at_ms in apply_async_statement).
+RETRY_START_DELAY_MS = 2 * QUERY_LOG_SKEW_MARGIN_MS + 1_000
+# Reads of the server clock while a retry waits for it to pass that start.
+# The wait is about 5 s, so the clock passes it on the first read after it.
 MAX_SERVER_CLOCK_READS = 10
 # ClickHouse's ACCESS_DENIED (497) for system.query_log, as the native client
 # and the ObsessionDB console relay it.
@@ -289,9 +293,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         input_.migration_name,
         input_.statement_index,
     )
-    attempt_lower_bound = _started_attempt_lower_bound(
-        prior_op, input_.fingerprint, input_.before_retry
-    )
+    attempt_lower_bound = _started_attempt_lower_bound(prior_op, input_.fingerprint)
     in_flight = _check_in_flight(
         client, query_id, input_.operation_type, attempt_lower_bound
     )
@@ -317,16 +319,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         # record: a run that stops while it polls leaves a record whose
         # QueryFinish a re-run finds (#672). Its start is the server's, from
         # its elapsed time.
-        if in_flight.elapsed_ms is None:
-            attached_started_at = (
-                prior_op.started_at
-                if prior_op is not None
-                else iso_without_zone(_EPOCH + timedelta(milliseconds=server_now_ms))
-            )
-        else:
-            attached_started_at = iso_without_zone(
-                _EPOCH + timedelta(milliseconds=server_now_ms - in_flight.elapsed_ms)
-            )
+        attached_started_at = _attached_started_at(prior_op, in_flight, server_now_ms)
         journal_store.write_migration_state(
             upsert_operation(
                 initial_state
@@ -405,18 +398,18 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
 
     # The attempt's start on the server clock, which also stamps query_log,
     # recorded before the attempt is journaled and submitted: a re-run bounds
-    # the attempt's query_log entry by it (#672). An earlier attempt that may
-    # have finished unseen started no later than the in-flight check, so a
-    # retry of one first waits until that start falls outside the bound.
+    # the attempt's query_log entry by it (#672). An earlier attempt can have
+    # finished without any check seeing it (a killed run, a submit error
+    # journaled failed, --abandon), but it started no later than the in-flight
+    # check. A retry waits until the server clock is past that by the skew
+    # margin twice (the earlier attempt's replica, and this bound's) plus the
+    # whole second query_log compares, so that start falls before the bound.
     started_at_ms = (
-        _server_time_at_least(
-            client,
-            server_now_ms + QUERY_LOG_SKEW_MARGIN_MS + 1_000,
-            input_.operation_type,
-            query_id,
+        server_now_ms
+        if prior_op is None
+        else _server_time_at_least(
+            client, server_now_ms + RETRY_START_DELAY_MS, input_.operation_type, query_id
         )
-        if prior_op is not None and _may_have_finished_unseen(prior_op)
-        else server_now_ms
     )
     started_at = iso_without_zone(_EPOCH + timedelta(milliseconds=started_at_ms))
 
@@ -731,6 +724,28 @@ def _check_in_flight(
         raise RuntimeError(msg) from error
 
 
+def _attached_started_at(
+    prior_op: OperationState | None, in_flight: QueryStatus, server_now_ms: int
+) -> str:
+    """The start an attach records for the attempt it attaches to (#672).
+
+    A record this release wrote for the attempt keeps its start: the elapsed
+    time is observed after ``server_now_ms`` was read, so the start derived
+    from both can lie earlier than the attempt's by that delay.
+    """
+    if (
+        prior_op is not None
+        and prior_op.status == "started"
+        and prior_op.last_error == STARTED_RECORD_MARKER
+    ):
+        return prior_op.started_at
+    if in_flight.elapsed_ms is None:
+        if prior_op is not None:
+            return prior_op.started_at
+        return iso_without_zone(_EPOCH + timedelta(milliseconds=server_now_ms))
+    return iso_without_zone(_EPOCH + timedelta(milliseconds=server_now_ms - in_flight.elapsed_ms))
+
+
 def _record_finished_attempt(
     input_: AsyncApplyInput,
     state: MigrationRowState,
@@ -781,14 +796,6 @@ def _journal_attempt_failed(
     )
 
 
-def _may_have_finished_unseen(op: OperationState) -> bool:
-    """Whether an earlier attempt may have a QueryFinish no check of it saw.
-
-    One journaled started, or failed by a retry that found no outcome.
-    """
-    return op.status == "started" or op.last_error == NO_OUTCOME_ERROR
-
-
 def _server_time_at_least(
     client: ClickHouseClient, target_ms: int, operation_type: str, query_id: str
 ) -> int:
@@ -806,27 +813,23 @@ def _server_time_at_least(
     raise RuntimeError(msg)
 
 
-def _started_attempt_lower_bound(
-    op: OperationState | None, fingerprint: str, before_retry: str | None
-) -> str | None:
+def _started_attempt_lower_bound(op: OperationState | None, fingerprint: str) -> str | None:
     """The query_log bound of a started attempt whose outcome a re-run reads (#672).
 
     Only a started attempt of this statement's SQL can have finished without
     its run journaling the outcome: a failed attempt has its outcome, a record
     without a query id never ran under one, and a finished attempt of other
-    SQL (kept by --abandon and an edit) did not run this statement. With
-    before-retry SQL, only a record this release wrote counts: a retry by an
-    older release may have compensated the attempt without recording it, so
-    its QueryFinish is no longer the statement's outcome. Its query_log entry
-    is bounded by the start the attempt recorded, on the server clock; a retry
-    that follows an attempt that may have finished unseen waits until that
-    attempt falls before its own start's bound (_server_time_at_least).
+    SQL (kept by --abandon and an edit) did not run this statement. Only a
+    record this release wrote counts (STARTED_RECORD_MARKER). Its query_log
+    entry is bounded by the start the attempt recorded, on the server clock; a
+    retry waits until every earlier attempt falls before its own start's bound
+    (started_at_ms in apply_async_statement).
     """
     if op is None or op.status != "started" or op.query_id == "":
         return None
     if op.fingerprint not in ("", fingerprint):
         return None
-    if before_retry is not None and op.last_error != STARTED_RECORD_MARKER:
+    if op.last_error != STARTED_RECORD_MARKER:
         return None
     started_ms = (_journal_time(op.started_at) - _EPOCH) // timedelta(milliseconds=1)
     return _query_log_lower_bound(started_ms, 0)
