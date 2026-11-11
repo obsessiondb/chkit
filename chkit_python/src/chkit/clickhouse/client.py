@@ -366,6 +366,9 @@ class ClickHouseClient:
             return QueryStatus(status="unknown")
 
         after = after_time or "1970-01-01 00:00:00"
+        # event_date prunes query_log's partitions: the entry is logged no earlier
+        # than the query started. A day of slack covers a session time zone other
+        # than the server's; toDate32, as a Date before 1970 wraps around.
         log_sql = (
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
             f"FROM {source('system.query_log')} "
@@ -373,6 +376,7 @@ class ClickHouseClient:
             "AND type IN ('QueryFinish', 'ExceptionWhileProcessing') "
             "AND is_initial_query = 1 "
             f"AND query_start_time >= parseDateTimeBestEffort('{after}') "
+            f"AND event_date >= toDate32(parseDateTimeBestEffort('{after}')) - 1 "
             "ORDER BY event_time DESC LIMIT 1"
         )
         log = self.query(log_sql, settings=read_settings)

@@ -98,6 +98,16 @@ const OPERATIONS_TUPLE_TYPE =
   'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, \'UTC\'), finished_at Nullable(DateTime64(3, \'UTC\')), last_error String))'
 
 /**
+ * The `operations` tuple with its times as strings. A DateTime64 that
+ * toJSONString or the output format renders follows the user's
+ * date_time_output_format ('1794350634.552' with 'unix_timestamp'), while a
+ * CAST to String always gives 'YYYY-MM-DD HH:MM:SS.mmm' (#672).
+ */
+const OPERATIONS_READ_TYPE =
+  'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status String, started_at String, finished_at Nullable(String), last_error String))'
+const OPERATIONS_SELECT = `toJSONString(CAST(operations, '${OPERATIONS_READ_TYPE}'))`
+
+/**
  * One fingerprint per entry of `operations`, in the same order (#599). A
  * separate column, so the `operations` type older releases write stays the
  * same. Older releases name their INSERT columns, so a row they write gets
@@ -308,6 +318,16 @@ SETTINGS index_granularity = 1`
   let journalDatabase: Promise<string> | undefined
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
+  // The newest applied_at version per migration that this store read or
+  // wrote. Each write takes a newer one (#672): ReplacingMergeTree keeps the
+  // newest version and the replicated read either row of a tie, so a write
+  // stamped by a clock that stalls, steps back or runs behind the writer of
+  // the version it read would otherwise be lost.
+  const newestVersion = new Map<string, number>()
+  function noteVersion(name: string, appliedAt: string): void {
+    const version = rowVersion(appliedAt)
+    if (Number.isFinite(version)) newestVersion.set(name, Math.max(newestVersion.get(name) ?? version, version))
+  }
 
   /**
    * Makes sure the journal can be read or, with `create`, written. Only a
@@ -625,7 +645,7 @@ SETTINGS index_granularity = 1`
     const fingerprints = fingerprintColumn
     const fanout = await replicaFanout()
     const fingerprintSelect = `toJSONString(${FINGERPRINTS_COLUMN})`
-    const columns = `name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations${fingerprints ? `, ${fingerprintSelect} AS ${FINGERPRINTS_COLUMN}` : ''}`
+    const columns = `name, toString(applied_at) AS applied_at, checksum, chkit_version, migration_completed, ${OPERATIONS_SELECT} AS operations${fingerprints ? `, ${fingerprintSelect} AS ${FINGERPRINTS_COLUMN}` : ''}`
     if (!fanout) {
       const sql = `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit}`
       try {
@@ -643,7 +663,7 @@ SETTINGS index_granularity = 1`
     const latest = fingerprints ? `, latest.6 AS ${FINGERPRINTS_COLUMN}` : ''
     const versioned = fingerprints ? `, ${fingerprintSelect}` : ''
     return await db.query<MigrationRow>(
-      `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations${latest} FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)${versioned}), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
+      `SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations${latest} FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, ${OPERATIONS_SELECT}${versioned}), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
     )
   }
 
@@ -716,6 +736,7 @@ SETTINGS index_granularity = 1`
       const rows = await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
       const written = lastWritten.get(migrationName)
       const row = rows[0]
+      if (row) noteVersion(migrationName, row.applied_at)
       if (!row) return written ?? null
       const state: MigrationRowState = {
         name: row.name,
@@ -740,7 +761,15 @@ SETTINGS index_granularity = 1`
       // The release that wrote the state last. migrate checks a state another
       // release wrote before it resumes it, so the statement positions in a
       // state this release wrote are always this release's split (#562).
-      const state = { ...input, chkitVersion: CLI_VERSION }
+      const floor = newestVersion.get(input.name)
+      const requested = rowVersion(input.appliedAt)
+      const version =
+        floor === undefined ? requested : Math.max(Number.isFinite(requested) ? requested : Date.now(), floor + 1)
+      const state = {
+        ...input,
+        appliedAt: version === requested ? input.appliedAt : new Date(version).toISOString().replace('Z', ''),
+        chkitVersion: CLI_VERSION,
+      }
       if (_databaseMissing) {
         debug('journal', 'resetting databaseMissing flag — migration may have created the database')
         _databaseMissing = false
@@ -756,6 +785,7 @@ SETTINGS index_granularity = 1`
       await ensureFingerprintColumn()
       await insertState(state, fingerprintColumn)
       lastWritten.set(state.name, state)
+      noteVersion(state.name, state.appliedAt)
       await trySyncReplica()
     },
 

@@ -430,6 +430,41 @@ describe('createJournalStore', () => {
       expect(state?.operations.map((op) => op.status)).toEqual(['started'])
     })
 
+    // #672: ReplacingMergeTree keeps the newest applied_at, so a write stamped
+    // by a clock that stalls, steps back or runs behind the writer of the row
+    // it read must still carry a newer version.
+    test('each write carries a newer version than the last write, also on a stalled clock', async () => {
+      const { db, commandCalls } = createScriptedExecutor(
+        new Map<string | RegExp, unknown[]>([
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
+        ]),
+      )
+      const store = createJournalStore(db)
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.150'))
+
+      const versions = commandCalls
+        .filter((sql) => sql.startsWith('INSERT INTO'))
+        .map((sql) => /VALUES \('m\.sql', '([^']+)'/.exec(sql)?.[1])
+      expect(versions).toEqual(['2026-10-09T12:00:00.200', '2026-10-09T12:00:00.201', '2026-10-09T12:00:00.202'])
+    })
+
+    test('a write carries a newer version than the row it read, also when its clock is behind', async () => {
+      const { db, commandCalls } = createScriptedExecutor(
+        new Map<string | RegExp, unknown[]>([
+          [/SELECT name, migration_completed, operations FROM .* LIMIT 0/, []],
+          [/FROM .* FINAL WHERE name = /, [staleRow('2026-10-09 12:00:00.300')]],
+        ]),
+      )
+      const store = createJournalStore(db)
+      await store.readMigrationState('m.sql')
+      await store.writeMigrationState(writtenState('2026-10-09T12:00:00.200'))
+
+      const insert = commandCalls.find((sql) => sql.startsWith('INSERT INTO'))
+      expect(insert).toContain("VALUES ('m.sql', '2026-10-09T12:00:00.301'")
+    })
+
     test('returns the last write when the replica has no row yet', async () => {
       const store = storeAnswering([])
       const written = writtenState('2026-10-09T12:00:00.200')
@@ -513,7 +548,7 @@ describe('createJournalStore', () => {
       const read = queries.find((sql) => sql.includes("name = 'm.sql'"))
       expect(read).toContain("clusterAllReplicas('default', currentDatabase(), '_chkit_migrations')")
       expect(read).toContain(
-        'argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations), toJSONString(operation_fingerprints)), applied_at)',
+        "argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(CAST(operations, 'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status String, started_at String, finished_at Nullable(String), last_error String))')), toJSONString(operation_fingerprints)), applied_at)",
       )
       expect(read).not.toContain('FINAL')
     })
