@@ -458,9 +458,11 @@ mirrors this via a new ``on_pull_introspect`` plugin hook:
 - ``PluginRuntime.run_on_pull_introspect`` returns the first non-None
   list returned by any plugin's ``on_pull_introspect`` method
   (deferring otherwise).
-- ``chkit pull`` (``src/chkit/cli/commands/pull.py``) calls it BEFORE
-  opening a ``ClickHouseClient``; if a plugin handled introspection,
-  pull skips the SQL path entirely.
+- ``chkit pull`` (``src/chkit/cli/commands/pull.py``) calls it before
+  any SQL introspection; if a plugin handled introspection, pull skips
+  the SQL path entirely. With ``--database`` it never contacts
+  ClickHouse; without it, pull first lists the server's objects to pick
+  the databases and count skipped objects, as TS does (#698).
 
 The obsessiondb plugin can adopt this hook in a future iteration; the
 plumbing is in place.
@@ -1916,7 +1918,7 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   `warnings`, `content` under `--dryrun`); the Python-only `viewCount`,
   `materializedViewCount` and `dictionaryCount` are gone. Errors (#664), a missing
   primary key (#518) and column codecs through the console API (#517) were fixed earlier.
-- Left: the `on_pull_introspect` hook is not the TS `pull({ introspect })` option. It
-  returns definitions and runs before Python connects, so without `--database` it gets
-  no databases and the payload reports `databases: []` and no `skippedObjects`; TS lists
-  the server's databases first and passes them to its introspector.
+- Left: the `on_pull_introspect` hook is not the TS `pull({ introspect })` option: it
+  returns definitions, not introspected objects. Without `--database`, pull now lists the
+  server's objects first, as TS does, so the hook gets the target databases and the
+  payload reports them and the skipped objects (#698).

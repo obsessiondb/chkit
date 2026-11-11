@@ -78,5 +78,14 @@ def test_list_migrations_returns_sorted_paths(tmp_path: Path) -> None:
     assert stems == ["20260101000000_a", "20260102000000_b"]
 
 
+def test_list_migrations_orders_by_code_point(tmp_path: Path) -> None:
+    # #703: same order as TS, U+FF5E before U+1F600 (a UTF-16 surrogate pair).
+    migrations_dir = tmp_path / "migrations"
+    _write_migration(migrations_dir, "20260101000000_a\U0001f600")
+    _write_migration(migrations_dir, "20260101000000_a\uff5e")
+    stems = [p.stem for p in list_migrations(migrations_dir)]
+    assert stems == ["20260101000000_a\uff5e", "20260101000000_a\U0001f600"]
+
+
 def test_list_migrations_returns_empty_when_dir_missing(tmp_path: Path) -> None:
     assert list_migrations(tmp_path / "nope") == []

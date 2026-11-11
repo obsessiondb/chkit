@@ -258,16 +258,16 @@ def test_snapshot_rebuild_hands_every_hook_the_parsed_flags(project: Path) -> No
 
 def test_pull_writes_the_default_out_file_and_needs_force_to_overwrite(project: Path) -> None:
     default_out = project / "src" / "db" / "schema" / "pulled.py"
-
-    assert CliRunner().invoke(app, ["pull"]).exit_code == 0
+    # -d app: without --database, pull lists the server's databases first (#698).
+    assert CliRunner().invoke(app, ["pull", "-d", "app"]).exit_code == 0
     assert default_out.exists()
-    assert _recorded(project)["on_pull_introspect"] == {}
+    assert _recorded(project)["on_pull_introspect"] == {"--database": ["app"]}
 
-    refused = CliRunner().invoke(app, ["pull"])
+    refused = CliRunner().invoke(app, ["pull", "-d", "app"])
     assert refused.exit_code != 0
     assert "Output file already exists" in refused.output
     for flag in ("--force", "-f", "--overwrite"):
-        assert CliRunner().invoke(app, ["pull", flag]).exit_code == 0, flag
+        assert CliRunner().invoke(app, ["pull", "-d", "app", flag]).exit_code == 0, flag
 
 
 @pytest.fixture
