@@ -225,3 +225,75 @@ def test_pull_runtime_threads_through_when_hook_returns_none() -> None:
         databases=(),
     )
     assert runtime.run_on_pull_introspect(ctx) is None
+
+
+def test_pull_writes_the_output_path_as_given_without_following_symlinks(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As TS ``resolve(process.cwd(), outFile)``: the path is made absolute by
+    # text, so a symlink is replaced rather than written through (#702).
+    project = tmp_path / "project"
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "real").mkdir(parents=True)
+    project.mkdir()
+    (elsewhere / "target.py").write_text("# target\n", encoding="utf-8")
+    (project / "link.py").symlink_to(elsewhere / "target.py")
+    (project / "linkdir").symlink_to(elsewhere / "real")
+    (project / "dangling.py").symlink_to(tmp_path / "nowhere" / "f.py")
+    (project / "tmp-named.py.tmp").write_text("# kept\n", encoding="utf-8")
+    (project / "tmp-named.py").symlink_to(project / "tmp-named.py.tmp")
+
+    monkeypatch.chdir(project)
+    monkeypatch.syspath_prepend(str(project))
+    _install_custom_plugin_module(project)
+    (project / "clickhouse.config.py").write_text(CONFIG, encoding="utf-8")
+    (project / "schema.py").write_text(
+        "from chkit import schema\ndefinitions = schema()\n", encoding="utf-8"
+    )
+    cwd = Path.cwd()
+
+    def run(out_file: str, *flags: str) -> Any:
+        with patch("chkit.clickhouse.client.ClickHouseClient.connect"):
+            return runner.invoke(
+                app, ["pull", "--json", *flags, "--out-file", out_file], catch_exceptions=False
+            )
+
+    def pull(out_file: str) -> str:
+        result = run(out_file, "--force")
+        assert result.exit_code == 0, result.output
+        return str(json.loads(result.stdout)["outFile"])
+
+    # A symlinked output file is replaced by the pulled file; its target is untouched.
+    assert pull(str(cwd / "link.py")) == str(cwd / "link.py")
+    assert not (project / "link.py").is_symlink()
+    assert 'name="generated"' in (project / "link.py").read_text(encoding="utf-8")
+    assert (elsewhere / "target.py").read_text(encoding="utf-8") == "# target\n"
+
+    # A link to the file a fixed ``<name>.tmp`` would be: the target stays put.
+    assert pull(str(cwd / "tmp-named.py")) == str(cwd / "tmp-named.py")
+    assert (project / "tmp-named.py.tmp").read_text(encoding="utf-8") == "# kept\n"
+
+    # A dangling symlink is an existing output file: refused without --force,
+    # replaced with it, and nothing is created where it pointed.
+    refused = run(str(cwd / "dangling.py"))
+    assert refused.exit_code == 2, refused.output
+    assert json.loads(refused.stdout) == {
+        "ok": False,
+        "command": "schema",
+        "error": f"Output file already exists at {cwd / 'dangling.py'}. "
+        "Re-run with --force or set plugin option overwrite=true.",
+    }
+    assert (project / "dangling.py").is_symlink()
+    assert pull(str(cwd / "dangling.py")) == str(cwd / "dangling.py")
+    assert (project / "dangling.py").is_file()
+    assert not (project / "dangling.py").is_symlink()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere", "project"]
+
+    # A symlinked directory is reported as given and written through by the OS.
+    assert pull("linkdir/s.py") == str(cwd / "linkdir" / "s.py")
+    assert 'name="generated"' in (elsewhere / "real" / "s.py").read_text(encoding="utf-8")
+
+    # `..` after a symlinked directory is taken by text, not from the link target.
+    assert pull("linkdir/../x.py") == str(cwd / "x.py")
+    assert 'name="generated"' in (project / "x.py").read_text(encoding="utf-8")
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["real", "target.py"]

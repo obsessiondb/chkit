@@ -23,6 +23,8 @@ from __future__ import annotations
 import contextlib
 import os
 import re
+import secrets
+import time
 from collections.abc import Sequence
 from pathlib import Path
 from typing import Annotated, Any
@@ -467,14 +469,17 @@ class PullConfigError(Exception):
 
 
 def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None:
-    if out_file.exists() and not overwrite:
+    # A dangling symlink is an existing entry that the rename would replace (#702).
+    if (out_file.exists() or out_file.is_symlink()) and not overwrite:
         msg = (
             f"Output file already exists at {out_file}. "
             "Re-run with --force or set plugin option overwrite=true."
         )
         raise PullConfigError(msg)
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp_file = out_file.with_suffix(out_file.suffix + ".tmp")
+    # A random hidden name, as TS: a fixed ``<name>.tmp`` could be the target
+    # of a symlinked output file and be moved away by the rename (#702).
+    tmp_file = out_file.parent / f".{int(time.time() * 1000)}-{secrets.token_hex(6)}.tmp"
     tmp_file.write_text(content, encoding="utf-8")
     tmp_file.replace(out_file)
 
@@ -676,7 +681,10 @@ def _run(
         definitions, index_granularity=configured_index_granularity(config)
     )
     content = render_schema_file(definitions, shared_tables=shared_tables)
-    out_file_abs = (Path.cwd() / out_file).resolve()
+    # Made absolute by text, as TS ``resolve(process.cwd(), outFile)``: a
+    # symlink is not followed, so pull writes (and reports) the path it was
+    # given and replaces a symlink there rather than writing through it (#702).
+    out_file_abs = Path(os.path.abspath(Path.cwd() / out_file))
 
     if not dryrun:
         _write_schema_file(out_file_abs, content, overwrite=overwrite)
