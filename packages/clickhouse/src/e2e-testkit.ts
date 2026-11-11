@@ -101,7 +101,8 @@ export function quoteIdent(value: string): string {
  * DROP DATABASE drops the tables the serving replica lists, then fails if a
  * table appeared meanwhile. On a multi-replica service (ObsessionDB) that
  * happens when the replica applies an earlier CREATE during the drop; the
- * server answers "Try again". Any other error throws at once.
+ * server answers "Try again". Any other error throws at once. `timeoutMs`
+ * stops the re-runs; it does not cut short a DROP that is still running.
  * chkit-py's twin is `drop_database`.
  */
 export async function dropDatabase(

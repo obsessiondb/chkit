@@ -151,8 +151,9 @@ def drop_database(
     DROP DATABASE drops the tables the serving replica lists, then fails if a
     table appeared meanwhile. On a multi-replica service (ObsessionDB) that
     happens when the replica applies an earlier CREATE during the drop; the
-    server answers "Try again". Any other error raises at once. Port of TS
-    ``dropDatabase``.
+    server answers "Try again". Any other error raises at once. ``timeout``
+    stops the re-runs; it does not cut short a DROP that is still running.
+    Port of TS ``dropDatabase``.
     """
     deadline = time.monotonic() + timeout
     while True:
