@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, setSystemTime, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, type Mock, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
@@ -222,15 +222,17 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
   const INSERT = 'INSERT INTO default.t VALUES (1);'
   const SQL = `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n${INSERT}\n`
 
-  // The clock is frozen and each check takes 10 s, so a wait gives up after
-  // 3 checks of its 30 s instead of 30 s of real time (#719).
+  // The monotonic clock the waits time their deadline on is frozen and each
+  // check takes 10 s, so a wait gives up after 3 checks of its 30 s instead of
+  // 30 s of real time (#719).
   let now = 0
+  let clock: Mock<() => number> | undefined
   beforeEach(() => {
-    now = Date.parse('2026-01-01T00:00:00Z')
-    setSystemTime(new Date(now))
+    now = 0
+    clock = spyOn(performance, 'now').mockImplementation(() => now)
   })
   afterEach(() => {
-    setSystemTime()
+    clock?.mockRestore()
   })
 
   // A single-replica target on which default.t is listed in system.tables
@@ -244,7 +246,6 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
         if (sql.includes('system.one')) return []
         events.push('propagation-query')
         now += 10_000
-        setSystemTime(new Date(now))
         return visible.value ? [{ x: 1 }] : []
       },
     } as unknown as ClickHouseExecutor

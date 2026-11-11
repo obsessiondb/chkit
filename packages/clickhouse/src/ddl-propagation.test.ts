@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, setSystemTime, test } from 'bun:test'
+import { afterEach, describe, expect, type Mock, setSystemTime, spyOn, test } from 'bun:test'
 
 import { waitForDDLPropagation } from './ddl-propagation.js'
 import type { ClickHouseExecutor } from './index.js'
@@ -24,22 +24,25 @@ function row(replica: string, fields: Partial<ColumnRow> = {}): ColumnRow {
   return { replica, ...BASE, ...fields }
 }
 
-// The fakes freeze the clock and let each check take 500 ms, the default poll
-// interval, so a wait gives up after 60 checks, 30 s (#719).
+// The fakes freeze the monotonic clock the waits time their deadline on and
+// let each check take 500 ms, the default poll interval, so a wait gives up
+// after 60 checks, 30 s (#719).
 const CHECK_MS = 500
 let now = 0
+let clock: Mock<() => number> | undefined
 
 function freezeClock(): void {
-  now = Date.parse('2026-01-01T00:00:00Z')
-  setSystemTime(new Date(now))
+  now = 0
+  clock = spyOn(performance, 'now').mockImplementation(() => now)
 }
 
 function tick(): void {
   now += CHECK_MS
-  setSystemTime(new Date(now))
 }
 
 afterEach(() => {
+  clock?.mockRestore()
+  clock = undefined
   setSystemTime()
 })
 
@@ -219,6 +222,27 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
 })
 
 describe('waitForDDLPropagation: deadline', () => {
+  test('a wait ends at its deadline while the wall clock stands still', async () => {
+    setSystemTime(new Date('2026-01-01T00:00:00Z'))
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+        return [] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    const options = { ...FAST, deadlineMs: 50 }
+
+    await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', options)).rejects.toThrow(
+      'waitForTable: app.events not yet visible',
+    )
+    await expect(
+      waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        ...options,
+        statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
+      }),
+    ).rejects.toThrow('app.events.raw definition not applied on every replica')
+  })
+
   test('a polling query that never returns ends the wait at the deadline', async () => {
     const db = {
       async query<T>(sql: string): Promise<T[]> {

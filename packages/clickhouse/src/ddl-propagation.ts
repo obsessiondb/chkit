@@ -544,18 +544,19 @@ async function waitForSystemRows(
 /**
  * Runs `attempt` until it stops throwing, `pollIntervalMs` (500 ms) apart, and
  * starts no check that would begin at or after the deadline (30 s), as
- * `waitUntilApplied` does. The last error is thrown. A TypeError that is not a
+ * `waitUntilApplied` does. Both time the deadline on the monotonic clock, as
+ * chkit-py does, so a wall-clock change cannot stretch or end a wait. The last error is thrown. A TypeError that is not a
  * fetch network failure is a bug in the check, not lag, and p-retry throws it
  * at once.
  */
 async function pollUntilDeadline(attempt: () => Promise<void>, options: PropagationOptions | undefined): Promise<void> {
   const pollIntervalMs = options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout
-  const deadline = Date.now() + (options?.deadlineMs ?? WAIT_DEADLINE_MS)
+  const deadline = performance.now() + (options?.deadlineMs ?? WAIT_DEADLINE_MS)
   await pRetry(attempt, {
     retries: Number.POSITIVE_INFINITY,
     minTimeout: pollIntervalMs,
     factor: 1,
-    shouldRetry: () => Date.now() + pollIntervalMs < deadline,
+    shouldRetry: () => performance.now() + pollIntervalMs < deadline,
   })
 }
 
@@ -622,7 +623,7 @@ async function waitUntilApplied(
 ): Promise<void> {
   const pollIntervalMs = options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout
   const deadlineMs = options?.deadlineMs ?? WAIT_DEADLINE_MS
-  const deadline = Date.now() + deadlineMs
+  const deadline = performance.now() + deadlineMs
   let checks = 0
   let detail = ''
   for (;;) {
@@ -630,7 +631,7 @@ async function waitUntilApplied(
     const outcome = await checkBefore(check, deadline, deadlineMs)
     if (outcome.mismatch === undefined && outcome.failure === undefined) return
     detail = outcome.failure ?? outcome.mismatch ?? ''
-    if (Date.now() + pollIntervalMs >= deadline) break
+    if (performance.now() + pollIntervalMs >= deadline) break
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
   }
   throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
@@ -645,7 +646,7 @@ async function checkBefore(
   const expired = new Promise<{ failure: string }>((resolve) => {
     timer = setTimeout(
       () => resolve({ failure: `a check did not return within the ${deadlineMs / 1000}s deadline` }),
-      Math.max(deadline - Date.now(), 0),
+      Math.max(deadline - performance.now(), 0),
     )
   })
   try {
