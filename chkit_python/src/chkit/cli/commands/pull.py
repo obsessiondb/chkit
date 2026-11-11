@@ -20,6 +20,7 @@ obsessiondb plugin port.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
 from collections.abc import Sequence
@@ -599,34 +600,52 @@ def _run(
 
     selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
 
-    # Allow a registered plugin to bypass the SQL-based pull entirely
-    # (e.g. ObsessionDB's metadata API). Plugins implement
-    # ``on_pull_introspect`` and return a list of SchemaDefinition.
-    custom = plugin_runtime.run_on_pull_introspect(
-        ChxOnPullIntrospectContext(
-            command="pull",
-            config=config,
-            table_scope=TableScope(enabled=False),
-            flags=hook_flags,
-            clickhouse=config.clickhouse,
-            databases=selected,
-        )
-    )
     raw_objects: list[object] = []  # objects from system.tables (for skipped count)
     inner_storage_warnings: list[str] = []
-    if custom is not None:
-        definitions = list(custom)
-    else:
-        with open_client(executor, config.clickhouse) as client:
+    with contextlib.ExitStack() as stack:
+        client: ClickHouseClient | None = None
+        # As in TS, a custom introspector reads elsewhere, but without
+        # --database pull first lists the target's objects: they select the
+        # databases the hook gets and count what it skipped (#698).
+        custom_introspect = plugin_runtime.has_on_pull_introspect()
+        if custom_introspect and not selected:
+            client = stack.enter_context(open_client(executor, config.clickhouse))
+            raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
+            selected = sorted({getattr(o, "database", "") for o in raw_objects})
+
+        # Allow a registered plugin to bypass the SQL-based pull entirely
+        # (e.g. ObsessionDB's metadata API). Plugins implement
+        # ``on_pull_introspect`` and return a list of SchemaDefinition.
+        custom = (
+            plugin_runtime.run_on_pull_introspect(
+                ChxOnPullIntrospectContext(
+                    command="pull",
+                    config=config,
+                    table_scope=TableScope(enabled=False),
+                    flags=hook_flags,
+                    clickhouse=config.clickhouse,
+                    databases=selected,
+                )
+            )
+            if custom_introspect
+            else None
+        )
+        if custom is not None:
+            definitions = list(custom)
+        else:
+            listed = client is not None
+            if client is None:
+                client = stack.enter_context(open_client(executor, config.clickhouse))
             # The pulled tables are compared later against definitions
             # canonicalized with clickhouse.indexGranularity, which must be this
             # server's default. A custom introspector reads elsewhere.
             assert_server_index_granularity(client, configured_index_granularity(config))
-            # Capture objects so we can summarize what got skipped, even when
-            # --database was passed explicitly.
-            raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
-            if not selected:
-                selected = sorted({getattr(o, "database", "") for o in raw_objects})
+            if not listed:
+                # Capture objects so we can summarize what got skipped, even when
+                # --database was passed explicitly.
+                raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
+                if not selected:
+                    selected = sorted({getattr(o, "database", "") for o in raw_objects})
             definitions, inner_storage_warnings = _pull_definitions(client, selected)
     definitions = [d for d in definitions if _is_pulled_object(d)]
 
