@@ -672,7 +672,7 @@ SETTINGS index_granularity = 1`
     try {
       // A replica that does not answer fails the read, rather than drop the
       // rows only it has (#716).
-      return await db.query<MigrationRow>(sql, { skip_unavailable_shards: 0 })
+      return await db.query<MigrationRow>(`${sql} SETTINGS skip_unavailable_shards = 0`)
     } catch (error) {
       // A readonly = 1 user cannot change any setting (#402); it only reads.
       if (!isClickHouseError(error, READONLY)) throw error

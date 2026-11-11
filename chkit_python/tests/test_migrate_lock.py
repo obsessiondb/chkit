@@ -83,6 +83,8 @@ class FakeServer:
     hidden: set[str] = field(default_factory=set)
     # Names of the claims whose writes the server drops.
     dropped: set[str] = field(default_factory=set)
+    # When set, the next read fails, after calling it.
+    fail_next_read: Callable[[], None] | None = None
 
     def execute(self, sql: str, settings: dict[str, Any] | None = None) -> None:
         match = _INSERT.search(sql)
@@ -98,6 +100,10 @@ class FakeServer:
         self.rows.append(Row(name=name, version=version, holder=_unquote(match[5])))
 
     def query(self, sql: str, settings: dict[str, Any] | None = None) -> SimpleNamespace:
+        fail, self.fail_next_read = self.fail_next_read, None
+        if fail is not None:
+            fail()
+            raise RuntimeError("read failed")
         found = _OWN.search(sql)
         own = _unquote(found[1]) if found else ""
         latest: dict[str, Row] = {}
@@ -194,9 +200,7 @@ def test_a_live_claim_stops_it_after_every_attempt_naming_the_holder() -> None:
         _acquire(server, _deps(Clock(), sleeps))
     error = caught.value
     assert error.code == "migrate_locked"
-    assert (
-        f"{OTHER_DESCRIBED}; last heartbeat 5s ago, free in 115s unless renewed" in error.message
-    )
+    assert f"{OTHER_DESCRIBED}; last heartbeat 5s ago, free in 115s unless renewed" in error.message
     assert "re-run with --break-lock other." in error.message
     assert len(sleeps) == LOCK_TIMINGS.attempts - 1
     for attempt in range(1, LOCK_TIMINGS.attempts + 1):
@@ -320,6 +324,36 @@ def test_a_heartbeat_whose_version_does_not_read_back_newer_does_not_renew_the_c
     lock.release()
 
 
+def test_a_newer_version_read_back_counts_from_the_first_heartbeat_that_may_have_written_it() -> (
+    None
+):
+    server = FakeServer()
+    name = f"{LOCK_ROW_PREFIX}run-1"
+    clock = Clock()
+    lock = _acquire(server, _deps(clock, [], heartbeat_ms=1))
+    # The heartbeat sent at 10 s writes a newer version, but its read fails.
+    # The next one, sent at 20 s, reaches a replica that drops its write and
+    # reads the version the first one wrote.
+    failed = [False]
+
+    def fail() -> None:
+        failed[0] = True
+        server.dropped.add(name)
+        clock.now = 20_000
+
+    server.fail_next_read = fail
+    clock.now = 10_000
+    _wait_for(lambda: failed[0] and len(server.claims_of(name)) == 2)
+    time.sleep(0.03)
+    clock.now = 10_000 + LOCK_TIMINGS.valid_ms
+    lock.assert_held()
+    clock.now = 10_000 + LOCK_TIMINGS.valid_ms + 1
+    with pytest.raises(MigrateError, match="lost the migrate lock"):
+        lock.assert_held()
+    server.dropped.clear()
+    lock.release()
+
+
 def test_a_heartbeat_sent_after_the_claim_lapsed_does_not_renew_it() -> None:
     server = FakeServer()
     clock = Clock()
@@ -336,9 +370,7 @@ def test_a_heartbeat_sent_after_the_claim_lapsed_does_not_renew_it() -> None:
 def test_a_claim_another_run_released_is_lost_at_the_next_heartbeat() -> None:
     server = FakeServer()
     lock = _acquire(server, _deps(Clock(), [], heartbeat_ms=1))
-    server.rows.append(
-        Row(name=f"{LOCK_ROW_PREFIX}run-1", version=RELEASED, holder=OTHER_HOLDER)
-    )
+    server.rows.append(Row(name=f"{LOCK_ROW_PREFIX}run-1", version=RELEASED, holder=OTHER_HOLDER))
 
     def lost() -> bool:
         try:
@@ -388,7 +420,8 @@ def test_the_read_keeps_the_newest_version_of_each_claim_on_every_replica() -> N
         "FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest "
         "FROM clusterAllReplicas('default', 'app', '_chkit_migrations') "
         "WHERE startsWith(name, '__chkit_migrate_lock__/') GROUP BY name) "
-        "WHERE NOT released OR name = '__chkit_migrate_lock__/x' ORDER BY name"
+        "WHERE NOT released OR name = '__chkit_migrate_lock__/x' ORDER BY name "
+        "SETTINGS skip_unavailable_shards = 0"
     )
 
 

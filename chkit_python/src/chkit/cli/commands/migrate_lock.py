@@ -157,7 +157,11 @@ def claim_insert_sql(
 
 
 def claims_select_sql(target: LockTarget, own: str) -> str:
-    """Every claim not released, plus ``own`` whatever its state, newest version per claim."""
+    """Every claim not released, plus ``own`` whatever its state, newest version per claim.
+
+    A read that misses a replica could miss the claim on it, so a fanned-out
+    read fails instead of skipping an unavailable replica."""
+    settings = " SETTINGS skip_unavailable_shards = 0" if target.fanout is not None else ""
     if target.fanout is not None:
         source = (
             f"clusterAllReplicas('{_escape(target.fanout.cluster)}', "
@@ -171,7 +175,7 @@ def claims_select_sql(target: LockTarget, own: str) -> str:
         "toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms "
         "FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest "
         f"FROM {source} WHERE startsWith(name, '{LOCK_ROW_PREFIX}') GROUP BY name) "
-        f"WHERE NOT released OR name = '{_escape(own)}' ORDER BY name"
+        f"WHERE NOT released OR name = '{_escape(own)}' ORDER BY name{settings}"
     )
 
 
@@ -184,12 +188,8 @@ def _write_settings(target: LockTarget) -> dict[str, Any] | None:
     return {"insert_quorum": "auto", "insert_quorum_parallel": 0}
 
 
-def _read_settings(target: LockTarget) -> dict[str, Any]:
-    """A read that misses a replica could miss the claim on it, so a fanned-out
-    read fails instead of skipping an unavailable replica."""
-    if target.fanout is not None:
-        return {"skip_unavailable_shards": 0}
-    return {"select_sequential_consistency": "1"}
+def _read_settings(target: LockTarget) -> dict[str, Any] | None:
+    return None if target.fanout is not None else {"select_sequential_consistency": "1"}
 
 
 def _parse_bool(value: Any) -> bool:
@@ -395,6 +395,10 @@ class MigrateLock:
         self._holder_json = holder_json
         self._confirmed_at = confirmed_at
         self._version = version
+        # The send time of the first heartbeat since the last counted one: a
+        # newer version read back may come from any of them, so it is counted
+        # from there.
+        self._first_uncounted_at: float | None = None
         self._deps = deps
         self._log = log
         self._lost: str | None = None
@@ -420,6 +424,8 @@ class MigrateLock:
         # same version for longer than valid_ms knows this run counts no
         # renewal.
         sent_at = self._deps.now()
+        if self._first_uncounted_at is None:
+            self._first_uncounted_at = sent_at
         if self._lapsed(sent_at):
             if self._lost is None:
                 self._lost = self._lapsed_reason(sent_at)
@@ -457,7 +463,8 @@ class MigrateLock:
                 self._lost = self._lapsed_reason(acked)
             return
         self._version = own.version
-        self._confirmed_at = sent_at
+        self._confirmed_at = self._first_uncounted_at
+        self._first_uncounted_at = None
 
     def assert_held(self) -> None:
         """Raises when the lock may no longer be held."""

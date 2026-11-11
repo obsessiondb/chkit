@@ -35,6 +35,8 @@ interface FakeServer {
   hidden: Set<string>
   /** Names of the claims whose writes the server drops. */
   dropped: Set<string>
+  /** When set, the next read fails, after calling it. */
+  failNextRead?: () => void
 }
 
 const UNQUOTE = (value: string) => value.replace(/\\(.)/g, '$1')
@@ -69,6 +71,12 @@ function fakeServer(): FakeServer {
     server.rows.push({ name, version, holder: UNQUOTE(match[5] as string) })
   }
   const query = async (sql: string) => {
+    const fail = server.failNextRead
+    if (fail) {
+      server.failNextRead = undefined
+      fail()
+      throw new Error('read failed')
+    }
     const own = /OR name = '((?:[^'\\]|\\.)*)'/.exec(sql)?.[1] ?? ''
     const latest = new Map<string, Row>()
     for (const row of server.rows) {
@@ -272,6 +280,31 @@ describe('holding the migrate lock', () => {
     await lock.release()
   })
 
+  test('a newer version read back counts from the first heartbeat that may have written it', async () => {
+    const server = fakeServer()
+    const name = `${LOCK_ROW_PREFIX}run-1`
+    const { overrides, local } = deps({ heartbeatMs: 1 })
+    const lock = await acquireMigrateLock(server.db, TARGET, quiet, overrides)
+    // The heartbeat sent at 10 s writes a newer version, but its read fails.
+    // The next one, sent at 20 s, reaches a replica that drops its write and
+    // reads the version the first one wrote.
+    let failed = false
+    server.failNextRead = () => {
+      failed = true
+      server.dropped.add(name)
+      local.now = 20_000
+    }
+    local.now = 10_000
+    await waitFor(() => failed && claimsOf(server, name).length === 2)
+    await Bun.sleep(30)
+    local.now = 10_000 + LOCK_TIMINGS.validMs
+    lock.assertHeld()
+    local.now = 10_000 + LOCK_TIMINGS.validMs + 1
+    expect(() => lock.assertHeld()).toThrow('lost the migrate lock')
+    server.dropped.clear()
+    await lock.release()
+  })
+
   test('a heartbeat sent after the claim lapsed does not renew it', async () => {
     const server = fakeServer()
     const { overrides, local } = deps({ heartbeatMs: 20 })
@@ -325,7 +358,7 @@ describe('claim SQL', () => {
         'toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms ' +
         "FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest FROM clusterAllReplicas('default', 'app', '_chkit_migrations') " +
         "WHERE startsWith(name, '__chkit_migrate_lock__/') GROUP BY name) " +
-        "WHERE NOT released OR name = '__chkit_migrate_lock__/x' ORDER BY name",
+        "WHERE NOT released OR name = '__chkit_migrate_lock__/x' ORDER BY name SETTINGS skip_unavailable_shards = 0",
     )
   })
 })

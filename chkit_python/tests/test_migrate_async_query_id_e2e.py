@@ -29,6 +29,7 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
+    held_lock_claim,
     poll_until,
     quote_ident,
     resolve_live_env,
@@ -141,7 +142,9 @@ def make_fixture() -> Iterator[Fixture]:
         shutil.rmtree(dir_, ignore_errors=True)
 
 
-def _start(fixture: Fixture, target: Target) -> subprocess.Popen[str]:
+def _start(
+    fixture: Fixture, target: Target, extra_args: tuple[str, ...] = ()
+) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
             sys.executable,
@@ -152,6 +155,7 @@ def _start(fixture: Fixture, target: Target) -> subprocess.Popen[str]:
             str(fixture.dir / f"{target}.config.py"),
             "--execute",
             "--json",
+            *extra_args,
         ],
         cwd=fixture.dir,
         env={
@@ -173,8 +177,8 @@ def _wait(process: subprocess.Popen[str]) -> CliResult:
     return CliResult(exit_code=process.returncode, stdout=stdout, stderr=stderr)
 
 
-def _migrate(fixture: Fixture, target: Target) -> CliResult:
-    return _wait(_start(fixture, target))
+def _migrate(fixture: Fixture, target: Target, extra_args: tuple[str, ...] = ()) -> CliResult:
+    return _wait(_start(fixture, target, extra_args))
 
 
 def _diagnostic(label: str, result: CliResult) -> str:
@@ -264,7 +268,11 @@ def test_a_rerun_attaches_to_the_load_its_killed_run_left_running(
     killed.kill()
     assert _wait(killed).exit_code != 0
 
-    resumed = _migrate(fixture, "staging")
+    # The killed run still holds the migrate lock (#716).
+    claim = held_lock_claim(
+        fixture.client, fixture.databases["staging"], fixture.journal_table
+    )
+    resumed = _migrate(fixture, "staging", ("--break-lock", claim))
     assert resumed.exit_code == 0, _diagnostic("staging re-run", resumed)
     assert "attaching to in-flight query" in resumed.stderr
     assert "running before-retry SQL" not in resumed.stderr

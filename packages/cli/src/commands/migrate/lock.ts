@@ -155,12 +155,15 @@ export function claimsSelectSql(target: LockTarget, own: string): string {
   const source = target.fanout
     ? `clusterAllReplicas('${escapeSqlString(target.fanout.cluster)}', '${escapeSqlString(target.database)}', '${target.journalTable}')`
     : `${quoteName(target.database)}.${target.journalTable}`
+  // A read that misses a replica could miss the claim on it, so a fanned-out
+  // read fails instead of skipping an unavailable replica.
+  const settings = target.fanout ? ' SETTINGS skip_unavailable_shards = 0' : ''
   return (
     `SELECT name, latest.2 AS holder, latest.1 >= ${RELEASED_FROM} AS released, toString(latest.1) AS version, ` +
     'toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms ' +
     `FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest FROM ${source} ` +
     `WHERE startsWith(name, '${LOCK_ROW_PREFIX}') GROUP BY name) ` +
-    `WHERE NOT released OR name = '${escapeSqlString(own)}' ORDER BY name`
+    `WHERE NOT released OR name = '${escapeSqlString(own)}' ORDER BY name${settings}`
   )
 }
 
@@ -174,12 +177,8 @@ function writeSettings(target: LockTarget): ClickHouseSettings | undefined {
   return target.fanout ? undefined : { insert_quorum: 'auto', insert_quorum_parallel: 0 }
 }
 
-/**
- * A read that misses a replica could miss the claim on it, so a fanned-out
- * read fails instead of skipping an unavailable replica.
- */
-function readSettings(target: LockTarget): ClickHouseSettings {
-  return target.fanout ? { skip_unavailable_shards: 0 } : { select_sequential_consistency: '1' }
+function readSettings(target: LockTarget): ClickHouseSettings | undefined {
+  return target.fanout ? undefined : { select_sequential_consistency: '1' }
 }
 
 function parseBool(value: unknown): boolean {
@@ -391,6 +390,9 @@ function startHolding(
   const { timings } = deps
   let confirmedAt = claim.confirmedAt
   let version = claim.version
+  // The send time of the first heartbeat since the last counted one: a newer
+  // version read back may come from any of them, so it is counted from there.
+  let firstUncountedAt: number | undefined
   let lost: string | undefined
   let stopped = false
   let timer: ReturnType<typeof setTimeout> | undefined
@@ -409,6 +411,7 @@ function startHolding(
   // version for longer than validMs knows this run counts no renewal.
   async function heartbeat(): Promise<void> {
     const sentAt = deps.now()
+    firstUncountedAt ??= sentAt
     if (lapsed(sentAt)) {
       lost ??= lapsedReason(sentAt)
       return
@@ -428,7 +431,8 @@ function startHolding(
         return
       }
       version = own.version
-      confirmedAt = sentAt
+      confirmedAt = firstUncountedAt
+      firstUncountedAt = undefined
     } catch (error) {
       debug('migrate-lock', `heartbeat failed: ${error instanceof Error ? error.message : String(error)}`)
     }

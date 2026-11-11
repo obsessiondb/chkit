@@ -13,6 +13,7 @@ import {
   createPrefix,
   formatTestDiagnostic,
   getLiveEnv,
+  heldLockClaim,
   pollUntil,
   quoteIdent,
   startCli,
@@ -79,7 +80,9 @@ describe('async migrate statements across databases (#463)', () => {
       killed.kill()
       expect((await killed.result).exitCode).not.toBe(0)
 
-      const resumed = await migrate(fixture, 'staging').result
+      // The killed run still holds the migrate lock (#716).
+      const claim = await heldLockClaim(fixture.executor, fixture.databases.staging, fixture.journalTable)
+      const resumed = await migrate(fixture, 'staging', ['--break-lock', claim]).result
       expect(resumed.exitCode, formatTestDiagnostic('staging re-run', resumed)).toBe(0)
       expect(resumed.stderr).toContain('attaching to in-flight query')
       expect(resumed.stderr).not.toContain('running before-retry SQL')
@@ -156,10 +159,14 @@ async function dropFixture(fixture: Fixture): Promise<void> {
   await rm(fixture.dir, { recursive: true, force: true })
 }
 
-function migrate(fixture: Fixture, target: Target): { result: Promise<CliResult>; kill: () => void } {
+function migrate(
+  fixture: Fixture,
+  target: Target,
+  extraArgs: string[] = [],
+): { result: Promise<CliResult>; kill: () => void } {
   return startCli(
     fixture.dir,
-    ['migrate', '--config', fixture.configs[target], '--execute', '--json'],
+    ['migrate', '--config', fixture.configs[target], '--execute', '--json', ...extraArgs],
     { CHKIT_JOURNAL_TABLE: fixture.journalTable, CHKIT_E2E_PASSWORD: getLiveEnv().clickhousePassword, CI: '1' },
   )
 }

@@ -772,7 +772,7 @@ class JournalStore:
         try:
             # A replica that does not answer fails the read, rather than drop
             # the rows only it has (#716).
-            return self._client.query(fanout_sql, {"skip_unavailable_shards": 0}).rows
+            return self._client.query(f"{fanout_sql} SETTINGS skip_unavailable_shards = 0").rows
         except Exception as exc:
             # A readonly = 1 user cannot change any setting (#402); it only reads.
             if not _is_clickhouse_error(exc, _READONLY):

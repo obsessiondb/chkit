@@ -8,6 +8,9 @@
 import { join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { quoteIdent } from '@chkit/clickhouse/e2e-testkit'
+
 import { createIsolatedCliEnv, spawnWithTimeout } from './spawn-cli.js'
 
 // Re-export all shared utilities so CLI tests only need one import
@@ -175,4 +178,22 @@ export function formatTestDiagnostic(
     parts.push(`extra: ${JSON.stringify(extra, null, 2)}`)
   }
   return parts.join('\n')
+}
+
+/**
+ * The migrate lock claim that a killed run left behind in the journal
+ * (#716), for `--break-lock`.
+ */
+export async function heldLockClaim(
+  executor: ClickHouseExecutor,
+  database: string,
+  journalTable: string,
+): Promise<string> {
+  const rows = await executor.query<{ claim: string }>(
+    `SELECT substring(name, ${'__chkit_migrate_lock__/'.length + 1}) AS claim FROM ${quoteIdent(database)}.${quoteIdent(journalTable)} ` +
+      "WHERE startsWith(name, '__chkit_migrate_lock__/') GROUP BY name " +
+      "HAVING max(applied_at) < toDateTime64('2299-01-01 00:00:00', 3, 'UTC') SETTINGS select_sequential_consistency = 1",
+  )
+  if (rows.length !== 1) throw new Error(`expected one held migrate lock claim, found ${JSON.stringify(rows)}`)
+  return (rows[0] as { claim: string }).claim
 }
