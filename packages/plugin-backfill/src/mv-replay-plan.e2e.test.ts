@@ -246,12 +246,19 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
     // intra-partition range splitting) — the same shape the copy e2e uses. This
     // keeps the test on the part the fix touches (source introspection + the
     // per-partition INSERT…SELECT) rather than the sort-key splitter.
-    const [bytesRow] = await ddl.query<{ total: string }>(`
-      SELECT toString(sum(data_uncompressed_bytes)) AS total
-      FROM system.parts
-      WHERE database = '${db}' AND table = '${sourceTable}' AND active = 1
-      SETTINGS select_sequential_consistency = 1
-    `)
+    // Poll until every partition is listed: the read can land on a replica that
+    // has not loaded the inserted parts yet (#718), as chkit-py's port does.
+    const [bytesRow] = await pollUntil(
+      () =>
+        ddl.query<{ total: string; partitions: string }>(`
+          SELECT toString(sum(data_uncompressed_bytes)) AS total,
+                 toString(uniqExact(partition)) AS partitions
+          FROM system.parts
+          WHERE database = '${db}' AND table = '${sourceTable}' AND active = 1
+          SETTINGS select_sequential_consistency = 1
+        `),
+      (rows) => Number(rows[0]?.partitions ?? 0) === BUCKETS,
+    )
     const uncompressedBytes = Number(bytesRow?.total ?? 0)
     expect(uncompressedBytes).toBeGreaterThan(0)
 
