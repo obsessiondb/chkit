@@ -160,7 +160,9 @@ def claim_insert_sql(
 
 
 def claims_select_sql(target: LockTarget, own: str) -> str:
-    """Every claim not released, plus ``own`` whatever its state, newest version per claim.
+    """Every claim not released, plus ``own`` whatever its state: the newest row
+    per claim, and of rows with one version the one of the latest heartbeat, so
+    every read of the same rows picks the same one.
 
     A read that misses a replica could miss the claim on it, so a fanned-out
     read fails instead of skipping an unavailable replica."""
@@ -176,7 +178,8 @@ def claims_select_sql(target: LockTarget, own: str) -> str:
         f"SELECT name, latest.2 AS holder, latest.1 >= {_RELEASED_FROM} AS released, "
         "toString(latest.1) AS version, "
         "toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms "
-        "FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest "
+        "FROM (SELECT name, argMax(tuple(applied_at, checksum), "
+        "tuple(applied_at, JSONExtractInt(checksum, 'beat'))) AS latest "
         f"FROM {source} WHERE startsWith(name, '{LOCK_ROW_PREFIX}') GROUP BY name) "
         f"WHERE NOT released OR name = '{_escape(own)}' ORDER BY name{settings}"
     )
@@ -369,7 +372,7 @@ def _release_stopped_claims(
         now = current.get(claim.name)
         if now is None or now.released:
             continue
-        if now.version != claim.version:
+        if now.version != claim.version or now.raw_holder != claim.raw_holder:
             alive.append(now)
             continue
         _write_claim(client, target, claim.name, claim.raw_holder, released=True)

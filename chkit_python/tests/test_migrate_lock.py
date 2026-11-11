@@ -68,6 +68,10 @@ def _parse_version(text: str) -> float:
     return round(parsed.timestamp() * 1000)
 
 
+def _beat_of(row: Row) -> int:
+    return int(json.loads(row.holder).get("beat", 0))
+
+
 @dataclass
 class Row:
     name: str
@@ -127,7 +131,8 @@ class FakeServer:
             if row.name in self.hidden:
                 continue
             seen = latest.get(row.name)
-            if seen is None or row.version >= seen.version:
+            # argMax by (version, beat), as the claim read does.
+            if seen is None or (row.version, _beat_of(row)) >= (seen.version, _beat_of(seen)):
                 latest[row.name] = row
         rows = [
             {
@@ -268,6 +273,25 @@ def test_a_claim_past_the_lease_whose_version_moves_while_watched_still_holds_th
         _acquire(server, _deps(Clock(), [], renew))
     assert caught.value.code == "migrate_locked"
     assert OTHER_DESCRIBED in caught.value.message
+    assert server.claims_of(OTHER)[-1].version != RELEASED
+
+
+def test_a_claim_past_the_lease_whose_heartbeat_writes_the_same_version_still_holds() -> None:
+    server = FakeServer()
+    version = server.clock - LOCK_TIMINGS.lease_ms - 10_000
+
+    def beat(n: int) -> str:
+        return json.dumps({**json.loads(OTHER_HOLDER), "beat": n})
+
+    server.rows.append(Row(name=OTHER, version=version, holder=beat(1)))
+
+    # The next heartbeat lands on a replica whose clock gives it the same version.
+    def renew(_ms: float) -> None:
+        server.rows.append(Row(name=OTHER, version=version, holder=beat(2)))
+
+    with pytest.raises(MigrateError) as caught:
+        _acquire(server, _deps(Clock(), [], renew))
+    assert caught.value.code == "migrate_locked"
     assert server.claims_of(OTHER)[-1].version != RELEASED
 
 
@@ -476,7 +500,8 @@ def test_the_read_keeps_the_newest_version_of_each_claim_on_every_replica() -> N
         "latest.1 >= toDateTime64('2299-01-01 00:00:00', 3, 'UTC') AS released, "
         "toString(latest.1) AS version, "
         "toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms "
-        "FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest "
+        "FROM (SELECT name, argMax(tuple(applied_at, checksum), "
+        "tuple(applied_at, JSONExtractInt(checksum, 'beat'))) AS latest "
         "FROM clusterAllReplicas('default', 'app', '_chkit_migrations') "
         "WHERE startsWith(name, '__chkit_migrate_lock__/') GROUP BY name) "
         "WHERE NOT released OR name = '__chkit_migrate_lock__/x' ORDER BY name "

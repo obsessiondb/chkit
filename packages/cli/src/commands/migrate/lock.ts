@@ -47,7 +47,7 @@ import { MigrateError } from './errors.js'
 
 export const LOCK_ROW_PREFIX = '__chkit_migrate_lock__/'
 /** The version of a released claim: newer than any heartbeat. */
-export const RELEASED_AT = '2299-12-31 23:59:59.000'
+const RELEASED_AT = '2299-12-31 23:59:59.000'
 const RELEASED_FROM = "toDateTime64('2299-01-01 00:00:00', 3, 'UTC')"
 /** How long release() waits for a heartbeat in flight. */
 const RELEASE_WAIT_MS = 5_000
@@ -73,7 +73,7 @@ export interface LockTarget {
 }
 
 /** Who holds a claim, stored as JSON in the claim row's `checksum`. */
-export interface LockHolder {
+interface LockHolder {
   host: string
   pid: number
   chkitVersion: string
@@ -82,7 +82,7 @@ export interface LockHolder {
   beat: number
 }
 
-export interface LockClaim {
+interface LockClaim {
   name: string
   holder: LockHolder | null
   /** The holder JSON as stored, for a claim chkit cannot parse. */
@@ -153,7 +153,11 @@ export function claimInsertSql(
   )
 }
 
-/** Every claim not released, plus `own` whatever its state, newest version per claim. */
+/**
+ * Every claim not released, plus `own` whatever its state: the newest row per
+ * claim, and of rows with one version the one of the latest heartbeat, so
+ * every read of the same rows picks the same one.
+ */
 export function claimsSelectSql(target: LockTarget, own: string): string {
   const source = target.fanout
     ? `clusterAllReplicas('${escapeSqlString(target.fanout.cluster)}', '${escapeSqlString(target.database)}', '${target.journalTable}')`
@@ -164,7 +168,7 @@ export function claimsSelectSql(target: LockTarget, own: string): string {
   return (
     `SELECT name, latest.2 AS holder, latest.1 >= ${RELEASED_FROM} AS released, toString(latest.1) AS version, ` +
     'toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms ' +
-    `FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest FROM ${source} ` +
+    `FROM (SELECT name, argMax(tuple(applied_at, checksum), tuple(applied_at, JSONExtractInt(checksum, 'beat'))) AS latest FROM ${source} ` +
     `WHERE startsWith(name, '${LOCK_ROW_PREFIX}') GROUP BY name) ` +
     `WHERE NOT released OR name = '${escapeSqlString(own)}' ORDER BY name${settings}`
   )
@@ -234,7 +238,7 @@ function claimId(claim: LockClaim): string {
   return claim.name.slice(LOCK_ROW_PREFIX.length)
 }
 
-export function describeHolder(claim: LockClaim): string {
+function describeHolder(claim: LockClaim): string {
   const { holder } = claim
   const who = holder
     ? `pid ${holder.pid} on host ${holder.host} (chkit ${holder.chkitVersion}), started ${holder.startedAt}`
@@ -317,7 +321,7 @@ async function releaseStoppedClaims(
   for (const claim of stale) {
     const now = current.find((item) => item.name === claim.name)
     if (!now || now.released) continue
-    if (now.version !== claim.version) {
+    if (now.version !== claim.version || now.rawHolder !== claim.rawHolder) {
       alive.push(now)
       continue
     }

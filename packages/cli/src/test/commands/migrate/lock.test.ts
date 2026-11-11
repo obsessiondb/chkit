@@ -60,6 +60,10 @@ function parseVersion(text: string): number {
   return Date.parse(`${text.replace(' ', 'T')}Z`)
 }
 
+function beatOf(row: Row): number {
+  return (JSON.parse(row.holder) as { beat?: number }).beat ?? 0
+}
+
 function fakeServer(): FakeServer {
   const server: FakeServer = {
     rows: [],
@@ -99,7 +103,10 @@ function fakeServer(): FakeServer {
     for (const row of server.rows) {
       if (server.hidden.has(row.name)) continue
       const seen = latest.get(row.name)
-      if (!seen || row.version >= seen.version) latest.set(row.name, row)
+      // argMax by (version, beat), as the claim read does.
+      if (!seen || row.version > seen.version || (row.version === seen.version && beatOf(row) >= beatOf(seen))) {
+        latest.set(row.name, row)
+      }
     }
     const after = server.afterRead
     server.afterRead = undefined
@@ -222,6 +229,20 @@ describe('acquireMigrateLock', () => {
     const error = await rejection(acquireMigrateLock(server.db, TARGET, quiet, overrides))
     expect(error.code).toBe('migrate_locked')
     expect(error.message).toContain(OTHER_DESCRIBED)
+    expect(claimsOf(server, OTHER).at(-1)?.version).not.toBe(RELEASED)
+  })
+
+  test('a claim past the lease whose heartbeat writes the same version while watched still holds the lock', async () => {
+    const server = fakeServer()
+    const version = server.clock.now - LOCK_TIMINGS.leaseMs - 10_000
+    const beat = (n: number) => JSON.stringify({ ...JSON.parse(OTHER_HOLDER), beat: n })
+    server.rows.push({ name: OTHER, version, holder: beat(1) })
+    // The next heartbeat lands on a replica whose clock gives it the same version.
+    const { overrides } = deps({}, () => {
+      server.rows.push({ name: OTHER, version, holder: beat(2) })
+    })
+    const error = await rejection(acquireMigrateLock(server.db, TARGET, quiet, overrides))
+    expect(error.code).toBe('migrate_locked')
     expect(claimsOf(server, OTHER).at(-1)?.version).not.toBe(RELEASED)
   })
 
@@ -413,7 +434,7 @@ describe('claim SQL', () => {
     expect(claimsSelectSql({ ...TARGET, fanout: { cluster: 'default', replicas: 2 } }, `${LOCK_ROW_PREFIX}x`)).toBe(
       "SELECT name, latest.2 AS holder, latest.1 >= toDateTime64('2299-01-01 00:00:00', 3, 'UTC') AS released, toString(latest.1) AS version, " +
         'toString(toUnixTimestamp64Milli(now64(3)) - toUnixTimestamp64Milli(latest.1)) AS age_ms ' +
-        "FROM (SELECT name, argMax(tuple(applied_at, checksum), applied_at) AS latest FROM clusterAllReplicas('default', 'app', '_chkit_migrations') " +
+        "FROM (SELECT name, argMax(tuple(applied_at, checksum), tuple(applied_at, JSONExtractInt(checksum, 'beat'))) AS latest FROM clusterAllReplicas('default', 'app', '_chkit_migrations') " +
         "WHERE startsWith(name, '__chkit_migrate_lock__/') GROUP BY name) " +
         "WHERE NOT released OR name = '__chkit_migrate_lock__/x' ORDER BY name SETTINGS skip_unavailable_shards = 0",
     )
