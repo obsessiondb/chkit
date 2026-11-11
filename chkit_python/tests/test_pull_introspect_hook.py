@@ -188,6 +188,8 @@ def test_pull_writes_the_output_path_as_given_without_following_symlinks(
     (project / "link.py").symlink_to(elsewhere / "target.py")
     (project / "linkdir").symlink_to(elsewhere / "real")
     (project / "dangling.py").symlink_to(tmp_path / "nowhere" / "f.py")
+    (project / "tmp-named.py.tmp").write_text("# kept\n", encoding="utf-8")
+    (project / "tmp-named.py").symlink_to(project / "tmp-named.py.tmp")
 
     monkeypatch.chdir(project)
     monkeypatch.syspath_prepend(str(project))
@@ -198,11 +200,14 @@ def test_pull_writes_the_output_path_as_given_without_following_symlinks(
     )
     cwd = Path.cwd()
 
-    def pull(out_file: str) -> str:
+    def run(out_file: str, *flags: str) -> Any:
         with patch("chkit.clickhouse.client.ClickHouseClient.connect"):
-            result = runner.invoke(
-                app, ["pull", "--json", "--force", "--out-file", out_file], catch_exceptions=False
+            return runner.invoke(
+                app, ["pull", "--json", *flags, "--out-file", out_file], catch_exceptions=False
             )
+
+    def pull(out_file: str) -> str:
+        result = run(out_file, "--force")
         assert result.exit_code == 0, result.output
         return str(json.loads(result.stdout)["outFile"])
 
@@ -212,7 +217,21 @@ def test_pull_writes_the_output_path_as_given_without_following_symlinks(
     assert 'name="generated"' in (project / "link.py").read_text(encoding="utf-8")
     assert (elsewhere / "target.py").read_text(encoding="utf-8") == "# target\n"
 
-    # A dangling symlink is replaced too; nothing is created where it pointed.
+    # A link to the file a fixed ``<name>.tmp`` would be: the target stays put.
+    assert pull(str(cwd / "tmp-named.py")) == str(cwd / "tmp-named.py")
+    assert (project / "tmp-named.py.tmp").read_text(encoding="utf-8") == "# kept\n"
+
+    # A dangling symlink is an existing output file: refused without --force,
+    # replaced with it, and nothing is created where it pointed.
+    refused = run(str(cwd / "dangling.py"))
+    assert refused.exit_code == 2, refused.output
+    assert json.loads(refused.stdout) == {
+        "ok": False,
+        "command": "schema",
+        "error": f"Output file already exists at {cwd / 'dangling.py'}. "
+        "Re-run with --force or set plugin option overwrite=true.",
+    }
+    assert (project / "dangling.py").is_symlink()
     assert pull(str(cwd / "dangling.py")) == str(cwd / "dangling.py")
     assert (project / "dangling.py").is_file()
     assert not (project / "dangling.py").is_symlink()

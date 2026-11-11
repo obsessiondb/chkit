@@ -1057,13 +1057,13 @@ describe('@chkit/plugin-pull schema command', () => {
     const command = plugin.commands[0]
     if (!command) throw new Error('missing command')
 
-    const pull = async (outFile: string): Promise<unknown> => {
+    const run = async (outFile: string, overwrite: boolean): Promise<{ code: number | undefined; output: unknown[] }> => {
       const output: unknown[] = []
       const code = await command.run({
         args: [],
-        flags: { '--force': true },
+        flags: overwrite ? { '--force': true } : {},
         jsonMode: true,
-        options: PullSchema.parse({ databases: ['app'], outFile, overwrite: true }),
+        options: PullSchema.parse({ databases: ['app'], outFile, overwrite }),
         rawOptions: { databases: ['app'], outFile },
         configPath: join(project, 'clickhouse.config.ts'),
         config: {
@@ -1086,6 +1086,10 @@ describe('@chkit/plugin-pull schema command', () => {
           output.push(value)
         },
       })
+      return { code, output }
+    }
+    const pull = async (outFile: string): Promise<string> => {
+      const { code, output } = await run(outFile, true)
       expect(code).toBe(0)
       return (output[0] as { outFile: string }).outFile
     }
@@ -1097,7 +1101,16 @@ describe('@chkit/plugin-pull schema command', () => {
       expect(await readFile(join(project, 'link.ts'), 'utf8')).toContain('const app_users = table({')
       expect(await readFile(join(elsewhere, 'target.ts'), 'utf8')).toBe('// target\n')
 
-      // A dangling symlink is replaced too; nothing is created where it pointed.
+      // A dangling symlink is an existing output file: refused without --force,
+      // replaced with it, and nothing is created where it pointed.
+      const refused = await run(join(project, 'dangling.ts'), false)
+      expect(refused.code).toBe(2)
+      expect(refused.output[0]).toEqual({
+        ok: false,
+        command: 'schema',
+        error: `Output file already exists at ${join(project, 'dangling.ts')}. Re-run with --force or set plugin option overwrite=true.`,
+      })
+      expect((await lstat(join(project, 'dangling.ts'))).isSymbolicLink()).toBe(true)
       expect(await pull(join(project, 'dangling.ts'))).toBe(join(project, 'dangling.ts'))
       expect((await lstat(join(project, 'dangling.ts'))).isFile()).toBe(true)
       expect((await readdir(dir)).sort()).toEqual(['elsewhere', 'project'])
