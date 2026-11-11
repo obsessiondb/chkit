@@ -15,6 +15,7 @@ export {
   getLiveEnv,
   createLiveExecutor,
   createStatelessLiveExecutor,
+  dropDatabase,
   quoteIdent,
   createPrefix,
   createJournalTableName,
