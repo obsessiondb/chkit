@@ -16,6 +16,9 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit.cli.main import app
+from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
+from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
@@ -201,20 +204,42 @@ def test_every_codec_form_migrates_without_drift_and_server_codec_changes_drift(
         }
         expect_no_drift()
 
+        # One out-of-band ALTER at a time, each on every replica before the next:
+        # on ObsessionDB an ALTER on a replica that has not applied the previous
+        # one writes back its stale schema and loses that change (#709).
+        chkit_config = ChxResolvedClickHouseConfig(
+            url=env.clickhouse_url,
+            username=env.clickhouse_user,
+            password=env.clickhouse_password,
+            database=database,
+            secure=env.clickhouse_url.startswith("https:"),
+        )
+
+        def modify_column(column: str, change: str) -> None:
+            statement = f"ALTER TABLE {obj} MODIFY COLUMN {column} {change}"
+            client.command(statement)
+            with ClickHouseClient.connect(chkit_config) as waiter:
+                wait_for_ddl_propagation(
+                    waiter,
+                    "alter_table_modify_column",
+                    f"table:{database}.{table_name}:column:{column}",
+                    statement=statement,
+                )
+
         # The same codecs, spelled the way ClickHouse fills in itself.
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN lz4hc CODEC(LZ4HC)")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN double_delta4 CODEC(DoubleDelta(8), ZSTD(2))")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN gorilla8 CODEC(Gorilla, ZSTD(2))")
+        modify_column("lz4hc", "CODEC(LZ4HC)")
+        modify_column("double_delta4", "CODEC(DoubleDelta(8), ZSTD(2))")
+        modify_column("gorilla8", "CODEC(Gorilla, ZSTD(2))")
         _wait_for_codecs(client, codecs_sql, lambda codecs: codecs.get("lz4hc") == "CODEC(LZ4HC(0))")
         expect_no_drift()
 
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN zstd3 String CODEC(LZ4)")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN plain String CODEC(ZSTD(3))")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN lz4 REMOVE CODEC")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN zstd_window CODEC(ZSTD(3))")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN delta8 CODEC(Delta(4), LZ4)")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN fpc12 CODEC(FPC(5))")
-        client.command(f"ALTER TABLE {obj} MODIFY COLUMN t64 CODEC(T64('bit'))")
+        modify_column("zstd3", "String CODEC(LZ4)")
+        modify_column("plain", "String CODEC(ZSTD(3))")
+        modify_column("lz4", "REMOVE CODEC")
+        modify_column("zstd_window", "CODEC(ZSTD(3))")
+        modify_column("delta8", "CODEC(Delta(4), LZ4)")
+        modify_column("fpc12", "CODEC(FPC(5))")
+        modify_column("t64", "CODEC(T64('bit'))")
         changed = {
             "zstd3": "CODEC(LZ4)",
             "plain": "CODEC(ZSTD(3))",
