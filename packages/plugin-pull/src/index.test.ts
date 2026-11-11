@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, readFile, rm, writeFile } from 'node:fs/promises'
+import { lstat, mkdir, mkdtemp, readdir, readFile, rm, symlink, writeFile } from 'node:fs/promises'
 import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
@@ -1022,6 +1022,94 @@ describe('@chkit/plugin-pull schema command', () => {
       expect(third.code).toBe(0)
       const forced = await readFile(outFile, 'utf8')
       expect(forced).toContain('export default schema(app_users)')
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  })
+
+  test('writes the output path as given, without following symlinks (#702)', async () => {
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-plugin-pull-symlink-'))
+    const project = join(dir, 'project')
+    const elsewhere = join(dir, 'elsewhere')
+    await mkdir(join(elsewhere, 'real'), { recursive: true })
+    await mkdir(project)
+    await writeFile(join(elsewhere, 'target.ts'), '// target\n', 'utf8')
+    await symlink(join(elsewhere, 'target.ts'), join(project, 'link.ts'))
+    await symlink(join(elsewhere, 'real'), join(project, 'linkdir'))
+    await symlink(join(dir, 'nowhere', 'f.ts'), join(project, 'dangling.ts'))
+
+    const plugin = createPullPlugin({
+      databases: ['app'],
+      introspect: async () => [
+        {
+          database: 'app',
+          name: 'users',
+          engine: 'MergeTree()',
+          primaryKey: '(id)',
+          orderBy: '(id)',
+          columns: [{ name: 'id', type: 'UInt64' }],
+          settings: {},
+          indexes: [],
+          projections: [],
+        },
+      ],
+    })
+    const command = plugin.commands[0]
+    if (!command) throw new Error('missing command')
+
+    const pull = async (outFile: string): Promise<unknown> => {
+      const output: unknown[] = []
+      const code = await command.run({
+        args: [],
+        flags: { '--force': true },
+        jsonMode: true,
+        options: PullSchema.parse({ databases: ['app'], outFile, overwrite: true }),
+        rawOptions: { databases: ['app'], outFile },
+        configPath: join(project, 'clickhouse.config.ts'),
+        config: {
+          schema: ['./schema.ts'],
+          outDir: './chkit',
+          migrationsDir: './chkit/migrations',
+          metaDir: './chkit/meta',
+          plugins: [],
+          check: { failOnPending: true, failOnChecksumMismatch: true, failOnDrift: true },
+          safety: { allowDestructive: false },
+          clickhouse: {
+            url: 'http://localhost:8123',
+            username: 'default',
+            password: '',
+            database: 'default',
+            secure: false,
+          },
+        },
+        print(value) {
+          output.push(value)
+        },
+      })
+      expect(code).toBe(0)
+      return (output[0] as { outFile: string }).outFile
+    }
+
+    try {
+      // A symlinked output file is replaced by the pulled file; its target is untouched.
+      expect(await pull(join(project, 'link.ts'))).toBe(join(project, 'link.ts'))
+      expect((await lstat(join(project, 'link.ts'))).isSymbolicLink()).toBe(false)
+      expect(await readFile(join(project, 'link.ts'), 'utf8')).toContain('const app_users = table({')
+      expect(await readFile(join(elsewhere, 'target.ts'), 'utf8')).toBe('// target\n')
+
+      // A dangling symlink is replaced too; nothing is created where it pointed.
+      expect(await pull(join(project, 'dangling.ts'))).toBe(join(project, 'dangling.ts'))
+      expect((await lstat(join(project, 'dangling.ts'))).isFile()).toBe(true)
+      expect((await readdir(dir)).sort()).toEqual(['elsewhere', 'project'])
+
+      // A symlinked directory is reported as given and written through by the OS.
+      expect(await pull(join(project, 'linkdir', 's.ts'))).toBe(join(project, 'linkdir', 's.ts'))
+      expect(await readFile(join(elsewhere, 'real', 's.ts'), 'utf8')).toContain('const app_users = table({')
+
+      // `..` after a symlinked directory is taken by text, not from the link target.
+      expect(await pull(`${project}/linkdir/../x.ts`)).toBe(join(project, 'x.ts'))
+      expect(await readFile(join(project, 'x.ts'), 'utf8')).toContain('const app_users = table({')
+      expect((await readdir(elsewhere)).sort()).toEqual(['real', 'target.ts'])
     } finally {
       await rm(dir, { recursive: true, force: true })
     }

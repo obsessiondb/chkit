@@ -642,7 +642,10 @@ def _run(
         definitions, index_granularity=configured_index_granularity(config)
     )
     content = render_schema_file(definitions, shared_tables=shared_tables)
-    out_file_abs = (Path.cwd() / out_file).resolve()
+    # Made absolute by text, as TS ``resolve(process.cwd(), outFile)``: a
+    # symlink is not followed, so pull writes (and reports) the path it was
+    # given and replaces a symlink there rather than writing through it (#702).
+    out_file_abs = Path(os.path.abspath(Path.cwd() / out_file))
 
     if not dryrun:
         _write_schema_file(out_file_abs, content, overwrite=overwrite)
