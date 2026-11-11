@@ -94,6 +94,36 @@ export function quoteIdent(value: string): string {
   return quoteIdentifier(value)
 }
 
+/**
+ * Drops a test database, re-running the DROP while it fails with
+ * `DATABASE_NOT_EMPTY`.
+ *
+ * DROP DATABASE drops the tables the serving replica lists, then fails if a
+ * table appeared meanwhile. On a multi-replica service (ObsessionDB) that
+ * happens when the replica applies an earlier CREATE during the drop; the
+ * server answers "Try again". Any other error throws at once.
+ * chkit-py's twin is `drop_database`.
+ */
+export async function dropDatabase(
+  executor: Pick<ClickHouseExecutor, 'command'>,
+  database: string,
+  options: PollUntilOptions = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
+      return
+    } catch (error) {
+      const text = `${(error as { type?: unknown }).type ?? ''} ${error instanceof Error ? error.message : String(error)}`
+      if (Date.now() >= deadline || !text.includes('DATABASE_NOT_EMPTY')) throw error
+    }
+    await sleep(intervalMs)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Run tags & naming
 // ---------------------------------------------------------------------------

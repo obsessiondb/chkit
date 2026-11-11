@@ -143,6 +143,28 @@ def quote_ident(value: str) -> str:
     return f"`{escaped}`"
 
 
+def drop_database(
+    client: Any, database: str, *, timeout: float = 30.0, interval: float = 0.5
+) -> None:
+    """Drop a test database, re-running the DROP while it fails with ``DATABASE_NOT_EMPTY``.
+
+    DROP DATABASE drops the tables the serving replica lists, then fails if a
+    table appeared meanwhile. On a multi-replica service (ObsessionDB) that
+    happens when the replica applies an earlier CREATE during the drop; the
+    server answers "Try again". Any other error raises at once. Port of TS
+    ``dropDatabase``.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+            return
+        except Exception as error:
+            if time.monotonic() >= deadline or "DATABASE_NOT_EMPTY" not in str(error):
+                raise
+        time.sleep(interval)
+
+
 def _random_suffix() -> str:
     """Return an 8-hex-digit random suffix (32 bits).
 
