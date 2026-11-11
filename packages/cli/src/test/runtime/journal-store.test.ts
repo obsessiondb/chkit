@@ -264,6 +264,44 @@ describe('createJournalStore', () => {
     expect(commandCalls.filter((sql) => sql.startsWith('INSERT INTO'))).toEqual([])
   })
 
+  test('retries a journal CREATE that reached a replica without the database yet (#493)', async () => {
+    // The probe found the database; the first CREATE reached a replica that
+    // has not applied CREATE DATABASE yet.
+    const commandCalls: string[] = []
+    let createAttempts = 0
+    const db = {
+      async command(sql: string) {
+        if (sql.startsWith('CREATE TABLE')) {
+          createAttempts += 1
+          if (createAttempts === 1) throw Object.assign(new Error('Database app does not exist'), { code: '81' })
+        }
+        commandCalls.push(sql)
+      },
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.startsWith('SELECT currentDatabase()')) return [{ database: 'app' }] as T[]
+        if (/SELECT name, migration_completed, operations FROM .* LIMIT 0/.test(sql) && createAttempts < 2) {
+          throw Object.assign(new Error('Table app._chkit_migrations does not exist. (UNKNOWN_TABLE)'), { code: '60' })
+        }
+        return []
+      },
+    } as unknown as ClickHouseExecutor
+
+    const store = createJournalStore(db)
+    await store.writeMigrationState({
+      name: 'bootstrap.sql',
+      appliedAt: '2026-05-26 12:00:00.000',
+      checksum: 'cs',
+      chkitVersion: 'v',
+      migrationCompleted: true,
+      operations: [],
+    })
+
+    expect(store.databaseMissing).toBe(false)
+    expect(createAttempts).toBe(2)
+    expect(commandCalls[0]).toStartWith('CREATE TABLE IF NOT EXISTS `app`._chkit_migrations')
+    expect(commandCalls.some((sql) => sql.startsWith('INSERT INTO `app`._chkit_migrations'))).toBe(true)
+  })
+
   test('writeMigrationState escapes single quotes inside lastError so SQL stays valid', async () => {
     const { db, commandCalls } = createScriptedExecutor(
       new Map<string | RegExp, unknown[]>([
@@ -576,8 +614,8 @@ describe('createJournalStore', () => {
         operations: [],
       })
 
-      expect(commands[0]).toStartWith('CREATE TABLE IF NOT EXISTS _chkit_migrations')
-      expect(commands.some((sql) => sql.startsWith('INSERT INTO _chkit_migrations'))).toBe(true)
+      expect(commands[0]).toStartWith('CREATE TABLE IF NOT EXISTS `default`._chkit_migrations')
+      expect(commands.some((sql) => sql.startsWith('INSERT INTO `default`._chkit_migrations'))).toBe(true)
     })
 
     test('an up-to-date journal is read without ALTER', async () => {
@@ -755,7 +793,7 @@ describe('createJournalStore', () => {
 
       const writes = commands.filter((sql) => !sql.startsWith('SYSTEM SYNC REPLICA'))
       expect(writes[0]).toBe(
-        'ALTER TABLE _chkit_migrations ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []',
+        'ALTER TABLE `default`._chkit_migrations ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []',
       )
       expect(writes[1]).toContain(", ['v1:a'])")
     })
@@ -1038,6 +1076,127 @@ describe('createJournalStore', () => {
 
         await expect(createJournalStore(db).readMigrationState('m.sql')).rejects.toThrow('HTTP 503')
       })
+    })
+  })
+
+  // A journal INSERT or ALTER that reaches a replica without the database is
+  // retried by the executor without it, so it must name the database and run
+  // only once every replica has the journal (#700).
+  describe('journal writes on a multi-replica target (#700)', () => {
+    function clickHouseError(code: string, message: string): Error {
+      return Object.assign(new Error(message), { code })
+    }
+
+    const UNKNOWN_DATABASE = () => clickHouseError('81', 'Database app does not exist. (UNKNOWN_DATABASE)')
+
+    /**
+     * A target whose replica probe answers `probe` in turn (an Error throws,
+     * a number is the replica count, the last one repeats). `legacy` makes it
+     * a journal an older release created, without the per-operation columns.
+     */
+    function target(options: { probe: Array<Error | number>; legacy?: boolean }) {
+      const calls: string[] = []
+      let probes = 0
+      let upgraded = !options.legacy
+      const db = {
+        async command(sql: string) {
+          calls.push(sql)
+          if (sql.includes('ADD COLUMN IF NOT EXISTS operations ')) upgraded = true
+        },
+        async query<T>(sql: string): Promise<T[]> {
+          calls.push(sql)
+          if (sql.includes('system.one')) {
+            const answer = options.probe[Math.min(probes, options.probe.length - 1)]
+            probes += 1
+            if (answer instanceof Error) throw answer
+            return [{ replicas: answer }] as T[]
+          }
+          if (sql.startsWith('SELECT name, migration_completed, operations FROM') && !upgraded) {
+            throw clickHouseError('47', 'Unknown expression identifier `operations`. (UNKNOWN_IDENTIFIER)')
+          }
+          if (sql.startsWith('SELECT currentDatabase()')) return [{ database: 'app' }] as T[]
+          if (sql.includes('AS replicas')) return [{ replicas: 2 }] as T[]
+          return []
+        },
+      } as unknown as ClickHouseExecutor
+      return { db, calls }
+    }
+
+    const state: MigrationRowState = {
+      name: 'm.sql',
+      appliedAt: '2026-11-10 12:00:00.000',
+      checksum: 'cs',
+      chkitVersion: 'v',
+      migrationCompleted: true,
+      operations: [],
+    }
+
+    const isJournalPoll = (sql: string) => sql.includes("clusterAllReplicas('default', system.tables)")
+    const isWrite = (sql: string) => sql.startsWith('INSERT INTO') || sql.startsWith('ALTER TABLE')
+
+    test('a replica probe that fails is not taken for a single replica', async () => {
+      // The probe reached a replica without the new database yet.
+      const { db, calls } = target({ probe: [UNKNOWN_DATABASE(), 2] })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      const poll = calls.findIndex(isJournalPoll)
+      expect(poll).toBeGreaterThanOrEqual(0)
+      expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('INSERT INTO')))
+    })
+
+    test('retries a replica probe that the console API reports without a code', async () => {
+      // The ObsessionDB console API sends only the message.
+      const { db, calls } = target({
+        probe: [new Error('Code: 81. DB::Exception: Database app does not exist. (UNKNOWN_DATABASE)'), 2],
+      })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      // The journal exists: the probe is retried, not taken for a missing journal.
+      expect(calls.some((sql) => sql.startsWith('CREATE TABLE'))).toBe(false)
+      const poll = calls.findIndex(isJournalPoll)
+      expect(poll).toBeGreaterThanOrEqual(0)
+      expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('INSERT INTO')))
+    })
+
+    test('a replica probe that keeps failing stops the write', async () => {
+      const { db, calls } = target({ probe: [clickHouseError('159', 'Timeout exceeded. (TIMEOUT_EXCEEDED)')] })
+
+      await expect(createJournalStore(db).writeMigrationState(state)).rejects.toThrow('TIMEOUT_EXCEEDED')
+      expect(calls.filter(isWrite)).toEqual([])
+    })
+
+    test.each([
+      ['a single node without the cluster', clickHouseError('701', "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)")],
+      ['a user that cannot query the cluster', clickHouseError('497', 'Not enough privileges. (ACCESS_DENIED)')],
+    ])('%s keeps the single-replica path', async (_label, error) => {
+      const { db, calls } = target({ probe: [error] })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      expect(calls.some(isJournalPoll)).toBe(false)
+      expect(calls.filter((sql) => sql.startsWith('INSERT INTO'))).toHaveLength(1)
+    })
+
+    test('waits for every replica before upgrading an older journal', async () => {
+      const { db, calls } = target({ probe: [2], legacy: true })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      const poll = calls.findIndex(isJournalPoll)
+      expect(poll).toBeGreaterThanOrEqual(0)
+      expect(poll).toBeLessThan(calls.findIndex((sql) => sql.startsWith('ALTER TABLE')))
+    })
+
+    test('every journal INSERT and ALTER names the database', async () => {
+      const { db, calls } = target({ probe: [2], legacy: true })
+
+      await createJournalStore(db).writeMigrationState(state)
+
+      const writes = calls.filter(isWrite)
+      expect(writes.length).toBeGreaterThan(1)
+      for (const sql of writes) expect(sql).toMatch(/^(INSERT INTO|ALTER TABLE) `app`\._chkit_migrations /)
     })
   })
 })
