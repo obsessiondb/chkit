@@ -154,6 +154,33 @@ export async function pollUntil<T>(
   }
 }
 
+// Errors a replica that has not applied an earlier CREATE answers with.
+const NOT_YET_VISIBLE_ERRORS = ['UNKNOWN_TABLE', 'UNKNOWN_DATABASE']
+
+/**
+ * Runs a statement that needs an object an earlier DDL created.
+ *
+ * On a multi-replica service (ObsessionDB) each request may land on a
+ * different replica, and one that hasn't applied the CREATE yet answers
+ * `UNKNOWN_TABLE` or `UNKNOWN_DATABASE`. Such a failure changes nothing, so
+ * the statement is re-run until the replica serving it sees the object; any
+ * other error throws at once. chkit-py's twin is `run_once_visible`.
+ */
+export async function runOnceVisible<T>(run: () => Promise<T>, options: PollUntilOptions = {}): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      return await run()
+    } catch (error) {
+      const text = `${(error as { type?: unknown }).type ?? ''} ${error instanceof Error ? error.message : String(error)}`
+      if (Date.now() >= deadline || !NOT_YET_VISIBLE_ERRORS.some((code) => text.includes(code))) throw error
+    }
+    await sleep(intervalMs)
+  }
+}
+
 // Re-exported from ddl-propagation for test convenience.
 
 export {

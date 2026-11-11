@@ -219,7 +219,7 @@ def poll_until(
 
 # Errors a statement gets when it lands on a replica that hasn't applied an
 # earlier DDL yet. Such a failure changes nothing, so the statement can run again.
-_NOT_YET_VISIBLE_ERRORS = ("UNKNOWN_TABLE",)
+_NOT_YET_VISIBLE_ERRORS = ("UNKNOWN_TABLE", "UNKNOWN_DATABASE")
 
 
 def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: float = 0.5) -> T:
@@ -227,8 +227,8 @@ def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: f
 
     On a multi-replica service (ObsessionDB) each request may land on a
     different replica, and one that hasn't applied the CREATE yet answers
-    ``UNKNOWN_TABLE`` even after ``wait_for_table`` saw the table on another
-    one. Such a failure changes nothing, so the statement is re-run until the
+    ``UNKNOWN_TABLE`` (or ``UNKNOWN_DATABASE``) even after ``wait_for_table``
+    saw the table on another one. Such a failure changes nothing, so the statement is re-run until the
     replica serving it sees the object; any other error raises at once.
     """
     deadline = time.monotonic() + timeout
