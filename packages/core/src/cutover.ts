@@ -10,6 +10,7 @@ import {
   type TableDefinition,
 } from './model.js'
 import { columnTypeFingerprint, keyFingerprint, renderColumnType, toCreateSQL } from './sql.js'
+import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
 import {
   DEFAULT_INDEX_GRANULARITY,
   declaredReadonlySettings,
@@ -685,7 +686,7 @@ function assertCutoverSupported(input: {
       problems.push(`key column ${name} must be a stored column of both the old and the new table.`)
       continue
     }
-    if (column.nullable || /^\s*(LowCardinality\s*\(\s*)?Nullable\s*\(/.test(column.type)) {
+    if (column.nullable || isNullableType(column.type)) {
       problems.push(`key column ${name} is Nullable; NOT IN never matches NULL, so such rows could not be told apart.`)
     }
   }
@@ -758,6 +759,23 @@ function copiedColumns(oldDef: TableDefinition, newDef: TableDefinition, problem
     columns.push(oldColumn.name)
   }
   return columns
+}
+
+/**
+ * Whether a column type is `Nullable(T)` or `LowCardinality(Nullable(T))`.
+ * ClickHouse skips comments and reads quoted type names, so a type with a
+ * comment before `Nullable` or `` `Nullable`(UInt64) `` is Nullable too (#699).
+ * Type names are case-sensitive.
+ */
+function isNullableType(type: string): boolean {
+  const tokens = tokenizeSQL(type).filter((token) => !isTrivia(token))
+  const isOpen = (index: number) => tokens[index]?.kind === 'punctuation' && tokens[index]?.text === '('
+  const nameAt = (index: number) => {
+    const token = tokens[index]
+    return token === undefined ? undefined : identifierName(token)
+  }
+  const start = nameAt(0) === 'LowCardinality' && isOpen(1) ? 2 : 0
+  return nameAt(start) === 'Nullable' && isOpen(start + 1)
 }
 
 function isStored(column: ColumnDefinition): boolean {

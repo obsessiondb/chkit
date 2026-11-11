@@ -57,7 +57,7 @@ from chkit.core.sql import (
     render_column_type,
     to_create_sql,
 )
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import identifier_name, is_trivia, js_trim, tokenize_sql
 from chkit.core.table_settings import (
     DEFAULT_INDEX_GRANULARITY,
     declared_readonly_settings,
@@ -92,7 +92,6 @@ _STREAMING_ENGINES: Final = frozenset(
 )
 _COMMENT_PREFIX: Final = "chkit cutover "
 _REPLICATED_PATH: Final = re.compile(r"^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'")
-_NULLABLE: Final = re.compile(r"^\s*(LowCardinality\s*\(\s*)?Nullable\s*\(")
 
 @dataclass(frozen=True)
 class CutoverRequest:
@@ -977,7 +976,7 @@ def _assert_cutover_supported(  # noqa: PLR0912, PLR0915
                 f"key column {name} must be a stored column of both the old and the new table."
             )
             continue
-        if column.nullable or _NULLABLE.match(column.type):
+        if column.nullable or _is_nullable_type(column.type):
             problems.append(
                 f"key column {name} is Nullable; NOT IN never matches NULL, so such rows could "
                 "not be told apart."
@@ -1065,6 +1064,29 @@ def _copied_columns(
             continue
         columns.append(old_column.name)
     return columns
+
+
+def _is_nullable_type(type_: str) -> bool:
+    """Whether a column type is ``Nullable(T)`` or ``LowCardinality(Nullable(T))``.
+
+    ClickHouse skips comments and reads quoted type names, so a type with a comment
+    before ``Nullable`` or ```Nullable`(UInt64)`` is Nullable too (#699). Type names
+    are case-sensitive.
+    """
+    tokens = [token for token in tokenize_sql(type_) if not is_trivia(token)]
+
+    def is_open(index: int) -> bool:
+        return (
+            index < len(tokens)
+            and tokens[index].kind == "punctuation"
+            and tokens[index].text == "("
+        )
+
+    def name_at(index: int) -> str | None:
+        return identifier_name(tokens[index]) if index < len(tokens) else None
+
+    start = 2 if name_at(0) == "LowCardinality" and is_open(1) else 0
+    return name_at(start) == "Nullable" and is_open(start + 1)
 
 
 def _is_stored(column: ColumnDefinition) -> bool:

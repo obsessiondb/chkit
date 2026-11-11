@@ -372,7 +372,17 @@ describe('planCutover refuses changes it cannot cut over safely', () => {
         plan({ oldDef: events({ columns: nullable }), newDef: events({ columns: nullable, primaryKey: ['user_id'], orderBy: ['user_id'] }) })
       )
     ).toEqual([expect.stringContaining('key column id is Nullable')])
-    for (const type of ['Nullable(UInt64)', 'LowCardinality(Nullable(String))', ' LowCardinality ( Nullable (String))']) {
+    for (const type of [
+      'Nullable(UInt64)',
+      'LowCardinality(Nullable(String))',
+      ' LowCardinality ( Nullable (String))',
+      // ClickHouse skips comments and reads quoted type names (#699).
+      'LowCardinality(/* c */ Nullable(String))',
+      '`LowCardinality`(Nullable(String))',
+      '`Nullable`(UInt64)',
+      '"Nullable" /* c */ (UInt64)',
+      '-- c\nLowCardinality(`Nullable`(String))',
+    ]) {
       const inline = [{ name: 'id', type }, columns[1], columns[2]] as TableDefinition['columns']
       expect(
         messages(() =>
