@@ -25,9 +25,10 @@ import json
 import os
 import re
 import time
+from collections.abc import Callable
 from datetime import UTC, datetime, timedelta
 from pathlib import Path
-from typing import Any, Final, Literal
+from typing import Any, Final, Literal, TypeVar
 
 import typer
 from pydantic import BaseModel, ConfigDict, Field
@@ -52,9 +53,16 @@ from chkit.clickhouse.ddl_propagation import (
     wait_for_column,
     wait_for_table,
 )
-from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
+from chkit.clickhouse.replicas import (
+    ReplicaFanout,
+    all_replicas,
+    resolve_replica_fanout_or_raise,
+)
+from chkit.core.identifier import quote_identifier
 from chkit.core.on_cluster import on_cluster_clause
 from chkit.core.sql_lexer import js_regex, js_trim
+
+_T = TypeVar("_T")
 
 OperationStatus = Literal["started", "completed", "failed"]
 
@@ -309,6 +317,7 @@ class JournalStore:
         "_cluster",
         "_columns_unreadable",
         "_database_missing",
+        "_database_name_read",
         "_fingerprint_column",
         "_fingerprint_column_added",
         "_last_written",
@@ -340,6 +349,8 @@ class JournalStore:
         # The user may not read system.columns; the column is then read from
         # the journal's definition in system.tables.
         self._columns_unreadable: bool = False
+        # currentDatabase(), once it answered.
+        self._database_name_read: str | None = None
         # Read-your-writes: the last row version this store wrote per migration.
         self._last_written: dict[str, MigrationRowState] = {}
         # The newest applied_at version per migration that this store read or
@@ -357,7 +368,7 @@ class JournalStore:
     def table_name(self) -> str:
         return self._table
 
-    def _create_table_sql(self) -> str:
+    def _create_table_sql(self, database: str) -> str:
         # In cluster mode the journal must be consistent across every node, so
         # it uses a replicated engine with a no-``{shard}`` Keeper path (one
         # cluster-wide replication group) created ``ON CLUSTER``. ``{uuid}`` is
@@ -369,7 +380,10 @@ class JournalStore:
         # unique cluster-wide — per-shard ``{replica}`` naming (the common
         # multi-shard layout) would otherwise collide. The read path already
         # uses SYNC REPLICA + FINAL + sequential consistency. Single-node/Cloud
-        # keeps the plain engine.
+        # keeps the plain engine. The table is named in its database: the client
+        # retries a statement that fails with UNKNOWN_DATABASE without the
+        # database, which would otherwise create the journal in the server's
+        # default database (#493).
         engine = (
             "ReplicatedReplacingMergeTree("
             "'/clickhouse/tables/{uuid}/chkit_journal', "
@@ -378,7 +392,8 @@ class JournalStore:
             else "ReplacingMergeTree(applied_at)"
         )
         return (
-            f"CREATE TABLE IF NOT EXISTS {self._table}{self._on_cluster} (\n"
+            f"CREATE TABLE IF NOT EXISTS {quote_identifier(database)}.{self._table}"
+            f"{self._on_cluster} (\n"
             f"    name String,\n"
             f"    applied_at DateTime64(3, 'UTC'),\n"
             f"    checksum String,\n"
@@ -391,7 +406,7 @@ class JournalStore:
             f"SETTINGS index_granularity = 1"
         )
 
-    def _ensure_table(self, *, create: bool) -> None:  # noqa: PLR0911
+    def _ensure_table(self, *, create: bool) -> None:
         """Make sure the journal can be read or, with ``create``, written.
 
         Only a write creates the journal or adds the columns an old one lacks,
@@ -403,20 +418,16 @@ class JournalStore:
             self._client.query(
                 f"SELECT name, migration_completed, operations FROM {self._table} LIMIT 0"
             )
-            self._wait_for_every_replica()
-            self._fingerprint_column = self._detect_fingerprint_column()
-            self._bootstrapped = True
-            self._table_missing = False
-            return
         except Exception as exc:
             if is_unknown_database_error(exc):
                 self._database_missing = True
                 self._bootstrapped = True
                 return
             if _is_clickhouse_error(exc, _UNKNOWN_IDENTIFIER):
-                # The journal predates per-operation tracking.
-                self._ensure_schema_upgraded()
+                # The journal predates per-operation tracking. Every replica
+                # must have it before its ALTERs run (#700).
                 self._wait_for_every_replica()
+                self._ensure_schema_upgraded()
                 self._fingerprint_column = self._detect_fingerprint_column()
                 self._bootstrapped = True
                 return
@@ -430,24 +441,92 @@ class JournalStore:
                     return
                 self._table_missing = True
                 return
-        try:
-            self._client.execute(self._create_table_sql())
-        except Exception as exc:
-            if is_unknown_database_error(exc):
-                self._database_missing = True
-                self._bootstrapped = True
-                return
-            raise
+        else:
+            # Only the probe's own error is read above: a failure of the
+            # waits after it stops the run (#700).
+            self._wait_for_every_replica()
+            self._fingerprint_column = self._detect_fingerprint_column()
+            self._bootstrapped = True
+            self._table_missing = False
+            return
+        self._create_journal_table()
         self._wait_for_every_replica()
         # Another process, maybe an older release, may have created it first.
         self._fingerprint_column = self._detect_fingerprint_column()
         self._bootstrapped = True
         self._table_missing = False
 
+    def _while_database_propagates(self, what: str, run: Callable[[], _T]) -> _T:
+        """Run ``run``, retrying it while it reaches a replica without the database.
+
+        The probe found the database, so UNKNOWN_DATABASE here means the
+        request reached a replica that has not applied ``CREATE DATABASE`` yet
+        (#493): retry until it has. A database that never arrives stops the
+        run, so the state being written is never dropped.
+        """
+        for attempt in range(1, MAX_RETRIES + 2):
+            try:
+                return run()
+            except Exception as exc:
+                if not is_unknown_database_error(exc):
+                    raise
+                if attempt > MAX_RETRIES:
+                    # The server's message is left out, so the error never
+                    # reads as a missing database itself; it stays the cause.
+                    msg = (
+                        f"Cannot {what}: its database is still missing on the replica "
+                        f"that received the request after {attempt} attempts. Re-run "
+                        "chkit once the database has reached every replica."
+                    )
+                    raise RuntimeError(msg) from exc
+                debug(
+                    "journal",
+                    f"database not yet on this replica — retrying to {what} "
+                    f"(attempt {attempt})",
+                )
+                time.sleep(RETRY_DELAY_SECONDS)
+        raise AssertionError("unreachable")
+
+    def _create_journal_table(self) -> None:
+        self._while_database_propagates(
+            f"create the journal table {self._table}",
+            lambda: self._client.execute(self._create_table_sql(self._database_name())),
+        )
+
+    def _database_name(self) -> str:
+        """currentDatabase(), read once it answers."""
+        if self._database_name_read is None:
+            self._database_name_read = self._while_database_propagates(
+                f"read the database of {self._table}", self._current_database
+            )
+        return self._database_name_read
+
+    def _qualified_table(self) -> str:
+        """The journal as ``database.table``.
+
+        The client retries a statement that fails with UNKNOWN_DATABASE
+        without the database, so every journal INSERT and ALTER names it, or
+        one that reaches a replica without the database would write a journal
+        in the server's default database (#700).
+        """
+        return f"{quote_identifier(self._database_name())}.{self._table}"
+
+    def _replica_fanout(self) -> ReplicaFanout | None:
+        """The replicas to wait for.
+
+        A probe that fails for another reason than a missing cluster or a
+        user that cannot query it stops the run, rather than skip the waits
+        that keep journal writes off a replica without the journal (#700).
+        """
+        return self._while_database_propagates(
+            "discover the replicas of the journal",
+            lambda: resolve_replica_fanout_or_raise(self._client, self._cluster),
+        )
+
     def _exists_on_another_replica(self) -> bool:
         # On a multi-replica target, the replica that answered the probe may
         # not have applied another process's CREATE yet.
-        fanout = resolve_replica_fanout(self._client, self._cluster)
+        fanout = self._replica_fanout()
         if fanout is None:
             return False
         rows = self._client.query(
@@ -463,13 +542,13 @@ class JournalStore:
         fails while one of them does not have the table yet, e.g. right after
         the CREATE above or another process's. A single replica needs no wait.
         """
-        if resolve_replica_fanout(self._client, self._cluster) is None:
+        if self._replica_fanout() is None:
             return
-        wait_for_table(self._client, self._current_database(), self._table, cluster=self._cluster)
+        wait_for_table(self._client, self._database_name(), self._table, cluster=self._cluster)
 
     def _current_database(self) -> str:
         rows = self._client.query("SELECT currentDatabase() AS database").rows
-        return str(rows[0]["database"]) if rows else "default"
+        return str(rows[0].get("database", "default")) if rows else "default"
 
     def _detect_fingerprint_column(self) -> bool:
         """Whether the journal has the fingerprint column.
@@ -479,7 +558,7 @@ class JournalStore:
         any replica has it (one that lags may not yet), and then every replica
         must get it, because reads and writes name it.
         """
-        fanout = resolve_replica_fanout(self._client, self._cluster)
+        fanout = self._replica_fanout()
         if fanout is None:
             try:
                 self._client.query(f"SELECT {_FINGERPRINTS_COLUMN} FROM {self._table} LIMIT 0")
@@ -508,7 +587,7 @@ class JournalStore:
             return False
         wait_for_column(
             self._client,
-            self._current_database(),
+            self._database_name(),
             self._table,
             _FINGERPRINTS_COLUMN,
             cluster=self._cluster,
@@ -587,7 +666,7 @@ class JournalStore:
             return
         wait_for_column(
             self._client,
-            self._current_database(),
+            self._database_name(),
             self._table,
             _FINGERPRINTS_COLUMN,
             cluster=self._cluster,
@@ -604,7 +683,7 @@ class JournalStore:
         self._fingerprint_column_added = True
         try:
             self._client.execute(
-                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS {_FINGERPRINTS_COLUMN_DEFINITION}"
             )
         except Exception as exc:
@@ -615,7 +694,7 @@ class JournalStore:
             )
             typer.echo(_fingerprint_column_warning(self._table, exc), err=True)
             return
-        fanout = resolve_replica_fanout(self._client, self._cluster)
+        fanout = self._replica_fanout()
         if fanout is not None:
             self._wait_for_fingerprint_column(fanout)
         self._fingerprint_column = True
@@ -627,15 +706,15 @@ class JournalStore:
         # replica converges on the new column set in the same DDL round-trip.
         try:
             self._client.execute(
-                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true"
             )
             self._client.execute(
-                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS operations {_OPERATIONS_TUPLE_TYPE} DEFAULT []"
             )
             self._client.execute(
-                f"ALTER TABLE {self._table}{self._on_cluster} "
+                f"ALTER TABLE {self._qualified_table()}{self._on_cluster} "
                 f"ADD COLUMN IF NOT EXISTS {_FINGERPRINTS_COLUMN_DEFINITION}"
             )
         except Exception as exc:
@@ -657,7 +736,7 @@ class JournalStore:
         ``ReplacingMergeTree(applied_at)`` keeps too.
         """
         fingerprints = self._fingerprint_column
-        fanout = resolve_replica_fanout(self._client, self._cluster)
+        fanout = self._replica_fanout()
         fingerprint_select = f"toJSONString({_FINGERPRINTS_COLUMN})"
         if fanout is None:
             fingerprint_column = (
@@ -813,7 +892,7 @@ class JournalStore:
             f", {_fingerprints_array_literal(state.operations)}" if fingerprints else ""
         )
         sql = (
-            f"INSERT INTO {self._table} "
+            f"INSERT INTO {self._qualified_table()} "
             f"(name, applied_at, checksum, chkit_version, "
             f"migration_completed, operations{fingerprint_column}) VALUES ("
             f"'{_escape_sql_string(state.name)}', "
@@ -825,6 +904,11 @@ class JournalStore:
             f"{fingerprint_value}"
             f")"
         )
+        self._while_database_propagates(
+            f"write to {self._table}", lambda: self._execute_insert(sql)
+        )
+
+    def _execute_insert(self, sql: str) -> None:
         for attempt in range(1, _INSERT_RACE_MAX_ATTEMPTS + 1):
             try:
                 self._client.execute(sql)

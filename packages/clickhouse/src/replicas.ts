@@ -19,9 +19,23 @@ const probes = new WeakMap<ClickHouseExecutor, Map<string, Promise<ReplicaFanout
 /**
  * Counts the replicas of `cluster` (default `default`) once per executor.
  * Returns undefined for a single replica, or when the cluster does not exist
- * or the user cannot query it, so callers keep their single-replica path.
+ * or the user cannot query it, so callers keep their single-replica path. Any
+ * other failure also returns undefined, but is not cached: the next call
+ * probes again.
  */
 export function resolveReplicaFanout(
+  executor: ClickHouseExecutor,
+  cluster: string = DEFAULT_CLUSTER,
+): Promise<ReplicaFanout | undefined> {
+  return resolveReplicaFanoutOrThrow(executor, cluster).catch(() => undefined)
+}
+
+/**
+ * resolveReplicaFanout for a caller that must not take a failed probe for a
+ * single replica (#700): a failure other than a missing cluster or a user
+ * that cannot query it rejects, and is not cached.
+ */
+export function resolveReplicaFanoutOrThrow(
   executor: ClickHouseExecutor,
   cluster: string = DEFAULT_CLUSTER,
 ): Promise<ReplicaFanout | undefined> {
@@ -30,11 +44,13 @@ export function resolveReplicaFanout(
     byCluster = new Map()
     probes.set(executor, byCluster)
   }
-  let probe = byCluster.get(cluster)
-  if (!probe) {
-    probe = probeReplicas(executor, cluster)
-    byCluster.set(cluster, probe)
-  }
+  const cached = byCluster.get(cluster)
+  if (cached) return cached
+  const probe = probeReplicas(executor, cluster)
+  byCluster.set(cluster, probe)
+  probe.catch(() => {
+    if (byCluster.get(cluster) === probe) byCluster.delete(cluster)
+  })
   return probe
 }
 
@@ -53,9 +69,23 @@ async function probeReplicas(
     )
     const replicas = Number(rows[0]?.replicas ?? 0)
     return replicas > 1 ? { cluster, replicas } : undefined
-  } catch {
-    return undefined
+  } catch (error) {
+    if (hasNoFanout(error)) return undefined
+    throw error
   }
+}
+
+/**
+ * Whether `error` says the target has no fan-out chkit can use: the cluster
+ * does not exist (CLUSTER_DOESNT_EXIST, or BAD_GET on older servers) or the
+ * user may not query it (ACCESS_DENIED). The ObsessionDB console API sends
+ * only the message.
+ */
+function hasNoFanout(error: unknown): boolean {
+  if (!(error instanceof Error)) return false
+  const code = 'code' in error ? String(error.code) : ''
+  if (code === '701' || code === '170' || code === '497') return true
+  return /CLUSTER_DOESNT_EXIST|Requested cluster '.*' not found|ACCESS_DENIED|Not enough privileges/.test(error.message)
 }
 
 export function stringLiteral(value: string): string {
