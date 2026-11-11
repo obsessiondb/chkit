@@ -479,7 +479,8 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
         with pytest.raises(RuntimeError, match="attached attempt failed"):
             apply_async_statement(statement)
         assert any("attaching to in-flight query" in line for line in lines)
-        assert journal.statuses() == ["failed"]
+        # The attach journals the attempt started (#672), then its failure.
+        assert journal.statuses() == ["started", "failed"]
         worker.join(timeout=60)
         assert "attached attempt failed" in attached_outcome[0]
 

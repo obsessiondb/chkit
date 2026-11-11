@@ -180,8 +180,11 @@ export function createRemoteExecutor(deps: {
 			// string compared with a DateTime column may carry neither fractional
 			// seconds nor a zone (TYPE_MISMATCH), so an ISO 8601 bound such as
 			// '2026-10-02T16:22:23.641Z' goes through parseDateTimeBestEffort.
+			// event_date prunes query_log's partitions: the entry is logged no
+			// earlier than the query started. A day of slack covers a session time
+			// zone other than the server's; toDate32, as a Date before 1970 wraps around.
 			const afterFilter = options?.afterTime
-				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)})`
+				? `AND query_start_time >= parseDateTimeBestEffort(${quoteString(options.afterTime)}) AND event_date >= toDate32(parseDateTimeBestEffort(${quoteString(options.afterTime)})) - 1`
 				: ''
 
 			// The query runs on the replica that received it, so a multi-replica

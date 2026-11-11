@@ -25,7 +25,7 @@ import json
 import os
 import re
 import time
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Any, Final, Literal
 
@@ -109,6 +109,24 @@ _OPERATIONS_TUPLE_TYPE: Final[str] = (
     "last_error String"
     "))"
 )
+
+# The ``operations`` tuple with its times as strings. A DateTime64 that
+# toJSONString renders follows the user's date_time_output_format
+# ('1794350634.552' with 'unix_timestamp'), while a CAST to String always
+# gives 'YYYY-MM-DD HH:MM:SS.mmm' (#672).
+_OPERATIONS_READ_TYPE: Final[str] = (
+    "Array(Tuple("
+    "operation_index Int32, "
+    "operation_key String, "
+    "operation_type String, "
+    "query_id String, "
+    "status String, "
+    "started_at String, "
+    "finished_at Nullable(String), "
+    "last_error String"
+    "))"
+)
+_OPERATIONS_SELECT: Final[str] = f"toJSONString(CAST(operations, '{_OPERATIONS_READ_TYPE}'))"
 
 # One fingerprint per entry of ``operations``, in the same order (#599). A
 # separate column, so the ``operations`` type older releases write stays the
@@ -294,6 +312,7 @@ class JournalStore:
         "_fingerprint_column",
         "_fingerprint_column_added",
         "_last_written",
+        "_newest_version",
         "_on_cluster",
         "_table",
         "_table_missing",
@@ -323,6 +342,12 @@ class JournalStore:
         self._columns_unreadable: bool = False
         # Read-your-writes: the last row version this store wrote per migration.
         self._last_written: dict[str, MigrationRowState] = {}
+        # The newest applied_at version per migration that this store read or
+        # wrote. Each write takes a newer one (#672): ReplacingMergeTree keeps
+        # the newest version and the replicated read either row of a tie, so a
+        # write stamped by a clock that stalls, steps back or runs behind the
+        # writer of the version it read would otherwise be lost.
+        self._newest_version: dict[str, datetime] = {}
 
     @property
     def database_missing(self) -> bool:
@@ -639,8 +664,8 @@ class JournalStore:
                 f", {fingerprint_select} AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
             )
             sql = (
-                f"SELECT name, applied_at, checksum, chkit_version, "
-                f"migration_completed, toJSONString(operations) AS operations{fingerprint_column} "
+                f"SELECT name, toString(applied_at) AS applied_at, checksum, chkit_version, "
+                f"migration_completed, {_OPERATIONS_SELECT} AS operations{fingerprint_column} "
                 f"FROM {self._table} FINAL WHERE {where} ORDER BY name{limit}"
             )
             try:
@@ -657,10 +682,10 @@ class JournalStore:
         latest = f", latest.6 AS {_FINGERPRINTS_COLUMN}" if fingerprints else ""
         versioned = f", {fingerprint_select}" if fingerprints else ""
         return self._client.query(
-            "SELECT name, latest.1 AS applied_at, latest.2 AS checksum, "
+            "SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, "
             "latest.3 AS chkit_version, latest.4 AS migration_completed, "
             f"latest.5 AS operations{latest} FROM (SELECT name, argMax(tuple(applied_at, "
-            f"checksum, chkit_version, migration_completed, toJSONString(operations){versioned}), "
+            f"checksum, chkit_version, migration_completed, {_OPERATIONS_SELECT}{versioned}), "
             "applied_at) AS latest FROM clusterAllReplicas("
             f"'{_escape_sql_string(fanout.cluster)}', currentDatabase(), '{self._table}') "
             f"GROUP BY name) WHERE {where} ORDER BY name{limit}"
@@ -729,6 +754,7 @@ class JournalStore:
         if not rows:
             return written
         row = rows[0]
+        self._note_version(migration_name, str(row["applied_at"]))
         state = MigrationRowState(
             name=str(row["name"]),
             applied_at=str(row["applied_at"]),
@@ -756,6 +782,12 @@ class JournalStore:
         # state this release wrote are always this release's split (#562).
         if state.chkit_version != __version__:
             state = state.model_copy(update={"chkit_version": __version__})
+        floor = self._newest_version.get(state.name)
+        if floor is not None:
+            version = max(_row_version(state.applied_at), floor + timedelta(milliseconds=1))
+            if version != _row_version(state.applied_at):
+                applied_at = version.strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3]
+                state = state.model_copy(update={"applied_at": applied_at})
         if self._database_missing:
             self._database_missing = False
             self._bootstrapped = False
@@ -767,7 +799,13 @@ class JournalStore:
         self._ensure_fingerprint_column()
         self._insert_state(state, fingerprints=self._fingerprint_column)
         self._last_written[state.name] = state
+        self._note_version(state.name, state.applied_at)
         self._try_sync_replica()
+
+    def _note_version(self, name: str, applied_at: str) -> None:
+        version = _row_version(applied_at)
+        newest = self._newest_version.get(name)
+        self._newest_version[name] = version if newest is None else max(newest, version)
 
     def _insert_state(self, state: MigrationRowState, *, fingerprints: bool) -> None:
         fingerprint_column = f", {_FINGERPRINTS_COLUMN}" if fingerprints else ""

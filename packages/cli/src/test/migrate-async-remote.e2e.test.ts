@@ -150,7 +150,8 @@ describe('async migrate statements through the ObsessionDB remote executor (live
 
       await expect(applyAsyncStatement(statement)).rejects.toThrow(/attached attempt failed/)
       expect(lines.some((line) => line.includes('attaching to in-flight query'))).toBe(true)
-      expect(journal.statuses()).toEqual(['failed'])
+      // The attach journals the attempt started (#672), then its failure.
+      expect(journal.statuses()).toEqual(['started', 'failed'])
       expect(await attached).toContain('attached attempt failed')
 
       // The in-flight check of a started attempt also reads its outcome,

@@ -1055,6 +1055,9 @@ export function createExecutorWithClient(
 				if (options?.runningOnly) return { status: 'unknown' }
 
 				const afterTime = options?.afterTime ?? '1970-01-01T00:00:00Z'
+				// event_date prunes query_log's partitions: the entry is logged no earlier
+				// than the query started. A day of slack covers a session time zone other
+				// than the server's; toDate32, as a Date before 1970 wraps around.
 				const queryLogFrom = from('query_log')
 				const log = await client.query({
 					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
@@ -1064,6 +1067,7 @@ WHERE user = currentUser()
   AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
   AND is_initial_query = 1
   AND query_start_time >= parseDateTimeBestEffort({after:String})
+  AND event_date >= toDate32(parseDateTimeBestEffort({after:String})) - 1
 ORDER BY event_time DESC
 LIMIT 1
 SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
