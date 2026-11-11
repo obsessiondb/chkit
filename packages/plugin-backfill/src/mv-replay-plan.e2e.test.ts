@@ -259,6 +259,7 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
         `),
       (rows) => Number(rows[0]?.partitions ?? 0) === BUCKETS,
     )
+    expect(Number(bytesRow?.partitions ?? 0)).toBe(BUCKETS)
     const uncompressedBytes = Number(bytesRow?.total ?? 0)
     expect(uncompressedBytes).toBeGreaterThan(0)
 

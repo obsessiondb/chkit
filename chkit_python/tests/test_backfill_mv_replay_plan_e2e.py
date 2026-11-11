@@ -337,6 +337,8 @@ def test_plans_from_the_source_then_execute_backfill_populates_the_empty_target(
         ).rows,
         lambda rows: bool(rows) and int(rows[0]["partitions"]) == BUCKETS,
     )
+    assert bytes_rows
+    assert int(bytes_rows[0]["partitions"]) == BUCKETS
     uncompressed_bytes = int(float(bytes_rows[0]["total"])) if bytes_rows else 0
     assert uncompressed_bytes > 0
 
