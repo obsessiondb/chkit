@@ -1,3 +1,5 @@
+import { isTrivia, tokenizeSQL } from '@chkit/core'
+
 import type { ClickHouseExecutor } from './index.js'
 
 function quoteLiteral(value: string): string {
@@ -33,11 +35,43 @@ function batchFragments(fragments: readonly string[]): string[][] {
 }
 
 /**
+ * Lowercase the name of every function call in a SQL fragment.
+ *
+ * ClickHouse resolves case-insensitive function names to their registered case
+ * when it stores a query (`FLOOR(...)` comes back as `floor(...)`), but its
+ * formatter keeps the written case — so a view whose schema says `FLOOR`
+ * drifts on the stored `floor` (#729). Only an identifier followed by `(` is
+ * a call; strings, quoted identifiers, comments and plain names keep their
+ * case.
+ */
+export function normalizeFunctionNameCase(sql: string): string {
+  const tokens = tokenizeSQL(sql)
+  let out = ''
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]
+    if (token === undefined) continue
+    let text = token.text
+    if (token.kind === 'identifier') {
+      let next = i + 1
+      let following = tokens[next]
+      while (following !== undefined && isTrivia(following)) {
+        next += 1
+        following = tokens[next]
+      }
+      if (following?.text === '(') text = text.toLowerCase()
+    }
+    out += text
+  }
+  return out
+}
+
+/**
  * Canonicalize SQL fragments through ClickHouse's own formatter, so a schema
  * fragment can be compared against what ClickHouse actually stores. The server
  * rewrites expressions on the way in — spacing, operator precedence parens,
  * `INTERVAL n UNIT` → `toIntervalUnit(n)` — which no local string normalizer can
- * reproduce (#195).
+ * reproduce (#195). Function-call names are lowercased afterwards, since the
+ * server canonicalizes their case on write but the formatter does not (#729).
  *
  * `wrap` distinguishes a scalar expression (wrapped as `SELECT <expr>`, prefix
  * stripped back off) from a full `SELECT` query (formatted as-is). Formatting is
@@ -74,7 +108,7 @@ export async function canonicalizeSqlFragments(
       const value = formatted[i]
       if (raw === undefined || value == null) continue
       const canonical = options.wrap ? stripSelectPrefix(value) : value.trim()
-      if (canonical) result.set(raw, canonical)
+      if (canonical) result.set(raw, normalizeFunctionNameCase(canonical))
     }
   }
   return result

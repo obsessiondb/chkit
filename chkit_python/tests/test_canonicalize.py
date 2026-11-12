@@ -6,7 +6,10 @@ import re
 from dataclasses import dataclass, field
 from typing import Any
 
-from chkit.clickhouse.canonicalize import canonicalize_sql_fragments
+from chkit.clickhouse.canonicalize import (
+    canonicalize_sql_fragments,
+    normalize_function_name_case,
+)
 from chkit.clickhouse.client import QueryResult
 
 
@@ -27,7 +30,7 @@ def test_strips_select_wrapper_and_maps_each_fragment() -> None:
 
     result = canonicalize_sql_fragments(client, ["cityHash64(a,b)", "n*2+1"], wrap=True)
 
-    assert result["cityHash64(a,b)"] == "cityHash64(a, b)"
+    assert result["cityHash64(a,b)"] == "cityhash64(a, b)"
     assert result["n*2+1"] == "(n * 2) + 1"
     assert "formatQuerySingleLineOrNull('SELECT ' || fragment)" in client.sqls[0]
 
@@ -46,7 +49,7 @@ def test_omits_fragments_clickhouse_could_not_format() -> None:
 
     result = canonicalize_sql_fragments(client, ["cityHash64(a,b)", "((bad"], wrap=True)
 
-    assert result["cityHash64(a,b)"] == "cityHash64(a, b)"
+    assert result["cityHash64(a,b)"] == "cityhash64(a, b)"
     assert "((bad" not in result
 
 
@@ -102,3 +105,25 @@ def test_splits_large_input_into_bounded_queries_and_merges_results() -> None:
     assert len(result) == len(fragments)
     assert result[fragments[0]] == "ok"
     assert result[fragments[-1]] == "ok"
+
+
+def test_lowercases_function_calls_so_written_case_matches_stored_case() -> None:
+    """The formatter echoes the written case while the stored query carries
+    ClickHouse's canonical case; after normalization both sides agree (#729)."""
+    written_query = "SELECT FLOOR(toUnixTimestamp(ts) / 300) AS bucket FROM drift_repro.events"
+    stored_query = "SELECT floor(toUnixTimestamp(ts) / 300) AS bucket FROM drift_repro.events"
+    written = _FakeClient([written_query])
+    stored = _FakeClient([stored_query])
+
+    written_map = canonicalize_sql_fragments(written, [written_query], wrap=False)
+    stored_map = canonicalize_sql_fragments(stored, [stored_query], wrap=False)
+
+    assert written_map[written_query] == stored_map[stored_query]
+
+
+def test_normalize_function_name_case_leaves_literals_and_aliases_alone() -> None:
+    assert (
+        normalize_function_name_case("SELECT FLOOR(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`")
+        == "SELECT floor(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`"
+    )
+    assert normalize_function_name_case("count ()") == "count ()"
