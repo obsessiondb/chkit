@@ -33,7 +33,7 @@ export async function loadGeneratedQueries(
  * literal ClickHouse substitutes for the value @clickhouse/client sends.
  * Parity compares this with Tinybird's own rendering.
  */
-export function renderEndpointSql(endpoint: TranslatedEndpoint, query: GeneratedQuery, params: Record<string, string>): string {
+function renderEndpointSql(endpoint: TranslatedEndpoint, query: GeneratedQuery, params: Record<string, string>): string {
   const parsed = query.params.parse(callValues(endpoint, params))
   return endpoint.sql.replace(/\{([A-Za-z_][A-Za-z0-9_]*):String\}/g, (_placeholder, name: string) => {
     const value = parsed[name]

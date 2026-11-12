@@ -94,7 +94,7 @@ async function projectWorkspaceName(projectDir: string): Promise<string | undefi
   return typeof parsed.name === 'string' ? parsed.name : undefined
 }
 
-export async function api<T>(target: LocalTarget, token: string, path: string): Promise<T> {
+async function api<T>(target: LocalTarget, token: string, path: string): Promise<T> {
   const response = await fetch(`${target.apiUrl}${path}`, { headers: { Authorization: `Bearer ${token}` } })
   const text = await response.text()
   if (!response.ok) throw new Error(`GET ${path}: ${response.status} ${text.slice(0, 300)}`)

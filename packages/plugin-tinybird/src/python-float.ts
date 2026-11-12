@@ -19,16 +19,21 @@ export function pythonFloat(value: number): string {
 }
 
 /** The same function as source for the generated queries module, which must not import the plugin. */
-export const PYTHON_FLOAT_SOURCE = `/** Python's str(float(x)): how Tinybird renders a float param. */
-const pythonFloat = (value: number): string => {
-  if (Number.isNaN(value)) return 'nan'
-  if (!Number.isFinite(value)) return value > 0 ? 'inf' : '-inf'
-  if (value === 0) return Object.is(value, -0) ? '-0.0' : '0.0'
-  const [mantissa = '', exponentText = '0'] = value.toExponential().split('e')
-  const exponent = Number(exponentText)
-  if (exponent < -4 || exponent >= 16) return \`\${mantissa}e\${exponent < 0 ? '-' : '+'}\${String(Math.abs(exponent)).padStart(2, '0')}\`
-  const sign = value < 0 ? '-' : ''
-  const digits = mantissa.replace('-', '').replace('.', '')
-  if (exponent < 0) return \`\${sign}0.\${'0'.repeat(-exponent - 1)}\${digits}\`
-  return \`\${sign}\${digits.slice(0, exponent + 1).padEnd(exponent + 1, '0')}.\${digits.slice(exponent + 1) || '0'}\`
-}`
+export const PYTHON_FLOAT_SOURCE = [
+  "/** Python's str(float(x)): how Tinybird renders a float param. */",
+  "const pythonFloat = (value: number): string => {",
+  "  if (Number.isNaN(value)) return 'nan'",
+  "  if (!Number.isFinite(value)) return value > 0 ? 'inf' : '-inf'",
+  "  if (value === 0) return Object.is(value, -0) ? '-0.0' : '0.0'",
+  "  const [mantissa = '', exponentText = '0'] = value.toExponential().split('e')",
+  "  const exponent = Number(exponentText)",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: generated TypeScript containing a template literal
+  "  if (exponent < -4 || exponent >= 16) return `${mantissa}e${exponent < 0 ? '-' : '+'}${String(Math.abs(exponent)).padStart(2, '0')}`",
+  "  const sign = value < 0 ? '-' : ''",
+  "  const digits = mantissa.replace('-', '').replace('.', '')",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: generated TypeScript containing a template literal
+  "  if (exponent < 0) return `${sign}0.${'0'.repeat(-exponent - 1)}${digits}`",
+  // biome-ignore lint/suspicious/noTemplateCurlyInString: generated TypeScript containing a template literal
+  "  return `${sign}${digits.slice(0, exponent + 1).padEnd(exponent + 1, '0')}.${digits.slice(exponent + 1) || '0'}`",
+  "}",
+].join('\n')

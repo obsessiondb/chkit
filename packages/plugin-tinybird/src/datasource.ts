@@ -49,7 +49,9 @@ const KAFKA_COLUMNS: ColumnDefinition[] = [
 const KAFKA_HEADERS: ColumnDefinition = { name: '__headers', type: 'Map(String, String)' }
 const KAFKA_META = new Set([...KAFKA_COLUMNS, KAFKA_HEADERS].map((column) => column.name))
 // `_PATTERN_INDEX_ENTRY` of the Tinybird CLI, matched from the start of the entry as Python's re.match does.
-const INDEX_ENTRY = /^(\w+)\s+([\w\s*[\]*(),'"-><.]+)\s+TYPE\s+(\w+)(?:\(([\w\s*.,]+)\))?(?:\s+GRANULARITY\s+(\d+))?/
+// Its expression class holds `"->`, which Python reads as the range from `"` to `>` (likely by accident);
+// that range is written out here character by character: "#$%&'()*+,-./0-9:;<=>.
+const INDEX_ENTRY = /^(\w+)\s+([\w\s*[\]"#$%&'()*+,\-./0-9:;<=>]+)\s+TYPE\s+(\w+)(?:\(([\w\s*.,]+)\))?(?:\s+GRANULARITY\s+(\d+))?/
 
 export function translateDatasource(file: Datafile, database: string): Translation<TableDefinition> {
   const reasons: string[] = []

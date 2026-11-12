@@ -124,11 +124,11 @@ function oracleNameMap(oracle: OracleSnapshot, database: string): Map<string, st
   return map
 }
 
-export function mapOracleNames(ddl: string, names: ReadonlyMap<string, string>): string {
+function mapOracleNames(ddl: string, names: ReadonlyMap<string, string>): string {
   return ddl.replace(/\bd_[0-9a-f]+\.t_[0-9a-f]+_v\d+(?:_mv)?\b/g, (match) => names.get(match) ?? match)
 }
 
-export function normalizeDdl(ddl: string): { ddl: string; applied: string[] } {
+function normalizeDdl(ddl: string): { ddl: string; applied: string[] } {
   const applied: string[] = []
   let out = ddl.trim()
   const comment = / COMMENT '\{"resource_name": "[^']*"\}'$/

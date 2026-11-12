@@ -132,6 +132,18 @@ describe('translateDatasource', () => {
     expect(translated.ok && translated.value.settings).toEqual({ max_bytes_to_merge_at_max_space_in_pool: '18446744073709551615', merge_max_block_size: 8192 })
   })
 
+  test('an index expression may use exactly the characters Tinybird accepts, its " to > range included', () => {
+    const indexes = (expression: string) => datasource([...SCHEMA, 'INDEXES >', `    idx ${expression} TYPE minmax`, '', 'ENGINE "MergeTree"'])
+    // Tinybird's class: word characters, whitespace, * [ ] and the range " to >.
+    for (const char of `"#$%&'()*+,-./0123456789:;<=>[]*`) {
+      const translated = indexes(`a${char}b`)
+      expect({ char, expression: translated.ok && translated.value.indexes?.[0]?.expression }).toEqual({ char, expression: `a${char}b` })
+    }
+    for (const char of ['!', '?', '@', '^', '{', '|', '}', '~', '`', '\\']) {
+      expect({ char, ok: indexes(`a${char}b`).ok }).toEqual({ char, ok: false })
+    }
+  })
+
   test('Null takes no keys or settings', () => {
     const translated = datasource([...SCHEMA, 'ENGINE "Null"'])
     expect(translated.ok && translated.value).toMatchObject({ engine: 'Null()', orderBy: [], primaryKey: [] })

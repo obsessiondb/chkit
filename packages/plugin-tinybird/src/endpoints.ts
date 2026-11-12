@@ -83,6 +83,8 @@ const PARAM_KINDS: Record<string, ParamKind> = {
   DateTime64: { schema: 't.string()', pattern: 'DATE_TIME64', sample: '2025-01-02 03:04:05.678' },
 }
 
+// The opening of a template interpolation, written as data so no escape is needed.
+const INTERPOLATION_OPEN = ['$', '{'].join('')
 const TEMPLATE_TAG = /\{\{([\s\S]*?)\}\}|\{%([\s\S]*?)%\}|\{#([\s\S]*?)#\}/g
 const PLACEHOLDER = /\{([A-Za-z_][A-Za-z0-9_]*):String\}/g
 
@@ -300,7 +302,7 @@ function renderEndpoint(
   const body = escapeTemplate(endpoint.sql).replace(PLACEHOLDER, (placeholder, name: string) => {
     const param = params.get(name)
     if (!param) return placeholder
-    return `\${${hoisted.get(name) ?? paramSource(param)}}`
+    return interpolation(hoisted.get(name) ?? paramSource(param))
   })
   const consts = [...hoisted].map(([name, constName]) => {
     const param = params.get(name)
@@ -322,8 +324,13 @@ function paramSource(param: EndpointParam): string {
   return `${value}.${float ? 'prefault' : 'default'}(${literal})`
 }
 
-export function isFloat(type: string): boolean {
+function isFloat(type: string): boolean {
   return type === 'Float32' || type === 'Float64'
+}
+
+/** `${expression}` in the generated template literal. */
+function interpolation(expression: string): string {
+  return [INTERPOLATION_OPEN, expression, '}'].join('')
 }
 
 /** Text for a JavaScript template literal: backslashes, backticks and `${` are escaped. */
