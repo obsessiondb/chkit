@@ -28,7 +28,26 @@ const ENGINES: Record<string, { name: string; params: string[]; keyless?: boolea
   null: { name: 'Null', params: [], keyless: true },
 }
 
-const INGESTION_PREFIXES = ['KAFKA_', 'IMPORT_', 'PG_']
+const INGESTION_PREFIXES = ['IMPORT_', 'PG_']
+
+/**
+ * The columns Tinybird appends to every Kafka datasource (observed on
+ * Tinybird Local): after the SCHEMA columns, in this order, with these types,
+ * whatever the value or key format. A meta column the SCHEMA declares is
+ * dropped from its place and its type replaced. `__headers` is added only
+ * when KAFKA_STORE_HEADERS is `true` in any case; `__value` exists even
+ * without KAFKA_STORE_RAW_VALUE, which only decides whether it is filled.
+ */
+const KAFKA_COLUMNS: ColumnDefinition[] = [
+  { name: '__value', type: 'String' },
+  { name: '__topic', type: 'LowCardinality(String)' },
+  { name: '__partition', type: 'Int16' },
+  { name: '__offset', type: 'Int64' },
+  { name: '__timestamp', type: 'DateTime' },
+  { name: '__key', type: 'String' },
+]
+const KAFKA_HEADERS: ColumnDefinition = { name: '__headers', type: 'Map(String, String)' }
+const KAFKA_META = new Set([...KAFKA_COLUMNS, KAFKA_HEADERS].map((column) => column.name))
 // `_PATTERN_INDEX_ENTRY` of the Tinybird CLI, matched from the start of the entry as Python's re.match does.
 const INDEX_ENTRY = /^(\w+)\s+([\w\s*[\]*(),'"-><.]+)\s+TYPE\s+(\w+)(?:\(([\w\s*.,]+)\))?(?:\s+GRANULARITY\s+(\d+))?/
 
@@ -56,10 +75,15 @@ export function translateDatasource(file: Datafile, database: string): Translati
   for (const { command, line } of file.unsupported) reasons.push(`${command} (line ${line}) is not evaluated by the importer`)
   if (reasons.length > 0) return { ok: false, reasons }
 
-  const columns = tinybirdColumns.map(toColumnDefinition)
+  const kafka = file.vars.has('KAFKA_CONNECTION_NAME')
+  const columns = kafka ? kafkaColumns(tinybirdColumns.map(toColumnDefinition), file.vars.get('KAFKA_STORE_HEADERS')) : tinybirdColumns.map(toColumnDefinition)
+  const warnings = kafka ? [kafkaWarning(file.vars.get('KAFKA_TOPIC'))] : []
+  const replaced = kafka ? tinybirdColumns.filter((column) => KAFKA_META.has(column.name)).map((column) => column.name) : []
+  if (replaced.length > 0) notes.push(`Kafka meta column${replaced.length === 1 ? '' : 's'} ${replaced.join(', ')} declared in SCHEMA ${replaced.length === 1 ? 'is' : 'are'} placed and typed as Tinybird does`)
   const jsonPaths = tinybirdColumns.filter((column) => column.jsonPath).length
   if (jsonPaths > 0) notes.push(`${jsonPaths} JSONPath mapping${jsonPaths === 1 ? '' : 's'} (ingestion only, not part of the DDL)`)
   const ingestion = [...file.vars.keys()].filter((key) => INGESTION_PREFIXES.some((prefix) => key.startsWith(prefix)))
+  if (kafka) notes.push(`Kafka columns ${columns.filter((column) => KAFKA_META.has(column.name)).map((column) => column.name).join(', ')} added after the SCHEMA columns, as Tinybird adds them`)
   if (ingestion.length > 0) notes.push(`connector settings not translated (ingestion): ${ingestion.join(', ')}`)
   if (file.blocks.has('FORWARD_QUERY')) notes.push('FORWARD_QUERY not translated (Tinybird deployment migration)')
   if (file.vars.has('SHARED_WITH')) notes.push('SHARED_WITH not translated (Tinybird workspace sharing)')
@@ -67,7 +91,7 @@ export function translateDatasource(file: Datafile, database: string): Translati
   const engineParams = engine.params.map((key) => file.vars.get(key)).filter((value): value is string => Boolean(value))
   const engineSql = `${engine.name}(${engineParams.join(', ')})`
   if (engine.keyless) {
-    return { ok: true, value: { kind: 'table', database, name: file.name, engine: engineSql, columns, primaryKey: [], orderBy: [] }, notes }
+    return { ok: true, value: { kind: 'table', database, name: file.name, engine: engineSql, columns, primaryKey: [], orderBy: [] }, notes, ...(warnings.length > 0 ? { warnings } : {}) }
   }
 
   const partitionBy = file.vars.get('ENGINE_PARTITION_KEY')?.trim() || undefined
@@ -76,7 +100,8 @@ export function translateDatasource(file: Datafile, database: string): Translati
   const verdict = ttlPartitionVerdict({
     partitionKey: partitionBy,
     ttl,
-    columnTypes: new Map(tinybirdColumns.map((column) => [column.name, column.type])),
+    // The columns ClickHouse gets, Kafka meta columns included (a TTL on __timestamp counts).
+    columnTypes: new Map(columns.map((column) => [column.name, column.nullable ? `Nullable(${column.type})` : String(column.type)])),
   })
   if (verdict === 'compatible' && !('ttl_only_drop_parts' in settings)) {
     settings.ttl_only_drop_parts = 1
@@ -109,7 +134,18 @@ export function translateDatasource(file: Datafile, database: string): Translati
       ...(indexes.length > 0 ? { indexes } : {}),
     },
     notes,
+    ...(warnings.length > 0 ? { warnings } : {}),
   }
+}
+
+/** SCHEMA columns without Kafka meta columns, then Tinybird's Kafka columns. */
+function kafkaColumns(columns: ColumnDefinition[], storeHeaders: string | undefined): ColumnDefinition[] {
+  const headers = storeHeaders?.trim().toLowerCase() === 'true'
+  return [...columns.filter((column) => !KAFKA_META.has(column.name)), ...KAFKA_COLUMNS, ...(headers ? [KAFKA_HEADERS] : [])]
+}
+
+function kafkaWarning(topic: string | undefined): string {
+  return `Kafka ingestion is not translated: the table keeps Tinybird's Kafka columns, and something must consume topic ${topic ?? '(unset)'} into it. ObsessionDB has no Kafka CDC yet; a ClickHouse Kafka engine table with a materialized view, @chkit/plugin-ingest or your own inserts can fill it.`
 }
 
 function toColumnDefinition(column: TinybirdColumn): ColumnDefinition {

@@ -88,6 +88,14 @@ The command exits `0` when the import ran, also when some objects do not transla
 | `ENGINE_SETTINGS` | `settings`, plus `ttl_only_drop_parts = 1` where Tinybird adds it: when the TTL is one `column ± interval` on the partition column and the interval is at least the partition period |
 | `INDEXES` | `indexes` |
 
+### Kafka datasources
+
+A datasource with `KAFKA_CONNECTION_NAME` gets the columns Tinybird adds to every Kafka datasource, after its `SCHEMA` columns and in this order: `__value String`, `__topic LowCardinality(String)`, `__partition Int16`, `__offset Int64`, `__timestamp DateTime`, `__key String`, and `__headers Map(String, String)` when `KAFKA_STORE_HEADERS` is `true`. A meta column the `SCHEMA` declares itself is placed and typed the same way, as Tinybird does. Materialized views, copies and endpoints that read these columns translate as usual.
+
+:::caution
+Kafka ingestion is not translated. The table matches Tinybird's, but nothing consumes the topic: set up a ClickHouse Kafka engine table with a materialized view, [`@chkit/plugin-ingest`](/plugins/ingest/), or your own inserts. ObsessionDB has no Kafka CDC yet. The import reports this as a warning on each Kafka datasource and in the head of the generated schema file.
+:::
+
 ### Materialized pipes
 
 The view is named after the pipe and writes `TO` the `DATASOURCE`. Nodes the materialized node reads are inlined as `(SELECT …) AS <node>`, and every datasource is written as `<database>.<name> AS <name>`, as Tinybird does before it creates the view.
@@ -121,7 +129,7 @@ Translated param types: `String`, `Int8`–`Int64`, `UInt8`–`UInt64`, `Float32
 
 - `ENGINE_SAMPLING_KEY`: the chkit table DSL has no `SAMPLE BY`. Pipes that read such a datasource are not translated either.
 - Templated SQL in materialized and copy pipes, reads of Tinybird service datasources (`tinybird.*`) and of other workspaces.
-- Ingestion (Events API, connectors, JSONPaths at runtime), tokens, sinks and connection files.
+- Ingestion (Events API, Kafka consumers, connectors, JSONPaths at runtime), tokens, sinks and connection files. Kafka and connector datasources still translate as tables.
 - Datafiles `tb build` does not read: deeper than the scan depth (`maxDepth`, 3 by default), under a top-level entry whose name starts with `vendor` (other workspaces' datasources), or hidden. Each is listed as skipped with the reason.
 - Commands that use environment substitution (`$VAR`, `${VAR}`), which Tinybird evaluates at build time.
 

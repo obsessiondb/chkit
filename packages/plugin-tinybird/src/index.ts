@@ -177,6 +177,7 @@ export function createTinybirdPlugin(options: TinybirdPluginOptions = {}): Tinyb
             print(summaryLine(counts, dryrun ? undefined : outFile))
             for (const entry of imported.report.entries) {
               if (entry.status === 'untranslatable') print(`  not translated: ${entry.kind} ${entry.name}: ${entry.reasons.join('; ')}`)
+              if (entry.status === 'translated') for (const warning of entry.warnings ?? []) print(`  warning: ${entry.kind} ${entry.name}: ${warning}`)
             }
             if (dryrun) {
               print(imported.schemaSource)
@@ -204,7 +205,15 @@ export async function importTinybirdProject(input: { projectDir: string; databas
     if (translated.ok) {
       definitions.push(translated.value)
       datasources.add(file.name)
-      entries.push({ kind: 'datasource', name: file.name, file: file.path, status: 'translated', chkit: { kind: 'table', database, name: file.name }, notes: translated.notes })
+      entries.push({
+        kind: 'datasource',
+        name: file.name,
+        file: file.path,
+        status: 'translated',
+        chkit: { kind: 'table', database, name: file.name },
+        notes: translated.notes,
+        ...(translated.warnings?.length ? { warnings: translated.warnings } : {}),
+      })
     } else {
       untranslatableDatasources.set(file.name, translated.reasons.join('; '))
       entries.push({ kind: 'datasource', name: file.name, file: file.path, status: 'untranslatable', reasons: translated.reasons })

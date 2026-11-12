@@ -159,7 +159,60 @@ describe('translateDatasource', () => {
   })
 
   test('notes connector settings, which are ingestion', () => {
-    const translated = datasource([...SCHEMA, 'ENGINE "MergeTree"', 'KAFKA_CONNECTION_NAME kafka', 'KAFKA_TOPIC events'])
-    expect(translated.ok && translated.notes).toEqual(['connector settings not translated (ingestion): KAFKA_CONNECTION_NAME, KAFKA_TOPIC'])
+    const translated = datasource([...SCHEMA, 'ENGINE "MergeTree"', 'IMPORT_CONNECTION_NAME s3', 'IMPORT_BUCKET_URI s3://b/*.csv'])
+    expect(translated.ok && translated.notes).toEqual(['connector settings not translated (ingestion): IMPORT_CONNECTION_NAME, IMPORT_BUCKET_URI'])
+  })
+
+  describe('Kafka datasources', () => {
+    // Column sets observed on Tinybird Local (parity/ and the fixture oracle).
+    const META = [
+      { name: '__value', type: 'String' },
+      { name: '__topic', type: 'LowCardinality(String)' },
+      { name: '__partition', type: 'Int16' },
+      { name: '__offset', type: 'Int64' },
+      { name: '__timestamp', type: 'DateTime' },
+      { name: '__key', type: 'String' },
+    ]
+    const HEADERS = { name: '__headers', type: 'Map(String, String)' }
+    const kafka = (schema: string[], settings: string[]) =>
+      datasource(['SCHEMA >', ...schema, '', 'ENGINE "MergeTree"', 'ENGINE_SORTING_KEY "ts"', 'KAFKA_CONNECTION_NAME kconn', 'KAFKA_TOPIC events', ...settings])
+
+    test('appends the meta columns after the SCHEMA columns, __headers only with KAFKA_STORE_HEADERS true', () => {
+      const plain = kafka(['    `ts` DateTime `json:$.ts`'], ['KAFKA_STORE_RAW_VALUE True'])
+      expect(plain.ok && plain.value.columns).toEqual([{ name: 'ts', type: 'DateTime' }, ...META])
+      for (const flag of ['True', 'true', 'TRUE', '"True"', "'True'"]) {
+        const headers = kafka(['    `ts` DateTime'], [`KAFKA_STORE_HEADERS ${flag}`])
+        expect({ flag, columns: headers.ok && headers.value.columns }).toEqual({ flag, columns: [{ name: 'ts', type: 'DateTime' }, ...META, HEADERS] })
+      }
+      for (const flag of ['False', '1', 'yes']) {
+        const none = kafka(['    `ts` DateTime'], [`KAFKA_STORE_HEADERS ${flag}`])
+        expect({ flag, columns: none.ok && none.value.columns }).toEqual({ flag, columns: [{ name: 'ts', type: 'DateTime' }, ...META] })
+      }
+    })
+
+    test('a declared meta column is placed and typed as Tinybird does; other __ columns stay', () => {
+      const translated = kafka(
+        ['    `__key` Nullable(String),', '    `ts` DateTime,', '    `__other` String,', '    `__headers` Map(String, String),', '    `__value` Int64'],
+        []
+      )
+      expect(translated.ok && translated.value.columns).toEqual([{ name: 'ts', type: 'DateTime' }, { name: '__other', type: 'String' }, ...META])
+      expect(translated.ok && translated.notes).toContain('Kafka meta columns __key, __headers, __value declared in SCHEMA are placed and typed as Tinybird does')
+    })
+
+    test('a TTL on __timestamp gets ttl_only_drop_parts as Tinybird gives it', () => {
+      const translated = datasource([
+        'SCHEMA >', '    `ts` DateTime', '', 'ENGINE "ReplacingMergeTree"', 'ENGINE_PARTITION_KEY "toYYYYMM(__timestamp)"',
+        'ENGINE_SORTING_KEY "__key, ts"', 'ENGINE_TTL "__timestamp + toIntervalMonth(1)"', 'KAFKA_CONNECTION_NAME kconn', 'KAFKA_TOPIC events',
+      ])
+      expect(translated.ok && translated.value.settings).toEqual({ ttl_only_drop_parts: 1 })
+    })
+
+    test('warns that ingestion is not translated', () => {
+      const translated = kafka(['    `ts` DateTime'], [])
+      expect(translated.ok && translated.warnings).toEqual([
+        "Kafka ingestion is not translated: the table keeps Tinybird's Kafka columns, and something must consume topic events into it. ObsessionDB has no Kafka CDC yet; a ClickHouse Kafka engine table with a materialized view, @chkit/plugin-ingest or your own inserts can fill it.",
+      ])
+      expect(translated.ok && translated.notes.join(' ')).not.toContain('connector settings')
+    })
   })
 })

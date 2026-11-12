@@ -59,17 +59,24 @@ describe('tinybird import command', () => {
       reportFile: report,
       dryrun: false,
       counts: {
-        datasource: { translated: 11, untranslatable: 1 },
-        materialized: { translated: 4, untranslatable: 0 },
+        datasource: { translated: 13, untranslatable: 1 },
+        materialized: { translated: 5, untranslatable: 0 },
         copy: { translated: 5, untranslatable: 2 },
-        endpoint: { translated: 3, untranslatable: 1 },
-        skipped: 0,
+        endpoint: { translated: 4, untranslatable: 1 },
+        // The Kafka connection file.
+        skipped: 1,
       },
     })
     const schema = await readFile(outFile, 'utf8')
     expect(schema.startsWith("import { schema, table, materializedView } from '@chkit/core'\n")).toBe(true)
     expect(schema).toContain('//   datasource sampled: ENGINE_SAMPLING_KEY')
     expect(schema).toContain('name: "user_snapshot_copy"')
+    // A Kafka datasource translates, with Tinybird's columns and a warning that ingestion is not translated.
+    expect(schema).toContain('// Translated, with something to set up:\n//   datasource kafka_events: Kafka ingestion is not translated')
+    expect(schema).toContain('{ name: "__headers", type: "Map(String, String)" }')
+    const kafka = (printed[0] as { entries: Array<{ name: string; status: string; warnings?: string[] }> }).entries.find((entry) => entry.name === 'kafka_events')
+    expect(kafka?.status).toBe('translated')
+    expect(kafka?.warnings?.[0]).toContain('something must consume topic events into it')
     expect(await readFile(queriesOutFile, 'utf8')).toContain('export const events_by_type = query({ name: "events_by_type" })`')
     const written = JSON.parse(await readFile(report, 'utf8'))
     expect(written.counts.copy).toEqual({ translated: 5, untranslatable: 2 })
@@ -92,7 +99,7 @@ describe('tinybird import command', () => {
     const { code, printed } = await runImport({ '--out-file': outFile, '--dryrun': true }, false)
     expect(code).toBe(0)
     expect(String(printed[0])).toBe(
-      'Tinybird import preview (datasource: 11 translated, 1 not; materialized: 4 translated, 0 not; copy: 5 translated, 2 not; endpoint: 3 translated, 1 not)'
+      'Tinybird import preview (datasource: 13 translated, 1 not; materialized: 5 translated, 0 not; copy: 5 translated, 2 not; endpoint: 4 translated, 1 not)'
     )
     expect(printed.some((line) => String(line).startsWith("import { schema, table, materializedView } from '@chkit/core'"))).toBe(true)
     expect(await access(outFile).then(() => true, () => false)).toBe(false)

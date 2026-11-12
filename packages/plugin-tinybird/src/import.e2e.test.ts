@@ -70,14 +70,14 @@ describe('@chkit/plugin-tinybird fixture parity (test stack)', () => {
     ])
     expect(entries.filter((entry) => entry.status === 'equal').map((entry) => entry.kind).sort()).toEqual([
       ...Array(5).fill('copy'),
-      ...Array(11).fill('datasource'),
-      ...Array(3).fill('endpoint'),
-      ...Array(4).fill('materialized'),
+      ...Array(13).fill('datasource'),
+      ...Array(4).fill('endpoint'),
+      ...Array(5).fill('materialized'),
     ])
 
     // Every query runs on ClickHouse with each param set, omitted params taking the generated defaults.
     const queries = generated as unknown as Record<string, (params: Record<string, unknown>, options: { client: QueryClient }) => Promise<unknown[]>>
-    expect(imported.endpoints.map((endpoint) => endpoint.exportName).sort()).toEqual(['events_by_type', 'flagged_users', 'static_counts'])
+    expect(imported.endpoints.map((endpoint) => endpoint.exportName).sort()).toEqual(['events_by_type', 'flagged_users', 'kafka_by_key', 'static_counts'])
     for (const endpoint of imported.endpoints) {
       const run = queries[endpoint.exportName]
       expect(typeof run).toBe('function')

@@ -1,5 +1,6 @@
 /** The outcome of translating one Tinybird object. */
-export type Translation<T> = { ok: true; value: T; notes: string[] } | { ok: false; reasons: string[] }
+/** `warnings`: what the user must act on although the object translated (e.g. ingestion to set up). */
+export type Translation<T> = { ok: true; value: T; notes: string[]; warnings?: string[] } | { ok: false; reasons: string[] }
 
 /** `pipe`: a pipe whose kind is unknown because it INCLUDEs datafile text the importer does not evaluate. */
 export type ObjectKind = 'datasource' | 'materialized' | 'copy' | 'endpoint' | 'pipe'
@@ -13,6 +14,7 @@ export type ImportEntry =
       /** The chkit object it became. */
       chkit: { kind: 'table' | 'materialized_view' | 'query'; database?: string; name: string }
       notes: string[]
+      warnings?: string[]
     }
   | { kind: ObjectKind; name: string; file: string; status: 'untranslatable'; reasons: string[] }
   | { kind: 'other'; name: string; file: string; status: 'skipped'; reasons: string[] }
@@ -44,12 +46,19 @@ export function countEntries(report: ImportReport): ImportCounts {
 /** Comment lines for the generated schema file: what was not translated, and why. */
 export function untranslatableSummary(report: ImportReport): string[] {
   const entries = report.entries.filter((entry) => entry.status === 'untranslatable')
-  if (entries.length === 0) return []
+  const warned = report.entries.flatMap((entry) =>
+    entry.status === 'translated' ? (entry.warnings ?? []).map((warning) => `  ${entry.kind} ${oneLine(entry.name)}: ${oneLine(warning)}`) : []
+  )
   return [
-    'Not translated (see the import report for details):',
-    ...entries.flatMap((entry) =>
-      entry.status === 'untranslatable' ? [`  ${entry.kind} ${oneLine(entry.name)}: ${oneLine(entry.reasons.join('; '))}`] : []
-    ),
+    ...(entries.length > 0
+      ? [
+          'Not translated (see the import report for details):',
+          ...entries.flatMap((entry) =>
+            entry.status === 'untranslatable' ? [`  ${entry.kind} ${oneLine(entry.name)}: ${oneLine(entry.reasons.join('; '))}`] : []
+          ),
+        ]
+      : []),
+    ...(warned.length > 0 ? ['Translated, with something to set up:', ...warned] : []),
   ]
 }
 
