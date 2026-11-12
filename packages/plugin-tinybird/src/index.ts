@@ -175,10 +175,7 @@ export function createTinybirdPlugin(options: TinybirdPluginOptions = {}): Tinyb
               return 0
             }
             print(summaryLine(counts, dryrun ? undefined : outFile))
-            for (const entry of imported.report.entries) {
-              if (entry.status === 'untranslatable') print(`  not translated: ${entry.kind} ${entry.name}: ${entry.reasons.join('; ')}`)
-              if (entry.status === 'translated') for (const warning of entry.warnings ?? []) print(`  warning: ${entry.kind} ${entry.name}: ${warning}`)
-            }
+            for (const line of untranslatableSummary(imported.report)) print(line)
             if (dryrun) {
               print(imported.schemaSource)
               if (imported.queriesSource) print(imported.queriesSource)

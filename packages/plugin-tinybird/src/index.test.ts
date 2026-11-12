@@ -69,10 +69,10 @@ describe('tinybird import command', () => {
     })
     const schema = await readFile(outFile, 'utf8')
     expect(schema.startsWith("import { schema, table, materializedView } from '@chkit/core'\n")).toBe(true)
-    expect(schema).toContain('//   datasource sampled: ENGINE_SAMPLING_KEY')
+    expect(schema).toContain('//   datasource sampled:\n//     - ENGINE_SAMPLING_KEY')
     expect(schema).toContain('name: "user_snapshot_copy"')
     // A Kafka datasource translates, with Tinybird's columns and a warning that ingestion is not translated.
-    expect(schema).toContain('// Translated, with something to set up:\n//   datasource kafka_events: Kafka ingestion is not translated')
+    expect(schema).toContain('// Translated, with something to set up:\n//   datasource kafka_events:\n//     - Kafka ingestion is not translated')
     expect(schema).toContain('{ name: "__headers", type: "Map(String, String)" }')
     const kafka = (printed[0] as { entries: Array<{ name: string; status: string; warnings?: string[] }> }).entries.find((entry) => entry.name === 'kafka_events')
     expect(kafka?.status).toBe('translated')
