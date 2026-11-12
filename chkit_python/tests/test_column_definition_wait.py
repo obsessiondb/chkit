@@ -7,6 +7,8 @@ Port of ``packages/clickhouse/src/alter-column-statement.test.ts`` and
 from __future__ import annotations
 
 import re
+import threading
+import time
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -324,6 +326,47 @@ def test_names_the_replica_and_field_that_still_differ_when_replicas_disagree() 
             KEY,
             statement="ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;",
         )
+
+
+# ---------- deadline ----------
+
+
+@dataclass
+class _HangingTarget:
+    """Answers the replica count, then holds every poll until ``release`` is set."""
+
+    release: threading.Event = field(default_factory=threading.Event)
+
+    def query(self, sql: str) -> _Result:
+        if "system.one" in sql:
+            return _Result([{"replicas": 2}])
+        self.release.wait(10)
+        return _Result([])
+
+
+def test_a_polling_query_that_never_returns_ends_the_wait_at_the_deadline(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.DEFINITION_WAIT_DEADLINE_SECONDS", 0.5)
+    target = _HangingTarget()
+    started = time.monotonic()
+
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            wait_for_ddl_propagation(
+                target,
+                "alter_table_modify_column",
+                KEY,
+                statement="ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;",
+            )
+    finally:
+        target.release.set()
+
+    assert str(raised.value) == (
+        "waitForDDLPropagation: app.events.raw definition not applied on every replica "
+        "after 1 checks: a check did not return within the 0.5s deadline"
+    )
+    assert time.monotonic() - started < 3
 
 
 # ---------- other column operations ----------

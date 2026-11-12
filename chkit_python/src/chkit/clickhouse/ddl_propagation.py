@@ -23,6 +23,7 @@ from __future__ import annotations
 
 import json
 import re
+import threading
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -450,21 +451,18 @@ def wait_for_column_rename(
 def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     """Poll ``check`` until it reports no mismatch.
 
-    Uses the retry budget of the other waits (21 checks, 0.5 s apart) and stops
-    retrying at a 30 s deadline (TS also abandons a check that does not
-    return by then; a synchronous query here is not abandoned, and like every
-    chkit-py request it has no read timeout, #661). On timeout the error names
-    what was still different on the last check.
+    Uses the retry budget of the other waits (21 checks, 0.5 s apart) and a hard
+    deadline of 30 s: chkit-py requests have no read timeout (#661), so a check
+    that does not return ends the wait at the deadline instead of holding the
+    migration, as in TS. On timeout the error names what was still different
+    on the last check.
     """
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     detail = ""
     checks = 0
     for attempt in range(MAX_RETRIES + 1):
         checks += 1
-        try:
-            mismatch = check()
-        except Exception as error:  # reported on timeout
-            mismatch = str(error)
+        mismatch = _check_before(check, deadline)
         if mismatch is None:
             return
         detail = mismatch
@@ -476,6 +474,30 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
         f"after {checks} checks: {detail}"
     )
     raise RuntimeError(msg)
+
+
+def _check_before(check: Callable[[], str | None], deadline: float) -> str | None:
+    """Run ``check`` and stop waiting for it at ``deadline`` (TS ``checkBefore``).
+
+    Returns the mismatch, the error message, or the timeout. The check runs on a
+    daemon thread, so a check that never returns does not keep the process alive.
+    An abandoned check still holds the client's session, so a caller must not
+    send another query on that client after the timeout.
+    """
+    outcome: list[str | None] = []
+
+    def _run() -> None:
+        try:
+            outcome.append(check())
+        except Exception as error:  # reported on timeout
+            outcome.append(str(error))
+
+    thread = threading.Thread(target=_run, name="chkit-ddl-propagation-check", daemon=True)
+    thread.start()
+    thread.join(max(deadline - time.monotonic(), 0))
+    if not outcome:
+        return f"a check did not return within the {DEFINITION_WAIT_DEADLINE_SECONDS:g}s deadline"
+    return outcome[0]
 
 
 def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None) -> None:
