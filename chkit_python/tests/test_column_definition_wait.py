@@ -23,9 +23,7 @@ KEY = "table:app.events:column:raw"
 _FORMAT = re.compile(r"^SELECT formatQuerySingleLine\('SELECT (.*)'\) AS formatted$")
 
 
-@pytest.fixture(autouse=True)
-def _no_sleep(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time.sleep", lambda _: None)
+pytestmark = pytest.mark.usefixtures("propagation_clock")
 
 
 @dataclass
@@ -304,7 +302,7 @@ def test_names_the_field_and_says_it_is_not_lag_when_every_replica_kept_the_old_
 
     assert str(raised.value) == (
         "waitForDDLPropagation: app.events.raw definition not applied on every replica "
-        "after 21 checks: replica r1 reports default_expression "
+        "after 60 checks: replica r1 reports default_expression "
         "\"defaultValueOfTypeName('String')\", the statement sets \"'seed'\"; every replica "
         "reports the same, so this is not replication lag: the server accepted the statement "
         "without applying it"
@@ -316,7 +314,7 @@ def test_names_the_replica_and_field_that_still_differ_when_replicas_disagree() 
 
     with pytest.raises(
         RuntimeError,
-        match='after 21 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64"',
+        match='after 60 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64"',
     ):
         wait_for_ddl_propagation(
             target,
@@ -324,6 +322,22 @@ def test_names_the_replica_and_field_that_still_differ_when_replicas_disagree() 
             KEY,
             statement="ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;",
         )
+
+
+def test_a_column_definition_that_reaches_every_replica_after_15_seconds_passes() -> None:
+    # Checks 0.5 s apart for 30 s, not 21 checks (#719).
+    stale = [_row("r1", type="UInt64"), _row("r2")]
+    applied = [_row("r1", type="UInt64"), _row("r2", type="UInt64")]
+    target = _Target([*([stale] * 30), applied])
+
+    wait_for_ddl_propagation(
+        target,
+        "alter_table_modify_column",
+        KEY,
+        statement="ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;",
+    )
+
+    assert len(target.polled("system.columns")) == 31
 
 
 # ---------- other column operations ----------

@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, type Mock, setSystemTime, spyOn, test } from 'bun:test'
 
 import { waitForDDLPropagation } from './ddl-propagation.js'
 import type { ClickHouseExecutor } from './index.js'
@@ -24,14 +24,37 @@ function row(replica: string, fields: Partial<ColumnRow> = {}): ColumnRow {
   return { replica, ...BASE, ...fields }
 }
 
+// The fakes freeze the monotonic clock the waits time their deadline on and
+// let each check take 500 ms, the default poll interval, so a wait gives up
+// after 60 checks, 30 s (#719).
+const CHECK_MS = 500
+let now = 0
+let clock: Mock<() => number> | undefined
+
+function freezeClock(): void {
+  now = 0
+  clock = spyOn(performance, 'now').mockImplementation(() => now)
+}
+
+function tick(): void {
+  now += CHECK_MS
+}
+
+afterEach(() => {
+  clock?.mockRestore()
+  clock = undefined
+  setSystemTime()
+})
+
 /**
  * A target with `replicas` replicas behind one endpoint. Each poll of a system
- * table answers with the next entry of `polls` (the last one repeats);
- * `formatQuerySingleLine` answers from `formatted`, or echoes its input.
+ * table answers with the next entry of `polls` (the last one repeats) and
+ * takes 500 ms; `formatQuerySingleLine` answers from `formatted`, or echoes its input.
  */
 function fakeTarget(polls: object[][], options: { replicas?: number; formatted?: Record<string, string> } = {}) {
   const queries: string[] = []
   let poll = 0
+  freezeClock()
   const db = {
     async query<T>(sql: string): Promise<T[]> {
       queries.push(sql)
@@ -43,6 +66,7 @@ function fakeTarget(polls: object[][], options: { replicas?: number; formatted?:
       }
       const rows = polls[Math.min(poll, polls.length - 1)] ?? []
       poll += 1
+      tick()
       return rows as T[]
     },
   } as unknown as ClickHouseExecutor
@@ -181,7 +205,7 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
         statement: "ALTER TABLE app.events MODIFY COLUMN `raw` String EPHEMERAL 'seed';",
       }),
     ).rejects.toThrow(
-      `waitForDDLPropagation: app.events.raw definition not applied on every replica after 21 checks: replica r1 reports default_expression "defaultValueOfTypeName('String')", the statement sets "'seed'"; every replica reports the same, so this is not replication lag: the server accepted the statement without applying it`,
+      `waitForDDLPropagation: app.events.raw definition not applied on every replica after 60 checks: replica r1 reports default_expression "defaultValueOfTypeName('String')", the statement sets "'seed'"; every replica reports the same, so this is not replication lag: the server accepted the statement without applying it`,
     )
   })
 
@@ -193,11 +217,32 @@ describe('waitForDDLPropagation: MODIFY COLUMN waits for the definition it sets'
         ...FAST,
         statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
       }),
-    ).rejects.toThrow('after 21 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64"')
+    ).rejects.toThrow('after 60 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64"')
   })
 })
 
 describe('waitForDDLPropagation: deadline', () => {
+  test('a wait ends at its deadline while the wall clock stands still', async () => {
+    setSystemTime(new Date('2026-01-01T00:00:00Z'))
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+        return [] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    const options = { ...FAST, deadlineMs: 50 }
+
+    await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', options)).rejects.toThrow(
+      'waitForTable: app.events not yet visible',
+    )
+    await expect(
+      waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        ...options,
+        statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
+      }),
+    ).rejects.toThrow('app.events.raw definition not applied on every replica')
+  })
+
   test('a polling query that never returns ends the wait at the deadline', async () => {
     const db = {
       async query<T>(sql: string): Promise<T[]> {
@@ -218,32 +263,61 @@ describe('waitForDDLPropagation: deadline', () => {
   })
 })
 
-// chkit-py's tests/test_ddl_propagation.py pins the same budget (#578).
-describe('waitForDDLPropagation: catalog waits check 21 times', () => {
-  test('a table that never appears is checked 21 times', async () => {
+// chkit-py's tests/test_ddl_propagation.py pins the same budget (#578, #719).
+describe('waitForDDLPropagation: catalog waits poll for 30 s', () => {
+  const never = (rows: object[]) => Array.from({ length: 100 }, () => rows)
+  // Listed for the first `checks` checks, then not (or the other way round).
+  const after = (checks: number, before: object[], then: object[]) => [...Array.from({ length: checks }, () => before), then]
+
+  test('a table that never appears is checked 60 times, 30 s, and fails as before', async () => {
     const { db, polled } = fakeTarget([[]], { replicas: 1 })
 
     await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)).rejects.toThrow(
       'waitForTable: app.events not yet visible',
     )
-    expect(polled('system.tables')).toHaveLength(21)
+    expect(polled('system.tables')).toHaveLength(60)
   })
 
-  test('a table that appears on the 21st check passes', async () => {
-    const { db, polled } = fakeTarget([...Array.from({ length: 20 }, () => []), [{ x: 1 }]], { replicas: 1 })
+  test('a table that reaches every replica after 15 s passes', async () => {
+    const { db, polled } = fakeTarget(after(30, [{ replicas: 1 }], [{ replicas: 2 }]))
 
     await waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)
-    expect(polled('system.tables')).toHaveLength(21)
+    expect(polled('system.tables')).toHaveLength(31)
+  })
+
+  test('a table that appears on the 60th check passes', async () => {
+    const { db, polled } = fakeTarget(after(59, [], [{ x: 1 }]), { replicas: 1 })
+
+    await waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)
+    expect(polled('system.tables')).toHaveLength(60)
+  })
+
+  test('a dropped table that a replica lists for 20 s passes', async () => {
+    const { db, polled } = fakeTarget(after(40, [{ replicas: 1 }], [{ replicas: 0 }]))
+
+    await waitForDDLPropagation(db, 'drop_table', 'table:app.events__cutover_1_reconcile', FAST)
+    expect(polled('system.tables')).toHaveLength(41)
+  })
+
+  test('a dropped table that a replica keeps listing fails as before after 30 s', async () => {
+    const { db, polled } = fakeTarget(never([{ replicas: 1 }]))
+
+    await expect(
+      waitForDDLPropagation(db, 'drop_table', 'table:app.events__cutover_1_reconcile', FAST),
+    ).rejects.toThrow('waitForTableAbsent: app.events__cutover_1_reconcile still present')
+    expect(polled('system.tables')).toHaveLength(60)
   })
 
   // p-retry gives up at once on a TypeError that is not a fetch network
   // failure; chkit-py's _poll does the same for TypeError and AttributeError (#627).
   function failingTarget(error: () => Error) {
     let checks = 0
+    freezeClock()
     const db = {
       async query<T>(sql: string): Promise<T[]> {
         if (sql.includes('system.one')) return [{ replicas: 1 }] as T[]
         checks += 1
+        tick()
         throw error()
       },
     } as unknown as ClickHouseExecutor
@@ -257,27 +331,44 @@ describe('waitForDDLPropagation: catalog waits check 21 times', () => {
     expect(checks()).toBe(1)
   })
 
-  test('a server error in the check is retried: 21 checks', async () => {
+  test('a server error in the check is retried for 30 s: 60 checks', async () => {
     const { db, checks } = failingTarget(() => new Error('Code: 210. DB::NetException: Connection refused'))
 
     await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)).rejects.toThrow('Connection refused')
-    expect(checks()).toBe(21)
+    expect(checks()).toBe(60)
   })
 
-  test('a fetch network failure, a TypeError, is retried: 21 checks', async () => {
+  test('a fetch network failure, a TypeError, is retried for 30 s: 60 checks', async () => {
     const { db, checks } = failingTarget(() => new TypeError('fetch failed'))
 
     await expect(waitForDDLPropagation(db, 'create_table', 'table:app.events', FAST)).rejects.toThrow('fetch failed')
-    expect(checks()).toBe(21)
+    expect(checks()).toBe(60)
   })
 
-  test('a dictionary that never appears is checked 21 times', async () => {
+  test('a dictionary that never appears is checked 60 times', async () => {
     const { db, polled } = fakeTarget([[]], { replicas: 1 })
 
     await expect(waitForDDLPropagation(db, 'create_dictionary', 'dictionary:app.users', FAST)).rejects.toThrow(
       'waitForDictionary: app.users not yet visible',
     )
-    expect(polled('system.tables')).toHaveLength(21)
+    expect(polled('system.tables')).toHaveLength(60)
+  })
+
+  test('a dictionary that reaches every replica after 15 s passes', async () => {
+    const { db, polled } = fakeTarget(after(30, [{ replicas: 1, agreed: 1 }], [{ replicas: 2, agreed: 1 }]))
+
+    await waitForDDLPropagation(db, 'create_dictionary', 'dictionary:app.users', FAST)
+    expect(polled('system.tables')).toHaveLength(31)
+  })
+
+  test('a column definition that reaches every replica after 15 s passes', async () => {
+    const { db, polled } = fakeTarget(after(30, [row('r1', { type: 'UInt64' }), row('r2')], [row('r1', { type: 'UInt64' }), row('r2', { type: 'UInt64' })]))
+
+    await waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+      ...FAST,
+      statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
+    })
+    expect(polled('system.columns')).toHaveLength(31)
   })
 })
 

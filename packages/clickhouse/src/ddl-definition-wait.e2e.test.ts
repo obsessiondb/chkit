@@ -141,6 +141,7 @@ describe('@chkit/clickhouse column definition wait e2e', () => {
       await expect(
         waitForDDLPropagation(executor, 'alter_table_modify_column', `table:${env.clickhouseDatabase}.${name}:column:s`, {
           pollIntervalMs: 50,
+          deadlineMs: 2_000,
           statement: `ALTER TABLE ${qualified} MODIFY COLUMN \`s\` String DEFAULT 'new';`,
         }),
       ).rejects.toThrow(`reports default_expression "'old'", the statement sets "'new'"`)

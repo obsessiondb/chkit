@@ -9,10 +9,11 @@ before every replica has the new schema. Migrations that follow up with
 fail. These helpers poll ``system.tables`` / ``system.columns`` until
 the operation is observable, then return.
 
-Retry strategy: one check plus 20 retries, 500 ms apart (21 checks, ~10 s
-budget), and no delay after the last check. Matches the TS ``p-retry`` options
-``{ retries: 20, minTimeout: 500, factor: 1 }`` (``factor: 1`` -> fixed delay,
-no exponential backoff).
+Retry strategy: checks 500 ms apart until a 30 s deadline, starting no check
+that would begin at or after it, and no delay after the last check. A loaded
+ObsessionDB service can take well over 10 s to show a CREATE or DROP on every
+replica (#719). Matches TS, which polls with ``p-retry`` (``factor: 1`` ->
+fixed delay, no exponential backoff) until the same deadline.
 
 The polling client is passed in (any object with a ``query(sql) ->
 QueryResult`` method) so this module can be unit-tested without a live
@@ -36,9 +37,10 @@ from chkit.clickhouse.alter_column_statement import (
 from chkit.clickhouse.replicas import ReplicaFanout, all_replicas, resolve_replica_fanout
 
 # Retries after the first check, like TS ``retries: 20``: 21 checks in all.
+# The journal reads use it; the propagation waits poll until the deadline.
 MAX_RETRIES = 20
 RETRY_DELAY_SECONDS = 0.5
-# Upper bound on a column definition or rename wait.
+# How long a propagation wait gives every replica to show the change (#719).
 DEFINITION_WAIT_DEADLINE_SECONDS = 30.0
 
 
@@ -87,22 +89,19 @@ def _quote(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
 
-def _poll(
-    check_fn: Callable[[], bool],
-    *,
-    retries: int = MAX_RETRIES,
-    delay: float = RETRY_DELAY_SECONDS,
-) -> None:
-    """Call ``check_fn`` until it returns truthy, at most ``retries + 1`` times.
+def _poll(check_fn: Callable[[], bool]) -> None:
+    """Call ``check_fn`` until it returns truthy or the deadline passes.
 
-    Sleeps ``delay`` between checks, not after the last one, like TS
-    ``p-retry``. Raises the last error from ``check_fn`` if every check fails.
-    A ``TypeError`` or ``AttributeError`` is a bug in the check, not lag, and is
-    raised at once: p-retry does not retry a ``TypeError`` that is not a fetch
-    network failure, and these are its Python equivalents (#627).
+    Sleeps ``RETRY_DELAY_SECONDS`` between checks and starts no check that
+    would begin at or after ``DEFINITION_WAIT_DEADLINE_SECONDS``, like TS
+    ``pollUntilDeadline``. Raises the last error from ``check_fn`` if every
+    check fails. A ``TypeError`` or ``AttributeError`` is a bug in the check,
+    not lag, and is raised at once: p-retry does not retry a ``TypeError`` that
+    is not a fetch network failure, and these are its Python equivalents (#627).
     """
+    deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     last_error: BaseException | None = None
-    for attempt in range(retries + 1):
+    while True:
         try:
             if check_fn():
                 return
@@ -110,8 +109,9 @@ def _poll(
             raise
         except Exception as error:
             last_error = error
-        if attempt < retries:
-            time.sleep(delay)
+        if time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+            break
+        time.sleep(RETRY_DELAY_SECONDS)
     if last_error is not None:
         raise last_error
     msg = "polling exhausted without success or error"
@@ -450,16 +450,16 @@ def wait_for_column_rename(
 def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     """Poll ``check`` until it reports no mismatch.
 
-    Uses the retry budget of the other waits (21 checks, 0.5 s apart) and stops
-    retrying at a 30 s deadline (TS also abandons a check that does not
-    return by then; a synchronous query here is not abandoned, and like every
-    chkit-py request it has no read timeout, #661). On timeout the error names
-    what was still different on the last check.
+    Checks 0.5 s apart until the 30 s deadline of the other waits (TS also
+    abandons a check that does not return by then; a synchronous query here is
+    not abandoned, and like every chkit-py request it has no read timeout,
+    #661). On timeout the error names what was still different on the last
+    check.
     """
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     detail = ""
     checks = 0
-    for attempt in range(MAX_RETRIES + 1):
+    while True:
         checks += 1
         try:
             mismatch = check()
@@ -468,7 +468,7 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
         if mismatch is None:
             return
         detail = mismatch
-        if attempt == MAX_RETRIES or time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+        if time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
             break
         time.sleep(RETRY_DELAY_SECONDS)
     msg = (
