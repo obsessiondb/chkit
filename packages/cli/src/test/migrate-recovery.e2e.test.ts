@@ -19,6 +19,7 @@ import {
   waitForColumn,
   waitForRows,
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   type CliResult,
 } from './e2e-testkit.js'
@@ -292,6 +293,9 @@ describe('@chkit/cli migrate failed-migration recovery e2e (#233)', () => {
 
       parseJson(migrate(project, ['--abandon', M, '--apply', '--json']))
       await executor.command(`DROP TABLE ${quoteIdent(db)}.${quoteIdent(b)}`)
+      // The next request may land on a replica that has not dropped b yet,
+      // where the rerun's CREATE TABLE b would fail.
+      await waitForTableAbsent(executor, db, b)
       const rerun = migrate(project, ['--execute', '--json'])
       expect(rerun.exitCode, formatTestDiagnostic('apply after abandon', rerun)).toBe(0)
       await waitForTable(executor, db, b)

@@ -7,7 +7,7 @@ import {
 } from '../runtime/command-dispatch.js'
 import { TABLE_FLAG } from '../runtime/global-flags.js'
 import { emitJson, printOutput } from '../runtime/json-output.js'
-import { UnknownFlagError, MissingFlagValueError } from '@chkit/core'
+import { compareCodePoints, UnknownFlagError, MissingFlagValueError } from '@chkit/core'
 import { resolveTableScope, tableKeysFromDefinitions } from '../runtime/table-scope.js'
 import { loadSchemaDefinitions } from '../runtime/schema-loader.js'
 
@@ -71,7 +71,7 @@ async function cmdPlugin(ctx: import('../plugins.js').ChxPluginCommandContext): 
 
   const selectedPlugin = plugins.find((entry) => entry.plugin.manifest.name === pluginName)
   if (!selectedPlugin) {
-    const known = plugins.map((entry) => entry.plugin.manifest.name).sort()
+    const known = plugins.map((entry) => entry.plugin.manifest.name).sort(compareCodePoints)
     throw new Error(
       `Unknown plugin "${pluginName}". Available: ${known.length > 0 ? known.join(', ') : '(none)'}.`
     )

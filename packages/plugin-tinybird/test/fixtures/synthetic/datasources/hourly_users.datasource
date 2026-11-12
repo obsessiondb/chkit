@@ -1,0 +1,12 @@
+SCHEMA >
+    `hour` DateTime,
+    `event_type` LowCardinality(String),
+    `users` AggregateFunction(uniq, UInt64),
+    `last_amount` AggregateFunction(argMax, Decimal(18, 6), DateTime),
+    `total` SimpleAggregateFunction(sum, Decimal(38, 6))
+
+ENGINE "AggregatingMergeTree"
+ENGINE_PARTITION_KEY "toDate(hour)"
+ENGINE_SORTING_KEY "event_type, hour"
+ENGINE_TTL "hour + toIntervalDay(7)"
+ENGINE_SETTINGS "ttl_only_drop_parts = 0"
