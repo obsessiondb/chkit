@@ -524,6 +524,10 @@ function startHolding(
 export function guardExecutor(db: ClickHouseExecutor, check: () => void): ClickHouseExecutor {
   return new Proxy(db, {
     get(target, property, receiver) {
+      if (property === 'command') {
+        const commandGuarded = target.commandGuarded?.bind(target)
+        if (commandGuarded) return (sql: string, settings?: ClickHouseSettings) => commandGuarded(sql, check, settings)
+      }
       const value = Reflect.get(target, property, receiver)
       if (typeof value !== 'function' || property === 'close') return value
       return (...args: unknown[]) => {

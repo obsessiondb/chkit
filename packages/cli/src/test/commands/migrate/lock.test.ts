@@ -1,6 +1,6 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { type ClickHouseExecutor, createExecutorWithClient, createStatelessClickHouseClient } from '@chkit/clickhouse'
 
 import { MigrateError } from '../../../commands/migrate/errors.js'
 import {
@@ -406,6 +406,41 @@ describe('claim SQL', () => {
 })
 
 describe('guardExecutor', () => {
+  for (const loseLock of [false, true]) {
+    test(`a missing-database retry checks lock ownership again (lost: ${loseLock})`, async () => {
+      const fallbackRequests: Array<{ sql: string; threads: string | null }> = []
+      const server = Bun.serve({
+        port: 0,
+        async fetch(request) {
+          fallbackRequests.push({ sql: (await request.text()).trim(), threads: new URL(request.url).searchParams.get('max_threads') })
+          return new Response('')
+        },
+      })
+      const config = { url: server.url.toString(), username: 'default', password: '', database: 'app', secure: false }
+      const client = createStatelessClickHouseClient(config)
+      let held = true
+      const firstRequest = spyOn(client, 'command').mockImplementation(async () => {
+        held = !loseLock
+        throw Object.assign(new Error('Code: 81. UNKNOWN_DATABASE'), { code: '81' })
+      })
+      const executor = createExecutorWithClient(config, client)
+      const guarded = guardExecutor(executor, () => {
+        if (!held) throw new MigrateError('migrate_lock_lost', 'lost before retry')
+      })
+      const settings = { max_threads: 1 }
+      try {
+        const command = guarded.command('INSERT INTO app.events SELECT 1', settings)
+        if (loseLock) await expect(command).rejects.toThrow('lost before retry')
+        else await command
+        expect(firstRequest).toHaveBeenCalledTimes(1)
+        expect(fallbackRequests).toEqual(loseLock ? [] : [{ sql: 'INSERT INTO app.events SELECT 1', threads: '1' }])
+      } finally {
+        await executor.close()
+        server.stop(true)
+      }
+    })
+  }
+
   test('checks before every request but close', async () => {
     const calls: string[] = []
     const db = {

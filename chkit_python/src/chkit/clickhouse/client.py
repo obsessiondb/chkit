@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import uuid
+from collections.abc import Callable
 from typing import Any, Literal, NoReturn, Self
 from urllib.parse import unquote, urlparse
 
@@ -204,11 +205,19 @@ class ClickHouseClient:
         executor's ``command(sql, settings)``). As in TS, a statement that
         fails because the configured database does not exist is retried without
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
+        self.execute_guarded(statement, lambda: None, settings)
+
+    def execute_guarded(
+        self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
+    ) -> None:
+        """Check ownership before each command attempt, including an internal retry."""
+        check()
         try:
             self._client.command(statement, settings=settings)
         except DatabaseError as error:
             if not is_unknown_database_error(error):
                 raise
+            check()
             self._client.command(statement, settings=settings, use_database=False)
 
     def query(

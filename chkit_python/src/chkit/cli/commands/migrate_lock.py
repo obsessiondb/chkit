@@ -623,6 +623,13 @@ class GuardedClient:
         self._check = check
 
     def __getattr__(self, name: str) -> Any:
+        if name == "execute":
+            execute_guarded = getattr(self._client, "execute_guarded", None)
+            if execute_guarded is not None:
+                def guarded_execute(statement: str, settings: dict[str, Any] | None = None) -> None:
+                    execute_guarded(statement, self._check, settings)
+
+                return guarded_execute
         value = getattr(self._client, name)
         if not callable(value) or name == "close":
             return value

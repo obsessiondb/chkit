@@ -14,8 +14,10 @@ from dataclasses import dataclass, field, replace
 from datetime import UTC, datetime
 from types import SimpleNamespace
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
+from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError
@@ -31,7 +33,9 @@ from chkit.cli.commands.migrate_lock import (
     claim_insert_sql,
     claims_select_sql,
 )
+from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.replicas import ReplicaFanout
+from chkit.core.model import ChxResolvedClickHouseConfig
 
 TARGET = LockTarget(database="app", journal_table="_chkit_migrations", fanout=None)
 RELEASED = math.inf
@@ -504,3 +508,38 @@ def test_guarded_client_checks_before_every_request_but_close() -> None:
         guarded.query("SELECT 1")
     guarded.close()
     assert calls == ["check", "query", "check", "close"]
+
+
+@pytest.mark.parametrize("lose_lock", [False, True])
+def test_missing_database_retry_checks_lock_ownership_again(lose_lock: bool) -> None:
+    held = True
+    driver = MagicMock()
+
+    def first_request(*_args: Any, **_kwargs: Any) -> None:
+        nonlocal held
+        if driver.command.call_count == 1:
+            held = not lose_lock
+            raise DatabaseError("Code: 81. UNKNOWN_DATABASE")
+
+    driver.command.side_effect = first_request
+    raw = ClickHouseClient(
+        driver,
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123", username="default", password="", database="app", secure=False
+        ),
+    )
+
+    def check() -> None:
+        if not held:
+            raise MigrateError("migrate_lock_lost", "lost before retry")
+
+    client = GuardedClient(raw, check)
+    settings = {"max_threads": 1}
+    if lose_lock:
+        with pytest.raises(MigrateError, match="lost before retry"):
+            client.execute("INSERT INTO app.events SELECT 1", settings)
+    else:
+        client.execute("INSERT INTO app.events SELECT 1", settings)
+    assert driver.command.call_count == (1 if lose_lock else 2)
+    if not lose_lock:
+        assert driver.command.call_args.kwargs == {"settings": settings, "use_database": False}
