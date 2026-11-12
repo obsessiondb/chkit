@@ -1,0 +1,11 @@
+SCHEMA >
+    `day` Date,
+    `event_type` LowCardinality(String),
+    `amount` Decimal(38, 6),
+    `events` UInt64
+
+ENGINE "SummingMergeTree"
+ENGINE_PARTITION_KEY "toYear(day)"
+ENGINE_SORTING_KEY "day, event_type"
+ENGINE_COLUMNS "amount"
+ENGINE_TTL "day + toIntervalYear(2)"

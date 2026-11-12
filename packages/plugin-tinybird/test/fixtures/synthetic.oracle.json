@@ -1,0 +1,258 @@
+{
+ "capturedFrom": "Tinybird Local (http://localhost:7181)",
+ "clickhouseVersion": "25.8.43.2",
+ "serverTimezone": "UTC",
+ "workspaceDatabase": "d_0450c6",
+ "objects": [
+  {
+   "kind": "copy",
+   "name": "type_totals_business_hours",
+   "mode": "append",
+   "cron": "0 9-17 * * 1-5",
+   "timezone": "Etc/UTC",
+   "target": "type_totals",
+   "debugQuery": "SELECT\n    event_type,\n    sum(amount) AS total,\n    now() AS computed_at\nFROM daily_amounts AS daily_amounts\nGROUP BY event_type"
+  },
+  {
+   "kind": "copy",
+   "name": "type_totals_hourly",
+   "mode": "append",
+   "cron": "15 * * * *",
+   "timezone": "Etc/UTC",
+   "target": "type_totals",
+   "debugQuery": "SELECT\n    event_type,\n    sum(amount) AS total,\n    now() AS computed_at\nFROM daily_amounts AS daily_amounts\nGROUP BY event_type"
+  },
+  {
+   "kind": "copy",
+   "name": "type_totals_manual",
+   "mode": "append",
+   "cron": null,
+   "timezone": "Etc/UTC",
+   "target": "type_totals",
+   "debugQuery": "SELECT\n    event_type,\n    sum(amount) AS total,\n    now() AS computed_at\nFROM daily_amounts AS daily_amounts\nGROUP BY event_type"
+  },
+  {
+   "kind": "copy",
+   "name": "type_totals_monthly",
+   "mode": "append",
+   "cron": "0 4 1 * *",
+   "timezone": "Etc/UTC",
+   "target": "type_totals",
+   "debugQuery": "SELECT\n    event_type,\n    sum(amount) AS total,\n    now() AS computed_at\nFROM daily_amounts AS daily_amounts\nGROUP BY event_type"
+  },
+  {
+   "kind": "copy",
+   "name": "type_totals_quarter",
+   "mode": "append",
+   "cron": "*/15 * * * *",
+   "timezone": "Etc/UTC",
+   "target": "type_totals",
+   "debugQuery": "SELECT\n    event_type,\n    sum(amount) AS total,\n    now() AS computed_at\nFROM daily_amounts AS daily_amounts\nGROUP BY event_type"
+  },
+  {
+   "kind": "copy",
+   "name": "type_totals_weekly",
+   "mode": "append",
+   "cron": "0 6 * * 1",
+   "timezone": "Etc/UTC",
+   "target": "type_totals",
+   "debugQuery": "SELECT\n    event_type,\n    sum(amount) AS total,\n    now() AS computed_at\nFROM daily_amounts AS daily_amounts\nGROUP BY event_type"
+  },
+  {
+   "kind": "copy",
+   "name": "user_snapshot_copy",
+   "mode": "replace",
+   "cron": "30 2 * * *",
+   "timezone": "Etc/UTC",
+   "target": "user_snapshot",
+   "debugQuery": "SELECT\n    u.user_id AS user_id,\n    u.name AS name,\n    c.events AS events,\n    now() AS snapshot_at\nFROM users AS u\nFINAL\nINNER JOIN\n(\n    SELECT\n        user_id,\n        count() AS events\n    FROM events AS events\n    GROUP BY user_id\n) AS c ON c.user_id = u.user_id"
+  },
+  {
+   "kind": "datasource",
+   "name": "balances",
+   "table": "t_56ffdb0215f7485bbea1ef10c6997725_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_56ffdb0215f7485bbea1ef10c6997725_v1 (`account` String, `balance` Int64, `sign` Int8, `version` UInt64) ENGINE = VersionedCollapsingMergeTree(sign, version) ORDER BY account SETTINGS index_granularity = 8192 COMMENT '{\"resource_name\": \"balances\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "daily_amounts",
+   "table": "t_9ebb2376e86c4fb388f58622856f4b3d_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_9ebb2376e86c4fb388f58622856f4b3d_v1 (`day` Date, `event_type` LowCardinality(String), `amount` Decimal(38, 6), `events` UInt64) ENGINE = SummingMergeTree(amount) PARTITION BY toYear(day) ORDER BY (day, event_type) TTL day + toIntervalYear(2) SETTINGS index_granularity = 8192 COMMENT '{\"resource_name\": \"daily_amounts\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "events",
+   "table": "t_4f8db56d097444de9928ad7d6f3b69ac_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_4f8db56d097444de9928ad7d6f3b69ac_v1 (`event_id` UUID, `event_time` DateTime, `event_type` LowCardinality(String), `user_id` UInt64, `amount` Decimal(18, 6) DEFAULT 0, `country` LowCardinality(Nullable(String)), `tags` Array(String), `attributes` Map(String, String), `payload` String CODEC(ZSTD(3)), `ingested_at` DateTime64(3) DEFAULT now64(3) CODEC(Delta(8), ZSTD(1)), INDEX idx_user user_id TYPE bloom_filter(0.01) GRANULARITY 4, INDEX idx_type event_type TYPE set(100) GRANULARITY 1) ENGINE = MergeTree PARTITION BY toYYYYMM(event_time) ORDER BY (event_type, event_time, user_id) TTL event_time + toIntervalMonth(3) SETTINGS ttl_only_drop_parts = 1, index_granularity = 8192 COMMENT '{\"resource_name\": \"events\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "flagged_events",
+   "table": "t_2284a14740f64784911f3d7c195ee1ef_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_2284a14740f64784911f3d7c195ee1ef_v1 (`event_time` DateTime, `user_id` UInt64, `flag` LowCardinality(String), `amount` Decimal(18, 6)) ENGINE = MergeTree PARTITION BY toYYYYMM(event_time) ORDER BY (flag, event_time) TTL event_time + toIntervalMonth(6) SETTINGS ttl_only_drop_parts = 1, index_granularity = 8192 COMMENT '{\"resource_name\": \"flagged_events\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "hourly_users",
+   "table": "t_8cc871def00249cba5ffcbd733654b03_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_8cc871def00249cba5ffcbd733654b03_v1 (`hour` DateTime, `event_type` LowCardinality(String), `users` AggregateFunction(uniq, UInt64), `last_amount` AggregateFunction(argMax, Decimal(18, 6), DateTime), `total` SimpleAggregateFunction(sum, Decimal(38, 6))) ENGINE = AggregatingMergeTree PARTITION BY toDate(hour) ORDER BY (event_type, hour) TTL hour + toIntervalDay(7) SETTINGS ttl_only_drop_parts = 0, index_granularity = 8192 COMMENT '{\"resource_name\": \"hourly_users\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "kafka_events",
+   "table": "t_303c27d939be4d57856b2f5e40e883fb_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_303c27d939be4d57856b2f5e40e883fb_v1 (`ts` DateTime, `user_id` UInt64, `__value` String, `__topic` LowCardinality(String), `__partition` Int16, `__offset` Int64, `__timestamp` DateTime, `__key` String, `__headers` Map(String, String)) ENGINE = MergeTree PARTITION BY toYYYYMM(__timestamp) ORDER BY (user_id, ts) SETTINGS index_granularity = 8192 COMMENT '{\"resource_name\": \"kafka_events\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "kafka_raw",
+   "table": "t_4802bcfa5135484c81103da97c5c7250_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_4802bcfa5135484c81103da97c5c7250_v1 (`ts` DateTime, `user_id` UInt64, `raw` String, `topic` String, `header_count` UInt64) ENGINE = MergeTree ORDER BY ts SETTINGS index_granularity = 8192 COMMENT '{\"resource_name\": \"kafka_raw\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "landing",
+   "table": "t_4e06b9e864a74319b148dd8bfedc2d74_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_4e06b9e864a74319b148dd8bfedc2d74_v1 (`user_id` UInt64, `amount` Float64) ENGINE = `Null` COMMENT '{\"resource_name\": \"landing\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "sampled",
+   "table": "t_edacdaefca5f4035b4d0e5af3a1ba92e_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_edacdaefca5f4035b4d0e5af3a1ba92e_v1 (`user_id` UInt64, `ts` DateTime) ENGINE = MergeTree ORDER BY (intHash32(user_id), ts) SAMPLE BY intHash32(user_id) SETTINGS index_granularity = 8192 COMMENT '{\"resource_name\": \"sampled\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "sessions",
+   "table": "t_8b277847ebbd401da2be571427350241_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_8b277847ebbd401da2be571427350241_v1 (`session_id` String, `user_id` UInt64, `started_at` DateTime, `sign` Int8) ENGINE = CollapsingMergeTree(sign) PARTITION BY toStartOfHour(started_at) PRIMARY KEY user_id ORDER BY (user_id, session_id) TTL started_at + toIntervalDay(1) SETTINGS ttl_only_drop_parts = 1, index_granularity = 8192 COMMENT '{\"resource_name\": \"sessions\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "type_totals",
+   "table": "t_32dc086c2a0e43d0bf1a6a00a157b80f_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_32dc086c2a0e43d0bf1a6a00a157b80f_v1 (`event_type` LowCardinality(String), `total` Decimal(38, 6), `computed_at` DateTime) ENGINE = MergeTree ORDER BY tuple() SETTINGS index_granularity = 8192 COMMENT '{\"resource_name\": \"type_totals\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "user_flags",
+   "table": "t_01ba87037ed345239df5ca13a3d7b3f3_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_01ba87037ed345239df5ca13a3d7b3f3_v1 (`user_id` UInt64, `flag` LowCardinality(String), `set_at` DateTime) ENGINE = ReplacingMergeTree(set_at) PARTITION BY toYYYYMMDD(set_at) ORDER BY (user_id, flag) TTL toDate(set_at) + toIntervalDay(30) SETTINGS ttl_only_drop_parts = 1, index_granularity = 8192 COMMENT '{\"resource_name\": \"user_flags\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "user_snapshot",
+   "table": "t_6eafeb0f7f46498a90bc52d362de9099_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_6eafeb0f7f46498a90bc52d362de9099_v1 (`user_id` UInt64, `name` String, `events` UInt64, `snapshot_at` DateTime) ENGINE = MergeTree ORDER BY user_id SETTINGS index_granularity = 8192 COMMENT '{\"resource_name\": \"user_snapshot\"}'"
+  },
+  {
+   "kind": "datasource",
+   "name": "users",
+   "table": "t_0567d21058c54f70a269bae454e4a09e_v1",
+   "createTableQuery": "CREATE TABLE d_0450c6.t_0567d21058c54f70a269bae454e4a09e_v1 (`user_id` UInt64, `name` String, `email` Nullable(String), `updated_at` DateTime, `is_deleted` UInt8 DEFAULT 0) ENGINE = ReplacingMergeTree(updated_at, is_deleted) ORDER BY user_id SETTINGS index_granularity = 2048 COMMENT '{\"resource_name\": \"users\"}'"
+  },
+  {
+   "kind": "endpoint",
+   "name": "events_by_type",
+   "renders": [
+    {
+     "params": {},
+     "sql": "SELECT\n    event_type,\n    count() AS events,\n    sum(amount) AS amount\nFROM events AS events\nWHERE (event_time >= '2024-01-01 00:00:00') AND (event_type = 'click') AND (user_id > toUInt64('0')) AND (events.amount >= toFloat64('1.0')) AND (user_id <= toUInt64('18446744073709551615')) AND (event_type != 'none')\nGROUP BY event_type\nLIMIT toInt32('100')"
+    },
+    {
+     "params": {
+      "start": "2025-01-02 03:04:05",
+      "event_type": "chkit",
+      "min_user": "7",
+      "min_amount": "1.5",
+      "max_user": "7",
+      "skip": "chkit",
+      "limit": "-7"
+     },
+     "sql": "SELECT\n    event_type,\n    count() AS events,\n    sum(amount) AS amount\nFROM events AS events\nWHERE (event_time >= '2025-01-02 03:04:05') AND (event_type = 'chkit') AND (user_id > toUInt64('7')) AND (events.amount >= toFloat64('1.5')) AND (user_id <= toUInt64('7')) AND (event_type != 'chkit')\nGROUP BY event_type\nLIMIT toInt32('-7')"
+    }
+   ]
+  },
+  {
+   "kind": "endpoint",
+   "name": "flagged_users",
+   "renders": [
+    {
+     "params": {},
+     "sql": "SELECT\n    user_id,\n    argMax(flag, set_at) AS flag\nFROM user_flags AS user_flags\nGROUP BY user_id"
+    }
+   ]
+  },
+  {
+   "kind": "endpoint",
+   "name": "kafka_by_key",
+   "renders": [
+    {
+     "params": {},
+     "sql": "SELECT\n    __key AS key,\n    count() AS messages\nFROM kafka_events AS kafka_events\nWHERE __partition >= toInt16('0')\nGROUP BY key"
+    },
+    {
+     "params": {
+      "partition": "-7"
+     },
+     "sql": "SELECT\n    __key AS key,\n    count() AS messages\nFROM kafka_events AS kafka_events\nWHERE __partition >= toInt16('-7')\nGROUP BY key"
+    }
+   ]
+  },
+  {
+   "kind": "endpoint",
+   "name": "static_counts",
+   "renders": [
+    {
+     "params": {},
+     "sql": "SELECT\n    event_type,\n    count() AS events\nFROM events AS events\nGROUP BY event_type"
+    }
+   ]
+  },
+  {
+   "kind": "endpoint",
+   "name": "top_users",
+   "renders": [
+    {
+     "params": {},
+     "sql": "SELECT\n    user_id,\n    count() AS events\nFROM events AS events\nWHERE user_id IN [1, 2, 3]\nGROUP BY user_id\nORDER BY events DESC"
+    }
+   ]
+  },
+  {
+   "kind": "materialized",
+   "name": "daily_amounts_mv",
+   "node": "daily_amounts_node",
+   "table": "t_64b71b3949f84475a9a8678168479860_v1_mv",
+   "createTableQuery": "CREATE MATERIALIZED VIEW d_0450c6.t_64b71b3949f84475a9a8678168479860_v1_mv TO d_0450c6.t_9ebb2376e86c4fb388f58622856f4b3d_v1 (`day` Date, `event_type` LowCardinality(String), `amount` Decimal(38, 6), `events` UInt64) AS (SELECT toDate(event_time) AS day, event_type, sum(amount) AS amount, count() AS events FROM d_0450c6.t_4f8db56d097444de9928ad7d6f3b69ac_v1 AS events WHERE event_type != 'test' GROUP BY day, event_type) COMMENT '{\"resource_name\": \"daily_amounts_mv.daily_amounts_node\"}'"
+  },
+  {
+   "kind": "materialized",
+   "name": "flagged_events_mv",
+   "node": "flagged",
+   "table": "t_769c69bee2f546f2909582dfa55f8f21_v1_mv",
+   "createTableQuery": "CREATE MATERIALIZED VIEW d_0450c6.t_769c69bee2f546f2909582dfa55f8f21_v1_mv TO d_0450c6.t_2284a14740f64784911f3d7c195ee1ef_v1 (`event_time` DateTime, `user_id` UInt64, `flag` String, `amount` Decimal(18, 6)) AS (SELECT e.event_time AS event_time, e.user_id AS user_id, f.flag AS flag, e.amount AS amount FROM d_0450c6.t_4f8db56d097444de9928ad7d6f3b69ac_v1 AS e, d_0450c6.t_0567d21058c54f70a269bae454e4a09e_v1 AS u INNER JOIN (SELECT user_id, argMax(flag, set_at) AS flag FROM d_0450c6.t_01ba87037ed345239df5ca13a3d7b3f3_v1 AS user_flags GROUP BY user_id) AS f ON f.user_id = u.user_id WHERE (e.user_id = u.user_id) AND (e.event_type NOT IN (SELECT event_type FROM d_0450c6.t_32dc086c2a0e43d0bf1a6a00a157b80f_v1 AS type_totals WHERE total < 0))) COMMENT '{\"resource_name\": \"flagged_events_mv.flagged\"}'"
+  },
+  {
+   "kind": "materialized",
+   "name": "hourly_users_mv",
+   "node": "aggregated",
+   "table": "t_c959dbad94194fa0885e8319b2001ea8_v1_mv",
+   "createTableQuery": "CREATE MATERIALIZED VIEW d_0450c6.t_c959dbad94194fa0885e8319b2001ea8_v1_mv TO d_0450c6.t_8cc871def00249cba5ffcbd733654b03_v1 (`hour` DateTime, `event_type` LowCardinality(String), `users` AggregateFunction(uniq, UInt64), `last_amount` AggregateFunction(argMax, Decimal(18, 6), DateTime), `total` Decimal(38, 6)) AS (SELECT toStartOfHour(event_time) AS hour, event_type, uniqState(user_id) AS users, argMaxState(amount, event_time) AS last_amount, sum(amount) AS total FROM (SELECT event_time, event_type, user_id, amount FROM d_0450c6.t_4f8db56d097444de9928ad7d6f3b69ac_v1 AS e WHERE e.user_id IN (SELECT user_id FROM d_0450c6.t_0567d21058c54f70a269bae454e4a09e_v1 AS users FINAL WHERE is_deleted = 0)) AS filtered GROUP BY hour, event_type) COMMENT '{\"resource_name\": \"hourly_users_mv.aggregated\"}'"
+  },
+  {
+   "kind": "materialized",
+   "name": "kafka_raw_mv",
+   "node": "raw",
+   "table": "t_a9c1e0451a67431da0faffd6e5086aab_v1_mv",
+   "createTableQuery": "CREATE MATERIALIZED VIEW d_0450c6.t_a9c1e0451a67431da0faffd6e5086aab_v1_mv TO d_0450c6.t_4802bcfa5135484c81103da97c5c7250_v1 (`ts` DateTime, `user_id` UInt64, `raw` String, `topic` LowCardinality(String), `header_count` UInt64) AS (SELECT ts, user_id, __value AS raw, toString(__topic) AS topic, length(__headers) AS header_count FROM d_0450c6.t_303c27d939be4d57856b2f5e40e883fb_v1 AS kafka_events) COMMENT '{\"resource_name\": \"kafka_raw_mv.raw\"}'"
+  },
+  {
+   "kind": "materialized",
+   "name": "landing_to_sessions_mv",
+   "node": "joined",
+   "table": "t_8c08692aa0ae4da296d180aa2a4c96e4_v1_mv",
+   "createTableQuery": "CREATE MATERIALIZED VIEW d_0450c6.t_8c08692aa0ae4da296d180aa2a4c96e4_v1_mv TO d_0450c6.t_8b277847ebbd401da2be571427350241_v1 (`session_id` String, `user_id` UInt64, `started_at` DateTime, `sign` Int8) AS (WITH recent AS (SELECT user_id, max(updated_at) AS updated_at FROM d_0450c6.t_0567d21058c54f70a269bae454e4a09e_v1 AS users GROUP BY user_id) SELECT toString(l.user_id) AS session_id, l.user_id AS user_id, r.updated_at AS started_at, toInt8(1) AS sign FROM d_0450c6.t_4e06b9e864a74319b148dd8bfedc2d74_v1 AS l LEFT JOIN recent AS r ON r.user_id = l.user_id ARRAY JOIN [1] AS one WHERE l.amount > 0) COMMENT '{\"resource_name\": \"landing_to_sessions_mv.joined\"}'"
+  }
+ ]
+}

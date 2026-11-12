@@ -1,0 +1,10 @@
+SCHEMA >
+    `user_id` UInt64,
+    `flag` LowCardinality(String),
+    `set_at` DateTime
+
+ENGINE "ReplacingMergeTree"
+ENGINE_PARTITION_KEY "toYYYYMMDD(set_at)"
+ENGINE_SORTING_KEY "user_id, flag"
+ENGINE_VER "set_at"
+ENGINE_TTL "toDate(set_at) + toIntervalDay(30)"

@@ -1,0 +1,8 @@
+SCHEMA >
+    `user_id` UInt64,
+    `name` String,
+    `events` UInt64,
+    `snapshot_at` DateTime
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "user_id"

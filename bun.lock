@@ -184,6 +184,19 @@
         "zod": "^4.3.6",
       },
     },
+    "packages/plugin-tinybird": {
+      "name": "@chkit/plugin-tinybird",
+      "version": "0.2.0-beta.15",
+      "dependencies": {
+        "@chkit/clickhouse": "workspace:*",
+        "@chkit/core": "workspace:*",
+        "@chkit/plugin-pull": "workspace:*",
+        "zod": "^4.3.6",
+      },
+      "devDependencies": {
+        "@clickhouse/client": "^1.11.0",
+      },
+    },
     "registry": {
       "name": "@chkit/registry",
       "version": "0.0.0",
@@ -345,6 +358,8 @@
     "@chkit/plugin-obsessiondb": ["@chkit/plugin-obsessiondb@workspace:packages/plugin-obsessiondb"],
 
     "@chkit/plugin-pull": ["@chkit/plugin-pull@workspace:packages/plugin-pull"],
+
+    "@chkit/plugin-tinybird": ["@chkit/plugin-tinybird@workspace:packages/plugin-tinybird"],
 
     "@chkit/python": ["@chkit/python@workspace:chkit_python"],
 
@@ -1605,6 +1620,8 @@
     "@chkit/plugin-obsessiondb/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/plugin-pull/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
+
+    "@chkit/plugin-tinybird/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
     "@chkit/registry/zod": ["zod@4.3.6", "", {}, "sha512-rftlrkhHZOcjDwkGlnUtZZkvaPHCsDATp4pGpuOOMDaTdDDXF91wuVDJoWoPsKX/3YPQ5fHuF3STjcYyKr+Qhg=="],
 
