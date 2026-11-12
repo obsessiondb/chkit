@@ -177,6 +177,7 @@ In TypeScript, plugins are npm packages registered in the `plugins` array of `cl
 | Generate **typed row models**: TypeScript types (and optional Zod schemas), or Pydantic models in Python: from the schema | [`@chkit/plugin-codegen`](/plugins/codegen/) | Keeps application row types in sync with the schema definitions. |
 | **Backfill** historical data into materialized views | [`@chkit/plugin-backfill`](/plugins/backfill/) | Partition/sort-key replay with checkpoints; inspect plan predicates and retry/engine semantics. |
 | Deploy to **ObsessionDB** | [`@chkit/plugin-obsessiondb`](/obsessiondb/overview/) | ObsessionDB connection and service selection; strips the `storage_policy` table setting when targeting non-ObsessionDB ClickHouse. |
+| Move a **Tinybird** project to chkit | [`@chkit/plugin-tinybird`](/plugins/tinybird/) | TypeScript only. Install the `chkit-tinybird` skill (`npx skills add obsessiondb/chkit --skill chkit-tinybird`): it walks the agent through finding or pulling the project, the import and what does not translate. |
 
 Install plugins for the project's stated requirements.
 

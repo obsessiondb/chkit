@@ -1,0 +1,12 @@
+SCHEMA >
+    `user_id` UInt64,
+    `name` String,
+    `email` Nullable(String),
+    `updated_at` DateTime,
+    `is_deleted` UInt8 DEFAULT 0
+
+ENGINE "ReplacingMergeTree"
+ENGINE_SORTING_KEY "user_id"
+ENGINE_VER "updated_at"
+ENGINE_IS_DELETED "is_deleted"
+ENGINE_SETTINGS "index_granularity = 2048"

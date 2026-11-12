@@ -15,15 +15,18 @@ export {
   getLiveEnv,
   createLiveExecutor,
   createStatelessLiveExecutor,
+  dropDatabase,
   quoteIdent,
   createPrefix,
   createJournalTableName,
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   waitForColumn,
   waitForDictionary,
   waitForRows,
   pollUntil,
+  runOnceVisible,
 } from '@chkit/clickhouse/e2e-testkit'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')

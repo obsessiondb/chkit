@@ -7,6 +7,8 @@ ClickHouseClient.connect() call).
 
 from __future__ import annotations
 
+import importlib
+import json
 from pathlib import Path
 from typing import Any
 from unittest.mock import patch
@@ -17,6 +19,7 @@ from typer.testing import CliRunner
 from chkit.cli.main import app
 from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.introspect import SchemaObjectRef
 from chkit.core.model import (
     ChxResolvedCheckConfig,
     ChxResolvedConfig,
@@ -104,12 +107,13 @@ def test_pull_uses_custom_introspector_and_skips_clickhouse(
     ) as mock_connect:
         result = runner.invoke(
             app,
-            ["pull", "--out-file", str(out_file)],
+            ["pull", "--database", "custom", "--out-file", str(out_file)],
             catch_exceptions=False,
         )
 
     assert result.exit_code == 0, result.output
-    # The hook intercepted; ClickHouse should never have been contacted.
+    # The hook intercepted; with --database given, ClickHouse should never
+    # have been contacted (as in TS).
     mock_connect.assert_not_called()
     assert out_file.exists()
     content = out_file.read_text(encoding="utf-8")
@@ -133,12 +137,61 @@ def test_pull_writes_the_configured_index_granularity_for_a_table_without_one(
     out_file = tmp_path / "pulled.py"
 
     with patch("chkit.clickhouse.client.ClickHouseClient.connect"):
-        result = runner.invoke(app, ["pull", "--out-file", str(out_file)], catch_exceptions=False)
+        result = runner.invoke(
+            app,
+            ["pull", "--database", "custom", "--out-file", str(out_file)],
+            catch_exceptions=False,
+        )
 
     assert result.exit_code == 0, result.output
     content = out_file.read_text(encoding="utf-8")
     assert '"index_granularity": 4096,' in content
     assert "8192" not in content
+
+
+def test_pull_without_database_lists_the_target_databases_for_the_custom_introspector(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # Without --database, pull lists the server's objects first, as TS does:
+    # the hook gets the target databases and the payload reports them and the
+    # objects the hook did not return (#698).
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.syspath_prepend(str(tmp_path))
+    _install_custom_plugin_module(tmp_path)
+    (tmp_path / "clickhouse.config.py").write_text(CONFIG, encoding="utf-8")
+    (tmp_path / "schema.py").write_text(
+        "from chkit import schema\ndefinitions = schema()\n", encoding="utf-8"
+    )
+    received: list[list[str]] = []
+    hooks = importlib.import_module("custom_introspector_plugin")._Hooks
+    original = hooks.on_pull_introspect
+
+    def recording_hook(self: Any, ctx: Any) -> Any:
+        received.append(list(ctx.databases))
+        return original(self, ctx)
+
+    monkeypatch.setattr(hooks, "on_pull_introspect", recording_hook)
+    objects = [
+        SchemaObjectRef(kind="table", database="logs", name="raw"),
+        SchemaObjectRef(kind="table", database="custom", name="generated"),
+        SchemaObjectRef(kind="view", database="custom", name="recent"),
+    ]
+
+    with (
+        patch("chkit.clickhouse.client.ClickHouseClient.connect"),
+        patch("chkit.cli.commands.pull.list_schema_objects", return_value=objects),
+    ):
+        result = runner.invoke(app, ["pull", "--json", "--dryrun"], catch_exceptions=False)
+
+    assert result.exit_code == 0, result.output
+    assert received == [["custom", "logs"]]
+    payload = json.loads(result.output)
+    assert payload["databases"] == ["custom", "logs"]
+    assert payload["definitionCount"] == 1
+    assert payload["skippedObjects"] == [
+        {"kind": "table", "count": 1},
+        {"kind": "view", "count": 1},
+    ]
 
 
 def test_pull_runtime_threads_through_when_hook_returns_none() -> None:
@@ -172,3 +225,75 @@ def test_pull_runtime_threads_through_when_hook_returns_none() -> None:
         databases=(),
     )
     assert runtime.run_on_pull_introspect(ctx) is None
+
+
+def test_pull_writes_the_output_path_as_given_without_following_symlinks(
+    runner: CliRunner, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # As TS ``resolve(process.cwd(), outFile)``: the path is made absolute by
+    # text, so a symlink is replaced rather than written through (#702).
+    project = tmp_path / "project"
+    elsewhere = tmp_path / "elsewhere"
+    (elsewhere / "real").mkdir(parents=True)
+    project.mkdir()
+    (elsewhere / "target.py").write_text("# target\n", encoding="utf-8")
+    (project / "link.py").symlink_to(elsewhere / "target.py")
+    (project / "linkdir").symlink_to(elsewhere / "real")
+    (project / "dangling.py").symlink_to(tmp_path / "nowhere" / "f.py")
+    (project / "tmp-named.py.tmp").write_text("# kept\n", encoding="utf-8")
+    (project / "tmp-named.py").symlink_to(project / "tmp-named.py.tmp")
+
+    monkeypatch.chdir(project)
+    monkeypatch.syspath_prepend(str(project))
+    _install_custom_plugin_module(project)
+    (project / "clickhouse.config.py").write_text(CONFIG, encoding="utf-8")
+    (project / "schema.py").write_text(
+        "from chkit import schema\ndefinitions = schema()\n", encoding="utf-8"
+    )
+    cwd = Path.cwd()
+
+    def run(out_file: str, *flags: str) -> Any:
+        with patch("chkit.clickhouse.client.ClickHouseClient.connect"):
+            return runner.invoke(
+                app, ["pull", "--json", *flags, "--out-file", out_file], catch_exceptions=False
+            )
+
+    def pull(out_file: str) -> str:
+        result = run(out_file, "--force")
+        assert result.exit_code == 0, result.output
+        return str(json.loads(result.stdout)["outFile"])
+
+    # A symlinked output file is replaced by the pulled file; its target is untouched.
+    assert pull(str(cwd / "link.py")) == str(cwd / "link.py")
+    assert not (project / "link.py").is_symlink()
+    assert 'name="generated"' in (project / "link.py").read_text(encoding="utf-8")
+    assert (elsewhere / "target.py").read_text(encoding="utf-8") == "# target\n"
+
+    # A link to the file a fixed ``<name>.tmp`` would be: the target stays put.
+    assert pull(str(cwd / "tmp-named.py")) == str(cwd / "tmp-named.py")
+    assert (project / "tmp-named.py.tmp").read_text(encoding="utf-8") == "# kept\n"
+
+    # A dangling symlink is an existing output file: refused without --force,
+    # replaced with it, and nothing is created where it pointed.
+    refused = run(str(cwd / "dangling.py"))
+    assert refused.exit_code == 2, refused.output
+    assert json.loads(refused.stdout) == {
+        "ok": False,
+        "command": "schema",
+        "error": f"Output file already exists at {cwd / 'dangling.py'}. "
+        "Re-run with --force or set plugin option overwrite=true.",
+    }
+    assert (project / "dangling.py").is_symlink()
+    assert pull(str(cwd / "dangling.py")) == str(cwd / "dangling.py")
+    assert (project / "dangling.py").is_file()
+    assert not (project / "dangling.py").is_symlink()
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["elsewhere", "project"]
+
+    # A symlinked directory is reported as given and written through by the OS.
+    assert pull("linkdir/s.py") == str(cwd / "linkdir" / "s.py")
+    assert 'name="generated"' in (elsewhere / "real" / "s.py").read_text(encoding="utf-8")
+
+    # `..` after a symlinked directory is taken by text, not from the link target.
+    assert pull("linkdir/../x.py") == str(cwd / "x.py")
+    assert 'name="generated"' in (project / "x.py").read_text(encoding="utf-8")
+    assert sorted(p.name for p in elsewhere.iterdir()) == ["real", "target.py"]
