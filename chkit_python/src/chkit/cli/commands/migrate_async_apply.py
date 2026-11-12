@@ -21,9 +21,11 @@ Key invariants:
   reads that attempt's outcome from ``system.query_log`` (#672): a
   ``QueryFinish`` is recorded as completed instead of resubmitted.
 - Status ``unknown`` is a transient state (just-submitted or
-  just-finished gap); loop until ``running`` / ``finished`` / ``failed``
-  unless the submit itself rejected before any poll found the query
-  running, which is recorded as failed.
+  just-finished gap); loop until ``running`` / ``finished`` / ``failed``.
+  When the submit itself failed before any poll found the query running,
+  a definitive server rejection is recorded as failed, while a transport
+  failure gets a bounded grace: the server may be running the query
+  unobserved (#671).
 - The query id is deterministic, so ``system.query_log`` can still hold
   entries of an earlier attempt of the same statement (abandoned, or
   retried after an edit). A new submission only trusts entries of queries
@@ -42,6 +44,10 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
@@ -213,6 +219,27 @@ def _progress_line(label: str, status: QueryStatus, elapsed_sec: int) -> str:
 
 def _describe_error(error: BaseException) -> str:
     return clickhouse_error_message(error)
+
+
+def _is_server_rejection(error: BaseException) -> bool:
+    """Tell a definitive server rejection from a transport failure (#671).
+
+    A server rejection (the statement never ran) carries a ClickHouse
+    exception code: clickhouse-connect raises DatabaseError, and the
+    ObsessionDB console executor keeps the code from the server's error text.
+    ``wrap_connection_error`` rethrows an authentication failure as a plain
+    error named by its message. Both mean the query will never appear in
+    system.query_log, so the attempt can be journaled failed right away.
+    Anything else - a gateway timeout, a proxy 5xx, a network cut - is
+    indeterminate: the server may be running the query without any poll
+    having seen it.
+    """
+    if isinstance(error, DatabaseError):
+        return True
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code.isdigit():
+        return True
+    return re.search(r"authentication failed", str(error), re.IGNORECASE) is not None
 
 
 class _Submission:
@@ -610,13 +637,15 @@ def _poll(
             continue
 
         # status is "unknown" here. If submit already raised and no poll found
-        # the query running, it never made it server-side (e.g. SQL parse
-        # error): record the attempt as failed and surface that error. Known
-        # gap: a load that ends before the first poll, with a transport error
-        # on its submit, also lands here (#657). Otherwise it's a transient gap
-        # (just-submitted, or just-finished before query_log has it).
+        # the query running, a definitive server rejection (e.g. SQL parse
+        # error) means the query never made it server-side: record the attempt
+        # as failed and surface that error. A transport failure on the submit
+        # says nothing: the server may be running the query unobserved, so it
+        # falls through to the bounded grace below (#671). Without a submit
+        # error it's a transient gap (just-submitted, or just-finished before
+        # query_log has it).
         submit_error = submission.error if submission is not None else None
-        if submit_error is not None and not seen_running:
+        if submit_error is not None and not seen_running and _is_server_rejection(submit_error):
             input_.journal_store.write_migration_state(
                 upsert_operation(
                     base_state,

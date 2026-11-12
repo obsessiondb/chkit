@@ -9,6 +9,7 @@ from datetime import UTC, datetime
 from typing import Any
 
 import pytest
+from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 
 from chkit.cli.commands import migrate_async_apply
 from chkit.cli.commands.migrate_async_apply import (
@@ -621,18 +622,22 @@ _QUERY_ID = make_deterministic_query_id(
 def test_apply_async_submit_rejected_before_start_is_recorded_failed() -> None:
     client = _ScriptedClient(
         statuses=[QueryStatus(status="unknown")] * 3,
-        submit_raises=RuntimeError("Syntax error: failed at position 1"),
+        submit_raises=DatabaseError(
+            "Received ClickHouse exception, code: 62, server response: Code: 62. "
+            "DB::Exception: Syntax error: failed at position 1. (SYNTAX_ERROR) "
+            "(for url http://localhost:8123)"
+        ),
     )
     journal = _FakeJournalStore()
     lines: list[str] = []
-    with pytest.raises(RuntimeError, match="Syntax error"):
+    with pytest.raises(DatabaseError, match="Syntax error"):
         apply_async_statement(_input(client=client, journal=journal, log=lines.append))
     # The query never started, so the attempt is recorded as failed (#233):
     # an edited file can then run again without --retry.
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
     assert journal.writes[1].operations[0].last_error == (
-        "Syntax error: failed at position 1"
+        "Syntax error: failed at position 1. "
     )
     # The submit error is the command's error; no progress line repeats it (#561).
     assert lines == [f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})"]
@@ -741,6 +746,68 @@ def test_apply_async_submit_failing_after_the_query_ran_gives_up_after_the_poll_
     # The outcome is unknown, so the attempt stays started.
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started"]
+
+
+def test_apply_async_transport_failed_submit_without_running_sighting_completes() -> None:
+    """#671: a transport error on the submit (e.g. HTTP 524) with no poll
+    having seen the query running says nothing about the outcome: the server
+    may be running it unobserved. The same grace as after a seen-running
+    submit failure applies."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            QueryStatus(status="unknown"),  # first poll after the failed submit
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=25, written_bytes=200, duration_ms=9000),
+        ],
+        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+    )
+    journal = _FakeJournalStore()
+    result = apply_async_statement(_input(client=client, journal=journal))
+    assert result.kind == "completed"
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+
+
+def test_apply_async_transport_failed_submit_without_trace_stays_started() -> None:
+    """#671: no server trace after the grace: the attempt stays started for a
+    re-run to re-attach; it is not journaled failed. Same message as TS."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            *[QueryStatus(status="unknown") for _ in range(21)],
+        ],
+        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError) as excinfo:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert str(excinfo.value) == (
+        f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
+        "the submit request failed (HTTP 524: error code: 524) and polling found no "
+        "outcome 21\u00d7. A re-run of `chkit migrate --apply` attaches to the query "
+        "if it still runs and runs the statement again if not."
+    )
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started"]
+
+
+def test_apply_async_console_executor_rejection_fails_at_once() -> None:
+    """#671: the ObsessionDB console executor raises a plain RuntimeError but
+    keeps the ClickHouse exception code on it, so a rejection through the
+    console is still journaled failed at once (#233)."""
+    rejection = RuntimeError("Code: 62. DB::Exception: Syntax error: failed at position 1")
+    rejection.code = "62"  # type: ignore[attr-defined]
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")] * 3,
+        submit_raises=rejection,
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError, match="Syntax error"):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+    assert journal.writes[1].operations[0].last_error == str(rejection)
 
 
 class _OpenSubmitClient(_ScriptedClient):
@@ -951,7 +1018,11 @@ def test_apply_async_new_submission_ignores_earlier_attempt(
         ["flush gap"] * 30,
         attached_start=0,
         earlier_start=stale_start,
-        submit_raises=RuntimeError("Unknown table expression identifier 'default.src_typo'"),
+        submit_raises=DatabaseError(
+            "Received ClickHouse exception, code: 60, server response: Code: 60. "
+            "DB::Exception: Unknown table expression identifier 'default.src_typo'. "
+            "(UNKNOWN_TABLE) (for url http://localhost:8123)"
+        ),
     )
     _advance_clock(monkeypatch, client)
     state = (
@@ -963,7 +1034,7 @@ def test_apply_async_new_submission_ignores_earlier_attempt(
         ).model_copy(update={"name": "20260101_000000_async.sql"})
     )
     journal = _FakeJournalStore(state=state)
-    with pytest.raises(RuntimeError, match="src_typo"):
+    with pytest.raises(DatabaseError, match="src_typo"):
         apply_async_statement(_input(client=client, journal=journal))
     # A retry's bound lies 5 s later still (#672).
     bound = SUBMISSION_BOUND if prior == "none" else RETRY_SUBMISSION_BOUND
