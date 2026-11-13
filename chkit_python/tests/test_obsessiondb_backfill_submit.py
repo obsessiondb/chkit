@@ -544,9 +544,12 @@ def _patch_jobs_api(
     monkeypatch: pytest.MonkeyPatch,
     status: str,
     done_task_ids: tuple[str, ...] = (),
+    jobs: dict[str, tuple[str, ...]] | None = None,
 ) -> list[tuple[str, dict[str, Any]]]:
     """``jobs_get`` answers with a job in ``status`` whose tasks ``done_task_ids``
-    finished; ``jobs_submit`` returns job-new.
+    finished; ``jobs_submit`` returns job-new. With ``jobs`` (job id -> its task
+    ids), ``jobs_submit`` records the job it creates there as job-<n> and
+    ``jobs_get`` answers with that job's tasks.
     """
     calls: list[tuple[str, dict[str, Any]]] = []
 
@@ -579,14 +582,20 @@ def _patch_jobs_api(
                             }
                         ],
                     }
-                    for index, task_id in enumerate(("c1", "c2"))
+                    for index, task_id in enumerate(
+                        jobs[job_id] if jobs and job_id in jobs else ("c1", "c2")
+                    )
                 ],
             }
         )
 
     def fake_jobs_submit(_creds: Credentials, **kwargs: Any) -> str:
         calls.append(("jobs/submit", kwargs))
-        return "job-new"
+        if jobs is None:
+            return "job-new"
+        job_id = f"job-{len(jobs) + 1}"
+        jobs[job_id] = tuple(task.id for task in kwargs["tasks"])
+        return job_id
 
     def no_planning(**_kwargs: Any) -> BuildBackfillPlanOutput:
         msg = "submit --plan-id must not build a new plan"
@@ -668,6 +677,30 @@ def test_handle_submit_plan_id_leaves_out_chunks_that_finished_in_the_job(
         "Skipped 1 chunk that already finished.\n"
         f"Track progress: {BASE}/svc-1/jobs/job-new"
     ]
+
+
+def test_handle_submit_plan_id_leaves_out_a_chunk_finished_in_an_earlier_job(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
+) -> None:
+    _setup_saved_plan(tmp_path, job_id="job-1")
+    calls = _patch_jobs_api(
+        monkeypatch, "failed", ("c1",), jobs={"job-1": ("c1", "c2")}
+    )
+
+    msgs: list[Any] = []
+    for _ in range(2):
+        code = handle_submit(
+            _submit_context(
+                flags={"--plan-id": PLAN_ID}, msgs=msgs, json_mode=True, config_dir=tmp_path
+            )
+        )
+        assert code == 0
+
+    submitted = [args for procedure, args in calls if procedure == "jobs/submit"]
+    assert [[t.id for t in args["tasks"]] for args in submitted] == [["c2"], ["c2"]]
+    assert msgs[1]["jobId"] == "job-3"
+    assert msgs[1]["replacedJobId"] == "job-2"
+    assert msgs[1]["skippedChunks"] == 1
 
 
 def test_handle_submit_plan_id_refuses_when_every_chunk_finished_in_the_job(
