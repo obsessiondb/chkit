@@ -1,0 +1,5 @@
+NODE endpoint
+SQL >
+    SELECT event_type, count() AS events FROM events GROUP BY event_type
+
+TYPE endpoint

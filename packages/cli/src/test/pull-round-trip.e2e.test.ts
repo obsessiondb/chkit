@@ -8,6 +8,7 @@ import {
   createJournalTableName,
   createLiveExecutor,
   createPrefix,
+  dropDatabase,
   formatTestDiagnostic,
   getLiveEnv,
   pollUntil,
@@ -282,7 +283,7 @@ export default schema(
     expect(drift.exitCode, formatTestDiagnostic('drift', drift)).toBe(0)
     expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
   } finally {
-    await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
+    await dropDatabase(executor, database)
     await executor.close()
     await rm(dir, { recursive: true, force: true })
   }

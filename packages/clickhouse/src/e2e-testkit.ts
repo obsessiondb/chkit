@@ -94,6 +94,37 @@ export function quoteIdent(value: string): string {
   return quoteIdentifier(value)
 }
 
+/**
+ * Drops a test database, re-running the DROP while it fails with
+ * `DATABASE_NOT_EMPTY`.
+ *
+ * DROP DATABASE drops the tables the serving replica lists, then fails if a
+ * table appeared meanwhile. On a multi-replica service (ObsessionDB) that
+ * happens when the replica applies an earlier CREATE during the drop; the
+ * server answers "Try again". Any other error throws at once. `timeoutMs`
+ * stops the re-runs; it does not cut short a DROP that is still running.
+ * chkit-py's twin is `drop_database`.
+ */
+export async function dropDatabase(
+  executor: Pick<ClickHouseExecutor, 'command'>,
+  database: string,
+  options: PollUntilOptions = {},
+): Promise<void> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      await executor.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
+      return
+    } catch (error) {
+      const text = `${(error as { type?: unknown }).type ?? ''} ${error instanceof Error ? error.message : String(error)}`
+      if (Date.now() >= deadline || !text.includes('DATABASE_NOT_EMPTY')) throw error
+    }
+    await sleep(intervalMs)
+  }
+}
+
 // ---------------------------------------------------------------------------
 // Run tags & naming
 // ---------------------------------------------------------------------------
@@ -154,10 +185,38 @@ export async function pollUntil<T>(
   }
 }
 
+// Errors a replica that has not applied an earlier CREATE answers with.
+const NOT_YET_VISIBLE_ERRORS = ['UNKNOWN_TABLE', 'UNKNOWN_DATABASE']
+
+/**
+ * Runs a statement that needs an object an earlier DDL created.
+ *
+ * On a multi-replica service (ObsessionDB) each request may land on a
+ * different replica, and one that hasn't applied the CREATE yet answers
+ * `UNKNOWN_TABLE` or `UNKNOWN_DATABASE`. Such a failure changes nothing, so
+ * the statement is re-run until the replica serving it sees the object; any
+ * other error throws at once. chkit-py's twin is `run_once_visible`.
+ */
+export async function runOnceVisible<T>(run: () => Promise<T>, options: PollUntilOptions = {}): Promise<T> {
+  const timeoutMs = options.timeoutMs ?? 30_000
+  const intervalMs = options.intervalMs ?? 500
+  const deadline = Date.now() + timeoutMs
+  for (;;) {
+    try {
+      return await run()
+    } catch (error) {
+      const text = `${(error as { type?: unknown }).type ?? ''} ${error instanceof Error ? error.message : String(error)}`
+      if (Date.now() >= deadline || !NOT_YET_VISIBLE_ERRORS.some((code) => text.includes(code))) throw error
+    }
+    await sleep(intervalMs)
+  }
+}
+
 // Re-exported from ddl-propagation for test convenience.
 
 export {
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   waitForColumn,
   waitForDictionary,

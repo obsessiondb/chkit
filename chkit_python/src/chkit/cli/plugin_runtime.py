@@ -337,6 +337,13 @@ class PluginRuntime:
             with contextlib.suppress(Exception):
                 close()
 
+    def has_on_pull_introspect(self) -> bool:
+        """Whether any plugin defines an ``on_pull_introspect`` hook."""
+        return any(
+            _get_hook(entry.plugin, "on_pull_introspect") is not None
+            for entry in self._plugins
+        )
+
     def run_on_pull_introspect(
         self, context: ChxOnPullIntrospectContext
     ) -> list[Any] | None:
