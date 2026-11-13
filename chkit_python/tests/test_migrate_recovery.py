@@ -8,7 +8,6 @@ abandon-output,retry-output,empty,apply-resume}.test.ts`` and
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
@@ -1182,17 +1181,7 @@ class _EventStore(FakeStore):
         super().append_entry(entry, chkit_version=chkit_version)
 
 
-@pytest.fixture
-def _fast_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let a propagation wait time out without sleeping between its checks."""
-    from chkit.clickhouse import ddl_propagation  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        ddl_propagation, "time", SimpleNamespace(sleep=lambda _s: None, monotonic=time.monotonic)
-    )
-
-
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: Path) -> None:
     events: list[str] = []
     client = _PropagationClient(events, visible=False)
@@ -1220,7 +1209,7 @@ def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: 
     assert [(e.name, e.checksum) for e in store.appended] == [("m.sql", checksum_sql(_WAIT_SQL))]
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Path) -> None:
     # --abandon keeps every record as failed, so the next run restarts at
     # statement 1 with the abandoned record of statement 2 still in the state.
@@ -1253,7 +1242,7 @@ def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Pat
     assert events == ["propagation-query", f"command {_INSERT_T};", "append"]
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None:
     events: list[str] = []
     client = _PropagationClient(events, visible=False)
@@ -1276,7 +1265,7 @@ def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None
     assert store.appended == []
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
     tmp_path: Path,
 ) -> None:

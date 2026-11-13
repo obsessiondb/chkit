@@ -10,6 +10,7 @@ import {
   type TableDefinition,
 } from './model.js'
 import { columnTypeFingerprint, keyFingerprint, renderColumnType, toCreateSQL } from './sql.js'
+import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
 import {
   DEFAULT_INDEX_GRANULARITY,
   declaredReadonlySettings,
@@ -685,7 +686,7 @@ function assertCutoverSupported(input: {
       problems.push(`key column ${name} must be a stored column of both the old and the new table.`)
       continue
     }
-    if (column.nullable || /^\s*(LowCardinality\s*\(\s*)?Nullable\s*\(/.test(column.type)) {
+    if (column.nullable || isNullableType(column.type)) {
       problems.push(`key column ${name} is Nullable; NOT IN never matches NULL, so such rows could not be told apart.`)
     }
   }
@@ -758,6 +759,37 @@ function copiedColumns(oldDef: TableDefinition, newDef: TableDefinition, problem
     columns.push(oldColumn.name)
   }
   return columns
+}
+
+/**
+ * Whether a column type is `Nullable(T)` or `LowCardinality(Nullable(T))`.
+ * ClickHouse skips comments and Unicode whitespace, and reads type names quoted
+ * in backticks, double quotes or `“…”`, so a type with a comment before
+ * `Nullable` or `` `Nullable`(UInt64) `` is Nullable too (#699). The shared
+ * lexer reads Unicode whitespace and `“`, `”` as punctuation, so they are
+ * handled here. Type names are case-sensitive.
+ */
+// One character ClickHouse skips as whitespace (skipWhitespacesUTF8): JavaScript's
+// \s plus the ones it lacks. A character only JavaScript reads as whitespace makes
+// a type ClickHouse rejects anyway.
+const CLICKHOUSE_SPACE = /^[\s\u0085\u180e\u200b-\u200d\u2060]$/
+
+function isNullableType(type: string): boolean {
+  const tokens = tokenizeSQL(type).filter((token) => !isTrivia(token) && !CLICKHOUSE_SPACE.test(token.text))
+  const isOpen = (index: number) => tokens[index]?.kind === 'punctuation' && tokens[index]?.text === '('
+  // The name at `index` and the index after it.
+  const nameAt = (index: number): [string | undefined, number] => {
+    const token = tokens[index]
+    if (token === undefined) return [undefined, index]
+    if (token.text === '\u201c' && tokens[index + 2]?.text === '\u201d') {
+      const inner = tokens[index + 1]
+      return [inner?.kind === 'identifier' ? inner.text : undefined, index + 3]
+    }
+    return [identifierName(token), index + 1]
+  }
+  let [name, next] = nameAt(0)
+  if (name === 'LowCardinality' && isOpen(next)) [name, next] = nameAt(next + 1)
+  return name === 'Nullable' && isOpen(next)
 }
 
 function isStored(column: ColumnDefinition): boolean {

@@ -143,6 +143,29 @@ def quote_ident(value: str) -> str:
     return f"`{escaped}`"
 
 
+def drop_database(
+    client: Any, database: str, *, timeout: float = 30.0, interval: float = 0.5
+) -> None:
+    """Drop a test database, re-running the DROP while it fails with ``DATABASE_NOT_EMPTY``.
+
+    DROP DATABASE drops the tables the serving replica lists, then fails if a
+    table appeared meanwhile. On a multi-replica service (ObsessionDB) that
+    happens when the replica applies an earlier CREATE during the drop; the
+    server answers "Try again". Any other error raises at once. ``timeout``
+    stops the re-runs; it does not cut short a DROP that is still running.
+    Port of TS ``dropDatabase``.
+    """
+    deadline = time.monotonic() + timeout
+    while True:
+        try:
+            client.execute(f"DROP DATABASE IF EXISTS {quote_ident(database)} SYNC")
+            return
+        except Exception as error:
+            if time.monotonic() >= deadline or "DATABASE_NOT_EMPTY" not in str(error):
+                raise
+        time.sleep(interval)
+
+
 def _random_suffix() -> str:
     """Return an 8-hex-digit random suffix (32 bits).
 
@@ -219,7 +242,7 @@ def poll_until(
 
 # Errors a statement gets when it lands on a replica that hasn't applied an
 # earlier DDL yet. Such a failure changes nothing, so the statement can run again.
-_NOT_YET_VISIBLE_ERRORS = ("UNKNOWN_TABLE",)
+_NOT_YET_VISIBLE_ERRORS = ("UNKNOWN_TABLE", "UNKNOWN_DATABASE")
 
 
 def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: float = 0.5) -> T:
@@ -227,8 +250,8 @@ def run_once_visible(run: Callable[[], T], *, timeout: float = 30.0, interval: f
 
     On a multi-replica service (ObsessionDB) each request may land on a
     different replica, and one that hasn't applied the CREATE yet answers
-    ``UNKNOWN_TABLE`` even after ``wait_for_table`` saw the table on another
-    one. Such a failure changes nothing, so the statement is re-run until the
+    ``UNKNOWN_TABLE`` (or ``UNKNOWN_DATABASE``) even after ``wait_for_table``
+    saw the table on another one. Such a failure changes nothing, so the statement is re-run until the
     replica serving it sees the object; any other error raises at once.
     """
     deadline = time.monotonic() + timeout
