@@ -4,8 +4,6 @@ import { join } from 'node:path'
 import {
   collectDestructiveOperationMarkers,
   collectUnmarkedDestructiveStatements,
-  migrationContainsDangerOperation,
-  migrationContainsDestructiveSql,
   type DestructiveOperationMarker,
 } from '../../runtime/safety-markers.js'
 
@@ -22,17 +20,14 @@ export async function scanDestructive(
   const operations: DestructiveOperationMarker[] = []
   for (const file of pending) {
     const sql = await readFile(join(migrationsDir, file), 'utf8')
-    if (migrationContainsDangerOperation(sql)) {
-      // Generated migration with planner risk markers (unchanged behavior).
-      migrations.push(file)
-      operations.push(...collectDestructiveOperationMarkers(file, sql))
-    } else if (migrationContainsDestructiveSql(sql)) {
-      // Destructive SQL at a marker-less position: a fully hand-written
-      // migration, or a statement hand-appended to a generated one. Planner-
-      // marked statements (incl. non-danger drops) are trusted and not re-scanned.
-      migrations.push(file)
-      operations.push(...collectUnmarkedDestructiveStatements(file, sql))
-    }
+    // Planner danger markers, plus destructive SQL at marker-less positions: a
+    // fully hand-written migration, or a statement hand-appended to a generated
+    // one. Planner-marked statements (incl. non-danger drops) are trusted and
+    // not re-scanned.
+    const found = [...collectDestructiveOperationMarkers(file, sql), ...collectUnmarkedDestructiveStatements(file, sql)]
+    if (found.length === 0) continue
+    migrations.push(file)
+    operations.push(...found)
   }
   return { migrations, operations }
 }
