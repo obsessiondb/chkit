@@ -245,9 +245,36 @@ describe('physical KILL receipt coverage', () => {
       },
     }
     await killWithReceipts(conn, identity, [ID])
-    expect(physical).toHaveLength(2)
-    expect(new Set(physical).size).toBe(2)
+    expect(physical).toHaveLength(4)
+    expect(new Set(physical).size).toBe(4)
     expect(reads).toBe(2)
+  })
+
+  for (const replicas of [2, 3]) test(`${replicas}-node round robin cannot pin KILLs to a subset of members`, async () => {
+    const identity = { ...IDENTITY, serverUUIDs: [SERVER, other, '00000000-0000-4000-8000-000000000008'].slice(0, replicas) }
+    let requests = 0
+    let waits = 0
+    const receipts: Array<{ server_uuid: string; principal: string; query_id: string }> = []
+    const killed = new Set<string>()
+    const conn = {
+      remaining() { if (++waits > 3) throw new Error('bounded regression deadline'); return 1 },
+      async query<T>(sql: string, options?: QueryControlOptions): Promise<T[]> {
+        const server = identity.serverUUIDs[requests++ % identity.serverUUIDs.length]
+        if (!server) throw new Error('missing route')
+        let rows: unknown[] = []
+        if (sql.includes('system.one')) rows = identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: 'writer' }))
+        else if (sql === 'SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal') rows = [{ server_uuid: server, principal: 'writer' }]
+        else if (sql.startsWith('KILL QUERY')) {
+          killed.add(server)
+          receipts.push({ server_uuid: server, principal: 'writer', query_id: options?.queryId ?? '' })
+        } else if (sql.includes('system.query_log')) rows = [...receipts]
+        else throw new Error(`unexpected SQL ${sql}`)
+        return rows as T[]
+      },
+    }
+    await killWithReceipts(conn, identity, [ID])
+    expect([...killed].sort()).toEqual([...identity.serverUUIDs].sort())
+    expect(new Set(receipts.map((row) => row.query_id)).size).toBe(receipts.length)
   })
 
   for (const invalid of ['missing member', 'wrong principal', 'wrong server', 'wrong id', 'unreadable logs'] as const) {

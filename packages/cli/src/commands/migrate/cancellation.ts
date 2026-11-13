@@ -273,17 +273,21 @@ export async function killWithReceipts(conn: Control, identity: QueryIdentity, i
   const covered = new Set<string>()
   while (covered.size !== identity.serverUUIDs.length) {
     await assertIdentityTopology(conn, identity)
-    const controlId = randomUUID()
-    controls.push(controlId)
-    try {
-      await conn.query(`KILL QUERY WHERE ${processPredicate(identity, ids)} AND ${identityGuard(identity)} SYNC`, {
-        queryId: controlId,
-        settings: { log_queries: 1, log_queries_probability: 1, log_queries_min_query_duration_ms: 0 },
-      })
-    } catch (error) {
-      // An empty KILL can be NOTHING_TO_KILL on some versions. Only a successful
-      // QueryFinish receipt counts; the exception alone never supplies coverage.
-      if (!isNothingToKill(error)) throw error
+    // Keep a full burst together: interleaving one receipt read per KILL can
+    // pin every KILL to the same member of a round-robin endpoint.
+    for (let attempt = 0; attempt < identity.serverUUIDs.length; attempt++) {
+      const controlId = randomUUID()
+      controls.push(controlId)
+      try {
+        await conn.query(`KILL QUERY WHERE ${processPredicate(identity, ids)} AND ${identityGuard(identity)} SYNC`, {
+          queryId: controlId,
+          settings: { log_queries: 1, log_queries_probability: 1, log_queries_min_query_duration_ms: 0 },
+        })
+      } catch (error) {
+        // An empty KILL can be NOTHING_TO_KILL on some versions. Only a successful
+        // QueryFinish receipt counts; the exception alone never supplies coverage.
+        if (!isNothingToKill(error)) throw error
+      }
     }
     const receipts = await conn.query<{ server_uuid: string; principal: string; query_id: string }>(
       `SELECT server_uuid, principal, query_id FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, view(SELECT toString(serverUUID()) AS server_uuid, user AS principal, query_id FROM system.query_log WHERE event_date >= today() - 1 AND event_time >= now() - INTERVAL 5 MINUTE AND query_id IN (${controls.map(sqlString).join(',')}) AND type = 'QueryFinish' AND exception_code = 0 AND user = ${sqlString(identity.principal)})) SETTINGS skip_unavailable_shards = 0`,

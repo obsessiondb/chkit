@@ -286,7 +286,7 @@ def test_kill_requires_receipts_from_every_declared_member() -> None:
     assert len(set(fixture.controls)) == 2
     assert all(control not in {CLAIM, QUERY_ID} for control in fixture.controls)
     receipt_sql = [sql for sql, _ in fixture.calls if "system.query_log" in sql]
-    assert len(receipt_sql) == 2
+    assert len(receipt_sql) == 1
     assert all("type = 'QueryFinish'" in sql and "exception_code = 0" in sql for sql in receipt_sql)
     assert not any(sql.startswith("INSERT") for sql, _ in fixture.calls)
 
@@ -488,3 +488,40 @@ def test_journal_is_never_an_eligible_recovery_data_table(sql: str) -> None:
     with pytest.raises(MigrateError, match="journal"):
         expand_recovery_plan(fixture, TARGET, replace(initial, obligations=[]), [QueryContext("load.sql", 0, sql, before)])
     assert not any(query.startswith(("KILL", "INSERT")) for query, _ in fixture.calls)
+
+
+@pytest.mark.parametrize("replicas", [2, 3])
+def test_round_robin_routes_every_request_without_pinning_kills_to_one_node(replicas: int) -> None:
+    identity = replace(IDENTITY, server_uuids=[SERVER, QUERY_ID, SOURCE][:replicas])
+    requests = 0
+    waits = 0
+    receipts: list[dict[str, Any]] = []
+    killed: set[str] = set()
+
+    class RoundRobinControl:
+        def remaining(self) -> float:
+            nonlocal waits
+            waits += 1
+            if waits > 3:
+                raise RuntimeError("bounded regression deadline")
+            return 1
+
+        def query(self, sql: str, *, query_id: str | None = None, settings: Any = None) -> list[dict[str, Any]]:
+            nonlocal requests
+            server = identity.server_uuids[requests % len(identity.server_uuids)]
+            requests += 1
+            if "system.one" in sql:
+                return [{"server_uuid": member, "principal": "writer"} for member in identity.server_uuids]
+            if sql == "SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal":
+                return [{"server_uuid": server, "principal": "writer"}]
+            if sql.startswith("KILL QUERY"):
+                killed.add(server)
+                receipts.append({"server_uuid": server, "principal": "writer", "query_id": query_id})
+                return []
+            if "system.query_log" in sql:
+                return list(receipts)
+            raise AssertionError(sql)
+
+    kill_with_receipts(RoundRobinControl(), identity, [CLAIM])  # type: ignore[arg-type]
+    assert killed == set(identity.server_uuids)
+    assert len({row["query_id"] for row in receipts}) == len(receipts)

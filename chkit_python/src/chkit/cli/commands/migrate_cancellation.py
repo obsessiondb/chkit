@@ -487,22 +487,25 @@ def kill_with_receipts(conn: _Control, identity: QueryIdentity, ids: list[str]) 
     covered: set[str] = set()
     while len(covered) != len(identity.server_uuids):
         _assert_identity_topology(conn, identity)
-        control_id = str(uuid4())
-        controls.append(control_id)
-        try:
-            conn.query(
-                f"KILL QUERY WHERE {_process_predicate(identity, ids)} "
-                f"AND {_identity_guard(identity)} SYNC",
-                query_id=control_id,
-                settings={
-                    "log_queries": 1,
-                    "log_queries_probability": 1,
-                    "log_queries_min_query_duration_ms": 0,
-                },
-            )
-        except Exception as error:
-            if not re.search(r"\bNOTHING_TO_KILL\b", str(error)):
-                raise
+        # A consecutive burst avoids a round-robin phase lock caused by
+        # interleaving one receipt read after each KILL.
+        for _attempt in identity.server_uuids:
+            control_id = str(uuid4())
+            controls.append(control_id)
+            try:
+                conn.query(
+                    f"KILL QUERY WHERE {_process_predicate(identity, ids)} "
+                    f"AND {_identity_guard(identity)} SYNC",
+                    query_id=control_id,
+                    settings={
+                        "log_queries": 1,
+                        "log_queries_probability": 1,
+                        "log_queries_min_query_duration_ms": 0,
+                    },
+                )
+            except Exception as error:
+                if not re.search(r"\bNOTHING_TO_KILL\b", str(error)):
+                    raise
         control_list = ",".join(sql_string(query_id) for query_id in controls)
         receipts = conn.query(
             "SELECT server_uuid, principal, query_id FROM clusterAllReplicas("
