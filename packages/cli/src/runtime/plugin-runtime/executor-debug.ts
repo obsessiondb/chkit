@@ -34,9 +34,18 @@ export function wrapExecutorWithDebug(
   const queryJson = executor.queryJson?.bind(executor)
 
   const systemTableSource = executor.systemTableSource?.bind(executor)
+  const openConcurrent = executor.openConcurrent?.bind(executor)
+  const commandGuarded = executor.commandGuarded?.bind(executor)
 
   return {
     ...(systemTableSource ? { systemTableSource } : {}),
+    ...(openConcurrent ? { openConcurrent: () => wrapExecutorWithDebug(openConcurrent()) } : {}),
+    ...(commandGuarded ? {
+      commandGuarded(sql: string, check: () => void, settings?: ClickHouseSettings): Promise<void> {
+        debug('clickhouse', `command: ${truncate(sql)}`)
+        return trace('command', null, () => commandGuarded(sql, check, settings))
+      },
+    } : {}),
     command(sql: string, settings?: ClickHouseSettings): Promise<void> {
       debug('clickhouse', `command: ${truncate(sql)}`)
       return trace('command', null, () => executor.command(sql, settings))

@@ -806,6 +806,20 @@ class JournalStore:
         ]
         return MigrationJournal(applied=applied)
 
+    def lock_target(self) -> tuple[str, str, ReplicaFanout | None] | None:
+        """Where the migrate lock writes its claims (#716).
+
+        The journal (created if missing) as (database, table, replicas); None
+        while the database does not exist.
+        """
+        if self._database_missing:
+            self._database_missing = False
+            self._bootstrapped = False
+        self._ensure_table(create=True)
+        if self._database_missing:
+            return None
+        return self._database_name(), self._table, self._replica_fanout()
+
     def append_entry(self, entry: MigrationJournalEntry, *, chkit_version: str) -> None:
         """Flip migration_completed=true; preserve any existing operations[]."""
         existing = self.read_migration_state(entry.name)

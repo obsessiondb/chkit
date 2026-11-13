@@ -50,6 +50,12 @@ export interface JournalStore {
   readMigrationState(migrationName: string): Promise<MigrationRowState | null>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
+  /**
+   * Where the migrate lock writes its claims (#716): the journal, created
+   * if missing, with its database and replicas. Null while the database
+   * does not exist.
+   */
+  lockTarget(): Promise<{ database: string; journalTable: string; fanout: ReplicaFanout | undefined } | null>
   readonly databaseMissing: boolean
 }
 
@@ -787,6 +793,16 @@ SETTINGS index_granularity = 1`
       lastWritten.set(state.name, state)
       noteVersion(state.name, state.appliedAt)
       await trySyncReplica()
+    },
+
+    async lockTarget() {
+      if (_databaseMissing) {
+        _databaseMissing = false
+        bootstrapped = false
+      }
+      await ensureTable(true)
+      if (_databaseMissing) return null
+      return { database: await databaseName(), journalTable, fanout: await replicaFanout() }
     },
 
     async appendEntry(entry: MigrationJournalEntry): Promise<void> {
