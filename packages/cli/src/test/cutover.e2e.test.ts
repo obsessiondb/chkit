@@ -1,6 +1,6 @@
 import { describe, test } from 'bun:test'
 
-import { liveCutoverTarget, runBackfillScenario, runKeepScenario } from './cutover-scenario.js'
+import { liveCutoverTarget, runBackfillScenario, runKeepScenario, runUndeclaredPrimaryKeyScenario } from './cutover-scenario.js'
 
 // Zero-downtime cutover of a sort-key change (#202) under concurrent writers,
 // against the local stack or ObsessionDB (CHKIT_E2E_TARGET=obsessiondb).
@@ -15,4 +15,8 @@ describe('generate --cutover e2e (#202)', () => {
   test('copies through the backfill plugin, then swaps and drops the old table', async () => {
     await runBackfillScenario(liveCutoverTarget(), 'cutover_backfill')
   }, 900_000)
+
+  test('cuts over a table created with only ORDER BY, without PRIMARY KEY (#524)', async () => {
+    await runUndeclaredPrimaryKeyScenario(liveCutoverTarget(), 'cutover_pk')
+  }, 300_000)
 })

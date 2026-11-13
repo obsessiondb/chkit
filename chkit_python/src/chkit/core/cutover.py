@@ -259,6 +259,8 @@ def plan_cutover(
         table=request.table,
         names=names,
         columns=columns,
+        old_columns=old_canonical.columns,
+        snapshot_from_definition=_snapshot_from_definition(old_canonical),
         key=request.key,
         cluster=options.cluster,
         readonly_settings=declared_readonly_settings(
@@ -345,9 +347,6 @@ def _build_operations(
         return f"{table_key}:cutover:{step}"
 
     shadow_def = _without_rename(new_def).model_copy(update={"name": names.shadow})
-    snapshot_def = _without_rename(old_def).model_copy(
-        update={"name": names.snapshot, "comment": format_cutover_metadata(metadata)}
-    )
     operations = [
         _op("cutover_validate", step_key("start"), "caution", sql.validate_start),
         _op("create_table", f"table:{database}.{names.shadow}", "safe", to_create_sql(shadow_def)),
@@ -375,7 +374,7 @@ def _build_operations(
             "create_table",
             f"table:{database}.{names.snapshot}",
             "safe",
-            to_create_sql(snapshot_def),
+            _create_snapshot_sql(old_def=old_def, request=request, names=names, metadata=metadata),
         ),
         _op(
             "cutover_snapshot",
@@ -536,6 +535,38 @@ def _build_operations(
     return operations
 
 
+def _create_snapshot_sql(
+    *,
+    old_def: TableDefinition,
+    request: CutoverRequest,
+    names: CutoverNames,
+    metadata: CutoverMetadata,
+) -> str:
+    """The snapshot is created AS the table, so it gets the table's definition as
+    the server stores it. ATTACH PARTITION compares the keys as they are
+    written, so before ClickHouse 26.7 a table created with only ORDER BY does
+    not attach to one that declares PRIMARY KEY (#524). A Replicated table
+    keeps the old definition unless its path in the schema has {uuid}: ClickHouse
+    expands {table} when it creates a table, also in a default_replica_path that
+    chkit cannot see, so a copy could register at the table's own path. TS
+    ``createSnapshotSQL``."""
+    comment = format_cutover_metadata(metadata)
+    if _snapshot_from_definition(old_def):
+        return to_create_sql(
+            _without_rename(old_def).model_copy(update={"name": names.snapshot, "comment": comment})
+        )
+    return (
+        f"CREATE TABLE IF NOT EXISTS {render_qualified_name(request.database, names.snapshot)} "
+        f"AS {render_qualified_name(request.database, request.table)}\n"
+        f"COMMENT {_string_literal(comment)};"
+    )
+
+
+def _snapshot_from_definition(old_def: TableDefinition) -> bool:
+    path = _replicated_path(old_def.engine) or ""
+    return engine_name(old_def.engine).startswith("Replicated") and "{uuid}" not in path
+
+
 @dataclass(frozen=True)
 class _CutoverSql:
     validate_start: str
@@ -567,6 +598,8 @@ def _create_cutover_sql(
     table: str,
     names: CutoverNames,
     columns: list[str],
+    old_columns: list[ColumnDefinition],
+    snapshot_from_definition: bool,
     key: list[str],
     cluster: str | None,
     readonly_settings: list[str],
@@ -596,11 +629,12 @@ def _create_cutover_sql(
         if readonly_settings
         else ""
     )
-    # The snapshot table is created from the old definition and must get the
-    # old table's layout, or the EXCHANGE guard stops the cutover after the
-    # copy. Check before anything is created: the old table stores what it was
-    # created with, and a missing index_granularity is the server's default,
-    # which chkit only assumes (clickhouse.indexGranularity).
+    # The EXCHANGE guards tell the old table from the new one by layout, so the
+    # old table must store the read-only settings the migration expects, or
+    # the guard stops the cutover after the copy. Check before anything is
+    # created: the old table stores what it was created with, and a missing
+    # index_granularity is the server's default, which chkit only assumes
+    # (clickhouse.indexGranularity).
     settings_match = (
         f"({table_count(table)} = 0 OR (SELECT any("
         f"{readonly_settings_layout_sql(readonly_settings, index_granularity)}) "
@@ -623,6 +657,44 @@ def _create_cutover_sql(
             f"FROM system.tables WHERE database = {_string_literal(database)} "
             f"AND name = {_string_literal(name)})"
         )
+
+    # The snapshot holds every column the table stores, but the mirror and the
+    # copy move only the columns of the old definition: a column only the server
+    # has would not reach the new table, and a copied column it lacks stops the
+    # mirror. A Nested column `n` is stored as `n.x`.
+    def literals(values: list[str]) -> str:
+        return "[" + ", ".join(_string_literal(value) for value in values) + "]"
+
+    nested = [column.name for column in old_columns if column.type.startswith("Nested(")]
+    stored_columns = (
+        f"FROM system.columns WHERE database = {_string_literal(database)} "
+        f"AND table = {_string_literal(table)} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
+    )
+    nested_match = (
+        f" OR arrayExists(column -> startsWith(name, concat(column, '.')), {literals(nested)})"
+        if nested
+        else ""
+    )
+    undeclared_columns = (
+        f"(SELECT countIf(NOT (has({literals([column.name for column in old_columns])}, name)"
+        f"{nested_match})) {stored_columns}) AS undeclared_columns"
+    )
+    declared_columns = (
+        f"({table_count(table)} = 0 OR (SELECT hasAll(groupArray(name), "
+        f"{literals([column for column in columns if column not in nested])}) "
+        f"{stored_columns})) AS declared_columns"
+    )
+    # A snapshot rendered from the old definition always declares PRIMARY KEY.
+    # Before ClickHouse 26.7 parts attach only between tables that both declare
+    # it or both leave it out; 26.7 compares the key by value.
+    declared_key = (
+        f"({table_count(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) "
+        f"FROM system.tables WHERE database = {_string_literal(database)} "
+        f"AND name = {_string_literal(table)}) OR toUInt32OrZero(splitByChar('.', version())[1]) "
+        "* 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
+        if snapshot_from_definition
+        else None
+    )
 
     # Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
     def guard(condition: str, message: str) -> str:
@@ -762,6 +834,9 @@ def _create_cutover_sql(
             f"SELECT (SELECT count() FROM system.databases WHERE name = "
             f"{_string_literal(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,",
             f"{table_count(table)} AS present,",
+            f"{undeclared_columns},",
+            f"{declared_columns},",
+            *([f"{declared_key},"] if declared_key else []),
             f"{table_count(names.shadow)} + {table_count(names.mirror)} + "
             f"{table_count(names.snapshot)} + {table_count(names.reconcile)} AS leftovers,",
             f"{pending_mutations} AS mutations{',' if settings_match else ''}",
@@ -780,6 +855,36 @@ def _create_cutover_sql(
             "  throwIf(min(present) = 0, "
             + _string_literal(f"Table {target} does not exist.")
             + "),",
+            "  throwIf(max(undeclared_columns) > 0, "
+            + _string_literal(
+                f"{target} stores a column that the schema does not declare, so its values "
+                "would not reach the new table. Nothing was created or copied. Run chkit drift, "
+                "change the schema to match the table, and generate the cutover again."
+            )
+            + "),",
+            "  throwIf(min(declared_columns) = 0, "
+            + _string_literal(
+                f"{target} lacks a column that the schema declares, so the mirror cannot read "
+                "it. Nothing was created or copied. Run chkit drift, change the schema to match "
+                "the table, and generate the cutover again."
+            )
+            + "),",
+            *(
+                [
+                    "  throwIf(min(declared_key) = 0, "
+                    + _string_literal(
+                        f"{target} was created without PRIMARY KEY. Its replication path in the "
+                        "schema has no {uuid}, so the cutover's snapshot is created from the "
+                        "schema with PRIMARY KEY, and before ClickHouse 26.7 the table's parts do "
+                        "not attach to it. Nothing was created or copied. Recreate the table with "
+                        'PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" in '
+                        "the cutover guide."
+                    )
+                    + "),"
+                ]
+                if declared_key
+                else []
+            ),
             "  throwIf(max(leftovers) > 0, "
             + _string_literal(
                 f"Objects of an earlier attempt of this cutover exist ({names.shadow}, "

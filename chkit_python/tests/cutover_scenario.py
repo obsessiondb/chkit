@@ -34,6 +34,7 @@ from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
     format_test_diagnostic,
+    poll_until,
     wait_for_table_on_every_replica,
 )
 
@@ -606,6 +607,47 @@ def run_retry_scenario(
     finally:
         if writers is not None:
             writers.stop()
+        drop_cutover_project(target, project)
+
+
+def run_undeclared_primary_key_scenario(
+    target: CutoverTarget, label: str, directory: Path
+) -> None:
+    """A table created with only ORDER BY, as outside chkit (#524). Before
+    ClickHouse 26.7 its parts attach only to a table that leaves PRIMARY KEY
+    out too, so the snapshot must copy the table's stored definition."""
+    project = create_cutover_project(target, label, directory)
+    try:
+        fqn = f"{target.database}.{project.table}"
+        target.admin.execute(f"DROP TABLE {fqn} SYNC")
+        target.admin.execute(
+            f"CREATE TABLE {fqn} (id UInt64, user_id UInt64, payload String) "
+            f"ENGINE = {target.engine} ORDER BY id"
+        )
+        created = poll_until(
+            lambda: target.admin.query(
+                "SELECT engine_full FROM system.tables "
+                f"WHERE database = '{target.database}' AND name = '{project.table}'"
+            ).rows,
+            bool,
+        )
+        assert created, "the table is not listed"
+        assert " PRIMARY KEY " not in str(created[0]["engine_full"]), created
+        target.admin.execute(
+            f"INSERT INTO {fqn} (id, user_id, payload) "
+            "SELECT number, number % 97, 'historic' FROM numbers(1000)"
+        )
+
+        _generate_cutover(target, project)
+        expect_ok(cli(["migrate", "--apply", "--json"]), "migrate --apply (cutover)")
+        assert sorting_keys(target, project) == {
+            project.table: "user_id, id",
+            project.previous: "id",
+        }
+        total = rows(target, f"SELECT count() AS total FROM {target.rows_of(project.table)}")
+        assert int(total[0]["total"]) == 1000
+        assert_chkit_clean()
+    finally:
         drop_cutover_project(target, project)
 
 
