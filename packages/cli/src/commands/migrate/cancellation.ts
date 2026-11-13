@@ -2,7 +2,7 @@ import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import type { ClickHouseExecutor, QueryControlOptions } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryControlOptions } from '@chkit/clickhouse'
 import { compareCodePoints, quoteIdentifier, statementFingerprint } from '@chkit/core'
 
 import { claimsSelectSql, LOCK_ROW_PREFIX, type LockTarget, type MigrateLock } from './lock.js'
@@ -20,6 +20,24 @@ export interface RecoveryObligation { migration: string; statementIndex: number;
 export interface RecoveryContext { protocol: 1; claim: string; identity: QueryIdentity; parents: string[]; obligations: RecoveryObligation[] }
 interface RecoveryRecord { context: RecoveryContext; checksum: string; completed: boolean }
 export interface CancellationPlan { claim: string; holder: string; identity: QueryIdentity; resumePending: boolean; targets: QueryTarget[]; sources: QueryTarget[]; parents: string[]; obligations: RecoveryObligation[]; inherited: boolean }
+
+/** Explicit recovery must make every decision from fresh, complete reads. */
+export function freshRecoveryExecutor(db: ClickHouseExecutor): ClickHouseExecutor {
+  const query = db.queryControl?.bind(db)
+  if (!query) throw cancellationError('Explicit recovery requires bounded fresh control reads.')
+  return new Proxy(db, {
+    get(target, property) {
+      if (property === 'queryStatus') return async () => { throw cancellationError('Explicit recovery cannot attach historical async queries. Finish async recovery before using --cancel-lock-queries.') }
+      if (property === 'query') return <T>(sql: string, settings?: ClickHouseSettings) => query<T>(sql, DEADLINE_MS, { settings: { ...settings, skip_unavailable_shards: 0 } })
+      if (property === 'openConcurrent') {
+        const open = target.openConcurrent?.bind(target)
+        return open ? () => freshRecoveryExecutor(open()) : undefined
+      }
+      const value = Reflect.get(target, property, target)
+      return typeof value === 'function' ? value.bind(target) : value
+    },
+  })
+}
 
 /** Missing/denied discovery never supplies a single-server fallback. */
 export async function resolveQueryIdentity(db: ClickHouseExecutor, configuredCluster?: string): Promise<QueryIdentity> {

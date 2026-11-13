@@ -65,7 +65,7 @@ import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
 import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
 import { createQueryTracker, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
-import { assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
+import { assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
 
 const MIGRATE_FLAGS = defineFlags([
   TABLE_FLAG,
@@ -229,9 +229,13 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   let heldLock: MigrateLock | undefined
   let queryTracker: QueryTracker | undefined
   let completeRecovery: (() => Promise<void>) | undefined
-  const rawDb = pluginContext.executor
+  const rawDb = cancelQueries ? freshRecoveryExecutor(pluginContext.executor) : pluginContext.executor
+  const initialIdentity = cancelQueries ? await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) : undefined
+  const recoveryCluster = initialIdentity?.cluster
+  if (initialIdentity && !recoveryCluster) throw new MigrateError('migrate_cancellation_failed', 'Explicit recovery requires an attested cluster.')
   const db = guardExecutor(rawDb, () => heldLock?.assertHeld())
-  const journalStore = createJournalStore(db, config.clickhouse?.cluster)
+  const journalStore = createJournalStore(db, config.clickhouse?.cluster, initialIdentity && recoveryCluster
+    ? { cluster: recoveryCluster, replicas: initialIdentity.serverUUIDs.length } : undefined)
   const breakLock = f['--break-lock']
   // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
   const log = jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
@@ -251,8 +255,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     }
     const heartbeatDb = rawDb.openConcurrent?.()
     try {
-      let identity: QueryIdentity | undefined
-      if (rawDb.commandTracked && rawDb.queryControl) {
+      let identity: QueryIdentity | undefined = initialIdentity
+      if (!identity && rawDb.commandTracked && rawDb.queryControl) {
         try { identity = await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) }
         catch (error) {
           if (cancelQueries) throw error
@@ -264,6 +268,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       if (cancellation) {
         const contexts: QueryContext[] = []
         for (const file of selectedFiles) {
+          const state = await journalStore.readMigrationState(file)
+          if (state?.operations.some((op) => op.status !== 'completed' && op.queryId !== '')) throw new MigrateError('migrate_cancellation_failed', `Explicit recovery cannot attach the historical async attempt in ${file}. Finish async recovery before using --cancel-lock-queries.`)
           const sql = await readFile(join(migrationsDir, file), 'utf8')
           const summaries = extractMigrationOperationSummaries(sql)
           for (const [statementIndex, forwardSQL] of extractExecutableStatements(sql).entries()) {

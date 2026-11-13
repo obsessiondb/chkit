@@ -273,7 +273,7 @@ function rowVersion(appliedAt: string): number {
   return Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
 }
 
-export function createJournalStore(db: ClickHouseExecutor, cluster?: string): JournalStore {
+export function createJournalStore(db: ClickHouseExecutor, cluster?: string, fanoutOverride?: ReplicaFanout): JournalStore {
   const journalTable = resolveJournalTableName()
   debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
   // In cluster mode the journal must be consistent across every node, so it uses
@@ -462,6 +462,8 @@ SETTINGS index_granularity = 1`
    * journal (#700).
    */
   async function replicaFanout(): Promise<ReplicaFanout | undefined> {
+    // Explicit recovery supplies attested UUID coverage, including one server.
+    if (fanoutOverride) return fanoutOverride.replicas > 1 ? fanoutOverride : undefined
     return await whileDatabasePropagates('discover the replicas of the journal', () =>
       resolveReplicaFanoutOrThrow(db, cluster),
     )

@@ -106,6 +106,36 @@ class _LockCheck(Protocol):
     def assert_held(self) -> None: ...
 
 
+class FreshRecoveryClient:
+    """Fresh, complete decision reads for explicit recovery, including clones."""
+
+    __slots__ = ("_client",)
+
+    def __init__(self, client: Any) -> None:
+        if not callable(getattr(client, "query_control", None)):
+            raise cancellation_error("Explicit recovery requires bounded fresh control reads.")
+        self._client = client
+
+    def __getattr__(self, name: str) -> Any:
+        if name == "query_status":
+            raise cancellation_error(
+                "Explicit recovery cannot attach historical async queries. "
+                "Finish async recovery before using --cancel-lock-queries."
+            )
+        if name == "query":
+            def query(statement: str, settings: dict[str, Any] | None = None) -> Any:
+                return self._client.query_control(
+                    statement, _DEADLINE_MS,
+                    settings={**(settings or {}), "skip_unavailable_shards": 0},
+                )
+
+            return query
+        value = getattr(self._client, name)
+        if name == "open_concurrent" and callable(value):
+            return lambda: FreshRecoveryClient(value())
+        return value
+
+
 class _Control:
     def __init__(
         self,

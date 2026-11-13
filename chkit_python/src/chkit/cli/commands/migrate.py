@@ -47,6 +47,7 @@ from chkit.cli.commands.migrate_abandon import (
 from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migration
 from chkit.cli.commands.migrate_barrier import find_pending_non_select_barriers
 from chkit.cli.commands.migrate_cancellation import (
+    FreshRecoveryClient,
     assert_cancellation_clear,
     assert_cancellation_unfinished,
     cancel_predecessor,
@@ -130,6 +131,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
+from chkit.clickhouse.replicas import ReplicaFanout
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, configured_index_granularity
 from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
@@ -425,7 +427,22 @@ def _run(
         )
         raise MigrateError("migration_not_found", msg)
 
-    with open_client(executor, config.clickhouse) as raw_client:
+    with open_client(executor, config.clickhouse) as configured_client:
+        raw_client = (
+            FreshRecoveryClient(configured_client) if cancel_lock_queries else configured_client
+        )
+        initial_identity = resolve_query_identity(
+            raw_client, config.clickhouse.cluster if config.clickhouse else None,
+        ) if cancel_lock_queries else None
+        recovery_coverage = None
+        if initial_identity is not None:
+            if not initial_identity.cluster:
+                raise MigrateError(
+                    "migrate_cancellation_failed", "Recovery requires an attested cluster.",
+                )
+            recovery_coverage = ReplicaFanout(
+                initial_identity.cluster, len(initial_identity.server_uuids),
+            )
         # Every request of the run, journal writes included, first checks
         # that the run still holds the migrate lock, once it took it (#716).
         lock_holder = _LockHolder()
@@ -433,7 +450,8 @@ def _run(
         # ``cluster`` opts the journal into ReplicatedReplacingMergeTree
         # created ``ON CLUSTER`` so history stays consistent across nodes.
         journal_store = JournalStore(
-            client, cluster=config.clickhouse.cluster if config.clickhouse else None
+            client, cluster=config.clickhouse.cluster if config.clickhouse else None,
+            **({"fanout_override": recovery_coverage} if recovery_coverage else {}),
         )
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
@@ -458,6 +476,7 @@ def _run(
             with_lock=_MigrateLockRunner(
                 raw_client=raw_client,
                 journal_store=journal_store,
+                initial_identity=initial_identity,
                 migrations_dir=migrations_dir,
                 holder=lock_holder,
                 break_lock=break_lock,
@@ -933,8 +952,10 @@ class _MigrateLockRunner(WithLock):
         configured_cluster: str | None = None,
         migration_hooks: bool = False,
         migrations_dir: Path | None = None,
+        initial_identity: QueryIdentity | None = None,
     ) -> None:
         self._raw_client = raw_client
+        self._initial_identity = initial_identity
         self._journal_store = journal_store
         self._holder = holder
         self._break_lock = break_lock
@@ -977,9 +998,10 @@ class _MigrateLockRunner(WithLock):
 
         try:
             target = LockTarget(database=database, journal_table=table, fanout=fanout)
-            identity: QueryIdentity | None = None
+            identity: QueryIdentity | None = self._initial_identity
             if (
-                callable(getattr(self._raw_client, "execute_tracked", None))
+                identity is None
+                and callable(getattr(self._raw_client, "execute_tracked", None))
                 and callable(getattr(self._raw_client, "query_control", None))
             ):
                 try:
@@ -1000,6 +1022,16 @@ class _MigrateLockRunner(WithLock):
             if cancellation is not None:
                 contexts: list[QueryContext] = []
                 for filename in selected_files or []:
+                    state = self._journal_store.read_migration_state(filename)
+                    if state is not None and any(
+                        op.status != "completed" and op.query_id != "" for op in state.operations
+                    ):
+                        raise MigrateError(
+                            "migrate_cancellation_failed",
+                            "Explicit recovery cannot attach the historical async attempt "
+                            f"in {filename}. "
+                            "Finish async recovery before using --cancel-lock-queries.",
+                        )
                     if self._migrations_dir is None:
                         raise MigrateError(
                             "migrate_cancellation_failed", "Recovery has no migration directory.",
