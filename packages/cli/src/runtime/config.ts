@@ -47,6 +47,17 @@ interface ProfileLayer extends RawConfig {
   origin: ProfileOrigin
 }
 
+/**
+ * No config to load: no file at the `--config` path, or no project config and
+ * no user profile. So no plugin is configured either (#687).
+ */
+export class ConfigNotFoundError extends Error {
+  constructor(message: string) {
+    super(message)
+    this.name = 'ConfigNotFoundError'
+  }
+}
+
 function isConfigFunction(candidate: ChxConfigInput): candidate is ChxConfigFn {
   return typeof candidate === 'function'
 }
@@ -71,7 +82,7 @@ export async function loadConfig(
   if (configPathArg) {
     debug('config', `resolving explicit config at ${projectPath}`)
     if (!existsSync(projectPath)) {
-      throw new Error(`Config not found at ${projectPath}.`)
+      throw new ConfigNotFoundError(`Config not found at ${projectPath}.`)
     }
   } else {
     debug('config', `looking for project config at ${projectPath}`)
@@ -96,13 +107,13 @@ export async function loadConfig(
   }
 
   if (options.command === 'query') {
-    throw new Error(
+    throw new ConfigNotFoundError(
       `No project config found at ${projectPath}, and no ObsessionDB profile is available.\n` +
         `Run 'chkit obsessiondb login' to query ObsessionDB from any directory, or run 'chkit init' in a project.`,
     )
   }
 
-  throw new Error(
+  throw new ConfigNotFoundError(
     `Config not found at ${projectPath}.\n` +
       `Either run 'chkit init' in your project, or run 'chkit obsessiondb login' to use chkit from any directory.`,
   )
@@ -220,6 +231,19 @@ function finalize(
     plugins: (config.plugins ?? []).length,
   })
   return { config, path, source, profileLayered }
+}
+
+/**
+ * The plugins that `chkit obsessiondb login`, which the missing config error
+ * names, adds: the ObsessionDB plugin, unless that optional package is not
+ * installed (#687).
+ */
+export async function profileFallbackPlugins(): Promise<ChxPluginRegistration[]> {
+  try {
+    return [await loadObsessionDBRegistration()]
+  } catch {
+    return []
+  }
 }
 
 async function loadObsessionDBRegistration(): Promise<ChxPluginRegistration> {

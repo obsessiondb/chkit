@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from 'node:process'
 import { format } from 'node:util'
-import { expandShortFlags, type FlagDef, MissingFlagValueError, type ParsedFlags } from '@chkit/core'
+import { type ChxPluginRegistration, expandShortFlags, type FlagDef, MissingFlagValueError, type ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
 import { cmdSkills } from '../commands/skills.js'
@@ -9,7 +9,7 @@ import { getInternalPlugins } from '../internal-plugins/index.js'
 import { normalizeGlobalArgs } from '../runtime/argv.js'
 import { parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
-import { loadConfig } from '../runtime/config.js'
+import { ConfigNotFoundError, type LoadedConfig, loadConfig, profileFallbackPlugins } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
 import { extractConfigPath } from '../runtime/extract-config-path.js'
 import { GLOBAL_FLAGS, TABLE_FLAG } from '../runtime/global-flags.js'
@@ -23,6 +23,7 @@ import {
 } from '../runtime/json-output.js'
 import { configureCliLogging } from '../runtime/logging.js'
 import { loadPluginRuntime } from '../runtime/plugin-runtime/index.js'
+import { normalizePluginRegistration } from '../runtime/plugin-runtime/loader.js'
 import { CLI_VERSION } from '../runtime/version.js'
 
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
@@ -152,16 +153,36 @@ function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRunt
   })
 }
 
-function createInternalRegistry(): ReturnType<typeof createCommandRegistry> {
+function createInternalRegistry(
+  pluginExtensions: Parameters<typeof createCommandRegistry>[0]['pluginExtensions'] = [],
+): ReturnType<typeof createCommandRegistry> {
   return createCommandRegistry({
     globalFlags: GLOBAL_FLAGS,
-    pluginExtensions: [],
+    pluginExtensions,
     pluginCommands: getInternalPlugins().map((plugin) => ({
       pluginName: plugin.manifest.name,
       manifestName: plugin.manifest.name,
       commands: plugin.commands ?? [],
     })),
   })
+}
+
+/**
+ * Reports an argument error of a built-in command when no project config
+ * loaded, as chkit-py does (#687), with the flags that `registrations` add
+ * to it. Returns whether it did.
+ */
+function reportsBuiltinArgError(
+  argv: string[],
+  commandName: string,
+  registrations: readonly ChxPluginRegistration[],
+): boolean {
+  const plugins = registrations.map(normalizePluginRegistration).filter((entry) => entry.enabled)
+  const registry = createInternalRegistry(
+    plugins.map(({ plugin }) => ({ pluginName: plugin.manifest.name, extensions: plugin.extendCommands ?? [] })),
+  )
+  const resolved = registry.get(commandName)
+  return resolved !== undefined && parseInitFlags({ argv, commandName, resolved, registry, plugins: [] }) === null
 }
 
 async function run(): Promise<void> {
@@ -237,12 +258,24 @@ async function run(): Promise<void> {
     return
   }
   const env = { command: commandName, mode: process.env.NODE_ENV }
-  const { config, path: configPath, source: configSource } = await loadConfig(configPathArg, env, {
-    command: commandName,
-    allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
-  })
+  let loaded: LoadedConfig
+  try {
+    loaded = await loadConfig(configPathArg, env, {
+      command: commandName,
+      allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
+    })
+  } catch (error) {
+    // An argument error comes first (#687). The flags that `chkit obsessiondb login`,
+    // which the error names, adds count as valid.
+    if (!wantsHelp && error instanceof ConfigNotFoundError) {
+      if (reportsBuiltinArgError(argv, commandName, await profileFallbackPlugins())) return
+    }
+    throw error
+  }
+  const { config, path: configPath, source: configSource } = loaded
 
   if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
+    if (!wantsHelp && reportsBuiltinArgError(argv, commandName, config.plugins)) return
     reportUsageError({
       command: commandName,
       code: 'project_config_required',
