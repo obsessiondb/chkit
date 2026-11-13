@@ -27,6 +27,7 @@ from chkit.cli.commands.migrate_async_apply import (
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import (
+    MigrateError,
     PendingNonSelectBarrier,
     in_progress_checksum_mismatch_error,
     non_select_barrier_error,
@@ -188,6 +189,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         and initial_state.checksum != migration_checksum
     ):
         _accept_edited_migration(
+            client=input_.client,
             file=file,
             state=initial_state,
             checksum=migration_checksum,
@@ -257,6 +259,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             if state_before is not None
             else None
         )
+        if prior_attempt is not None:
+            _assert_async_attempt_stopped(input_.client, file, prior_attempt)
         if prior_attempt is not None and operation is not None and operation.before_retry:
             try:
                 _run_before_retry(
@@ -527,6 +531,7 @@ def _run_before_retry(
 
 def _accept_edited_migration(
     *,
+    client: ClickHouseClient,
     file: str,
     state: MigrationRowState,
     checksum: str,
@@ -566,14 +571,65 @@ def _accept_edited_migration(
             f"{file} changed since its last failed attempt; no statement is recorded "
             "as completed, so it runs again from statement 1."
         )
-    journal_store.write_migration_state(
-        rebase_in_progress_state(
-            state,
-            checksum=checksum,
-            identities=identities,
-            applied_at=iso_without_zone(datetime.now(tz=UTC)),
-        )
+    rebased = rebase_in_progress_state(
+        state,
+        checksum=checksum,
+        identities=identities,
+        applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
+    _assert_dropped_attempts_stopped(client, file, state, rebased)
+    journal_store.write_migration_state(rebased)
+
+
+def _assert_dropped_attempts_stopped(
+    client: ClickHouseClient,
+    file: str,
+    state: MigrationRowState,
+    rebased: MigrationRowState,
+) -> None:
+    """Stop an edit that drops the record of an async attempt that still runs.
+
+    An async retry runs under a random query id (#701), so the record a
+    rebase drops is the only trace of an attempt that may still run (a submit
+    that failed while the server ran it, an attempt kept by --abandon): the
+    next run would not find it. Every replica is read.
+    """
+    dropped = [
+        op
+        for op in state.operations
+        if op.status != "completed"
+        and op.query_id != ""
+        and not any(kept is op for kept in rebased.operations)
+    ]
+    for op in dropped:
+        _assert_async_attempt_stopped(client, file, op)
+
+
+def _assert_async_attempt_stopped(
+    client: ClickHouseClient, file: str, op: OperationState
+) -> None:
+    """Keep the only record of an async attempt until it stops on every replica."""
+    if op.status == "completed" or op.query_id == "":
+        return
+    try:
+        status = client.query_status(op.query_id, every_replica=True, running_only=True)
+    except Exception as error:
+        msg = (
+            f"Cannot apply {file}: could not check whether the earlier "
+            f"attempt of statement {op.operation_index + 1} (query_id {op.query_id}) is "
+            f"still running ({clickhouse_error_message(error)}). Nothing ran — re-run "
+            "chkit migrate --apply."
+        )
+        raise RuntimeError(msg) from error
+    if status.status == "running":
+        raise MigrateError(
+            "retry_mismatch",
+            f"Cannot apply {file}: the earlier attempt of statement "
+            f"{op.operation_index + 1} (query_id {op.query_id}) is still running on the "
+            "server, and continuing would discard its query id. Wait for it to "
+            f"finish or run KILL QUERY WHERE query_id = '{op.query_id}', then run chkit "
+            "migrate --apply again.",
+        )
 
 
 def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool:

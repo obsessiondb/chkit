@@ -71,6 +71,40 @@ describe('async migrate re-run of a started step (#672)', () => {
       await dropFixture(fixture)
     }
   }, TIMEOUT_MS)
+
+  // #701: query_log is flushed on a timer (7.5 s by default), so right after
+  // the load ends it is neither running nor in query_log. The re-run checks
+  // again while query_log is flushed instead of loading the rows again.
+  test('a re-run right after the load its killed run left ended waits for its query_log entry', async () => {
+    const fixture = await createFixture('rerun_flush')
+    try {
+      const killed = migrate(fixture)
+      const queryId = await waitForStartedQueryId(fixture)
+      await pollUntil(
+        () => fixture.executor.queryStatus(queryId, { everyReplica: true, runningOnly: true }),
+        (found) => found.status === 'running',
+        { intervalMs: 100, timeoutMs: 10_000 },
+      )
+      killed.kill()
+      expect((await killed.result).exitCode).not.toBe(0)
+      // The load ends; re-run as soon as no replica runs it.
+      await pollUntil(
+        () => fixture.executor.queryStatus(queryId, { everyReplica: true, runningOnly: true }),
+        (found) => found.status !== 'running',
+        { intervalMs: 100, timeoutMs: 60_000 },
+      )
+
+      const claim = await heldLockClaim(fixture.executor, fixture.database, fixture.journalTable)
+      const rerun = await migrate(fixture, ['--break-lock', claim]).result
+      expect(rerun.exitCode, formatTestDiagnostic('re-run', rerun)).toBe(0)
+      expect(rerun.stderr).toContain(`previous attempt of query_id=${queryId} finished on the server`)
+      expect(rerun.stderr).not.toContain('resubmitting')
+      expect(await journalStatuses(fixture)).toBe('completed')
+      expect(await countEvents(fixture)).toBe(ROWS)
+    } finally {
+      await dropFixture(fixture)
+    }
+  }, TIMEOUT_MS)
 })
 
 async function createFixture(label: string): Promise<Fixture> {
