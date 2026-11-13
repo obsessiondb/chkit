@@ -348,6 +348,7 @@ export async function applyMigration(input: {
       continue
     }
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
+    if (priorAttempt !== undefined) await assertAsyncAttemptStopped(db, file, priorAttempt)
     if (priorAttempt !== undefined && operation?.beforeRetry) {
       try {
         await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
@@ -534,21 +535,30 @@ async function assertDroppedAttemptsStopped(
   const dropped = state.operations.filter(
     (op) => op.status !== 'completed' && op.queryId !== '' && !rebased.operations.includes(op),
   )
-  for (const op of dropped) {
-    let status: QueryStatus
-    try {
-      status = await db.queryStatus(op.queryId, { everyReplica: true, runningOnly: true })
-    } catch (error) {
-      throw new Error(
-        `Cannot apply the edited ${file}: could not check whether the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running (${error instanceof Error ? error.message : String(error)}). Nothing ran — re-run chkit migrate --apply.`,
-        { cause: error },
-      )
-    }
-    if (status.status === 'running') {
-      throw new MigrateError(
-        'retry_mismatch',
-        `Cannot apply the edited ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and the edit changed that statement's operation. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
-      )
-    }
+  for (const op of dropped) await assertAsyncAttemptStopped(db, file, op)
+}
+
+// A non-async path must not compensate or replace a recorded async attempt
+// while it still runs: its random query id is the only way to find it later.
+async function assertAsyncAttemptStopped(
+  db: ClickHouseExecutor,
+  file: string,
+  op: OperationState,
+): Promise<void> {
+  if (op.status === 'completed' || op.queryId === '') return
+  let status: QueryStatus
+  try {
+    status = await db.queryStatus(op.queryId, { everyReplica: true, runningOnly: true })
+  } catch (error) {
+    throw new Error(
+      `Cannot apply ${file}: could not check whether the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running (${error instanceof Error ? error.message : String(error)}). Nothing ran — re-run chkit migrate --apply.`,
+      { cause: error },
+    )
+  }
+  if (status.status === 'running') {
+    throw new MigrateError(
+      'retry_mismatch',
+      `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
+    )
   }
 }

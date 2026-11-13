@@ -29,6 +29,7 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
+    held_lock_claim,
     poll_until,
     quote_ident,
     resolve_live_env,
@@ -36,7 +37,8 @@ from tests.e2e_testkit import (
 )
 
 _ROWS = 16
-# About 8 s at 0.5 s per row, so the other run starts while it still runs.
+# About 16 s at 1 s per row, so the other run starts, and a re-run takes the
+# migrate lock, while it still runs.
 # It fails on row _FAIL_AT in a database whose fail_marker has a row.
 _FAIL_AT = 12
 _CLI_TIMEOUT_SECONDS = 120.0
@@ -100,7 +102,7 @@ def make_fixture() -> Iterator[Fixture]:
         "-- before-retry: TRUNCATE TABLE events\n"
         f"INSERT INTO events SELECT number + throwIf(number = {_FAIL_AT} AND "
         "(SELECT count() FROM fail_marker) > 0, 'failure in this database') "
-        f"FROM numbers({_ROWS}) WHERE sleepEachRow(0.5) = 0 SETTINGS max_block_size = 1;\n",
+        f"FROM numbers({_ROWS}) WHERE sleepEachRow(1) = 0 SETTINGS max_block_size = 1;\n",
         encoding="utf-8",
     )
     for target, database in databases.items():
@@ -141,7 +143,9 @@ def make_fixture() -> Iterator[Fixture]:
         shutil.rmtree(dir_, ignore_errors=True)
 
 
-def _start(fixture: Fixture, target: Target) -> subprocess.Popen[str]:
+def _start(
+    fixture: Fixture, target: Target, extra_args: tuple[str, ...] = ()
+) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
             sys.executable,
@@ -152,6 +156,7 @@ def _start(fixture: Fixture, target: Target) -> subprocess.Popen[str]:
             str(fixture.dir / f"{target}.config.py"),
             "--execute",
             "--json",
+            *extra_args,
         ],
         cwd=fixture.dir,
         env={
@@ -173,8 +178,8 @@ def _wait(process: subprocess.Popen[str]) -> CliResult:
     return CliResult(exit_code=process.returncode, stdout=stdout, stderr=stderr)
 
 
-def _migrate(fixture: Fixture, target: Target) -> CliResult:
-    return _wait(_start(fixture, target))
+def _migrate(fixture: Fixture, target: Target, extra_args: tuple[str, ...] = ()) -> CliResult:
+    return _wait(_start(fixture, target, extra_args))
 
 
 def _diagnostic(label: str, result: CliResult) -> str:
@@ -264,7 +269,11 @@ def test_a_rerun_attaches_to_the_load_its_killed_run_left_running(
     killed.kill()
     assert _wait(killed).exit_code != 0
 
-    resumed = _migrate(fixture, "staging")
+    # The killed run still holds the migrate lock (#716).
+    claim = held_lock_claim(
+        fixture.client, fixture.databases["staging"], fixture.journal_table
+    )
+    resumed = _migrate(fixture, "staging", ("--break-lock", claim))
     assert resumed.exit_code == 0, _diagnostic("staging re-run", resumed)
     assert "attaching to in-flight query" in resumed.stderr
     assert "running before-retry SQL" not in resumed.stderr

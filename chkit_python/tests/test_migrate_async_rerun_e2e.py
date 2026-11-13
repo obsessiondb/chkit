@@ -28,6 +28,7 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
+    held_lock_claim,
     poll_until,
     quote_ident,
     resolve_live_env,
@@ -125,7 +126,7 @@ def make_fixture() -> Iterator[Fixture]:
         shutil.rmtree(dir_, ignore_errors=True)
 
 
-def _start(fixture: Fixture) -> subprocess.Popen[str]:
+def _start(fixture: Fixture, extra_args: tuple[str, ...] = ()) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
             sys.executable,
@@ -136,6 +137,7 @@ def _start(fixture: Fixture) -> subprocess.Popen[str]:
             str(fixture.dir / "clickhouse.config.py"),
             "--execute",
             "--json",
+            *extra_args,
         ],
         cwd=fixture.dir,
         env={
@@ -208,7 +210,9 @@ def test_a_rerun_records_the_finished_load_of_its_killed_run_without_loading_it_
     assert finished.status == "finished"
     assert _journal(fixture)[0] == "started"
 
-    rerun = _wait(_start(fixture))
+    # The killed run still holds the migrate lock (#716).
+    claim = held_lock_claim(fixture.client, fixture.database, fixture.journal_table)
+    rerun = _wait(_start(fixture, ("--break-lock", claim)))
     assert rerun.exit_code == 0, _diagnostic("re-run", rerun)
     assert f"previous attempt of query_id={query_id} finished on the server" in rerun.stderr
     assert "resubmitting" not in rerun.stderr
@@ -253,7 +257,8 @@ def test_a_rerun_right_after_the_load_of_its_killed_run_ended_waits_for_its_quer
     )
     assert ended.status != "running"
 
-    rerun = _wait(_start(fixture))
+    claim = held_lock_claim(fixture.client, fixture.database, fixture.journal_table)
+    rerun = _wait(_start(fixture, ("--break-lock", claim)))
     assert rerun.exit_code == 0, _diagnostic("re-run", rerun)
     assert f"previous attempt of query_id={query_id} finished on the server" in rerun.stderr
     assert "resubmitting" not in rerun.stderr

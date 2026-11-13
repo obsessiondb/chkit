@@ -13,6 +13,7 @@ import {
   createPrefix,
   formatTestDiagnostic,
   getLiveEnv,
+  heldLockClaim,
   pollUntil,
   quoteIdent,
   startCli,
@@ -58,7 +59,9 @@ describe('async migrate re-run of a started step (#672)', () => {
       expect(finished.status).toBe('finished')
       expect(await journalStatuses(fixture)).toBe('started')
 
-      const rerun = await migrate(fixture).result
+      // The killed run still holds the migrate lock (#716).
+      const claim = await heldLockClaim(fixture.executor, fixture.database, fixture.journalTable)
+      const rerun = await migrate(fixture, ['--break-lock', claim]).result
       expect(rerun.exitCode, formatTestDiagnostic('re-run', rerun)).toBe(0)
       expect(rerun.stderr).toContain(`previous attempt of query_id=${queryId} finished on the server`)
       expect(rerun.stderr).not.toContain('resubmitting')
@@ -91,7 +94,8 @@ describe('async migrate re-run of a started step (#672)', () => {
         { intervalMs: 100, timeoutMs: 60_000 },
       )
 
-      const rerun = await migrate(fixture).result
+      const claim = await heldLockClaim(fixture.executor, fixture.database, fixture.journalTable)
+      const rerun = await migrate(fixture, ['--break-lock', claim]).result
       expect(rerun.exitCode, formatTestDiagnostic('re-run', rerun)).toBe(0)
       expect(rerun.stderr).toContain(`previous attempt of query_id=${queryId} finished on the server`)
       expect(rerun.stderr).not.toContain('resubmitting')
@@ -159,8 +163,8 @@ async function dropFixture(fixture: Fixture): Promise<void> {
   await rm(fixture.dir, { recursive: true, force: true })
 }
 
-function migrate(fixture: Fixture): { result: Promise<CliResult>; kill: () => void } {
-  return startCli(fixture.dir, ['migrate', '--config', fixture.config, '--execute', '--json'], {
+function migrate(fixture: Fixture, extraArgs: string[] = []): { result: Promise<CliResult>; kill: () => void } {
+  return startCli(fixture.dir, ['migrate', '--config', fixture.config, '--execute', '--json', ...extraArgs], {
     CHKIT_JOURNAL_TABLE: fixture.journalTable,
     CHKIT_E2E_PASSWORD: getLiveEnv().clickhousePassword,
     CI: '1',

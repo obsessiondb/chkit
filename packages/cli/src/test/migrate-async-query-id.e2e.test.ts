@@ -13,6 +13,7 @@ import {
   createPrefix,
   formatTestDiagnostic,
   getLiveEnv,
+  heldLockClaim,
   pollUntil,
   quoteIdent,
   startCli,
@@ -26,7 +27,7 @@ import {
 
 const TIMEOUT_MS = 240_000
 const ROWS = 16
-// About 8 s at 0.5 s per row, so the other run starts while it still runs.
+// About 16 s at 1 s per row, so the other run starts, and a re-run takes the migrate lock, while it still runs.
 // It fails on row FAIL_AT in a database whose fail_marker has a row.
 const FAIL_AT = 12
 
@@ -79,7 +80,9 @@ describe('async migrate statements across databases (#463)', () => {
       killed.kill()
       expect((await killed.result).exitCode).not.toBe(0)
 
-      const resumed = await migrate(fixture, 'staging').result
+      // The killed run still holds the migrate lock (#716).
+      const claim = await heldLockClaim(fixture.executor, fixture.databases.staging, fixture.journalTable)
+      const resumed = await migrate(fixture, 'staging', ['--break-lock', claim]).result
       expect(resumed.exitCode, formatTestDiagnostic('staging re-run', resumed)).toBe(0)
       expect(resumed.stderr).toContain('attaching to in-flight query')
       expect(resumed.stderr).not.toContain('running before-retry SQL')
@@ -104,7 +107,7 @@ async function createFixture(label: string): Promise<Fixture> {
     [
       '-- operation: load_table_data key=table:events risk=caution mode=async',
       '-- before-retry: TRUNCATE TABLE events',
-      `INSERT INTO events SELECT number + throwIf(number = ${FAIL_AT} AND (SELECT count() FROM fail_marker) > 0, 'failure in this database') FROM numbers(${ROWS}) WHERE sleepEachRow(0.5) = 0 SETTINGS max_block_size = 1;`,
+      `INSERT INTO events SELECT number + throwIf(number = ${FAIL_AT} AND (SELECT count() FROM fail_marker) > 0, 'failure in this database') FROM numbers(${ROWS}) WHERE sleepEachRow(1) = 0 SETTINGS max_block_size = 1;`,
       '',
     ].join('\n'),
     'utf8',
@@ -156,10 +159,14 @@ async function dropFixture(fixture: Fixture): Promise<void> {
   await rm(fixture.dir, { recursive: true, force: true })
 }
 
-function migrate(fixture: Fixture, target: Target): { result: Promise<CliResult>; kill: () => void } {
+function migrate(
+  fixture: Fixture,
+  target: Target,
+  extraArgs: string[] = [],
+): { result: Promise<CliResult>; kill: () => void } {
   return startCli(
     fixture.dir,
-    ['migrate', '--config', fixture.configs[target], '--execute', '--json'],
+    ['migrate', '--config', fixture.configs[target], '--execute', '--json', ...extraArgs],
     { CHKIT_JOURNAL_TABLE: fixture.journalTable, CHKIT_E2E_PASSWORD: getLiveEnv().clickhousePassword, CI: '1' },
   )
 }

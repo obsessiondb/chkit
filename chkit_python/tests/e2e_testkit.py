@@ -337,3 +337,19 @@ __all__ = [
     "run_once_visible",
     "wait_for_table_on_every_replica",
 ]
+
+
+
+def held_lock_claim(client: Any, database: str, journal_table: str) -> str:
+    """The migrate lock claim that a killed run left behind in the journal
+    (#716), for ``--break-lock``. Port of the TS ``heldLockClaim``."""
+    prefix = "__chkit_migrate_lock__/"
+    rows = client.query(
+        f"SELECT substring(name, {len(prefix) + 1}) AS claim "
+        f"FROM {quote_ident(database)}.{quote_ident(journal_table)} "
+        f"WHERE startsWith(name, '{prefix}') GROUP BY name "
+        "HAVING max(applied_at) < toDateTime64('2299-01-01 00:00:00', 3, 'UTC') "
+        "SETTINGS select_sequential_consistency = 1"
+    ).rows
+    assert len(rows) == 1, f"expected one held migrate lock claim, found {rows}"
+    return str(rows[0]["claim"])

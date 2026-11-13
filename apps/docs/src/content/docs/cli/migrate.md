@@ -23,6 +23,7 @@ chkit migrate [flags]
 | `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` or interactive confirmation |
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
 | `-t`, `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
+| `--break-lock <claim>` | string | — | Release the [migrate lock](#concurrent-runs) claim of a run that is no longer running, then take the lock |
 | `--setting <name=value>` | string[] | — | Send a ClickHouse [query setting](#query-settings) with each migration statement. Repeatable, or comma-separated |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
@@ -184,6 +185,33 @@ The journal is written as each statement runs, not batched. The table is created
 
 The table is a `ReplacingMergeTree` keyed by `name`: every change inserts a newer version of the row, and chkit reads it with `FINAL`, which returns the newest version. A `SELECT` without `FINAL` can show several rows per migration until background merges collapse them. `--abandon` writes a new version too, so it needs no privilege beyond the `INSERT` that every journal write uses.
 
+### Concurrent runs
+
+Only one `migrate --apply` (or `migrate --abandon --apply`) works on a journal at a time ([#716](https://github.com/obsessiondb/chkit/issues/716)). Before it applies anything, a run takes the migrate lock; a second run against the same journal stops with the code `migrate_locked` and names the run that holds it:
+
+```
+Another chkit migrate run holds the migrate lock on analytics._chkit_migrations:
+  claim 3f1c…: pid 70784 on host ci-runner-7 (chkit 0.2.0), started 2026-11-11T09:03:01.959Z; last heartbeat 11s ago, free in 109s unless renewed
+```
+
+Plan runs, `status` and `check` take no lock and need no write access.
+
+How it works:
+
+- The lock is a row of the journal named `__chkit_migrate_lock__/<claim>`, with `migration_completed = false`, so every chkit release reads past it. A run writes its own claim, then reads every claim back; it holds the lock when no other claim is there. Two runs that claim at the same moment can both back off; each retries a few times within about 10 seconds before it gives up.
+- After taking the lock, a run reads the journal again. A migration that another run applied in the meantime is skipped (`Skipping …: another migrate run applied it meanwhile.`); any other change to what the run showed stops it with `journal_changed` before it applies anything.
+- The holder renews its claim every 10 seconds. A renewal counts from the time the heartbeat was sent, once the holder reads it back as the claim's newest row. A holder whose renewals have not counted for 60 seconds (a paused process, a lost connection), whose heartbeat does not read back (a heartbeat request that failed may still reach the server later), or whose claim was released with `--break-lock`, stops before its next request with `migrate_lock_lost`; run `migrate` again to resume.
+- A run that is killed or crashes keeps its claim. Once the server dates the claim's last heartbeat more than 120 seconds back, the next run watches it for 65 seconds; when it did not change, that run has stopped, so the next run releases the claim (and says so) and takes the lock. Watching makes this safe when the clocks of the replicas differ.
+- On a multi-replica target the claims are read from every replica (see below), where the replica that accepted a claim always has it; a replica that does not answer fails the read. On a single endpoint without that fan-out, claims are written with `insert_quorum = 'auto'` and read with `select_sequential_consistency = 1`. A run that cannot read its own claim back right after writing it stops with `migrate_lock_unverifiable` instead of taking a lock it cannot check.
+
+What the lock does not cover:
+
+- A statement a run already sent keeps running on the server when that run is killed or loses the lock; ClickHouse cannot fence it. The next run handles it as it handles any statement of a stopped run (an [async](#async-operations-modeasync) statement is attached to; a sync one runs again). A process paused for more than its remaining 60 seconds between its check and its next request can still send that request.
+- While the database in `clickhouse.database` does not exist yet, there is no journal to hold the lock: a first run that creates the database takes none, and says so on stderr.
+- Releases before the lock do not take or check it, so the lock only keeps apart runs of releases that have it. `CHKIT_MIGRATE_LOCK=off` turns the lock off, as before this release; `migrate` then prints a warning on stderr.
+
+To free the lock of a run you know has stopped, without waiting for it to expire, pass the claim from the error: `chkit migrate --apply --break-lock 3f1c…`. It releases only that claim and takes the lock; when another run holds the lock by then, it stops with `migrate_locked` as usual. Breaking the claim of a run that is still running lets both runs apply statements until that run's next renewal.
+
 ### Multi-replica targets
 
 On a service whose endpoint spreads requests over several replicas, such as a multi-replica ObsessionDB service, a read can land on a replica that has not applied the latest DDL or journal write yet. chkit counts the replicas of the cluster set in `clickhouse.cluster`, or of the `default` cluster when none is set, once per run. With more than one replica:
@@ -222,7 +250,7 @@ INSERT INTO default.hits SELECT * FROM s3(...);
 
 When `chkit migrate --apply` encounters an async operation it:
 
-1. Computes the statement's `query_id`. The first attempt uses `sha256('chkit:' + database + ':' + journal_table + ':' + migration_filename + ':' + statement_index)`, where `database` is the server's `currentDatabase()` and `journal_table` is the [journal](#journal) table (`_chkit_migrations`, or `CHKIT_JOURNAL_TABLE`), so runs of one migration file against other databases, or by other projects that keep their journal in the same database, never share a query id. A statement the journal already tracks is checked under the `queryId` it recorded, including one an earlier chkit derived from the file name and statement index alone. Every retry gets a new random id, recorded in the journal before it is submitted, so no other attempt or run of the statement ever shares it. An edit applied with `--retry` (or after `--abandon`) that changes the operation of a statement whose earlier attempt is recorded under such an id stops while that attempt still runs on any replica, since the next run would no longer look for it.
+1. Computes the statement's `query_id`. The first attempt uses `sha256('chkit:' + database + ':' + journal_table + ':' + migration_filename + ':' + statement_index)`, where `database` is the server's `currentDatabase()` and `journal_table` is the [journal](#journal) table (`_chkit_migrations`, or `CHKIT_JOURNAL_TABLE`), so runs of one migration file against other databases, or by other projects that keep their journal in the same database, never share a query id. A statement the journal already tracks is checked under the `queryId` it recorded, including one an earlier chkit derived from the file name and statement index alone. Every retry gets a new random id, recorded in the journal before it is submitted, so no other attempt or run of the statement ever shares it. Before an edit discards an earlier attempt's record, or a sync or barrier step replaces its recorded async query id, chkit checks that id on every replica and stops while the attempt is running or the check fails. This includes changing only `mode=async` to `mode=sync` or `mode=barrier`; no `-- before-retry:` SQL runs until that check succeeds.
 2. Checks `system.processes` for an attempt with the recorded id that is still running, and attaches to it instead of submitting again. On a [multi-replica target](#multi-replica-targets) the check reads every replica. When a replica cannot be read, `migrate` stops with an error before it runs `-- before-retry:` SQL or submits again; re-run it once the replica is back. The polls that follow skip a replica they cannot reach.
    When the journal records the statement as started (its run was killed, or gave up polling after a failed submit) and no replica still runs it, the check also reads that attempt's outcome from `system.query_log` on every replica, by its id. The entries of a first attempt's id count only from the start the journal records for it (server clock, 2-second margin), as that id is the same whenever the journal has no record of the statement; those of a retry's id count from an hour before, which only lets `query_log` skip older partitions. A finished attempt is recorded as completed and the statement is not submitted again. `query_log` is written on a timer (every 7.5 seconds by default), so an attempt without an entry yet is checked again every 2 seconds for 10 seconds before it counts as having none. An attempt whose entry takes longer to reach `query_log` (a longer flush interval, a stalled flush) is still run again. A failed attempt, or one without an entry, is retried as below. When the statement has `-- before-retry:` SQL, the attempt is recorded as failed before that SQL runs, so a later re-run cannot take a late `QueryFinish` of it for the outcome of rows the SQL removed. When the user cannot read `system.query_log`, `migrate` stops and names the missing `SELECT ON system.query_log` grant; any other failed read stops it the same way as an unreadable replica.
    A started record written by an earlier chkit release is read as that release did. A release with the `query_log` check but without per-attempt ids used one id for every attempt, so its record counts only entries of queries that started no earlier than its recorded start, and is not checked again while `query_log` is flushed. A record from a release without the check is only checked in `system.processes`: its start is on the client's clock, and a retry by that release may have run the `-- before-retry:` SQL without recording it. An earlier release reading a record this release wrote checks it in `system.processes` only, as it does its own records. Avoid switching releases while a migration is in progress: an earlier release runs the `-- before-retry:` SQL without first recording the attempt as failed, so if it stops right after that SQL, this release can still take the attempt's `QueryFinish` for the outcome.
@@ -463,6 +491,10 @@ A failure that stops the command prints the standard error envelope:
 | `migration_not_found` | `--retry` names a file that is not in the migrations directory |
 | `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |
 | `migration_already_applied` | `--abandon`: the migration is already applied |
+| `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
+| `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, a heartbeat did not read back, or another run broke its claim; the run stopped before its next request |
+| `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |
+| `journal_changed` | Another run changed the journal between the plan and the lock in a way the plan does not cover; nothing was applied |
 | `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`, or an empty migration name |
 
 Other failures, such as a statement that ClickHouse rejects, use the code `error`.

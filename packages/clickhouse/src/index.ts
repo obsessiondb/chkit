@@ -91,6 +91,8 @@ export type ObservableSystemTable = 'processes' | 'query_log'
 
 export interface ClickHouseExecutor {
 	command(sql: string, settings?: ClickHouseSettings): Promise<void>
+	/** Optional capability: check before each command attempt, including an internal retry. */
+	commandGuarded?(sql: string, check: () => void, settings?: ClickHouseSettings): Promise<void>
 	/** Rows as JSON objects. A number a double cannot hold exactly (an integer
 	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
 	 *  its digits; the ObsessionDB console API returns every value as a string. */
@@ -138,6 +140,12 @@ export interface ClickHouseExecutor {
 	/** Optional capability: whether the user may change settings, which a readonly = 1
 	 *  user may not. Native executors look it up once, with their first read. */
 	canChangeSettings?(): Promise<boolean>
+
+	/** Optional capability: a new executor to the same target without an HTTP session,
+	 *  for requests sent while one of this executor's requests is in flight (ClickHouse
+	 *  runs one query at a time per session). The caller closes it. Executors without
+	 *  a session omit it and take concurrent requests themselves. */
+	openConcurrent?(): ClickHouseExecutor
 
 	close(): Promise<void>
 }
@@ -804,49 +812,54 @@ export function createExecutorWithClient(
 		return (await settingsChangeableOnce()) ? { ...PROGRESS_SETTINGS, ...settings } : settings
 	}
 
-	return {
-		async command(sql: string, settings?: ClickHouseSettings): Promise<void> {
-			try {
-				const result = await client.command({
-					query: sql,
-					http_headers: { 'X-DDL': '1' },
-					clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
+	async function command(sql: string, settings?: ClickHouseSettings, check?: () => void): Promise<void> {
+		check?.()
+		try {
+			const result = await client.command({
+				query: sql,
+				http_headers: { 'X-DDL': '1' },
+				clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
+			})
+			assertStreamedQuerySucceeded({
+				response_headers: result.response_headers,
+				query_id: result.query_id,
+				sql,
+			})
+			logProfiling(profiler, sql, result.query_id, result.summary)
+		} catch (error) {
+			if (isUnknownDatabaseError(error)) {
+				check?.()
+				const fallback = createClient({
+					url: config.url,
+					...credentialOptions(config),
+					application: CHKIT_APPLICATION_ID,
+					request_timeout: NO_REQUEST_TIMEOUT,
+					clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
+					log: SILENT_CLIENT_LOG,
 				})
-				assertStreamedQuerySucceeded({
-					response_headers: result.response_headers,
-					query_id: result.query_id,
-					sql,
-				})
-				logProfiling(profiler, sql, result.query_id, result.summary)
-			} catch (error) {
-				if (isUnknownDatabaseError(error)) {
-					const fallback = createClient({
-						url: config.url,
-						...credentialOptions(config),
-						application: CHKIT_APPLICATION_ID,
-						request_timeout: NO_REQUEST_TIMEOUT,
-						clickhouse_settings: { wait_end_of_query: 1, async_insert: 0 },
-						log: SILENT_CLIENT_LOG,
+				try {
+					const fallbackResult = await fallback.command({
+						query: sql,
+						http_headers: { 'X-DDL': '1' },
+						clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
 					})
-					try {
-						const fallbackResult = await fallback.command({
-							query: sql,
-							http_headers: { 'X-DDL': '1' },
-							clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
-						})
-						assertStreamedQuerySucceeded({
-							response_headers: fallbackResult.response_headers,
-							query_id: fallbackResult.query_id,
-							sql,
-						})
-					} finally {
-						await fallback.close()
-					}
-					return
+					assertStreamedQuerySucceeded({
+						response_headers: fallbackResult.response_headers,
+						query_id: fallbackResult.query_id,
+						sql,
+					})
+				} finally {
+					await fallback.close()
 				}
-				wrapConnectionError(error, config.url, config.username)
+				return
 			}
-		},
+			wrapConnectionError(error, config.url, config.username)
+		}
+	}
+
+	return {
+		command,
+		commandGuarded: (sql, check, settings) => command(sql, settings, check),
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
 				const clickhouseSettings = await readSettings(settings)
@@ -1017,6 +1030,7 @@ export function createExecutorWithClient(
 			return `system.${table}`
 		},
 		canChangeSettings: settingsChangeableOnce,
+		openConcurrent: () => createStatelessClickHouseExecutor(config),
 		async queryStatus(queryId: string, options?: QueryStatusOptions): Promise<QueryStatus> {
 			// Without clickhouse.cluster, a multi-replica ObsessionDB service still
 			// runs the query on one replica only (#246).

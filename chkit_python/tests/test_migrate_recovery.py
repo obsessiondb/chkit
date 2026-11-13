@@ -1423,7 +1423,7 @@ def test_apply_edited_file_without_progress_runs_from_statement_1(
 class _StatusClient(_RecordingClient):
     """Answers the in-flight check of a dropped async attempt."""
 
-    def __init__(self, running: bool) -> None:
+    def __init__(self, running: bool | Exception) -> None:
         super().__init__()
         self._running = running
         self.status_calls: list[tuple[str, bool, bool]] = []
@@ -1437,6 +1437,8 @@ class _StatusClient(_RecordingClient):
         running_only: bool = False,
     ) -> QueryStatus:
         self.status_calls.append((query_id, every_replica, running_only))
+        if isinstance(self._running, Exception):
+            raise self._running
         return QueryStatus(status="running" if self._running else "unknown")
 
 
@@ -1472,6 +1474,66 @@ def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
     assert client.status_calls == [("retry-query-id", True, True)]
     assert len(client.calls) == (0 if running else 2)
     assert (len(store.writes) > 0) is not running
+
+
+@pytest.mark.parametrize("mode", ["sync", "barrier"])
+@pytest.mark.parametrize("prior", ["started", "failed", "abandoned", "stopped", "unreadable", "no-before-retry"])
+def test_mode_only_edit_preserves_async_attempt_until_stopped(
+    tmp_path: Path, mode: str, prior: str
+) -> None:
+    sql = (
+        "SELECT query_id FROM system.processes WHERE 0;"
+        if mode == "barrier" else "INSERT INTO db.a SELECT 1;"
+    )
+    compensation = "" if prior == "no-before-retry" else "-- before-retry: TRUNCATE TABLE db.a\n"
+    original = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"{compensation}{sql}\n"
+    )
+    edited = original.replace("mode=async", f"mode={mode}")
+    recorded = in_progress(
+        [op(
+            0, "failed" if prior in {"failed", "stopped", "unreadable"} else "started",
+            LOAD, query_id="random-retry-query-id",
+        ).model_copy(update={"fingerprint": statement_fingerprint(sql)})],
+        checksum=checksum_sql(original),
+    )
+
+    class CrashStore(FakeStore):
+        def write_migration_state(self, state: MigrationRowState) -> None:
+            super().write_migration_state(state)
+            if prior != "stopped" and state.operations[0].query_id == "":
+                raise RuntimeError("crash after ID overwrite")
+
+    class ModeClient(_StatusClient):
+        def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+            return QueryResult(column_names=["query_id"], rows=[{"x": 1}] if "system.tables" in sql else [])
+
+    store = CrashStore(recorded)
+    if prior == "abandoned":
+        abandon_migration_state(recorded, journal_store=store)
+    client = ModeClient(RuntimeError("replica unavailable") if prior == "unreadable" else prior != "stopped")
+    _write(tmp_path, edited)
+    retry = _retry_for(edited, checksum_sql(original))
+    if prior == "stopped":
+        _apply(tmp_path, client, store, retry=retry)
+        assert client.calls == (["TRUNCATE TABLE db.a", sql] if mode == "sync" else ["TRUNCATE TABLE db.a"])
+        assert store.state is not None
+        assert store.state.migration_completed is True
+    else:
+        if prior == "unreadable":
+            with pytest.raises(RuntimeError, match="replica unavailable"):
+                _apply(tmp_path, client, store, retry=retry)
+        else:
+            with pytest.raises(MigrateError) as raised:
+                _apply(tmp_path, client, store, retry=retry)
+            assert raised.value.code == "retry_mismatch"
+        assert client.calls == []
+        assert store.appended == []
+        assert store.state is not None
+        assert store.state.operations[0].query_id == "random-retry-query-id"
+        assert all(write.operations[0].query_id == "random-retry-query-id" for write in store.writes)
+    assert client.status_calls == [("random-retry-query-id", True, True)]
 
 
 def test_apply_started_statement_still_requires_retry(tmp_path: Path) -> None:

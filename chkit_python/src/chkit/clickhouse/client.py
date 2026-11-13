@@ -13,6 +13,7 @@ import os
 import re
 import threading
 import uuid
+from collections.abc import Callable
 from typing import Any, Literal, NoReturn, Self
 from urllib.parse import unquote, urlparse
 
@@ -167,6 +168,15 @@ class ClickHouseClient:
         _use_ts_timeouts(client)
         return client
 
+    def open_concurrent(self) -> ClickHouseClient:
+        """A new client to the same target without an HTTP session, for requests
+        sent while one of this client's requests is in flight (ClickHouse runs
+        one query at a time per session). The caller closes it. TS
+        ``openConcurrent``."""
+        return ClickHouseClient(
+            self._open_driver(self._config, autogenerate_session_id=False), self._config
+        )
+
     def close(self) -> None:
         # Does not wait for a submit driver still opening (on the thread of an
         # interrupted async migrate), which has no connect timeout: that
@@ -195,11 +205,19 @@ class ClickHouseClient:
         executor's ``command(sql, settings)``). As in TS, a statement that
         fails because the configured database does not exist is retried without
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
+        self.execute_guarded(statement, lambda: None, settings)
+
+    def execute_guarded(
+        self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
+    ) -> None:
+        """Check ownership before each command attempt, including an internal retry."""
+        check()
         try:
             self._client.command(statement, settings=settings)
         except DatabaseError as error:
             if not is_unknown_database_error(error):
                 raise
+            check()
             self._client.command(statement, settings=settings, use_database=False)
 
     def query(

@@ -18,6 +18,10 @@ MigrateErrorCode = Literal[
     "in_progress_checksum_mismatch",
     "statement_split_changed",
     "barrier_not_select",
+    "migrate_locked",
+    "migrate_lock_lost",
+    "migrate_lock_unverifiable",
+    "journal_changed",
 ]
 
 EMPTY_MIGRATIONS_SUMMARY = (
@@ -176,4 +180,14 @@ def empty_migrations_error(files: Sequence[str]) -> RuntimeError:
         "An empty migration would be recorded as applied, and SQL added to it later "
         "would fail the checksum check.\n"
         "Add SQL statements to each file or delete it, then re-run chkit migrate --apply."
+    )
+
+
+def journal_changed_error(detail: str) -> MigrateError:
+    """The journal changed between the plan this run showed and the moment it
+    took the migrate lock, in a way the plan does not cover (#716)."""
+    return MigrateError(
+        "journal_changed",
+        f"Another migrate run changed the journal while this run was planning: {detail}. "
+        "Nothing was applied; run migrate again to see the current plan.",
     )
