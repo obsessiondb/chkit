@@ -211,12 +211,17 @@ def test_tracked_execute_blocks_the_pinned_drivers_remote_close_retry() -> None:
 def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
     client, fake = _stub_client()
     httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')
-    result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000)
+    result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored", "result_overflow_mode": "break", "max_result_rows": 1})
     assert result.rows == [{"query_id": "old-query", "kill_status": "finished"}]
     request = httpx_mock.get_request()
     assert request is not None
     assert request.url.params["database"] == "default"
     assert request.url.params["default_format"] == "JSONEachRow"
+    assert request.url.params["query_id"] == "receipt-control"
+    assert request.url.params["log_queries"] == "1"
+    assert request.url.params["max_result_rows"] == "1"
+    for name in ("result_overflow_mode", "group_by_overflow_mode", "set_overflow_mode", "timeout_overflow_mode", "read_overflow_mode"):
+        assert request.url.params[name] == "throw"
     assert "session_id" not in request.url.params
     assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC"
     fake.query.assert_not_called()
@@ -537,3 +542,12 @@ def test_wrap_connection_error_reraises_an_unrecognized_error() -> None:
     with pytest.raises(DatabaseError) as info:
         wrap_connection_error(cause, "http://localhost:8123")
     assert info.value is cause
+
+
+@pytest.mark.parametrize("code", [None, "0"])
+def test_native_control_accepts_zero_exception_header(
+    httpx_mock: HTTPXMock, code: str | None,
+) -> None:
+    client, _fake = _stub_client()
+    httpx_mock.add_response(text='{"n":0}\n', headers={"X-ClickHouse-Exception-Code": code} if code else {})
+    assert client.query_control("SELECT 0 AS n", 1000).rows == [{"n": 0}]

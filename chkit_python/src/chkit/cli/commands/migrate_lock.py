@@ -99,7 +99,7 @@ class TakeoverReservation:
     claim: str
     holder: str
     before_release: Callable[[], None] | None = None
-    resume_pending: Callable[[], None] | None = None
+    resume_pending: Callable[[list[dict[str, str]]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -586,6 +586,7 @@ def acquire_migrate_lock(
         "startedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "beat": 0,
         **({"queries": query_tracking.to_payload()} if query_tracking is not None else {}),
+        **({"recoveryOf": takeover.claim} if takeover is not None else {}),
     }
     holder_json = json.dumps(holder, separators=(",", ":"), ensure_ascii=False)
     if takeover is not None:
@@ -668,7 +669,10 @@ def _takeover_lock(
         if others:
             if takeover.resume_pending is None:
                 raise _locked_error(target, others, deps.timings)
-            takeover.resume_pending()
+            takeover.resume_pending([
+                {"claim": item.name.removeprefix(LOCK_ROW_PREFIX), "holder": item.raw_holder}
+                for item in others
+            ])
             live = [claim for claim in others if claim.age_ms < deps.timings.lease_ms]
             if live:
                 raise _locked_error(target, live, deps.timings)

@@ -25,7 +25,11 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
 from pydantic import BaseModel, ConfigDict
 from urllib3 import Timeout
 
-from chkit.clickhouse.control import remaining_control_seconds, run_control_request
+from chkit.clickhouse.control import (
+    STRICT_CONTROL_SETTINGS,
+    remaining_control_seconds,
+    run_control_request,
+)
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.jsnum import js_math_round
 from chkit.core.model import ChxResolvedClickHouseConfig
@@ -266,7 +270,10 @@ class ClickHouseClient:
         finally:
             self._client.http = pool
 
-    def query_control(self, statement: str, timeout_ms: float) -> QueryResult:
+    def query_control(
+        self, statement: str, timeout_ms: float, *, query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> QueryResult:
         """A session-free, non-retrying control request with one absolute budget."""
         def request(deadline: float) -> QueryResult:
             parsed = urlparse(self._config.url)
@@ -279,12 +286,19 @@ class ClickHouseClient:
                     auth=(username, password),
                     params={
                         "database": self._config.database, "default_format": "JSONEachRow",
+                        **{key: str(value) for key, value in (settings or {}).items()
+                           if key != "query_id" and value is not None},
+                        **STRICT_CONTROL_SETTINGS,
                         "wait_end_of_query": "1",
+                        **({"query_id": query_id} if query_id else {}),
                     },
+                    headers={"Connection": "close"},
                     content=statement,
                     timeout=remaining_control_seconds(deadline),
                 )
-                if response.is_error or response.headers.get("X-ClickHouse-Exception-Code"):
+                if response.is_error or response.headers.get("X-ClickHouse-Exception-Code") not in (
+                    None, "", "0",
+                ):
                     raise DatabaseError(response.text)
                 rows = [json.loads(line) for line in response.text.splitlines() if line.strip()]
                 return QueryResult(column_names=list(rows[0]) if rows else [], rows=rows)

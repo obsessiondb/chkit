@@ -86,6 +86,7 @@ interface LockHolder {
   /** Which write of the holder the row is: 0 for the claim, then one per heartbeat. */
   beat: number
   queries?: QueryIdentity
+  recoveryOf?: string
 }
 
 interface LockClaim {
@@ -358,7 +359,7 @@ export async function acquireMigrateLock(
     /** Advertises durable per-physical-attempt query associations. */
     queryTracking?: QueryIdentity
     /** Validated predecessor snapshot for cancellation's reservation-before-release handoff. */
-    takeover?: { claim: string; holder: string; beforeRelease?: () => Promise<void>; resumePending?: () => Promise<void> }
+    takeover?: { claim: string; holder: string; beforeRelease?: () => Promise<void>; resumePending?: (reservations: readonly { claim: string; holder: string }[]) => Promise<void> }
   },
   overrides: Partial<Omit<LockDeps, 'log'>> = {},
 ): Promise<MigrateLock> {
@@ -371,6 +372,7 @@ export async function acquireMigrateLock(
     startedAt: new Date().toISOString(),
     beat: 0,
     ...(options.queryTracking ? { queries: options.queryTracking } : {}),
+    ...(options.takeover ? { recoveryOf: options.takeover.claim } : {}),
   }
   const holderJson = JSON.stringify(holder)
   if (options.takeover) {
@@ -392,7 +394,7 @@ export async function acquireMigrateLock(
         // Only an unresolved durable barrier proves these later cooperating
         // reservations could not have admitted migration work of their own.
         if (!options.takeover.resumePending) throw lockedError(target, others, timings)
-        await options.takeover.resumePending()
+        await options.takeover.resumePending(others.map((claim) => ({ claim: claim.name.slice(LOCK_ROW_PREFIX.length), holder: claim.rawHolder })))
         const live = others.filter((claim) => claim.ageMs < timings.leaseMs)
         if (live.length > 0) throw lockedError(target, live, timings)
         const alive = await releaseStoppedClaims(db, target, others, deps)

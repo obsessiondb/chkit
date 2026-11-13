@@ -109,11 +109,14 @@ def test_control_decodes_rows_and_sets_remaining_http_timeout(
         )
 
     monkeypatch.setattr(remote_executor, "workbench_query_execute", execute)
-    result = client().query_control("KILL QUERY WHERE query_id = 'old' SYNC", 1000)
+    result = client().query_control("KILL QUERY WHERE query_id = 'old' SYNC", 1000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored"})
     assert result.rows == [{"kill_status": "finished"}]
     assert result.column_names == ["kill_status"]
     assert len(calls) == 1
     assert 0 < calls[0]["timeout"] <= 1
+    assert calls[0]["query_id"] == "receipt-control"
+    assert calls[0]["settings"]["log_queries"] == 1
+    assert "query_id" not in calls[0]["settings"]
 
 
 def test_control_deadline_bounds_a_stalled_request(
@@ -157,3 +160,27 @@ def test_workbench_control_timeout_reaches_http_transport(httpx_mock: HTTPXMock)
     assert request.extensions["timeout"] == {
         "connect": 0.25, "read": 0.25, "write": 0.25, "pool": 0.25,
     }
+
+
+@pytest.mark.parametrize("truncated", [True, False])
+def test_control_refuses_truncated_workbench_results(
+    truncated: bool, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    calls: list[dict[str, Any]] = []
+
+    def execute(_credentials: Credentials, **kwargs: Any) -> WorkbenchExecuteResult:
+        calls.append(kwargs)
+        return WorkbenchExecuteResult.model_validate({
+            "data": [["0"]], "meta": [{"name": "n", "type": "UInt64"}], "rows": 1,
+            "truncated": truncated,
+        })
+
+    monkeypatch.setattr(remote_executor, "workbench_query_execute", execute)
+    if truncated:
+        with pytest.raises(RuntimeError, match="truncated"):
+            client().query_control("SELECT 0 AS n", 1000)
+    else:
+        assert client().query_control("SELECT 0 AS n", 1000).rows == [{"n": "0"}]
+    assert calls[0]["settings"]["result_overflow_mode"] == "throw"
+    assert calls[0]["settings"]["group_by_overflow_mode"] == "throw"
+    assert client().query("SELECT 0 AS n").rows == [{"n": "0"}]

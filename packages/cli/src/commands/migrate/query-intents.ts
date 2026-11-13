@@ -3,11 +3,15 @@ import { randomUUID } from 'node:crypto'
 import type { ClickHouseExecutor, ClickHouseSettings } from '@chkit/clickhouse'
 import { identifierName, isTrivia, quoteIdentifier, statementFingerprint, tokenizeSQL, type SQLToken } from '@chkit/core'
 
+import type { RecoveryObligation } from './cancellation.js'
+
 import { CLI_VERSION } from '../../runtime/version.js'
 import { MigrateError } from './errors.js'
 import type { LockTarget, MigrateLock } from './lock.js'
 
 export const QUERY_INTENT_PREFIX = '__chkit_migrate_query__/'
+
+const CANCELLABLE_SETTINGS = new Set(['max_threads', 'max_insert_threads', 'max_block_size', 'max_insert_block_size', 'min_insert_block_size_rows', 'min_insert_block_size_bytes', 'async_insert'])
 
 /** The effective SQL identity and verified topology, shared by both ports. */
 export interface QueryIdentity {
@@ -25,7 +29,7 @@ export interface QueryContext {
 }
 
 export type QueryPhase = 'forward' | 'compensation'
-export interface QueryTarget { database: string; name: string }
+export interface QueryTarget { database: string; name: string; uuid?: string; engine?: string }
 export type QueryKind = 'insert' | 'truncate' | 'async' | 'unsupported'
 
 /** Immutable checksum JSON; never contains SQL or credentials. */
@@ -37,7 +41,16 @@ export interface QueryIntent extends QueryIdentity {
   phase: QueryPhase
   kind: QueryKind
   fingerprint: string
+  forwardFingerprint: string
   target?: QueryTarget
+  source?: QueryTarget
+}
+
+export interface QueryRecovery {
+  targets: readonly QueryTarget[]
+  sources?: readonly QueryTarget[]
+  obligations?: readonly RecoveryObligation[]
+  afterCompensation(target: QueryTarget): Promise<void>
 }
 
 export interface QueryTracker {
@@ -51,22 +64,49 @@ export function createQueryTracker(input: {
   target: LockTarget
   identity: QueryIdentity
   lock: MigrateLock
+  recovery?: QueryRecovery
 }): QueryTracker {
-  const { db, target, identity, lock } = input
+  const { db, target, identity, lock, recovery } = input
   const command = db.commandTracked?.bind(db)
   const claim = lock.claimId
   if (!command || !claim) throw cancellationError('This executor does not support tracked commands.')
 
-  const record = async (context: QueryContext, phase: QueryPhase, sql: string, queryId: string, kind?: QueryKind, settings?: ClickHouseSettings): Promise<string> => {
+  const record = async (context: QueryContext, phase: QueryPhase, sql: string, queryId: string, kind?: QueryKind, settings?: ClickHouseSettings): Promise<QueryIntent> => {
     lock.assertHeld()
     const classification = classifyQueryIntent(sql, phase, context.beforeRetry, target.database)
     const forward = classifyQueryIntent(context.forwardSQL, 'forward', context.beforeRetry, target.database)
     const matched = phase !== 'compensation' || (forward.kind === 'insert' && sameTarget(classification.target, forward.target))
+    let recordedTarget = classification.target
+    // Compensation retains its forward source so a crash before reload can
+    // recover the same frozen input even when only a TRUNCATE intent exists.
+    let recordedSource = classification.source ?? (phase === 'compensation' ? forward.source : undefined)
+    let verified = true
+    if (kind !== 'async' && classification.kind !== 'unsupported' && identity.cluster) {
+      try {
+        if (recordedTarget) recordedTarget = await attestQueryTable(db, identity, recordedTarget)
+        if (recordedSource) {
+          recordedSource = await attestQueryTable(db, identity, recordedSource)
+          if (recordedSource.uuid === recordedTarget?.uuid) throw cancellationError('A compensation target cannot also be its source.')
+        }
+      } catch {
+        // Ordinary execution keeps its existing behavior. Unsupported coverage
+        // is durable and explicit cancellation must refuse the entire claim.
+        verified = false
+      }
+      lock.assertHeld()
+    }
+    const unsafeSettings = Object.entries(settings ?? {}).some(([key, value]) => value !== undefined && !CANCELLABLE_SETTINGS.has(key))
+      || (settings?.async_insert !== undefined && String(settings.async_insert) !== '0')
     const intent: QueryIntent = {
       ...identity, claim, queryId, migration: context.migration, statementIndex: context.statementIndex,
-      phase, fingerprint: statementFingerprint(sql),
-      kind: kind ?? ((!matched || settings?.query_id !== undefined || settings?.wait_for_async_insert !== undefined || (settings?.async_insert !== undefined && String(settings.async_insert) !== '0')) ? 'unsupported' : classification.kind),
-      ...(classification.target ? { target: classification.target } : {}),
+      phase, fingerprint: statementFingerprint(sql), forwardFingerprint: statementFingerprint(context.forwardSQL),
+      kind: kind ?? ((!verified || !matched || unsafeSettings) ? 'unsupported' : classification.kind),
+      ...(recordedTarget ? { target: recordedTarget } : {}),
+      ...(recordedSource ? { source: recordedSource } : {}),
+    }
+    if (recovery?.obligations && !recovery.obligations.some((item) => item.migration === context.migration && item.statementIndex === context.statementIndex && item.forwardFingerprint === intent.forwardFingerprint)) throw cancellationError('Explicit recovery requires the unchanged recorded forward SQL; no statement was sent.')
+    if (recovery && (!['insert', 'truncate'].includes(intent.kind) || !recovery.targets.some((expected) => sameTarget(expected, recordedTarget) && expected.uuid === recordedTarget?.uuid && expected.engine === recordedTarget?.engine) || (recordedSource && !recovery.sources?.some((expected) => sameTarget(expected, recordedSource) && expected.uuid === recordedSource?.uuid && expected.engine === recordedSource?.engine)))) {
+      throw cancellationError('Explicit cancellation recovery requires supported SQL against the recorded table identity; no statement was sent.')
     }
     const name = `${QUERY_INTENT_PREFIX}${claim}/${queryId}`
     const checksum = JSON.stringify(intent)
@@ -74,19 +114,35 @@ export function createQueryTracker(input: {
     await db.command(
       `INSERT INTO ${quoteIdentifier(target.database)}.${target.journalTable} ` +
       '(name, applied_at, checksum, chkit_version, migration_completed, operations) ' +
-      `SELECT ${sqlString(name)}, now64(3), ${sqlString(checksum)}, ${sqlString(CLI_VERSION)}, false, []`,
+      `SELECT ${sqlString(name)}, now64(3), ${sqlString(checksum)}, ${sqlString(CLI_VERSION)}, false, [] SETTINGS async_insert = 0, insert_quorum = 'auto', insert_quorum_parallel = 0`,
     )
+    const from = identity.cluster ? `clusterAllReplicas(${sqlString(identity.cluster)}, ${sqlString(target.database)}, ${sqlString(target.journalTable)})` : `${quoteIdentifier(target.database)}.${target.journalTable}`
     const rows = await db.query<{ checksum: string }>(
-      `SELECT checksum FROM ${quoteIdentifier(target.database)}.${target.journalTable} WHERE name = ${sqlString(name)} GROUP BY checksum`,
+      `SELECT checksum FROM ${from} WHERE name = ${sqlString(name)} GROUP BY checksum SETTINGS skip_unavailable_shards = 0, select_sequential_consistency = 1`,
     )
     if (rows.length !== 1 || rows[0]?.checksum !== checksum) throw cancellationError('The query intent did not read back; no statement was sent.')
     lock.assertHeld()
-    return queryId
+    return intent
   }
 
   return {
-    command(context, phase, sql, settings) {
-      return command(sql, () => lock.assertHeld(), () => record(context, phase, sql, randomUUID(), undefined, settings), settings)
+    async command(context, phase, sql, settings) {
+      const classification = classifyQueryIntent(sql, phase, context.beforeRetry, target.database)
+      const expected = recovery?.targets.find((table) => sameTarget(table, classification.target))
+      const effectiveSettings = phase === 'compensation' && expected?.engine === 'SharedMergeTree'
+        ? { ...settings, shared_merge_tree_require_truncate_fence: 1 } : settings
+      let physicalTarget: QueryTarget | undefined
+      await command(sql, () => lock.assertHeld(), async () => {
+        const intent = await record(context, phase, sql, randomUUID(), undefined, settings)
+        physicalTarget = intent.target
+        return intent.queryId
+      }, effectiveSettings)
+      lock.assertHeld()
+      if (phase === 'compensation' && recovery) {
+        if (!physicalTarget) throw cancellationError('Compensation has no attested target.')
+        await recovery.afterCompensation(physicalTarget)
+        lock.assertHeld()
+      }
     },
     async recordAsync(context, queryId) {
       await record(context, 'forward', context.forwardSQL, queryId, 'async')
@@ -95,7 +151,7 @@ export function createQueryTracker(input: {
 }
 
 /** Deliberately small executable-SQL whitelist, independent of operation markers. */
-export function classifyQueryIntent(sql: string, phase: QueryPhase, beforeRetry: string | null, database = ''): { kind: QueryKind; target?: QueryTarget } {
+export function classifyQueryIntent(sql: string, phase: QueryPhase, beforeRetry: string | null, database = ''): { kind: QueryKind; target?: QueryTarget; source?: QueryTarget } {
   const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
   if (tokens.at(-1)?.text === ';') tokens.pop()
   if (tokens.some((token) => !token.terminated || token.text === ';')) return { kind: 'unsupported' }
@@ -116,12 +172,13 @@ export function classifyQueryIntent(sql: string, phase: QueryPhase, beforeRetry:
     return name !== undefined && (unsafe.has(name) || /CLUSTER$/.test(name) || /^REMOTE(SECURE)?$/.test(name))
   })) return { kind: 'unsupported' }
   if (!rest.some((token) => token.kind === 'identifier' && ['SELECT', 'VALUES'].includes(token.text.toUpperCase()))) return { kind: 'unsupported' }
-  // v1 excludes source tables/views and arbitrary table functions: they can
-  // hide distributed children outside the recorded topology. Numeric sources
-  // and a small set of local expressions cover the verified recovery path.
+  // One named source is attested before sending. Joins, nested SELECTs, views
+  // and arbitrary functions cannot hide work beyond the recorded topology.
   const functions = new Set(['NUMBERS', 'NUMBERS_MT', 'SLEEP', 'SLEEPEACHROW', 'TOUINT8', 'TOUINT16', 'TOUINT32', 'TOUINT64', 'TOINT8', 'TOINT16', 'TOINT32', 'TOINT64', 'TOSTRING', 'SELECT', 'VALUES'])
   let depth = 0
   let sourceDepth: number | undefined
+  let source: QueryTarget | undefined
+  let selects = 0
   for (let i = 0; i < rest.length; i++) {
     const token = rest[i]
     if (token?.text === '(') depth++
@@ -129,18 +186,26 @@ export function classifyQueryIntent(sql: string, phase: QueryPhase, beforeRetry:
     if (token?.text === ',' && sourceDepth !== undefined && depth <= sourceDepth) return { kind: 'unsupported' }
     const name = token && identifierName(token)?.toUpperCase()
     if (!name) continue
+    if (name === 'SELECT' && ++selects > 1) return { kind: 'unsupported' }
     if (['WITH', 'JOIN', 'UNION', 'IN', 'GLOBAL'].includes(name)) return { kind: 'unsupported' }
     if (name === 'FROM') {
+      if (depth !== 0 || sourceDepth !== undefined) return { kind: 'unsupported' }
       sourceDepth = depth
       const next = rest[i + 1]
       const sourceName = next && identifierName(next)?.toUpperCase()
-      if (!sourceName || !['NUMBERS', 'NUMBERS_MT'].includes(sourceName) || rest[i + 2]?.text !== '(') return { kind: 'unsupported' }
+      if (!sourceName) return { kind: 'unsupported' }
+      if (!(['NUMBERS', 'NUMBERS_MT'].includes(sourceName) && rest[i + 2]?.text === '(')) {
+        const parsedSource = readTarget(rest, i + 1, database || parsed.target.database)
+        if (!parsedSource || rest[parsedSource.end]?.text === '(') return { kind: 'unsupported' }
+        source = parsedSource.target
+      }
     }
     if (rest[i + 1]?.text === '(' && !functions.has(name)) return { kind: 'unsupported' }
   }
+  if (source && sameTarget(source, parsed.target)) return { kind: 'unsupported' }
   const compensation = beforeRetry === null ? undefined : classifyQueryIntent(beforeRetry, 'compensation', null, database)
   return compensation?.kind === 'truncate' && sameTarget(compensation.target, parsed.target)
-    ? { kind: 'insert', target: parsed.target }
+    ? { kind: 'insert', target: parsed.target, ...(source ? { source } : {}) }
     : { kind: 'unsupported' }
 }
 
@@ -150,6 +215,19 @@ export function cancellationError(message: string): MigrateError {
 
 export function sqlString(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")}'`
+}
+
+export async function attestQueryTable(db: Pick<ClickHouseExecutor, 'queryControl'>, identity: QueryIdentity, target: QueryTarget): Promise<QueryTarget> {
+  if (!db.queryControl || !identity.cluster) throw cancellationError('Table identity cannot be attested.')
+  const rows = await db.queryControl<{ server_uuid: string; principal: string; uuid: string; engine: string; dependencies: string }>(
+    `SELECT server_uuid, principal, uuid, engine, dependencies FROM clusterAllReplicas(${sqlString(identity.cluster)}, view(SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, toString(uuid) AS uuid, engine, toJSONString(dependencies_table) AS dependencies FROM system.tables WHERE database = ${sqlString(target.database)} AND name = ${sqlString(target.name)})) SETTINGS skip_unavailable_shards = 0`, 30_000,
+  )
+  const first = rows[0]
+  const members = rows.map((row) => row.server_uuid).sort()
+  if (!first || (!/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i.test(first.uuid) || first.uuid === '00000000-0000-0000-0000-000000000000') || JSON.stringify(members) !== JSON.stringify([...identity.serverUUIDs].sort()) || rows.some((row) => row.principal !== identity.principal || row.uuid !== first.uuid || row.engine !== first.engine || !['MergeTree', 'ReplicatedMergeTree', 'SharedMergeTree'].includes(row.engine) || row.dependencies !== '[]')) {
+    throw cancellationError('Table identity, storage engine or replica coverage cannot be attested.')
+  }
+  return { ...target, uuid: first.uuid, engine: first.engine }
 }
 
 function sameTarget(left: QueryTarget | undefined, right: QueryTarget | undefined): boolean {

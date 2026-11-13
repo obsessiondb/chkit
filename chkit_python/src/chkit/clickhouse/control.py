@@ -9,6 +9,19 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import TypeVar
 
+STRICT_CONTROL_SETTINGS = {
+    "read_overflow_mode": "throw",
+    "read_overflow_mode_leaf": "throw",
+    "group_by_overflow_mode": "throw",
+    "sort_overflow_mode": "throw",
+    "result_overflow_mode": "throw",
+    "timeout_overflow_mode": "throw",
+    "timeout_overflow_mode_leaf": "throw",
+    "set_overflow_mode": "throw",
+    "transfer_overflow_mode": "throw",
+    "distinct_overflow_mode": "throw",
+}
+
 _T = TypeVar("_T")
 
 

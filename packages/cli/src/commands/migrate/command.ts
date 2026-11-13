@@ -1,4 +1,4 @@
-import { mkdir } from 'node:fs/promises'
+import { mkdir, readFile } from 'node:fs/promises'
 import { join, relative } from 'node:path'
 import process from 'node:process'
 
@@ -63,8 +63,9 @@ import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
-import { createQueryTracker, type QueryIdentity, type QueryTracker } from './query-intents.js'
-import { assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, markCancellationPending, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
+import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
+import { createQueryTracker, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
+import { assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
 
 const MIGRATE_FLAGS = defineFlags([
   TABLE_FLAG,
@@ -132,9 +133,10 @@ interface MigrateContext {
   /** Runs `fn` holding the migrate lock (#716). */
   withLock: WithLock
   queryTracker: () => QueryTracker | undefined
+  completeRecovery?: () => Promise<void>
 }
 
-type WithLock = <T>(fn: () => Promise<T>) => Promise<T>
+type WithLock = <T>(fn: () => Promise<T>, selectedFiles?: readonly string[]) => Promise<T>
 
 interface ScopeResolution {
   /** --table matched no table, so no migration is selected. */
@@ -226,13 +228,14 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   // the run still holds the migrate lock, once it took it (#716).
   let heldLock: MigrateLock | undefined
   let queryTracker: QueryTracker | undefined
+  let completeRecovery: (() => Promise<void>) | undefined
   const rawDb = pluginContext.executor
   const db = guardExecutor(rawDb, () => heldLock?.assertHeld())
   const journalStore = createJournalStore(db, config.clickhouse?.cluster)
   const breakLock = f['--break-lock']
   // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
   const log = jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
-  const withLock: WithLock = async (fn) => {
+  const withLock: WithLock = async (fn, selectedFiles = []) => {
     if (migrateLockDisabled()) {
       console.error('⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a concurrent migrate can apply the same statements.')
       return await fn()
@@ -257,7 +260,20 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
         }
       }
       if (cancelQueries && !identity) throw new MigrateError('migrate_cancellation_failed', 'This executor cannot safely track/cancel queries.')
-      const cancellation = cancelQueries && identity && breakLock ? await prepareCancellation(rawDb, target, identity, breakLock) : undefined
+      let cancellation = cancelQueries && identity && breakLock ? await prepareCancellation(rawDb, target, identity, breakLock) : undefined
+      if (cancellation) {
+        const contexts: QueryContext[] = []
+        for (const file of selectedFiles) {
+          const sql = await readFile(join(migrationsDir, file), 'utf8')
+          const summaries = extractMigrationOperationSummaries(sql)
+          for (const [statementIndex, forwardSQL] of extractExecutableStatements(sql).entries()) {
+            const operation = summaries[statementIndex]
+            if (operation && operation.mode !== 'sync') throw new MigrateError('migrate_cancellation_failed', 'Explicit recovery requires a fully synchronous selected migration plan.')
+            contexts.push({ migration: file, statementIndex, forwardSQL, beforeRetry: operation?.beforeRetry ?? null })
+          }
+        }
+        cancellation = await expandRecoveryPlan(rawDb, target, cancellation, contexts)
+      }
       await assertCancellationClear(rawDb, target, cancellation?.claim, identity)
       const migrationHooks = pluginRuntime.plugins.some((item) => item.plugin.hooks?.onBeforeApply || item.plugin.hooks?.onAfterApply)
       if (cancelQueries && migrationHooks) throw new MigrateError('migrate_cancellation_failed', 'Cancellation cannot cover arbitrary migration plugin hooks.')
@@ -265,15 +281,18 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       const lock = await acquireMigrateLock(rawDb, target, {
         breakLock: cancellation?.claim ?? breakLock, log, heartbeatDb, queryTracking: trackedIdentity,
         ...(cancellation ? { takeover: { claim: cancellation.claim, holder: cancellation.holder, beforeRelease: () => markCancellationPending(rawDb, target, cancellation),
-          ...(cancellation.resumePending ? { resumePending: () => assertCancellationUnfinished(rawDb, target, cancellation) } : {}),
+          resumePending: (reservations) => assertCancellationUnfinished(rawDb, target, cancellation, reservations),
         } } : {}),
       })
       heldLock = lock
       try {
         await assertCancellationClear(rawDb, target, cancellation?.claim, identity)
-        if (cancellation) await cancelPredecessor(rawDb, target, cancellation, lock)
-        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock }) : undefined
-        return await fn()
+        const recovery = cancellation ? await cancelPredecessor(rawDb, target, cancellation, lock) : undefined
+        completeRecovery = recovery ? async () => { await finishRecovery(rawDb, target, recovery, lock); completeRecovery = undefined } : undefined
+        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, ...(cancellation ? { recovery: { targets: cancellation.targets, sources: cancellation.sources, obligations: cancellation.obligations, afterCompensation: (table) => settleCompensation(rawDb, cancellation, table, lock) } } : {}) }) : undefined
+        const result = await fn()
+        await completeRecovery?.()
+        return result
       } catch (error) {
         // A step that retries or wraps the guard's error (a poll loop, a
         // statement error) reports the lost lock, with its code (#716).
@@ -282,6 +301,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       } finally {
         heldLock = undefined
         queryTracker = undefined
+        completeRecovery = undefined
         await lock.release()
       }
     } finally {
@@ -339,6 +359,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     abandonTarget,
     withLock,
     queryTracker: () => queryTracker,
+    completeRecovery: async () => { await completeRecovery?.() },
   }
 }
 
@@ -458,7 +479,8 @@ async function resolvePendingScope(ctx: MigrateContext): Promise<ScopeResolution
 }
 
 /** Nothing to apply: say why, with what --retry did. */
-function renderNothingPending(ctx: MigrateContext, plan: PendingPlan): number {
+export async function renderNothingPending(ctx: Pick<MigrateContext, 'jsonMode' | 'mode' | 'tableScope' | 'completeRecovery'>, plan: Pick<PendingPlan, 'noScopeMatch' | 'retry'>): Promise<number> {
+  await ctx.completeRecovery?.()
   const { jsonMode, mode, tableScope } = ctx
   const input = { jsonMode, mode, scope: tableScope, retry: plan.retry }
   if (plan.noScopeMatch) emitNoScopeMatch(input)
@@ -568,7 +590,7 @@ async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promi
  * and emit the final summary.
  */
 async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<number> {
-  return await ctx.withLock(async () => await applyPlan(ctx, await replanUnderLock(ctx, plan)))
+  return await ctx.withLock(async () => await applyPlan(ctx, await replanUnderLock(ctx, plan)), plan.pending)
 }
 
 /**
@@ -631,6 +653,7 @@ async function applyPlan(ctx: MigrateContext, plan: PendingPlan): Promise<number
     if (!jsonMode) renderApplied(file)
   }
 
+  await ctx.completeRecovery?.()
   if (jsonMode) {
     emitApplySummaryJson({ scope: tableScope, applied: appliedNow, undeterminedScope, retry })
     return 0

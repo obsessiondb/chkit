@@ -347,7 +347,7 @@ def test_resuming_cancellation_reclaims_only_a_crashed_reservation_protected_by_
     lock = acquire_migrate_lock(
         server, TARGET, break_lock="other", log=lambda _line: None,
         deps=_deps(clock, sleeps, advance),
-        takeover=TakeoverReservation("other", OTHER_HOLDER, resume_pending=lambda: None),
+        takeover=TakeoverReservation("other", OTHER_HOLDER, resume_pending=lambda _reservations: None),
     )
     assert server.claims_of(third)[-1].version == RELEASED
     assert LOCK_TIMINGS.valid_ms + LOCK_TIMINGS.observe_margin_ms in sleeps

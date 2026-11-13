@@ -43,6 +43,7 @@ class WorkbenchExecuteResult(BaseModel):
     statistics: dict[str, Any] | None = None
     query_id: str | None = None
     error: str | None = None
+    truncated: bool = False
 
 
 def workbench_query_execute(

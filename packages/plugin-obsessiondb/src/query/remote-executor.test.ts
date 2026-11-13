@@ -233,6 +233,28 @@ describe('createRemoteExecutor cancellation transport', () => {
 		}
 	})
 
+	test('forwards receipt control id at top level and settings without a conflicting query_id', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			await connect(workbench.url).queryControl('SELECT * FROM system.one', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored' } })
+			expect(workbench.inputs).toHaveLength(1)
+			expect(workbench.inputs[0]).toMatchObject({ queryId: 'receipt-control', settings: { log_queries: 1 } })
+			expect(workbench.inputs[0]?.settings).not.toHaveProperty('query_id')
+		} finally { workbench.stop() }
+	})
+	for (const truncated of [true, false]) {
+		test(`control refuses API truncation without changing ordinary reads (${truncated})`, async () => {
+			const workbench = startScriptedWorkbench({ replicas: 1, truncated })
+			try {
+				const remote = connect(workbench.url)
+				const control = remote.queryControl('SELECT * FROM system.one', 1000, { settings: { result_overflow_mode: 'break', max_result_rows: 1 } })
+				if (truncated) await expect(control).rejects.toThrow('truncated')
+				else expect(await control).toEqual([{ replicas: '1' }])
+				expect(workbench.inputs[0]?.settings).toMatchObject({ result_overflow_mode: 'throw', group_by_overflow_mode: 'throw', set_overflow_mode: 'throw', max_result_rows: 1 })
+				expect(await remote.query('SELECT * FROM system.one')).toEqual([{ replicas: '1' }])
+			} finally { workbench.stop() }
+		})
+	}
 	test('decodes control rows and propagates server errors', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 2, processesError: 'ACCESS_DENIED' })
 		try {
@@ -383,6 +405,7 @@ function connect(baseUrl: string) {
 function startScriptedWorkbench(script: {
 	replicas: number
 	processesError?: string
+	truncated?: boolean
 	tables?: { meta: string[]; data: string[][] }
 }) {
 	const queries: string[] = []
@@ -397,7 +420,7 @@ function startScriptedWorkbench(script: {
 			queries.push(input.query)
 			if (input.query.includes('system.one')) {
 				return Response.json({
-					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1 },
+					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1, ...(script.truncated !== undefined ? { truncated: script.truncated } : {}) },
 				})
 			}
 			if (script.tables && input.query.includes('FROM system.tables')) {

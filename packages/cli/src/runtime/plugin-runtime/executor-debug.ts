@@ -1,4 +1,4 @@
-import type { ClickHouseExecutor, ClickHouseSettings, QueryStatusOptions } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryControlOptions, QueryStatusOptions } from '@chkit/clickhouse'
 
 import { debug, isDebugEnabled } from '../debug.js'
 
@@ -49,8 +49,8 @@ export function wrapExecutorWithDebug(
       },
     } : {}),
     ...(queryControl ? {
-      queryControl<T>(sql: string, timeoutMs: number) {
-        return trace('query control', (rows) => `${rows.length} rows`, () => queryControl<T>(sql, timeoutMs))
+      queryControl<T>(sql: string, timeoutMs: number, options?: QueryControlOptions) {
+        return trace('query control', (rows) => `${rows.length} rows`, () => queryControl<T>(sql, timeoutMs, options))
       },
     } : {}),
     ...(commandGuarded ? {

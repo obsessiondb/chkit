@@ -37,6 +37,25 @@ type InsertCall = {
 }
 
 describe('tracked command physical attempts (#732)', () => {
+  test('control sends its own query id and receipt settings without command routing', async () => {
+    const requests: URL[] = []
+    const server = Bun.serve({ port: 0, fetch(request) {
+      requests.push(new URL(request.url))
+      expect(request.headers.get('X-DDL')).toBeNull()
+      expect(request.headers.get('Connection')?.toLowerCase()).toBe('close')
+      return new Response('{}\n')
+    } })
+    const db = createStatelessClickHouseExecutor({ url: server.url.toString(), username: 'default', password: '', database: 'default', secure: false })
+    try {
+      if (!db.queryControl) throw new Error('Missing control capability')
+      await db.queryControl('KILL QUERY WHERE 0 SYNC', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored', result_overflow_mode: 'break', max_result_rows: 1 } })
+      expect(requests).toHaveLength(1)
+      expect(requests[0]?.searchParams.get('query_id')).toBe('receipt-control')
+      expect(requests[0]?.searchParams.get('log_queries')).toBe('1')
+      for (const name of ['result_overflow_mode', 'group_by_overflow_mode', 'set_overflow_mode', 'timeout_overflow_mode', 'read_overflow_mode']) expect(requests[0]?.searchParams.get(name)).toBe('throw')
+      expect(requests[0]?.searchParams.get('max_result_rows')).toBe('1')
+    } finally { await db.close(); server.stop(true) }
+  })
   test('control deadline closes a stalled response body and permits executor close', async () => {
     const server = Bun.serve({ port: 0, fetch() {
       return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{"partial":1}\n')) } }))

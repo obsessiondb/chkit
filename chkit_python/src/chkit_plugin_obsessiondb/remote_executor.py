@@ -35,7 +35,11 @@ from chkit.clickhouse.client import (
     QueryResult,
     QueryStatus,
 )
-from chkit.clickhouse.control import remaining_control_seconds, run_control_request
+from chkit.clickhouse.control import (
+    STRICT_CONTROL_SETTINGS,
+    remaining_control_seconds,
+    run_control_request,
+)
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
     SchemaObjectRef,
@@ -166,15 +170,27 @@ class RemoteClickHouseClient:
         )
         _raise_if_error(result)
 
-    def query_control(self, statement: str, timeout_ms: float) -> QueryResult:
+    def query_control(
+        self, statement: str, timeout_ms: float, *, query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> QueryResult:
         def request(deadline: float) -> QueryResult:
             result = workbench_query_execute(
                 self._credentials,
                 service_slug=self._service_slug,
                 query=statement,
                 timeout=remaining_control_seconds(deadline),
+                query_id=query_id,
+                settings=_coerce_wire_settings({
+                    **{key: value for key, value in (settings or {}).items() if key != "query_id"},
+                    **STRICT_CONTROL_SETTINGS,
+                }),
             )
             _raise_if_error(result)
+            if result.truncated:
+                raise RuntimeError(
+                    "Cancellation control result was truncated; complete proof is required"
+                )
             return QueryResult(
                 column_names=[col.name for col in result.meta],
                 rows=normalize_query_data(result),

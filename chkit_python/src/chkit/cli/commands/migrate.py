@@ -50,9 +50,12 @@ from chkit.cli.commands.migrate_cancellation import (
     assert_cancellation_clear,
     assert_cancellation_unfinished,
     cancel_predecessor,
+    expand_recovery_plan,
+    finish_recovery,
     mark_cancellation_pending,
     prepare_cancellation,
     resolve_query_identity,
+    settle_compensation,
 )
 from chkit.cli.commands.migrate_empty import find_empty_migrations
 from chkit.cli.commands.migrate_errors import (
@@ -83,7 +86,12 @@ from chkit.cli.commands.migrate_prompts import (
     is_background_or_ci,
     print_destructive_operation_details,
 )
-from chkit.cli.commands.migrate_query_intents import QueryIdentity, QueryTracker
+from chkit.cli.commands.migrate_query_intents import (
+    QueryContext,
+    QueryIdentity,
+    QueryRecovery,
+    QueryTracker,
+)
 from chkit.cli.commands.migrate_recovery import resolve_recovery_targets
 from chkit.cli.commands.migrate_retry import (
     RetryResolution,
@@ -111,6 +119,8 @@ from chkit.cli.safety_markers import (
     DestructiveOperationMarker,
     collect_destructive_operation_markers,
     collect_unmarked_destructive_statements,
+    extract_executable_statements,
+    extract_migration_operation_summaries,
 )
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
@@ -150,6 +160,7 @@ class _MigrateContext:
     # Runs ``fn`` holding the migrate lock (#716).
     with_lock: WithLock
     query_tracker: Callable[[], QueryTracker | None] = field(default=lambda: None)
+    complete_recovery: Callable[[], None] = field(default=lambda: None)
 
 
 _T = TypeVar("_T")
@@ -447,6 +458,7 @@ def _run(
             with_lock=_MigrateLockRunner(
                 raw_client=raw_client,
                 journal_store=journal_store,
+                migrations_dir=migrations_dir,
                 holder=lock_holder,
                 break_lock=break_lock,
                 json_mode=output_json,
@@ -461,6 +473,7 @@ def _run(
                 ),
             ),
             query_tracker=lambda: lock_holder.tracker,
+            complete_recovery=lock_holder.complete_recovery,
         )
         if targets.abandon_target is not None:
             run_abandon(
@@ -639,6 +652,7 @@ def _resolve_pending_scope(ctx: _MigrateContext) -> _PendingPlan:
 
 def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     """Nothing to apply: say why, with what --retry did."""
+    ctx.complete_recovery()
     if plan.no_scope_match:
         selector = ctx.table_scope.selector or ""
         if ctx.json_mode:
@@ -843,7 +857,12 @@ def _run_destructive_gate(ctx: _MigrateContext, pending: list[str]) -> None:
 def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     """Apply each pending migration holding the migrate lock (#716), journal
     it, and emit the final summary."""
-    ctx.with_lock(lambda: _apply_plan(ctx, _replan_under_lock(ctx, plan)))
+    def apply() -> None:
+        _apply_plan(ctx, _replan_under_lock(ctx, plan))
+    if isinstance(ctx.with_lock, _MigrateLockRunner):
+        ctx.with_lock(apply, selected_files=plan.pending)
+    else:
+        ctx.with_lock(apply)
 
 
 def _replan_under_lock(ctx: _MigrateContext, plan: _PendingPlan) -> _PendingPlan:
@@ -882,11 +901,17 @@ def _replan_under_lock(ctx: _MigrateContext, plan: _PendingPlan) -> _PendingPlan
 class _LockHolder:
     """The migrate lock this run holds, if any, checked before each request."""
 
-    __slots__ = ("lock", "tracker")
+    __slots__ = ("completion", "lock", "tracker")
 
     def __init__(self) -> None:
         self.lock: MigrateLock | None = None
         self.tracker: QueryTracker | None = None
+        self.completion: Callable[[], None] | None = None
+
+    def complete_recovery(self) -> None:
+        if self.completion is not None:
+            self.completion()
+            self.completion = None
 
     def check(self) -> None:
         if self.lock is not None:
@@ -907,6 +932,7 @@ class _MigrateLockRunner(WithLock):
         cancel_queries: bool = False,
         configured_cluster: str | None = None,
         migration_hooks: bool = False,
+        migrations_dir: Path | None = None,
     ) -> None:
         self._raw_client = raw_client
         self._journal_store = journal_store
@@ -916,8 +942,9 @@ class _MigrateLockRunner(WithLock):
         self._cancel_queries = cancel_queries
         self._configured_cluster = configured_cluster
         self._migration_hooks = migration_hooks
+        self._migrations_dir = migrations_dir
 
-    def __call__(self, fn: Callable[[], _T]) -> _T:
+    def __call__(self, fn: Callable[[], _T], selected_files: list[str] | None = None) -> _T:
         if migrate_lock_disabled():
             typer.echo(
                 "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "
@@ -970,6 +997,29 @@ class _MigrateLockRunner(WithLock):
                 if self._cancel_queries and identity is not None and self._break_lock is not None
                 else None
             )
+            if cancellation is not None:
+                contexts: list[QueryContext] = []
+                for filename in selected_files or []:
+                    if self._migrations_dir is None:
+                        raise MigrateError(
+                            "migrate_cancellation_failed", "Recovery has no migration directory.",
+                        )
+                    sql = (self._migrations_dir / filename).read_text(encoding="utf-8")
+                    summaries = extract_migration_operation_summaries(sql)
+                    for index, forward_sql in enumerate(extract_executable_statements(sql)):
+                        operation = summaries[index] if index < len(summaries) else None
+                        if operation is not None and operation.mode != "sync":
+                            raise MigrateError(
+                                "migrate_cancellation_failed",
+                                "Explicit recovery requires a fully synchronous selected plan.",
+                            )
+                        contexts.append(QueryContext(
+                            filename, index, forward_sql,
+                            operation.before_retry if operation else None,
+                        ))
+                cancellation = expand_recovery_plan(
+                    self._raw_client, target, cancellation, contexts,
+                )
             allowed = cancellation.claim if cancellation is not None else None
             assert_cancellation_clear(self._raw_client, target, allowed, identity)
             if self._cancel_queries and self._migration_hooks:
@@ -990,10 +1040,10 @@ class _MigrateLockRunner(WithLock):
                         cancellation.claim, cancellation.holder,
                         lambda: mark_cancellation_pending(self._raw_client, target, cancellation),
                         (
-                            lambda: assert_cancellation_unfinished(
-                                self._raw_client, target, cancellation,
+                            lambda reservations: assert_cancellation_unfinished(
+                                self._raw_client, target, cancellation, reservations,
                             )
-                        ) if cancellation.resume_pending else None,
+                        ),
                     )
                     if cancellation is not None else None
                 ),
@@ -1001,13 +1051,29 @@ class _MigrateLockRunner(WithLock):
             self._holder.lock = lock
             try:
                 assert_cancellation_clear(self._raw_client, target, allowed, identity)
-                if cancellation is not None:
+                active_recovery = (
                     cancel_predecessor(self._raw_client, target, cancellation, lock)
+                    if cancellation is not None else None
+                )
+                self._holder.completion = (
+                    lambda: finish_recovery(self._raw_client, target, active_recovery, lock)
+                ) if active_recovery is not None else None
+                recovery = None
+                if cancellation is not None:
+                    plan = cancellation
+                    recovery = QueryRecovery(
+                        plan.targets,
+                        lambda table: settle_compensation(self._raw_client, plan, table, lock),
+                        tuple(plan.sources),
+                        tuple(plan.obligations),
+                    )
                 self._holder.tracker = (
-                    QueryTracker(self._raw_client, target, tracked_identity, lock)
+                    QueryTracker(self._raw_client, target, tracked_identity, lock, recovery)
                     if tracked_identity is not None else None
                 )
-                return fn()
+                result = fn()
+                self._holder.complete_recovery()
+                return result
             except BaseException:
                 # A step that retries or wraps the guard's error (a poll loop,
                 # a statement error) reports the lost lock, with its code.
@@ -1016,6 +1082,7 @@ class _MigrateLockRunner(WithLock):
             finally:
                 self._holder.lock = None
                 self._holder.tracker = None
+                self._holder.completion = None
                 lock.release()
         finally:
             if heartbeat_client is not None:
@@ -1060,6 +1127,7 @@ def _apply_plan(ctx: _MigrateContext, plan: _PendingPlan) -> None:
         if not ctx.json_mode:
             typer.echo(f"Applied: {filename}")
 
+    ctx.complete_recovery()
     if ctx.json_mode:
         payload: dict[str, object] = {
             "mode": "execute",

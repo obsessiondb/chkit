@@ -89,6 +89,25 @@ export interface ClickHouseJsonQueryResult<
 
 export type ObservableSystemTable = 'processes' | 'query_log'
 
+/** Control proofs must fail rather than return a limit-truncated result. */
+export const STRICT_CONTROL_SETTINGS: ClickHouseSettings = {
+	read_overflow_mode: 'throw',
+	read_overflow_mode_leaf: 'throw',
+	group_by_overflow_mode: 'throw',
+	sort_overflow_mode: 'throw',
+	result_overflow_mode: 'throw',
+	timeout_overflow_mode: 'throw',
+	timeout_overflow_mode_leaf: 'throw',
+	set_overflow_mode: 'throw',
+	transfer_overflow_mode: 'throw',
+	distinct_overflow_mode: 'throw',
+}
+
+export interface QueryControlOptions {
+	queryId?: string
+	settings?: ClickHouseSettings
+}
+
 export interface ClickHouseExecutor {
 	command(sql: string, settings?: ClickHouseSettings): Promise<void>
 	/** Optional capability: check before each command attempt, including an internal retry. */
@@ -96,7 +115,7 @@ export interface ClickHouseExecutor {
 	/** Native capability: durably assign a fresh id before each physical command attempt. */
 	commandTracked?(sql: string, check: () => void, beforeAttempt: () => Promise<string>, settings?: ClickHouseSettings): Promise<void>
 	/** Native control connection with a bounded request, including response consumption. */
-	queryControl?<T>(sql: string, timeoutMs: number): Promise<T[]>
+	queryControl?<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]>
 	/** Declared cluster used for strict cancellation coverage; never inferred from failed discovery. */
 	readonly queryControlCluster?: string
 	/** Rows as JSON objects. A number a double cannot hold exactly (an integer
@@ -225,6 +244,7 @@ export interface IntrospectedTable {
 type ClickHouseClient = ReturnType<typeof createClient>
 type ClickHouseConfig = NonNullable<ChxConfig['clickhouse']>
 type ClickHouseClientOptions = {
+	keepAlive?: boolean
 	compression?: {
 		request?: boolean
 		response?: boolean
@@ -761,6 +781,7 @@ export function createStatelessClickHouseClient(
 		clickhouse_settings: clickhouseSettings,
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
+		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
 	})
 }
 
@@ -786,6 +807,7 @@ export function createSessionClickHouseClient(
 		clickhouse_settings: clickhouseSettings,
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
+		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
 	})
 }
 
@@ -883,9 +905,11 @@ export function createExecutorWithClient(
 		...(config.cluster ? { queryControlCluster: config.cluster } : {}),
 		commandGuarded: (sql, check, settings) => command(sql, settings, check),
 		commandTracked: (sql, check, beforeAttempt, settings) => command(sql, settings, check, beforeAttempt),
-		async queryControl<T>(sql: string, timeoutMs: number): Promise<T[]> {
+		async queryControl<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]> {
 			if (!Number.isFinite(timeoutMs) || !(timeoutMs > 0)) throw new Error('Cancellation deadline expired')
-			controlClient ??= createStatelessClickHouseClient(config)
+			// Disable the driver pool: a header override is ignored by the client,
+			// and a pinned socket cannot collect KILL receipts from other members.
+			controlClient ??= createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, { keepAlive: false })
 			const activeClient = controlClient
 			const controller = new AbortController()
 			let result: Awaited<ReturnType<ClickHouseClient['query']>> | undefined
@@ -902,7 +926,13 @@ export function createExecutorWithClient(
 			})
 			try {
 				return await Promise.race([deadline, (async () => {
-					result = await activeClient.query({ query: sql, format: 'JSONEachRow', abort_signal: controller.signal })
+					const settings = { ...options?.settings, ...STRICT_CONTROL_SETTINGS }
+					delete settings.query_id
+					result = await activeClient.query({
+						query: sql, format: 'JSONEachRow', abort_signal: controller.signal,
+						...(options?.queryId ? { query_id: options.queryId } : {}),
+						clickhouse_settings: settings,
+					})
 					if (expired) { result.close(); throw new Error('Cancellation deadline expired') }
 					assertStreamedQuerySucceeded({ response_headers: result.response_headers, query_id: result.query_id, sql })
 					const rows = parseJsonEachRow<T>(await result.text())

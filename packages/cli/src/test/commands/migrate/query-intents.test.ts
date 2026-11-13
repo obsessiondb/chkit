@@ -1,5 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { statementFingerprint } from '@chkit/core'
 
 import { classifyQueryIntent, createQueryTracker, type QueryIdentity } from '../../../commands/migrate/query-intents.js'
 
@@ -26,6 +27,19 @@ describe('migration query intents (#732)', () => {
     expect(classifyQueryIntent('INSERT INTO app.events (id) SELECT 1', 'forward', context.beforeRetry).kind).toBe('insert')
   })
 
+  test('records one real table source, while refusing hidden secondary sources', () => {
+    expect(classifyQueryIntent('INSERT INTO app.events SELECT id, toString(id) FROM app.frozen WHERE id > 0', 'forward', context.beforeRetry)).toEqual({ kind: 'insert', target: { database: 'app', name: 'events' }, source: { database: 'app', name: 'frozen' } })
+    for (const sql of [
+      'INSERT INTO app.events SELECT id FROM app.events',
+      'INSERT INTO app.events SELECT id FROM app.frozen, other.distributed',
+      'INSERT INTO app.events SELECT id FROM app.frozen JOIN other.x USING id',
+      'INSERT INTO app.events SELECT (SELECT id FROM app.frozen)',
+      'INSERT INTO app.events SELECT id FROM app.frozen WHERE id IN other.view',
+      'INSERT INTO app.events SELECT id FROM app.frozen UNION ALL SELECT id FROM app.other',
+      'INSERT INTO app.events SELECT id FROM remote(\'host\', app.frozen)',
+    ]) expect(classifyQueryIntent(sql, 'forward', context.beforeRetry).kind).toBe('unsupported')
+  })
+
   for (const failure of ['none', 'intent', 'ownership'] as const) {
     test(`persists and reads back an intent before admitting SQL (${failure})`, async () => {
       const events: string[] = []
@@ -34,7 +48,7 @@ describe('migration query intents (#732)', () => {
       const db = {
         async command(sql: string) {
           events.push('intent')
-          checksum = /, '((?:[^'\\]|\\.)*)', '.*', false, \[\]$/.exec(sql)?.[1]?.replace(/\\(.)/g, '$1') ?? ''
+          checksum = /, '((?:[^'\\]|\\.)*)', '.*', false, \[\] SETTINGS/.exec(sql)?.[1]?.replace(/\\(.)/g, '$1') ?? ''
           if (failure === 'intent') throw new Error('intent failed')
         },
         async query() { events.push('read-back'); if (failure === 'ownership') held = false; return [{ checksum }] },
@@ -54,6 +68,106 @@ describe('migration query intents (#732)', () => {
       else { await expect(run).rejects.toThrow(failure === 'intent' ? 'intent failed' : 'lost ownership'); expect(events).not.toContain('user SQL') }
       expect(checksum).not.toContain('INSERT INTO')
       expect(checksum).not.toContain('TRUNCATE TABLE')
+    })
+  }
+})
+
+describe('attested table source admission', () => {
+  for (const fault of ['none', 'denied', 'distributed', 'missing member', 'ownership', 'parallel read setting', 'compensation source'] as const) {
+    test(`stores source and destination identity before SQL (${fault})`, async () => {
+      const events: string[] = []
+      let held = true
+      let checksum = ''
+      const targetUUID = '00000000-0000-4000-8000-000000000002'
+      const sourceUUID = '00000000-0000-4000-8000-000000000003'
+      const db = {
+        async queryControl(sql: string) {
+          events.push('metadata')
+          expect(sql).toContain('view(SELECT')
+          if (fault === 'denied') throw new Error('ACCESS_DENIED')
+          if (fault === 'ownership') held = false
+          const source = sql.includes("name = 'frozen'")
+          return fault === 'missing member' ? [] : [{ server_uuid: identity.serverUUIDs[0], principal: 'writer', uuid: source ? sourceUUID : targetUUID, engine: fault === 'distributed' && source ? 'Distributed' : 'MergeTree', dependencies: '[]' }]
+        },
+        async command(sql: string) {
+          events.push('intent')
+          expect(sql).toContain("insert_quorum = 'auto'")
+          checksum = /, '((?:[^'\\]|\\.)*)', '.*', false, \[\] SETTINGS/.exec(sql)?.[1]?.replace(/\\(.)/g, '$1') ?? ''
+        },
+        async query(sql: string) { events.push('read-back'); expect(sql).toContain("clusterAllReplicas('declared'"); return [{ checksum }] },
+        async commandTracked(_sql: string, check: () => void, before: () => Promise<string>) { check(); await before(); check(); events.push('user SQL') },
+      } as unknown as ClickHouseExecutor
+      const tracker = createQueryTracker({ db, identity: { ...identity, cluster: 'declared' }, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined }, lock: { claimId: 'claim', assertHeld() { if (!held) throw new Error('ownership lost') }, release: async () => {} } })
+      const sql = 'INSERT INTO app.events SELECT id FROM app.frozen'
+      const run = tracker.command({ ...context, forwardSQL: sql }, fault === 'compensation source' ? 'compensation' : 'forward', fault === 'compensation source' ? context.beforeRetry : sql, fault === 'parallel read setting' ? { cluster_for_parallel_replicas: 'other' } : { max_threads: 1 })
+      if (fault === 'ownership') {
+        await expect(run).rejects.toThrow('ownership lost')
+        expect(events).not.toContain('user SQL')
+      } else {
+        await run
+        const intent = JSON.parse(checksum)
+        expect(intent.kind).toBe(fault === 'compensation source' ? 'truncate' : fault === 'none' ? 'insert' : 'unsupported')
+        expect(intent.forwardFingerprint).toBe(statementFingerprint(sql))
+        if (fault === 'compensation source') expect(intent.fingerprint).toBe(statementFingerprint(context.beforeRetry))
+        expect(events.at(-1)).toBe('user SQL')
+        if (fault === 'none' || fault === 'compensation source') {
+          expect(intent.target).toMatchObject({ uuid: targetUUID, engine: 'MergeTree' })
+          expect(intent.source).toMatchObject({ uuid: sourceUUID, engine: 'MergeTree' })
+          expect(events).toEqual(['metadata', 'metadata', 'intent', 'read-back', 'user SQL'])
+        }
+      }
+    })
+  }
+})
+
+describe('strict explicit recovery tracker', () => {
+  for (const fault of ['none', 'unsupported SQL', 'changed UUID', 'metadata denied', 'settlement failure', 'lost after SQL', 'source changed'] as const) {
+    test(`checks current SQL before admission and settles before the next INSERT (${fault})`, async () => {
+      const events: string[] = []
+      let held = true
+      let checksum = ''
+      const uuid = '00000000-0000-4000-8000-000000000002'
+      const table = { database: 'app', name: 'events', uuid, engine: 'SharedMergeTree' }
+      const db = {
+        async queryControl(sql: string) {
+          events.push('metadata')
+          if (fault === 'metadata denied') throw new Error('ACCESS_DENIED')
+          return [{ server_uuid: identity.serverUUIDs[0], principal: 'writer', uuid: sql.includes("name = 'frozen'") ? '00000000-0000-4000-8000-000000000004' : fault === 'changed UUID' ? identity.serverUUIDs[0] : uuid, engine: 'SharedMergeTree', dependencies: '[]' }]
+        },
+        async command(sql: string) {
+          events.push('intent')
+          checksum = /, '((?:[^'\\]|\\.)*)', '.*', false, \[\] SETTINGS/.exec(sql)?.[1]?.replace(/\\(.)/g, '$1') ?? ''
+        },
+        async query() { events.push('read-back'); return [{ checksum }] },
+        async commandTracked(sql: string, check: () => void, before: () => Promise<string>, settings?: Record<string, unknown>) {
+          check(); await before(); check()
+          const compensation = sql.startsWith('TRUNCATE')
+          if (compensation) expect(settings?.shared_merge_tree_require_truncate_fence).toBe(1)
+          events.push(compensation ? 'compensation' : 'forward')
+          if (fault === 'lost after SQL') held = false
+        },
+      } as unknown as ClickHouseExecutor
+      const tracker = createQueryTracker({ db, identity: { ...identity, cluster: 'declared' }, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined },
+        lock: { claimId: 'claim', assertHeld() { if (!held) throw new Error('ownership lost') }, release: async () => {} },
+        recovery: { targets: [table], sources: [{ database: 'app', name: 'frozen', uuid: '00000000-0000-4000-8000-000000000003', engine: 'SharedMergeTree' }], async afterCompensation(actual) { expect(actual).toEqual(table); events.push('settled'); if (fault === 'settlement failure') throw new Error('not settled') } },
+      })
+      const actualContext = fault === 'source changed' ? { ...context, forwardSQL: 'INSERT INTO app.events SELECT id FROM app.frozen' } : context
+      const compensation = fault === 'unsupported SQL' ? 'TRUNCATE TABLE app.events SYNC' : context.beforeRetry
+      const run = (async () => {
+        await tracker.command(actualContext, 'compensation', compensation)
+        await tracker.command(actualContext, 'forward', actualContext.forwardSQL)
+      })()
+      if (fault === 'none') {
+        await run
+        expect(events).toEqual(['metadata', 'intent', 'read-back', 'compensation', 'settled', 'metadata', 'intent', 'read-back', 'forward'])
+      } else {
+        await expect(run).rejects.toThrow()
+        expect(events).not.toContain('forward')
+        if (['unsupported SQL', 'changed UUID', 'metadata denied'].includes(fault)) {
+          expect(events).not.toContain('intent')
+          expect(events).not.toContain('compensation')
+        }
+      }
     })
   }
 })
