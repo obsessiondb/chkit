@@ -1,6 +1,8 @@
 import { readdir, readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { compareCodePoints } from '@chkit/core'
+
 import type {
   GenerateMigrationArtifactsInput,
   GenerateMigrationArtifactsOutput,
@@ -28,7 +30,7 @@ export async function generateMigrationArtifacts(
   const toolVersion = input.toolVersion ?? '0.1.0'
 
   const entries = await readdir(input.migrationsDir).catch(() => [] as string[])
-  const sqlFiles = entries.filter((f) => f.endsWith('.sql')).sort()
+  const sqlFiles = entries.filter((f) => f.endsWith('.sql')).sort(compareCodePoints)
 
   const migrations = await Promise.all(
     sqlFiles.map(async (file) => ({

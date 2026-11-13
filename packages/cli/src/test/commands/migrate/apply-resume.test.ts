@@ -2,7 +2,7 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, type Mock, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
@@ -222,6 +222,19 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
   const INSERT = 'INSERT INTO default.t VALUES (1);'
   const SQL = `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n${INSERT}\n`
 
+  // The monotonic clock the waits time their deadline on is frozen and each
+  // check takes 10 s, so a wait gives up after 3 checks of its 30 s instead of
+  // 30 s of real time (#719).
+  let now = 0
+  let clock: Mock<() => number> | undefined
+  beforeEach(() => {
+    now = 0
+    clock = spyOn(performance, 'now').mockImplementation(() => now)
+  })
+  afterEach(() => {
+    clock?.mockRestore()
+  })
+
   // A single-replica target on which default.t is listed in system.tables
   // only while `visible` is set.
   function propagationDb(events: string[], visible: { value: boolean }) {
@@ -232,6 +245,7 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
       async query(sql: string) {
         if (sql.includes('system.one')) return []
         events.push('propagation-query')
+        now += 10_000
         return visible.value ? [{ x: 1 }] : []
       },
     } as unknown as ClickHouseExecutor

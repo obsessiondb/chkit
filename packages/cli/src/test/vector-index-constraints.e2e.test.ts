@@ -2,6 +2,7 @@ import { expect, test } from 'bun:test'
 import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
+import { waitForDDLPropagation } from '@chkit/clickhouse'
 import { table, type TableDefinition, type TableInput } from '@chkit/core'
 import { renderSchemaFile } from '../../../plugin-pull/src/render-schema.js'
 import {
@@ -139,20 +140,30 @@ test('vector indexes and constraints: generate, migrate, drift, pull, change, dr
     expect((await driftUntil((payload) => !payload.drifted)).drifted).toBe(false)
     await writeSchema(definition)
 
-    // 3. Out-of-band changes are drift, in both directions.
-    await executor.command(`ALTER TABLE ${fullName} DROP CONSTRAINT dimension`)
-    await executor.command(`ALTER TABLE ${fullName} ADD CONSTRAINT extra CHECK id < 1000000`)
-    await executor.command(`ALTER TABLE ${fullName} DROP INDEX embedding_hnsw`)
+    // 3. Out-of-band changes are drift, in both directions. One ALTER at a
+    // time, each on every replica before the next: on ObsessionDB an ALTER on
+    // a replica that has not applied the previous one writes back its stale
+    // schema and loses that change (#709).
+    const alter = async (operationType: string, member: string, change: string) => {
+      const statement = `ALTER TABLE ${fullName} ${change}`
+      await executor.command(statement)
+      await waitForDDLPropagation(executor, operationType, `table:${definition.database}.${name}:${member}`, { statement })
+    }
+    await alter('alter_table_drop_constraint', 'constraint:dimension', 'DROP CONSTRAINT dimension')
+    await alter('alter_table_add_constraint', 'constraint:extra', 'ADD CONSTRAINT extra CHECK id < 1000000')
+    await alter('alter_table_drop_index', 'index:embedding_hnsw', 'DROP INDEX embedding_hnsw')
     const outOfBand = await driftUntil(
       (payload) => (payload.tableDrift[0]?.constraintDiffs.length ?? 0) === 2 && (payload.tableDrift[0]?.indexDiffs.length ?? 0) === 1
     )
     expect(outOfBand.tableDrift[0]?.reasonCodes).toEqual(['index_mismatch', 'constraint_mismatch'])
     expect(outOfBand.tableDrift[0]?.constraintDiffs).toEqual(['dimension', 'extra'])
     expect(outOfBand.tableDrift[0]?.indexDiffs).toEqual(['embedding_hnsw'])
-    await executor.command(`ALTER TABLE ${fullName} DROP CONSTRAINT extra`)
-    await executor.command(`ALTER TABLE ${fullName} ADD CONSTRAINT dimension CHECK length(embedding) = 4`)
-    await executor.command(
-      `ALTER TABLE ${fullName} ADD INDEX embedding_hnsw embedding TYPE vector_similarity('hnsw', 'cosineDistance', 4) GRANULARITY 100000000`
+    await alter('alter_table_drop_constraint', 'constraint:extra', 'DROP CONSTRAINT extra')
+    await alter('alter_table_add_constraint', 'constraint:dimension', 'ADD CONSTRAINT dimension CHECK length(embedding) = 4')
+    await alter(
+      'alter_table_add_index',
+      'index:embedding_hnsw',
+      `ADD INDEX embedding_hnsw embedding TYPE vector_similarity('hnsw', 'cosineDistance', 4) GRANULARITY 100000000`
     )
     await driftUntil((payload) => !payload.drifted)
 

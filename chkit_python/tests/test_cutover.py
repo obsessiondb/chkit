@@ -456,6 +456,20 @@ def test_refuses_missing_or_nullable_keys() -> None:
         "Nullable(UInt64)",
         "LowCardinality(Nullable(String))",
         " LowCardinality ( Nullable (String))",
+        # ClickHouse skips comments and reads quoted type names (#699).
+        "LowCardinality(/* c */ Nullable(String))",
+        "`LowCardinality`(Nullable(String))",
+        "`Nullable`(UInt64)",
+        '"Nullable" /* c */ (UInt64)',
+        "-- c\nLowCardinality(`Nullable`(String))",
+        # ClickHouse reads Unicode whitespace and “…” quotes too.
+        "Nullable\u00a0(UInt64)",
+        "LowCardinality(\u3000Nullable(String))",
+        "\u201cNullable\u201d(UInt64)",
+        "LowCardinality(\u201cNullable\u201d (String))",
+        "Nullable\u0085\u180e(UInt64)",
+        "\u200bNullable\u200c(UInt64)",
+        "LowCardinality(\u200dNullable\u2060(String))",
     ]:
         inline: list[Any] = [{"name": "id", "type": type_}, *COLUMNS[1:]]
         found = messages(

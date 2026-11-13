@@ -1,0 +1,9 @@
+SCHEMA >
+    `ts` DateTime,
+    `user_id` UInt64,
+    `raw` String,
+    `topic` String,
+    `header_count` UInt64
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "ts"

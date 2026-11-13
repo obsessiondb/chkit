@@ -4,7 +4,7 @@ import { join } from 'node:path'
 import { tmpdir } from 'node:os'
 
 import { resolveConfig } from '@chkit/core'
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { allReplicas, resolveReplicaFanoutOrThrow, type ClickHouseExecutor } from '@chkit/clickhouse'
 import {
   createLiveExecutor,
   createPrefix,
@@ -246,12 +246,27 @@ describe('e2e: mv_replay backfill of an empty aggregate target (chkit#187)', () 
     // intra-partition range splitting) — the same shape the copy e2e uses. This
     // keeps the test on the part the fix touches (source introspection + the
     // per-partition INSERT…SELECT) rather than the sort-key splitter.
-    const [bytesRow] = await ddl.query<{ total: string }>(`
-      SELECT toString(sum(data_uncompressed_bytes)) AS total
-      FROM system.parts
-      WHERE database = '${db}' AND table = '${sourceTable}' AND active = 1
-      SETTINGS select_sequential_consistency = 1
-    `)
+    // Planning reads the source's parts on whichever replica answers, so poll
+    // until every replica lists every partition (#718). One replica that has
+    // not loaded the inserted parts yet would otherwise size or plan too few.
+    const fanout = await resolveReplicaFanoutOrThrow(ddl)
+    const replicas = fanout?.replicas ?? 1
+    // Through view(): reading system.parts itself across replicas needs a
+    // grant on every column, which ObsessionDB users lack.
+    const partsSql = `SELECT hostName() AS replica, data_uncompressed_bytes, partition FROM system.parts WHERE database = '${db}' AND table = '${sourceTable}' AND active = 1`
+    const parts = await pollUntil(
+      () =>
+        ddl.query<{ total: string; partitions: string }>(`
+          SELECT replica,
+                 toString(sum(data_uncompressed_bytes)) AS total,
+                 toString(uniqExact(partition)) AS partitions
+          FROM ${fanout ? allReplicas(fanout, `view(${partsSql})`) : `(${partsSql})`}
+          GROUP BY replica
+        `),
+      (rows) => rows.length === replicas && rows.every((row) => Number(row.partitions) === BUCKETS),
+    )
+    expect(parts.map((row) => Number(row.partitions))).toEqual(Array(replicas).fill(BUCKETS))
+    const [bytesRow] = parts
     const uncompressedBytes = Number(bytesRow?.total ?? 0)
     expect(uncompressedBytes).toBeGreaterThan(0)
 

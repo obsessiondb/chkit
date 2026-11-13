@@ -72,6 +72,23 @@ describe('generateMigrationArtifacts', () => {
     })
   })
 
+  test('migrations are ordered by code point, as chkit migrate runs them (#703)', async () => {
+    await withTempDir(async (dir) => {
+      const migrationsDir = join(dir, 'migrations')
+      await mkdir(migrationsDir)
+      // A bare sort() compares UTF-16 units and puts U+1F600 (a surrogate
+      // pair) before U+FF5E; listMigrations and chkit-py put U+FF5E first.
+      await writeFile(join(migrationsDir, '20260325_a\u{1F600}.sql'), 'ALTER TABLE app.t ADD COLUMN x UInt8;', 'utf8')
+      await writeFile(join(migrationsDir, '20260325_a\uFF5E.sql'), 'CREATE TABLE app.t (id UInt64) ENGINE = MergeTree() ORDER BY id;', 'utf8')
+
+      const result = await generateMigrationArtifacts({ migrationsDir })
+
+      const createIndex = result.content.indexOf("name: '20260325_a\uFF5E'")
+      expect(createIndex).toBeGreaterThan(-1)
+      expect(createIndex).toBeLessThan(result.content.indexOf("name: '20260325_a\u{1F600}'"))
+    })
+  })
+
   test('empty migrations directory produces valid module with empty array', async () => {
     await withTempDir(async (dir) => {
       const migrationsDir = join(dir, 'migrations')

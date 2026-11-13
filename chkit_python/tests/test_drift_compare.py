@@ -76,6 +76,12 @@ def test_diff_settings_orders_keys() -> None:
     assert diffs == ["a", "m", "z"]
 
 
+def test_diff_settings_orders_keys_by_code_point() -> None:
+    # #703: same order as TS, U+FF5E before U+1F600 (a UTF-16 surrogate pair).
+    high, fullwidth = "a\U0001f600", "a\uff5e"
+    assert diff_settings({high: 1, fullwidth: 1}, {high: 2, fullwidth: 2}) == [fullwidth, high]
+
+
 # ---------- diff_named_shape_maps ----------
 
 

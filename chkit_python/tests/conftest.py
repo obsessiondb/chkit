@@ -98,6 +98,31 @@ def assert_valid_sql(ch_client: _QueryClient) -> Callable[[str], None]:
     return _assert
 
 
+class PropagationClock:
+    """A clock for the propagation waits that only moves when they sleep."""
+
+    def __init__(self) -> None:
+        self.now = 0.0
+        self.sleeps: list[float] = []
+
+    def monotonic(self) -> float:
+        return self.now
+
+    def sleep(self, seconds: float) -> None:
+        self.sleeps.append(seconds)
+        self.now += seconds
+
+
+@pytest.fixture
+def propagation_clock(monkeypatch: pytest.MonkeyPatch) -> PropagationClock:
+    """Run the propagation waits on a fake clock: no real sleeps, and each
+    0.5 s sleep moves the 30 s deadline closer, so a wait that never passes
+    gives up after 60 checks (#719)."""
+    clock = PropagationClock()
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.time", clock)
+    return clock
+
+
 @pytest.fixture
 def single_replica(monkeypatch: pytest.MonkeyPatch) -> None:
     """Pin the replica probe to a single replica (#265).

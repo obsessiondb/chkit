@@ -5,8 +5,10 @@ import type { ClickHouseExecutor } from './index.js'
 import { allReplicas, resolveReplicaFanout, stringLiteral, type ReplicaFanout } from './replicas.js'
 
 const RETRY_OPTIONS = { retries: 20, minTimeout: 500, factor: 1 }
-// Upper bound on a column definition or rename wait, including slow queries.
-const DEFINITION_WAIT_DEADLINE_MS = 30_000
+// How long a propagation wait gives every replica to show the change,
+// including slow queries. A loaded ObsessionDB service can take well over
+// 10 s to show a CREATE or DROP on every replica (#719).
+const WAIT_DEADLINE_MS = 30_000
 
 // The `system.columns` fields a column definition wait compares.
 const COLUMN_FIELDS = ['type', 'default_kind', 'default_expression', 'comment', 'compression_codec'] as const
@@ -58,7 +60,7 @@ export interface PropagationOptions {
   statement?: string
   /** Delay between checks. Defaults to 500 ms. */
   pollIntervalMs?: number
-  /** Upper bound on a column definition, column rename or exchange wait. Defaults to 30 s. */
+  /** Upper bound on a wait. Defaults to 30 s. */
   deadlineMs?: number
 }
 
@@ -119,9 +121,9 @@ export async function waitForDictionary(
   const where = `database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)} AND engine = 'Dictionary'`
   const label = `waitForDictionary: ${database}.${dictionaryName} not yet visible`
   const fanout = await resolveReplicaFanout(executor, options?.cluster)
-  await pRetry(async () => {
+  await pollUntilDeadline(async () => {
     if (!(await dictionaryCatalogVisible(executor, where, fanout))) throw new Error(label)
-  }, retryOptions(options))
+  }, options)
 }
 
 export async function waitForColumn(
@@ -534,13 +536,28 @@ async function waitForSystemRows(
   options: PropagationOptions | undefined,
 ): Promise<void> {
   const fanout = await resolveReplicaFanout(executor, options?.cluster)
-  await pRetry(async () => {
+  await pollUntilDeadline(async () => {
     if (!(await systemRowsMatch(executor, wait, fanout))) throw new Error(wait.label)
-  }, retryOptions(options))
+  }, options)
 }
 
-function retryOptions(options: PropagationOptions | undefined): typeof RETRY_OPTIONS {
-  return { ...RETRY_OPTIONS, minTimeout: options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout }
+/**
+ * Runs `attempt` until it stops throwing, `pollIntervalMs` (500 ms) apart, and
+ * starts no check that would begin at or after the deadline (30 s), as
+ * `waitUntilApplied` does. Both time the deadline on the monotonic clock, as
+ * chkit-py does, so a wall-clock change cannot stretch or end a wait. The last error is thrown. A TypeError that is not a
+ * fetch network failure is a bug in the check, not lag, and p-retry throws it
+ * at once.
+ */
+async function pollUntilDeadline(attempt: () => Promise<void>, options: PropagationOptions | undefined): Promise<void> {
+  const pollIntervalMs = options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout
+  const deadline = performance.now() + (options?.deadlineMs ?? WAIT_DEADLINE_MS)
+  await pRetry(attempt, {
+    retries: Number.POSITIVE_INFINITY,
+    minTimeout: pollIntervalMs,
+    factor: 1,
+    shouldRetry: () => performance.now() + pollIntervalMs < deadline,
+  })
 }
 
 async function dictionaryCatalogVisible(
@@ -593,11 +610,11 @@ function constraintWhere(database: string, tableName: string, constraintName: st
 }
 
 /**
- * Polls `check` until it reports no mismatch, with the retry budget of the
- * other waits (21 checks, 500 ms apart by default) and a hard deadline: chkit's queries
- * have no request timeout, so a check that does not return ends the wait at
- * the deadline instead of holding the migration. On timeout the error names
- * what was still different on the last check.
+ * Polls `check` until it reports no mismatch, 500 ms apart by default, until
+ * the deadline (30 s by default) of the other waits. The deadline is hard:
+ * chkit's queries have no request timeout, so a check that does not return
+ * ends the wait at the deadline instead of holding the migration. On timeout
+ * the error names what was still different on the last check.
  */
 async function waitUntilApplied(
   subject: string,
@@ -605,8 +622,8 @@ async function waitUntilApplied(
   check: () => Promise<string | undefined>,
 ): Promise<void> {
   const pollIntervalMs = options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout
-  const deadlineMs = options?.deadlineMs ?? DEFINITION_WAIT_DEADLINE_MS
-  const deadline = Date.now() + deadlineMs
+  const deadlineMs = options?.deadlineMs ?? WAIT_DEADLINE_MS
+  const deadline = performance.now() + deadlineMs
   let checks = 0
   let detail = ''
   for (;;) {
@@ -614,7 +631,7 @@ async function waitUntilApplied(
     const outcome = await checkBefore(check, deadline, deadlineMs)
     if (outcome.mismatch === undefined && outcome.failure === undefined) return
     detail = outcome.failure ?? outcome.mismatch ?? ''
-    if (checks > RETRY_OPTIONS.retries || Date.now() + pollIntervalMs >= deadline) break
+    if (performance.now() + pollIntervalMs >= deadline) break
     await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
   }
   throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
@@ -629,7 +646,7 @@ async function checkBefore(
   const expired = new Promise<{ failure: string }>((resolve) => {
     timer = setTimeout(
       () => resolve({ failure: `a check did not return within the ${deadlineMs / 1000}s deadline` }),
-      Math.max(deadline - Date.now(), 0),
+      Math.max(deadline - performance.now(), 0),
     )
   })
   try {

@@ -1,0 +1,7 @@
+NODE raw
+SQL >
+    SELECT ts, user_id, __value AS raw, toString(__topic) AS topic, length(__headers) AS header_count
+    FROM kafka_events
+
+TYPE materialized
+DATASOURCE kafka_raw
