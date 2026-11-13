@@ -24,6 +24,7 @@ chkit migrate [flags]
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
 | `-t`, `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
 | `--break-lock <claim>` | string | — | Release the [migrate lock](#concurrent-runs) claim of a run that is no longer running, then take the lock |
+| `--cancel-lock-queries` | boolean | `false` | Cancel [tracked statements of a stopped run](#cancelling-a-stopped-runs-queries) before recovery; requires `--apply --break-lock <claim>` |
 | `--setting <name=value>` | string[] | — | Send a ClickHouse [query setting](#query-settings) with each migration statement. Repeatable, or comma-separated |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
@@ -211,6 +212,30 @@ What the lock does not cover:
 - Releases before the lock do not take or check it, so the lock only keeps apart runs of releases that have it. `CHKIT_MIGRATE_LOCK=off` turns the lock off, as before this release; `migrate` then prints a warning on stderr.
 
 To free the lock of a run you know has stopped, without waiting for it to expire, pass the claim from the error: `chkit migrate --apply --break-lock 3f1c…`. It releases only that claim and takes the lock; when another run holds the lock by then, it stops with `migrate_locked` as usual. Breaking the claim of a run that is still running lets both runs apply statements until that run's next renewal.
+
+### Cancelling a stopped run's queries
+
+After stopping the old CLI process, use `--cancel-lock-queries` with its claim to cancel supported statements that remain on the server before recovery:
+
+```sh
+chkit migrate --apply --break-lock 3f1c… --cancel-lock-queries
+```
+
+This recovery supports a direct endpoint to one declared server, with the lock enabled and the journal database present. Native connections must declare `clickhouse.cluster`; the ObsessionDB console transport uses its `default` cluster. chkit checks that the declared cluster contains exactly one server and verifies its UUID and effective SQL principal. A missing permission, an unavailable server or a changed identity stops recovery. Keep the endpoint and cluster configuration unchanged between the stopped run and recovery; a load balancer whose write destinations extend beyond that declaration is unsupported.
+
+Runs with verified tracking record a separate immutable query ID before each synchronous statement attempt and each `-- before-retry:` attempt. These journal records retain the claim, statement fingerprint and target after the lock is released. They contain no SQL text or credentials. A claim from an older release, or one whose executor could not establish tracking, cannot use this recovery.
+
+The supported statement pair is a synchronous `INSERT` and an explicit `-- before-retry: TRUNCATE TABLE database.table` for the same plain `MergeTree` target. The INSERT is limited to `VALUES` or a simple `SELECT` of literals or `numbers`/`numbers_mt`, with a small allowlist of pure expressions. Table and view sources, joins and CTEs are unsupported. chkit also checks the target engine and dependencies before cancellation.
+
+A claim containing any async or unsupported attempt stops recovery, including a completed attempt. Inline `SETTINGS`, multi-server clusters, `ReplicatedMergeTree`, `SharedMergeTree` and materialized-view or background writers are unsupported. Migration plugins with arbitrary before/after-apply hooks also prevent cancellation. Ordinary [async attachment](#async-operations-modeasync) keeps its existing behavior.
+
+chkit reserves the replacement lock before releasing the predecessor, requests cancellation for its recorded IDs, and checks that neither those queries nor matching child queries remain. It runs compensation and replacement statements only after that verification succeeds. Cancellation can leave committed rows; the `TRUNCATE` removes those rows before the load runs again, so the target must be safe to clear.
+
+An interrupted or unverified cancellation leaves a durable pending marker. Later apply runs stop at that marker, including runs with no pending migration files. Resume with the same explicit cancellation command; a timeout or a successful lock release does not clear it.
+
+:::caution
+Stop the predecessor CLI before recovery. Cancellation stops work that the server has received; it cannot prohibit a delayed request or a paused client from sending work later. `--break-lock` alone continues to release only the lock claim.
+:::
 
 ### Multi-replica targets
 
@@ -494,6 +519,7 @@ A failure that stops the command prints the standard error envelope:
 | `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
 | `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, a heartbeat did not read back, or another run broke its claim; the run stopped before its next request |
 | `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |
+| `migrate_cancellation_failed` | Cancellation was unsupported, could not be verified or was interrupted; replacement work did not start |
 | `journal_changed` | Another run changed the journal between the plan and the lock in a way the plan does not cover; nothing was applied |
 | `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`, or an empty migration name |
 

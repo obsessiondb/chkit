@@ -23,7 +23,7 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass, replace
+from dataclasses import dataclass, field, replace
 from pathlib import Path
 from typing import Annotated, Any, TypeVar, cast
 
@@ -46,6 +46,14 @@ from chkit.cli.commands.migrate_abandon import (
 )
 from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migration
 from chkit.cli.commands.migrate_barrier import find_pending_non_select_barriers
+from chkit.cli.commands.migrate_cancellation import (
+    assert_cancellation_clear,
+    assert_cancellation_unfinished,
+    cancel_predecessor,
+    mark_cancellation_pending,
+    prepare_cancellation,
+    resolve_query_identity,
+)
 from chkit.cli.commands.migrate_empty import find_empty_migrations
 from chkit.cli.commands.migrate_errors import (
     EMPTY_MIGRATIONS_SUMMARY,
@@ -58,6 +66,7 @@ from chkit.cli.commands.migrate_lock import (
     GuardedClient,
     LockTarget,
     MigrateLock,
+    TakeoverReservation,
     acquire_migrate_lock,
     migrate_lock_disabled,
 )
@@ -74,6 +83,7 @@ from chkit.cli.commands.migrate_prompts import (
     is_background_or_ci,
     print_destructive_operation_details,
 )
+from chkit.cli.commands.migrate_query_intents import QueryIdentity, QueryTracker
 from chkit.cli.commands.migrate_recovery import resolve_recovery_targets
 from chkit.cli.commands.migrate_retry import (
     RetryResolution,
@@ -139,6 +149,7 @@ class _MigrateContext:
     retry_target: str | None
     # Runs ``fn`` holding the migrate lock (#716).
     with_lock: WithLock
+    query_tracker: Callable[[], QueryTracker | None] = field(default=lambda: None)
 
 
 _T = TypeVar("_T")
@@ -248,6 +259,16 @@ def run(  # noqa: PLR0917
             ),
         ),
     ] = None,
+    cancel_lock_queries: Annotated[
+        bool,
+        typer.Option(
+            "--cancel-lock-queries",
+            help=(
+                "Cancel the tracked queries of the stopped --break-lock run "
+                "before recovery (requires --apply)"
+            ),
+        ),
+    ] = False,
     output_json: Annotated[
         bool,
         typer.Option("--json", help="Emit a JSON-formatted summary."),
@@ -269,6 +290,7 @@ def run(  # noqa: PLR0917
             "--retry": retry,
             "--abandon": abandon,
             "--break-lock": break_lock,
+            "--cancel-lock-queries": cancel_lock_queries,
             "--setting": setting,
             "--json": output_json,
             "--force-shared-engines": force_shared_engines,
@@ -285,6 +307,7 @@ def run(  # noqa: PLR0917
             retry=retry,
             abandon=abandon,
             break_lock=break_lock,
+            cancel_lock_queries=cancel_lock_queries,
             setting=setting,
             output_json=output_json,
             service=service,
@@ -312,6 +335,7 @@ def _run(
     retry: str | None,
     abandon: str | None,
     break_lock: str | None,
+    cancel_lock_queries: bool,
     setting: list[str] | None,
     output_json: bool,
     service: str | None,
@@ -324,6 +348,15 @@ def _run(
         table=table_selector,
         allow_destructive=allow_destructive,
     )
+    if cancel_lock_queries and (
+        hook_flags.get("--apply") is not True or not break_lock
+        or targets.abandon_target is not None or migrate_lock_disabled()
+    ):
+        raise MigrateError(
+            "invalid_usage",
+            "--cancel-lock-queries requires explicit --apply, --break-lock <claim>, "
+            "an enabled migrate lock, and no --abandon.",
+        )
     settings = parse_setting_flags(setting)
     config = load_config(config_path, ChxConfigEnv(command="migrate"))
     plugin_runtime = load_plugin_runtime(
@@ -417,7 +450,17 @@ def _run(
                 holder=lock_holder,
                 break_lock=break_lock,
                 json_mode=output_json,
+                cancel_queries=cancel_lock_queries,
+                configured_cluster=config.clickhouse.cluster if config.clickhouse else None,
+                migration_hooks=any(
+                    entry.plugin.hooks is not None and (
+                        getattr(entry.plugin.hooks, "on_before_apply", None) is not None
+                        or getattr(entry.plugin.hooks, "on_after_apply", None) is not None
+                    )
+                    for entry in plugin_runtime.plugins
+                ),
             ),
+            query_tracker=lambda: lock_holder.tracker,
         )
         if targets.abandon_target is not None:
             run_abandon(
@@ -441,7 +484,10 @@ def _run(
         _run_checksum_gate(ctx, journal)
         plan = _resolve_pending_plan(ctx)
         if not plan.pending:
-            _render_nothing_pending(ctx, plan)
+            if execute_requested:
+                ctx.with_lock(lambda: _render_nothing_pending(ctx, plan))
+            else:
+                _render_nothing_pending(ctx, plan)
             return
         if _render_plan(ctx, plan):
             return
@@ -836,10 +882,11 @@ def _replan_under_lock(ctx: _MigrateContext, plan: _PendingPlan) -> _PendingPlan
 class _LockHolder:
     """The migrate lock this run holds, if any, checked before each request."""
 
-    __slots__ = ("lock",)
+    __slots__ = ("lock", "tracker")
 
     def __init__(self) -> None:
         self.lock: MigrateLock | None = None
+        self.tracker: QueryTracker | None = None
 
     def check(self) -> None:
         if self.lock is not None:
@@ -857,12 +904,18 @@ class _MigrateLockRunner(WithLock):
         holder: _LockHolder,
         break_lock: str | None,
         json_mode: bool,
+        cancel_queries: bool = False,
+        configured_cluster: str | None = None,
+        migration_hooks: bool = False,
     ) -> None:
         self._raw_client = raw_client
         self._journal_store = journal_store
         self._holder = holder
         self._break_lock = break_lock
         self._json_mode = json_mode
+        self._cancel_queries = cancel_queries
+        self._configured_cluster = configured_cluster
+        self._migration_hooks = migration_hooks
 
     def __call__(self, fn: Callable[[], _T]) -> _T:
         if migrate_lock_disabled():
@@ -874,6 +927,11 @@ class _MigrateLockRunner(WithLock):
             return fn()
         found = self._journal_store.lock_target()
         if found is None:
+            if self._cancel_queries:
+                raise MigrateError(
+                    "migrate_cancellation_failed",
+                    "The database/journal does not exist; cancellation cannot be verified.",
+                )
             typer.echo(
                 "⚠ The target database does not exist yet, so the journal cannot hold the "
                 "migrate lock: this run takes none. Do not start another migrate against "
@@ -891,15 +949,64 @@ class _MigrateLockRunner(WithLock):
             typer.echo(line, err=self._json_mode)
 
         try:
+            target = LockTarget(database=database, journal_table=table, fanout=fanout)
+            identity: QueryIdentity | None = None
+            if (
+                callable(getattr(self._raw_client, "execute_tracked", None))
+                and callable(getattr(self._raw_client, "query_control", None))
+            ):
+                try:
+                    identity = resolve_query_identity(self._raw_client, self._configured_cluster)
+                except Exception:
+                    if self._cancel_queries:
+                        raise
+            if self._cancel_queries and identity is None:
+                raise MigrateError(
+                    "migrate_cancellation_failed",
+                    "This executor cannot safely track/cancel queries.",
+                )
+            cancellation = (
+                prepare_cancellation(self._raw_client, target, identity, self._break_lock)
+                if self._cancel_queries and identity is not None and self._break_lock is not None
+                else None
+            )
+            allowed = cancellation.claim if cancellation is not None else None
+            assert_cancellation_clear(self._raw_client, target, allowed, identity)
+            if self._cancel_queries and self._migration_hooks:
+                raise MigrateError(
+                    "migrate_cancellation_failed",
+                    "Cancellation cannot cover arbitrary migration plugin hooks.",
+                )
+            tracked_identity = None if self._migration_hooks else identity
             lock = acquire_migrate_lock(
                 self._raw_client,
-                LockTarget(database=database, journal_table=table, fanout=fanout),
-                break_lock=self._break_lock,
+                target,
+                break_lock=allowed or self._break_lock,
                 log=log,
                 heartbeat_client=heartbeat_client,
+                query_tracking=tracked_identity,
+                takeover=(
+                    TakeoverReservation(
+                        cancellation.claim, cancellation.holder,
+                        lambda: mark_cancellation_pending(self._raw_client, target, cancellation),
+                        (
+                            lambda: assert_cancellation_unfinished(
+                                self._raw_client, target, cancellation,
+                            )
+                        ) if cancellation.resume_pending else None,
+                    )
+                    if cancellation is not None else None
+                ),
             )
             self._holder.lock = lock
             try:
+                assert_cancellation_clear(self._raw_client, target, allowed, identity)
+                if cancellation is not None:
+                    cancel_predecessor(self._raw_client, target, cancellation, lock)
+                self._holder.tracker = (
+                    QueryTracker(self._raw_client, target, tracked_identity, lock)
+                    if tracked_identity is not None else None
+                )
                 return fn()
             except BaseException:
                 # A step that retries or wraps the guard's error (a poll loop,
@@ -908,6 +1015,7 @@ class _MigrateLockRunner(WithLock):
                 raise
             finally:
                 self._holder.lock = None
+                self._holder.tracker = None
                 lock.release()
         finally:
             if heartbeat_client is not None:
@@ -945,6 +1053,7 @@ def _apply_plan(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                 log=log,
                 settings=ctx.settings,
                 flags=ctx.flags,
+                query_tracker=ctx.query_tracker(),
             )
         )
         applied_now.append(entry)

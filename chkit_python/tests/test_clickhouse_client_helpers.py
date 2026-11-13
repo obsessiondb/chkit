@@ -9,12 +9,16 @@ branching, ``wrap_connection_error``).
 from __future__ import annotations
 
 import threading
+import time
 from unittest.mock import MagicMock
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
+from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
+from pytest_httpx import HTTPXMock
 from urllib3 import Timeout
+from urllib3.exceptions import ProtocolError
 
 from chkit.clickhouse import (
     ClickHouseClient,
@@ -24,6 +28,7 @@ from chkit.clickhouse import (
     wrap_connection_error,
 )
 from chkit.clickhouse.client import clickhouse_error_message
+from chkit.clickhouse.control import run_control_request
 from chkit.core.model import ChxResolvedClickHouseConfig
 
 
@@ -122,6 +127,125 @@ def test_execute_reraises_other_database_errors_without_retry() -> None:
         client.execute("CREATE TABL x")
 
     assert fake.command.call_count == 1
+
+
+def test_tracked_execute_records_a_fresh_id_for_the_database_fallback() -> None:
+    client, fake = _stub_client()
+    fake.command.side_effect = [DatabaseError("Code: 81. UNKNOWN_DATABASE"), None]
+    events: list[str] = []
+    ids = iter(["first", "fallback"])
+
+    def record() -> str:
+        query_id = next(ids)
+        events.append(query_id)
+        return query_id
+
+    client.execute_tracked("INSERT INTO t SELECT 1", lambda: events.append("check"), record,
+                           {"max_threads": 2, "query_id": "ignored"})
+
+    assert events == ["check", "first", "check", "check", "fallback", "check"]
+    assert [call.kwargs["settings"] for call in fake.command.call_args_list] == [
+        {"wait_end_of_query": 1, "async_insert": 0, "max_threads": 2, "query_id": "first"},
+        {"wait_end_of_query": 1, "async_insert": 0, "max_threads": 2, "query_id": "fallback"},
+    ]
+    assert [call.kwargs["use_database"] for call in fake.command.call_args_list] == [True, False]
+
+
+def test_tracked_execute_rechecks_after_durable_intent() -> None:
+    client, fake = _stub_client()
+    held = True
+
+    def record() -> str:
+        nonlocal held
+        held = False
+        return "never-sent"
+
+    def check() -> None:
+        if not held:
+            raise RuntimeError("lock lost while recording intent")
+
+    with pytest.raises(RuntimeError, match="lock lost while recording intent"):
+        client.execute_tracked("INSERT INTO t SELECT 1", check, record)
+    fake.command.assert_not_called()
+
+
+def test_tracked_execute_does_not_replay_driver_http_requests() -> None:
+    client, fake = _stub_client()
+    pool = fake.http
+
+    def command(*_args: object, **_kwargs: object) -> None:
+        fake.http.request("POST", "http://localhost/")
+        fake.http.request("POST", "http://localhost/")
+
+    fake.command.side_effect = command
+    with pytest.raises(RuntimeError, match="cannot be replayed"):
+        client.execute_tracked("INSERT INTO t SELECT 1", lambda: None, lambda: "one-send")
+    pool.request.assert_called_once_with("POST", "http://localhost/", retries=False)
+    assert fake.http is pool
+
+
+def test_tracked_execute_blocks_the_pinned_drivers_remote_close_retry() -> None:
+    client, fake = _stub_client()
+    fake.headers = {}
+    fake.params = {}
+    fake._send_progress = False
+    fake._progress_interval = None
+    fake._autogenerate_query_id = False
+    fake.url = "http://localhost:8123"
+    fake.server_host_name = None
+    pool = fake.http
+    error = ProtocolError("remote closed")
+    error.__context__ = ConnectionResetError("reset")
+    pool.request.side_effect = error
+
+    def command(statement: str, **_kwargs: object) -> None:
+        HttpClient._raw_request(fake, statement, {})
+
+    fake.command.side_effect = command
+    with pytest.raises(RuntimeError, match="cannot be replayed"):
+        client.execute_tracked("INSERT INTO t SELECT 1", lambda: None, lambda: "one-send")
+    assert pool.request.call_count == 1
+    assert pool.request.call_args.kwargs["retries"] is False
+
+
+def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
+    client, fake = _stub_client()
+    httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')
+    result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000)
+    assert result.rows == [{"query_id": "old-query", "kill_status": "finished"}]
+    request = httpx_mock.get_request()
+    assert request is not None
+    assert request.url.params["database"] == "default"
+    assert request.url.params["default_format"] == "JSONEachRow"
+    assert "session_id" not in request.url.params
+    assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC"
+    fake.query.assert_not_called()
+    fake.command.assert_not_called()
+
+
+def test_control_request_deadline_bounds_a_stuck_body() -> None:
+    done = threading.Event()
+    entered = threading.Event()
+
+    def request(_deadline: float) -> None:
+        entered.set()
+        done.wait()
+
+    started = time.monotonic()
+    try:
+        with pytest.raises(TimeoutError, match="Cancellation deadline expired"):
+            run_control_request(request, 30)
+        assert entered.is_set()
+        assert time.monotonic() - started < 1
+    finally:
+        done.set()
+
+
+def test_control_request_does_not_start_after_expiry() -> None:
+    request = MagicMock()
+    with pytest.raises(TimeoutError, match="Cancellation deadline expired"):
+        run_control_request(request, 0)
+    request.assert_not_called()
 
 
 # ---------- submit ----------

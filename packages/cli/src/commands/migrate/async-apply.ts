@@ -13,6 +13,7 @@ import {
 import { CLI_VERSION } from '../../runtime/version.js'
 import { inProgressChecksumMismatchError } from './errors.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
+import type { QueryTracker } from './query-intents.js'
 
 const POLL_INTERVAL_MS = 5_000
 // Every retry submits under a random query id of its own (#701), so the
@@ -79,6 +80,7 @@ export interface AsyncApplyInput {
   beforeRetry: string | null
   /** --setting values, sent with the submitted statement and its before-retry SQL. */
   settings?: ClickHouseSettings
+  queryTracker?: QueryTracker
   log: (line: string) => void
   pollIntervalMs?: number
   sleep?: (ms: number) => Promise<void>
@@ -290,7 +292,9 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     }
     if (beforeRetry !== null) {
       log(`  ${operationType}: running before-retry SQL`)
-      await db.command(beforeRetry, settings)
+      if (input.queryTracker) {
+        await input.queryTracker.command({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, 'compensation', beforeRetry, settings)
+      } else await db.command(beforeRetry, settings)
     }
   } else {
     log(`  ${operationType}: submitting async (query_id=${queryId})`)
@@ -335,6 +339,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     attemptQueryId === baseQueryId
       ? queryLogLowerBound(Math.max(serverNowMs, (await readServerState(db)).nowMs), 0)
       : retryQueryLogLowerBound(serverNowMs)
+  await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
   const submitPromise = db.submit(sql, attemptQueryId, settings)
 
   return await pollUntilTerminal({

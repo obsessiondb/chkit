@@ -24,7 +24,7 @@ having to fake a ``clickhouse_connect`` Client object.
 
 from __future__ import annotations
 
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from pydantic import BaseModel, ConfigDict
@@ -35,6 +35,7 @@ from chkit.clickhouse.client import (
     QueryResult,
     QueryStatus,
 )
+from chkit.clickhouse.control import remaining_control_seconds, run_control_request
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
     SchemaObjectRef,
@@ -112,6 +113,7 @@ class RemoteClickHouseClient:
     """Drop-in replacement for :class:`chkit.clickhouse.client.ClickHouseClient`."""
 
     __slots__ = ("_credentials", "_database", "_service_slug")
+    query_control_cluster: str = "default"
 
     def __init__(
         self,
@@ -141,6 +143,46 @@ class RemoteClickHouseClient:
         return self._database
 
     # ---- ClickHouseClient surface ----
+
+    def execute_tracked(
+        self,
+        statement: str,
+        check: Callable[[], None],
+        before_attempt: Callable[[], str],
+        settings: dict[str, Any] | None = None,
+    ) -> None:
+        check()
+        query_id = before_attempt()
+        check()
+        wire_settings = _coerce_wire_settings(settings) or {}
+        wire_settings.pop("query_id", None)
+        wire_settings.setdefault("async_insert", 0)
+        result = workbench_query_execute(
+            self._credentials,
+            service_slug=self._service_slug,
+            query=statement,
+            query_id=query_id,
+            settings=wire_settings,
+        )
+        _raise_if_error(result)
+
+    def query_control(self, statement: str, timeout_ms: float) -> QueryResult:
+        def request(deadline: float) -> QueryResult:
+            result = workbench_query_execute(
+                self._credentials,
+                service_slug=self._service_slug,
+                query=statement,
+                timeout=remaining_control_seconds(deadline),
+            )
+            _raise_if_error(result)
+            return QueryResult(
+                column_names=[col.name for col in result.meta],
+                rows=normalize_query_data(result),
+            )
+
+        # The shared deadline bounds connection setup, the entire response and
+        # error enrichment, rather than only inactivity between socket reads.
+        return run_control_request(request, timeout_ms)
 
     def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         result = workbench_query_execute(

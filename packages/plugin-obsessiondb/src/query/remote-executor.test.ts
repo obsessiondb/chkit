@@ -1,7 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
-
 import {
 	createRemoteExecutor,
 	normalizeQueryData,
@@ -165,6 +163,90 @@ describe('createRemoteExecutor command', () => {
 	})
 })
 
+describe('createRemoteExecutor cancellation transport', () => {
+	test('persists an id and rechecks ownership before sending a write with its settings', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			const events: string[] = []
+			expect(remote.commandTracked).toBeFunction()
+			await remote.commandTracked('INSERT INTO t SELECT 1', () => {
+				events.push('check')
+			}, async () => {
+				expect(workbench.inputs).toHaveLength(0)
+				events.push('intent')
+				return 'tracked-1'
+			}, { async_insert: 1, query_id: 'ignored', log_comment: 'kept' })
+			expect(events).toEqual(['check', 'intent', 'check'])
+			expect(workbench.inputs).toEqual([{
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-1',
+				settings: { async_insert: 1, log_comment: 'kept' },
+			}])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('defaults tracked writes to synchronous inserts', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			await remote.commandTracked('INSERT INTO t SELECT 1', () => {}, async () => 'tracked-sync')
+			expect(workbench.inputs).toEqual([{
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync',
+				settings: { async_insert: 0 },
+			}])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('does not send when ownership is lost while recording the intent', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			let held = true
+			await expect(remote.commandTracked('TRUNCATE TABLE t', () => {
+				if (!held) throw new Error('lost ownership')
+			}, async () => {
+				held = false
+				return 'tracked-2'
+			})).rejects.toThrow('lost ownership')
+			expect(workbench.inputs).toHaveLength(0)
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('bounds a stalled response body rather than waiting for fetch headers only', async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => new Response(new ReadableStream({ start(controller) {
+				controller.enqueue(new TextEncoder().encode('{"json":'))
+			} }), { headers: { 'Content-Type': 'application/json' } }),
+		})
+		try {
+			const remote = connect(`http://127.0.0.1:${server.port}`)
+			await expect(remote.queryControl('SELECT 1', 100)).rejects.toThrow('deadline expired')
+		} finally {
+			server.stop(true)
+		}
+	})
+
+	test('decodes control rows and propagates server errors', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 2, processesError: 'ACCESS_DENIED' })
+		try {
+			const remote = connect(workbench.url)
+			expect(await remote.queryControl('SELECT * FROM system.one', 1000)).toEqual([{ replicas: '2' }])
+			await expect(remote.queryControl('SELECT * FROM system.processes', 1000)).rejects.toThrow('ACCESS_DENIED')
+			await expect(remote.queryControl('SELECT 1', 0)).rejects.toThrow('deadline expired')
+			expect(workbench.inputs).toHaveLength(2)
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
 // #246: the query runs on the replica that received it, so on a multi-replica
 // service queryStatus reads processes and query_log on every replica.
 describe('createRemoteExecutor queryStatus', () => {
@@ -285,11 +367,14 @@ describe('createRemoteExecutor introspection', () => {
 	})
 })
 
-function connect(baseUrl: string): ClickHouseExecutor {
-	return createRemoteExecutor({
+function connect(baseUrl: string) {
+	const executor = createRemoteExecutor({
 		credentials: { access_token: 'test', base_url: baseUrl },
 		serviceSlug: 'test',
 	})
+	const { commandTracked, queryControl } = executor
+	if (!commandTracked || !queryControl) throw new Error('Missing cancellation transport')
+	return { ...executor, commandTracked, queryControl }
 }
 
 // Stands in for the workbench API: answers the replica probe with `replicas`,

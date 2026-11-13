@@ -29,6 +29,7 @@ from chkit.cli.commands.migrate_lock import (
     LockTarget,
     LockTimings,
     MigrateLock,
+    TakeoverReservation,
     acquire_migrate_lock,
     claim_insert_sql,
     claims_select_sql,
@@ -302,6 +303,69 @@ def test_break_lock_releases_the_claim_it_names_and_takes_the_lock() -> None:
     assert lines == [f"Broke the migrate lock of {OTHER_DESCRIBED}."]
     assert server.claims_of(OTHER)[-1].version == RELEASED
     lock.release()
+
+
+def test_cancellation_reserves_before_releasing_its_predecessor() -> None:
+    server = FakeServer()
+    _other_claim(server, 5000)
+    lock = acquire_migrate_lock(
+        server, TARGET, break_lock="other", log=lambda _line: None,
+        deps=_deps(Clock(), []), takeover=TakeoverReservation("other", OTHER_HOLDER),
+    )
+    reservation = next(i for i, row in enumerate(server.rows) if row.name.endswith("run-1"))
+    release = next(i for i, row in enumerate(server.rows)
+                   if row.name == OTHER and row.version == RELEASED)
+    assert reservation < release
+    assert lock.claim_id == "run-1"
+    lock.release()
+
+
+def test_another_claim_blocks_cancellation_without_releasing_the_predecessor() -> None:
+    server = FakeServer()
+    _other_claim(server, 5000)
+    server.rows.append(Row(f"{LOCK_ROW_PREFIX}third", server.clock, OTHER_HOLDER))
+    with pytest.raises(MigrateError) as raised:
+        acquire_migrate_lock(
+            server, TARGET, break_lock="other", log=lambda _line: None,
+            deps=_deps(Clock(), []), takeover=TakeoverReservation("other", OTHER_HOLDER),
+        )
+    assert raised.value.code == "migrate_locked"
+    assert all(row.version != RELEASED for row in server.claims_of(OTHER))
+
+
+def test_resuming_cancellation_reclaims_only_a_crashed_reservation_protected_by_pending() -> None:
+    server = FakeServer()
+    _other_claim(server, 5000)
+    third = f"{LOCK_ROW_PREFIX}crashed-reservation"
+    server.rows.append(Row(third, server.clock - LOCK_TIMINGS.lease_ms - 1, OTHER_HOLDER))
+    clock = Clock()
+    sleeps: list[float] = []
+
+    def advance(ms: float) -> None:
+        clock.now += ms
+
+    lock = acquire_migrate_lock(
+        server, TARGET, break_lock="other", log=lambda _line: None,
+        deps=_deps(clock, sleeps, advance),
+        takeover=TakeoverReservation("other", OTHER_HOLDER, resume_pending=lambda: None),
+    )
+    assert server.claims_of(third)[-1].version == RELEASED
+    assert LOCK_TIMINGS.valid_ms + LOCK_TIMINGS.observe_margin_ms in sleeps
+    assert lock.claim_id == "run-2"
+    lock.release()
+
+
+def test_fresh_cancellation_does_not_reclaim_a_stale_owner_with_possible_own_sql() -> None:
+    server = FakeServer()
+    _other_claim(server, 5000)
+    third = f"{LOCK_ROW_PREFIX}previous-owner"
+    server.rows.append(Row(third, server.clock - LOCK_TIMINGS.lease_ms - 1, OTHER_HOLDER))
+    with pytest.raises(MigrateError):
+        acquire_migrate_lock(
+            server, TARGET, break_lock="other", log=lambda _line: None,
+            deps=_deps(Clock(), []), takeover=TakeoverReservation("other", OTHER_HOLDER),
+        )
+    assert server.claims_of(third)[-1].version != RELEASED
 
 
 def test_break_lock_naming_another_claim_leaves_the_holder_alone() -> None:

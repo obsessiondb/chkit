@@ -15,6 +15,7 @@ from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -41,6 +42,7 @@ from chkit.cli.commands.migrate_errors import (
     in_progress_checksum_mismatch_error,
 )
 from chkit.cli.commands.migrate_output import format_retry_notice, render_abandon_text
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     Marker,
     OperationMismatch,
@@ -1036,6 +1038,7 @@ def _apply(
     retry: RetryResume | None = None,
     runtime: _FakeRuntime | None = None,
     log: Callable[[str], None] | None = None,
+    query_tracker: QueryTracker | None = None,
 ) -> MigrationJournalEntry:
     return apply_migration(
         ApplyMigrationInput(
@@ -1048,8 +1051,37 @@ def _apply(
             file="m.sql",
             retry=retry,
             log=log or (lambda _line: None),
+            query_tracker=query_tracker,
         )
     )
+
+
+def test_sync_retry_tracks_compensation_and_forward_separately(tmp_path: Path) -> None:
+    statement = "INSERT INTO db.a SELECT 1;"
+    before_retry = "TRUNCATE TABLE db.a"
+    sql = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=sync\n"
+        f"-- before-retry: {before_retry}\n{statement}"
+    )
+    store = FakeStore(in_progress([op(0, "failed", LOAD)], checksum=checksum_sql(sql)))
+    client = _RecordingClient()
+    tracker = MagicMock()
+    phases: list[str] = []
+
+    def command(context: QueryContext, phase: str, text: str, settings: Any) -> None:
+        assert context == QueryContext("m.sql", 0, statement, before_retry)
+        assert settings is None
+        assert store.state is not None
+        assert store.state.operations[0].status == ("failed" if phase == "compensation" else "started")
+        assert text == (before_retry if phase == "compensation" else statement)
+        phases.append(phase)
+
+    tracker.command.side_effect = command
+    _apply(_write(tmp_path, sql), client, store, query_tracker=tracker)
+    assert phases == ["compensation", "forward"]
+    assert client.calls == []
+    assert store.state is not None
+    assert store.state.migration_completed is True
 
 
 def _retry_for(sql: str, previous: str = "old") -> RetryResume:

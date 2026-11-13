@@ -63,6 +63,8 @@ import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
+import { createQueryTracker, type QueryIdentity, type QueryTracker } from './query-intents.js'
+import { assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, markCancellationPending, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
 
 const MIGRATE_FLAGS = defineFlags([
   TABLE_FLAG,
@@ -93,6 +95,7 @@ const MIGRATE_FLAGS = defineFlags([
     description: 'ClickHouse query setting sent with each migration statement, e.g. max_table_size_to_drop=0 (repeatable)',
     placeholder: '<name=value>',
   },
+  { name: '--cancel-lock-queries', type: 'boolean', description: 'Cancel the tracked queries of the stopped --break-lock run before recovery (requires --apply)' },
 ] as const)
 
 export const migrateCommand: ChxPluginCommand = {
@@ -128,6 +131,7 @@ interface MigrateContext {
   abandonTarget: string | undefined
   /** Runs `fn` holding the migrate lock (#716). */
   withLock: WithLock
+  queryTracker: () => QueryTracker | undefined
 }
 
 type WithLock = <T>(fn: () => Promise<T>) => Promise<T>
@@ -174,7 +178,7 @@ async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | 
   if (checksumExit !== undefined) return checksumExit
 
   const plan = await resolvePendingPlan(ctx)
-  if (plan.pending.length === 0) return renderNothingPending(ctx, plan)
+  if (plan.pending.length === 0) return ctx.executeRequested ? ctx.withLock(async () => renderNothingPending(ctx, plan)) : renderNothingPending(ctx, plan)
 
   const planExit = await renderPlan(ctx, plan)
   if (planExit !== undefined) return planExit
@@ -203,6 +207,10 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const tableSelector = f['--table']
   const jsonMode = f['--json'] === true
   const { retryTarget, abandonTarget } = resolveRecoveryTargets(flags)
+  const cancelQueries = f['--cancel-lock-queries'] === true
+  if (cancelQueries && (f['--apply'] !== true || !f['--break-lock'] || abandonTarget !== undefined || migrateLockDisabled())) {
+    throw new MigrateError('invalid_usage', '--cancel-lock-queries requires explicit --apply, --break-lock <claim>, an enabled migrate lock, and no --abandon.')
+  }
 
   const { migrationsDir, metaDir } = resolveDirs(config)
   debug(
@@ -217,6 +225,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   // Every request of the run, journal writes included, first checks that
   // the run still holds the migrate lock, once it took it (#716).
   let heldLock: MigrateLock | undefined
+  let queryTracker: QueryTracker | undefined
   const rawDb = pluginContext.executor
   const db = guardExecutor(rawDb, () => heldLock?.assertHeld())
   const journalStore = createJournalStore(db, config.clickhouse?.cluster)
@@ -230,6 +239,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     }
     const target = await journalStore.lockTarget()
     if (target === null) {
+      if (cancelQueries) throw new MigrateError('migrate_cancellation_failed', 'The database/journal does not exist; cancellation cannot be verified.')
       console.error(
         '⚠ The target database does not exist yet, so the journal cannot hold the migrate lock: this run takes none. ' +
           'Do not start another migrate against this target until it finishes.',
@@ -238,9 +248,31 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     }
     const heartbeatDb = rawDb.openConcurrent?.()
     try {
-      const lock = await acquireMigrateLock(rawDb, target, { breakLock, log, heartbeatDb })
+      let identity: QueryIdentity | undefined
+      if (rawDb.commandTracked && rawDb.queryControl) {
+        try { identity = await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) }
+        catch (error) {
+          if (cancelQueries) throw error
+          debug('migrate:queries', `query tracking unavailable: ${error instanceof Error ? error.message : String(error)}`)
+        }
+      }
+      if (cancelQueries && !identity) throw new MigrateError('migrate_cancellation_failed', 'This executor cannot safely track/cancel queries.')
+      const cancellation = cancelQueries && identity && breakLock ? await prepareCancellation(rawDb, target, identity, breakLock) : undefined
+      await assertCancellationClear(rawDb, target, cancellation?.claim, identity)
+      const migrationHooks = pluginRuntime.plugins.some((item) => item.plugin.hooks?.onBeforeApply || item.plugin.hooks?.onAfterApply)
+      if (cancelQueries && migrationHooks) throw new MigrateError('migrate_cancellation_failed', 'Cancellation cannot cover arbitrary migration plugin hooks.')
+      const trackedIdentity = migrationHooks ? undefined : identity
+      const lock = await acquireMigrateLock(rawDb, target, {
+        breakLock: cancellation?.claim ?? breakLock, log, heartbeatDb, queryTracking: trackedIdentity,
+        ...(cancellation ? { takeover: { claim: cancellation.claim, holder: cancellation.holder, beforeRelease: () => markCancellationPending(rawDb, target, cancellation),
+          ...(cancellation.resumePending ? { resumePending: () => assertCancellationUnfinished(rawDb, target, cancellation) } : {}),
+        } } : {}),
+      })
       heldLock = lock
       try {
+        await assertCancellationClear(rawDb, target, cancellation?.claim, identity)
+        if (cancellation) await cancelPredecessor(rawDb, target, cancellation, lock)
+        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock }) : undefined
         return await fn()
       } catch (error) {
         // A step that retries or wraps the guard's error (a poll loop, a
@@ -249,6 +281,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
         throw error
       } finally {
         heldLock = undefined
+        queryTracker = undefined
         await lock.release()
       }
     } finally {
@@ -305,6 +338,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     retryTarget,
     abandonTarget,
     withLock,
+    queryTracker: () => queryTracker,
   }
 }
 
@@ -589,6 +623,7 @@ async function applyPlan(ctx: MigrateContext, plan: PendingPlan): Promise<number
       migrationsDir,
       file,
       settings,
+      queryTracker: ctx.queryTracker(),
       retry: retry?.action === 'resume' && retry.migration === file ? retry : undefined,
       log,
     })

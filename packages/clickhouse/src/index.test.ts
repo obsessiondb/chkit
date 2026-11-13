@@ -36,6 +36,61 @@ type InsertCall = {
   columns?: string[]
 }
 
+describe('tracked command physical attempts (#732)', () => {
+  test('control deadline closes a stalled response body and permits executor close', async () => {
+    const server = Bun.serve({ port: 0, fetch() {
+      return new Response(new ReadableStream({ start(controller) { controller.enqueue(new TextEncoder().encode('{"partial":1}\n')) } }))
+    } })
+    const config = { url: server.url.toString(), username: 'default', password: '', database: 'default', secure: false }
+    const db = createStatelessClickHouseExecutor(config)
+    const started = performance.now()
+    try {
+      await expect(db.queryControl!('SELECT 1', 50)).rejects.toThrow()
+      await db.close()
+      expect(performance.now() - started).toBeLessThan(1500)
+    } finally { server.stop(true) }
+  })
+  for (const loseLock of [false, true]) {
+    test(`records a distinct id before each guarded fallback (lost: ${loseLock})`, async () => {
+      const sent: string[] = []
+      const server = Bun.serve({ port: 0, async fetch(request) {
+        const params = new URL(request.url).searchParams
+        sent.push(params.get('query_id') ?? '')
+        expect(params.get('async_insert')).toBe('0')
+        expect(params.get('max_threads')).toBe('1')
+        return new Response('')
+      } })
+      const config = { url: server.url.toString(), username: 'default', password: '', database: 'missing', secure: false }
+      const client = createStatelessClickHouseClient(config)
+      let held = true
+      const primary = spyOn(client, 'command').mockImplementation(async (params) => {
+        sent.push(params.query_id ?? '')
+        held = !loseLock
+        throw Object.assign(new Error('UNKNOWN_DATABASE'), { code: '81' })
+      })
+      const db = createExecutorWithClient(config, client)
+      const recorded: string[] = []
+      try {
+        const run = db.commandTracked!('INSERT INTO app.events SELECT 1', () => {
+          if (!held) throw new Error('ownership lost')
+        }, async () => {
+          const id = `physical-${recorded.length + 1}`
+          recorded.push(id)
+          return id
+        }, { max_threads: 1 })
+        if (loseLock) await expect(run).rejects.toThrow('ownership lost')
+        else await run
+        expect(primary).toHaveBeenCalledTimes(1)
+        expect(recorded).toEqual(loseLock ? ['physical-1'] : ['physical-1', 'physical-2'])
+        expect(sent).toEqual(recorded)
+      } finally {
+        await db.close()
+        server.stop(true)
+      }
+    })
+  }
+})
+
 type MockClientOptions = {
   commandHeaders?: Record<string, string>
   queryHeaders?: Record<string, string>
