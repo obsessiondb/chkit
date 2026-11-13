@@ -3,9 +3,9 @@ import process from 'node:process'
 
 import { cancel, isCancel, log, select } from '@clack/prompts'
 
-import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
+import { resolveBaseUrl } from '../auth/index.js'
 import { runLogin } from '../auth/login.js'
-import { runSignup } from '../auth/signup.js'
+import { signup } from '../auth/signup.js'
 import { runClaim } from '../service/claim.js'
 
 export const CONNECT_CHOICES = ['claim', 'account', 'clickhouse', 'later'] as const
@@ -82,30 +82,23 @@ export async function runOnboarding(options: OnboardingOptions): Promise<void> {
   }
 
   // choice === 'claim'
-  const signupCode = await runSignup(baseUrl, print, {
+  const outcome = await signup(baseUrl, print, {
     email: options.email,
     code: options.code,
     orgName: options.orgName,
   })
-  // A non-zero code is a hard failure (e.g. no email in a non-interactive run). runSignup has
-  // already printed the runbook; throw so an explicit `--connect claim` caller sees a non-zero exit
-  // instead of silently falling through to "next steps" with status 0.
-  if (signupCode !== 0) {
+  // A failure (e.g. no email in a non-interactive run) has already printed the runbook; throw so an
+  // explicit `--connect claim` caller sees a non-zero exit instead of falling through to "next steps".
+  if (outcome.status === 'failed') {
     throw new Error(
       'Signup did not complete. Run `chkit obsessiondb signup` to finish, then `chkit obsessiondb service claim`.',
     )
   }
+  // Two-step pause: the code was sent and signup printed the verify command. Not a failure; exit 0 so
+  // the caller can finish step 2. Never fall back to a login already on disk, which may be another account.
+  if (outcome.status === 'otp_sent') return
 
-  const creds = await loadCredentials()
-  // signup returned 0 but nothing was persisted: this is the two-step pause — the code was sent and
-  // runSignup printed the verify command. Not a failure; exit 0 so the caller can finish step 2.
-  if (!creds) return
-
-  const claimCode = await runClaim(
-    { ...creds, base_url: resolveBaseUrl(creds.base_url) },
-    options.configPath,
-    print,
-  )
+  const claimCode = await runClaim(outcome.credentials, options.configPath, print)
   // runClaim prints its own diagnostics on failure; surface a non-zero exit for explicit callers.
   if (claimCode !== 0) {
     throw new Error('Could not claim a free instance. Run `chkit obsessiondb service claim` to retry.')
