@@ -308,23 +308,37 @@ class PluginRuntime:
                 ChxOnCheckReportContext(result=result, print=print_fn),
             )
 
-    def resolve_context(self, context_input: Any) -> PluginContext | None:
-        """Mirror of TS ``runtime.resolveContext``: try each plugin's
-        ``get_context`` hook in order; return the first non-None
-        :class:`PluginContext`. Plugins return ``None`` to defer to the next.
+    def resolve_context(self, context_input: ChxGetContextInput) -> PluginContext | None:
+        """Mirror of TS ``runtime.resolveContext``: run every plugin's
+        ``get_context`` hook in order. A :class:`PluginContext` with an
+        executor replaces the one before it, which is closed, so the last
+        plugin executor wins. A hook error closes the current plugin executor
+        and raises. Returns None when no plugin provides an executor.
+
+        The caller owns ``context_input.defaults`` and closes it, so this
+        never closes the default executor.
 
         Used by ``chkit plugin <name> <command>`` and other commands that want
         plugin-provided executors (e.g. ObsessionDB's remote executor when a
         service is selected).
         """
+        default_executor = context_input.defaults.executor
+        ctx: PluginContext | None = None
         for entry in self._plugins:
             hook = _get_hook(entry.plugin, "get_context")
             if hook is None:
                 continue
-            result = self._call_hook(entry, "getContext", hook, context_input)
-            if isinstance(result, PluginContext):
-                return result
-        return None
+            try:
+                result = self._call_hook(entry, "getContext", hook, context_input)
+            except Exception:
+                if ctx is not None and ctx.executor is not default_executor:
+                    self.dispose_context(ctx)
+                raise
+            if isinstance(result, PluginContext) and result.executor is not None:
+                if ctx is not None and ctx.executor is not default_executor:
+                    self.dispose_context(ctx)
+                ctx = result if result.has_executor else replace(result, has_executor=True)
+        return ctx
 
     def dispose_context(self, ctx: PluginContext) -> None:
         """Mirror of TS ``runtime.disposeContext``: best-effort close on the
