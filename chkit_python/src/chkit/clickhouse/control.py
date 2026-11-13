@@ -9,7 +9,10 @@ from collections.abc import Callable
 from concurrent.futures import Future
 from typing import TypeVar
 
-STRICT_CONTROL_SETTINGS = {
+STRICT_CONTROL_SETTINGS: dict[str, str | int] = {
+    "use_query_cache": 0,
+    "enable_reads_from_query_cache": 0,
+    "enable_writes_to_query_cache": 0,
     "read_overflow_mode": "throw",
     "read_overflow_mode_leaf": "throw",
     "group_by_overflow_mode": "throw",

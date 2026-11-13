@@ -41,19 +41,25 @@ describe('tracked command physical attempts (#732)', () => {
     const requests: URL[] = []
     const server = Bun.serve({ port: 0, fetch(request) {
       requests.push(new URL(request.url))
-      expect(request.headers.get('X-DDL')).toBeNull()
-      expect(request.headers.get('Connection')?.toLowerCase()).toBe('close')
+      if (requests.length === 1) {
+        expect(request.headers.get('X-DDL')).toBeNull()
+        expect(request.headers.get('Connection')?.toLowerCase()).toBe('close')
+      }
       return new Response('{}\n')
     } })
     const db = createStatelessClickHouseExecutor({ url: server.url.toString(), username: 'default', password: '', database: 'default', secure: false })
     try {
       if (!db.queryControl) throw new Error('Missing control capability')
-      await db.queryControl('KILL QUERY WHERE 0 SYNC', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored', result_overflow_mode: 'break', max_result_rows: 1 } })
+      await db.queryControl('KILL QUERY WHERE 0 SYNC', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored', result_overflow_mode: 'break', max_result_rows: 1, use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } })
       expect(requests).toHaveLength(1)
       expect(requests[0]?.searchParams.get('query_id')).toBe('receipt-control')
       expect(requests[0]?.searchParams.get('log_queries')).toBe('1')
       for (const name of ['result_overflow_mode', 'group_by_overflow_mode', 'set_overflow_mode', 'timeout_overflow_mode', 'read_overflow_mode']) expect(requests[0]?.searchParams.get(name)).toBe('throw')
       expect(requests[0]?.searchParams.get('max_result_rows')).toBe('1')
+      const cacheSettings = { use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } as const
+      for (const name of Object.keys(cacheSettings)) expect(requests[0]?.searchParams.get(name)).toBe('0')
+      await db.query('SELECT 1', cacheSettings)
+      for (const name of Object.keys(cacheSettings)) expect(requests.at(-1)?.searchParams.get(name)).toBe('1')
     } finally { await db.close(); server.stop(true) }
   })
   test('control deadline closes a stalled response body and permits executor close', async () => {

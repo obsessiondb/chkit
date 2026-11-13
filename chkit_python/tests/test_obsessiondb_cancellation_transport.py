@@ -109,7 +109,7 @@ def test_control_decodes_rows_and_sets_remaining_http_timeout(
         )
 
     monkeypatch.setattr(remote_executor, "workbench_query_execute", execute)
-    result = client().query_control("KILL QUERY WHERE query_id = 'old' SYNC", 1000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored"})
+    result = client().query_control("KILL QUERY WHERE query_id = 'old' SYNC", 1000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored", "use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1})
     assert result.rows == [{"kill_status": "finished"}]
     assert result.column_names == ["kill_status"]
     assert len(calls) == 1
@@ -117,6 +117,11 @@ def test_control_decodes_rows_and_sets_remaining_http_timeout(
     assert calls[0]["query_id"] == "receipt-control"
     assert calls[0]["settings"]["log_queries"] == 1
     assert "query_id" not in calls[0]["settings"]
+    cache_settings = {"use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1}
+    for name in cache_settings:
+        assert calls[0]["settings"][name] == 0
+    client().query("SELECT 1", settings=cache_settings)
+    assert calls[1]["settings"] == cache_settings
 
 
 def test_control_deadline_bounds_a_stalled_request(

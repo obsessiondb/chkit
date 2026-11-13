@@ -89,8 +89,11 @@ export interface ClickHouseJsonQueryResult<
 
 export type ObservableSystemTable = 'processes' | 'query_log'
 
-/** Control proofs must fail rather than return a limit-truncated result. */
+/** Control proofs require fresh, complete results rather than cached or truncated data. */
 export const STRICT_CONTROL_SETTINGS: ClickHouseSettings = {
+	use_query_cache: 0,
+	enable_reads_from_query_cache: 0,
+	enable_writes_to_query_cache: 0,
 	read_overflow_mode: 'throw',
 	read_overflow_mode_leaf: 'throw',
 	group_by_overflow_mode: 'throw',

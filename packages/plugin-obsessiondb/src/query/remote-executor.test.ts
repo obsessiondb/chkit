@@ -236,10 +236,13 @@ describe('createRemoteExecutor cancellation transport', () => {
 	test('forwards receipt control id at top level and settings without a conflicting query_id', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {
-			await connect(workbench.url).queryControl('SELECT * FROM system.one', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored' } })
+			await connect(workbench.url).queryControl('SELECT * FROM system.one', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored', use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } })
 			expect(workbench.inputs).toHaveLength(1)
-			expect(workbench.inputs[0]).toMatchObject({ queryId: 'receipt-control', settings: { log_queries: 1 } })
+			expect(workbench.inputs[0]).toMatchObject({ queryId: 'receipt-control', settings: { log_queries: 1, use_query_cache: 0, enable_reads_from_query_cache: 0, enable_writes_to_query_cache: 0 } })
 			expect(workbench.inputs[0]?.settings).not.toHaveProperty('query_id')
+			const cacheSettings = { use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } as const
+			await connect(workbench.url).query('SELECT 1', cacheSettings)
+			expect(workbench.inputs[1]?.settings).toMatchObject(cacheSettings)
 		} finally { workbench.stop() }
 	})
 	for (const truncated of [true, false]) {

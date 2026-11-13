@@ -211,7 +211,7 @@ def test_tracked_execute_blocks_the_pinned_drivers_remote_close_retry() -> None:
 def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
     client, fake = _stub_client()
     httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')
-    result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored", "result_overflow_mode": "break", "max_result_rows": 1})
+    result = client.query_control("KILL QUERY WHERE query_id = 'old-query' SYNC", 5000, query_id="receipt-control", settings={"log_queries": 1, "query_id": "ignored", "result_overflow_mode": "break", "max_result_rows": 1, "use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1})
     assert result.rows == [{"query_id": "old-query", "kill_status": "finished"}]
     request = httpx_mock.get_request()
     assert request is not None
@@ -226,6 +226,11 @@ def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock:
     assert request.content == b"KILL QUERY WHERE query_id = 'old-query' SYNC"
     fake.query.assert_not_called()
     fake.command.assert_not_called()
+    cache_settings = {"use_query_cache": 1, "enable_reads_from_query_cache": 1, "enable_writes_to_query_cache": 1}
+    for name in cache_settings:
+        assert request.url.params[name] == "0"
+    client.query("SELECT 1", settings=cache_settings)
+    fake.query.assert_called_once_with("SELECT 1", settings=cache_settings)
 
 
 def test_control_request_deadline_bounds_a_stuck_body() -> None:
