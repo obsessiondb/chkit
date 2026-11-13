@@ -306,14 +306,19 @@ def _sorted(operations: Sequence[MigrationOperation]) -> list[MigrationOperation
     dependency-aware (#231); the classes this pipeline adds to are ordered by
     key, and operations that share a key keep the planner's order (the sort is
     stable), so a column's ``REMOVE DEFAULT`` still runs before its
-    ``MODIFY COLUMN``.
+    ``MODIFY COLUMN``. The column ADDs fill their key-order positions in the
+    planner's order, which puts an ADD after the ADDs its default reads (#681).
     """
 
     def sort_key(op: MigrationOperation) -> tuple[int, str]:
         rank = _rank_operation(op)
         return (rank, "" if rank in (_DROP_RANK, _CREATE_RANK) else op.key)
 
-    return sorted(operations, key=sort_key)
+    adds = iter([op for op in operations if op.type == "alter_table_add_column"])
+    return [
+        next(adds) if op.type == "alter_table_add_column" else op
+        for op in sorted(operations, key=sort_key)
+    ]
 
 
 def _summarize_risk(operations: Sequence[MigrationOperation]) -> _RiskSummary:

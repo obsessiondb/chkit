@@ -68,7 +68,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
-from chkit.core.sql_lexer import js_regex, js_trim
+from chkit.core.sql_lexer import identifier_name, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
@@ -834,20 +834,67 @@ def _order_operations(
     *,
     drop: DependencyGraph,
     create: DependencyGraph,
+    add_column: DependencyGraph,
 ) -> list[MigrationOperation]:
     """Reorder the drop and create segments of a (rank, key)-sorted plan by object dependencies.
 
     Drops run dependents first, creates run dependencies first (#231). Alters
-    and create_database keep their place.
+    and create_database keep their place, but an ADD COLUMN moves behind the
+    ADD COLUMNs its default reads (#681).
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
     creates = [op for op in ordered if _rank(op) >= 3]  # noqa: PLR2004
     return [
         *order_by_dependencies(drops, lambda op: op.key, lambda key: drop.get(key, ())),
-        *middle,
+        *_order_column_adds(middle, add_column),
         *order_by_dependencies(creates, lambda op: op.key, lambda key: create.get(key, ())),
     ]
+
+
+def _order_column_adds(
+    operations: list[MigrationOperation], reads: DependencyGraph
+) -> list[MigrationOperation]:
+    """Move each ADD COLUMN behind the ADD COLUMNs of the columns its expression reads (#681).
+
+    The expression is the column's DEFAULT, MATERIALIZED or ALIAS one. The ADD
+    COLUMNs fill the positions they had, so every other operation keeps its place.
+    """
+    adds = iter(
+        order_by_dependencies(
+            [op for op in operations if op.type == "alter_table_add_column"],
+            lambda op: op.key,
+            lambda key: reads.get(key, ()),
+        )
+    )
+    return [next(adds) if op.type == "alter_table_add_column" else op for op in operations]
+
+
+def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+    """Column operation key to the keys of the same table's columns its default expression names.
+
+    A name can also be a function or a lambda parameter; such an extra edge
+    moves an ADD COLUMN later, or makes a cycle that keeps the key order.
+    """
+    graph: dict[str, set[str]] = {}
+    for definition in definitions:
+        if not isinstance(definition, TableDefinition):
+            continue
+        prefix = f"table:{definition.database}.{definition.name}:column:"
+        names = {column.name for column in definition.columns}
+        for column in definition.columns:
+            if column.default is None:
+                continue
+            parsed = parse_column_default(column.default)
+            if parsed.kind != "expression":
+                continue
+            read: set[str] = set()
+            for token in tokenize_sql(parsed.sql):
+                name = identifier_name(token)
+                if name is not None and name != column.name and name in names:
+                    read.add(prefix + name)
+            graph[prefix + column.name] = read
+    return graph
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:
@@ -987,6 +1034,7 @@ def plan_diff(
         operations,
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
         create=build_dependency_graph(new_canonical),
+        add_column=_column_default_reads(new_canonical),
     )
 
     counts: dict[RiskLevel, int] = {"safe": 0, "caution": 0, "danger": 0}

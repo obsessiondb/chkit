@@ -140,6 +140,37 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
       'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
     ])
   })
+
+  test('column rename keeps an ADD COLUMN after the ADD COLUMN its DEFAULT reads (#681)', () => {
+    const t = (columns: ColumnDefinition[]) =>
+      table({
+        database: 'app',
+        name: 't',
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      })
+    const planned = planDiff(
+      [t([{ name: 'a', type: 'String' }])],
+      [
+        t([
+          { name: 'b', type: 'String' },
+          { name: 'price', type: 'UInt64' },
+          { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } },
+        ]),
+      ]
+    )
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }])
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+    ])
+  })
 })
 
 describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {
