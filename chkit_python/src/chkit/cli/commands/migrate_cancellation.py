@@ -379,9 +379,9 @@ def cancel_predecessor(
     _assert_intents_covered(intents, plan.obligations)
     _validate_obligations(conn, identity, plan.obligations, target)
     ids = [intent["queryId"] for intent in intents]
+    predicate = _process_predicate(identity, ids)
+    from_ = f"clusterAllReplicas({sql_string(_require_cluster(identity))}, system.processes)"
     if ids:
-        predicate = _process_predicate(identity, ids)
-        from_ = f"clusterAllReplicas({sql_string(_require_cluster(identity))}, system.processes)"
         id_list = ",".join(sql_string(query_id) for query_id in ids)
         processes = conn.query(
             f"SELECT query_id, initial_query_id, user, initial_user FROM {from_} "
@@ -395,6 +395,10 @@ def cancel_predecessor(
                 raise cancellation_error(
                     "A recorded query id belongs to another SQL principal; no query was canceled."
                 )
+    # Fixed boundaries only; receipt and terminal loops never renew a budget.
+    lock.assert_held()
+    conn = _Control(client, lock)
+    if ids:
         kill_with_receipts(conn, identity, ids)
         while True:
             _assert_identity_topology(conn, identity)
@@ -408,6 +412,7 @@ def cancel_predecessor(
                 break
             time.sleep(min(100, conn.remaining()) / 1000)
     lock.assert_held()
+    conn = _Control(client, lock)
     active_claim = lock.claim_id
     if not active_claim or not _UUID.fullmatch(active_claim):
         raise cancellation_error("The replacement lock has no valid claim identity.")

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import json
 import re
+import time
 from dataclasses import replace
 from typing import Any
 from uuid import UUID
@@ -197,6 +198,79 @@ class ControlFixture:
     @staticmethod
     def _rows(rows: list[dict[str, Any]]) -> QueryResult:
         return QueryResult(column_names=list(rows[0]) if rows else [], rows=rows)
+
+
+def test_fixed_phase_budgets_accommodate_latency(monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = ControlFixture()
+    plan = prepare_cancellation(fixture, TARGET, IDENTITY, CLAIM)
+    now = 0.0
+    query = fixture.query_control
+
+    def delayed(sql: str, timeout_ms: float, **kwargs: Any) -> QueryResult:
+        nonlocal now
+        if sql.startswith(("SELECT query_id", "SELECT count()")) or (
+            sql.startswith("INSERT") and "/required" in sql
+        ):
+            now += 20
+        return query(sql, timeout_ms, **kwargs)
+
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(fixture, "query_control", delayed)
+    cancel_predecessor(fixture, TARGET, plan, fixture)
+    assert now == 60
+    assert next(timeout for sql, timeout in fixture.calls if sql.startswith("KILL")) == 30_000
+    assert next(timeout for sql, timeout in fixture.calls if sql.startswith("INSERT") and "/required" in sql) == 30_000
+    assert f"{CANCELLATION_PREFIX}{CLAIM}/completed" in fixture.markers
+
+
+def test_receipt_polling_never_renews_phase_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = ControlFixture()
+    plan = prepare_cancellation(fixture, TARGET, IDENTITY, CLAIM)
+    now = 0.0
+    reads = 0
+    query = fixture.query_control
+
+    def delayed(sql: str, timeout_ms: float, **kwargs: Any) -> QueryResult:
+        nonlocal now, reads
+        rows = query(sql, timeout_ms, **kwargs)
+        if "system.query_log" in sql:
+            now += 10
+            reads += 1
+            return fixture._rows([])
+        return rows
+
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(fixture, "query_control", delayed)
+    with pytest.raises(MigrateError, match="deadline expired"):
+        cancel_predecessor(fixture, TARGET, plan, fixture)
+    assert reads == 3
+    assert not any(sql.startswith("SELECT count()") for sql, _ in fixture.calls)
+    assert not fixture.markers
+
+
+@pytest.mark.parametrize("phase", ["preflight", "cancellation", "handoff"])
+def test_expired_phase_cannot_advance(phase: str, monkeypatch: pytest.MonkeyPatch) -> None:
+    fixture = ControlFixture()
+    plan = prepare_cancellation(fixture, TARGET, IDENTITY, CLAIM)
+    now = 0.0
+    query = fixture.query_control
+
+    def delayed(sql: str, timeout_ms: float, **kwargs: Any) -> QueryResult:
+        nonlocal now
+        expires = (sql.startswith("SELECT query_id") if phase == "preflight" else
+                   sql.startswith("SELECT count()") if phase == "cancellation" else
+                   sql.startswith("INSERT") and "/required" in sql)
+        if expires:
+            now += 30.001
+        return query(sql, timeout_ms, **kwargs)
+
+    monkeypatch.setattr(time, "monotonic", lambda: now)
+    monkeypatch.setattr(fixture, "query_control", delayed)
+    with pytest.raises(MigrateError, match="deadline expired"):
+        cancel_predecessor(fixture, TARGET, plan, fixture)
+    assert fixture.killed == (phase != "preflight")
+    assert (f"{RECOVERY_PREFIX}{SUCCESSOR}/required" in fixture.markers) == (phase == "handoff")
+    assert f"{CANCELLATION_PREFIX}{CLAIM}/completed" not in fixture.markers
 
 
 def test_pending_barrier_blocks_later_owners_until_terminal_completion() -> None:

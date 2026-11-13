@@ -132,7 +132,7 @@ export async function assertCancellationClear(db: ClickHouseExecutor, target: Lo
 
 /** No compensation or replacement statement may run until this returns. */
 export async function cancelPredecessor(db: ClickHouseExecutor, target: LockTarget, plan: CancellationPlan, lock: MigrateLock): Promise<RecoveryContext> {
-  const conn = control(db, lock)
+  let conn = control(db, lock)
   const { identity, claim } = plan
   await assertIdentityTopology(conn, identity)
   // A fresh read closes the validation-to-reservation interval. Validate the
@@ -144,27 +144,34 @@ export async function cancelPredecessor(db: ClickHouseExecutor, target: LockTarg
   assertIntentsCovered(intents, plan.obligations)
   await validateObligations(conn, identity, plan.obligations, target)
   const ids = intents.map((intent) => intent.queryId)
-  if (ids.length > 0) {
   const predicate = processPredicate(identity, ids)
   const from = `clusterAllReplicas(${sqlString(requireCluster(identity))}, system.processes)`
-  const processes = await conn.query<{ query_id: string; initial_query_id: string; user: string; initial_user: string }>(
-    `SELECT query_id, initial_query_id, user, initial_user FROM ${from} WHERE query_id IN (${ids.map(sqlString).join(',')}) OR initial_query_id IN (${ids.map(sqlString).join(',')}) SETTINGS skip_unavailable_shards = 0`,
-  )
-  for (const row of processes) {
-    if ((ids.includes(row.query_id) && row.user !== identity.principal) || (ids.includes(row.initial_query_id) && row.initial_user !== identity.principal)) {
-      throw cancellationError('A recorded query id belongs to another SQL principal; no query was canceled.')
+  if (ids.length > 0) {
+    const processes = await conn.query<{ query_id: string; initial_query_id: string; user: string; initial_user: string }>(
+      `SELECT query_id, initial_query_id, user, initial_user FROM ${from} WHERE query_id IN (${ids.map(sqlString).join(',')}) OR initial_query_id IN (${ids.map(sqlString).join(',')}) SETTINGS skip_unavailable_shards = 0`,
+    )
+    for (const row of processes) {
+      if ((ids.includes(row.query_id) && row.user !== identity.principal) || (ids.includes(row.initial_query_id) && row.initial_user !== identity.principal)) {
+        throw cancellationError('A recorded query id belongs to another SQL principal; no query was canceled.')
+      }
     }
   }
-  await killWithReceipts(conn, identity, ids)
-  for (;;) {
-    await assertIdentityTopology(conn, identity)
-    const running = await conn.query<{ n: string | number }>(`SELECT count() AS n FROM ${from} WHERE ${predicate} SETTINGS skip_unavailable_shards = 0`)
-    if (running.length !== 1 || !Number.isFinite(Number(running[0]?.n))) throw cancellationError('Cannot verify query termination on every server.')
-    if (Number(running[0]?.n) === 0) break
-    await sleep(Math.min(100, conn.remaining()))
-  }
+  // Fixed phase boundaries only: every receipt/terminal loop shares one
+  // absolute budget. No phase starts after the previous one failed.
+  lock.assertHeld()
+  conn = control(db, lock)
+  if (ids.length > 0) {
+    await killWithReceipts(conn, identity, ids)
+    for (;;) {
+      await assertIdentityTopology(conn, identity)
+      const running = await conn.query<{ n: string | number }>(`SELECT count() AS n FROM ${from} WHERE ${predicate} SETTINGS skip_unavailable_shards = 0`)
+      if (running.length !== 1 || !Number.isFinite(Number(running[0]?.n))) throw cancellationError('Cannot verify query termination on every server.')
+      if (Number(running[0]?.n) === 0) break
+      await sleep(Math.min(100, conn.remaining()))
+    }
   }
   lock.assertHeld()
+  conn = control(db, lock)
   const activeClaim = lock.claimId
   if (!activeClaim || !UUID.test(activeClaim)) throw cancellationError('The replacement lock has no valid claim identity.')
   const context: RecoveryContext = { protocol: 1, claim: activeClaim, identity, parents: [...new Set([claim, ...plan.parents])].sort(), obligations: plan.obligations }

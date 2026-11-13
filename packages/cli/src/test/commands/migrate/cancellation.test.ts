@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import type { ClickHouseExecutor, QueryControlOptions } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
 
@@ -84,6 +84,69 @@ function fake(identity: QueryIdentity = IDENTITY) {
 }
 
 describe('explicit predecessor cancellation (#732)', () => {
+  test('fresh fixed phase budgets accommodate latency without renewing a loop deadline', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    let now = 0
+    const clock = spyOn(performance, 'now').mockImplementation(() => now)
+    const query = f.db.queryControl!.bind(f.db)
+    f.db.queryControl = async (sql, timeout, options) => {
+      if (sql.startsWith('SELECT query_id') || sql.startsWith('SELECT count()') ||
+        (sql.startsWith('INSERT') && sql.includes('/required'))) now += 20_000
+      return query(sql, timeout, options)
+    }
+    try {
+      await cancelPredecessor(f.db, TARGET, plan, f.lock)
+      expect(now).toBe(60_000)
+      expect(f.calls.find((call) => call.sql.startsWith('KILL'))?.timeout).toBe(30_000)
+      expect(f.calls.find((call) => call.sql.startsWith('INSERT') && call.sql.includes('/required'))?.timeout).toBe(30_000)
+      expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(true)
+    } finally { clock.mockRestore() }
+  })
+
+  test('repeated receipt polling cannot renew the cancellation phase budget', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    let now = 0
+    let reads = 0
+    const clock = spyOn(performance, 'now').mockImplementation(() => now)
+    const query = f.db.queryControl!.bind(f.db)
+    f.db.queryControl = async (sql, timeout, options) => {
+      const rows = await query(sql, timeout, options)
+      if (sql.includes('system.query_log')) { now += 10_000; reads++; return [] }
+      return rows
+    }
+    try {
+      await expect(cancelPredecessor(f.db, TARGET, plan, f.lock)).rejects.toThrow('deadline expired')
+      expect(reads).toBe(3)
+      expect(f.calls.some((call) => call.sql.startsWith('SELECT count()'))).toBe(false)
+      expect(f.markers.size).toBe(0)
+    } finally { clock.mockRestore() }
+  })
+
+  for (const phase of ['preflight', 'cancellation', 'handoff'] as const) {
+    test(`expired ${phase} phase cannot advance to later recovery actions`, async () => {
+      const f = fake()
+      const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+      let now = 0
+      const clock = spyOn(performance, 'now').mockImplementation(() => now)
+      const query = f.db.queryControl!.bind(f.db)
+      f.db.queryControl = async (sql, timeout, options) => {
+        const expires = phase === 'preflight' ? sql.startsWith('SELECT query_id') :
+          phase === 'cancellation' ? sql.startsWith('SELECT count()') :
+          sql.startsWith('INSERT') && sql.includes('/required')
+        if (expires) now += 30_001
+        return query(sql, timeout, options)
+      }
+      try {
+        await expect(cancelPredecessor(f.db, TARGET, plan, f.lock)).rejects.toThrow('deadline expired')
+        expect(f.state.killed).toBe(phase !== 'preflight')
+        expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/required`)).toBe(phase === 'handoff')
+        expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(false)
+      } finally { clock.mockRestore() }
+    })
+  }
+
   test('pending cancellation blocks later ordinary/no-pending owners until terminal proof completes', async () => {
     const f = fake()
     expect(await resolveQueryIdentity(f.db)).toEqual(IDENTITY)

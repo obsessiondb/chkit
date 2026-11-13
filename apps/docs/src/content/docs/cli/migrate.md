@@ -233,6 +233,8 @@ Per-query settings are limited to `max_threads`, `max_insert_threads`, `max_bloc
 
 Tracked runs record a fresh query ID before each physical synchronous or compensation attempt. Immutable journal records retain the claim, forward fingerprint and table identities after lock release, without SQL text or credentials. chkit reserves the replacement lock, cancels exact recorded query IDs for the same principal, and requires successful local KILL receipts from every declared server plus absence of those queries and matching child queries. Query-log visibility and permission to enable control-query logging are required; missing receipts or a timeout block replacement work.
 
+Cancellation has three fixed phases, each with a 30-second budget: fresh validation, KILL receipts and terminal proof, then durable recovery handoff. Polling never renews a phase's budget. Together these phases can take up to 90 seconds while the replacement lock remains valid; planning, compensation and reload are separate steps. An expired phase blocks later phases and replacement work.
+
 Cancellation can leave committed rows. The `TRUNCATE` removes them before reloading, so the target must be safe to clear. After cancellation, a durable recovery marker blocks ordinary apply, including runs with no pending files, until the journal proves every covered statement completed. A crashed successor inherits the full recovery plan. Resume with the stopped successor claim named in the error; reusing an older claim redirects to that successor. A timeout, lock release or scoped-out migration never clears unfinished recovery.
 
 :::caution
