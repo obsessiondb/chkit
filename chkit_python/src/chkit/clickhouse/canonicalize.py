@@ -9,7 +9,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from chkit.core.sql_lexer import js_regex, js_trim
+from chkit.core.sql_lexer import is_trivia, js_regex, js_trim, tokenize_sql
 
 # Keep each batched query well under ClickHouse's default max_query_size
 # (262144 bytes) so a large schema doesn't overflow a single query — which would
@@ -19,6 +19,30 @@ MAX_BATCH_LITERAL_BYTES = 128_000
 _SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+(.+)$"), re.IGNORECASE | re.DOTALL)
 
 
+def normalize_function_name_case(sql: str) -> str:
+    """Lowercase the name of every function call in a SQL fragment.
+
+    ClickHouse resolves case-insensitive function names to their registered
+    case when it stores a query (``FLOOR(...)`` comes back as ``floor(...)``),
+    but its formatter keeps the written case — so a view whose schema says
+    ``FLOOR`` drifts on the stored ``floor`` (#729). Only an identifier
+    followed by ``(`` is a call; strings, quoted identifiers, comments and
+    plain names keep their case.
+    """
+    tokens = tokenize_sql(sql)
+    out: list[str] = []
+    for i, token in enumerate(tokens):
+        if token.kind == "identifier":
+            nxt = i + 1
+            while nxt < len(tokens) and is_trivia(tokens[nxt]):
+                nxt += 1
+            if nxt < len(tokens) and tokens[nxt].text == "(":
+                out.append(token.text.lower())
+                continue
+        out.append(token.text)
+    return "".join(out)
+
+
 def canonicalize_sql_fragments(
     client: Any, fragments: Sequence[str], *, wrap: bool
 ) -> dict[str, str]:
@@ -26,7 +50,9 @@ def canonicalize_sql_fragments(
 
     The server rewrites expressions on the way in — spacing, operator
     precedence parens, ``INTERVAL n UNIT`` -> ``toIntervalUnit(n)`` — which no
-    local string normalizer can reproduce.
+    local string normalizer can reproduce. Function-call names are lowercased
+    afterwards, since the server canonicalizes their case on write but the
+    formatter does not (#729).
 
     ``wrap`` distinguishes a scalar expression (wrapped as ``SELECT <expr>``,
     prefix stripped back off) from a full ``SELECT`` query (formatted as-is).
@@ -60,7 +86,7 @@ def canonicalize_sql_fragments(
                 continue
             canonical = _strip_select_prefix(value) if wrap else js_trim(value)
             if canonical:
-                result[raw] = canonical
+                result[raw] = normalize_function_name_case(canonical)
     return result
 
 

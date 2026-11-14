@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { canonicalizeSqlFragments } from './canonicalize.js'
+import { canonicalizeSqlFragments, normalizeFunctionNameCase } from './canonicalize.js'
 import type { ClickHouseExecutor } from './index.js'
 
 // Minimal executor stand-in: records the SQL it was asked to run and replays a
@@ -21,7 +21,7 @@ describe('canonicalizeSqlFragments', () => {
 
     const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', 'n*2+1'], { wrap: true })
 
-    expect(map.get('cityHash64(a,b)')).toBe('cityHash64(a, b)')
+    expect(map.get('cityHash64(a,b)')).toBe('cityhash64(a, b)')
     expect(map.get('n*2+1')).toBe('(n * 2) + 1')
     expect(capture.sql).toContain("formatQuerySingleLineOrNull('SELECT ' || fragment)")
   })
@@ -43,7 +43,7 @@ describe('canonicalizeSqlFragments', () => {
 
     const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', '((bad'], { wrap: true })
 
-    expect(map.get('cityHash64(a,b)')).toBe('cityHash64(a, b)')
+    expect(map.get('cityHash64(a,b)')).toBe('cityhash64(a, b)')
     expect(map.has('((bad')).toBe(false)
   })
 
@@ -99,4 +99,28 @@ describe('canonicalizeSqlFragments', () => {
     expect(map.get(fragments[0]!)).toBe('ok')
     expect(map.get(fragments.at(-1)!)).toBe('ok')
   })
+
+  test('lowercases function calls so written case matches stored case (#729)', async () => {
+    // The formatter echoes the written case while the stored query carries
+    // ClickHouse's canonical case; after normalization both sides agree.
+    const writtenQuery =
+      'SELECT FLOOR(toUnixTimestamp(ts) / 300) AS bucket FROM drift_repro.events'
+    const storedQuery =
+      'SELECT floor(toUnixTimestamp(ts) / 300) AS bucket FROM drift_repro.events'
+    const written = fakeExecutor([writtenQuery], {})
+    const stored = fakeExecutor([storedQuery], {})
+
+    const writtenMap = await canonicalizeSqlFragments(written, [writtenQuery], { wrap: false })
+    const storedMap = await canonicalizeSqlFragments(stored, [storedQuery], { wrap: false })
+
+    expect(writtenMap.get(writtenQuery)).toBe(storedMap.get(storedQuery))
+  })
+
+  test('normalizeFunctionNameCase leaves literals, quoted identifiers and aliases alone', () => {
+    expect(
+      normalizeFunctionNameCase("SELECT FLOOR(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`")
+    ).toBe("SELECT floor(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`")
+    expect(normalizeFunctionNameCase('count ()')).toBe('count ()')
+  })
 })
+
