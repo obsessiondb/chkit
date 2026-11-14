@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import { type ResolveScope, resolveNode, SqlResolveError } from './sql-resolve.js'
+import { tokenizeSQL } from '@chkit/core'
+
+import { type ResolveScope, resolveNode, SqlResolveError, unresolvedTable } from './sql-resolve.js'
 
 function scope(nodes: Record<string, string>, extra: Partial<ResolveScope> = {}): ResolveScope {
   return {
@@ -94,6 +96,42 @@ describe('resolveNode', () => {
     const resolved = resolveNode('endpoint', scope({ endpoint: 'SELECT * FROM top_users' }, { pipes }))
     expect(resolved.sql).toBe('SELECT * FROM (\nSELECT id FROM analytics.users AS users\n) AS top_users')
     expect([...resolved.pipes]).toEqual(['top_users'])
+  })
+
+  test('resolves queries in parens that open with another paren', () => {
+    const node = 'SELECT id FROM events'
+    const inline = (sql: string) => resolveNode('n', scope({ a: node, n: sql })).sql
+    const a = '(\nSELECT id FROM analytics.events AS events\n) AS a'
+    expect(inline('WITH x AS ((SELECT id FROM a) INTERSECT SELECT id FROM a) SELECT count() FROM x')).toBe(
+      `WITH x AS ((SELECT id FROM ${a}) INTERSECT SELECT id FROM ${a}) SELECT count() FROM x`
+    )
+    expect(inline('WITH x AS (SELECT id FROM a INTERSECT SELECT id FROM a) SELECT count() FROM x')).toBe(
+      `WITH x AS (SELECT id FROM ${a} INTERSECT SELECT id FROM ${a}) SELECT count() FROM x`
+    )
+    expect(inline('WITH x AS (SELECT id from a) SELECT count() from x')).toBe(`WITH x AS (SELECT id from ${a}) SELECT count() from x`)
+    expect(inline('SELECT count() FROM ((SELECT id FROM a) UNION ALL SELECT id FROM a)')).toBe(
+      `SELECT count() FROM ((SELECT id FROM ${a}) UNION ALL SELECT id FROM ${a})`
+    )
+    expect(inline('SELECT 1 FROM events UNION ALL ((SELECT 1 FROM a) UNION ALL SELECT 1 FROM a)')).toBe(
+      `SELECT 1 FROM analytics.events AS events UNION ALL ((SELECT 1 FROM ${a}) UNION ALL SELECT 1 FROM ${a})`
+    )
+    expect(inline('SELECT * FROM (SELECT 1) AS y, ((SELECT 1 FROM a) UNION ALL SELECT 1 FROM a) AS z')).toBe(
+      `SELECT * FROM (SELECT 1) AS y, ((SELECT 1 FROM ${a}) UNION ALL SELECT 1 FROM ${a}) AS z`
+    )
+    expect(inline('SELECT ((SELECT max(id) FROM a) - 1) AS m, extract(DAY FROM ts) FROM events')).toBe(
+      `SELECT ((SELECT max(id) FROM ${a}) - 1) AS m, extract(DAY FROM ts) FROM analytics.events AS events`
+    )
+  })
+
+  test('unresolvedTable finds a project name left after FROM or JOIN, outside CTEs', () => {
+    const known = new Set(['a', 'events'])
+    const missed = (sql: string) => unresolvedTable(tokenizeSQL(sql), new Map(), known)
+    expect(missed('SELECT 1 FROM a')).toBe('a')
+    expect(missed('SELECT 1 FROM x LEFT JOIN `events` ON 1')).toBe('events')
+    expect(missed('WITH a AS (SELECT 1) SELECT * FROM a')).toBeUndefined()
+    expect(missed('SELECT 1 FROM system.a, numbers(1) ARRAY JOIN a')).toBeUndefined()
+    expect(missed("SELECT 'FROM a' -- FROM a\nFROM other")).toBeUndefined()
+    expect(unresolvedTable(tokenizeSQL('SELECT 1 FROM a'), new Map([[6, '(SELECT 1) AS a']]), known)).toBeUndefined()
   })
 
   test('drops a trailing semicolon', () => {

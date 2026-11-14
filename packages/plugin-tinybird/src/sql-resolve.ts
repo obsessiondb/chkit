@@ -118,7 +118,43 @@ function resolveIn(
       throw new SqlResolveError(`reads ${name}, which is not a datasource, a node of this pipe or a pipe of the project`)
     }
   }
+  const missed = unresolvedTable(tokens, replacements, known)
+  if (missed) throw new SqlResolveError(`reads ${missed} in a query shape the import cannot resolve`)
   return tokens.map((token, index) => replacements.get(index) ?? token.text).join('')
+}
+
+/**
+ * A second, scope-blind pass over the SQL: a name of the project right after
+ * `FROM` or `JOIN` that was not resolved and is not a CTE anywhere in the query.
+ * It means `tableReferences` missed a query scope, and the SQL would fail on
+ * ClickHouse with UNKNOWN_TABLE, so the object is reported as not translated.
+ */
+export function unresolvedTable(tokens: SQLToken[], replacements: ReadonlyMap<number, string>, known: ReadonlySet<string>): string | undefined {
+  const significant = tokens.map((token, index) => ({ token, index })).filter(({ token }) => !isTrivia(token))
+  const upper = (at: number) => {
+    const token = significant[at]?.token
+    return token?.kind === 'identifier' ? token.text.toUpperCase() : undefined
+  }
+  const ctes = new Set<string>()
+  for (let at = 0; at < significant.length; at++) {
+    const token = significant[at]?.token
+    if (token && upper(at + 1) === 'AS' && significant[at + 2]?.token.text === '(') {
+      const name = identifierName(token)
+      if (name) ctes.add(name)
+    }
+  }
+  for (let at = 1; at < significant.length; at++) {
+    const entry = significant[at]
+    const previous = upper(at - 1)
+    if (!entry || replacements.has(entry.index)) continue
+    if (previous !== 'FROM' && !(previous === 'JOIN' && upper(at - 2) !== 'ARRAY')) continue
+    if (entry.token.kind !== 'identifier' && entry.token.kind !== 'quoted_identifier') continue
+    const after = significant[at + 1]?.token.text
+    if (after === '.' || after === '(') continue
+    const name = identifierName(entry.token)
+    if (name && known.has(name) && !ctes.has(name)) return name
+  }
+  return undefined
 }
 
 interface TableReference {
@@ -174,7 +210,10 @@ export function tableReferences(tokens: SQLToken[], known: ReadonlySet<string> =
   for (let at = 0; at < significant.length; at++) {
     const current = text(at)
     if (current === '(') {
-      const next = word(at + 1)
+      // `((SELECT …) INTERSECT SELECT …)` is a query too: look past the parens it opens with.
+      let first = at + 1
+      while (text(first) === '(') first++
+      const next = word(first)
       const previous = word(at - 1)
       scopes.push(next === 'SELECT' || next === 'WITH' || previous === 'FROM' || previous === 'JOIN' || previous === 'IN')
       ctes.push(new Set())
