@@ -239,10 +239,9 @@ def test_column_comments(project: _Project, ch_client: Any) -> None:
     ] == [(f"{database}.events", ["c2"], ["changed_column"])]
 
 
-# ObsessionDB applies MODIFY COMMENT on one replica only; the server fix is
-# tracked from #407. chkit emits the same SQL on every target, and verify still
-# runs these cases.
-@pytest.mark.skipif(_ON_OBSESSIONDB, reason="MODIFY COMMENT is replica-local on ObsessionDB (#407)")
+# ObsessionDB applies MODIFY COMMENT on one replica only, a server bug. chkit
+# emits the same SQL on every target, and verify still runs these cases.
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="MODIFY COMMENT is replica-local on ObsessionDB")
 def test_object_comments(project: _Project, ch_client: Any) -> None:
     database = project.database
 

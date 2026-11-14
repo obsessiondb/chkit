@@ -119,8 +119,8 @@ describe('@chkit/cli quoted identifiers e2e', () => {
   )
 
   // ObsessionDB applies a cross-database RENAME TABLE on one replica only for
-  // minutes, so the propagation wait times out; the server fix is tracked from
-  // #682. chkit emits the same SQL on every target, and verify still runs this.
+  // minutes, so the propagation wait times out; a server bug. chkit emits the
+  // same SQL on every target, and verify still runs this.
   test.skipIf(onObsessionDB)(
     'generate -> migrate renames a table into a new database that needs quoting (#490)',
     async () => {
