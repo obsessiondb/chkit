@@ -29,7 +29,7 @@ from chkit.clickhouse.replicas import ReplicaFanout, resolve_replica_fanout_or_r
 from chkit.core.sql_fingerprint import statement_fingerprint
 
 FORWARD = "INSERT INTO app.events SELECT 1;"
-SQL = "-- operation: sql_statement key=statement:0 risk=safe\n-- before-retry: TRUNCATE TABLE app.events\n" + FORWARD + "\n"
+SQL = "-- operation: sql_statement key=statement:0 risk=safe\n-- before-retry: CREATE OR REPLACE TABLE app.events AS app.events\n" + FORWARD + "\n"
 SERVER = "00000000-0000-4000-8000-000000000003"
 UUID = "00000000-0000-4000-8000-000000000002"
 TABLE = QueryTarget("app", "events", UUID, "MergeTree")
@@ -79,7 +79,7 @@ def test_journal_resume_uses_fresh_reads_only_for_explicit_recovery(
             check()
             before()
             check()
-            if sql.startswith("TRUNCATE"):
+            if sql.startswith("CREATE OR REPLACE"):
                 events.append("compensation")
                 self.rows = 0
             else:
@@ -88,9 +88,14 @@ def test_journal_resume_uses_fresh_reads_only_for_explicit_recovery(
 
     raw = Client()
     client = FreshRecoveryClient(raw) if explicit_recovery else raw
+
+    def settled(_table: Any) -> Any:
+        events.append("settled")
+        return TABLE
+
     lock = SimpleNamespace(claim_id="00000000-0000-4000-8000-000000000005", assert_held=lambda: None)
     tracker = QueryTracker(client, LockTarget("app", "_chkit_migrations", None), IDENTITY, cast(Any, lock),
-                           QueryRecovery([TABLE], lambda _: events.append("settled"), (),
+                           QueryRecovery([TABLE], settled, (),
                                          (RecoveryObligation("m.sql", 0, statement_fingerprint(FORWARD), TABLE),)))
     (tmp_path / "m.sql").write_text(SQL)
     runtime = SimpleNamespace(run_on_before_apply=lambda ctx: ctx.statements, run_on_after_apply=lambda ctx: None)

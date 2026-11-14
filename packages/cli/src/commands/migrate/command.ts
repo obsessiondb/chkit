@@ -64,7 +64,7 @@ import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
 import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
-import { createQueryTracker, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
+import { createQueryTracker, queryTrackingDisabled, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
 import { assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
 
 const MIGRATE_FLAGS = defineFlags([
@@ -210,8 +210,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const jsonMode = f['--json'] === true
   const { retryTarget, abandonTarget } = resolveRecoveryTargets(flags)
   const cancelQueries = f['--cancel-lock-queries'] === true
-  if (cancelQueries && (f['--apply'] !== true || !f['--break-lock'] || abandonTarget !== undefined || migrateLockDisabled())) {
-    throw new MigrateError('invalid_usage', '--cancel-lock-queries requires explicit --apply, --break-lock <claim>, an enabled migrate lock, and no --abandon.')
+  if (cancelQueries && (f['--apply'] !== true || !f['--break-lock'] || abandonTarget !== undefined || migrateLockDisabled() || queryTrackingDisabled())) {
+    throw new MigrateError('invalid_usage', '--cancel-lock-queries requires explicit --apply, --break-lock <claim>, an enabled migrate lock and query tracking, and no --abandon.')
   }
 
   const { migrationsDir, metaDir } = resolveDirs(config)
@@ -256,7 +256,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     const heartbeatDb = rawDb.openConcurrent?.()
     try {
       let identity: QueryIdentity | undefined = initialIdentity
-      if (!identity && rawDb.commandTracked && rawDb.queryControl) {
+      if (!identity && !queryTrackingDisabled() && rawDb.commandTracked && rawDb.queryControl) {
         try { identity = await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) }
         catch (error) {
           if (cancelQueries) throw error
@@ -295,7 +295,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
         await assertCancellationClear(rawDb, target, cancellation?.claim, identity)
         const recovery = cancellation ? await cancelPredecessor(rawDb, target, cancellation, lock) : undefined
         completeRecovery = recovery ? async () => { await finishRecovery(rawDb, target, recovery, lock); completeRecovery = undefined } : undefined
-        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, ...(cancellation ? { recovery: { targets: cancellation.targets, sources: cancellation.sources, obligations: cancellation.obligations, afterCompensation: (table) => settleCompensation(rawDb, cancellation, table, lock) } } : {}) }) : undefined
+        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, ...(cancellation && recovery ? { recovery: { targets: recovery.obligations.map((item) => item.target), sources: recovery.obligations.flatMap((item) => item.source ? [item.source] : []), obligations: recovery.obligations, afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
         const result = await fn()
         await completeRecovery?.()
         return result

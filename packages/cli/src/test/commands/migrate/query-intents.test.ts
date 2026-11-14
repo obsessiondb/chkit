@@ -5,7 +5,7 @@ import { statementFingerprint } from '@chkit/core'
 import { classifyQueryIntent, createQueryTracker, type QueryIdentity } from '../../../commands/migrate/query-intents.js'
 
 const identity: QueryIdentity = { protocol: 1, principal: 'writer', serverUUIDs: ['00000000-0000-4000-8000-000000000001'] }
-const context = { migration: 'load.sql', statementIndex: 0, forwardSQL: 'INSERT INTO app.events SELECT 1', beforeRetry: 'TRUNCATE TABLE app.events' }
+const context = { migration: 'load.sql', statementIndex: 0, forwardSQL: 'INSERT INTO app.events SELECT 1', beforeRetry: 'CREATE OR REPLACE TABLE app.events AS app.events' }
 
 describe('migration query intents (#732)', () => {
   test('classifies executable SQL, not comments or marker claims', () => {
@@ -21,9 +21,13 @@ describe('migration query intents (#732)', () => {
       'INSERT INTO app.events SELECT 1 WHERE 1 IN app.distributed_source',
       'INSERT INTO app.events SELECT 1 SETTINGS `async_insert`=1',
     ]) expect(classifyQueryIntent(sql, 'forward', context.beforeRetry).kind).toBe('unsupported')
-    expect(classifyQueryIntent(context.forwardSQL, 'forward', 'TRUNCATE TABLE other.events').kind).toBe('unsupported')
-    expect(classifyQueryIntent('TRUNCATE TABLE app.events SYNC', 'compensation', null).kind).toBe('unsupported')
-    expect(classifyQueryIntent('INSERT INTO TABLE app.events SELECT 1', 'forward', 'TRUNCATE TABLE app.TABLE', 'app').kind).toBe('unsupported')
+    expect(classifyQueryIntent(context.forwardSQL, 'forward', 'CREATE OR REPLACE TABLE other.events AS other.events').kind).toBe('unsupported')
+    expect(classifyQueryIntent(context.forwardSQL, 'forward', 'TRUNCATE TABLE app.events').kind).toBe('unsupported')
+    expect(classifyQueryIntent('CREATE OR REPLACE TABLE events AS events', 'compensation', null, 'app')).toEqual({ kind: 'replace', target: { database: 'app', name: 'events' } })
+    for (const sql of ['TRUNCATE TABLE app.events', 'CREATE OR REPLACE TABLE app.events AS app.other', 'CREATE OR REPLACE TABLE app.events AS SELECT * FROM app.events', 'CREATE OR REPLACE TABLE app.events AS app.events ENGINE = Memory', 'CREATE TABLE app.events AS app.events']) {
+      expect(classifyQueryIntent(sql, 'compensation', null).kind).toBe('unsupported')
+    }
+    expect(classifyQueryIntent('INSERT INTO TABLE app.events SELECT 1', 'forward', 'CREATE OR REPLACE TABLE app.TABLE AS app.TABLE', 'app').kind).toBe('unsupported')
     expect(classifyQueryIntent('INSERT INTO app.events (id) SELECT 1', 'forward', context.beforeRetry).kind).toBe('insert')
   })
 
@@ -67,9 +71,44 @@ describe('migration query intents (#732)', () => {
       if (failure === 'none') { await run; expect(events).toEqual(['intent', 'read-back', 'user SQL']) }
       else { await expect(run).rejects.toThrow(failure === 'intent' ? 'intent failed' : 'lost ownership'); expect(events).not.toContain('user SQL') }
       expect(checksum).not.toContain('INSERT INTO')
-      expect(checksum).not.toContain('TRUNCATE TABLE')
+      expect(checksum).not.toContain('CREATE OR REPLACE')
     })
   }
+
+  test('an ordinary run whose intent cannot be stored continues untracked behind a durable marker', async () => {
+    const writes: string[] = []
+    const sent: string[] = []
+    const db = {
+      async command(sql: string) {
+        writes.push(sql)
+        if (!sql.includes('__chkit_migrate_query__/claim/untracked')) throw new Error('intent failed')
+      },
+      async query() { return [] },
+      async commandTracked(sql: string, check: () => void, before: () => Promise<string>) { check(); await before(); check(); sent.push(sql) },
+    } as unknown as ClickHouseExecutor
+    const logs: string[] = []
+    const tracker = createQueryTracker({ db, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined }, identity,
+      lock: { claimId: 'claim', assertHeld() {}, release: async () => {} }, log: (line) => logs.push(line) })
+    await tracker.command(context, 'forward', context.forwardSQL)
+    await tracker.command({ ...context, statementIndex: 1 }, 'forward', context.forwardSQL)
+    expect(sent).toHaveLength(2)
+    expect(writes.filter((sql) => sql.includes('/untracked'))).toHaveLength(1)
+    expect(writes).toHaveLength(2)
+    expect(logs[0]).toContain('continues untracked')
+  })
+
+  test('explicit recovery never degrades to untracked', async () => {
+    const db = {
+      async command() { throw new Error('intent failed') },
+      async query() { return [] },
+      async commandTracked(_sql: string, check: () => void, before: () => Promise<string>) { check(); await before() },
+    } as unknown as ClickHouseExecutor
+    const table = { database: 'app', name: 'events', uuid: '00000000-0000-4000-8000-000000000002', engine: 'MergeTree' }
+    const tracker = createQueryTracker({ db, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined }, identity,
+      lock: { claimId: 'claim', assertHeld() {}, release: async () => {} },
+      recovery: { targets: [table], async afterCompensation() { return table } } })
+    await expect(tracker.command(context, 'forward', context.forwardSQL)).rejects.toThrow()
+  })
 })
 
 describe('attested table source admission', () => {
@@ -106,7 +145,7 @@ describe('attested table source admission', () => {
       } else {
         await run
         const intent = JSON.parse(checksum)
-        expect(intent.kind).toBe(fault === 'compensation source' ? 'truncate' : fault === 'none' ? 'insert' : 'unsupported')
+        expect(intent.kind).toBe(fault === 'compensation source' ? 'replace' : fault === 'none' ? 'insert' : 'unsupported')
         expect(intent.forwardFingerprint).toBe(statementFingerprint(sql))
         if (fault === 'compensation source') expect(intent.fingerprint).toBe(statementFingerprint(context.beforeRetry))
         expect(events.at(-1)).toBe('user SQL')
@@ -141,18 +180,18 @@ describe('strict explicit recovery tracker', () => {
         async query() { events.push('read-back'); return [{ checksum }] },
         async commandTracked(sql: string, check: () => void, before: () => Promise<string>, settings?: Record<string, unknown>) {
           check(); await before(); check()
-          const compensation = sql.startsWith('TRUNCATE')
-          if (compensation) expect(settings?.shared_merge_tree_require_truncate_fence).toBe(1)
+          const compensation = sql.startsWith('CREATE OR REPLACE')
+          expect(settings).toBeUndefined()
           events.push(compensation ? 'compensation' : 'forward')
           if (fault === 'lost after SQL') held = false
         },
       } as unknown as ClickHouseExecutor
       const tracker = createQueryTracker({ db, identity: { ...identity, cluster: 'declared' }, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined },
         lock: { claimId: 'claim', assertHeld() { if (!held) throw new Error('ownership lost') }, release: async () => {} },
-        recovery: { targets: [table], sources: [{ database: 'app', name: 'frozen', uuid: '00000000-0000-4000-8000-000000000003', engine: 'SharedMergeTree' }], async afterCompensation(actual) { expect(actual).toEqual(table); events.push('settled'); if (fault === 'settlement failure') throw new Error('not settled') } },
+        recovery: { targets: [table], sources: [{ database: 'app', name: 'frozen', uuid: '00000000-0000-4000-8000-000000000003', engine: 'SharedMergeTree' }], async afterCompensation(actual) { expect(actual).toEqual(table); events.push('settled'); if (fault === 'settlement failure') throw new Error('not settled'); return table } },
       })
       const actualContext = fault === 'source changed' ? { ...context, forwardSQL: 'INSERT INTO app.events SELECT id FROM app.frozen' } : context
-      const compensation = fault === 'unsupported SQL' ? 'TRUNCATE TABLE app.events SYNC' : context.beforeRetry
+      const compensation = fault === 'unsupported SQL' ? 'TRUNCATE TABLE app.events' : context.beforeRetry
       const run = (async () => {
         await tracker.command(actualContext, 'compensation', compensation)
         await tracker.command(actualContext, 'forward', actualContext.forwardSQL)

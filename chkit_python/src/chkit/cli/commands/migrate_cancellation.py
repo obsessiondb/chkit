@@ -3,15 +3,15 @@
 from __future__ import annotations
 
 import json
-import math
+import logging
 import re
 import time
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol
-from uuid import uuid4
 
 from chkit import __version__
+from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.commands.migrate_lock import (
     LOCK_ROW_PREFIX,
     LockTarget,
@@ -19,6 +19,7 @@ from chkit.cli.commands.migrate_lock import (
 )
 from chkit.cli.commands.migrate_query_intents import (
     QUERY_INTENT_PREFIX,
+    UNTRACKED,
     QueryContext,
     QueryIdentity,
     QueryTarget,
@@ -33,6 +34,9 @@ from chkit.core.sql_fingerprint import statement_fingerprint
 
 RECOVERY_PREFIX = "__chkit_migrate_recovery__/"
 CANCELLATION_PREFIX = "__chkit_migrate_cancel__/"
+# `<prefix><old uuid>`: a recovery replaced that table; the row names its new UUID.
+REPLACE_PREFIX = "__chkit_migrate_replace__/"
+_LOGGER = logging.getLogger("chkit.migrate.queries")
 _DEADLINE_MS = 30_000
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
 _FINGERPRINT = re.compile(r"^v1:[0-9a-f]{64}$")
@@ -92,6 +96,19 @@ class CancellationPlan:
     parents: list[str] = field(default_factory=list)
     obligations: list[RecoveryObligation] = field(default_factory=list)
     inherited: bool = False
+
+
+@dataclass(slots=True)
+class _Resolution:
+    """How recorded target UUIDs map to live tables.
+
+    Durable replace markers, the targets of recorded replaces whose marker may be
+    missing (a crash right after the replace), and replacements this run adopted.
+    """
+
+    replaced: dict[str, str] = field(default_factory=dict)
+    pending: set[str] = field(default_factory=set)
+    adopted: dict[str, QueryTarget] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -222,13 +239,16 @@ def prepare_cancellation(
             "The predecessor is untracked, uses another SQL principal, "
             "or belongs to another topology."
         )
-    intents = _validate_intents(conn, target, identity, claim, inherited is not None)
-    obligations = _unique_obligations([
+    resolution = _read_resolution(conn, target, identity)
+    intents = _validate_intents(
+        conn, target, identity, claim, allow_empty=inherited is not None, resolution=resolution,
+    )
+    obligations = _unique_obligations(_validate_obligations(conn, identity, [
         *(inherited.context.obligations if inherited is not None else []),
         *_obligations_from_intents(intents),
-    ])
-    _validate_obligations(conn, identity, obligations, target)
+    ], target, resolution))
     _assert_intents_covered(intents, obligations)
+    _assert_replace_grants(conn, obligations)
     prefix = f"{CANCELLATION_PREFIX}{claim}/"
     markers = _variants(conn, _source(target, identity), f"startsWith(name, {sql_string(prefix)})")
     if any(row["name"].endswith("/completed") for row in markers):
@@ -264,7 +284,7 @@ def expand_recovery_plan(
         )
         if classified.kind != "insert" or classified.target is None:
             raise cancellation_error(
-                "Recovery requires supported synchronous INSERT/TRUNCATE pairs throughout "
+                "Recovery requires supported synchronous INSERT/replace pairs throughout "
                 f"{context.migration}; no query was canceled."
             )
         table = attest_query_table(metadata, plan.identity, classified.target)
@@ -276,8 +296,9 @@ def expand_recovery_plan(
             context.migration, context.statement_index,
             statement_fingerprint(context.forward_sql), table, source,
         )
-        _validate_obligations(conn, plan.identity, [obligation], target)
-        additions.append(obligation)
+        additions.extend(
+            _validate_obligations(conn, plan.identity, [obligation], target, _Resolution())
+        )
     for inherited in plan.obligations:
         if not any(
             item.migration == inherited.migration
@@ -285,6 +306,7 @@ def expand_recovery_plan(
         ):
             _assert_journal_coverage(conn, target, plan.identity, [inherited])
     obligations = _unique_obligations([*plan.obligations, *additions])
+    _assert_replace_grants(conn, obligations)
     return replace(
         plan, obligations=obligations, targets=[item.target for item in obligations],
         sources=[item.source for item in obligations if item.source is not None],
@@ -322,7 +344,10 @@ def assert_cancellation_unfinished(
             or reservation["claim"] in history
         ):
             raise cancellation_error("A competing claim is not a linked reservation-only recovery.")
-        if _validate_intents(conn, target, plan.identity, reservation["claim"], allow_empty=True):
+        if _validate_intents(
+            conn, target, plan.identity, reservation["claim"], allow_empty=True,
+            resolution=_read_resolution(conn, target, plan.identity),
+        ):
             raise cancellation_error(
                 "A competing recovery already recorded migration work; name its actual claim."
             )
@@ -398,6 +423,11 @@ def assert_cancellation_clear(
 def cancel_predecessor(
     client: Any, target: LockTarget, plan: CancellationPlan, lock: _LockCheck,
 ) -> RecoveryContext:
+    """No compensation or replacement statement may run until this returns.
+
+    The KILL only frees the server: the replace of each target is what keeps a
+    stopped statement from storing rows (#732).
+    """
     conn = _Control(client, lock)
     identity, claim = plan.identity, plan.claim
     _assert_identity_topology(conn, identity)
@@ -405,16 +435,20 @@ def cancel_predecessor(
     _assert_no_successor(history, claim)
     if plan.inherited and claim not in history:
         raise cancellation_error("The inherited recovery context disappeared.")
-    intents = _validate_intents(conn, target, identity, claim, plan.inherited)
-    _assert_intents_covered(intents, plan.obligations)
-    _validate_obligations(conn, identity, plan.obligations, target)
+    resolution = _read_resolution(conn, target, identity)
+    intents = _validate_intents(
+        conn, target, identity, claim, allow_empty=plan.inherited, resolution=resolution,
+    )
+    obligations = _unique_obligations(
+        _validate_obligations(conn, identity, plan.obligations, target, resolution)
+    )
+    _assert_intents_covered(intents, obligations)
     ids = [intent["queryId"] for intent in intents]
-    predicate = _process_predicate(identity, ids)
-    from_ = f"clusterAllReplicas({sql_string(_require_cluster(identity))}, system.processes)"
     if ids:
         id_list = ",".join(sql_string(query_id) for query_id in ids)
         processes = conn.query(
-            f"SELECT query_id, initial_query_id, user, initial_user FROM {from_} "
+            "SELECT query_id, initial_query_id, user, initial_user FROM "
+            f"clusterAllReplicas({sql_string(_require_cluster(identity))}, system.processes) "
             f"WHERE query_id IN ({id_list}) OR initial_query_id IN ({id_list}) "
             "SETTINGS skip_unavailable_shards = 0"
         )
@@ -425,29 +459,17 @@ def cancel_predecessor(
                 raise cancellation_error(
                     "A recorded query id belongs to another SQL principal; no query was canceled."
                 )
-    # Fixed boundaries only; receipt and terminal loops never renew a budget.
+        _kill_recorded_queries(conn, identity, ids)
+    # A recorded replace whose marker the stopped run never wrote: record the
+    # UUID it left, so every later read resolves the same table.
+    for from_uuid, table in resolution.adopted.items():
+        _write_replace_marker(conn, target, identity, from_uuid, table)
     lock.assert_held()
-    conn = _Control(client, lock)
-    if ids:
-        kill_with_receipts(conn, identity, ids)
-        while True:
-            _assert_identity_topology(conn, identity)
-            running = conn.query(
-                f"SELECT count() AS n FROM {from_} WHERE {predicate} "
-                "SETTINGS skip_unavailable_shards = 0"
-            )
-            if len(running) != 1 or not _finite_number(running[0].get("n")):
-                raise cancellation_error("Cannot verify query termination on every server.")
-            if float(running[0]["n"]) == 0:
-                break
-            time.sleep(min(100, conn.remaining()) / 1000)
-    lock.assert_held()
-    conn = _Control(client, lock)
     active_claim = lock.claim_id
     if not active_claim or not _UUID.fullmatch(active_claim):
         raise cancellation_error("The replacement lock has no valid claim identity.")
     context = RecoveryContext(
-        1, active_claim, identity, sorted({claim, *plan.parents}), plan.obligations
+        1, active_claim, identity, sorted({claim, *plan.parents}), obligations
     )
     # Durable successor ownership precedes ancestor completion and every user send.
     _write_recovery_marker(conn, target, context, "required")
@@ -471,11 +493,13 @@ def finish_recovery(
     """Release the barrier only after durable journal proof covers the entire plan."""
     conn = _Control(client, lock)
     _assert_identity_topology(conn, context.identity)
-    _validate_obligations(conn, context.identity, context.obligations, target)
-    own_intents = _validate_intents(conn, target, context.identity, context.claim, allow_empty=True)
-    obligations = _unique_obligations([
+    resolution = _read_resolution(conn, target, context.identity)
+    own_intents = _validate_intents(
+        conn, target, context.identity, context.claim, allow_empty=True, resolution=resolution,
+    )
+    obligations = _unique_obligations(_validate_obligations(conn, context.identity, [
         *context.obligations, *_obligations_from_intents(own_intents)
-    ])
+    ], target, resolution))
     _assert_journal_coverage(conn, target, context.identity, obligations)
     _write_recovery_marker(conn, target, context, "completed")
 
@@ -514,57 +538,48 @@ def _assert_journal_coverage(
             )
 
 
-def kill_with_receipts(conn: _Control, identity: QueryIdentity, ids: list[str]) -> None:
-    """Require exact successful local KILL receipts from every declared member."""
-    if not ids or any(not _UUID.fullmatch(query_id) for query_id in ids):
-        raise cancellation_error("Cancellation requires exact recorded query ids.")
-    controls: list[str] = []
-    covered: set[str] = set()
-    while len(covered) != len(identity.server_uuids):
-        _assert_identity_topology(conn, identity)
-        # A consecutive burst avoids a round-robin phase lock caused by
-        # interleaving one receipt read after each KILL.
-        for _attempt in identity.server_uuids:
-            control_id = str(uuid4())
-            controls.append(control_id)
-            try:
-                conn.query(
-                    f"KILL QUERY WHERE {_process_predicate(identity, ids)} "
-                    f"AND {_identity_guard(identity)} SYNC",
-                    query_id=control_id,
-                    settings={
-                        "log_queries": 1,
-                        "log_queries_probability": 1,
-                        "log_queries_min_query_duration_ms": 0,
-                    },
-                )
-            except Exception as error:
-                if not re.search(r"\bNOTHING_TO_KILL\b", str(error)):
-                    raise
-        control_list = ",".join(sql_string(query_id) for query_id in controls)
-        receipts = conn.query(
-            "SELECT server_uuid, principal, query_id FROM clusterAllReplicas("
-            f"{sql_string(_require_cluster(identity))}, view("
-            "SELECT toString(serverUUID()) AS server_uuid, user AS principal, query_id "
-            "FROM system.query_log WHERE event_date >= today() - 1 "
-            "AND event_time >= now() - INTERVAL 5 MINUTE "
-            f"AND query_id IN ({control_list}) "
-            "AND type = 'QueryFinish' AND exception_code = 0 "
-            f"AND user = {sql_string(identity.principal)})) SETTINGS skip_unavailable_shards = 0"
-        )
-        for row in receipts:
-            if (
-                row["server_uuid"] not in identity.server_uuids
-                or row["principal"] != identity.principal
-                or row["query_id"] not in controls
-            ):
-                raise cancellation_error(
-                    "A KILL receipt has an unexpected server, principal or query id."
-                )
-            covered.add(row["server_uuid"])
-        if len(covered) != len(identity.server_uuids):
-            time.sleep(min(100, conn.remaining()) / 1000)
-    _assert_identity_topology(conn, identity)
+def _kill_recorded_queries(conn: _Control, identity: QueryIdentity, ids: list[str]) -> None:
+    """Local KILLs, one per declared member, so a round-robin endpoint reaches each. Best effort."""
+    for _member in identity.server_uuids:
+        try:
+            conn.query(f"KILL QUERY WHERE {_process_predicate(identity, ids)} ASYNC")
+        except MigrateError:
+            raise
+        except Exception as error:  # the replace, not the KILL, is the gate
+            _LOGGER.debug("KILL failed: %s", error)
+
+
+def _assert_replace_grants(conn: _Control, obligations: list[RecoveryObligation]) -> None:
+    """The replace needs CREATE TABLE and DROP TABLE on each target, directly or via roles."""
+    rows = conn.query(
+        "SELECT access_type, database, table, is_partial_revoke FROM system.grants "
+        "WHERE (user_name = currentUser() OR role_name IN "
+        "(SELECT role_name FROM system.enabled_roles)) AND access_type IN "
+        "('ALL', 'CREATE', 'CREATE TABLE', 'DROP', 'DROP TABLE') AND column IS NULL"
+    )
+
+    def covers(row: dict[str, Any], table: QueryTarget) -> bool:
+        return (row.get("database") in (None, table.database)
+                and row.get("table") in (None, table.name))
+
+    def allowed(access: set[str], table: QueryTarget) -> bool:
+        matching = [row for row in rows if row.get("access_type") in access and covers(row, table)]
+        return (any(not _is_true(row.get("is_partial_revoke")) for row in matching)
+                and not any(_is_true(row.get("is_partial_revoke")) for row in matching))
+
+    for obligation in obligations:
+        table = obligation.target
+        if not allowed({"ALL", "CREATE", "CREATE TABLE"}, table) or not allowed(
+            {"ALL", "DROP", "DROP TABLE"}, table
+        ):
+            raise cancellation_error(
+                f"Recovery replaces {table.database}.{table.name}, which needs "
+                "CREATE TABLE and DROP TABLE on it."
+            )
+
+
+def _is_true(value: Any) -> bool:
+    return value is True or value == 1 or value in ("1", "true")
 
 
 def _topology(conn: _Control, cluster: str) -> _Topology:
@@ -616,16 +631,29 @@ def _validate_intents(
     target: LockTarget,
     identity: QueryIdentity,
     claim: str,
-    allow_empty: bool = False,
+    *,
+    allow_empty: bool,
+    resolution: _Resolution,
 ) -> list[dict[str, Any]]:
     prefix = f"{QUERY_INTENT_PREFIX}{claim}/"
     rows = _variants(conn, _source(target, identity), f"startsWith(name, {sql_string(prefix)})")
     if not rows and not allow_empty:
         raise cancellation_error("The predecessor has no cancellable tracked queries.")
+    if any(row["name"] == f"{prefix}{UNTRACKED}" for row in rows):
+        raise cancellation_error(
+            "The predecessor ran statements chkit could not track, so it cannot be cancelled. "
+            "Stop it and recover by hand."
+        )
+    parsed = [(row["name"][len(prefix):], _object_json(row["checksum"])) for row in rows]
+    # A recorded replace may have run without its marker: its target can have a new UUID.
+    for _query_id, data in parsed:
+        table = data.get("target")
+        if data.get("phase") == "compensation" and isinstance(table, dict) and isinstance(
+            table.get("uuid"), str
+        ):
+            resolution.pending.add(_resolve_uuid(resolution, table["uuid"]))
     intents: list[dict[str, Any]] = []
-    for row in rows:
-        data = _object_json(row["checksum"])
-        query_id = row["name"][len(prefix) :]
+    for query_id, data in parsed:
         recorded = _parse_identity(data)
         index = data.get("statementIndex")
         fingerprint = data.get("fingerprint")
@@ -636,7 +664,7 @@ def _validate_intents(
             or data.get("claim") != claim
             or not _same_identity(recorded, identity)
             or data.get("phase") not in ("forward", "compensation")
-            or data.get("kind") not in ("insert", "truncate")
+            or data.get("kind") != ("insert" if data.get("phase") == "forward" else "replace")
             or not isinstance(data.get("migration"), str)
             or not isinstance(index, int)
             or isinstance(index, bool)
@@ -654,18 +682,50 @@ def _validate_intents(
         _assert_not_journal(target, _recorded_table(data.get("target")))
         if "source" in data:
             _assert_not_journal(target, _recorded_table(data["source"]))
-        _validate_table(conn, identity, data.get("target"), source_table=False)
-        if "source" in data:
-            _validate_table(conn, identity, data["source"], source_table=True)
-            if data["source"]["uuid"] == data["target"]["uuid"]:
-                raise cancellation_error("The compensation target cannot also be its own source.")
-        intents.append(data)
+        table = _validate_table(
+            conn, identity, data.get("target"), source_table=False, resolution=resolution,
+        )
+        source = (
+            _validate_table(
+            conn, identity, data["source"], source_table=True, resolution=resolution,
+        )
+            if "source" in data else None
+        )
+        if source is not None and source.uuid == table.uuid:
+            raise cancellation_error(
+                "The compensation would replace its own source; replacement work is blocked."
+            )
+        intents.append({
+            **data, "target": table.to_payload(),
+            **({"source": source.to_payload()} if source is not None else {}),
+        })
     return intents
 
 
+def _table_rows(
+    conn: _Control, identity: QueryIdentity, database: str, name: str,
+) -> list[dict[str, Any]]:
+    return conn.query(
+        "SELECT server_uuid, principal, uuid, engine, dependencies, database_engine "
+        f"FROM clusterAllReplicas({sql_string(_require_cluster(identity))}, view("
+        "SELECT toString(serverUUID()) AS server_uuid, "
+        "currentUser() AS principal, toString(uuid) AS uuid, engine, "
+        "toJSONString(dependencies_table) AS dependencies, "
+        f"(SELECT any(engine) FROM system.databases WHERE name = {sql_string(database)}) "
+        f"AS database_engine FROM system.tables WHERE database = {sql_string(database)} "
+        f"AND name = {sql_string(name)})) SETTINGS skip_unavailable_shards = 0"
+    )
+
+
+def _same_members(rows: list[dict[str, Any]], identity: QueryIdentity) -> bool:
+    return sorted(row["server_uuid"] for row in rows) == sorted(identity.server_uuids)
+
+
 def _validate_table(
-    conn: _Control, identity: QueryIdentity, value: Any, *, source_table: bool
-) -> None:
+    conn: _Control, identity: QueryIdentity, value: Any, *, source_table: bool,
+    resolution: _Resolution,
+) -> QueryTarget:
+    """The live table a recorded one stands for now, refusing any change recovery did not make."""
     if (
         not isinstance(value, dict)
         or not isinstance(value.get("database"), str)
@@ -681,16 +741,7 @@ def _validate_table(
         or not isinstance(value.get("engine"), str)
     ):
         raise cancellation_error("A table source or target has no recorded storage identity.")
-    metadata = conn.query(
-        "SELECT server_uuid, principal, uuid, engine, dependencies FROM clusterAllReplicas("
-        f"{sql_string(_require_cluster(identity))}, view("
-        "SELECT toString(serverUUID()) AS server_uuid, "
-        "currentUser() AS principal, toString(uuid) AS uuid, engine, "
-        "toJSONString(dependencies_table) AS dependencies FROM system.tables "
-        f"WHERE database = {sql_string(value['database'])} "
-        f"AND name = {sql_string(value['name'])})) "
-        "SETTINGS skip_unavailable_shards = 0"
-    )
+    metadata = _table_rows(conn, identity, value["database"], value["name"])
     engines = (
         {"MergeTree", "ReplicatedMergeTree", "SharedMergeTree"}
         if source_table
@@ -702,70 +753,119 @@ def _validate_table(
         or (not source_table and value["engine"] == "MergeTree" and len(identity.server_uuids) != 1)
     ):
         raise cancellation_error(
-            "Cancellation currently requires a plain MergeTree target on one server, "
-            "with verified source engines and no materialized-view dependencies."
+            "Cancellation requires a plain MergeTree target on one declared server, or a "
+            "SharedMergeTree target, without materialized-view dependencies."
         )
-    if sorted(row["server_uuid"] for row in metadata) != sorted(identity.server_uuids) or any(
+    if not source_table and any(
+        row.get("database_engine") not in ("Atomic", "Shared") for row in metadata
+    ):
+        raise cancellation_error(
+            "Recovery replaces its targets, which needs an Atomic or Shared database."
+        )
+    expected = value["uuid"] if source_table else _resolve_uuid(resolution, value["uuid"])
+    live = str(metadata[0]["uuid"]) if metadata else ""
+    adopted = (
+        not source_table and live != expected and expected in resolution.pending
+        and bool(_UUID.fullmatch(live))
+    )
+    if not _same_members(metadata, identity) or any(
         row["principal"] != identity.principal
-        or row["uuid"] != value["uuid"]
+        or row["uuid"] != (live if adopted else expected)
         or row["engine"] != value["engine"]
         for row in metadata
     ):
         raise cancellation_error(
             "A recorded source or target identity changed; replacement work is blocked."
         )
-    if not source_table and value["engine"] == "SharedMergeTree":
-        _assert_shared_fence(conn, identity)
+    table = QueryTarget(
+        value["database"], value["name"], live if adopted else expected, value["engine"]
+    )
+    if adopted:
+        resolution.adopted[expected] = table
+    return table
 
 
 def settle_compensation(
-    client: Any, plan: CancellationPlan, table: QueryTarget, lock: _LockCheck
-) -> None:
+    client: Any, target: LockTarget, plan: CancellationPlan, table: QueryTarget,
+    lock: _LockCheck,
+) -> QueryTarget:
+    """Wait until every replica serves the new, empty table, then record its new UUID (#732)."""
     conn = _Control(client, lock)
     _assert_identity_topology(conn, plan.identity)
-    _validate_table(conn, plan.identity, table.to_payload(), source_table=False)
-    if table.engine != "SharedMergeTree":
-        return
-    while True:
-        _assert_shared_fence(conn, plan.identity)
-        rows = conn.query(
-            "SELECT server_uuid, principal, n FROM clusterAllReplicas("
-            f"{sql_string(_require_cluster(plan.identity))}, view("
-            "SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, "
-            "toString(sum(rows)) AS n FROM system.parts "
-            f"WHERE database = {sql_string(table.database)} AND table = {sql_string(table.name)} "
-            "AND active)) SETTINGS skip_unavailable_shards = 0"
-        )
-        if sorted(row["server_uuid"] for row in rows) != sorted(plan.identity.server_uuids) or any(
-            row["principal"] != plan.identity.principal
-            or not _finite_number(row.get("n"))
-            or float(row["n"]) < 0
-            for row in rows
+    if table.uuid is None:
+        raise cancellation_error("Compensation has no recorded table identity.")
+    replaced: QueryTarget | None = None
+    while replaced is None:
+        rows = _table_rows(conn, plan.identity, table.database, table.name)
+        uuid = rows[0].get("uuid") if rows else None
+        if (
+            _same_members(rows, plan.identity) and uuid and uuid != table.uuid
+            and all(row["uuid"] == uuid for row in rows)
         ):
-            raise cancellation_error("Cannot verify compensation storage state on every server.")
-        if all(float(row["n"]) == 0 for row in rows):
-            break
-        time.sleep(min(100, conn.remaining()) / 1000)
-    _assert_identity_topology(conn, plan.identity)
-    _validate_table(conn, plan.identity, table.to_payload(), source_table=False)
+            if any(
+                row["principal"] != plan.identity.principal or row["engine"] != table.engine
+                or row["dependencies"] != "[]" for row in rows
+            ):
+                raise cancellation_error(
+                    "The replaced table changed engine or gained dependencies; reload is blocked."
+                )
+            replaced = QueryTarget(table.database, table.name, str(uuid), table.engine)
+        else:
+            time.sleep(min(100, conn.remaining()) / 1000)
+    _write_replace_marker(conn, target, plan.identity, table.uuid, replaced)
     lock.assert_held()
+    return replaced
 
 
-def _assert_shared_fence(conn: _Control, identity: QueryIdentity) -> None:
-    rows = conn.query(
-        "SELECT server_uuid, principal, version FROM clusterAllReplicas("
-        f"{sql_string(_require_cluster(identity))}, view("
-        "SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, "
-        "toString(sharedMergeTreeTruncateFenceVersion()) AS version FROM system.one)) "
-        "SETTINGS skip_unavailable_shards = 0"
+def _write_replace_marker(
+    conn: _Control, target: LockTarget, identity: QueryIdentity, from_uuid: str,
+    table: QueryTarget,
+) -> None:
+    name = f"{REPLACE_PREFIX}{from_uuid}"
+    checksum = json.dumps(
+        {"protocol": 1, "from": from_uuid, **table.to_payload()},
+        separators=(",", ":"), ensure_ascii=False,
     )
-    if sorted(row["server_uuid"] for row in rows) != sorted(identity.server_uuids) or any(
-        row["principal"] != identity.principal or str(row.get("version")) != "1" for row in rows
-    ):
-        raise cancellation_error(
-            "Every replica must enable SharedMergeTree truncate-fence protocol 1 "
-            "before cancellation recovery."
-        )
+    conn.query(
+        f"INSERT INTO {quote_identifier(target.database)}.{target.journal_table} "
+        "(name, applied_at, checksum, chkit_version, migration_completed, operations) "
+        f"SELECT {sql_string(name)}, now64(3), {sql_string(checksum)}, "
+        f"{sql_string(__version__)}, false, [] "
+        "SETTINGS async_insert = 0, insert_quorum = 'auto', insert_quorum_parallel = 0"
+    )
+    rows = _variants(conn, _source(target, identity), f"name = {sql_string(name)}")
+    if len(rows) != 1 or rows[0]["checksum"] != checksum:
+        raise cancellation_error("The replace marker did not read back; reload is blocked.")
+
+
+def _read_resolution(conn: _Control, target: LockTarget, identity: QueryIdentity) -> _Resolution:
+    resolution = _Resolution()
+    rows = _variants(
+        conn, _source(target, identity), f"startsWith(name, {sql_string(REPLACE_PREFIX)})"
+    )
+    for row in rows:
+        from_uuid = row["name"][len(REPLACE_PREFIX):]
+        data = _object_json(row["checksum"])
+        to = _recorded_table(data)
+        if (
+            not _UUID.fullmatch(from_uuid) or type(data.get("protocol")) is not int
+            or data["protocol"] != 1 or data.get("from") != from_uuid or to.uuid == from_uuid
+        ):
+            raise cancellation_error("Malformed replace history.")
+        resolution.replaced[from_uuid] = str(to.uuid)
+    return resolution
+
+
+def _resolve_uuid(resolution: _Resolution, value: str) -> str:
+    """The UUID a recorded one resolves to through durable replace markers."""
+    seen: set[str] = set()
+    current = value
+    while current in resolution.replaced:
+        if current in seen:
+            raise cancellation_error("Cyclic replace history.")
+        seen.add(current)
+        current = resolution.replaced[current]
+    return current
 
 
 def _recovery_history(
@@ -890,17 +990,29 @@ def _assert_intents_covered(
 
 def _validate_obligations(
     conn: _Control, identity: QueryIdentity, obligations: list[RecoveryObligation],
-    journal: LockTarget,
-) -> None:
+    journal: LockTarget, resolution: _Resolution,
+) -> list[RecoveryObligation]:
+    """Each obligation with its tables resolved to the live ones."""
     if not obligations:
         raise cancellation_error("Recovery has no complete forward obligations.")
+    validated: list[RecoveryObligation] = []
     for item in obligations:
         _assert_not_journal(journal, item.target)
         if item.source is not None:
             _assert_not_journal(journal, item.source)
-        _validate_table(conn, identity, item.target.to_payload(), source_table=False)
-        if item.source is not None:
-            _validate_table(conn, identity, item.source.to_payload(), source_table=True)
+        table = _validate_table(
+            conn, identity, item.target.to_payload(), source_table=False, resolution=resolution,
+        )
+        source = (
+            _validate_table(
+            conn, identity, item.source.to_payload(), source_table=True, resolution=resolution,
+        )
+            if item.source is not None else None
+        )
+        validated.append(RecoveryObligation(
+            item.migration, item.statement_index, item.forward_fingerprint, table, source,
+        ))
+    return validated
 
 
 def _assert_not_journal(journal: LockTarget, table: QueryTarget) -> None:
@@ -1012,15 +1124,6 @@ def _source(target: LockTarget, identity: QueryIdentity | None = None) -> str:
     )
 
 
-def _identity_guard(identity: QueryIdentity) -> str:
-    ids = ",".join(sql_string(value) for value in identity.server_uuids)
-    return (
-        f"throwIf(currentUser() != {sql_string(identity.principal)} "
-        f"OR NOT has([{ids}], toString(serverUUID())), "
-        "'Cancellation SQL identity or server mismatch') = 0"
-    )
-
-
 def _process_predicate(identity: QueryIdentity, ids: list[str]) -> str:
     id_list = ",".join(sql_string(query_id) for query_id in ids)
     return (
@@ -1071,9 +1174,3 @@ def _object_json(raw: str) -> dict[str, Any]:
         raise cancellation_error("Malformed cancellation metadata.")
     return value
 
-
-def _finite_number(value: Any) -> bool:
-    try:
-        return math.isfinite(float(value))
-    except (TypeError, ValueError):
-        return False

@@ -1,8 +1,8 @@
-import { describe, expect, spyOn, test } from 'bun:test'
-import type { ClickHouseExecutor, QueryControlOptions } from '@chkit/clickhouse'
+import { describe, expect, test } from 'bun:test'
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
 
-import { assertCancellationClear, cancelPredecessor, markCancellationPending, prepareCancellation, resolveQueryIdentity, killWithReceipts, settleCompensation, finishRecovery, expandRecoveryPlan, assertCancellationUnfinished, RECOVERY_PREFIX, CANCELLATION_PREFIX } from '../../../commands/migrate/cancellation.js'
+import { assertCancellationClear, cancelPredecessor, markCancellationPending, prepareCancellation, resolveQueryIdentity, settleCompensation, finishRecovery, expandRecoveryPlan, assertCancellationUnfinished, RECOVERY_PREFIX, CANCELLATION_PREFIX, REPLACE_PREFIX } from '../../../commands/migrate/cancellation.js'
 import type { QueryIdentity, QueryIntent, QueryTarget } from '../../../commands/migrate/query-intents.js'
 import { QUERY_INTENT_PREFIX } from '../../../commands/migrate/query-intents.js'
 import type { MigrateLock } from '../../../commands/migrate/lock.js'
@@ -13,6 +13,7 @@ const NEXT = '00000000-0000-4000-8000-000000000007'
 const SOURCE = '00000000-0000-4000-8000-000000000006'
 const SUCCESSOR = '00000000-0000-4000-8000-000000000005'
 const SERVER = '00000000-0000-4000-8000-000000000003'
+const REPLACED = '00000000-0000-4000-8000-000000000009'
 const IDENTITY: QueryIdentity = { protocol: 1, principal: 'writer', serverUUIDs: [SERVER], cluster: 'declared' }
 const TARGET = { database: 'app', journalTable: '_chkit_migrations', fanout: undefined }
 
@@ -27,19 +28,20 @@ function fake(identity: QueryIdentity = IDENTITY) {
   const calls: Array<{ sql: string; timeout: number }> = []
   const intent: QueryIntent = { ...identity, claim: CLAIM, queryId: ID, migration: 'load.sql', statementIndex: 0,
     phase: 'forward', kind: 'insert', fingerprint: statementFingerprint('INSERT INTO app.events SELECT 1'), forwardFingerprint: statementFingerprint('INSERT INTO app.events SELECT 1'), target: { database: 'app', name: 'events', uuid: ID, engine: 'MergeTree' } }
+  const compensation: QueryIntent = { ...intent, queryId: NEXT, phase: 'compensation', kind: 'replace', fingerprint: statementFingerprint('CREATE OR REPLACE TABLE app.events AS app.events') }
   const intents = new Map<string, QueryIntent[]>([[CLAIM, [intent]]])
-  const state = { failRequired: '', failRecoveryCompletion: '', journalOperations: [] as unknown[], metricsUUID: SOURCE, journalCompleted: false, recordedEngine: 'MergeTree', capability: 1, capabilityOverrides: [] as number[], capabilityError: false, partialParts: false, parts: 0, partsReads: 0, source: false, sourceUUID: SOURCE, sourceEngine: 'MergeTree', targetUUID: ID, kind: 'insert', engine: 'MergeTree', dependencies: '[]', principal: 'writer', server: SERVER,
-    localServer: SERVER, localPrincipal: 'writer',
+  const state = { failRequired: '', failRecoveryCompletion: '', journalOperations: [] as unknown[], metricsUUID: SOURCE, journalCompleted: false, recordedEngine: 'MergeTree', source: false, sourceUUID: SOURCE, sourceEngine: 'MergeTree', targetUUID: ID, kind: 'insert', engine: 'MergeTree', databaseEngine: 'Atomic', dependencies: '[]', principal: 'writer', server: SERVER,
+    localServer: SERVER, localPrincipal: 'writer', grants: [{ access_type: 'ALL', database: null, table: null, is_partial_revoke: 0 }] as unknown[],
+    replaceAfterReads: -1, replacedServers: [] as string[], tableReads: 0, compensated: false, untracked: false,
     loseAfterKill: false, killFailure: false, failCompletion: false, held: true, killed: false, unreadable: false, legacy: false }
-  let receiptId = ''
   const db = {
     queryControlCluster: 'declared',
     commandTracked: async () => {},
-    async queryControl(sql: string, timeout: number, options?: QueryControlOptions) {
+    async queryControl(sql: string, timeout: number) {
       calls.push({ sql, timeout })
       if (state.unreadable) throw new Error('replica unreadable')
       if (sql.includes('FROM system.clusters')) return [{ host: 'host', port: '9000', shard: '1', replica: '1' }]
-      if (sql.includes('sharedMergeTreeTruncateFenceVersion')) { if (state.capabilityError) throw new Error('UNKNOWN_FUNCTION'); return identity.serverUUIDs.map((server_uuid, index) => ({ server_uuid, principal: state.principal, version: state.capabilityOverrides[index] ?? state.capability })) }
+      if (sql.includes('system.grants')) return state.grants
       if (sql.includes('system.one')) return identity.serverUUIDs.map((server_uuid, index) => ({ server_uuid: index === 0 ? state.server : server_uuid, principal: state.principal }))
       if (sql === 'SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal') return [{ server_uuid: state.localServer, principal: state.localPrincipal }]
       if (sql.includes('argMax(tuple(applied_at')) return [CLAIM, SUCCESSOR, NEXT].map((claim) => ({ name: `__chkit_migrate_lock__/${claim}`, holder: JSON.stringify(state.legacy ? {} : { queries: identity }) }))
@@ -58,24 +60,26 @@ function fake(identity: QueryIdentity = IDENTITY) {
       if (sql.includes('groupUniqArray(checksum)')) {
         if (sql.includes(QUERY_INTENT_PREFIX)) {
           const claim = [CLAIM, SUCCESSOR, NEXT].find((value) => sql.includes(`${QUERY_INTENT_PREFIX}${value}/`)) ?? ''
-          return (intents.get(claim) ?? []).map((item) => ({ name: `${QUERY_INTENT_PREFIX}${claim}/${item.queryId}`, variants: JSON.stringify([JSON.stringify(claim === CLAIM ? { ...item, target: { ...item.target, engine: state.recordedEngine }, kind: state.kind, ...(state.source ? { source: { database: 'app', name: 'frozen', uuid: SOURCE, engine: 'MergeTree' } } : {}) } : item)]) }))
+          const recorded = claim === CLAIM && state.compensated ? [...(intents.get(claim) ?? []), compensation] : intents.get(claim) ?? []
+          if (claim === CLAIM && state.untracked) return [{ name: `${QUERY_INTENT_PREFIX}${claim}/untracked`, variants: JSON.stringify([JSON.stringify({ protocol: 1, claim })]) }]
+          return recorded.map((item) => ({ name: `${QUERY_INTENT_PREFIX}${claim}/${item.queryId}`, variants: JSON.stringify([JSON.stringify(claim === CLAIM ? { ...item, target: { ...item.target, engine: state.recordedEngine }, kind: item.phase === 'forward' ? state.kind : item.kind, ...(state.source ? { source: { database: 'app', name: 'frozen', uuid: SOURCE, engine: 'MergeTree' } } : {}) } : item)]) }))
         }
         const prefix = /startsWith\(name, '([^']+)'\)/.exec(sql)?.[1]
         return [...markers].filter(([name]) => (!prefix || name.startsWith(prefix)) && (!sql.includes('name = ') || sql.includes(`name = '${name}'`))).map(([name, checksum]) => ({ name, variants: JSON.stringify([checksum]) }))
       }
       if (sql.includes('arrayMap((op, fp)')) return [{ name: 'load.sql', migration_completed: state.journalCompleted ? '1' : '0', operations: JSON.stringify(state.journalOperations.length ? state.journalOperations : [[0, 'completed', intent.forwardFingerprint]]) }]
-      if (sql.includes('system.query_log')) return identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: 'writer', query_id: receiptId }))
-      if (sql.includes('system.tables')) return identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: state.principal, uuid: sql.includes("name = 'frozen'") ? state.sourceUUID : sql.includes("name = 'metrics'") ? state.metricsUUID : state.targetUUID, engine: sql.includes("name = 'frozen'") ? state.sourceEngine : state.engine, dependencies: state.dependencies }))
-      if (sql.includes('system.parts')) { state.partsReads++; const n = state.parts; state.parts = 0; return (state.partialParts ? identity.serverUUIDs.slice(0, 1) : identity.serverUUIDs).map((server_uuid) => ({ server_uuid, principal: 'writer', n })) }
+      if (sql.includes('system.tables')) {
+        const events = !sql.includes("name = 'frozen'") && !sql.includes("name = 'metrics'")
+        if (events && ++state.tableReads === state.replaceAfterReads) state.targetUUID = REPLACED
+        return identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: state.principal, uuid: sql.includes("name = 'frozen'") ? state.sourceUUID : sql.includes("name = 'metrics'") ? state.metricsUUID : state.replacedServers.includes(server_uuid) ? REPLACED : state.targetUUID, engine: sql.includes("name = 'frozen'") ? state.sourceEngine : state.engine, dependencies: state.dependencies, database_engine: state.databaseEngine }))
+      }
       if (sql.startsWith('SELECT query_id')) return [{ query_id: ID, initial_query_id: ID, user: 'writer', initial_user: 'writer' }]
       if (sql.startsWith('KILL QUERY')) {
-        if (state.killFailure) throw new Error('cancellation deadline expired')
-        receiptId = options?.queryId ?? ''
+        if (state.killFailure) throw new Error('KILL denied')
         state.killed = true
         if (state.loseAfterKill) state.held = false
         return [{ kill_status: 'finished' }]
       }
-      if (sql.startsWith('SELECT count()')) return [{ n: state.killed ? 0 : 1 }]
       throw new Error(`unexpected control SQL: ${sql}`)
     },
   } as unknown as ClickHouseExecutor
@@ -84,68 +88,16 @@ function fake(identity: QueryIdentity = IDENTITY) {
 }
 
 describe('explicit predecessor cancellation (#732)', () => {
-  test('fresh fixed phase budgets accommodate latency without renewing a loop deadline', async () => {
+  test('a failed KILL does not block recovery, the replace is the safety gate', async () => {
     const f = fake()
     const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
-    let now = 0
-    const clock = spyOn(performance, 'now').mockImplementation(() => now)
-    const query = f.db.queryControl!.bind(f.db)
-    f.db.queryControl = async (sql, timeout, options) => {
-      if (sql.startsWith('SELECT query_id') || sql.startsWith('SELECT count()') ||
-        (sql.startsWith('INSERT') && sql.includes('/required'))) now += 20_000
-      return query(sql, timeout, options)
-    }
-    try {
-      await cancelPredecessor(f.db, TARGET, plan, f.lock)
-      expect(now).toBe(60_000)
-      expect(f.calls.find((call) => call.sql.startsWith('KILL'))?.timeout).toBe(30_000)
-      expect(f.calls.find((call) => call.sql.startsWith('INSERT') && call.sql.includes('/required'))?.timeout).toBe(30_000)
-      expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(true)
-    } finally { clock.mockRestore() }
+    f.state.killFailure = true
+    await markCancellationPending(f.db, TARGET, plan)
+    await cancelPredecessor(f.db, TARGET, plan, f.lock)
+    expect(f.calls.filter((call) => call.sql.startsWith('KILL'))).toHaveLength(1)
+    expect(f.calls.find((call) => call.sql.startsWith('KILL'))?.sql).toContain('ASYNC')
+    expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(true)
   })
-
-  test('repeated receipt polling cannot renew the cancellation phase budget', async () => {
-    const f = fake()
-    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
-    let now = 0
-    let reads = 0
-    const clock = spyOn(performance, 'now').mockImplementation(() => now)
-    const query = f.db.queryControl!.bind(f.db)
-    f.db.queryControl = async (sql, timeout, options) => {
-      const rows = await query(sql, timeout, options)
-      if (sql.includes('system.query_log')) { now += 10_000; reads++; return [] }
-      return rows
-    }
-    try {
-      await expect(cancelPredecessor(f.db, TARGET, plan, f.lock)).rejects.toThrow('deadline expired')
-      expect(reads).toBe(3)
-      expect(f.calls.some((call) => call.sql.startsWith('SELECT count()'))).toBe(false)
-      expect(f.markers.size).toBe(0)
-    } finally { clock.mockRestore() }
-  })
-
-  for (const phase of ['preflight', 'cancellation', 'handoff'] as const) {
-    test(`expired ${phase} phase cannot advance to later recovery actions`, async () => {
-      const f = fake()
-      const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
-      let now = 0
-      const clock = spyOn(performance, 'now').mockImplementation(() => now)
-      const query = f.db.queryControl!.bind(f.db)
-      f.db.queryControl = async (sql, timeout, options) => {
-        const expires = phase === 'preflight' ? sql.startsWith('SELECT query_id') :
-          phase === 'cancellation' ? sql.startsWith('SELECT count()') :
-          sql.startsWith('INSERT') && sql.includes('/required')
-        if (expires) now += 30_001
-        return query(sql, timeout, options)
-      }
-      try {
-        await expect(cancelPredecessor(f.db, TARGET, plan, f.lock)).rejects.toThrow('deadline expired')
-        expect(f.state.killed).toBe(phase !== 'preflight')
-        expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/required`)).toBe(phase === 'handoff')
-        expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(false)
-      } finally { clock.mockRestore() }
-    })
-  }
 
   test('pending cancellation blocks later ordinary/no-pending owners until terminal proof completes', async () => {
     const f = fake()
@@ -168,10 +120,9 @@ describe('explicit predecessor cancellation (#732)', () => {
     const killIndex = f.calls.findIndex((call) => call.sql.startsWith('KILL'))
     const completeIndex = f.calls.findIndex((call) => call.sql.startsWith('INSERT') && call.sql.includes('/completed'))
     expect(completeIndex).toBeGreaterThan(killIndex)
-    expect(f.calls[completeIndex]?.timeout).toBeLessThanOrEqual(f.calls[killIndex]?.timeout ?? 0)
   })
 
-  for (const failure of ['killFailure', 'failCompletion', 'held', 'loseAfterKill'] as const) {
+  for (const failure of ['failCompletion', 'held', 'loseAfterKill'] as const) {
     test(`failure leaves a durable barrier before replacement SQL (${failure})`, async () => {
       const f = fake()
       const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
@@ -184,9 +135,12 @@ describe('explicit predecessor cancellation (#732)', () => {
     })
   }
 
-  for (const failure of ['async', 'unsupported', 'SharedMergeTree', 'materialized view', 'legacy', 'principal', 'endpoint', 'endpoint principal', 'unreadable'] as const) {
+  for (const failure of ['async', 'unsupported', 'SharedMergeTree', 'materialized view', 'legacy', 'principal', 'endpoint', 'endpoint principal', 'unreadable', 'Ordinary database', 'no DROP grant', 'revoked CREATE'] as const) {
     test(`refuses before any KILL or takeover (${failure})`, async () => {
       const f = fake()
+      if (failure === 'Ordinary database') f.state.databaseEngine = 'Ordinary'
+      if (failure === 'no DROP grant') f.state.grants = [{ access_type: 'CREATE TABLE', database: 'app', table: null, is_partial_revoke: 0 }]
+      if (failure === 'revoked CREATE') f.state.grants = [...f.state.grants, { access_type: 'CREATE', database: 'app', table: 'events', is_partial_revoke: 1 }]
       if (failure === 'async' || failure === 'unsupported') f.state.kind = failure
       if (failure === 'SharedMergeTree') f.state.engine = failure
       if (failure === 'materialized view') f.state.dependencies = '["mv"]'
@@ -213,6 +167,13 @@ describe('explicit predecessor cancellation (#732)', () => {
     })
   }
 
+  test('refuses a predecessor that ran untracked statements', async () => {
+    const f = fake()
+    f.state.untracked = true
+    await expect(prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)).rejects.toThrow('could not track')
+    expect(f.calls.some((call) => call.sql.startsWith('KILL') || call.sql.startsWith('INSERT'))).toBe(false)
+  })
+
   test('refuses multi-node plain MergeTree compensation and malformed claims', async () => {
     const identity = { ...IDENTITY, serverUUIDs: [SERVER, ID] }
     const f = fake(identity)
@@ -222,145 +183,58 @@ describe('explicit predecessor cancellation (#732)', () => {
   })
 })
 
-describe('SharedMergeTree fenced recovery', () => {
+describe('replace settlement', () => {
   const other = '00000000-0000-4000-8000-000000000004'
   const identity = { ...IDENTITY, serverUUIDs: [SERVER, other] }
 
-  test('admits only every-node protocol 1 and waits for settled parts before returning', async () => {
+  test('waits for every replica to serve the new UUID, then records it before the reload', async () => {
     const f = fake(identity)
     f.state.engine = 'SharedMergeTree'
     f.state.recordedEngine = 'SharedMergeTree'
     const plan = await prepareCancellation(f.db, TARGET, identity, CLAIM)
     expect(plan.targets[0]).toMatchObject({ uuid: ID, engine: 'SharedMergeTree' })
+    f.state.replacedServers = [SERVER]
+    f.state.replaceAfterReads = f.state.tableReads + 2
+    const replaced = await settleCompensation(f.db, TARGET, plan, targetTable(plan.targets), f.lock)
+    expect(replaced).toEqual({ database: 'app', name: 'events', uuid: REPLACED, engine: 'SharedMergeTree' })
+    expect(JSON.parse(f.markers.get(`${REPLACE_PREFIX}${ID}`) ?? '{}')).toMatchObject({ from: ID, uuid: REPLACED })
+    // Later reads resolve the recorded UUID through the marker.
+    expect((await prepareCancellation(f.db, TARGET, identity, CLAIM)).targets[0]?.uuid).toBe(REPLACED)
+  })
+
+  test('refuses a replaced table that changed engine or gained dependencies', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    f.state.targetUUID = REPLACED
+    f.state.dependencies = '["mv"]'
+    await expect(settleCompensation(f.db, TARGET, plan, targetTable(plan.targets), f.lock)).rejects.toThrow('dependencies')
+    expect(f.markers.size).toBe(0)
+  })
+
+  test('a replace without its marker is adopted only when the stopped run recorded it', async () => {
+    const f = fake()
+    f.state.targetUUID = REPLACED
+    await expect(prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)).rejects.toThrow('identity changed')
+    f.state.compensated = true
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    expect(plan.targets[0]?.uuid).toBe(REPLACED)
     await markCancellationPending(f.db, TARGET, plan)
-    await cancelPredecessor(f.db, TARGET, plan, f.lock)
-    f.state.parts = 8
-    await settleCompensation(f.db, plan, targetTable(plan.targets), f.lock)
-    expect(f.state.partsReads).toBe(2)
-    expect(f.calls.find((call) => call.sql.includes('system.parts'))?.sql).toContain('view(SELECT')
+    const recovery = await cancelPredecessor(f.db, TARGET, plan, f.lock)
+    expect(f.markers.has(`${REPLACE_PREFIX}${ID}`)).toBe(true)
+    expect(recovery.obligations[0]?.target.uuid).toBe(REPLACED)
   })
 
-  test('refuses disabled or unknown backend capability before any KILL', async () => {
-    const f = fake(identity)
-    f.state.engine = 'SharedMergeTree'
-    f.state.recordedEngine = 'SharedMergeTree'
-    f.state.capability = 0
-    await expect(prepareCancellation(f.db, TARGET, identity, CLAIM)).rejects.toThrow('protocol 1')
-    expect(f.calls.some((call) => call.sql.startsWith('KILL') || call.sql.startsWith('INSERT'))).toBe(false)
-  })
-
-  for (const fault of ['mixed versions', 'unknown function', 'partial parts'] as const) {
-    test(`fails closed on incomplete backend or storage proof (${fault})`, async () => {
-      const f = fake(identity)
-      f.state.engine = 'SharedMergeTree'
-      f.state.recordedEngine = 'SharedMergeTree'
-      if (fault === 'mixed versions') f.state.capabilityOverrides = [1, 0]
-      if (fault === 'unknown function') f.state.capabilityError = true
-      if (fault !== 'partial parts') {
-        await expect(prepareCancellation(f.db, TARGET, identity, CLAIM)).rejects.toThrow()
-        expect(f.calls.some((call) => call.sql.startsWith('KILL') || call.sql.startsWith('INSERT'))).toBe(false)
-      } else {
-        const plan = await prepareCancellation(f.db, TARGET, identity, CLAIM)
-        f.state.partialParts = true
-        await expect(settleCompensation(f.db, plan, targetTable(plan.targets), f.lock)).rejects.toThrow('every server')
-      }
-    })
-  }
-
-  test('refuses policy disabled after preflight before replacement work', async () => {
+  test('sends one best-effort local KILL per declared member', async () => {
     const f = fake(identity)
     f.state.engine = 'SharedMergeTree'
     f.state.recordedEngine = 'SharedMergeTree'
     const plan = await prepareCancellation(f.db, TARGET, identity, CLAIM)
-    f.state.capability = 0
-    await expect(settleCompensation(f.db, plan, targetTable(plan.targets), f.lock)).rejects.toThrow('protocol 1')
-    expect(f.state.partsReads).toBe(0)
+    await cancelPredecessor(f.db, TARGET, plan, f.lock)
+    const kills = f.calls.filter((call) => call.sql.startsWith('KILL'))
+    expect(kills).toHaveLength(2)
+    expect(kills[0]?.sql).not.toContain('ON CLUSTER')
+    expect(kills[0]?.sql).toContain("user = 'writer'")
   })
-})
-
-describe('physical KILL receipt coverage', () => {
-  const other = '00000000-0000-4000-8000-000000000004'
-  const identity = { ...IDENTITY, serverUUIDs: [SERVER, other] }
-
-  test('requires a finished receipt from every declared member, using fresh physical ids', async () => {
-    const physical: string[] = []
-    let reads = 0
-    const conn = {
-      remaining: () => 5000,
-      async query<T>(sql: string, options?: QueryControlOptions): Promise<T[]> {
-        let rows: unknown[] = []
-        if (sql.includes('system.one')) rows = identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: 'writer' }))
-        else if (sql === 'SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal') rows = [{ server_uuid: SERVER, principal: 'writer' }]
-        else if (sql.startsWith('KILL QUERY')) {
-          expect(sql).not.toContain('ON CLUSTER')
-          expect(sql).toContain("user = 'writer'")
-          expect(options?.settings).toMatchObject({ log_queries: 1, log_queries_probability: 1, log_queries_min_query_duration_ms: 0 })
-          physical.push(options?.queryId ?? '')
-        } else if (sql.includes('system.query_log')) {
-          expect(sql).toContain("type = 'QueryFinish' AND exception_code = 0")
-          expect(sql).toContain('skip_unavailable_shards = 0')
-          expect(sql).toContain('view(SELECT')
-          reads++
-          rows = [{ server_uuid: SERVER, principal: 'writer', query_id: physical[0] }]
-          if (reads > 1) rows.push({ server_uuid: other, principal: 'writer', query_id: physical[1] })
-        } else throw new Error(`unexpected SQL ${sql}`)
-        return rows as T[]
-      },
-    }
-    await killWithReceipts(conn, identity, [ID])
-    expect(physical).toHaveLength(4)
-    expect(new Set(physical).size).toBe(4)
-    expect(reads).toBe(2)
-  })
-
-  for (const replicas of [2, 3]) test(`${replicas}-node round robin cannot pin KILLs to a subset of members`, async () => {
-    const identity = { ...IDENTITY, serverUUIDs: [SERVER, other, '00000000-0000-4000-8000-000000000008'].slice(0, replicas) }
-    let requests = 0
-    let waits = 0
-    const receipts: Array<{ server_uuid: string; principal: string; query_id: string }> = []
-    const killed = new Set<string>()
-    const conn = {
-      remaining() { if (++waits > 3) throw new Error('bounded regression deadline'); return 1 },
-      async query<T>(sql: string, options?: QueryControlOptions): Promise<T[]> {
-        const server = identity.serverUUIDs[requests++ % identity.serverUUIDs.length]
-        if (!server) throw new Error('missing route')
-        let rows: unknown[] = []
-        if (sql.includes('system.one')) rows = identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: 'writer' }))
-        else if (sql === 'SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal') rows = [{ server_uuid: server, principal: 'writer' }]
-        else if (sql.startsWith('KILL QUERY')) {
-          killed.add(server)
-          receipts.push({ server_uuid: server, principal: 'writer', query_id: options?.queryId ?? '' })
-        } else if (sql.includes('system.query_log')) rows = [...receipts]
-        else throw new Error(`unexpected SQL ${sql}`)
-        return rows as T[]
-      },
-    }
-    await killWithReceipts(conn, identity, [ID])
-    expect([...killed].sort()).toEqual([...identity.serverUUIDs].sort())
-    expect(new Set(receipts.map((row) => row.query_id)).size).toBe(receipts.length)
-  })
-
-  for (const invalid of ['missing member', 'wrong principal', 'wrong server', 'wrong id', 'unreadable logs'] as const) {
-    test(`refuses incomplete or invalid receipt coverage (${invalid})`, async () => {
-      let remaining = 3
-      let physical = ''
-      const conn = {
-        remaining() { if (--remaining <= 0) throw new Error('deadline'); return 1 },
-        async query<T>(sql: string, options?: QueryControlOptions): Promise<T[]> {
-          let rows: unknown[] = []
-          if (sql.includes('system.one')) rows = identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: 'writer' }))
-          else if (sql === 'SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal') rows = [{ server_uuid: SERVER, principal: 'writer' }]
-          else if (sql.startsWith('KILL QUERY')) physical = options?.queryId ?? ''
-          else if (sql.includes('system.query_log')) {
-            if (invalid === 'unreadable logs') throw new Error('ACCESS_DENIED')
-            rows = [{ server_uuid: invalid === 'wrong server' ? ID : SERVER, principal: invalid === 'wrong principal' ? 'other' : 'writer', query_id: invalid === 'wrong id' ? ID : physical }]
-          } else throw new Error(`unexpected SQL ${sql}`)
-          return rows as T[]
-        },
-      }
-      await expect(killWithReceipts(conn, identity, [ID])).rejects.toThrow()
-    })
-  }
 })
 
 describe('durable inherited recovery handoff', () => {
@@ -429,8 +303,8 @@ describe('durable inherited recovery handoff', () => {
     const f = fake()
     const initial = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
     const contexts = [
-      { migration: 'load.sql', statementIndex: 0, forwardSQL: 'INSERT INTO app.events SELECT 1', beforeRetry: 'TRUNCATE TABLE app.events' },
-      { migration: 'load.sql', statementIndex: 1, forwardSQL: 'INSERT INTO app.metrics SELECT 2', beforeRetry: 'TRUNCATE TABLE app.metrics' },
+      { migration: 'load.sql', statementIndex: 0, forwardSQL: 'INSERT INTO app.events SELECT 1', beforeRetry: 'CREATE OR REPLACE TABLE app.events AS app.events' },
+      { migration: 'load.sql', statementIndex: 1, forwardSQL: 'INSERT INTO app.metrics SELECT 2', beforeRetry: 'CREATE OR REPLACE TABLE app.metrics AS app.metrics' },
     ]
     const full = await expandRecoveryPlan(f.db, TARGET, initial, contexts)
     expect(full.obligations).toHaveLength(2)
@@ -445,13 +319,13 @@ describe('durable inherited recovery handoff', () => {
     const f = fake()
     const initial = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
     const contexts = [
-      { migration: 'load.sql', statementIndex: 0, forwardSQL: 'INSERT INTO app.events SELECT 1', beforeRetry: 'TRUNCATE TABLE app.events' },
-      { migration: 'load.sql', statementIndex: 1, forwardSQL: 'INSERT INTO app.events SELECT 2', beforeRetry: 'TRUNCATE TABLE app.events' },
+      { migration: 'load.sql', statementIndex: 0, forwardSQL: 'INSERT INTO app.events SELECT 1', beforeRetry: 'CREATE OR REPLACE TABLE app.events AS app.events' },
+      { migration: 'load.sql', statementIndex: 1, forwardSQL: 'INSERT INTO app.events SELECT 2', beforeRetry: 'CREATE OR REPLACE TABLE app.events AS app.events' },
     ]
     await expect(expandRecoveryPlan(f.db, TARGET, initial, contexts)).rejects.toThrow('compensation target')
     const chain = [
       { ...contexts[0], forwardSQL: 'INSERT INTO app.events SELECT id FROM app.frozen' },
-      { ...contexts[1], forwardSQL: 'INSERT INTO app.frozen SELECT 2', beforeRetry: 'TRUNCATE TABLE app.frozen' },
+      { ...contexts[1], forwardSQL: 'INSERT INTO app.frozen SELECT 2', beforeRetry: 'CREATE OR REPLACE TABLE app.frozen AS app.frozen' },
     ]
     const withSource = fake()
     withSource.state.source = true
@@ -467,8 +341,8 @@ describe('durable inherited recovery handoff', () => {
     const f = fake()
     const initial = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
     for (const [forwardSQL, beforeRetry] of [
-      ['INSERT INTO app._chkit_migrations SELECT 1', 'TRUNCATE TABLE app._chkit_migrations'],
-      ['INSERT INTO app.events SELECT id FROM app._chkit_migrations', 'TRUNCATE TABLE app.events'],
+      ['INSERT INTO app._chkit_migrations SELECT 1', 'CREATE OR REPLACE TABLE app._chkit_migrations AS app._chkit_migrations'],
+      ['INSERT INTO app.events SELECT id FROM app._chkit_migrations', 'CREATE OR REPLACE TABLE app.events AS app.events'],
     ]) {
       await expect(expandRecoveryPlan(f.db, TARGET, { ...initial, obligations: [] }, [{ migration: 'load.sql', statementIndex: 0, forwardSQL: forwardSQL ?? '', beforeRetry: beforeRetry ?? null }])).rejects.toThrow('journal')
     }

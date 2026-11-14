@@ -215,30 +215,44 @@ To free the lock of a run you know has stopped, without waiting for it to expire
 
 ### Cancelling a stopped run's queries
 
-After stopping the old CLI process, use `--cancel-lock-queries` with its claim to cancel supported statements that remain on the server before recovery:
+After stopping the old CLI process, use `--cancel-lock-queries` with its claim to recover the data loads it left running on the server:
 
 ```sh
 chkit migrate --apply --break-lock 3f1c… --cancel-lock-queries
 ```
 
-Recovery requires the lock and journal database, and a declared cluster covering every server that can receive migration writes. Native connections use `clickhouse.cluster`; the ObsessionDB console transport uses `default`. chkit verifies stable server UUIDs and the effective SQL principal across that cluster. Missing permissions, an unavailable replica or a changed identity stop recovery. Keep the endpoint and cluster configuration unchanged; a hidden write destination outside the declaration is unsupported.
+Each statement it covers is a synchronous `INSERT` whose before-retry SQL replaces the same table with an empty copy of itself:
 
-Supported targets are plain `MergeTree` on one declared server, or `SharedMergeTree` whose replicas all report `sharedMergeTreeTruncateFenceVersion() = 1`. Shared recovery requires the backend truncate-fence protocol and its enabled server policy. Older or mixed backend versions refuse recovery. The server checks the required fence setting again when it admits Shared compensation; chkit then waits for empty active-parts metadata on every replica before reloading.
+```sql
+-- operation: sql_statement key=statement:0 risk=caution
+-- before-retry: CREATE OR REPLACE TABLE analytics.events AS analytics.events
+INSERT INTO analytics.events SELECT * FROM analytics.events_frozen;
+```
 
-The statement pair is a synchronous `INSERT` and an explicit `-- before-retry: TRUNCATE TABLE database.table` for the same target. `VALUES`, literal or `numbers`/`numbers_mt` expressions, and a simple `INSERT SELECT` from one named `MergeTree`, `ReplicatedMergeTree` or `SharedMergeTree` source table are supported. The source must stay frozen. chkit records and rechecks source and target UUIDs and engines; a recreated table at the same name stops recovery. Each statement needs a distinct compensation target, and no source may also be a compensation target elsewhere in the plan. The journal cannot be a data source or target.
+The replace gives the table a new UUID. A statement still writing to the old table, or one whose rows reach the server later, stores nothing in the new one, whatever error the server reports for it. chkit also sends `KILL QUERY` for the stopped run's recorded query IDs, to free the server; recovery does not depend on it. `TRUNCATE` does not stop a running `INSERT`, so it does not qualify.
 
-Before breaking the claim, chkit checks the complete selected migration files, including statements the stopped run had not reached. Unsupported DDL, async statements, views, joins, CTEs, inline `SETTINGS`, materialized-view dependencies and arbitrary migration hooks refuse recovery before cancellation. A claim containing an unsupported attempt also refuses, including completed attempts. Keep schema DDL separate from cancellable load runs. Explicit recovery preserves recorded forward SQL; restore that SQL rather than editing it during recovery.
+What recovery requires:
 
-Per-query settings are limited to `max_threads`, `max_insert_threads`, `max_block_size`, `max_insert_block_size`, `min_insert_block_size_rows`, `min_insert_block_size_bytes` and `async_insert=0`. Other settings make an attempt unsupported for cancellation. Ordinary migration execution and [async attachment](#async-operations-modeasync) retain their existing behavior.
+- A declared cluster covering every server that can receive migration writes. Native connections use `clickhouse.cluster`; the ObsessionDB console transport uses `default`. chkit verifies stable server UUIDs and the SQL user across that cluster; an unavailable replica or a changed identity stops recovery.
+- A `SharedMergeTree` target (ObsessionDB or ClickHouse Cloud), or a plain `MergeTree` target on one declared server, in an `Atomic` or `Shared` database, with no materialized views reading from it. `CREATE TABLE` and `DROP TABLE` on each target, directly or through a role.
+- `VALUES`, literal or `numbers`/`numbers_mt` expressions, or a simple `INSERT SELECT` from one named `MergeTree`, `ReplicatedMergeTree` or `SharedMergeTree` source table. The source must stay frozen. Each statement needs its own target, no source may be another statement's target, and the journal can be neither.
+- Per-query settings limited to `max_threads`, `max_insert_threads`, `max_block_size`, `max_insert_block_size`, `min_insert_block_size_rows`, `min_insert_block_size_bytes` and `async_insert=0`.
 
-Tracked runs record a fresh query ID before each physical synchronous or compensation attempt. Immutable journal records retain the claim, forward fingerprint and table identities after lock release, without SQL text or credentials. chkit reserves the replacement lock, cancels exact recorded query IDs for the same principal, and requires successful local KILL receipts from every declared server plus absence of those queries and matching child queries. Query-log visibility and permission to enable control-query logging are required; missing receipts or a timeout block replacement work. Explicit recovery uses bounded, uncached reads for planning, journal state and lock checks, including heartbeat connections. A recorded unfinished async query in a selected migration stops preflight before cancellation; finish its async recovery first.
+Before breaking the claim, chkit checks the complete selected migration files, including statements the stopped run had not reached. Unsupported DDL, async statements, views, joins, CTEs, inline `SETTINGS`, materialized-view dependencies and arbitrary migration hooks refuse recovery before anything is cancelled. A claim with any unsupported attempt also refuses. Keep schema DDL separate from cancellable load runs, and restore recorded forward SQL rather than editing it during recovery.
 
-Cancellation has three fixed phases, each with a 30-second budget: fresh validation, KILL receipts and terminal proof, then durable recovery handoff. Polling never renews a phase's budget. Together these phases can take up to 90 seconds while the replacement lock remains valid; planning, compensation and reload are separate steps. An expired phase blocks later phases and replacement work.
+How it stays safe across crashes: tracked runs record a fresh query ID and the table UUIDs before each statement, in immutable journal rows that hold no SQL text or credentials. After each replace, chkit waits until every replica serves the new table and records its new UUID before it reloads. A durable recovery marker blocks ordinary apply, including runs with no pending files, until the journal shows every covered statement completed. A crashed recovery is resumed with its own claim, named in the error.
 
-Cancellation can leave committed rows. The `TRUNCATE` removes them before reloading, so the target must be safe to clear. After cancellation, a durable recovery marker blocks ordinary apply, including runs with no pending files, until the journal proves every covered statement completed. A crashed successor inherits the full recovery plan. Resume with the stopped successor claim named in the error; reusing an older claim redirects to that successor. A timeout, lock release or scoped-out migration never clears unfinished recovery.
+Limits:
+
+- Stop the old CLI first. The replace stops only statements already sent to the old table; a request sent after it, an async insert queue, or a `Distributed` or `Buffer` table in front writes to the new table.
+- The replace removes every row in the target, including rows other writers had inserted.
+- Anything keyed by the old table UUID, such as cache pins, does not follow the new table.
+- Run one recovery per table at a time.
+
+Query tracking adds a journal write before each synchronous statement of every run. When that write fails, the run continues untracked and records that `--cancel-lock-queries` cannot cancel it. `CHKIT_MIGRATE_QUERY_TRACKING=off` turns tracking off; `--cancel-lock-queries` then refuses to run.
 
 :::caution
-Stop the predecessor CLI before recovery. Cancellation stops work that the server has received; it cannot prohibit a delayed request or a paused client from sending work later. `--break-lock` alone continues to release only the lock claim.
+`--break-lock` alone releases only the lock claim; it cancels nothing.
 :::
 
 ### Multi-replica targets
@@ -523,7 +537,7 @@ A failure that stops the command prints the standard error envelope:
 | `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
 | `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, a heartbeat did not read back, or another run broke its claim; the run stopped before its next request |
 | `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |
-| `migrate_cancellation_failed` | Cancellation was unsupported, could not be verified or was interrupted; replacement work did not start |
+| `migrate_cancellation_failed` | Recovery was unsupported, could not be verified or was interrupted; the recovery barrier remains until a run with `--cancel-lock-queries` completes it |
 | `journal_changed` | Another run changed the journal between the plan and the lock in a way the plan does not cover; nothing was applied |
 | `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`, or an empty migration name |
 

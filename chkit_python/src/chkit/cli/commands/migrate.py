@@ -92,6 +92,7 @@ from chkit.cli.commands.migrate_query_intents import (
     QueryIdentity,
     QueryRecovery,
     QueryTracker,
+    query_tracking_disabled,
 )
 from chkit.cli.commands.migrate_recovery import resolve_recovery_targets
 from chkit.cli.commands.migrate_retry import (
@@ -364,11 +365,12 @@ def _run(
     if cancel_lock_queries and (
         hook_flags.get("--apply") is not True or not break_lock
         or targets.abandon_target is not None or migrate_lock_disabled()
+        or query_tracking_disabled()
     ):
         raise MigrateError(
             "invalid_usage",
             "--cancel-lock-queries requires explicit --apply, --break-lock <claim>, "
-            "an enabled migrate lock, and no --abandon.",
+            "an enabled migrate lock and query tracking, and no --abandon.",
         )
     settings = parse_setting_flags(setting)
     config = load_config(config_path, ChxConfigEnv(command="migrate"))
@@ -1001,6 +1003,7 @@ class _MigrateLockRunner(WithLock):
             identity: QueryIdentity | None = self._initial_identity
             if (
                 identity is None
+                and not query_tracking_disabled()
                 and callable(getattr(self._raw_client, "execute_tracked", None))
                 and callable(getattr(self._raw_client, "query_control", None))
             ):
@@ -1091,16 +1094,21 @@ class _MigrateLockRunner(WithLock):
                     lambda: finish_recovery(self._raw_client, target, active_recovery, lock)
                 ) if active_recovery is not None else None
                 recovery = None
-                if cancellation is not None:
+                if cancellation is not None and active_recovery is not None:
                     plan = cancellation
+                    obligations = active_recovery.obligations
                     recovery = QueryRecovery(
-                        plan.targets,
-                        lambda table: settle_compensation(self._raw_client, plan, table, lock),
-                        tuple(plan.sources),
-                        tuple(plan.obligations),
+                        [item.target for item in obligations],
+                        lambda table: settle_compensation(
+                            self._raw_client, target, plan, table, lock,
+                        ),
+                        tuple(item.source for item in obligations if item.source is not None),
+                        tuple(obligations),
                     )
                 self._holder.tracker = (
-                    QueryTracker(self._raw_client, target, tracked_identity, lock, recovery)
+                    QueryTracker(
+                        self._raw_client, target, tracked_identity, lock, recovery, log=log,
+                    )
                     if tracked_identity is not None else None
                 )
                 result = fn()

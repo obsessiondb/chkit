@@ -10,6 +10,8 @@ import { MigrateError } from './errors.js'
 import type { LockTarget, MigrateLock } from './lock.js'
 
 export const QUERY_INTENT_PREFIX = '__chkit_migrate_query__/'
+/** Suffix of the row that marks a claim as having run untracked statements. */
+export const UNTRACKED = 'untracked'
 
 const CANCELLABLE_SETTINGS = new Set(['max_threads', 'max_insert_threads', 'max_block_size', 'max_insert_block_size', 'min_insert_block_size_rows', 'min_insert_block_size_bytes', 'async_insert'])
 
@@ -30,7 +32,7 @@ export interface QueryContext {
 
 export type QueryPhase = 'forward' | 'compensation'
 export interface QueryTarget { database: string; name: string; uuid?: string; engine?: string }
-export type QueryKind = 'insert' | 'truncate' | 'async' | 'unsupported'
+export type QueryKind = 'insert' | 'replace' | 'async' | 'unsupported'
 
 /** Immutable checksum JSON; never contains SQL or credentials. */
 export interface QueryIntent extends QueryIdentity {
@@ -50,7 +52,8 @@ export interface QueryRecovery {
   targets: readonly QueryTarget[]
   sources?: readonly QueryTarget[]
   obligations?: readonly RecoveryObligation[]
-  afterCompensation(target: QueryTarget): Promise<void>
+  /** Settles a replace and returns the target under its new UUID. */
+  afterCompensation(target: QueryTarget): Promise<QueryTarget>
 }
 
 export interface QueryTracker {
@@ -59,17 +62,29 @@ export interface QueryTracker {
   recordAsync(context: QueryContext, queryId: string): Promise<void>
 }
 
+/** CHKIT_MIGRATE_QUERY_TRACKING=off turns query tracking off for ordinary runs. */
+export function queryTrackingDisabled(): boolean {
+  const value = process.env.CHKIT_MIGRATE_QUERY_TRACKING?.trim().toLowerCase()
+  return value === 'off' || value === '0' || value === 'false'
+}
+
 export function createQueryTracker(input: {
   db: ClickHouseExecutor
   target: LockTarget
   identity: QueryIdentity
   lock: MigrateLock
   recovery?: QueryRecovery
+  log?: (line: string) => void
 }): QueryTracker {
   const { db, target, identity, lock, recovery } = input
   const command = db.commandTracked?.bind(db)
   const claim = lock.claimId
   if (!command || !claim) throw cancellationError('This executor does not support tracked commands.')
+  // A replace gives the target a new UUID; later intents must match it.
+  let targets = recovery ? [...recovery.targets] : []
+  // An ordinary run whose intent cannot be recorded continues untracked, once
+  // a durable marker makes its claim uncancellable. Recovery stays strict.
+  let untracked = false
 
   const record = async (context: QueryContext, phase: QueryPhase, sql: string, queryId: string, kind?: QueryKind, settings?: ClickHouseSettings): Promise<QueryIntent> => {
     lock.assertHeld()
@@ -78,7 +93,7 @@ export function createQueryTracker(input: {
     const matched = phase !== 'compensation' || (forward.kind === 'insert' && sameTarget(classification.target, forward.target))
     let recordedTarget = classification.target
     // Compensation retains its forward source so a crash before reload can
-    // recover the same frozen input even when only a TRUNCATE intent exists.
+    // recover the same frozen input even when only a replace intent exists.
     let recordedSource = classification.source ?? (phase === 'compensation' ? forward.source : undefined)
     let verified = true
     if (kind !== 'async' && classification.kind !== 'unsupported' && identity.cluster) {
@@ -105,7 +120,7 @@ export function createQueryTracker(input: {
       ...(recordedSource ? { source: recordedSource } : {}),
     }
     if (recovery?.obligations && !recovery.obligations.some((item) => item.migration === context.migration && item.statementIndex === context.statementIndex && item.forwardFingerprint === intent.forwardFingerprint)) throw cancellationError('Explicit recovery requires the unchanged recorded forward SQL; no statement was sent.')
-    if (recovery && (!['insert', 'truncate'].includes(intent.kind) || !recovery.targets.some((expected) => sameTarget(expected, recordedTarget) && expected.uuid === recordedTarget?.uuid && expected.engine === recordedTarget?.engine) || (recordedSource && !recovery.sources?.some((expected) => sameTarget(expected, recordedSource) && expected.uuid === recordedSource?.uuid && expected.engine === recordedSource?.engine)))) {
+    if (recovery && (!['insert', 'replace'].includes(intent.kind) || !targets.some((expected) => sameTarget(expected, recordedTarget) && expected.uuid === recordedTarget?.uuid && expected.engine === recordedTarget?.engine) || (recordedSource && !recovery.sources?.some((expected) => sameTarget(expected, recordedSource) && expected.uuid === recordedSource?.uuid && expected.engine === recordedSource?.engine)))) {
       throw cancellationError('Explicit cancellation recovery requires supported SQL against the recorded table identity; no statement was sent.')
     }
     const name = `${QUERY_INTENT_PREFIX}${claim}/${queryId}`
@@ -125,27 +140,51 @@ export function createQueryTracker(input: {
     return intent
   }
 
+  const markUntracked = async (error: unknown): Promise<void> => {
+    if (recovery || (error instanceof MigrateError && error.code === 'migrate_lock_lost')) throw error
+    try {
+      await db.command(
+        `INSERT INTO ${quoteIdentifier(target.database)}.${target.journalTable} ` +
+        '(name, applied_at, checksum, chkit_version, migration_completed, operations) ' +
+        `SELECT ${sqlString(`${QUERY_INTENT_PREFIX}${claim}/${UNTRACKED}`)}, now64(3), ${sqlString(JSON.stringify({ protocol: 1, claim }))}, ${sqlString(CLI_VERSION)}, false, [] SETTINGS async_insert = 0, insert_quorum = 'auto', insert_quorum_parallel = 0`,
+      )
+    } catch {
+      throw error
+    }
+    untracked = true
+    input.log?.(`⚠ Query tracking failed (${error instanceof Error ? error.message : String(error)}); this run continues untracked, and --cancel-lock-queries cannot cancel it.`)
+  }
+
   return {
     async command(context, phase, sql, settings) {
-      const classification = classifyQueryIntent(sql, phase, context.beforeRetry, target.database)
-      const expected = recovery?.targets.find((table) => sameTarget(table, classification.target))
-      const effectiveSettings = phase === 'compensation' && expected?.engine === 'SharedMergeTree'
-        ? { ...settings, shared_merge_tree_require_truncate_fence: 1 } : settings
       let physicalTarget: QueryTarget | undefined
       await command(sql, () => lock.assertHeld(), async () => {
-        const intent = await record(context, phase, sql, randomUUID(), undefined, settings)
-        physicalTarget = intent.target
-        return intent.queryId
-      }, effectiveSettings)
+        if (!untracked) {
+          try {
+            const intent = await record(context, phase, sql, randomUUID(), undefined, settings)
+            physicalTarget = intent.target
+            return intent.queryId
+          } catch (error) {
+            await markUntracked(error)
+          }
+        }
+        return randomUUID()
+      }, settings)
       lock.assertHeld()
       if (phase === 'compensation' && recovery) {
         if (!physicalTarget) throw cancellationError('Compensation has no attested target.')
-        await recovery.afterCompensation(physicalTarget)
+        const replaced = await recovery.afterCompensation(physicalTarget)
+        targets = [...targets.filter((table) => !sameTarget(table, replaced)), replaced]
         lock.assertHeld()
       }
     },
     async recordAsync(context, queryId) {
-      await record(context, 'forward', context.forwardSQL, queryId, 'async')
+      if (untracked) return
+      try {
+        await record(context, 'forward', context.forwardSQL, queryId, 'async')
+      } catch (error) {
+        await markUntracked(error)
+      }
     },
   }
 }
@@ -157,9 +196,13 @@ export function classifyQueryIntent(sql: string, phase: QueryPhase, beforeRetry:
   if (tokens.some((token) => !token.terminated || token.text === ';')) return { kind: 'unsupported' }
   const word = (index: number) => tokens[index]?.kind === 'identifier' ? tokens[index]?.text.toUpperCase() : undefined
   if (phase === 'compensation') {
-    if (word(0) !== 'TRUNCATE' || word(1) !== 'TABLE') return { kind: 'unsupported' }
-    const parsed = readTarget(tokens, 2, database)
-    return parsed && parsed.end === tokens.length ? { kind: 'truncate', target: parsed.target } : { kind: 'unsupported' }
+    // Exactly CREATE OR REPLACE TABLE t AS t: the same definition, empty, under
+    // a new UUID, so a statement still writing to the old table stores nothing.
+    if (word(0) !== 'CREATE' || word(1) !== 'OR' || word(2) !== 'REPLACE' || word(3) !== 'TABLE') return { kind: 'unsupported' }
+    const parsed = readTarget(tokens, 4, database)
+    if (!parsed || word(parsed.end) !== 'AS') return { kind: 'unsupported' }
+    const from = readTarget(tokens, parsed.end + 1, database)
+    return from && from.end === tokens.length && sameTarget(from.target, parsed.target) ? { kind: 'replace', target: parsed.target } : { kind: 'unsupported' }
   }
   if (word(0) !== 'INSERT' || word(1) !== 'INTO') return { kind: 'unsupported' }
   const parsed = readTarget(tokens, 2, database)
@@ -204,7 +247,7 @@ export function classifyQueryIntent(sql: string, phase: QueryPhase, beforeRetry:
   }
   if (source && sameTarget(source, parsed.target)) return { kind: 'unsupported' }
   const compensation = beforeRetry === null ? undefined : classifyQueryIntent(beforeRetry, 'compensation', null, database)
-  return compensation?.kind === 'truncate' && sameTarget(compensation.target, parsed.target)
+  return compensation?.kind === 'replace' && sameTarget(compensation.target, parsed.target)
     ? { kind: 'insert', target: parsed.target, ...(source ? { source } : {}) }
     : { kind: 'unsupported' }
 }

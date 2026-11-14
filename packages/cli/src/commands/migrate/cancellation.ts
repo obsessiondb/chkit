@@ -1,16 +1,19 @@
-import { randomUUID } from 'node:crypto'
 import { performance } from 'node:perf_hooks'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import type { ClickHouseExecutor, ClickHouseSettings, QueryControlOptions } from '@chkit/clickhouse'
 import { compareCodePoints, quoteIdentifier, statementFingerprint } from '@chkit/core'
 
-import { claimsSelectSql, LOCK_ROW_PREFIX, type LockTarget, type MigrateLock } from './lock.js'
-import { attestQueryTable, classifyQueryIntent, cancellationError, QUERY_INTENT_PREFIX, sqlString, type QueryContext, type QueryIdentity, type QueryIntent, type QueryTarget } from './query-intents.js'
+import { debug } from '../../runtime/debug.js'
 import { CLI_VERSION } from '../../runtime/version.js'
+import { MigrateError } from './errors.js'
+import { claimsSelectSql, LOCK_ROW_PREFIX, type LockTarget, type MigrateLock } from './lock.js'
+import { attestQueryTable, classifyQueryIntent, cancellationError, QUERY_INTENT_PREFIX, sqlString, UNTRACKED, type QueryContext, type QueryIdentity, type QueryIntent, type QueryTarget } from './query-intents.js'
 
 export const RECOVERY_PREFIX = '__chkit_migrate_recovery__/'
 export const CANCELLATION_PREFIX = '__chkit_migrate_cancel__/'
+/** `<prefix><old uuid>`: a recovery replaced that table; the row names its new UUID. */
+export const REPLACE_PREFIX = '__chkit_migrate_replace__/'
 const DEADLINE_MS = 30_000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -19,6 +22,12 @@ interface Control { query<T>(sql: string, options?: QueryControlOptions): Promis
 export interface RecoveryObligation { migration: string; statementIndex: number; forwardFingerprint: string; target: QueryTarget; source?: QueryTarget }
 export interface RecoveryContext { protocol: 1; claim: string; identity: QueryIdentity; parents: string[]; obligations: RecoveryObligation[] }
 interface RecoveryRecord { context: RecoveryContext; checksum: string; completed: boolean }
+/**
+ * How recorded target UUIDs map to live tables: durable replace markers, the
+ * targets of recorded replaces whose marker may be missing (a crash right after
+ * the replace), and replacements this run adopted for those.
+ */
+interface Resolution { replaced: Map<string, string>; pending: Set<string>; adopted: Map<string, QueryTarget> }
 export interface CancellationPlan { claim: string; holder: string; identity: QueryIdentity; resumePending: boolean; targets: QueryTarget[]; sources: QueryTarget[]; parents: string[]; obligations: RecoveryObligation[]; inherited: boolean }
 
 /** Explicit recovery must make every decision from fresh, complete reads. */
@@ -63,10 +72,11 @@ export async function prepareCancellation(db: ClickHouseExecutor, target: LockTa
   const holder = objectJSON(predecessor.holder)
   const recorded = parseIdentity(holder.queries)
   if (!sameIdentity(recorded, identity)) throw cancellationError('The predecessor is untracked, uses another SQL principal, or belongs to another topology.')
-  const intents = await validateIntents(conn, target, identity, claim, inherited !== undefined)
-  const obligations = uniqueObligations([...(inherited?.context.obligations ?? []), ...obligationsFromIntents(intents)])
-  await validateObligations(conn, identity, obligations, target)
+  const resolution = await readResolution(conn, target, identity)
+  const intents = await validateIntents(conn, target, identity, claim, inherited !== undefined, resolution)
+  const obligations = uniqueObligations(await validateObligations(conn, identity, [...(inherited?.context.obligations ?? []), ...obligationsFromIntents(intents)], target, resolution))
   assertIntentsCovered(intents, obligations)
+  await assertReplaceGrants(conn, obligations)
   const markers = await variants(conn, source(target, identity), `startsWith(name, ${sqlString(`${CANCELLATION_PREFIX}${claim}/`)})`)
   if (markers.some((row) => row.name.endsWith('/completed'))) throw cancellationError('This predecessor cancellation already completed. Name the actual newer stopped claim instead, or run ordinary apply.')
   return { claim, holder: predecessor.holder, identity, targets: obligations.map((item) => item.target), sources: obligations.flatMap((item) => item.source ? [item.source] : []), parents: inherited?.context.parents ?? [], obligations, inherited: inherited !== undefined, resumePending: inherited !== undefined || markers.some((row) => row.name.endsWith('/pending')) }
@@ -78,18 +88,18 @@ export async function expandRecoveryPlan(db: ClickHouseExecutor, target: LockTar
   const additions: RecoveryObligation[] = []
   for (const context of contexts) {
     const classified = classifyQueryIntent(context.forwardSQL, 'forward', context.beforeRetry, target.database)
-    if (classified.kind !== 'insert' || !classified.target) throw cancellationError(`Recovery requires supported synchronous INSERT/TRUNCATE pairs throughout ${context.migration}; no query was canceled.`)
+    if (classified.kind !== 'insert' || !classified.target) throw cancellationError(`Recovery requires supported synchronous INSERT/replace pairs throughout ${context.migration}; no query was canceled.`)
     const metadata = { queryControl: <T>(sql: string) => conn.query<T>(sql) }
     const table = await attestQueryTable(metadata, plan.identity, classified.target)
     const sourceTable = classified.source ? await attestQueryTable(metadata, plan.identity, classified.source) : undefined
     const obligation = { migration: context.migration, statementIndex: context.statementIndex, forwardFingerprint: statementFingerprint(context.forwardSQL), target: table, ...(sourceTable ? { source: sourceTable } : {}) }
-    await validateObligations(conn, plan.identity, [obligation], target)
-    additions.push(obligation)
+    additions.push(...await validateObligations(conn, plan.identity, [obligation], target, emptyResolution()))
   }
   for (const inherited of plan.obligations) {
     if (!additions.some((item) => item.migration === inherited.migration && item.statementIndex === inherited.statementIndex)) await assertJournalCoverage(conn, target, plan.identity, [inherited])
   }
   const obligations = uniqueObligations([...plan.obligations, ...additions])
+  await assertReplaceGrants(conn, obligations)
   return { ...plan, obligations, targets: obligations.map((item) => item.target), sources: obligations.flatMap((item) => item.source ? [item.source] : []) }
 }
 
@@ -106,7 +116,7 @@ export async function assertCancellationUnfinished(db: ClickHouseExecutor, targe
   for (const reservation of reservations) {
     const holder = objectJSON(reservation.holder)
     if (holder.recoveryOf !== plan.claim || !sameIdentity(parseIdentity(holder.queries), plan.identity) || history.has(reservation.claim)) throw cancellationError('A competing claim is not a linked reservation-only recovery.')
-    if ((await validateIntents(conn, target, plan.identity, reservation.claim, true)).length !== 0) throw cancellationError('A competing recovery already recorded migration work; name its actual claim.')
+    if ((await validateIntents(conn, target, plan.identity, reservation.claim, true, await readResolution(conn, target, plan.identity))).length !== 0) throw cancellationError('A competing recovery already recorded migration work; name its actual claim.')
   }
 }
 
@@ -148,9 +158,13 @@ export async function assertCancellationClear(db: ClickHouseExecutor, target: Lo
   }
 }
 
-/** No compensation or replacement statement may run until this returns. */
+/**
+ * No compensation or replacement statement may run until this returns. The
+ * KILL only frees the server: the replace of each target is what keeps a
+ * stopped statement from storing rows (#732).
+ */
 export async function cancelPredecessor(db: ClickHouseExecutor, target: LockTarget, plan: CancellationPlan, lock: MigrateLock): Promise<RecoveryContext> {
-  let conn = control(db, lock)
+  const conn = control(db, lock)
   const { identity, claim } = plan
   await assertIdentityTopology(conn, identity)
   // A fresh read closes the validation-to-reservation interval. Validate the
@@ -158,43 +172,31 @@ export async function cancelPredecessor(db: ClickHouseExecutor, target: LockTarg
   const history = await recoveryHistory(conn, target, identity)
   assertNoSuccessor(history, claim)
   if (plan.inherited && !history.get(claim)) throw cancellationError('The inherited recovery context disappeared.')
-  const intents = await validateIntents(conn, target, identity, claim, plan.inherited)
-  assertIntentsCovered(intents, plan.obligations)
-  await validateObligations(conn, identity, plan.obligations, target)
+  const resolution = await readResolution(conn, target, identity)
+  const intents = await validateIntents(conn, target, identity, claim, plan.inherited, resolution)
+  const obligations = uniqueObligations(await validateObligations(conn, identity, plan.obligations, target, resolution))
+  assertIntentsCovered(intents, obligations)
   const ids = intents.map((intent) => intent.queryId)
-  const predicate = processPredicate(identity, ids)
-  const from = `clusterAllReplicas(${sqlString(requireCluster(identity))}, system.processes)`
   if (ids.length > 0) {
     const processes = await conn.query<{ query_id: string; initial_query_id: string; user: string; initial_user: string }>(
-      `SELECT query_id, initial_query_id, user, initial_user FROM ${from} WHERE query_id IN (${ids.map(sqlString).join(',')}) OR initial_query_id IN (${ids.map(sqlString).join(',')}) SETTINGS skip_unavailable_shards = 0`,
+      `SELECT query_id, initial_query_id, user, initial_user FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, system.processes) WHERE query_id IN (${ids.map(sqlString).join(',')}) OR initial_query_id IN (${ids.map(sqlString).join(',')}) SETTINGS skip_unavailable_shards = 0`,
     )
     for (const row of processes) {
       if ((ids.includes(row.query_id) && row.user !== identity.principal) || (ids.includes(row.initial_query_id) && row.initial_user !== identity.principal)) {
         throw cancellationError('A recorded query id belongs to another SQL principal; no query was canceled.')
       }
     }
+    await killRecordedQueries(conn, identity, ids)
   }
-  // Fixed phase boundaries only: every receipt/terminal loop shares one
-  // absolute budget. No phase starts after the previous one failed.
+  // A recorded replace whose marker the stopped run never wrote: record the
+  // UUID it left, so every later read resolves the same table.
+  for (const [from, table] of resolution.adopted) await writeReplaceMarker(conn, target, identity, from, table)
   lock.assertHeld()
-  conn = control(db, lock)
-  if (ids.length > 0) {
-    await killWithReceipts(conn, identity, ids)
-    for (;;) {
-      await assertIdentityTopology(conn, identity)
-      const running = await conn.query<{ n: string | number }>(`SELECT count() AS n FROM ${from} WHERE ${predicate} SETTINGS skip_unavailable_shards = 0`)
-      if (running.length !== 1 || !Number.isFinite(Number(running[0]?.n))) throw cancellationError('Cannot verify query termination on every server.')
-      if (Number(running[0]?.n) === 0) break
-      await sleep(Math.min(100, conn.remaining()))
-    }
-  }
-  lock.assertHeld()
-  conn = control(db, lock)
   const activeClaim = lock.claimId
   if (!activeClaim || !UUID.test(activeClaim)) throw cancellationError('The replacement lock has no valid claim identity.')
-  const context: RecoveryContext = { protocol: 1, claim: activeClaim, identity, parents: [...new Set([claim, ...plan.parents])].sort(), obligations: plan.obligations }
-  // Issuance attests predecessor termination. This barrier is durable BEFORE
-  // old completion and BEFORE even the first replacement intent/user send.
+  const context: RecoveryContext = { protocol: 1, claim: activeClaim, identity, parents: [...new Set([claim, ...plan.parents])].sort(), obligations }
+  // This barrier is durable BEFORE old completion and BEFORE even the first
+  // replacement intent/user send.
   await writeRecoveryMarker(conn, target, context, 'required')
   for (const ancestor of context.parents) {
     const cancellationRows = await variants(conn, source(target, identity), `name = ${sqlString(`${CANCELLATION_PREFIX}${ancestor}/pending`)}`)
@@ -210,9 +212,9 @@ export async function cancelPredecessor(db: ClickHouseExecutor, target: LockTarg
 export async function finishRecovery(db: ClickHouseExecutor, target: LockTarget, context: RecoveryContext, lock: MigrateLock): Promise<void> {
   const conn = control(db, lock)
   await assertIdentityTopology(conn, context.identity)
-  await validateObligations(conn, context.identity, context.obligations, target)
-  const ownIntents = await validateIntents(conn, target, context.identity, context.claim, true)
-  const obligations = uniqueObligations([...context.obligations, ...obligationsFromIntents(ownIntents)])
+  const resolution = await readResolution(conn, target, context.identity)
+  const ownIntents = await validateIntents(conn, target, context.identity, context.claim, true, resolution)
+  const obligations = uniqueObligations(await validateObligations(conn, context.identity, [...context.obligations, ...obligationsFromIntents(ownIntents)], target, resolution))
   await assertJournalCoverage(conn, target, context.identity, obligations)
   await writeRecoveryMarker(conn, target, context, 'completed')
 }
@@ -231,31 +233,94 @@ async function assertJournalCoverage(conn: Control, target: LockTarget, identity
   }
 }
 
-/** The backend fence prevents a detached old PG commit from registering after TRUNCATE. */
-export async function settleCompensation(db: ClickHouseExecutor, plan: CancellationPlan, table: QueryTarget, lock: MigrateLock): Promise<void> {
+/**
+ * After the replace of `table`: wait until every replica serves the new, empty
+ * table, then durably record its new UUID before any reload (#732).
+ */
+export async function settleCompensation(db: ClickHouseExecutor, target: LockTarget, plan: CancellationPlan, table: QueryTarget, lock: MigrateLock): Promise<QueryTarget> {
   const conn = control(db, lock)
   await assertIdentityTopology(conn, plan.identity)
-  await validateTable(conn, plan.identity, table, false)
-  if (table.engine !== 'SharedMergeTree') return
-  for (;;) {
-    await assertSharedFence(conn, plan.identity)
-    const rows = await conn.query<{ server_uuid: string; principal: string; n: string | number }>(
-      `SELECT server_uuid, principal, n FROM clusterAllReplicas(${sqlString(requireCluster(plan.identity))}, view(SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, toString(sum(rows)) AS n FROM system.parts WHERE database = ${sqlString(table.database)} AND table = ${sqlString(table.name)} AND active)) SETTINGS skip_unavailable_shards = 0`,
-    )
-    if (JSON.stringify(rows.map((row) => row.server_uuid).sort()) !== JSON.stringify([...plan.identity.serverUUIDs].sort()) || rows.some((row) => row.principal !== plan.identity.principal || !Number.isFinite(Number(row.n)) || Number(row.n) < 0)) throw cancellationError('Cannot verify compensation storage state on every server.')
-    if (rows.every((row) => Number(row.n) === 0)) break
-    await sleep(Math.min(100, conn.remaining()))
+  if (!table.uuid) throw cancellationError('Compensation has no recorded table identity.')
+  let replaced: QueryTarget | undefined
+  while (!replaced) {
+    const rows = await tableRows(conn, plan.identity, table)
+    const uuid = rows[0]?.uuid
+    if (sameMembers(rows, plan.identity) && uuid && uuid !== table.uuid && rows.every((row) => row.uuid === uuid)) {
+      if (rows.some((row) => row.principal !== plan.identity.principal || row.engine !== table.engine || row.dependencies !== '[]')) throw cancellationError('The replaced table changed engine or gained dependencies; reload is blocked.')
+      replaced = { database: table.database, name: table.name, uuid, engine: table.engine }
+    } else await sleep(Math.min(100, conn.remaining()))
   }
-  await assertIdentityTopology(conn, plan.identity)
-  await validateTable(conn, plan.identity, table, false)
+  await writeReplaceMarker(conn, target, plan.identity, table.uuid, replaced)
   lock.assertHeld()
+  return replaced
 }
 
-async function assertSharedFence(conn: Control, identity: QueryIdentity): Promise<void> {
-  const rows = await conn.query<{ server_uuid: string; principal: string; version: string | number }>(
-    `SELECT server_uuid, principal, version FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, view(SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, toString(sharedMergeTreeTruncateFenceVersion()) AS version FROM system.one)) SETTINGS skip_unavailable_shards = 0`,
+async function writeReplaceMarker(conn: Control, target: LockTarget, identity: QueryIdentity, from: string, table: QueryTarget): Promise<void> {
+  const name = `${REPLACE_PREFIX}${from}`
+  const checksum = JSON.stringify({ protocol: 1, from, ...table })
+  await conn.query(`INSERT INTO ${quoteIdentifier(target.database)}.${target.journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations) SELECT ${sqlString(name)}, now64(3), ${sqlString(checksum)}, ${sqlString(CLI_VERSION)}, false, [] SETTINGS async_insert = 0, insert_quorum = 'auto', insert_quorum_parallel = 0`)
+  const rows = await variants(conn, source(target, identity), `name = ${sqlString(name)}`)
+  if (rows.length !== 1 || rows[0]?.checksum !== checksum) throw cancellationError('The replace marker did not read back; reload is blocked.')
+}
+
+async function readResolution(conn: Control, target: LockTarget, identity: QueryIdentity): Promise<Resolution> {
+  const resolution = emptyResolution()
+  for (const row of await variants(conn, source(target, identity), `startsWith(name, ${sqlString(REPLACE_PREFIX)})`)) {
+    const from = row.name.slice(REPLACE_PREFIX.length)
+    const data = objectJSON(row.checksum)
+    const to = recordedTable(data)
+    if (!UUID.test(from) || data.protocol !== 1 || data.from !== from || to.uuid === from) throw cancellationError('Malformed replace history.')
+    resolution.replaced.set(from, to.uuid ?? '')
+  }
+  return resolution
+}
+
+function emptyResolution(): Resolution {
+  return { replaced: new Map(), pending: new Set(), adopted: new Map() }
+}
+
+/** The UUID a recorded one resolves to through durable replace markers. */
+function resolveUUID(resolution: Resolution, uuid: string): string {
+  const seen = new Set<string>()
+  let current = uuid
+  for (let next = resolution.replaced.get(current); next !== undefined; next = resolution.replaced.get(current)) {
+    if (seen.has(current)) throw cancellationError('Cyclic replace history.')
+    seen.add(current)
+    current = next
+  }
+  return current
+}
+
+/** Local KILLs, one per declared member, so a round-robin endpoint reaches each. Best effort. */
+async function killRecordedQueries(conn: Control, identity: QueryIdentity, ids: string[]): Promise<void> {
+  for (let attempt = 0; attempt < identity.serverUUIDs.length; attempt++) {
+    try {
+      await conn.query(`KILL QUERY WHERE ${processPredicate(identity, ids)} ASYNC`)
+    } catch (error) {
+      if (error instanceof MigrateError) throw error
+      debug('migrate:queries', `KILL failed: ${error instanceof Error ? error.message : String(error)}`)
+    }
+  }
+}
+
+/** The replace needs CREATE TABLE and DROP TABLE on each target, granted directly or through enabled roles. */
+async function assertReplaceGrants(conn: Control, obligations: readonly RecoveryObligation[]): Promise<void> {
+  const rows = await conn.query<{ access_type: string; database: string | null; table: string | null; is_partial_revoke: unknown }>(
+    "SELECT access_type, database, table, is_partial_revoke FROM system.grants WHERE (user_name = currentUser() OR role_name IN (SELECT role_name FROM system.enabled_roles)) AND access_type IN ('ALL', 'CREATE', 'CREATE TABLE', 'DROP', 'DROP TABLE') AND column IS NULL",
   )
-  if (JSON.stringify(rows.map((row) => row.server_uuid).sort()) !== JSON.stringify([...identity.serverUUIDs].sort()) || rows.some((row) => row.principal !== identity.principal || String(row.version) !== '1')) throw cancellationError('Every replica must enable SharedMergeTree truncate-fence protocol 1 before cancellation recovery.')
+  const covers = (row: (typeof rows)[number], table: QueryTarget) => (row.database === null || row.database === table.database) && (row.table === null || row.table === table.name)
+  const allowed = (access: string[], table: QueryTarget) =>
+    rows.some((row) => access.includes(row.access_type) && !isTrue(row.is_partial_revoke) && covers(row, table)) &&
+    !rows.some((row) => access.includes(row.access_type) && isTrue(row.is_partial_revoke) && covers(row, table))
+  for (const { target } of obligations) {
+    if (!allowed(['ALL', 'CREATE', 'CREATE TABLE'], target) || !allowed(['ALL', 'DROP', 'DROP TABLE'], target)) {
+      throw cancellationError(`Recovery replaces ${target.database}.${target.name}, which needs CREATE TABLE and DROP TABLE on it.`)
+    }
+  }
+}
+
+function isTrue(value: unknown): boolean {
+  return value === true || value === 1 || value === '1' || value === 'true'
 }
 
 function control(db: ClickHouseExecutor, lock?: MigrateLock): Control {
@@ -291,80 +356,65 @@ async function topology(conn: Control, cluster: string): Promise<Topology> {
   return { identity: { protocol: 1, principal, serverUUIDs: uuids, cluster } }
 }
 
-/** Receipts prove each physical member executed its own local KILL. No ON CLUSTER/Keeper is assumed. */
-export async function killWithReceipts(conn: Control, identity: QueryIdentity, ids: string[]): Promise<void> {
-  if (ids.length === 0 || ids.some((id) => !UUID.test(id))) throw cancellationError('Cancellation requires exact recorded query ids.')
-  const controls: string[] = []
-  const covered = new Set<string>()
-  while (covered.size !== identity.serverUUIDs.length) {
-    await assertIdentityTopology(conn, identity)
-    // Keep a full burst together: interleaving one receipt read per KILL can
-    // pin every KILL to the same member of a round-robin endpoint.
-    for (let attempt = 0; attempt < identity.serverUUIDs.length; attempt++) {
-      const controlId = randomUUID()
-      controls.push(controlId)
-      try {
-        await conn.query(`KILL QUERY WHERE ${processPredicate(identity, ids)} AND ${identityGuard(identity)} SYNC`, {
-          queryId: controlId,
-          settings: { log_queries: 1, log_queries_probability: 1, log_queries_min_query_duration_ms: 0 },
-        })
-      } catch (error) {
-        // An empty KILL can be NOTHING_TO_KILL on some versions. Only a successful
-        // QueryFinish receipt counts; the exception alone never supplies coverage.
-        if (!isNothingToKill(error)) throw error
-      }
-    }
-    const receipts = await conn.query<{ server_uuid: string; principal: string; query_id: string }>(
-      `SELECT server_uuid, principal, query_id FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, view(SELECT toString(serverUUID()) AS server_uuid, user AS principal, query_id FROM system.query_log WHERE event_date >= today() - 1 AND event_time >= now() - INTERVAL 5 MINUTE AND query_id IN (${controls.map(sqlString).join(',')}) AND type = 'QueryFinish' AND exception_code = 0 AND user = ${sqlString(identity.principal)})) SETTINGS skip_unavailable_shards = 0`,
-    )
-    for (const row of receipts) {
-      if (!identity.serverUUIDs.includes(row.server_uuid) || row.principal !== identity.principal || !controls.includes(row.query_id)) throw cancellationError('A KILL receipt has an unexpected server, principal or query id.')
-      covered.add(row.server_uuid)
-    }
-    if (covered.size !== identity.serverUUIDs.length) await sleep(Math.min(100, conn.remaining()))
-  }
-  await assertIdentityTopology(conn, identity)
-}
-
 async function assertIdentityTopology(conn: Control, identity: QueryIdentity): Promise<Topology> {
   const current = await topology(conn, requireCluster(identity))
   if (!sameIdentity(current.identity, identity)) throw cancellationError('The SQL principal or server topology changed; replacement work is blocked.')
   return current
 }
 
-async function validateIntents(conn: Control, target: LockTarget, identity: QueryIdentity, claim: string, allowEmpty = false): Promise<QueryIntent[]> {
+async function validateIntents(conn: Control, target: LockTarget, identity: QueryIdentity, claim: string, allowEmpty: boolean, resolution: Resolution): Promise<QueryIntent[]> {
   const prefix = `${QUERY_INTENT_PREFIX}${claim}/`
   const rows = await variants(conn, source(target, identity), `startsWith(name, ${sqlString(prefix)})`)
   if (rows.length === 0 && !allowEmpty) throw cancellationError('The predecessor has no cancellable tracked queries.')
+  if (rows.some((row) => row.name === `${prefix}${UNTRACKED}`)) throw cancellationError('The predecessor ran statements chkit could not track, so it cannot be cancelled. Stop it and recover by hand.')
+  const parsed = rows.map((row) => ({ queryId: row.name.slice(prefix.length), data: objectJSON(row.checksum) }))
+  // A recorded replace may have run without its marker: its target can have a new UUID.
+  for (const { data } of parsed) {
+    if (data.phase === 'compensation' && isObject(data.target) && typeof data.target.uuid === 'string') resolution.pending.add(resolveUUID(resolution, data.target.uuid))
+  }
   const intents: QueryIntent[] = []
-  for (const row of rows) {
-    const data = objectJSON(row.checksum)
-    const queryId = row.name.slice(prefix.length)
+  for (const { queryId, data } of parsed) {
     const recordedIdentity = parseIdentity(data)
-    if (!UUID.test(queryId) || data.queryId !== queryId || data.claim !== claim || !sameIdentity(recordedIdentity, identity) || !['forward', 'compensation'].includes(String(data.phase)) || !['insert', 'truncate'].includes(String(data.kind)) || typeof data.migration !== 'string' || !Number.isInteger(data.statementIndex) || Number(data.statementIndex) < 0 || typeof data.fingerprint !== 'string' || !/^v1:[0-9a-f]{64}$/.test(data.fingerprint) || typeof data.forwardFingerprint !== 'string' || !/^v1:[0-9a-f]{64}$/.test(data.forwardFingerprint) || (data.phase === 'forward' && data.fingerprint !== data.forwardFingerprint)) {
+    if (!UUID.test(queryId) || data.queryId !== queryId || data.claim !== claim || !sameIdentity(recordedIdentity, identity) || !['forward', 'compensation'].includes(String(data.phase)) || data.kind !== (data.phase === 'forward' ? 'insert' : 'replace') || typeof data.migration !== 'string' || !Number.isInteger(data.statementIndex) || Number(data.statementIndex) < 0 || typeof data.fingerprint !== 'string' || !/^v1:[0-9a-f]{64}$/.test(data.fingerprint) || typeof data.forwardFingerprint !== 'string' || !/^v1:[0-9a-f]{64}$/.test(data.forwardFingerprint) || (data.phase === 'forward' && data.fingerprint !== data.forwardFingerprint)) {
       throw cancellationError('The predecessor contains unsupported, async or malformed query intents; no query was canceled.')
     }
     assertNotJournal(target, recordedTable(data.target))
     if (data.source !== undefined) assertNotJournal(target, recordedTable(data.source))
-    const table = await validateTable(conn, identity, data.target, false)
-    const sourceTable = data.source === undefined ? undefined : await validateTable(conn, identity, data.source, true)
-    if (sourceTable && sourceTable.uuid === table.uuid) throw cancellationError('The compensation would truncate its own source; replacement work is blocked.')
-    intents.push({ ...recordedIdentity, claim, queryId, migration: data.migration, statementIndex: Number(data.statementIndex), phase: data.phase === 'forward' ? 'forward' : 'compensation', kind: data.kind === 'insert' ? 'insert' : 'truncate', fingerprint: data.fingerprint, forwardFingerprint: data.forwardFingerprint, target: table, ...(sourceTable ? { source: sourceTable } : {}) })
+    const table = await validateTable(conn, identity, data.target, false, resolution)
+    const sourceTable = data.source === undefined ? undefined : await validateTable(conn, identity, data.source, true, resolution)
+    if (sourceTable && sourceTable.uuid === table.uuid) throw cancellationError('The compensation would replace its own source; replacement work is blocked.')
+    intents.push({ ...recordedIdentity, claim, queryId, migration: data.migration, statementIndex: Number(data.statementIndex), phase: data.phase === 'forward' ? 'forward' : 'compensation', kind: data.phase === 'forward' ? 'insert' : 'replace', fingerprint: data.fingerprint, forwardFingerprint: data.forwardFingerprint, target: table, ...(sourceTable ? { source: sourceTable } : {}) })
   }
   return intents
 }
 
-async function validateTable(conn: Control, identity: QueryIdentity, value: unknown, sourceTable: boolean): Promise<QueryTarget> {
+type TableRow = { server_uuid: string; principal: string; uuid: string; engine: string; dependencies: string; database_engine: string }
+
+async function tableRows(conn: Control, identity: QueryIdentity, table: { database: string; name: string }): Promise<TableRow[]> {
+  return await conn.query<TableRow>(
+    `SELECT server_uuid, principal, uuid, engine, dependencies, database_engine FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, view(SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, toString(uuid) AS uuid, engine, toJSONString(dependencies_table) AS dependencies, (SELECT any(engine) FROM system.databases WHERE name = ${sqlString(table.database)}) AS database_engine FROM system.tables WHERE database = ${sqlString(table.database)} AND name = ${sqlString(table.name)})) SETTINGS skip_unavailable_shards = 0`,
+  )
+}
+
+function sameMembers(rows: readonly { server_uuid: string }[], identity: QueryIdentity): boolean {
+  return JSON.stringify(rows.map((row) => row.server_uuid).sort()) === JSON.stringify([...identity.serverUUIDs].sort())
+}
+
+/** The live table a recorded one stands for now, refusing any change recovery did not make. */
+async function validateTable(conn: Control, identity: QueryIdentity, value: unknown, sourceTable: boolean, resolution: Resolution): Promise<QueryTarget> {
   if (!isObject(value) || typeof value.database !== 'string' || typeof value.name !== 'string' || !value.database || !value.name) throw cancellationError('A query intent has no valid SQL table.')
   if (typeof value.uuid !== 'string' || !UUID.test(value.uuid) || value.uuid === '00000000-0000-0000-0000-000000000000' || typeof value.engine !== 'string') throw cancellationError('A table source or target has no recorded storage identity.')
-  const metadata = await conn.query<{ server_uuid: string; principal: string; uuid: string; engine: string; dependencies: string }>(
-    `SELECT server_uuid, principal, uuid, engine, dependencies FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, view(SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, toString(uuid) AS uuid, engine, toJSONString(dependencies_table) AS dependencies FROM system.tables WHERE database = ${sqlString(value.database)} AND name = ${sqlString(value.name)})) SETTINGS skip_unavailable_shards = 0`,
-  )
+  const metadata = await tableRows(conn, identity, { database: value.database, name: value.name })
   const engines = sourceTable ? ['MergeTree', 'ReplicatedMergeTree', 'SharedMergeTree'] : ['MergeTree', 'SharedMergeTree']
-  if (metadata.length !== identity.serverUUIDs.length || metadata.some((row) => !engines.includes(row.engine) || row.dependencies !== '[]') || (!sourceTable && value.engine === 'MergeTree' && identity.serverUUIDs.length !== 1)) throw cancellationError('Cancellation requires a plain MergeTree target on one declared server, or a supported SharedMergeTree target, without materialized-view dependencies.')
-  if (JSON.stringify(metadata.map((row) => row.server_uuid).sort()) !== JSON.stringify([...identity.serverUUIDs].sort()) || metadata.some((row) => row.principal !== identity.principal || row.uuid !== value.uuid || row.engine !== value.engine)) throw cancellationError('A recorded source or target identity changed; replacement work is blocked.')
-  if (!sourceTable && value.engine === 'SharedMergeTree') await assertSharedFence(conn, identity)
-  return { database: value.database, name: value.name, uuid: value.uuid, engine: value.engine }
+  if (metadata.length !== identity.serverUUIDs.length || metadata.some((row) => !engines.includes(row.engine) || row.dependencies !== '[]') || (!sourceTable && value.engine === 'MergeTree' && identity.serverUUIDs.length !== 1)) throw cancellationError('Cancellation requires a plain MergeTree target on one declared server, or a SharedMergeTree target, without materialized-view dependencies.')
+  if (!sourceTable && metadata.some((row) => !['Atomic', 'Shared'].includes(row.database_engine))) throw cancellationError('Recovery replaces its targets, which needs an Atomic or Shared database.')
+  const expected = sourceTable ? value.uuid : resolveUUID(resolution, value.uuid)
+  const live = metadata[0]?.uuid ?? ''
+  const adopted = !sourceTable && live !== expected && resolution.pending.has(expected) && UUID.test(live)
+  if (!sameMembers(metadata, identity) || metadata.some((row) => row.principal !== identity.principal || row.uuid !== (adopted ? live : expected) || row.engine !== value.engine)) throw cancellationError('A recorded source or target identity changed; replacement work is blocked.')
+  const table = { database: value.database, name: value.name, uuid: adopted ? live : expected, engine: value.engine }
+  if (adopted) resolution.adopted.set(expected, table)
+  return table
 }
 
 async function recoveryHistory(conn: Control, target: LockTarget, identity?: QueryIdentity): Promise<Map<string, RecoveryRecord>> {
@@ -434,14 +484,18 @@ function assertIntentsCovered(intents: QueryIntent[], obligations: RecoveryOblig
   for (const intent of intents) if (!obligations.some((item) => JSON.stringify(item) === JSON.stringify(obligationsFromIntents([intent])[0]))) throw cancellationError('A successor admitted work outside its inherited recovery context.')
 }
 
-async function validateObligations(conn: Control, identity: QueryIdentity, obligations: RecoveryObligation[], journal: LockTarget): Promise<void> {
+/** Each obligation with its tables resolved to the live ones. */
+async function validateObligations(conn: Control, identity: QueryIdentity, obligations: RecoveryObligation[], journal: LockTarget, resolution: Resolution): Promise<RecoveryObligation[]> {
   if (obligations.length === 0) throw cancellationError('Recovery has no complete forward obligations.')
+  const validated: RecoveryObligation[] = []
   for (const item of obligations) {
     assertNotJournal(journal, item.target)
     if (item.source) assertNotJournal(journal, item.source)
-    await validateTable(conn, identity, item.target, false)
-    if (item.source) await validateTable(conn, identity, item.source, true)
+    const target = await validateTable(conn, identity, item.target, false, resolution)
+    const sourceTable = item.source ? await validateTable(conn, identity, item.source, true, resolution) : undefined
+    validated.push({ migration: item.migration, statementIndex: item.statementIndex, forwardFingerprint: item.forwardFingerprint, target, ...(sourceTable ? { source: sourceTable } : {}) })
   }
+  return validated
 }
 
 function assertNotJournal(journal: LockTarget, table: QueryTarget): void {
@@ -490,10 +544,6 @@ function source(target: LockTarget, identity?: QueryIdentity): string {
   return cluster ? `clusterAllReplicas(${sqlString(cluster)}, ${sqlString(target.database)}, ${sqlString(target.journalTable)})` : `${quoteIdentifier(target.database)}.${target.journalTable}`
 }
 
-function identityGuard(identity: QueryIdentity): string {
-  return `throwIf(currentUser() != ${sqlString(identity.principal)} OR NOT has([${identity.serverUUIDs.map(sqlString).join(',')}], toString(serverUUID())), 'Cancellation SQL identity or server mismatch') = 0`
-}
-
 function processPredicate(identity: QueryIdentity, ids: string[]): string {
   const list = ids.map(sqlString).join(',')
   return `((query_id IN (${list}) AND user = ${sqlString(identity.principal)}) OR (initial_query_id IN (${list}) AND initial_user = ${sqlString(identity.principal)}))`
@@ -521,8 +571,4 @@ function objectJSON(raw: string): Record<string, unknown> {
 
 function isObject(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value)
-}
-
-function isNothingToKill(error: unknown): boolean {
-  return error instanceof Error && /\bNOTHING_TO_KILL\b/.test(error.message)
 }

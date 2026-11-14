@@ -15,7 +15,7 @@ import { checksumSQL } from '../../../runtime/migration-store.js'
 import { CLI_VERSION } from '../../../runtime/version.js'
 
 const FORWARD = 'INSERT INTO app.events SELECT 1;'
-const SQL = '-- operation: sql_statement key=statement:0 risk=safe\n-- before-retry: TRUNCATE TABLE app.events\n' + FORWARD + '\n'
+const SQL = '-- operation: sql_statement key=statement:0 risk=safe\n-- before-retry: CREATE OR REPLACE TABLE app.events AS app.events\n' + FORWARD + '\n'
 const SERVER = '00000000-0000-4000-8000-000000000003'
 const UUID = '00000000-0000-4000-8000-000000000002'
 const TABLE = { database: 'app', name: 'events', uuid: UUID, engine: 'MergeTree' }
@@ -44,14 +44,14 @@ for (const explicitRecovery of [false, true]) {
       async queryControl(sql: string) { return read(sql, true) },
       async commandTracked(sql: string, check: () => void, before: () => Promise<string>) {
         check(); await before(); check()
-        if (sql.startsWith('TRUNCATE')) { events.push('compensation'); rows = 0 }
+        if (sql.startsWith('CREATE OR REPLACE')) { events.push('compensation'); rows = 0 }
         else { events.push('forward'); rows += 200 }
       },
     } as unknown as ClickHouseExecutor
     const db = explicitRecovery ? freshRecoveryExecutor(raw) : raw
     const tracker = createQueryTracker({ db, identity: IDENTITY, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined },
       lock: { claimId: '00000000-0000-4000-8000-000000000005', assertHeld() {}, async release() {} },
-      recovery: { targets: [TABLE], sources: [], obligations: [{ migration: 'm.sql', statementIndex: 0, forwardFingerprint: statementFingerprint(FORWARD), target: TABLE }], async afterCompensation() { events.push('settled') } } })
+      recovery: { targets: [TABLE], sources: [], obligations: [{ migration: 'm.sql', statementIndex: 0, forwardFingerprint: statementFingerprint(FORWARD), target: TABLE }], async afterCompensation() { events.push('settled'); return TABLE } } })
     try {
       await writeFile(join(dir, 'm.sql'), SQL)
       await applyMigration({ db, journalStore: createJournalStore(db), pluginRuntime: { async runOnBeforeApply({ statements }: { statements: string[] }) { return statements }, async runOnAfterApply() {} } as never,

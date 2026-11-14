@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import re
 import uuid
+from dataclasses import replace
 from typing import Any
 
 import pytest
@@ -24,14 +25,17 @@ from chkit.core.sql_fingerprint import statement_fingerprint
 
 IDENTITY = QueryIdentity(1, "writer", ["00000000-0000-4000-8000-000000000001"])
 CONTEXT = QueryContext(
-    "load.sql", 0, "INSERT INTO app.events SELECT 1", "TRUNCATE TABLE app.events",
+    "load.sql", 0, "INSERT INTO app.events SELECT 1",
+    "CREATE OR REPLACE TABLE app.events AS app.events",
 )
+REPLACE = "CREATE OR REPLACE TABLE app.events AS app.events"
 TARGET = LockTarget("app", "_chkit_migrations", None)
 
 
 def test_insert_body_cannot_hide_a_different_sql_target_after_table_keyword() -> None:
     assert classify_query_intent(
-        "INSERT INTO TABLE app.events SELECT 1", "forward", "TRUNCATE TABLE app.TABLE", "app",
+        "INSERT INTO TABLE app.events SELECT 1", "forward",
+        "CREATE OR REPLACE TABLE app.TABLE AS app.TABLE", "app",
     ).kind == "unsupported"
     assert classify_query_intent(
         "INSERT INTO app.events (id) SELECT 1", "forward", CONTEXT.before_retry,
@@ -53,12 +57,14 @@ class IntentClient:
         self.failure = failure
         self.events: list[str] = []
         self.checksum = ""
+        self.checksums: list[str] = []
 
     def execute(self, sql: str) -> None:
         self.events.append("intent")
         match = re.search(r", '((?:[^'\\]|\\.)*)', '.*', false, \[\] SETTINGS", sql)
         assert match is not None
         self.checksum = re.sub(r"\\(.)", r"\1", match[1])
+        self.checksums.append(self.checksum)
         if self.failure == "intent":
             raise RuntimeError("intent failed")
 
@@ -78,7 +84,7 @@ class IntentClient:
         self.events.append("user SQL")
 
 
-@pytest.mark.parametrize("failure", ["none", "intent", "ownership", "read-back"])
+@pytest.mark.parametrize("failure", ["none", "intent", "ownership"])
 def test_intent_is_acknowledged_before_user_sql(failure: str) -> None:
     lock = FakeLock()
     client = IntentClient(lock, failure)
@@ -87,15 +93,55 @@ def test_intent_is_acknowledged_before_user_sql(failure: str) -> None:
         tracker.command(CONTEXT, "forward", CONTEXT.forward_sql)
         assert client.events == ["intent", "read-back", "user SQL"]
     else:
-        with pytest.raises(RuntimeError if failure != "read-back" else Exception):
+        with pytest.raises(RuntimeError):
             tracker.command(CONTEXT, "forward", CONTEXT.forward_sql)
         assert "user SQL" not in client.events
-    assert "INSERT INTO" not in client.checksum
-    assert "TRUNCATE TABLE" not in client.checksum
-    payload = json.loads(client.checksum)
+    assert "INSERT INTO" not in client.checksums[0]
+    assert "CREATE OR REPLACE" not in client.checksums[0]
+    payload = json.loads(client.checksums[0])
     assert payload["serverUUIDs"] == IDENTITY.server_uuids
     assert payload["claim"] == "claim"
     assert payload["kind"] == "insert"
+
+
+def test_ordinary_run_continues_untracked_behind_a_durable_marker() -> None:
+    lock = FakeLock()
+    client = IntentClient(lock, "read-back")
+    logs: list[str] = []
+    tracker = QueryTracker(client, TARGET, IDENTITY, lock, log=logs.append)  # type: ignore[arg-type]
+    tracker.command(CONTEXT, "forward", CONTEXT.forward_sql)
+    tracker.command(replace(CONTEXT, statement_index=1), "forward", CONTEXT.forward_sql)
+    assert client.events == ["intent", "read-back", "intent", "user SQL", "user SQL"]
+    assert json.loads(client.checksum) == {"protocol": 1, "claim": "claim"}
+    assert "continues untracked" in logs[0]
+
+
+def test_explicit_recovery_never_degrades_to_untracked() -> None:
+    lock = FakeLock()
+    client = IntentClient(lock, "read-back")
+    table = QueryTarget("app", "events", "00000000-0000-4000-8000-000000000002", "MergeTree")
+    tracker = QueryTracker(
+        client, TARGET, IDENTITY, lock, QueryRecovery([table], lambda actual: actual),  # type: ignore[arg-type]
+    )
+    with pytest.raises(MigrateError):
+        tracker.command(CONTEXT, "forward", CONTEXT.forward_sql)
+    assert "user SQL" not in client.events
+
+
+def test_compensation_is_exactly_a_same_table_replace() -> None:
+    result = classify_query_intent("CREATE OR REPLACE TABLE events AS events", "compensation", None, "app")
+    assert result.kind == "replace"
+    assert result.target == QueryTarget("app", "events")
+    for sql in [
+        "TRUNCATE TABLE app.events", "CREATE OR REPLACE TABLE app.events AS app.other",
+        "CREATE OR REPLACE TABLE app.events AS SELECT * FROM app.events",
+        "CREATE OR REPLACE TABLE app.events AS app.events ENGINE = Memory",
+        "CREATE TABLE app.events AS app.events",
+    ]:
+        assert classify_query_intent(sql, "compensation", None).kind == "unsupported"
+    assert classify_query_intent(
+        CONTEXT.forward_sql, "forward", "TRUNCATE TABLE app.events",
+    ).kind == "unsupported"
 
 
 @pytest.mark.parametrize("sql", [
@@ -126,7 +172,7 @@ def test_quoted_targets_and_comments_use_the_lexer() -> None:
     assert classification.target is not None
     assert classification.target.to_payload() == {"database": "app", "name": "events"}
     assert classify_query_intent(
-        CONTEXT.forward_sql, "forward", "TRUNCATE TABLE other.events",
+        CONTEXT.forward_sql, "forward", "CREATE OR REPLACE TABLE other.events AS other.events",
     ).kind == "unsupported"
 
 
@@ -202,18 +248,18 @@ def test_named_source_metadata_is_acknowledged_before_sql(fault: str) -> None:
     if fault == "ownership":
         with pytest.raises(RuntimeError, match="lost ownership"):
             tracker.command(context, "compensation" if fault == "compensation source" else "forward",
-                        "TRUNCATE TABLE app.events" if fault == "compensation source" else sql)
+                        REPLACE if fault == "compensation source" else sql)
         assert "user SQL" not in client.events
     else:
         tracker.command(context, "compensation" if fault == "compensation source" else "forward",
-                        "TRUNCATE TABLE app.events" if fault == "compensation source" else sql)
+                        REPLACE if fault == "compensation source" else sql)
         intent = json.loads(client.checksum)
-        assert intent["kind"] == ("truncate" if fault == "compensation source"
+        assert intent["kind"] == ("replace" if fault == "compensation source"
                                   else "insert" if fault == "none" else "unsupported")
         assert client.events[-1] == "user SQL"
         assert intent["forwardFingerprint"] == statement_fingerprint(sql)
         if fault == "compensation source":
-            assert intent["fingerprint"] == statement_fingerprint("TRUNCATE TABLE app.events")
+            assert intent["fingerprint"] == statement_fingerprint(REPLACE)
         if fault in {"none", "compensation source"}:
             assert intent["source"]["uuid"] == "00000000-0000-4000-8000-000000000003"
             assert intent["target"]["uuid"] == "00000000-0000-4000-8000-000000000002"
@@ -243,20 +289,20 @@ def test_explicit_recovery_admission_and_settlement_precede_forward_sql(fault: s
             check()
             before()
             check()
-            compensation = sql.startswith("TRUNCATE")
-            if compensation:
-                assert settings["shared_merge_tree_require_truncate_fence"] == 1
+            compensation = sql.startswith("CREATE OR REPLACE")
+            assert settings is None
             self.events.append("compensation" if compensation else "forward")
             if fault == "lost after SQL":
                 self.lock.held = False
 
     client = RecoveryClient(lock, "none")
 
-    def settled(actual: QueryTarget) -> None:
+    def settled(actual: QueryTarget) -> QueryTarget:
         assert actual == table
         client.events.append("settled")
         if fault == "settlement failure":
             raise RuntimeError("not settled")
+        return table
 
     identity = QueryIdentity(1, "writer", IDENTITY.server_uuids, "declared")
     tracker = QueryTracker(
@@ -266,8 +312,7 @@ def test_explicit_recovery_admission_and_settlement_precede_forward_sql(fault: s
     )
     context = (QueryContext("load.sql", 0, "INSERT INTO app.events SELECT id FROM app.frozen",
                             CONTEXT.before_retry) if fault == "source changed" else CONTEXT)
-    compensation = ("TRUNCATE TABLE app.events SYNC" if fault == "unsupported SQL"
-                    else "TRUNCATE TABLE app.events")
+    compensation = "TRUNCATE TABLE app.events" if fault == "unsupported SQL" else REPLACE
     if fault == "none":
         tracker.command(context, "compensation", compensation)
         tracker.command(context, "forward", context.forward_sql)

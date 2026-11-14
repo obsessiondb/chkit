@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
@@ -19,12 +20,14 @@ if TYPE_CHECKING:
     from chkit.cli.commands.migrate_lock import LockTarget, MigrateLock
 
 QUERY_INTENT_PREFIX = "__chkit_migrate_query__/"
+# Suffix of the row that marks a claim as having run untracked statements.
+UNTRACKED = "untracked"
 CANCELLABLE_SETTINGS = {
     "max_threads", "max_insert_threads", "max_block_size", "max_insert_block_size",
     "min_insert_block_size_rows", "min_insert_block_size_bytes", "async_insert",
 }
 QueryPhase = Literal["forward", "compensation"]
-QueryKind = Literal["insert", "truncate", "async", "unsupported"]
+QueryKind = Literal["insert", "replace", "async", "unsupported"]
 
 
 @dataclass(frozen=True, slots=True)
@@ -74,9 +77,16 @@ class QueryClassification:
 @dataclass(frozen=True, slots=True)
 class QueryRecovery:
     targets: list[QueryTarget]
-    after_compensation: Callable[[QueryTarget], None]
+    # Settles a replace and returns the target under its new UUID.
+    after_compensation: Callable[[QueryTarget], QueryTarget]
     sources: tuple[QueryTarget, ...] = ()
     obligations: tuple[RecoveryObligation, ...] = ()
+
+
+def query_tracking_disabled() -> bool:
+    """Whether CHKIT_MIGRATE_QUERY_TRACKING turns query tracking off for ordinary runs."""
+    value = (os.environ.get("CHKIT_MIGRATE_QUERY_TRACKING") or "").strip().lower()
+    return value in {"off", "0", "false"}
 
 
 class QueryTracker:
@@ -84,7 +94,7 @@ class QueryTracker:
 
     def __init__(
         self, client: Any, target: LockTarget, identity: QueryIdentity, lock: MigrateLock,
-        recovery: QueryRecovery | None = None,
+        recovery: QueryRecovery | None = None, *, log: Callable[[str], None] | None = None,
     ) -> None:
         if not callable(getattr(client, "execute_tracked", None)) or not lock.claim_id:
             raise cancellation_error("This executor does not support tracked commands.")
@@ -93,44 +103,81 @@ class QueryTracker:
         self._identity = identity
         self._lock = lock
         self._recovery = recovery
+        self._log = log
+        # A replace gives the target a new UUID; later intents must match it.
+        self._targets = list(recovery.targets) if recovery else []
+        # An ordinary run whose intent cannot be recorded continues untracked,
+        # once a durable marker makes its claim uncancellable. Recovery stays strict.
+        self._untracked = False
 
     def command(
         self, context: QueryContext, phase: QueryPhase, sql: str,
         settings: dict[str, Any] | None = None,
     ) -> None:
-        classification = classify_query_intent(
-            sql, phase, context.before_retry, self._target.database,
-        )
-        expected = next((table for table in self._recovery.targets
-                         if classification.target is not None
-                         and table.database == classification.target.database
-                         and table.name == classification.target.name), None
-                        ) if self._recovery else None
-        effective_settings = (
-            {**(settings or {}), "shared_merge_tree_require_truncate_fence": 1}
-            if phase == "compensation" and expected and expected.engine == "SharedMergeTree"
-            else settings
-        )
         physical_target: QueryTarget | None = None
 
         def before() -> str:
             nonlocal physical_target
-            intent = self._record(context, phase, sql, str(uuid.uuid4()), settings=settings)
-            table = intent.get("target")
-            if table:
-                physical_target = QueryTarget(**table)
-            return str(intent["queryId"])
+            if not self._untracked:
+                try:
+                    intent = self._record(
+                        context, phase, sql, str(uuid.uuid4()), settings=settings,
+                    )
+                except Exception as error:
+                    self._mark_untracked(error)
+                else:
+                    table = intent.get("target")
+                    if table:
+                        physical_target = QueryTarget(**table)
+                    return str(intent["queryId"])
+            return str(uuid.uuid4())
 
-        self._client.execute_tracked(sql, self._lock.assert_held, before, effective_settings)
+        self._client.execute_tracked(sql, self._lock.assert_held, before, settings)
         self._lock.assert_held()
         if phase == "compensation" and self._recovery:
             if physical_target is None:
                 raise cancellation_error("Compensation has no attested target.")
-            self._recovery.after_compensation(physical_target)
+            replaced = self._recovery.after_compensation(physical_target)
+            self._targets = [
+                table for table in self._targets
+                if (table.database, table.name) != (replaced.database, replaced.name)
+            ] + [replaced]
             self._lock.assert_held()
 
     def record_async(self, context: QueryContext, query_id: str) -> None:
-        self._record(context, "forward", context.forward_sql, query_id, kind="async")
+        if self._untracked:
+            return
+        try:
+            self._record(context, "forward", context.forward_sql, query_id, kind="async")
+        except Exception as error:
+            self._mark_untracked(error)
+
+    def _mark_untracked(self, error: Exception) -> None:
+        if self._recovery is not None or (
+            isinstance(error, MigrateError) and error.code == "migrate_lock_lost"
+        ):
+            raise error
+        name = f"{QUERY_INTENT_PREFIX}{self._lock.claim_id}/{UNTRACKED}"
+        checksum = json.dumps(
+            {"protocol": 1, "claim": self._lock.claim_id}, separators=(",", ":"),
+        )
+        table = f"{quote_identifier(self._target.database)}.{self._target.journal_table}"
+        try:
+            self._client.execute(
+                f"INSERT INTO {table} "
+                "(name, applied_at, checksum, chkit_version, migration_completed, operations) "
+                f"SELECT {sql_string(name)}, now64(3), {sql_string(checksum)}, "
+                f"{sql_string(__version__)}, false, [] "
+                "SETTINGS async_insert = 0, insert_quorum = 'auto', insert_quorum_parallel = 0"
+            )
+        except Exception:
+            raise error from None
+        self._untracked = True
+        if self._log:
+            self._log(
+                f"⚠ Query tracking failed ({error}); this run continues untracked, "
+                "and --cancel-lock-queries cannot cancel it."
+            )
 
     def _record(
         self, context: QueryContext, phase: QueryPhase, sql: str, query_id: str,
@@ -197,8 +244,8 @@ class QueryTracker:
                 "Explicit recovery requires unchanged recorded forward SQL; no statement was sent."
             )
         if self._recovery and (
-            intent["kind"] not in {"insert", "truncate"}
-            or recorded_target not in self._recovery.targets
+            intent["kind"] not in {"insert", "replace"}
+            or recorded_target not in self._targets
             or (recorded_source is not None and recorded_source not in self._recovery.sources)
         ):
             raise cancellation_error(
@@ -275,12 +322,18 @@ def classify_query_intent(  # noqa: PLR0911 — mirrors the small TS whitelist's
         return tokens[index].text.upper()
 
     if phase == "compensation":
-        if word(0) != "TRUNCATE" or word(1) != "TABLE":
+        # Exactly CREATE OR REPLACE TABLE t AS t: the same definition, empty, under
+        # a new UUID, so a statement still writing to the old table stores nothing.
+        if [word(index) for index in range(4)] != ["CREATE", "OR", "REPLACE", "TABLE"]:
             return QueryClassification("unsupported")
-        parsed = _read_target(tokens, 2, database)
+        parsed = _read_target(tokens, 4, database)
+        if parsed is None or word(parsed[1]) != "AS":
+            return QueryClassification("unsupported")
+        source_table = _read_target(tokens, parsed[1] + 1, database)
         return (
-            QueryClassification("truncate", parsed[0])
-            if parsed and parsed[1] == len(tokens) else QueryClassification("unsupported")
+            QueryClassification("replace", parsed[0])
+            if source_table and source_table[1] == len(tokens) and source_table[0] == parsed[0]
+            else QueryClassification("unsupported")
         )
     if word(0) != "INSERT" or word(1) != "INTO":
         return QueryClassification("unsupported")
@@ -311,7 +364,7 @@ def classify_query_intent(  # noqa: PLR0911 — mirrors the small TS whitelist's
     )
     return (
         QueryClassification("insert", target, source)
-        if compensation and compensation.kind == "truncate" and compensation.target == target
+        if compensation and compensation.kind == "replace" and compensation.target == target
         else QueryClassification("unsupported")
     )
 
