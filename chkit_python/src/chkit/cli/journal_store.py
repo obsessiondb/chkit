@@ -318,6 +318,7 @@ class JournalStore:
         "_columns_unreadable",
         "_database_missing",
         "_database_name_read",
+        "_fanout_override",
         "_fingerprint_column",
         "_fingerprint_column_added",
         "_last_written",
@@ -328,11 +329,13 @@ class JournalStore:
     )
 
     def __init__(
-        self, client: ClickHouseClient, cluster: str | None = None
+        self, client: ClickHouseClient, cluster: str | None = None,
+        *, fanout_override: ReplicaFanout | None = None,
     ) -> None:
         self._client: ClickHouseClient = client
         self._table: str = resolve_journal_table_name()
         self._cluster: str | None = cluster
+        self._fanout_override = fanout_override
         self._on_cluster: str = on_cluster_clause(cluster)
         self._bootstrapped: bool = False
         self._database_missing: bool = False
@@ -518,6 +521,9 @@ class JournalStore:
         user that cannot query it stops the run, rather than skip the waits
         that keep journal writes off a replica without the journal (#700).
         """
+        # Explicit recovery supplies attested UUID coverage, including one server.
+        if self._fanout_override is not None:
+            return self._fanout_override if self._fanout_override.replicas > 1 else None
         return self._while_database_propagates(
             "discover the replicas of the journal",
             lambda: resolve_replica_fanout_or_raise(self._client, self._cluster),

@@ -11,6 +11,7 @@ export type MigrateErrorCode =
   | 'migrate_locked'
   | 'migrate_lock_lost'
   | 'migrate_lock_unverifiable'
+  | 'migrate_cancellation_failed'
   | 'journal_changed'
 
 /** A migrate failure with a stable code for `--json` consumers. */

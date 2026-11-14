@@ -8,6 +8,7 @@ import threading
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any
+from unittest.mock import MagicMock
 
 import pytest
 
@@ -21,6 +22,7 @@ from chkit.cli.commands.migrate_async_apply import (
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_query_intents import QueryContext
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.clickhouse.client import QueryResult, QueryStatus
 
@@ -657,6 +659,42 @@ def test_apply_async_submit_rejected_before_start_is_recorded_failed() -> None:
     )
     # The submit error is the command's error; no progress line repeats it (#561).
     assert lines == [f"  alter_table_modify_column: submitting async (query_id={_QUERY_ID})"]
+
+
+@pytest.mark.parametrize("intent_fails", [False, True])
+def test_async_intent_follows_started_write_and_precedes_unchanged_submit_id(
+    intent_fails: bool,
+) -> None:
+    client = _ScriptedClient([
+        QueryStatus(status="unknown"), QueryStatus(status="finished"),
+    ])
+    journal = _FakeJournalStore()
+    tracker = MagicMock()
+    recorded_ids: list[str] = []
+
+    def record(_context: QueryContext, query_id: str) -> None:
+        assert journal.state is not None
+        assert journal.state.operations[0].status == "started"
+        assert journal.state.operations[0].query_id == query_id
+        assert client.submitted == []
+        recorded_ids.append(query_id)
+        if intent_fails:
+            raise RuntimeError("intent unavailable")
+
+    tracker.record_async.side_effect = record
+    input_ = _input(client=client, journal=journal, query_tracker=tracker)
+    if intent_fails:
+        with pytest.raises(RuntimeError, match="intent unavailable"):
+            apply_async_statement(input_)
+        assert client.submitted == []
+        assert journal.state is not None
+        assert journal.state.operations[0].status == "started"
+    else:
+        apply_async_statement(input_)
+        assert [query_id for _sql, query_id in client.submitted] == recorded_ids
+    assert recorded_ids == [make_deterministic_query_id(
+        SERVER_DATABASE, "_chkit_migrations", input_.migration_name, 0,
+    )]
 
 
 @pytest.mark.parametrize("submit_fails", [True, False])

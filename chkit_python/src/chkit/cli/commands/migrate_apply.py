@@ -34,6 +34,7 @@ from chkit.cli.commands.migrate_errors import (
     recorded_statements_changed_error,
     statement_split_changed_error,
 )
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
     StatementIdentity,
@@ -108,6 +109,7 @@ class ApplyMigrationInput:
     settings: dict[str, str] | None = None
     # The command's parsed flags, keyed as in TS, for the apply hooks.
     flags: dict[str, Any] = field(default_factory=dict)
+    query_tracker: QueryTracker | None = None
 
 
 class StatementError(RuntimeError):
@@ -218,6 +220,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         before_retry=operation.before_retry,
                         log=input_.log,
                         settings=input_.settings,
+                        query_tracker=input_.query_tracker,
                     )
                 )
             except Exception as error:
@@ -272,6 +275,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     settings=input_.settings,
                     log=input_.log,
                     status=prior_attempt.status,
+                    query_tracker=input_.query_tracker,
+                    query_context=QueryContext(file, index, statement, operation.before_retry),
                 )
             except Exception as error:
                 raise statement_error(
@@ -307,6 +312,14 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     cluster=cluster,
                     settings=input_.settings,
                     log=input_.log,
+                )
+            elif input_.query_tracker is not None:
+                input_.query_tracker.command(
+                    QueryContext(
+                        file, index, statement,
+                        operation.before_retry if operation is not None else None,
+                    ),
+                    "forward", statement, input_.settings,
                 )
             else:
                 input_.client.execute(statement, settings=input_.settings)
@@ -514,6 +527,8 @@ def _run_before_retry(
     settings: dict[str, str] | None,
     log: Callable[[str], None],
     status: OperationStatus,
+    query_tracker: QueryTracker | None = None,
+    query_context: QueryContext | None = None,
 ) -> None:
     """Run a statement's ``-- before-retry:`` SQL before chkit attempts it again
     after an earlier attempt failed or was interrupted (TS ``runBeforeRetry``).
@@ -526,7 +541,10 @@ def _run_before_retry(
         wait_for_exchange(client, statement, cluster=cluster)
     attempt = "failed" if status == "failed" else "was interrupted"
     log(f"  {operation_type}: an earlier attempt {attempt} — running before-retry SQL")
-    client.execute(before_retry, settings=settings)
+    if query_tracker is not None and query_context is not None:
+        query_tracker.command(query_context, "compensation", before_retry, settings)
+    else:
+        client.execute(before_retry, settings=settings)
 
 
 def _accept_edited_migration(

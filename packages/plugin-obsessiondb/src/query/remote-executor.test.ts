@@ -1,7 +1,5 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ClickHouseExecutor } from '@chkit/clickhouse'
-
 import {
 	createRemoteExecutor,
 	normalizeQueryData,
@@ -165,6 +163,115 @@ describe('createRemoteExecutor command', () => {
 	})
 })
 
+describe('createRemoteExecutor cancellation transport', () => {
+	test('persists an id and rechecks ownership before sending a write with its settings', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			const events: string[] = []
+			expect(remote.commandTracked).toBeFunction()
+			await remote.commandTracked('INSERT INTO t SELECT 1', () => {
+				events.push('check')
+			}, async () => {
+				expect(workbench.inputs).toHaveLength(0)
+				events.push('intent')
+				return 'tracked-1'
+			}, { async_insert: 1, query_id: 'ignored', log_comment: 'kept' })
+			expect(events).toEqual(['check', 'intent', 'check'])
+			expect(workbench.inputs).toEqual([{
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-1',
+				settings: { async_insert: 1, log_comment: 'kept' },
+			}])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('defaults tracked writes to synchronous inserts', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			await remote.commandTracked('INSERT INTO t SELECT 1', () => {}, async () => 'tracked-sync')
+			expect(workbench.inputs).toEqual([{
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync',
+				settings: { async_insert: 0 },
+			}])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('does not send when ownership is lost while recording the intent', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+			let held = true
+			await expect(remote.commandTracked('TRUNCATE TABLE t', () => {
+				if (!held) throw new Error('lost ownership')
+			}, async () => {
+				held = false
+				return 'tracked-2'
+			})).rejects.toThrow('lost ownership')
+			expect(workbench.inputs).toHaveLength(0)
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('bounds a stalled response body rather than waiting for fetch headers only', async () => {
+		const server = Bun.serve({
+			port: 0,
+			fetch: () => new Response(new ReadableStream({ start(controller) {
+				controller.enqueue(new TextEncoder().encode('{"json":'))
+			} }), { headers: { 'Content-Type': 'application/json' } }),
+		})
+		try {
+			const remote = connect(`http://127.0.0.1:${server.port}`)
+			await expect(remote.queryControl('SELECT 1', 100)).rejects.toThrow('deadline expired')
+		} finally {
+			server.stop(true)
+		}
+	})
+
+	test('forwards receipt control id at top level and settings without a conflicting query_id', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			await connect(workbench.url).queryControl('SELECT * FROM system.one', 1000, { queryId: 'receipt-control', settings: { log_queries: 1, query_id: 'ignored', use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } })
+			expect(workbench.inputs).toHaveLength(1)
+			expect(workbench.inputs[0]).toMatchObject({ queryId: 'receipt-control', settings: { log_queries: 1, use_query_cache: 0, enable_reads_from_query_cache: 0, enable_writes_to_query_cache: 0 } })
+			expect(workbench.inputs[0]?.settings).not.toHaveProperty('query_id')
+			const cacheSettings = { use_query_cache: 1, enable_reads_from_query_cache: 1, enable_writes_to_query_cache: 1 } as const
+			await connect(workbench.url).query('SELECT 1', cacheSettings)
+			expect(workbench.inputs[1]?.settings).toMatchObject(cacheSettings)
+		} finally { workbench.stop() }
+	})
+	for (const truncated of [true, false]) {
+		test(`control refuses API truncation without changing ordinary reads (${truncated})`, async () => {
+			const workbench = startScriptedWorkbench({ replicas: 1, truncated })
+			try {
+				const remote = connect(workbench.url)
+				const control = remote.queryControl('SELECT * FROM system.one', 1000, { settings: { result_overflow_mode: 'break', max_result_rows: 1 } })
+				if (truncated) await expect(control).rejects.toThrow('truncated')
+				else expect(await control).toEqual([{ replicas: '1' }])
+				expect(workbench.inputs[0]?.settings).toMatchObject({ result_overflow_mode: 'throw', group_by_overflow_mode: 'throw', set_overflow_mode: 'throw', max_result_rows: 1 })
+				expect(await remote.query('SELECT * FROM system.one')).toEqual([{ replicas: '1' }])
+			} finally { workbench.stop() }
+		})
+	}
+	test('decodes control rows and propagates server errors', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 2, processesError: 'ACCESS_DENIED' })
+		try {
+			const remote = connect(workbench.url)
+			expect(await remote.queryControl('SELECT * FROM system.one', 1000)).toEqual([{ replicas: '2' }])
+			await expect(remote.queryControl('SELECT * FROM system.processes', 1000)).rejects.toThrow('ACCESS_DENIED')
+			await expect(remote.queryControl('SELECT 1', 0)).rejects.toThrow('deadline expired')
+			expect(workbench.inputs).toHaveLength(2)
+		} finally {
+			workbench.stop()
+		}
+	})
+})
+
 // #246: the query runs on the replica that received it, so on a multi-replica
 // service queryStatus reads processes and query_log on every replica.
 describe('createRemoteExecutor queryStatus', () => {
@@ -285,11 +392,14 @@ describe('createRemoteExecutor introspection', () => {
 	})
 })
 
-function connect(baseUrl: string): ClickHouseExecutor {
-	return createRemoteExecutor({
+function connect(baseUrl: string) {
+	const executor = createRemoteExecutor({
 		credentials: { access_token: 'test', base_url: baseUrl },
 		serviceSlug: 'test',
 	})
+	const { commandTracked, queryControl } = executor
+	if (!commandTracked || !queryControl) throw new Error('Missing cancellation transport')
+	return { ...executor, commandTracked, queryControl }
 }
 
 // Stands in for the workbench API: answers the replica probe with `replicas`,
@@ -298,6 +408,7 @@ function connect(baseUrl: string): ClickHouseExecutor {
 function startScriptedWorkbench(script: {
 	replicas: number
 	processesError?: string
+	truncated?: boolean
 	tables?: { meta: string[]; data: string[][] }
 }) {
 	const queries: string[] = []
@@ -312,7 +423,7 @@ function startScriptedWorkbench(script: {
 			queries.push(input.query)
 			if (input.query.includes('system.one')) {
 				return Response.json({
-					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1 },
+					json: { data: [[String(script.replicas)]], meta: [{ name: 'replicas', type: 'UInt64' }], rows: 1, ...(script.truncated !== undefined ? { truncated: script.truncated } : {}) },
 				})
 			}
 			if (script.tables && input.query.includes('FROM system.tables')) {

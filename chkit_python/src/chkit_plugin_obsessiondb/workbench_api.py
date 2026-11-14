@@ -43,6 +43,7 @@ class WorkbenchExecuteResult(BaseModel):
     statistics: dict[str, Any] | None = None
     query_id: str | None = None
     error: str | None = None
+    truncated: bool = False
 
 
 def workbench_query_execute(
@@ -52,6 +53,7 @@ def workbench_query_execute(
     query: str,
     settings: dict[str, Any] | None = None,
     query_id: str | None = None,
+    timeout: httpx.Timeout | float = QUERY_TIMEOUT,
 ) -> WorkbenchExecuteResult:
     """``workbench.query.execute`` — proxy a SQL string through ObsessionDB.
 
@@ -63,5 +65,5 @@ def workbench_query_execute(
         payload["settings"] = settings
     if query_id is not None:
         payload["queryId"] = query_id
-    body = _rpc_post(creds, "workbench/query/execute", payload, timeout=QUERY_TIMEOUT)
+    body = _rpc_post(creds, "workbench/query/execute", payload, timeout=timeout)
     return WorkbenchExecuteResult.model_validate(body)

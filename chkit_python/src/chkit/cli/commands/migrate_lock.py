@@ -48,14 +48,18 @@ import threading
 import time
 import uuid
 from collections.abc import Callable
+from contextlib import suppress
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
-from typing import Any
+from typing import TYPE_CHECKING, Any
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.clickhouse.client import clickhouse_error_message
 from chkit.clickhouse.replicas import ReplicaFanout
+
+if TYPE_CHECKING:
+    from chkit.cli.commands.migrate_query_intents import QueryIdentity
 
 LOCK_ROW_PREFIX = "__chkit_migrate_lock__/"
 # Reads of a heartbeat's row, and the wait between two (ms).
@@ -88,6 +92,14 @@ class LockTarget:
     database: str
     journal_table: str
     fanout: ReplicaFanout | None
+
+
+@dataclass(frozen=True, slots=True)
+class TakeoverReservation:
+    claim: str
+    holder: str
+    before_release: Callable[[], None] | None = None
+    resume_pending: Callable[[list[dict[str, str]]], None] | None = None
 
 
 @dataclass(frozen=True, slots=True)
@@ -419,6 +431,10 @@ class MigrateLock:
         self._thread = threading.Thread(target=self._run, name="chkit-migrate-lock", daemon=True)
         self._thread.start()
 
+    @property
+    def claim_id(self) -> str:
+        return self._name.removeprefix(LOCK_ROW_PREFIX)
+
     def _holder_json(self, beat: int) -> str:
         return json.dumps({**self._holder, "beat": beat}, separators=(",", ":"), ensure_ascii=False)
 
@@ -552,6 +568,8 @@ def acquire_migrate_lock(
     log: Callable[[str], None],
     heartbeat_client: Any = None,
     deps: LockDeps | None = None,
+    query_tracking: QueryIdentity | None = None,
+    takeover: TakeoverReservation | None = None,
 ) -> MigrateLock:
     """Takes the migrate lock, or raises ``migrate_locked`` naming the holder.
 
@@ -567,8 +585,19 @@ def acquire_migrate_lock(
         "chkitVersion": __version__,
         "startedAt": datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%S.%f")[:-3] + "Z",
         "beat": 0,
+        **({"queries": query_tracking.to_payload()} if query_tracking is not None else {}),
+        **({"recoveryOf": takeover.claim} if takeover is not None else {}),
     }
     holder_json = json.dumps(holder, separators=(",", ":"), ensure_ascii=False)
+    if takeover is not None:
+        if break_lock != takeover.claim:
+            raise MigrateError(
+                "invalid_usage", "Cancellation requires the same --break-lock claim.",
+            )
+        return _takeover_lock(
+            client, target, takeover=takeover, holder=holder, holder_json=holder_json,
+            heartbeat_client=heartbeat_client, deps=deps, log=log,
+        )
     if break_lock is not None:
         _break_claim(client, target, break_lock, log)
 
@@ -611,6 +640,72 @@ def acquire_migrate_lock(
         attempt += 1
         spread = timings.backoff_max_ms - timings.backoff_min_ms
         deps.sleep(timings.backoff_min_ms + deps.random() * spread)
+
+
+def _takeover_lock(
+    client: Any, target: LockTarget, *, takeover: TakeoverReservation, holder: dict[str, Any],
+    holder_json: str, heartbeat_client: Any, deps: LockDeps, log: Callable[[str], None],
+) -> MigrateLock:
+    name = f"{LOCK_ROW_PREFIX}{deps.new_id()}"
+    sent_at = deps.now()
+    try:
+        _write_claim(client, target, name, holder_json, released=False)
+        predecessor_name = f"{LOCK_ROW_PREFIX}{takeover.claim}"
+        claims = _read_claims(client, target, predecessor_name)
+        own = next((claim for claim in claims if claim.name == name), None)
+        predecessor = next((claim for claim in claims if claim.name == predecessor_name), None)
+        others = [
+            claim for claim in claims
+            if not claim.released and claim.name not in {name, predecessor_name}
+        ]
+        if own is None or own.released or deps.now() - sent_at > deps.timings.valid_ms:
+            raise _unverifiable_error(target)
+        if predecessor is None or predecessor.raw_holder != takeover.holder:
+            raise MigrateError(
+                "migrate_cancellation_failed",
+                "The predecessor claim changed or disappeared before takeover; "
+                "no query was canceled.",
+            )
+        if others:
+            if takeover.resume_pending is None:
+                raise _locked_error(target, others, deps.timings)
+            takeover.resume_pending([
+                {"claim": item.name.removeprefix(LOCK_ROW_PREFIX), "holder": item.raw_holder}
+                for item in others
+            ])
+            live = [claim for claim in others if claim.age_ms < deps.timings.lease_ms]
+            if live:
+                raise _locked_error(target, live, deps.timings)
+            alive = _release_stopped_claims(client, target, others, deps, log)
+            if alive:
+                raise _locked_error(target, alive, deps.timings)
+            _write_claim(client, target, name, holder_json, released=True)
+            return _takeover_lock(
+                client, target, takeover=takeover, holder=holder, holder_json=holder_json,
+                heartbeat_client=heartbeat_client, deps=deps, log=log,
+            )
+        if takeover.before_release is not None:
+            takeover.before_release()
+        if deps.now() - sent_at > deps.timings.valid_ms:
+            raise _unverifiable_error(target)
+        if not predecessor.released:
+            _write_claim(client, target, predecessor_name, predecessor.raw_holder, released=True)
+        current = _read_claims(client, target, name)
+        confirmed = next((claim for claim in current if claim.name == name), None)
+        remaining = [claim for claim in current if not claim.released and claim.name != name]
+        if confirmed is None or confirmed.released or deps.now() - sent_at > deps.timings.valid_ms:
+            raise _unverifiable_error(target)
+        if remaining:
+            raise _locked_error(target, remaining, deps.timings)
+        return MigrateLock(
+            client, heartbeat_client if heartbeat_client is not None else client, target,
+            name=name, holder=holder, confirmed_at=sent_at, version=confirmed.version,
+            deps=deps, log=log,
+        )
+    except BaseException:
+        with suppress(Exception):
+            _write_claim(client, target, name, holder_json, released=True)
+        raise
 
 
 class GuardedClient:

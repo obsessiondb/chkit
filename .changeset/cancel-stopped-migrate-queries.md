@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+Add `migrate --apply --break-lock <claim> --cancel-lock-queries` to recover a stopped run's data loads: chkit replaces each target with an empty copy before reloading, so a load still running on the server cannot add rows, including on SharedMergeTree in ObsessionDB and ClickHouse Cloud.

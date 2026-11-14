@@ -1,5 +1,6 @@
 import type {
 	ClickHouseExecutor,
+	QueryControlOptions,
 	ClickHouseInsertParams,
 	ClickHouseJsonQueryResult,
 	ClickHouseSettings,
@@ -7,6 +8,7 @@ import type {
 	SchemaObjectRef,
 } from '@chkit/clickhouse'
 import {
+	STRICT_CONTROL_SETTINGS,
 	allReplicas,
 	buildIntrospectedTables,
 	inferSchemaKindFromEngine,
@@ -113,6 +115,54 @@ export function createRemoteExecutor(deps: {
 	const client = createApiClient(credentials)
 
 	const executor: ClickHouseExecutor = {
+		queryControlCluster: 'default',
+		async commandTracked(sql, check, beforeAttempt, settings?) {
+			check()
+			const queryId = await beforeAttempt()
+			check()
+			const apiSettings = toApiSettings(settings) ?? {}
+			delete apiSettings.query_id
+			const res = await client.workbench.query.execute({
+				serviceSlug,
+				query: sql,
+				queryId,
+				settings: { async_insert: 0, ...apiSettings },
+			})
+			throwIfError(res)
+		},
+
+		async queryControl<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]> {
+			if (!Number.isFinite(timeoutMs) || timeoutMs <= 0) {
+				throw new Error('Cancellation control deadline expired')
+			}
+			const settings = toApiSettings({ ...options?.settings, ...STRICT_CONTROL_SETTINGS })
+			if (settings) delete settings.query_id
+			const controller = new AbortController()
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const deadline = new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
+					reject(new Error('Cancellation control deadline expired'))
+					controller.abort()
+				}, timeoutMs)
+			})
+			try {
+				// The race also bounds client-side error enrichment after an HTTP
+				// response. Aborting fetch alone does not bound those extra lookups.
+				const res = await Promise.race([
+					client.workbench.query.execute(
+						{ serviceSlug, query: sql, ...(options?.queryId ? { queryId: options.queryId } : {}), ...(settings ? { settings } : {}) },
+						{ signal: controller.signal },
+					),
+					deadline,
+				])
+				throwIfError(res)
+				if ('truncated' in res && res.truncated === true) throw new Error('Cancellation control result was truncated; complete proof is required')
+				return normalizeQueryData<T>(res)
+			} finally {
+				clearTimeout(timer)
+			}
+		},
+
 		async command(sql, settings?) {
 			const apiSettings = toApiSettings(settings)
 			const res = await client.workbench.query.execute({
