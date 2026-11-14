@@ -118,9 +118,8 @@ describe('comments e2e (#464)', () => {
     240_000
   )
 
-  // ObsessionDB applies MODIFY COMMENT on one replica only; the server fix is
-  // tracked from #407. chkit emits the same SQL on every target, and verify
-  // still runs these cases.
+  // ObsessionDB applies MODIFY COMMENT on one replica only, a server bug. chkit
+  // emits the same SQL on every target, and verify still runs these cases.
   test.skipIf(onObsessionDB)(
     'table, view, materialized view and dictionary comments: create, change, remove, empty, pull round trip and server drift',
     async () => {
