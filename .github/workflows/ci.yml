@@ -25,6 +25,8 @@ jobs:
         if: github.event_name == 'pull_request'
         uses: fallow-rs/fallow@v3
         with:
+          # 3.43.0 fails its binary check (@fallow-cli/linux-x64-musl missing).
+          version: 3.42.0
           format: sarif
           fail-on-issues: false
 
