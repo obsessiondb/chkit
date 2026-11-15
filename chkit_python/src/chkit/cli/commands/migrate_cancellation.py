@@ -6,6 +6,7 @@ import json
 import logging
 import re
 import time
+from collections.abc import Sequence
 from dataclasses import dataclass, field, replace
 from types import SimpleNamespace
 from typing import Any, Literal, Protocol
@@ -28,6 +29,7 @@ from chkit.cli.commands.migrate_query_intents import (
     classify_query_intent,
     sql_string,
 )
+from chkit.clickhouse.control import STRICT_CONTROL_SETTINGS
 from chkit.clickhouse.replicas import ReplicaFanout
 from chkit.core.identifier import quote_identifier
 from chkit.core.sql_fingerprint import statement_fingerprint
@@ -187,7 +189,12 @@ class _Control:
         self, sql: str, *, query_id: str | None = None, settings: dict[str, Any] | None = None
     ) -> list[dict[str, Any]]:
         if self._fallback:
-            return list(self._client.query(sql).rows)
+            # The journal store's permissions (no replica-wide control read),
+            # but fresh and complete: a cached or truncated history could hide
+            # an unfinished recovery.
+            if callable(getattr(self._client, "query_control", None)):
+                return list(self._client.query_control(sql, _DEADLINE_MS).rows)
+            return list(self._client.query(sql, dict(STRICT_CONTROL_SETTINGS)).rows)
         options: dict[str, Any] = {}
         if query_id is not None:
             options["query_id"] = query_id
@@ -243,13 +250,9 @@ def prepare_cancellation(
         )
     resolution = _read_resolution(conn, target, identity)
     abandoned = _read_abandoned(conn, _source(target, identity), claim)
-    intents = [
-        intent for intent in _validate_intents(
-            conn, target, identity, claim, allow_empty=inherited is not None,
-            resolution=resolution,
-        )
-        if intent["migration"] not in abandoned
-    ]
+    intents = _validate_intents(
+        conn, target, identity, claim, allow_empty=inherited is not None, resolution=resolution,
+    )
     obligations = _unique_obligations(_validate_obligations(conn, identity, [
         *(
             item for item in (inherited.context.obligations if inherited is not None else [])
@@ -454,7 +457,8 @@ def cancel_predecessor(
         _validate_obligations(conn, identity, plan.obligations, target, resolution)
     )
     _assert_intents_covered(intents, obligations)
-    ids = [intent["queryId"] for intent in intents]
+    # Abandoned statements are still stopped and waited for.
+    ids = _recorded_statements(conn, _source(target, identity), claim)[0]
     if ids:
         id_list = ",".join(sql_string(query_id) for query_id in ids)
         processes = conn.query(
@@ -512,8 +516,10 @@ def finish_recovery(
     own_intents = _validate_intents(
         conn, target, context.identity, context.claim, allow_empty=True, resolution=resolution,
     )
+    abandoned = _read_abandoned(conn, _source(target, context.identity), context.claim)
     obligations = _unique_obligations(_validate_obligations(conn, context.identity, [
-        *context.obligations, *_obligations_from_intents(own_intents)
+        *(item for item in context.obligations if item.migration not in abandoned),
+        *_obligations_from_intents(own_intents),
     ], target, resolution))
     _assert_journal_coverage(conn, target, context.identity, obligations)
     _write_recovery_marker(conn, target, context, "completed")
@@ -521,7 +527,7 @@ def finish_recovery(
 
 def _assert_journal_coverage(
     conn: _Control, target: LockTarget, identity: QueryIdentity,
-    obligations: list[RecoveryObligation],
+    obligations: Sequence[RecoveryObligation | _StatementRef],
 ) -> None:
     names = list(dict.fromkeys(item.migration for item in obligations))
     rows = conn.query(
@@ -592,17 +598,20 @@ def abandon_recovery(
     reads = _Control(client, fallback=True)
     history = _recovery_history(reads, target)
     for record in history.values():
-        if record.completed or not any(
-            item.migration == migration for item in record.context.obligations
-        ):
+        if record.completed:
             continue
         conn = _Control(client, lock)
         source = _source(target, record.context.identity)
+        # The recovering run's own recorded statements (an extra migration it
+        # sent) hold the barrier as much as the inherited ones.
+        own_ids, own = _recorded_statements(conn, source, record.context.claim)
+        held: list[RecoveryObligation | _StatementRef] = [*record.context.obligations, *own]
+        if not any(item.migration == migration for item in held):
+            continue
+        _drain_claim(client, record.context.identity, own_ids, lock)
         _write_abandon(conn, target, source, record.context.claim, migration)
         abandoned = _read_abandoned(conn, source, record.context.claim)
-        remaining = [
-            item for item in record.context.obligations if item.migration not in abandoned
-        ]
+        remaining = [item for item in held if item.migration not in abandoned]
         if remaining:
             try:
                 _assert_journal_coverage(conn, target, record.context.identity, remaining)
@@ -629,14 +638,13 @@ def abandon_recovery(
         identity = _parse_identity(_object_json(row["checksum"]).get("identity"))
         conn = _Control(client, lock)
         source = _source(target, identity)
-        prefix = f"{QUERY_INTENT_PREFIX}{claim}/"
-        intents = _variants(conn, source, f"startsWith(name, {sql_string(prefix)})")
-        migrations = {
-            data["migration"] for data in (_object_json(item["checksum"]) for item in intents)
-            if isinstance(data.get("migration"), str)
-        }
+        ids, recorded = _recorded_statements(conn, source, claim)
+        migrations = {item.migration for item in recorded}
         if migration not in migrations:
             continue
+        # The takeover may have stopped while waiting for these: a replace of the
+        # stopped run still running could land after a later reload.
+        _drain_claim(client, identity, ids, lock)
         _write_abandon(conn, target, source, claim, migration)
         if migrations - _read_abandoned(conn, source, claim):
             raise cancellation_error(
@@ -644,6 +652,50 @@ def abandon_recovery(
                 "other migrations. Resume it with --cancel-lock-queries, or abandon them too."
             )
         _write_marker(client, target, CancellationPlan(claim, "", identity), "completed", conn)
+
+
+@dataclass(frozen=True)
+class _StatementRef:
+    migration: str
+    statement_index: int
+    forward_fingerprint: str
+
+
+def _recorded_statements(
+    conn: _Control, source: str, claim: str,
+) -> tuple[list[str], list[_StatementRef]]:
+    """A claim's recorded query ids and statements, read without validating live tables."""
+    prefix = f"{QUERY_INTENT_PREFIX}{claim}/"
+    ids: list[str] = []
+    statements: list[_StatementRef] = []
+    for row in _variants(conn, source, f"startsWith(name, {sql_string(prefix)})"):
+        query_id = row["name"][len(prefix):]
+        if query_id == UNTRACKED:
+            continue
+        data = _object_json(row["checksum"])
+        index = data.get("statementIndex")
+        if (
+            not _UUID.fullmatch(query_id) or not isinstance(data.get("migration"), str)
+            or not isinstance(index, int) or isinstance(index, bool)
+            or not isinstance(data.get("forwardFingerprint"), str)
+        ):
+            raise cancellation_error("Malformed query intent; the recovery barrier remains.")
+        ids.append(query_id)
+        statements.append(_StatementRef(data["migration"], index, data["forwardFingerprint"]))
+    return ids, statements
+
+
+def _drain_claim(
+    client: Any, identity: QueryIdentity, ids: list[str], lock: _LockCheck | None,
+) -> None:
+    """Before --abandon releases a barrier: KILL the claim's queries, prove none still runs."""
+    if not ids:
+        return
+    conn = _Control(client, lock)
+    _assert_identity_topology(conn, identity)
+    _kill_recorded_queries(conn, identity, ids)
+    # Raises, before anything is written, while one may still run.
+    _wait_for_queries_gone(conn, identity, ids)
 
 
 def _write_abandon(
@@ -790,7 +842,15 @@ def _validate_intents(
             "The predecessor ran statements chkit could not track, so it cannot be cancelled. "
             "Stop it and recover by hand."
         )
-    parsed = [(row["name"][len(prefix):], _object_json(row["checksum"])) for row in rows]
+    # Migrations --abandon released from the claim are left out before
+    # validation: their tables may legitimately have changed.
+    abandoned = _read_abandoned(conn, _source(target, identity), claim)
+    parsed = [
+        (query_id, data) for query_id, data in (
+            (row["name"][len(prefix):], _object_json(row["checksum"])) for row in rows
+        )
+        if not isinstance(data.get("migration"), str) or data["migration"] not in abandoned
+    ]
     intents: list[dict[str, Any]] = []
     for query_id, data in parsed:
         recorded = _parse_identity(data)

@@ -35,7 +35,7 @@ function fake(identity: QueryIdentity = IDENTITY) {
     replaceAfterReads: -1, replacedServers: [] as string[], tableReads: 0, compensated: false, untracked: false,
     loseAfterKill: false, killFailure: false, failCompletion: false, held: true, killed: false, unreadable: false, legacy: false,
     // Polls of system.processes that still find a recorded statement; `lateUUID` lands once it ends.
-    runningPolls: 0, lateUUID: '' }
+    runningPolls: 0, lateUUID: '', processesUnreadable: false }
   const db = {
     queryControlCluster: 'declared',
     commandTracked: async () => {},
@@ -78,6 +78,7 @@ function fake(identity: QueryIdentity = IDENTITY) {
         return identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: state.principal, uuid: sql.includes("name = 'frozen'") ? state.sourceUUID : sql.includes("name = 'metrics'") ? state.metricsUUID : state.replacedServers.includes(server_uuid) ? REPLACED : state.targetUUID, engine: sql.includes("name = 'frozen'") ? state.sourceEngine : state.engine, dependencies: state.dependencies, database_engine: state.databaseEngine }))
       }
       if (sql.startsWith('SELECT count() AS n') && sql.includes('system.processes')) {
+        if (state.processesUnreadable) return []
         if (state.runningPolls > 0) return [{ n: state.runningPolls-- }]
         if (state.lateUUID) state.targetUUID = state.lateUUID
         return [{ n: '0' }]
@@ -416,5 +417,68 @@ describe('--abandon releases a stuck recovery (#733 review B)', () => {
     await abandonRecovery(f.db, TARGET, 'load.sql', f.lock)
     expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(true)
     await assertCancellationClear(f.db, TARGET)
+  })
+
+  test('waits for the stopped run\'s statements before releasing, and keeps the barrier when it cannot tell (#733 re-review 1)', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    await markCancellationPending(f.db, TARGET, plan)
+    f.state.processesUnreadable = true
+    await expect(abandonRecovery(f.db, TARGET, 'load.sql', f.lock)).rejects.toThrow('running queries')
+    expect([...f.markers.keys()].filter((name) => !name.endsWith('/pending'))).toEqual([])
+    await expect(assertCancellationClear(f.db, TARGET)).rejects.toThrow('unfinished')
+    f.state.processesUnreadable = false
+    f.state.runningPolls = 2
+    await abandonRecovery(f.db, TARGET, 'load.sql', f.lock)
+    const sql = f.calls.map((call) => call.sql)
+    const abandonWrite = sql.findIndex((statement) => statement.startsWith('INSERT') && statement.includes('__chkit_migrate_recovery_abandon__/'))
+    expect(sql.findIndex((statement) => statement.startsWith('KILL'))).toBeLessThan(abandonWrite)
+    expect(sql.findLastIndex((statement) => statement.startsWith('SELECT count() AS n'))).toBeLessThan(abandonWrite)
+    expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(true)
+  })
+
+  test('releases a migration the recovering run added itself, and resume skips its table (#733 re-review 3)', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    await markCancellationPending(f.db, TARGET, plan)
+    await cancelPredecessor(f.db, TARGET, plan, f.lock)
+    // The recovery's own extra migration b.sql was sent and failed; its table
+    // was then recreated, so its recorded UUID no longer matches.
+    const forward = statementFingerprint('INSERT INTO app.metrics SELECT 2')
+    const own: QueryIntent = { ...IDENTITY, claim: SUCCESSOR, queryId: '00000000-0000-4000-8000-000000000010', migration: 'b.sql', statementIndex: 0, phase: 'forward', kind: 'insert', fingerprint: forward, forwardFingerprint: forward, target: { database: 'app', name: 'metrics', uuid: SOURCE, engine: 'MergeTree' } }
+    f.intents.set(SUCCESSOR, [own])
+    f.state.metricsUUID = '00000000-0000-4000-8000-000000000011'
+    await expect(prepareCancellation(f.db, TARGET, IDENTITY, SUCCESSOR)).rejects.toThrow('no longer has the UUID')
+    // load.sql still unfinished: b.sql is released, the barrier stays for load.sql.
+    await expect(abandonRecovery(f.db, TARGET, 'b.sql', f.lock)).rejects.toThrow('still holds other migrations')
+    expect(f.markers.has(`__chkit_migrate_recovery_abandon__/${SUCCESSOR}/b.sql`)).toBe(true)
+    expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/completed`)).toBe(false)
+    const resumed = await prepareCancellation(f.db, TARGET, IDENTITY, SUCCESSOR)
+    expect(resumed.obligations.map((item) => item.migration)).toEqual(['load.sql'])
+    f.state.journalCompleted = true
+    await abandonRecovery(f.db, TARGET, 'b.sql', f.lock)
+    expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/completed`)).toBe(true)
+    await assertCancellationClear(f.db, TARGET)
+  })
+})
+
+describe('ordinary barrier reads (#733 re-review 2)', () => {
+  test('never trust a cached journal history', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    await markCancellationPending(f.db, TARGET, plan)
+    // A profile-level query cache would answer ordinary reads with the old, empty history.
+    const cached = { ...f.db, query: async () => [] } as unknown as ClickHouseExecutor
+    await expect(assertCancellationClear(cached, TARGET)).rejects.toThrow('unfinished')
+    // Without a control read, the ordinary read itself disables the cache and truncation.
+    const settingsSeen: unknown[] = []
+    const plain = {
+      async query(sql: string, settings?: Record<string, unknown>) {
+        settingsSeen.push(settings)
+        return await f.db.queryControl?.(sql, 0) ?? []
+      },
+    } as unknown as ClickHouseExecutor
+    await expect(assertCancellationClear(plain, TARGET)).rejects.toThrow('unfinished')
+    expect(settingsSeen[0]).toMatchObject({ use_query_cache: 0, result_overflow_mode: 'throw' })
   })
 })

@@ -1,7 +1,7 @@
 import { performance } from 'node:perf_hooks'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import type { ClickHouseExecutor, ClickHouseSettings, QueryControlOptions } from '@chkit/clickhouse'
+import { STRICT_CONTROL_SETTINGS, type ClickHouseExecutor, type ClickHouseSettings, type QueryControlOptions } from '@chkit/clickhouse'
 import { compareCodePoints, quoteIdentifier, statementFingerprint } from '@chkit/core'
 
 import { debug } from '../../runtime/debug.js'
@@ -22,6 +22,7 @@ const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 interface Topology { identity: QueryIdentity }
 interface Control { query<T>(sql: string, options?: QueryControlOptions): Promise<T[]>; remaining(): number }
 export interface RecoveryObligation { migration: string; statementIndex: number; forwardFingerprint: string; target: QueryTarget; source?: QueryTarget }
+type StatementRef = Pick<RecoveryObligation, 'migration' | 'statementIndex' | 'forwardFingerprint'>
 export interface RecoveryContext { protocol: 1; claim: string; identity: QueryIdentity; parents: string[]; obligations: RecoveryObligation[] }
 interface RecoveryRecord { context: RecoveryContext; checksum: string; completed: boolean }
 /** How recorded target UUIDs map to live tables, through durable replace markers only. */
@@ -77,7 +78,7 @@ export async function prepareCancellation(db: ClickHouseExecutor, target: LockTa
   if (!sameIdentity(recorded, identity)) throw cancellationError('The predecessor is untracked, uses another SQL principal, or belongs to another topology.')
   const resolution = await readResolution(conn, target, identity)
   const abandoned = await readAbandoned(conn, source(target, identity), claim)
-  const intents = (await validateIntents(conn, target, identity, claim, inherited !== undefined, resolution)).filter((intent) => !abandoned.has(intent.migration))
+  const intents = await validateIntents(conn, target, identity, claim, inherited !== undefined, resolution)
   const inheritedObligations = (inherited?.context.obligations ?? []).filter((item) => !abandoned.has(item.migration))
   const obligations = uniqueObligations(await validateObligations(conn, identity, [...inheritedObligations, ...obligationsFromIntents(intents)], target, resolution))
   assertIntentsCovered(intents, obligations)
@@ -191,7 +192,8 @@ export async function cancelPredecessor(db: ClickHouseExecutor, target: LockTarg
   const intents = await validateIntents(conn, target, identity, claim, plan.inherited, resolution)
   const obligations = uniqueObligations(await validateObligations(conn, identity, plan.obligations, target, resolution))
   assertIntentsCovered(intents, obligations)
-  const ids = intents.map((intent) => intent.queryId)
+  // Abandoned statements are still stopped and waited for.
+  const ids = (await recordedStatements(conn, source(target, identity), claim)).ids
   if (ids.length > 0) {
     const processes = await conn.query<{ query_id: string; initial_query_id: string; user: string; initial_user: string }>(
       `SELECT query_id, initial_query_id, user, initial_user FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, system.processes) WHERE query_id IN (${ids.map(sqlString).join(',')}) OR initial_query_id IN (${ids.map(sqlString).join(',')}) SETTINGS skip_unavailable_shards = 0`,
@@ -232,7 +234,9 @@ export async function finishRecovery(db: ClickHouseExecutor, target: LockTarget,
   await assertIdentityTopology(conn, context.identity)
   const resolution = await readResolution(conn, target, context.identity)
   const ownIntents = await validateIntents(conn, target, context.identity, context.claim, true, resolution)
-  const obligations = uniqueObligations(await validateObligations(conn, context.identity, [...context.obligations, ...obligationsFromIntents(ownIntents)], target, resolution))
+  const abandoned = await readAbandoned(conn, source(target, context.identity), context.claim)
+  const inherited = context.obligations.filter((item) => !abandoned.has(item.migration))
+  const obligations = uniqueObligations(await validateObligations(conn, context.identity, [...inherited, ...obligationsFromIntents(ownIntents)], target, resolution))
   await assertJournalCoverage(conn, target, context.identity, obligations)
   await writeRecoveryMarker(conn, target, context, 'completed')
 }
@@ -248,13 +252,20 @@ export async function abandonRecovery(db: ClickHouseExecutor, target: LockTarget
   const reads = journalReads(db)
   const history = await recoveryHistory(reads, target)
   for (const record of history.values()) {
-    if (record.completed || !record.context.obligations.some((item) => item.migration === migration)) continue
+    if (record.completed) continue
+    const { claim, identity } = record.context
     const conn = control(db, lock)
-    const from = source(target, record.context.identity)
-    await writeAbandon(conn, target, from, record.context.claim, migration)
-    const abandoned = await readAbandoned(conn, from, record.context.claim)
-    const remaining = record.context.obligations.filter((item) => !abandoned.has(item.migration))
-    if (remaining.length > 0) await assertJournalCoverage(conn, target, record.context.identity, remaining).catch(() => { throw cancellationError(`Released ${migration} from the recovery of claim ${record.context.claim}; it still holds other migrations. Apply or abandon them too.`) })
+    const from = source(target, identity)
+    // The recovering run's own recorded statements (an extra migration it
+    // sent) hold the barrier as much as the inherited ones.
+    const own = await recordedStatements(conn, from, claim)
+    const held = [...record.context.obligations, ...own.statements]
+    if (!held.some((item) => item.migration === migration)) continue
+    await drainClaim(db, identity, own.ids, lock)
+    await writeAbandon(conn, target, from, claim, migration)
+    const abandoned = await readAbandoned(conn, from, claim)
+    const remaining = held.filter((item) => !abandoned.has(item.migration))
+    if (remaining.length > 0) await assertJournalCoverage(conn, target, identity, remaining).catch(() => { throw cancellationError(`Released ${migration} from the recovery of claim ${claim}; it still holds other migrations. Apply or abandon them too.`) })
     await writeRecoveryMarker(conn, target, record.context, 'completed')
   }
   // A takeover that stopped before its recovery record: only the stopped
@@ -268,14 +279,44 @@ export async function abandonRecovery(db: ClickHouseExecutor, target: LockTarget
     const identity = parseIdentity(objectJSON(row.checksum).identity)
     const conn = control(db, lock)
     const from = source(target, identity)
-    const intents = await variants(conn, from, `startsWith(name, ${sqlString(`${QUERY_INTENT_PREFIX}${claim}/`)})`)
-    const migrations = new Set(intents.flatMap((intent) => { const data = objectJSON(intent.checksum); return typeof data.migration === 'string' ? [data.migration] : [] }))
+    const recorded = await recordedStatements(conn, from, claim)
+    const migrations = new Set(recorded.statements.map((item) => item.migration))
     if (!migrations.has(migration)) continue
+    // The takeover may have stopped while waiting for these: a replace of the
+    // stopped run still running could land after a later reload.
+    await drainClaim(db, identity, recorded.ids, lock)
     await writeAbandon(conn, target, from, claim, migration)
     const abandoned = await readAbandoned(conn, from, claim)
     if ([...migrations].some((name) => !abandoned.has(name))) throw cancellationError(`Released ${migration} from the cancellation of claim ${claim}; it still holds other migrations. Resume it with --cancel-lock-queries, or abandon them too.`)
     await writeMarker(db, target, { claim, identity }, 'completed', conn)
   }
+}
+
+/** A claim's recorded query ids and statements, read without validating their live tables. */
+async function recordedStatements(conn: Control, from: string, claim: string): Promise<{ ids: string[]; statements: Array<StatementRef> }> {
+  const prefix = `${QUERY_INTENT_PREFIX}${claim}/`
+  const rows = await variants(conn, from, `startsWith(name, ${sqlString(prefix)})`)
+  const ids: string[] = []
+  const statements: Array<StatementRef> = []
+  for (const row of rows) {
+    const queryId = row.name.slice(prefix.length)
+    if (queryId === UNTRACKED) continue
+    const data = objectJSON(row.checksum)
+    if (!UUID.test(queryId) || typeof data.migration !== 'string' || !Number.isInteger(data.statementIndex) || typeof data.forwardFingerprint !== 'string') throw cancellationError('Malformed query intent; the recovery barrier remains.')
+    ids.push(queryId)
+    statements.push({ migration: data.migration, statementIndex: Number(data.statementIndex), forwardFingerprint: data.forwardFingerprint })
+  }
+  return { ids, statements }
+}
+
+/** Before --abandon releases a barrier: KILL the claim's recorded queries and prove none still runs anywhere. */
+async function drainClaim(db: ClickHouseExecutor, identity: QueryIdentity, ids: string[], lock?: MigrateLock): Promise<void> {
+  if (ids.length === 0) return
+  const conn = control(db, lock)
+  await assertIdentityTopology(conn, identity)
+  await killRecordedQueries(conn, identity, ids)
+  // Throws, before anything is written, while one may still run.
+  await waitForQueriesGone(conn, identity, ids)
 }
 
 async function writeAbandon(conn: Control, target: LockTarget, from: string, claim: string, migration: string): Promise<void> {
@@ -298,7 +339,7 @@ async function readAbandoned(conn: Control, from: string, claim: string): Promis
   }))
 }
 
-async function assertJournalCoverage(conn: Control, target: LockTarget, identity: QueryIdentity, obligations: readonly RecoveryObligation[]): Promise<void> {
+async function assertJournalCoverage(conn: Control, target: LockTarget, identity: QueryIdentity, obligations: ReadonlyArray<StatementRef>): Promise<void> {
   const names = [...new Set(obligations.map((item) => item.migration))]
   const rows = await conn.query<{ name: string; migration_completed: string; operations: string }>(
     `SELECT name, toString(toUInt8(latest.1)) AS migration_completed, toJSONString(arrayMap((op, fp) -> tuple(op.operation_index, op.status, fp), latest.2, latest.3)) AS operations FROM (SELECT name, argMax(tuple(migration_completed, operations, operation_fingerprints), applied_at) AS latest FROM ${source(target, identity)} WHERE name IN (${names.map(sqlString).join(',')}) GROUP BY name) SETTINGS skip_unavailable_shards = 0, select_sequential_consistency = 1`,
@@ -423,9 +464,17 @@ function control(db: ClickHouseExecutor, lock?: MigrateLock): Control {
   return { remaining, async query<T>(sql: string, options?: QueryControlOptions) { const rows = await query<T>(sql, remaining(), options); remaining(); return rows } }
 }
 
-/** Reads through the ordinary executor, as the journal store does. */
+/**
+ * Reads the journal with the journal store's permissions (no replica-wide
+ * control read), but fresh and complete: a cached or truncated history could
+ * hide an unfinished recovery.
+ */
 function journalReads(db: ClickHouseExecutor): Control {
-  return { query: (sql) => db.query(sql), remaining: () => DEADLINE_MS }
+  const control = db.queryControl?.bind(db)
+  return {
+    query: <T>(sql: string) => control ? control<T>(sql, DEADLINE_MS) : db.query<T>(sql, STRICT_CONTROL_SETTINGS),
+    remaining: () => DEADLINE_MS,
+  }
 }
 
 async function topology(conn: Control, cluster: string): Promise<Topology> {
@@ -450,12 +499,19 @@ async function assertIdentityTopology(conn: Control, identity: QueryIdentity): P
   return current
 }
 
+/**
+ * The claim's recorded intents, with live tables validated. Migrations
+ * --abandon released from the claim are left out before validation: their
+ * tables may legitimately have changed.
+ */
 async function validateIntents(conn: Control, target: LockTarget, identity: QueryIdentity, claim: string, allowEmpty: boolean, resolution: Resolution): Promise<QueryIntent[]> {
   const prefix = `${QUERY_INTENT_PREFIX}${claim}/`
   const rows = await variants(conn, source(target, identity), `startsWith(name, ${sqlString(prefix)})`)
   if (rows.length === 0 && !allowEmpty) throw cancellationError('The predecessor has no cancellable tracked queries.')
   if (rows.some((row) => row.name === `${prefix}${UNTRACKED}`)) throw cancellationError('The predecessor ran statements chkit could not track, so it cannot be cancelled. Stop it and recover by hand.')
+  const abandoned = await readAbandoned(conn, source(target, identity), claim)
   const parsed = rows.map((row) => ({ queryId: row.name.slice(prefix.length), data: objectJSON(row.checksum) }))
+    .filter(({ data }) => typeof data.migration !== 'string' || !abandoned.has(data.migration))
   const intents: QueryIntent[] = []
   for (const { queryId, data } of parsed) {
     const recordedIdentity = parseIdentity(data)

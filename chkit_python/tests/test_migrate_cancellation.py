@@ -91,6 +91,7 @@ class ControlFixture:
         # Polls of system.processes that still find a recorded statement; `late_uuid` lands once it ends.
         self.running_polls = 0
         self.late_uuid = ""
+        self.processes_unreadable = False
 
     def execute_tracked(self, *_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("No replacement SQL belongs in cancellation preflight")
@@ -183,6 +184,8 @@ class ControlFixture:
                                 "dependencies": self.dependencies, "database_engine": self.database_engine}
                                for server in (self.servers or [self.server])])
         if sql.startswith("SELECT count() AS n") and "system.processes" in sql:
+            if self.processes_unreadable:
+                return self._rows([])
             if self.running_polls > 0:
                 self.running_polls -= 1
                 return self._rows([{"n": str(self.running_polls + 1)}])
@@ -562,3 +565,87 @@ def test_abandon_releases_a_takeover_that_stopped_before_its_recovery_record() -
     abandon_recovery(fixture, TARGET, "load.sql", fixture)
     assert f"{CANCELLATION_PREFIX}{CLAIM}/completed" in fixture.markers
     assert_cancellation_clear(fixture, TARGET)
+
+
+def test_abandon_waits_for_stopped_statements_and_keeps_the_barrier_when_unsure() -> None:
+    """#733 re-review 1: --abandon drains the claim's queries before releasing anything."""
+    fixture = ControlFixture()
+    plan = prepare_cancellation(fixture, TARGET, IDENTITY, CLAIM)
+    mark_cancellation_pending(fixture, TARGET, plan)
+    fixture.processes_unreadable = True
+    with pytest.raises(MigrateError, match="running queries"):
+        abandon_recovery(fixture, TARGET, "load.sql", fixture)
+    assert [name for name in fixture.markers if not name.endswith("/pending")] == []
+    with pytest.raises(MigrateError, match="unfinished"):
+        assert_cancellation_clear(fixture, TARGET)
+    fixture.processes_unreadable = False
+    fixture.running_polls = 2
+    abandon_recovery(fixture, TARGET, "load.sql", fixture)
+    sql = [query for query, _ in fixture.calls]
+    abandon_write = next(
+        index for index, query in enumerate(sql)
+        if query.startswith("INSERT") and "__chkit_migrate_recovery_abandon__/" in query
+    )
+    assert next(index for index, query in enumerate(sql) if query.startswith("KILL")) < abandon_write
+    last_poll = max(index for index, query in enumerate(sql) if query.startswith("SELECT count() AS n"))
+    assert last_poll < abandon_write
+    assert f"{CANCELLATION_PREFIX}{CLAIM}/completed" in fixture.markers
+
+
+def test_abandon_releases_a_migration_the_recovering_run_added_itself() -> None:
+    """#733 re-review 3: the recovery's own extra migration can be abandoned; resume skips it."""
+    fixture = ControlFixture()
+    plan = prepare_cancellation(fixture, TARGET, IDENTITY, CLAIM)
+    mark_cancellation_pending(fixture, TARGET, plan)
+    cancel_predecessor(fixture, TARGET, plan, fixture)
+    forward = statement_fingerprint("INSERT INTO app.metrics SELECT 2")
+    fixture.intents[SUCCESSOR] = [{
+        **IDENTITY.to_payload(), "claim": SUCCESSOR, "queryId": "00000000-0000-4000-8000-000000000010",
+        "migration": "b.sql", "statementIndex": 0, "phase": "forward", "kind": "insert",
+        "fingerprint": forward, "forwardFingerprint": forward,
+        "target": {"database": "app", "name": "metrics", "uuid": SOURCE, "engine": "MergeTree"},
+    }]
+    # b.sql's table was recreated after it failed, so its recorded UUID no longer matches.
+    fixture.source_uuid = "00000000-0000-4000-8000-000000000011"
+    with pytest.raises(MigrateError, match="no longer has the UUID"):
+        prepare_cancellation(fixture, TARGET, IDENTITY, SUCCESSOR)
+    with pytest.raises(MigrateError, match="still holds other migrations"):
+        abandon_recovery(fixture, TARGET, "b.sql", fixture)
+    assert f"__chkit_migrate_recovery_abandon__/{SUCCESSOR}/b.sql" in fixture.markers
+    assert f"{RECOVERY_PREFIX}{SUCCESSOR}/completed" not in fixture.markers
+    resumed = prepare_cancellation(fixture, TARGET, IDENTITY, SUCCESSOR)
+    assert [item.migration for item in resumed.obligations] == ["load.sql"]
+    fixture.journal_completed = True
+    abandon_recovery(fixture, TARGET, "b.sql", fixture)
+    assert f"{RECOVERY_PREFIX}{SUCCESSOR}/completed" in fixture.markers
+    assert_cancellation_clear(fixture, TARGET)
+
+
+def test_ordinary_barrier_reads_never_trust_a_cached_history() -> None:
+    """#733 re-review 2: ordinary barrier reads are fresh and complete."""
+    fixture = ControlFixture()
+    plan = prepare_cancellation(fixture, TARGET, IDENTITY, CLAIM)
+    mark_cancellation_pending(fixture, TARGET, plan)
+
+    class Cached(ControlFixture):
+        def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+            del sql, settings
+            return self._rows([])  # a profile-level query cache's old, empty history
+
+    cached = Cached()
+    cached.markers = fixture.markers
+    with pytest.raises(MigrateError, match="unfinished"):
+        assert_cancellation_clear(cached, TARGET)
+
+    seen: list[dict[str, Any] | None] = []
+
+    class Plain:
+        def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+            seen.append(settings)
+            return fixture.query_control(sql, 0)
+
+    with pytest.raises(MigrateError, match="unfinished"):
+        assert_cancellation_clear(Plain(), TARGET)
+    assert seen[0] is not None
+    assert seen[0]["use_query_cache"] == 0
+    assert seen[0]["result_overflow_mode"] == "throw"
