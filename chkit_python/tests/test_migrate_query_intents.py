@@ -58,6 +58,7 @@ class IntentClient:
         self.events: list[str] = []
         self.checksum = ""
         self.checksums: list[str] = []
+        self.sent_settings: list[Any] = []
 
     def execute(self, sql: str) -> None:
         self.events.append("intent")
@@ -76,12 +77,13 @@ class IntentClient:
         return QueryResult(column_names=["checksum"], rows=rows)
 
     def execute_tracked(
-        self, _sql: str, check: Any, before: Any, _settings: Any,
+        self, _sql: str, check: Any, before: Any, settings: Any,
     ) -> None:
         check()
         assert str(uuid.UUID(before()))
         check()
         self.events.append("user SQL")
+        self.sent_settings.append(settings)
 
 
 @pytest.mark.parametrize("failure", ["none", "intent", "ownership"])
@@ -109,9 +111,11 @@ def test_ordinary_run_continues_untracked_behind_a_durable_marker() -> None:
     client = IntentClient(lock, "read-back")
     logs: list[str] = []
     tracker = QueryTracker(client, TARGET, IDENTITY, lock, log=logs.append)  # type: ignore[arg-type]
-    tracker.command(CONTEXT, "forward", CONTEXT.forward_sql)
+    tracker.command(CONTEXT, "forward", CONTEXT.forward_sql, {"max_threads": 2})
     tracker.command(replace(CONTEXT, statement_index=1), "forward", CONTEXT.forward_sql)
     assert client.events == ["intent", "read-back", "intent", "user SQL", "user SQL"]
+    # Ordinary runs send the user's settings unchanged; only recovery adds async_insert=0.
+    assert client.sent_settings == [{"max_threads": 2}, None]
     assert json.loads(client.checksum) == {"protocol": 1, "claim": "claim"}
     assert "continues untracked" in logs[0]
 
@@ -290,7 +294,8 @@ def test_explicit_recovery_admission_and_settlement_precede_forward_sql(fault: s
             before()
             check()
             compensation = sql.startswith("CREATE OR REPLACE")
-            assert settings is None
+            # Recovery reloads synchronously on every transport (#733 review G).
+            assert settings == {"async_insert": 0}
             self.events.append("compensation" if compensation else "forward")
             if fault == "lost after SQL":
                 self.lock.held = False

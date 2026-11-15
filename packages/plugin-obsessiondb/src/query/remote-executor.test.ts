@@ -187,14 +187,15 @@ describe('createRemoteExecutor cancellation transport', () => {
 		}
 	})
 
-	test('defaults tracked writes to synchronous inserts', async () => {
+	// Like the native path, a tracked write adds no settings of its own; only
+	// recovery asks for async_insert=0 (#733 review G).
+	test('sends a tracked write with only the caller\'s settings', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {
 			const remote = connect(workbench.url)
 			await remote.commandTracked('INSERT INTO t SELECT 1', () => {}, async () => 'tracked-sync')
 			expect(workbench.inputs).toEqual([{
 				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync',
-				settings: { async_insert: 0 },
 			}])
 		} finally {
 			workbench.stop()

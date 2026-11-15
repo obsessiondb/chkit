@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
 
-import { assertCancellationClear, cancelPredecessor, markCancellationPending, prepareCancellation, resolveQueryIdentity, settleCompensation, finishRecovery, expandRecoveryPlan, assertCancellationUnfinished, RECOVERY_PREFIX, CANCELLATION_PREFIX, REPLACE_PREFIX } from '../../../commands/migrate/cancellation.js'
+import { abandonRecovery, assertCancellationClear, cancelPredecessor, markCancellationPending, prepareCancellation, resolveQueryIdentity, settleCompensation, finishRecovery, expandRecoveryPlan, assertCancellationUnfinished, RECOVERY_PREFIX, CANCELLATION_PREFIX, REPLACE_PREFIX } from '../../../commands/migrate/cancellation.js'
 import type { QueryIdentity, QueryIntent, QueryTarget } from '../../../commands/migrate/query-intents.js'
 import { QUERY_INTENT_PREFIX } from '../../../commands/migrate/query-intents.js'
 import type { MigrateLock } from '../../../commands/migrate/lock.js'
@@ -33,10 +33,14 @@ function fake(identity: QueryIdentity = IDENTITY) {
   const state = { failRequired: '', failRecoveryCompletion: '', journalOperations: [] as unknown[], metricsUUID: SOURCE, journalCompleted: false, recordedEngine: 'MergeTree', source: false, sourceUUID: SOURCE, sourceEngine: 'MergeTree', targetUUID: ID, kind: 'insert', engine: 'MergeTree', databaseEngine: 'Atomic', dependencies: '[]', principal: 'writer', server: SERVER,
     localServer: SERVER, localPrincipal: 'writer', grants: [{ access_type: 'ALL', database: null, table: null, is_partial_revoke: 0 }] as unknown[],
     replaceAfterReads: -1, replacedServers: [] as string[], tableReads: 0, compensated: false, untracked: false,
-    loseAfterKill: false, killFailure: false, failCompletion: false, held: true, killed: false, unreadable: false, legacy: false }
+    loseAfterKill: false, killFailure: false, failCompletion: false, held: true, killed: false, unreadable: false, legacy: false,
+    // Polls of system.processes that still find a recorded statement; `lateUUID` lands once it ends.
+    runningPolls: 0, lateUUID: '' }
   const db = {
     queryControlCluster: 'declared',
     commandTracked: async () => {},
+    // Ordinary journal reads: the same fake, without the control deadline.
+    async query(sql: string) { return await db.queryControl(sql, 0) },
     async queryControl(sql: string, timeout: number) {
       calls.push({ sql, timeout })
       if (state.unreadable) throw new Error('replica unreadable')
@@ -73,6 +77,11 @@ function fake(identity: QueryIdentity = IDENTITY) {
         if (events && ++state.tableReads === state.replaceAfterReads) state.targetUUID = REPLACED
         return identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: state.principal, uuid: sql.includes("name = 'frozen'") ? state.sourceUUID : sql.includes("name = 'metrics'") ? state.metricsUUID : state.replacedServers.includes(server_uuid) ? REPLACED : state.targetUUID, engine: sql.includes("name = 'frozen'") ? state.sourceEngine : state.engine, dependencies: state.dependencies, database_engine: state.databaseEngine }))
       }
+      if (sql.startsWith('SELECT count() AS n') && sql.includes('system.processes')) {
+        if (state.runningPolls > 0) return [{ n: state.runningPolls-- }]
+        if (state.lateUUID) state.targetUUID = state.lateUUID
+        return [{ n: '0' }]
+      }
       if (sql.startsWith('SELECT query_id')) return [{ query_id: ID, initial_query_id: ID, user: 'writer', initial_user: 'writer' }]
       if (sql.startsWith('KILL QUERY')) {
         if (state.killFailure) throw new Error('KILL denied')
@@ -105,8 +114,9 @@ describe('explicit predecessor cancellation (#732)', () => {
     const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
     await markCancellationPending(f.db, TARGET, plan)
     await expect(assertCancellationClear(f.db, TARGET)).rejects.toThrow('unfinished')
-    // Even a failed identity lookup must retain the declared transport cluster.
-    expect(f.calls.at(-1)?.sql).toContain("clusterAllReplicas('declared'")
+    // An ordinary run reads the journal as its store does: no clusterAllReplicas,
+    // so it needs no REMOTE grant (#733 review A).
+    expect(f.calls.at(-1)?.sql).not.toContain('clusterAllReplicas')
     await assertCancellationClear(f.db, TARGET, CLAIM)
     const recovery = await cancelPredecessor(f.db, TARGET, plan, f.lock)
     expect(f.state.killed).toBe(true)
@@ -211,17 +221,47 @@ describe('replace settlement', () => {
     expect(f.markers.size).toBe(0)
   })
 
-  test('a replace without its marker is adopted only when the stopped run recorded it', async () => {
+  test('never adopts a table whose UUID recovery did not record (#733 review C)', async () => {
+    // A replace the stopped run recorded but left without its marker.
     const f = fake()
-    f.state.targetUUID = REPLACED
-    await expect(prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)).rejects.toThrow('identity changed')
     f.state.compensated = true
+    f.state.targetUUID = REPLACED
+    await expect(prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)).rejects.toThrow('--abandon')
+    // A recorded replace A→B, then the table recreated as C: refuse, never B→C.
+    const g = fake()
+    const plan = await prepareCancellation(g.db, TARGET, IDENTITY, CLAIM)
+    g.state.targetUUID = REPLACED
+    await settleCompensation(g.db, TARGET, plan, targetTable(plan.targets), g.lock)
+    g.state.compensated = true
+    g.state.targetUUID = SERVER
+    await expect(prepareCancellation(g.db, TARGET, IDENTITY, CLAIM)).rejects.toThrow('no longer has the UUID')
+    expect([...g.markers.keys()].filter((name) => name.startsWith(REPLACE_PREFIX))).toEqual([`${REPLACE_PREFIX}${ID}`])
+  })
+
+  test('waits for the stopped run\'s statements to end, then refuses a replace that landed meanwhile (#733 review D)', async () => {
+    const f = fake()
     const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
-    expect(plan.targets[0]?.uuid).toBe(REPLACED)
+    await markCancellationPending(f.db, TARGET, plan)
+    f.state.runningPolls = 2
+    f.state.lateUUID = SERVER
+    await expect(cancelPredecessor(f.db, TARGET, plan, f.lock)).rejects.toThrow('no longer has the UUID')
+    expect(f.calls.filter((call) => call.sql.startsWith('SELECT count() AS n'))).toHaveLength(3)
+    expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/required`)).toBe(false)
+  })
+
+  test('completion re-checks the replaced target, so a late replace after the reload blocks it (#733 review D)', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
     await markCancellationPending(f.db, TARGET, plan)
     const recovery = await cancelPredecessor(f.db, TARGET, plan, f.lock)
-    expect(f.markers.has(`${REPLACE_PREFIX}${ID}`)).toBe(true)
-    expect(recovery.obligations[0]?.target.uuid).toBe(REPLACED)
+    f.state.targetUUID = REPLACED
+    await settleCompensation(f.db, TARGET, plan, targetTable(plan.targets), f.lock)
+    f.state.journalCompleted = true
+    f.state.targetUUID = SERVER
+    await expect(finishRecovery(f.db, TARGET, recovery, f.lock)).rejects.toThrow('no longer has the UUID')
+    expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/completed`)).toBe(false)
+    f.state.targetUUID = REPLACED
+    await finishRecovery(f.db, TARGET, recovery, f.lock)
   })
 
   test('sends one best-effort local KILL per declared member', async () => {
@@ -307,7 +347,9 @@ describe('durable inherited recovery handoff', () => {
       { migration: 'load.sql', statementIndex: 1, forwardSQL: 'INSERT INTO app.metrics SELECT 2', beforeRetry: 'CREATE OR REPLACE TABLE app.metrics AS app.metrics' },
     ]
     const full = await expandRecoveryPlan(f.db, TARGET, initial, contexts)
-    expect(full.obligations).toHaveLength(2)
+    // Only the recorded statement holds the barrier; the other is checked and may run (#733 review B).
+    expect(full.obligations).toEqual(initial.obligations)
+    expect(full.extra.map((item) => item.target.name)).toEqual(['metrics'])
     expect(full.targets.map((item) => item.name)).toEqual(['events', 'metrics'])
     await expect(expandRecoveryPlan(f.db, TARGET, initial, [...contexts, { ...contexts[0], migration: 'load.sql', statementIndex: 2, forwardSQL: 'ALTER TABLE app.events ADD COLUMN x UInt8', beforeRetry: null }])).rejects.toThrow('throughout')
     expect(f.calls.some((call) => call.sql.startsWith('KILL') || call.sql.startsWith('INSERT'))).toBe(false)
@@ -349,4 +391,30 @@ describe('durable inherited recovery handoff', () => {
     expect(f.calls.some((call) => call.sql.startsWith('KILL') || call.sql.startsWith('INSERT'))).toBe(false)
   })
 
+})
+
+describe('--abandon releases a stuck recovery (#733 review B)', () => {
+  test('a statement that keeps failing no longer blocks migrate for good', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    await markCancellationPending(f.db, TARGET, plan)
+    const recovery = await cancelPredecessor(f.db, TARGET, plan, f.lock)
+    await expect(finishRecovery(f.db, TARGET, recovery, f.lock)).rejects.toThrow('unchanged SQL')
+    await expect(assertCancellationClear(f.db, TARGET)).rejects.toThrow('--abandon')
+    await abandonRecovery(f.db, TARGET, 'other.sql', f.lock)
+    await expect(assertCancellationClear(f.db, TARGET)).rejects.toThrow('unfinished')
+    await abandonRecovery(f.db, TARGET, 'load.sql', f.lock)
+    expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/completed`)).toBe(true)
+    await assertCancellationClear(f.db, TARGET)
+  })
+
+  test('also releases a takeover that stopped before its recovery record', async () => {
+    const f = fake()
+    const plan = await prepareCancellation(f.db, TARGET, IDENTITY, CLAIM)
+    await markCancellationPending(f.db, TARGET, plan)
+    await expect(assertCancellationClear(f.db, TARGET)).rejects.toThrow('unfinished')
+    await abandonRecovery(f.db, TARGET, 'load.sql', f.lock)
+    expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(true)
+    await assertCancellationClear(f.db, TARGET)
+  })
 })

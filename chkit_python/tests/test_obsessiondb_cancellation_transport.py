@@ -57,7 +57,8 @@ def test_tracked_write_records_before_send_and_preserves_settings(
     }]
 
 
-def test_tracked_write_defaults_to_synchronous_insert(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_tracked_write_sends_only_the_callers_settings(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Like the native path; only recovery asks for async_insert=0 (#733 review G)."""
     calls: list[dict[str, Any]] = []
 
     def execute(_credentials: Credentials, **kwargs: Any) -> WorkbenchExecuteResult:
@@ -68,7 +69,7 @@ def test_tracked_write_defaults_to_synchronous_insert(monkeypatch: pytest.Monkey
     client().execute_tracked("INSERT INTO t SELECT 1", lambda: None, lambda: "sync-1")
     assert calls == [{
         "service_slug": "benchmarks", "query": "INSERT INTO t SELECT 1",
-        "query_id": "sync-1", "settings": {"async_insert": 0},
+        "query_id": "sync-1", "settings": None,
     }]
 
 

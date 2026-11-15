@@ -160,13 +160,12 @@ class RemoteClickHouseClient:
         check()
         wire_settings = _coerce_wire_settings(settings) or {}
         wire_settings.pop("query_id", None)
-        wire_settings.setdefault("async_insert", 0)
         result = workbench_query_execute(
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
             query_id=query_id,
-            settings=wire_settings,
+            settings=wire_settings or None,
         )
         _raise_if_error(result)
 

@@ -36,6 +36,8 @@ RECOVERY_PREFIX = "__chkit_migrate_recovery__/"
 CANCELLATION_PREFIX = "__chkit_migrate_cancel__/"
 # `<prefix><old uuid>`: a recovery replaced that table; the row names its new UUID.
 REPLACE_PREFIX = "__chkit_migrate_replace__/"
+# `<prefix><claim>/<migration>`: --abandon released that migration from the claim's recovery.
+ABANDON_PREFIX = "__chkit_migrate_recovery_abandon__/"
 _LOGGER = logging.getLogger("chkit.migrate.queries")
 _DEADLINE_MS = 30_000
 _UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$", re.I)
@@ -87,6 +89,11 @@ class _RecoveryRecord:
 
 @dataclass(frozen=True, slots=True)
 class CancellationPlan:
+    """`obligations` are the statements the stopped run recorded: only they hold
+    the recovery barrier. `extra` are the other selected statements, checked as
+    supported before takeover, which this run may also send.
+    """
+
     claim: str
     holder: str
     identity: QueryIdentity
@@ -96,19 +103,14 @@ class CancellationPlan:
     parents: list[str] = field(default_factory=list)
     obligations: list[RecoveryObligation] = field(default_factory=list)
     inherited: bool = False
+    extra: list[RecoveryObligation] = field(default_factory=list)
 
 
 @dataclass(slots=True)
 class _Resolution:
-    """How recorded target UUIDs map to live tables.
-
-    Durable replace markers, the targets of recorded replaces whose marker may be
-    missing (a crash right after the replace), and replacements this run adopted.
-    """
+    """How recorded target UUIDs map to live tables, through durable replace markers only."""
 
     replaced: dict[str, str] = field(default_factory=dict)
-    pending: set[str] = field(default_factory=set)
-    adopted: dict[str, QueryTarget] = field(default_factory=dict)
 
 
 @dataclass(frozen=True, slots=True)
@@ -240,11 +242,19 @@ def prepare_cancellation(
             "or belongs to another topology."
         )
     resolution = _read_resolution(conn, target, identity)
-    intents = _validate_intents(
-        conn, target, identity, claim, allow_empty=inherited is not None, resolution=resolution,
-    )
+    abandoned = _read_abandoned(conn, _source(target, identity), claim)
+    intents = [
+        intent for intent in _validate_intents(
+            conn, target, identity, claim, allow_empty=inherited is not None,
+            resolution=resolution,
+        )
+        if intent["migration"] not in abandoned
+    ]
     obligations = _unique_obligations(_validate_obligations(conn, identity, [
-        *(inherited.context.obligations if inherited is not None else []),
+        *(
+            item for item in (inherited.context.obligations if inherited is not None else [])
+            if item.migration not in abandoned
+        ),
         *_obligations_from_intents(intents),
     ], target, resolution))
     _assert_intents_covered(intents, obligations)
@@ -272,7 +282,11 @@ def prepare_cancellation(
 def expand_recovery_plan(
     client: Any, target: LockTarget, plan: CancellationPlan, contexts: list[QueryContext]
 ) -> CancellationPlan:
-    """Attest the complete selected plan before breaking a claim or killing a query."""
+    """Attest the complete selected plan before breaking a claim or killing a query.
+
+    Statements the stopped run never recorded must be supported, but do not
+    become obligations.
+    """
     conn = _Control(client)
     additions: list[RecoveryObligation] = []
     metadata = SimpleNamespace(
@@ -299,17 +313,18 @@ def expand_recovery_plan(
         additions.extend(
             _validate_obligations(conn, plan.identity, [obligation], target, _Resolution())
         )
-    for inherited in plan.obligations:
-        if not any(
-            item.migration == inherited.migration
-            and item.statement_index == inherited.statement_index for item in additions
-        ):
-            _assert_journal_coverage(conn, target, plan.identity, [inherited])
-    obligations = _unique_obligations([*plan.obligations, *additions])
-    _assert_replace_grants(conn, obligations)
+    def same(left: RecoveryObligation, right: RecoveryObligation) -> bool:
+        return (left.migration, left.statement_index) == (right.migration, right.statement_index)
+
+    for obligation in plan.obligations:
+        if not any(same(item, obligation) for item in additions):
+            _assert_journal_coverage(conn, target, plan.identity, [obligation])
+    extra = [item for item in additions if not any(same(item, ob) for ob in plan.obligations)]
+    every = _unique_obligations([*plan.obligations, *extra])
+    _assert_replace_grants(conn, every)
     return replace(
-        plan, obligations=obligations, targets=[item.target for item in obligations],
-        sources=[item.source for item in obligations if item.source is not None],
+        plan, extra=extra, targets=[item.target for item in every],
+        sources=[item.source for item in every if item.source is not None],
     )
 
 
@@ -363,19 +378,13 @@ def assert_cancellation_clear(
     allowed_claim: str | None = None,
     identity: QueryIdentity | None = None,
 ) -> None:
-    conn = _Control(
-        client,
-        fallback=not (
-            callable(getattr(client, "query_control", None))
-            and callable(getattr(client, "execute_tracked", None))
-        ),
-    )
-    cluster_hint = getattr(client, "query_control_cluster", None)
-    coverage = identity or (
-        QueryIdentity(1, "", [], cluster_hint)
-        if isinstance(cluster_hint, str) and cluster_hint
-        else None
-    )
+    """All later owners, including no-pending runs, must honor interrupted cancellation.
+
+    Ordinary runs (no `identity`) read the journal as its store does, so they
+    need no grant beyond the journal's.
+    """
+    conn = _Control(client, fallback=identity is None)
+    coverage = identity
     history = _recovery_history(conn, target, coverage)
     allowed = history.get(allowed_claim) if allowed_claim is not None else None
     ancestors = allowed.context.parents if allowed is not None and not allowed.completed else []
@@ -384,7 +393,8 @@ def assert_cancellation_clear(
             successor = _newest_required(history, claim)
             raise cancellation_error(
                 f"Recovery of claim {successor} is unfinished. Stop that CLI, then resume "
-                f"with --apply --break-lock {successor} --cancel-lock-queries."
+                f"with --apply --break-lock {successor} --cancel-lock-queries, or release a "
+                "migration with --abandon <migration> --apply."
             )
     rows = _variants(
         conn, _source(target, coverage), f"startsWith(name, {sql_string(CANCELLATION_PREFIX)})"
@@ -416,7 +426,8 @@ def assert_cancellation_clear(
         if completed is None and claim != allowed_claim and claim not in ancestors:
             raise cancellation_error(
                 f"Cancellation of claim {claim} is unfinished. Stop its old CLI, then resume "
-                f"with --apply --break-lock {claim} --cancel-lock-queries."
+                f"with --apply --break-lock {claim} --cancel-lock-queries, or release a "
+                "migration with --abandon <migration> --apply."
             )
 
 
@@ -460,10 +471,14 @@ def cancel_predecessor(
                     "A recorded query id belongs to another SQL principal; no query was canceled."
                 )
         _kill_recorded_queries(conn, identity, ids)
-    # A recorded replace whose marker the stopped run never wrote: record the
-    # UUID it left, so every later read resolves the same table.
-    for from_uuid, table in resolution.adopted.items():
-        _write_replace_marker(conn, target, identity, from_uuid, table)
+        # A stopped run's own replace still running could land after the reload
+        # and empty it: wait until none of its recorded statements runs anywhere.
+        settled = _Control(client, lock)
+        _wait_for_queries_gone(settled, identity, ids)
+        # One of them may have been a replace that landed while we waited.
+        _validate_obligations(
+            settled, identity, obligations, target, _read_resolution(settled, target, identity)
+        )
     lock.assert_held()
     active_claim = lock.claim_id
     if not active_claim or not _UUID.fullmatch(active_claim):
@@ -536,6 +551,137 @@ def _assert_journal_coverage(
                 f"{obligation.statement_index + 1}. Restore its unchanged SQL and include "
                 "it in apply; the recovery barrier remains."
             )
+
+
+def _wait_for_queries_gone(conn: _Control, identity: QueryIdentity, ids: list[str]) -> None:
+    """Poll every replica until none of `ids` (or a child) runs; refuse past the deadline."""
+    while True:
+        rows = conn.query(
+            "SELECT count() AS n FROM "
+            f"clusterAllReplicas({sql_string(_require_cluster(identity))}, system.processes) "
+            f"WHERE {_process_predicate(identity, ids)} SETTINGS skip_unavailable_shards = 0"
+        )
+        try:
+            running = int(rows[0]["n"]) if len(rows) == 1 else -1
+        except (TypeError, ValueError):
+            running = -1
+        if running < 0:
+            raise cancellation_error(
+                "Cannot read the running queries of every replica; replacement work is blocked."
+            )
+        if running == 0:
+            return
+        if conn.remaining() <= 100:  # noqa: PLR2004 — one poll interval, in ms
+            raise cancellation_error(
+                "A statement of the stopped run is still running after KILL; replacement "
+                "work is blocked. Retry once it ends."
+            )
+        time.sleep(0.1)
+
+
+def abandon_recovery(
+    client: Any, target: LockTarget, migration: str, lock: _LockCheck | None = None,
+) -> None:
+    """`--abandon <migration> --apply` releases that migration from unfinished recovery.
+
+    It leaves every recovery and stopped-run cancellation that holds it, so a
+    statement that keeps failing cannot block migrate for good. One left with
+    nothing else to finish completes. Runs holding the migrate lock; the next
+    apply reruns the migration with its before-retry.
+    """
+    reads = _Control(client, fallback=True)
+    history = _recovery_history(reads, target)
+    for record in history.values():
+        if record.completed or not any(
+            item.migration == migration for item in record.context.obligations
+        ):
+            continue
+        conn = _Control(client, lock)
+        source = _source(target, record.context.identity)
+        _write_abandon(conn, target, source, record.context.claim, migration)
+        abandoned = _read_abandoned(conn, source, record.context.claim)
+        remaining = [
+            item for item in record.context.obligations if item.migration not in abandoned
+        ]
+        if remaining:
+            try:
+                _assert_journal_coverage(conn, target, record.context.identity, remaining)
+            except MigrateError:
+                raise cancellation_error(
+                    f"Released {migration} from the recovery of claim {record.context.claim}; "
+                    "it still holds other migrations. Apply or abandon them too."
+                ) from None
+        _write_recovery_marker(conn, target, record.context, "completed")
+    # A takeover that stopped before its recovery record: only the stopped
+    # run's recorded statements hold it.
+    rows = _variants(
+        reads, _source(target), f"startsWith(name, {sql_string(CANCELLATION_PREFIX)})"
+    )
+    names = {row["name"] for row in rows}
+    for row in rows:
+        if not row["name"].endswith("/pending"):
+            continue
+        claim = row["name"][len(CANCELLATION_PREFIX):].removesuffix("/pending")
+        if f"{CANCELLATION_PREFIX}{claim}/completed" in names or any(
+            claim in record.context.parents for record in history.values()
+        ):
+            continue
+        identity = _parse_identity(_object_json(row["checksum"]).get("identity"))
+        conn = _Control(client, lock)
+        source = _source(target, identity)
+        prefix = f"{QUERY_INTENT_PREFIX}{claim}/"
+        intents = _variants(conn, source, f"startsWith(name, {sql_string(prefix)})")
+        migrations = {
+            data["migration"] for data in (_object_json(item["checksum"]) for item in intents)
+            if isinstance(data.get("migration"), str)
+        }
+        if migration not in migrations:
+            continue
+        _write_abandon(conn, target, source, claim, migration)
+        if migrations - _read_abandoned(conn, source, claim):
+            raise cancellation_error(
+                f"Released {migration} from the cancellation of claim {claim}; it still holds "
+                "other migrations. Resume it with --cancel-lock-queries, or abandon them too."
+            )
+        _write_marker(client, target, CancellationPlan(claim, "", identity), "completed", conn)
+
+
+def _write_abandon(
+    conn: _Control, target: LockTarget, source: str, claim: str, migration: str,
+) -> None:
+    name = f"{ABANDON_PREFIX}{claim}/{migration}"
+    checksum = json.dumps(
+        {"protocol": 1, "claim": claim, "migration": migration},
+        separators=(",", ":"), ensure_ascii=False,
+    )
+    conn.query(
+        f"INSERT INTO {quote_identifier(target.database)}.{target.journal_table} "
+        "(name, applied_at, checksum, chkit_version, migration_completed, operations) "
+        f"SELECT {sql_string(name)}, now64(3), {sql_string(checksum)}, "
+        f"{sql_string(__version__)}, false, [] "
+        "SETTINGS async_insert = 0, insert_quorum = 'auto', insert_quorum_parallel = 0"
+    )
+    rows = _variants(conn, source, f"name = {sql_string(name)}")
+    if len(rows) != 1 or rows[0]["checksum"] != checksum:
+        raise cancellation_error(
+            "The abandon record did not read back; the recovery barrier remains."
+        )
+
+
+def _read_abandoned(conn: _Control, source: str, claim: str) -> set[str]:
+    """Migrations --abandon released from `claim`."""
+    prefix = f"{ABANDON_PREFIX}{claim}/"
+    result: set[str] = set()
+    for row in _variants(conn, source, f"startsWith(name, {sql_string(prefix)})"):
+        data = _object_json(row["checksum"])
+        migration = row["name"][len(prefix):]
+        if (
+            type(data.get("protocol")) is not int or data["protocol"] != 1
+            or data.get("claim") != claim or data.get("migration") != migration or not migration
+        ):
+            raise cancellation_error("Malformed abandon record.")
+        result.add(migration)
+    return result
 
 
 def _kill_recorded_queries(conn: _Control, identity: QueryIdentity, ids: list[str]) -> None:
@@ -645,13 +791,6 @@ def _validate_intents(
             "Stop it and recover by hand."
         )
     parsed = [(row["name"][len(prefix):], _object_json(row["checksum"])) for row in rows]
-    # A recorded replace may have run without its marker: its target can have a new UUID.
-    for _query_id, data in parsed:
-        table = data.get("target")
-        if data.get("phase") == "compensation" and isinstance(table, dict) and isinstance(
-            table.get("uuid"), str
-        ):
-            resolution.pending.add(_resolve_uuid(resolution, table["uuid"]))
     intents: list[dict[str, Any]] = []
     for query_id, data in parsed:
         recorded = _parse_identity(data)
@@ -763,26 +902,22 @@ def _validate_table(
             "Recovery replaces its targets, which needs an Atomic or Shared database."
         )
     expected = value["uuid"] if source_table else _resolve_uuid(resolution, value["uuid"])
-    live = str(metadata[0]["uuid"]) if metadata else ""
-    adopted = (
-        not source_table and live != expected and expected in resolution.pending
-        and bool(_UUID.fullmatch(live))
-    )
     if not _same_members(metadata, identity) or any(
-        row["principal"] != identity.principal
-        or row["uuid"] != (live if adopted else expected)
-        or row["engine"] != value["engine"]
+        row["principal"] != identity.principal or row["engine"] != value["engine"]
         for row in metadata
     ):
         raise cancellation_error(
             "A recorded source or target identity changed; replacement work is blocked."
         )
-    table = QueryTarget(
-        value["database"], value["name"], live if adopted else expected, value["engine"]
-    )
-    if adopted:
-        resolution.adopted[expected] = table
-    return table
+    # A replace whose record is missing (a crash right after it) and a table
+    # recreated by someone else look the same: never guess which one it is.
+    if any(row["uuid"] != expected for row in metadata):
+        raise cancellation_error(
+            f"{value['database']}.{value['name']} no longer has the UUID recovery recorded: it "
+            "was recreated, or replaced without its record. Recovery cannot tell which; check "
+            "its data, then release its migration with --abandon <migration> --apply."
+        )
+    return QueryTarget(value["database"], value["name"], expected, value["engine"])
 
 
 def settle_compensation(

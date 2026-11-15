@@ -84,14 +84,17 @@ describe('migration query intents (#732)', () => {
         if (!sql.includes('__chkit_migrate_query__/claim/untracked')) throw new Error('intent failed')
       },
       async query() { return [] },
-      async commandTracked(sql: string, check: () => void, before: () => Promise<string>) { check(); await before(); check(); sent.push(sql) },
+      async commandTracked(sql: string, check: () => void, before: () => Promise<string>, settings?: Record<string, unknown>) { check(); await before(); check(); sent.push(sql); sentSettings.push(settings) },
     } as unknown as ClickHouseExecutor
+    const sentSettings: unknown[] = []
     const logs: string[] = []
     const tracker = createQueryTracker({ db, target: { database: 'app', journalTable: '_chkit_migrations', fanout: undefined }, identity,
       lock: { claimId: 'claim', assertHeld() {}, release: async () => {} }, log: (line) => logs.push(line) })
-    await tracker.command(context, 'forward', context.forwardSQL)
+    await tracker.command(context, 'forward', context.forwardSQL, { max_threads: 2 })
     await tracker.command({ ...context, statementIndex: 1 }, 'forward', context.forwardSQL)
     expect(sent).toHaveLength(2)
+    // Ordinary runs send the user's settings unchanged; only recovery adds async_insert=0.
+    expect(sentSettings).toEqual([{ max_threads: 2 }, undefined])
     expect(writes.filter((sql) => sql.includes('/untracked'))).toHaveLength(1)
     expect(writes).toHaveLength(2)
     expect(logs[0]).toContain('continues untracked')
@@ -181,7 +184,8 @@ describe('strict explicit recovery tracker', () => {
         async commandTracked(sql: string, check: () => void, before: () => Promise<string>, settings?: Record<string, unknown>) {
           check(); await before(); check()
           const compensation = sql.startsWith('CREATE OR REPLACE')
-          expect(settings).toBeUndefined()
+          // Recovery reloads synchronously on every transport (#733 review G).
+          expect(settings).toEqual({ async_insert: 0 })
           events.push(compensation ? 'compensation' : 'forward')
           if (fault === 'lost after SQL') held = false
         },

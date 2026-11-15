@@ -80,7 +80,8 @@ class QueryRecovery:
     # Settles a replace and returns the target under its new UUID.
     after_compensation: Callable[[QueryTarget], QueryTarget]
     sources: tuple[QueryTarget, ...] = ()
-    obligations: tuple[RecoveryObligation, ...] = ()
+    # Every statement this recovery may send: the recorded obligations and the other checked ones.
+    statements: tuple[RecoveryObligation, ...] = ()
 
 
 def query_tracking_disabled() -> bool:
@@ -132,7 +133,9 @@ class QueryTracker:
                     return str(intent["queryId"])
             return str(uuid.uuid4())
 
-        self._client.execute_tracked(sql, self._lock.assert_held, before, settings)
+        # Recovery reloads synchronously on both transports; ordinary runs keep their settings.
+        sent = {**(settings or {}), "async_insert": 0} if self._recovery else settings
+        self._client.execute_tracked(sql, self._lock.assert_held, before, sent)
         self._lock.assert_held()
         if phase == "compensation" and self._recovery:
             if physical_target is None:
@@ -235,10 +238,10 @@ class QueryTracker:
             **({"target": recorded_target.to_payload()} if recorded_target else {}),
             **({"source": recorded_source.to_payload()} if recorded_source else {}),
         }
-        if self._recovery and self._recovery.obligations and not any(
+        if self._recovery and self._recovery.statements and not any(
             item.migration == context.migration and item.statement_index == context.statement_index
             and item.forward_fingerprint == intent["forwardFingerprint"]
-            for item in self._recovery.obligations
+            for item in self._recovery.statements
         ):
             raise cancellation_error(
                 "Explicit recovery requires unchanged recorded forward SQL; no statement was sent."

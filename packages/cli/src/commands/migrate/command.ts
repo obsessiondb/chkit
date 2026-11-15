@@ -33,7 +33,7 @@ import { findPendingNonSelectBarriers } from './barrier.js'
 import { scanDestructive } from './destructive.js'
 import { findEmptyMigrations } from './empty.js'
 import { emptyMigrationsError, journalChangedError, MigrateError, nonSelectBarrierError } from './errors.js'
-import { acquireMigrateLock, guardExecutor, migrateLockDisabled, type MigrateLock } from './lock.js'
+import { acquireMigrateLock, guardExecutor, migrateLockDisabled, type LockTarget, type MigrateLock } from './lock.js'
 import {
   emitAbandonJson,
   emitApplySummaryJson,
@@ -65,7 +65,7 @@ import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
 import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
 import { createQueryTracker, queryTrackingDisabled, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
-import { assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
+import { abandonRecovery, assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
 
 const MIGRATE_FLAGS = defineFlags([
   TABLE_FLAG,
@@ -134,9 +134,17 @@ interface MigrateContext {
   withLock: WithLock
   queryTracker: () => QueryTracker | undefined
   completeRecovery?: () => Promise<void>
+  /** --cancel-lock-queries was passed. */
+  cancelQueries: boolean
+  /** Fails while a stopped run's recovery is unfinished; read-only, no lock. */
+  assertRecoveryClear: () => Promise<void>
 }
 
-type WithLock = <T>(fn: () => Promise<T>, selectedFiles?: readonly string[]) => Promise<T>
+/**
+ * `selectedFiles` are the migrations this run applies; `abandon` names the
+ * migration --abandon resets, which also releases it from unfinished recovery.
+ */
+type WithLock = <T>(fn: () => Promise<T>, options?: { selectedFiles?: readonly string[]; abandon?: string }) => Promise<T>
 
 interface ScopeResolution {
   /** --table matched no table, so no migration is selected. */
@@ -180,7 +188,12 @@ async function cmdMigrate(runCtx: ChxPluginCommandContext): Promise<undefined | 
   if (checksumExit !== undefined) return checksumExit
 
   const plan = await resolvePendingPlan(ctx)
-  if (plan.pending.length === 0) return ctx.executeRequested ? ctx.withLock(async () => renderNothingPending(ctx, plan)) : renderNothingPending(ctx, plan)
+  if (plan.pending.length === 0) {
+    // Only a recovery needs the lock with nothing to apply: it may still finish.
+    if (ctx.cancelQueries) return ctx.withLock(async () => renderNothingPending(ctx, plan))
+    if (ctx.executeRequested) await ctx.assertRecoveryClear()
+    return renderNothingPending(ctx, plan)
+  }
 
   const planExit = await renderPlan(ctx, plan)
   if (planExit !== undefined) return planExit
@@ -239,10 +252,19 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const breakLock = f['--break-lock']
   // Progress lines go to stderr in --json mode, so stdout stays one JSON document.
   const log = jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
-  const withLock: WithLock = async (fn, selectedFiles = []) => {
+  // With query tracking off, ordinary runs skip the recovery barrier entirely.
+  const checkRecoveryClear = async (target: LockTarget | null, allowedClaim?: string, identity?: QueryIdentity) => {
+    if (target === null || (queryTrackingDisabled() && !cancelQueries)) return
+    await assertCancellationClear(rawDb, target, allowedClaim, identity)
+  }
+  const withLock: WithLock = async (fn, { selectedFiles = [], abandon } = {}) => {
     if (migrateLockDisabled()) {
       console.error('⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a concurrent migrate can apply the same statements.')
-      return await fn()
+      const target = await journalStore.lockTarget()
+      if (abandon === undefined) await checkRecoveryClear(target)
+      const result = await fn()
+      if (abandon !== undefined && target !== null && !queryTrackingDisabled()) await abandonRecovery(rawDb, target, abandon)
+      return result
     }
     const target = await journalStore.lockTarget()
     if (target === null) {
@@ -280,7 +302,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
         }
         cancellation = await expandRecoveryPlan(rawDb, target, cancellation, contexts)
       }
-      await assertCancellationClear(rawDb, target, cancellation?.claim, identity)
+      if (abandon === undefined) await checkRecoveryClear(target, cancellation?.claim, cancellation?.identity)
       const migrationHooks = pluginRuntime.plugins.some((item) => item.plugin.hooks?.onBeforeApply || item.plugin.hooks?.onAfterApply)
       if (cancelQueries && migrationHooks) throw new MigrateError('migrate_cancellation_failed', 'Cancellation cannot cover arbitrary migration plugin hooks.')
       const trackedIdentity = migrationHooks ? undefined : identity
@@ -292,12 +314,13 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       })
       heldLock = lock
       try {
-        await assertCancellationClear(rawDb, target, cancellation?.claim, identity)
+        if (abandon === undefined) await checkRecoveryClear(target, cancellation?.claim, cancellation?.identity)
         const recovery = cancellation ? await cancelPredecessor(rawDb, target, cancellation, lock) : undefined
         completeRecovery = recovery ? async () => { await finishRecovery(rawDb, target, recovery, lock); completeRecovery = undefined } : undefined
-        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, ...(cancellation && recovery ? { recovery: { targets: recovery.obligations.map((item) => item.target), sources: recovery.obligations.flatMap((item) => item.source ? [item.source] : []), obligations: recovery.obligations, afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
+        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, ...(cancellation && recovery ? { recovery: { targets: [...recovery.obligations, ...cancellation.extra].map((item) => item.target), sources: [...recovery.obligations, ...cancellation.extra].flatMap((item) => item.source ? [item.source] : []), statements: [...recovery.obligations, ...cancellation.extra], afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
         const result = await fn()
         await completeRecovery?.()
+        if (abandon !== undefined && !queryTrackingDisabled()) await abandonRecovery(rawDb, target, abandon, lock)
         return result
       } catch (error) {
         // A step that retries or wraps the guard's error (a poll loop, a
@@ -364,6 +387,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     retryTarget,
     abandonTarget,
     withLock,
+    cancelQueries,
+    assertRecoveryClear: async () => { await checkRecoveryClear(await journalStore.lockTarget()) },
     queryTracker: () => queryTracker,
     completeRecovery: async () => { await completeRecovery?.() },
   }
@@ -429,7 +454,7 @@ async function abandonUnderLock(ctx: AbandonContext, migration: string, state: M
       throw journalChangedError(`the journal state of ${migration} is no longer the one shown`)
     }
     await abandonMigrationState(current, { journalStore })
-  })
+  }, { abandon: migration })
 }
 
 /** Gate 1: block when applied migrations no longer match their recorded checksum. */
@@ -596,7 +621,7 @@ async function runDestructiveGate(ctx: MigrateContext, pending: string[]): Promi
  * and emit the final summary.
  */
 async function applyPending(ctx: MigrateContext, plan: PendingPlan): Promise<number> {
-  return await ctx.withLock(async () => await applyPlan(ctx, await replanUnderLock(ctx, plan)), plan.pending)
+  return await ctx.withLock(async () => await applyPlan(ctx, await replanUnderLock(ctx, plan)), { selectedFiles: plan.pending })
 }
 
 /**

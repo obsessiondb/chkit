@@ -126,7 +126,7 @@ export function createRemoteExecutor(deps: {
 				serviceSlug,
 				query: sql,
 				queryId,
-				settings: { async_insert: 0, ...apiSettings },
+				...(Object.keys(apiSettings).length > 0 ? { settings: apiSettings } : {}),
 			})
 			throwIfError(res)
 		},

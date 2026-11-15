@@ -48,6 +48,7 @@ from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migratio
 from chkit.cli.commands.migrate_barrier import find_pending_non_select_barriers
 from chkit.cli.commands.migrate_cancellation import (
     FreshRecoveryClient,
+    abandon_recovery,
     assert_cancellation_clear,
     assert_cancellation_unfinished,
     cancel_predecessor,
@@ -518,10 +519,14 @@ def _run(
         _run_checksum_gate(ctx, journal)
         plan = _resolve_pending_plan(ctx)
         if not plan.pending:
-            if execute_requested:
-                ctx.with_lock(lambda: _render_nothing_pending(ctx, plan))
-            else:
-                _render_nothing_pending(ctx, plan)
+            runner = ctx.with_lock
+            # Only a recovery needs the lock with nothing to apply: it may still finish.
+            if isinstance(runner, _MigrateLockRunner) and runner.cancel_queries:
+                runner(lambda: _render_nothing_pending(ctx, plan))
+                return
+            if execute_requested and isinstance(runner, _MigrateLockRunner):
+                runner.assert_recovery_clear()
+            _render_nothing_pending(ctx, plan)
             return
         if _render_plan(ctx, plan):
             return
@@ -600,6 +605,8 @@ def _abandon_under_lock(ctx: AbandonContext, migration: str, state: MigrationRow
 
     if ctx.with_lock is None:
         abandon()
+    elif isinstance(ctx.with_lock, _MigrateLockRunner):
+        ctx.with_lock(abandon, abandon=migration)
     else:
         ctx.with_lock(abandon)
 
@@ -967,14 +974,48 @@ class _MigrateLockRunner(WithLock):
         self._migration_hooks = migration_hooks
         self._migrations_dir = migrations_dir
 
-    def __call__(self, fn: Callable[[], _T], selected_files: list[str] | None = None) -> _T:
+    @property
+    def cancel_queries(self) -> bool:
+        return self._cancel_queries
+
+    def _check_recovery_clear(
+        self, target: LockTarget | None, allowed: str | None = None,
+        identity: QueryIdentity | None = None,
+    ) -> None:
+        # With query tracking off, ordinary runs skip the recovery barrier entirely.
+        if target is None or (query_tracking_disabled() and not self._cancel_queries):
+            return
+        assert_cancellation_clear(self._raw_client, target, allowed, identity)
+
+    def _lock_target(self) -> LockTarget | None:
+        found = self._journal_store.lock_target()
+        if found is None:
+            return None
+        database, table, fanout = found
+        return LockTarget(database=database, journal_table=table, fanout=fanout)
+
+    def assert_recovery_clear(self) -> None:
+        """Fails while a stopped run's recovery is unfinished; read-only, no lock."""
+        self._check_recovery_clear(self._lock_target())
+
+    def __call__(
+        self, fn: Callable[[], _T], selected_files: list[str] | None = None,
+        abandon: str | None = None,
+    ) -> _T:
+        """`abandon` names the migration --abandon resets, which also leaves unfinished recovery."""
         if migrate_lock_disabled():
             typer.echo(
                 "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "
                 "concurrent migrate can apply the same statements.",
                 err=True,
             )
-            return fn()
+            unlocked = self._lock_target()
+            if abandon is None:
+                self._check_recovery_clear(unlocked)
+            result = fn()
+            if abandon is not None and unlocked is not None and not query_tracking_disabled():
+                abandon_recovery(self._raw_client, unlocked, abandon)
+            return result
         found = self._journal_store.lock_target()
         if found is None:
             if self._cancel_queries:
@@ -1056,7 +1097,9 @@ class _MigrateLockRunner(WithLock):
                     self._raw_client, target, cancellation, contexts,
                 )
             allowed = cancellation.claim if cancellation is not None else None
-            assert_cancellation_clear(self._raw_client, target, allowed, identity)
+            recovery_identity = cancellation.identity if cancellation is not None else None
+            if abandon is None:
+                self._check_recovery_clear(target, allowed, recovery_identity)
             if self._cancel_queries and self._migration_hooks:
                 raise MigrateError(
                     "migrate_cancellation_failed",
@@ -1085,7 +1128,8 @@ class _MigrateLockRunner(WithLock):
             )
             self._holder.lock = lock
             try:
-                assert_cancellation_clear(self._raw_client, target, allowed, identity)
+                if abandon is None:
+                    self._check_recovery_clear(target, allowed, recovery_identity)
                 active_recovery = (
                     cancel_predecessor(self._raw_client, target, cancellation, lock)
                     if cancellation is not None else None
@@ -1096,14 +1140,14 @@ class _MigrateLockRunner(WithLock):
                 recovery = None
                 if cancellation is not None and active_recovery is not None:
                     plan = cancellation
-                    obligations = active_recovery.obligations
+                    statements = [*active_recovery.obligations, *cancellation.extra]
                     recovery = QueryRecovery(
-                        [item.target for item in obligations],
+                        [item.target for item in statements],
                         lambda table: settle_compensation(
                             self._raw_client, target, plan, table, lock,
                         ),
-                        tuple(item.source for item in obligations if item.source is not None),
-                        tuple(obligations),
+                        tuple(item.source for item in statements if item.source is not None),
+                        tuple(statements),
                     )
                 self._holder.tracker = (
                     QueryTracker(
@@ -1113,6 +1157,8 @@ class _MigrateLockRunner(WithLock):
                 )
                 result = fn()
                 self._holder.complete_recovery()
+                if abandon is not None and not query_tracking_disabled():
+                    abandon_recovery(self._raw_client, target, abandon, lock)
                 return result
             except BaseException:
                 # A step that retries or wraps the guard's error (a poll loop,

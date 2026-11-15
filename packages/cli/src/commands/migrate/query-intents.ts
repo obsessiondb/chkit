@@ -51,7 +51,8 @@ export interface QueryIntent extends QueryIdentity {
 export interface QueryRecovery {
   targets: readonly QueryTarget[]
   sources?: readonly QueryTarget[]
-  obligations?: readonly RecoveryObligation[]
+  /** Every statement this recovery may send: the recorded obligations and the other checked ones. */
+  statements?: readonly RecoveryObligation[]
   /** Settles a replace and returns the target under its new UUID. */
   afterCompensation(target: QueryTarget): Promise<QueryTarget>
 }
@@ -119,7 +120,7 @@ export function createQueryTracker(input: {
       ...(recordedTarget ? { target: recordedTarget } : {}),
       ...(recordedSource ? { source: recordedSource } : {}),
     }
-    if (recovery?.obligations && !recovery.obligations.some((item) => item.migration === context.migration && item.statementIndex === context.statementIndex && item.forwardFingerprint === intent.forwardFingerprint)) throw cancellationError('Explicit recovery requires the unchanged recorded forward SQL; no statement was sent.')
+    if (recovery?.statements && !recovery.statements.some((item) => item.migration === context.migration && item.statementIndex === context.statementIndex && item.forwardFingerprint === intent.forwardFingerprint)) throw cancellationError('Explicit recovery requires the unchanged recorded forward SQL; no statement was sent.')
     if (recovery && (!['insert', 'replace'].includes(intent.kind) || !targets.some((expected) => sameTarget(expected, recordedTarget) && expected.uuid === recordedTarget?.uuid && expected.engine === recordedTarget?.engine) || (recordedSource && !recovery.sources?.some((expected) => sameTarget(expected, recordedSource) && expected.uuid === recordedSource?.uuid && expected.engine === recordedSource?.engine)))) {
       throw cancellationError('Explicit cancellation recovery requires supported SQL against the recorded table identity; no statement was sent.')
     }
@@ -158,6 +159,8 @@ export function createQueryTracker(input: {
   return {
     async command(context, phase, sql, settings) {
       let physicalTarget: QueryTarget | undefined
+      // Recovery reloads synchronously, on both transports; ordinary runs keep the user's settings.
+      const sent: ClickHouseSettings | undefined = recovery ? { ...settings, async_insert: 0 } : settings
       await command(sql, () => lock.assertHeld(), async () => {
         if (!untracked) {
           try {
@@ -169,7 +172,7 @@ export function createQueryTracker(input: {
           }
         }
         return randomUUID()
-      }, settings)
+      }, sent)
       lock.assertHeld()
       if (phase === 'compensation' && recovery) {
         if (!physicalTarget) throw cancellationError('Compensation has no attested target.')
