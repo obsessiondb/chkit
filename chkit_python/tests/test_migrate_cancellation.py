@@ -92,6 +92,7 @@ class ControlFixture:
         self.running_polls = 0
         self.late_uuid = ""
         self.processes_unreadable = False
+        self.dropped_servers: list[str] = []
 
     def execute_tracked(self, *_args: Any, **_kwargs: Any) -> None:
         raise AssertionError("No replacement SQL belongs in cancellation preflight")
@@ -183,15 +184,20 @@ class ControlFixture:
                                 "engine": self.source_engine if source else self.engine,
                                 "dependencies": self.dependencies, "database_engine": self.database_engine}
                                for server in (self.servers or [self.server])])
-        if sql.startswith("SELECT count() AS n") and "system.processes" in sql:
+        if sql.startswith("SELECT server_uuid, principal, n") and "system.processes" in sql:
             if self.processes_unreadable:
                 return self._rows([])
+            # Servers the cluster no longer lists answer nothing, whatever they still run.
+            answering = [server for server in self.identity.server_uuids if server not in self.dropped_servers]
+            running = "0"
             if self.running_polls > 0:
                 self.running_polls -= 1
-                return self._rows([{"n": str(self.running_polls + 1)}])
-            if self.late_uuid:
+                running = str(self.running_polls + 1)
+            elif self.late_uuid:
                 self.target_uuid = self.late_uuid
-            return self._rows([{"n": "0"}])
+            return self._rows([{"server_uuid": server, "principal": self.principal,
+                                "n": running if index == 0 else "0"}
+                               for index, server in enumerate(answering)])
         if sql.startswith("SELECT query_id"):
             return self._rows([{
                 "query_id": QUERY_ID, "initial_query_id": QUERY_ID,
@@ -475,8 +481,27 @@ def test_waits_for_stopped_statements_then_refuses_a_replace_that_landed() -> No
     fixture.late_uuid = SERVER
     with pytest.raises(MigrateError, match="no longer has the UUID"):
         cancel_predecessor(fixture, TARGET, plan, fixture)
-    assert len([sql for sql, _ in fixture.calls if sql.startswith("SELECT count() AS n")]) == 3
+    assert len([sql for sql, _ in fixture.calls if sql.startswith("SELECT server_uuid, principal, n")]) == 3
     assert f"{RECOVERY_PREFIX}{SUCCESSOR}/required" not in fixture.markers
+
+
+def test_a_replica_the_cluster_stops_listing_never_counts_as_drained() -> None:
+    """#733 final review: a poll must answer from every recorded replica."""
+    other = "00000000-0000-4000-8000-000000000004"
+    identity = replace(IDENTITY, server_uuids=[SERVER, other])
+    fixture = ControlFixture(identity)
+    fixture.engine = fixture.recorded_engine = "SharedMergeTree"
+    plan = prepare_cancellation(fixture, TARGET, identity, CLAIM)
+    mark_cancellation_pending(fixture, TARGET, plan)
+    # Topology still lists both servers; the processes poll no longer reaches `other`.
+    fixture.dropped_servers = [other]
+    with pytest.raises(MigrateError, match="every recorded replica"):
+        cancel_predecessor(fixture, TARGET, plan, fixture)
+    with pytest.raises(MigrateError, match="every recorded replica"):
+        abandon_recovery(fixture, TARGET, "load.sql", fixture)
+    assert [name for name in fixture.markers if not name.endswith("/pending")] == []
+    with pytest.raises(MigrateError, match="unfinished"):
+        assert_cancellation_clear(fixture, TARGET)
 
 
 def test_completion_rechecks_the_replaced_target_after_the_reload() -> None:
@@ -587,7 +612,7 @@ def test_abandon_waits_for_stopped_statements_and_keeps_the_barrier_when_unsure(
         if query.startswith("INSERT") and "__chkit_migrate_recovery_abandon__/" in query
     )
     assert next(index for index, query in enumerate(sql) if query.startswith("KILL")) < abandon_write
-    last_poll = max(index for index, query in enumerate(sql) if query.startswith("SELECT count() AS n"))
+    last_poll = max(index for index, query in enumerate(sql) if query.startswith("SELECT server_uuid, principal, n"))
     assert last_poll < abandon_write
     assert f"{CANCELLATION_PREFIX}{CLAIM}/completed" in fixture.markers
 

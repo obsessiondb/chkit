@@ -35,7 +35,7 @@ function fake(identity: QueryIdentity = IDENTITY) {
     replaceAfterReads: -1, replacedServers: [] as string[], tableReads: 0, compensated: false, untracked: false,
     loseAfterKill: false, killFailure: false, failCompletion: false, held: true, killed: false, unreadable: false, legacy: false,
     // Polls of system.processes that still find a recorded statement; `lateUUID` lands once it ends.
-    runningPolls: 0, lateUUID: '', processesUnreadable: false }
+    runningPolls: 0, lateUUID: '', processesUnreadable: false, droppedServers: [] as string[] }
   const db = {
     queryControlCluster: 'declared',
     commandTracked: async () => {},
@@ -77,11 +77,16 @@ function fake(identity: QueryIdentity = IDENTITY) {
         if (events && ++state.tableReads === state.replaceAfterReads) state.targetUUID = REPLACED
         return identity.serverUUIDs.map((server_uuid) => ({ server_uuid, principal: state.principal, uuid: sql.includes("name = 'frozen'") ? state.sourceUUID : sql.includes("name = 'metrics'") ? state.metricsUUID : state.replacedServers.includes(server_uuid) ? REPLACED : state.targetUUID, engine: sql.includes("name = 'frozen'") ? state.sourceEngine : state.engine, dependencies: state.dependencies, database_engine: state.databaseEngine }))
       }
-      if (sql.startsWith('SELECT count() AS n') && sql.includes('system.processes')) {
+      if (sql.startsWith('SELECT server_uuid, principal, n') && sql.includes('system.processes')) {
         if (state.processesUnreadable) return []
-        if (state.runningPolls > 0) return [{ n: state.runningPolls-- }]
+        // Servers the cluster no longer lists answer nothing, whatever they still run.
+        const answering = identity.serverUUIDs.filter((server) => !state.droppedServers.includes(server))
+        if (state.runningPolls > 0) {
+          const n = state.runningPolls--
+          return answering.map((server_uuid, index) => ({ server_uuid, principal: state.principal, n: index === 0 ? n : '0' }))
+        }
         if (state.lateUUID) state.targetUUID = state.lateUUID
-        return [{ n: '0' }]
+        return answering.map((server_uuid) => ({ server_uuid, principal: state.principal, n: '0' }))
       }
       if (sql.startsWith('SELECT query_id')) return [{ query_id: ID, initial_query_id: ID, user: 'writer', initial_user: 'writer' }]
       if (sql.startsWith('KILL QUERY')) {
@@ -246,8 +251,22 @@ describe('replace settlement', () => {
     f.state.runningPolls = 2
     f.state.lateUUID = SERVER
     await expect(cancelPredecessor(f.db, TARGET, plan, f.lock)).rejects.toThrow('no longer has the UUID')
-    expect(f.calls.filter((call) => call.sql.startsWith('SELECT count() AS n'))).toHaveLength(3)
+    expect(f.calls.filter((call) => call.sql.startsWith('SELECT server_uuid, principal, n'))).toHaveLength(3)
     expect(f.markers.has(`${RECOVERY_PREFIX}${SUCCESSOR}/required`)).toBe(false)
+  })
+
+  test('a replica the cluster stops listing mid-wait never counts as drained (#733 final review)', async () => {
+    const f = fake(identity)
+    f.state.engine = 'SharedMergeTree'
+    f.state.recordedEngine = 'SharedMergeTree'
+    const plan = await prepareCancellation(f.db, TARGET, identity, CLAIM)
+    await markCancellationPending(f.db, TARGET, plan)
+    // Topology still lists both servers; the processes poll no longer reaches `other`.
+    f.state.droppedServers = [other]
+    await expect(cancelPredecessor(f.db, TARGET, plan, f.lock)).rejects.toThrow('every recorded replica')
+    await expect(abandonRecovery(f.db, TARGET, 'load.sql', f.lock)).rejects.toThrow('every recorded replica')
+    expect([...f.markers.keys()].filter((name) => !name.endsWith('/pending'))).toEqual([])
+    await expect(assertCancellationClear(f.db, TARGET)).rejects.toThrow('unfinished')
   })
 
   test('completion re-checks the replaced target, so a late replace after the reload blocks it (#733 review D)', async () => {
@@ -433,7 +452,7 @@ describe('--abandon releases a stuck recovery (#733 review B)', () => {
     const sql = f.calls.map((call) => call.sql)
     const abandonWrite = sql.findIndex((statement) => statement.startsWith('INSERT') && statement.includes('__chkit_migrate_recovery_abandon__/'))
     expect(sql.findIndex((statement) => statement.startsWith('KILL'))).toBeLessThan(abandonWrite)
-    expect(sql.findLastIndex((statement) => statement.startsWith('SELECT count() AS n'))).toBeLessThan(abandonWrite)
+    expect(sql.findLastIndex((statement) => statement.startsWith('SELECT server_uuid, principal, n'))).toBeLessThan(abandonWrite)
     expect(f.markers.has(`${CANCELLATION_PREFIX}${CLAIM}/completed`)).toBe(true)
   })
 

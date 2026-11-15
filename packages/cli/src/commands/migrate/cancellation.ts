@@ -15,7 +15,7 @@ export const CANCELLATION_PREFIX = '__chkit_migrate_cancel__/'
 /** `<prefix><old uuid>`: a recovery replaced that table; the row names its new UUID. */
 export const REPLACE_PREFIX = '__chkit_migrate_replace__/'
 /** `<prefix><claim>/<migration>`: --abandon released that migration from the claim's recovery. */
-export const ABANDON_PREFIX = '__chkit_migrate_recovery_abandon__/'
+const ABANDON_PREFIX ='__chkit_migrate_recovery_abandon__/'
 const DEADLINE_MS = 30_000
 const UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/i
 
@@ -407,12 +407,19 @@ function resolveUUID(resolution: Resolution, uuid: string): string {
   return current
 }
 
-/** Polls every replica until none of `ids` (or a child of one) runs; refuses when the deadline passes. */
+/**
+ * Polls every replica until none of `ids` (or a child of one) runs; refuses when the deadline passes.
+ * Each poll must answer from exactly the recorded servers: a cluster that shrank mid-wait would
+ * otherwise hide a replica still running a recorded statement.
+ */
 async function waitForQueriesGone(conn: Control, identity: QueryIdentity, ids: string[]): Promise<void> {
   for (;;) {
-    const rows = await conn.query<{ n: string | number }>(`SELECT count() AS n FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, system.processes) WHERE ${processPredicate(identity, ids)} SETTINGS skip_unavailable_shards = 0`)
-    const running = Number(rows[0]?.n)
-    if (rows.length !== 1 || !Number.isFinite(running)) throw cancellationError('Cannot read the running queries of every replica; replacement work is blocked.')
+    const rows = await conn.query<{ server_uuid: string; principal: string; n: string | number }>(`SELECT server_uuid, principal, n FROM clusterAllReplicas(${sqlString(requireCluster(identity))}, view(SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, count() AS n FROM system.processes WHERE ${processPredicate(identity, ids)})) SETTINGS skip_unavailable_shards = 0`)
+    const servers = rows.map((row) => row.server_uuid).sort()
+    if (JSON.stringify(servers) !== JSON.stringify([...identity.serverUUIDs].sort()) || rows.some((row) => row.principal !== identity.principal || !Number.isFinite(Number(row.n)) || Number(row.n) < 0)) {
+      throw cancellationError('Cannot read the running queries of every recorded replica; replacement work is blocked.')
+    }
+    const running = rows.reduce((sum, row) => sum + Number(row.n), 0)
     if (running === 0) return
     if (conn.remaining() <= 100) throw cancellationError('A statement of the stopped run is still running after KILL; replacement work is blocked. Retry once it ends.')
     await sleep(100)

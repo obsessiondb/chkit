@@ -560,21 +560,34 @@ def _assert_journal_coverage(
 
 
 def _wait_for_queries_gone(conn: _Control, identity: QueryIdentity, ids: list[str]) -> None:
-    """Poll every replica until none of `ids` (or a child) runs; refuse past the deadline."""
+    """Poll every replica until none of `ids` (or a child) runs; refuse past the deadline.
+
+    Each poll must answer from exactly the recorded servers: a cluster that shrank mid-wait
+    would otherwise hide a replica still running a recorded statement.
+    """
     while True:
         rows = conn.query(
-            "SELECT count() AS n FROM "
-            f"clusterAllReplicas({sql_string(_require_cluster(identity))}, system.processes) "
-            f"WHERE {_process_predicate(identity, ids)} SETTINGS skip_unavailable_shards = 0"
+            "SELECT server_uuid, principal, n FROM "
+            f"clusterAllReplicas({sql_string(_require_cluster(identity))}, view("
+            "SELECT toString(serverUUID()) AS server_uuid, currentUser() AS principal, "
+            f"count() AS n FROM system.processes WHERE {_process_predicate(identity, ids)})) "
+            "SETTINGS skip_unavailable_shards = 0"
         )
         try:
-            running = int(rows[0]["n"]) if len(rows) == 1 else -1
-        except (TypeError, ValueError):
-            running = -1
-        if running < 0:
+            counts = [int(row["n"]) for row in rows]
+        except (KeyError, TypeError, ValueError):
+            counts = [-1]
+        servers = sorted(str(row.get("server_uuid")) for row in rows)
+        if (
+            servers != sorted(identity.server_uuids)
+            or any(row.get("principal") != identity.principal for row in rows)
+            or any(count < 0 for count in counts)
+        ):
             raise cancellation_error(
-                "Cannot read the running queries of every replica; replacement work is blocked."
+                "Cannot read the running queries of every recorded replica; replacement "
+                "work is blocked."
             )
+        running = sum(counts)
         if running == 0:
             return
         if conn.remaining() <= 100:  # noqa: PLR2004 — one poll interval, in ms
