@@ -47,6 +47,7 @@ from typing import Literal
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     assert_completed_statement,
     has_statement_progress,
@@ -148,6 +149,7 @@ class AsyncApplyInput:
     poll_interval_seconds: float = POLL_INTERVAL_SECONDS
     # --setting values, sent with the submitted statement and its before-retry SQL.
     settings: dict[str, str] | None = None
+    query_tracker: QueryTracker | None = None
 
 
 def iso_without_zone(dt: datetime) -> str:
@@ -425,8 +427,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
                 prior_error if attempt_outcome == "failed" else NO_OUTCOME_ERROR,
             )
         if input_.before_retry is not None:
-            input_.log(f"  {input_.operation_type}: running before-retry SQL")
-            client.execute(input_.before_retry, settings=input_.settings)
+            _execute_before_retry(input_, input_.before_retry)
     else:
         input_.log(
             f"  {input_.operation_type}: submitting async (query_id={query_id})"
@@ -473,6 +474,14 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     )
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
+    if input_.query_tracker is not None:
+        input_.query_tracker.record_async(
+            QueryContext(
+                input_.migration_name, input_.statement_index,
+                input_.sql, input_.before_retry,
+            ),
+            attempt_query_id,
+        )
     submission = _Submission(
         lambda: client.submit(input_.sql, query_id=attempt_query_id, settings=input_.settings)
     )
@@ -486,6 +495,19 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         started_at=started_at,
         fingerprint=input_.fingerprint,
     )
+
+
+def _execute_before_retry(input_: AsyncApplyInput, before_retry: str) -> None:
+    input_.log(f"  {input_.operation_type}: running before-retry SQL")
+    if input_.query_tracker is not None:
+        input_.query_tracker.command(
+            QueryContext(
+                input_.migration_name, input_.statement_index, input_.sql, before_retry,
+            ),
+            "compensation", before_retry, input_.settings,
+        )
+    else:
+        input_.client.execute(before_retry, settings=input_.settings)
 
 
 def _poll_until_terminal(

@@ -24,6 +24,7 @@ chkit migrate [flags]
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
 | `-t`, `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
 | `--break-lock <claim>` | string | — | Release the [migrate lock](#concurrent-runs) claim of a run that is no longer running, then take the lock |
+| `--cancel-lock-queries` | boolean | `false` | Cancel [tracked statements of a stopped run](#cancelling-a-stopped-runs-queries) before recovery; requires `--apply --break-lock <claim>` |
 | `--setting <name=value>` | string[] | — | Send a ClickHouse [query setting](#query-settings) with each migration statement. Repeatable, or comma-separated |
 
 Global flags documented on [CLI Overview](/cli/overview/#global-flags).
@@ -211,6 +212,58 @@ What the lock does not cover:
 - Releases before the lock do not take or check it, so the lock only keeps apart runs of releases that have it. `CHKIT_MIGRATE_LOCK=off` turns the lock off, as before this release; `migrate` then prints a warning on stderr.
 
 To free the lock of a run you know has stopped, without waiting for it to expire, pass the claim from the error: `chkit migrate --apply --break-lock 3f1c…`. It releases only that claim and takes the lock; when another run holds the lock by then, it stops with `migrate_locked` as usual. Breaking the claim of a run that is still running lets both runs apply statements until that run's next renewal.
+
+### Cancelling a stopped run's queries
+
+After stopping the old CLI process, use `--cancel-lock-queries` with its claim to recover the data loads it left running on the server:
+
+```sh
+chkit migrate --apply --break-lock 3f1c… --cancel-lock-queries
+```
+
+Each statement it covers is a synchronous `INSERT` whose before-retry SQL replaces the same table with an empty copy of itself:
+
+```sql
+-- operation: sql_statement key=statement:0 risk=caution
+-- before-retry: CREATE OR REPLACE TABLE analytics.events AS analytics.events
+INSERT INTO analytics.events SELECT * FROM analytics.events_frozen;
+```
+
+The replace gives the table a new UUID. A statement that already resolved the old table, including one still running, stores nothing in the new one, whatever error the server reports for it. A request that reaches the server after the replace resolves the name again and writes to the new table (see the limits below). chkit sends `KILL QUERY` for the stopped run's recorded query IDs, then waits up to 30 seconds until none of them runs on any replica, so a replace of the stopped run cannot land after the reload; when one is still running, recovery stops and can be retried. `TRUNCATE` does not stop a running `INSERT`, so it does not qualify.
+
+What recovery requires:
+
+- A declared cluster covering every server that can receive migration writes. Native connections use `clickhouse.cluster`; the ObsessionDB console transport uses `default`. chkit verifies stable server UUIDs and the SQL user across that cluster; an unavailable replica or a changed identity stops recovery.
+- A `SharedMergeTree` target (ObsessionDB or ClickHouse Cloud), or a plain `MergeTree` target on one declared server, in an `Atomic` or `Shared` database, with no materialized views reading from it. `CREATE TABLE` and `DROP TABLE` on each target, directly or through a role.
+- `VALUES`, literal or `numbers`/`numbers_mt` expressions, or a simple `INSERT SELECT` from one named `MergeTree`, `ReplicatedMergeTree` or `SharedMergeTree` source table. The source must stay frozen. Each statement needs its own target, no source may be another statement's target, and the journal can be neither.
+- Per-query settings limited to `max_threads`, `max_insert_threads`, `max_block_size`, `max_insert_block_size`, `min_insert_block_size_rows`, `min_insert_block_size_bytes` and `async_insert=0`.
+
+Before breaking the claim, chkit checks the complete selected migration files, including statements the stopped run had not reached; only the statements the stopped run recorded must complete before the recovery ends. Unsupported DDL, async statements, views, joins, CTEs, inline `SETTINGS`, materialized-view dependencies and arbitrary migration hooks refuse recovery before anything is cancelled. A claim with any unsupported attempt also refuses. Keep schema DDL separate from cancellable load runs, and restore recorded forward SQL rather than editing it during recovery.
+
+How it stays safe across crashes: tracked runs record a fresh query ID and the table UUIDs before each statement, in immutable journal rows that hold no SQL text or credentials. After each replace, chkit waits until every replica serves the new table and records its new UUID before it reloads, and it checks the table still has that UUID before the recovery ends. A table whose UUID recovery did not record (recreated by someone else, or replaced by a run that crashed before recording it) stops recovery instead of being adopted. A durable recovery marker blocks ordinary apply until the journal shows every covered statement completed; a `migrate --apply` with nothing pending checks it too, without taking the lock. These checks read the journal with the permissions ordinary runs already need, never from the query cache. A crashed recovery is resumed with its own claim, named in the error.
+
+When a covered statement cannot complete, for example because it keeps failing or its table was recreated, `chkit migrate --abandon <migration> --apply` releases that migration from the recovery, including a migration the recovering run started itself: the recovery ends once nothing else holds it, and the next apply runs the migration again from statement 1, with its before-retry replace. Before it releases anything, `--abandon` stops the recovery's recorded statements and waits up to 30 seconds until none still runs on any replica, so it needs the same cluster access as recovery; when that cannot be shown, the recovery stays and nothing is released.
+
+When the recovering CLI was killed, its claim keeps the [migrate lock](#concurrent-runs) until its lease expires, so `--abandon` alone stops with `migrate_locked`. Stop that CLI, then pass its claim, which the `migrate_locked` error names:
+
+```sh
+chkit migrate --abandon 20260929001110_funnel-model.sql --apply --break-lock 3f1c…
+```
+
+Until then, the killed recovery's statements keep running on the server; this `--abandon` stops them before it releases the migration.
+
+Limits:
+
+- Stop the old CLI first. The replace fences only statements already bound to the old table. Any request that reaches the server after the replace writes to the new table: one from an old CLI that is still running, a delayed or retried request, an async insert queue, or a `Distributed` or `Buffer` table in front.
+- The replace removes every row in the target, including rows other writers had inserted.
+- Anything keyed by the old table UUID, such as cache pins, does not follow the new table.
+- Run one recovery per table at a time.
+
+Query tracking adds a journal write before each synchronous statement of every run. When that write fails, or the SQL user cannot read every replica, the run continues untracked and records that `--cancel-lock-queries` cannot cancel it; it needs no grant beyond what migrate already needs. `CHKIT_MIGRATE_QUERY_TRACKING=off` turns tracking off, along with the recovery barrier check; `--cancel-lock-queries` then refuses to run.
+
+:::caution
+`--break-lock` alone releases only the lock claim; it cancels nothing.
+:::
 
 ### Multi-replica targets
 
@@ -494,6 +547,7 @@ A failure that stops the command prints the standard error envelope:
 | `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
 | `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, a heartbeat did not read back, or another run broke its claim; the run stopped before its next request |
 | `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |
+| `migrate_cancellation_failed` | Recovery was unsupported, could not be verified or was interrupted; the recovery barrier remains until a run with `--cancel-lock-queries` completes it |
 | `journal_changed` | Another run changed the journal between the plan and the lock in a way the plan does not cover; nothing was applied |
 | `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`, or an empty migration name |
 

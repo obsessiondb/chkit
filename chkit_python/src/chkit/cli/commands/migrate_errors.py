@@ -22,6 +22,7 @@ MigrateErrorCode = Literal[
     "migrate_lock_lost",
     "migrate_lock_unverifiable",
     "journal_changed",
+    "migrate_cancellation_failed",
 ]
 
 EMPTY_MIGRATIONS_SUMMARY = (

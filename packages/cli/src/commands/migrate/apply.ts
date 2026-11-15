@@ -30,6 +30,7 @@ import {
   type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
+import type { QueryContext, QueryTracker } from './query-intents.js'
 import {
   applyAsyncStatement,
   freshMigrationState,
@@ -198,6 +199,7 @@ export async function applyMigration(input: {
   file: string
   /** --setting values, sent with every statement of the migration (sync, async, barrier, before-retry). */
   settings?: ClickHouseSettings
+  queryTracker?: QueryTracker
   /** Set when --retry verified an edit of this in-progress migration before the run (#233). */
   retry?: { previousChecksum: string; checksum: string }
   /** Progress lines; the command sends them to stderr in --json mode. */
@@ -313,6 +315,7 @@ export async function applyMigration(input: {
           fingerprint: fingerprints[i] ?? '',
           beforeRetry: operation.beforeRetry,
           settings,
+          queryTracker: input.queryTracker,
           log,
         })
       } catch (error) {
@@ -356,6 +359,8 @@ export async function applyMigration(input: {
           settings,
           log,
           status: priorAttempt.status,
+          queryTracker: input.queryTracker,
+          queryContext: { migration: file, statementIndex: i, forwardSQL: statement, beforeRetry: operation.beforeRetry },
         })
       } catch (error) {
         throw statementError({ file, index: i, total: statements.length, statement, error })
@@ -377,7 +382,9 @@ export async function applyMigration(input: {
       if (operation?.mode === 'barrier') {
         await waitForInsertBarrier(db, statement, { cluster: config.clickhouse?.cluster, settings, log })
       } else {
-        await db.command(statement, settings)
+        if (input.queryTracker) {
+          await input.queryTracker.command({ migration: file, statementIndex: i, forwardSQL: statement, beforeRetry: operation?.beforeRetry ?? null }, 'forward', statement, settings)
+        } else await db.command(statement, settings)
       }
     } catch (error) {
       const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
@@ -472,13 +479,17 @@ async function runBeforeRetry(
     settings: ClickHouseSettings | undefined
     log: (line: string) => void
     status: OperationStatus
+    queryTracker?: QueryTracker
+    queryContext?: QueryContext
   },
 ): Promise<void> {
   if (operationType === 'exchange_tables') {
     await waitForExchange(db, statement, { cluster: options.cluster })
   }
   options.log(`  ${operationType}: an earlier attempt ${options.status === 'failed' ? 'failed' : 'was interrupted'} — running before-retry SQL`)
-  await db.command(beforeRetry, options.settings)
+  if (options.queryTracker && options.queryContext) {
+    await options.queryTracker.command(options.queryContext, 'compensation', beforeRetry, options.settings)
+  } else await db.command(beforeRetry, options.settings)
 }
 
 // An in-progress migration whose file changed resumes when this run's --retry

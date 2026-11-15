@@ -89,10 +89,38 @@ export interface ClickHouseJsonQueryResult<
 
 export type ObservableSystemTable = 'processes' | 'query_log'
 
+/** Control proofs require fresh, complete results rather than cached or truncated data. */
+export const STRICT_CONTROL_SETTINGS: ClickHouseSettings = {
+	use_query_cache: 0,
+	enable_reads_from_query_cache: 0,
+	enable_writes_to_query_cache: 0,
+	read_overflow_mode: 'throw',
+	read_overflow_mode_leaf: 'throw',
+	group_by_overflow_mode: 'throw',
+	sort_overflow_mode: 'throw',
+	result_overflow_mode: 'throw',
+	timeout_overflow_mode: 'throw',
+	timeout_overflow_mode_leaf: 'throw',
+	set_overflow_mode: 'throw',
+	transfer_overflow_mode: 'throw',
+	distinct_overflow_mode: 'throw',
+}
+
+export interface QueryControlOptions {
+	queryId?: string
+	settings?: ClickHouseSettings
+}
+
 export interface ClickHouseExecutor {
 	command(sql: string, settings?: ClickHouseSettings): Promise<void>
 	/** Optional capability: check before each command attempt, including an internal retry. */
 	commandGuarded?(sql: string, check: () => void, settings?: ClickHouseSettings): Promise<void>
+	/** Native capability: durably assign a fresh id before each physical command attempt. */
+	commandTracked?(sql: string, check: () => void, beforeAttempt: () => Promise<string>, settings?: ClickHouseSettings): Promise<void>
+	/** Native control connection with a bounded request, including response consumption. */
+	queryControl?<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]>
+	/** Declared cluster used for strict cancellation coverage; never inferred from failed discovery. */
+	readonly queryControlCluster?: string
 	/** Rows as JSON objects. A number a double cannot hold exactly (an integer
 	 *  beyond 2^53, a Decimal with more than 15 digits) arrives as a string of
 	 *  its digits; the ObsessionDB console API returns every value as a string. */
@@ -219,6 +247,7 @@ export interface IntrospectedTable {
 type ClickHouseClient = ReturnType<typeof createClient>
 type ClickHouseConfig = NonNullable<ChxConfig['clickhouse']>
 type ClickHouseClientOptions = {
+	keepAlive?: boolean
 	compression?: {
 		request?: boolean
 		response?: boolean
@@ -755,6 +784,7 @@ export function createStatelessClickHouseClient(
 		clickhouse_settings: clickhouseSettings,
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
+		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
 	})
 }
 
@@ -780,6 +810,7 @@ export function createSessionClickHouseClient(
 		clickhouse_settings: clickhouseSettings,
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
+		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
 	})
 }
 
@@ -794,6 +825,7 @@ export function createExecutorWithClient(
 		wait_end_of_query: 0,
 	})
 	let compressedClient: ClickHouseClient | undefined
+	let controlClient: ClickHouseClient | undefined
 
 	// Reads add the progress settings unless the user cannot change settings,
 	// looked up once per executor. A failed lookup is not cached: the database
@@ -812,13 +844,21 @@ export function createExecutorWithClient(
 		return (await settingsChangeableOnce()) ? { ...PROGRESS_SETTINGS, ...settings } : settings
 	}
 
-	async function command(sql: string, settings?: ClickHouseSettings, check?: () => void): Promise<void> {
+	async function command(sql: string, settings?: ClickHouseSettings, check?: () => void, beforeAttempt?: () => Promise<string>): Promise<void> {
+		const { query_id: _ignored, ...trackedSettings } = settings ?? {}
+		const commandSettings: ClickHouseSettings = beforeAttempt ? { ...WRITE_SETTINGS, ...trackedSettings } : { ...WRITE_SETTINGS, ...settings }
 		check?.()
+		let queryId: string | undefined
+		if (beforeAttempt) {
+			queryId = await beforeAttempt()
+			check?.()
+		}
 		try {
 			const result = await client.command({
 				query: sql,
+				...(queryId ? { query_id: queryId } : {}),
 				http_headers: { 'X-DDL': '1' },
-				clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
+				clickhouse_settings: commandSettings,
 			})
 			assertStreamedQuerySucceeded({
 				response_headers: result.response_headers,
@@ -829,6 +869,11 @@ export function createExecutorWithClient(
 		} catch (error) {
 			if (isUnknownDatabaseError(error)) {
 				check?.()
+				let fallbackId: string | undefined
+				if (beforeAttempt) {
+					fallbackId = await beforeAttempt()
+					check?.()
+				}
 				const fallback = createClient({
 					url: config.url,
 					...credentialOptions(config),
@@ -840,8 +885,9 @@ export function createExecutorWithClient(
 				try {
 					const fallbackResult = await fallback.command({
 						query: sql,
+						...(fallbackId ? { query_id: fallbackId } : {}),
 						http_headers: { 'X-DDL': '1' },
-						clickhouse_settings: { ...WRITE_SETTINGS, ...settings },
+						clickhouse_settings: commandSettings,
 					})
 					assertStreamedQuerySucceeded({
 						response_headers: fallbackResult.response_headers,
@@ -859,7 +905,45 @@ export function createExecutorWithClient(
 
 	return {
 		command,
+		...(config.cluster ? { queryControlCluster: config.cluster } : {}),
 		commandGuarded: (sql, check, settings) => command(sql, settings, check),
+		commandTracked: (sql, check, beforeAttempt, settings) => command(sql, settings, check, beforeAttempt),
+		async queryControl<T>(sql: string, timeoutMs: number, options?: QueryControlOptions): Promise<T[]> {
+			if (!Number.isFinite(timeoutMs) || !(timeoutMs > 0)) throw new Error('Cancellation deadline expired')
+			// Disable the driver pool: a header override is ignored by the client,
+			// and a pinned socket cannot collect KILL receipts from other members.
+			controlClient ??= createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, { keepAlive: false })
+			const activeClient = controlClient
+			const controller = new AbortController()
+			let result: Awaited<ReturnType<ClickHouseClient['query']>> | undefined
+			let expired = false
+			let consumed = false
+			let timer: ReturnType<typeof setTimeout> | undefined
+			const deadline = new Promise<never>((_, reject) => {
+				timer = setTimeout(() => {
+					expired = true
+					result?.close()
+					controller.abort()
+					reject(new Error('Cancellation deadline expired'))
+				}, Math.ceil(timeoutMs))
+			})
+			try {
+				return await Promise.race([deadline, (async () => {
+					const settings = { ...options?.settings, ...STRICT_CONTROL_SETTINGS }
+					delete settings.query_id
+					result = await activeClient.query({
+						query: sql, format: 'JSONEachRow', abort_signal: controller.signal,
+						...(options?.queryId ? { query_id: options.queryId } : {}),
+						clickhouse_settings: settings,
+					})
+					if (expired) { result.close(); throw new Error('Cancellation deadline expired') }
+					assertStreamedQuerySucceeded({ response_headers: result.response_headers, query_id: result.query_id, sql })
+					const rows = parseJsonEachRow<T>(await result.text())
+					consumed = true
+					return rows
+				})()])
+			} finally { clearTimeout(timer); controller.abort(); if (!consumed) result?.close() }
+		},
 		async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
 			try {
 				const clickhouseSettings = await readSettings(settings)
@@ -1127,6 +1211,7 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 				client.close(),
 				fireAndForgetClient.close(),
 				compressedClient?.close(),
+				controlClient?.close(),
 			])
 		},
 		async listSchemaObjects(): Promise<SchemaObjectRef[]> {

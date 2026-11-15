@@ -164,6 +164,46 @@ async function rejection(promise: Promise<unknown>): Promise<MigrateError> {
 const quiet = { log: () => {} }
 
 describe('acquireMigrateLock', () => {
+  test('cancellation acknowledges its reservation before releasing the predecessor', async () => {
+    const server = fakeServer()
+    otherClaim(server, 5_000)
+    const lock = await acquireMigrateLock(server.db, TARGET, { ...quiet, breakLock: 'other', takeover: { claim: 'other', holder: OTHER_HOLDER } }, deps().overrides)
+    const releaseIndex = server.rows.findIndex((row) => row.name === OTHER && row.version === RELEASED)
+    const reservationIndex = server.rows.findIndex((row) => row.name === `${LOCK_ROW_PREFIX}run-1`)
+    expect(reservationIndex).toBeLessThan(releaseIndex)
+    expect(lock.claimId).toBe('run-1')
+    await lock.release()
+  })
+
+  test('another claim prevents cancellation takeover before the predecessor is released', async () => {
+    const server = fakeServer()
+    otherClaim(server, 5_000)
+    server.rows.push({ name: `${LOCK_ROW_PREFIX}third`, version: server.clock.now, holder: OTHER_HOLDER })
+    await expect(acquireMigrateLock(server.db, TARGET, { ...quiet, breakLock: 'other', takeover: { claim: 'other', holder: OTHER_HOLDER } }, deps().overrides)).rejects.toMatchObject({ code: 'migrate_locked' })
+    expect(claimsOf(server, OTHER).some((row) => row.version === RELEASED)).toBe(false)
+  })
+
+  test('resumes cancellation after a prior replacement reservation crashed and expired', async () => {
+    const server = fakeServer()
+    otherClaim(server, 5_000)
+    server.rows.push({ name: `${LOCK_ROW_PREFIX}crashed-reservation`, version: server.clock.now - LOCK_TIMINGS.leaseMs - 1, holder: OTHER_HOLDER })
+    const timing = deps({}, (ms) => { timing.local.now += ms })
+    const lock = await acquireMigrateLock(server.db, TARGET, { ...quiet, breakLock: 'other', takeover: { claim: 'other', holder: OTHER_HOLDER, resumePending: async () => {} } }, timing.overrides)
+    expect(claimsOf(server, `${LOCK_ROW_PREFIX}crashed-reservation`).at(-1)?.version).toBe(RELEASED)
+    expect(timing.sleeps).toContain(LOCK_TIMINGS.validMs + LOCK_TIMINGS.observeMarginMs)
+    expect(lock.claimId).toBe('run-2')
+    await lock.release()
+  })
+
+  test('fresh cancellation cannot reclaim a stale unrelated owner that may have sent its own SQL', async () => {
+    const server = fakeServer()
+    otherClaim(server, 5_000)
+    const third = `${LOCK_ROW_PREFIX}earlier-owner`
+    server.rows.push({ name: third, version: server.clock.now - LOCK_TIMINGS.leaseMs - 1, holder: OTHER_HOLDER })
+    await expect(acquireMigrateLock(server.db, TARGET, { ...quiet, breakLock: 'other', takeover: { claim: 'other', holder: OTHER_HOLDER } }, deps().overrides)).rejects.toMatchObject({ code: 'migrate_locked' })
+    expect(claimsOf(server, third).at(-1)?.version).not.toBe(RELEASED)
+  })
+
   test('takes a free lock and releases it', async () => {
     const server = fakeServer()
     const lock = await acquireMigrateLock(server.db, TARGET, quiet, deps().overrides)

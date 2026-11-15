@@ -18,12 +18,18 @@ from typing import Any, Literal, NoReturn, Self
 from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
+import httpx
 from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
 from urllib3 import Timeout
 
+from chkit.clickhouse.control import (
+    STRICT_CONTROL_SETTINGS,
+    remaining_control_seconds,
+    run_control_request,
+)
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
 from chkit.core.jsnum import js_math_round
 from chkit.core.model import ChxResolvedClickHouseConfig
@@ -198,6 +204,10 @@ class ClickHouseClient:
     def database(self) -> str:
         return self._config.database
 
+    @property
+    def query_control_cluster(self) -> str | None:
+        return self._config.cluster
+
     def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         """Run a statement (DDL or DML) without returning rows.
 
@@ -219,6 +229,81 @@ class ClickHouseClient:
                 raise
             check()
             self._client.command(statement, settings=settings, use_database=False)
+
+    def execute_tracked(
+        self,
+        statement: str,
+        check: Callable[[], None],
+        before_attempt: Callable[[], str],
+        settings: dict[str, Any] | None = None,
+    ) -> None:
+        """Persist an id before each physical send; never replay an ambiguous send."""
+        check()
+        query_id = before_attempt()
+        check()
+        try:
+            self._tracked_attempt(statement, query_id, settings, use_database=True)
+        except DatabaseError as error:
+            if not is_unknown_database_error(error):
+                raise
+            check()
+            query_id = before_attempt()
+            check()
+            self._tracked_attempt(statement, query_id, settings, use_database=False)
+
+    def _tracked_attempt(
+        self, statement: str, query_id: str, settings: dict[str, Any] | None, *, use_database: bool
+    ) -> None:
+        # clickhouse-connect 0.15.1 retries a remotely closed connection once,
+        # even with query_retries=0. The same id must never name that replay.
+        pool = self._client.http
+        self._client.http = _SingleAttemptPool(pool)
+        try:
+            self._client.command(
+                statement,
+                settings={
+                    "wait_end_of_query": 1, "async_insert": 0,
+                    **(settings or {}), "query_id": query_id,
+                },
+                use_database=use_database,
+            )
+        finally:
+            self._client.http = pool
+
+    def query_control(
+        self, statement: str, timeout_ms: float, *, query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+    ) -> QueryResult:
+        """A session-free, non-retrying control request with one absolute budget."""
+        def request(deadline: float) -> QueryResult:
+            parsed = urlparse(self._config.url)
+            url = httpx.URL(scheme=parsed.scheme, host=parsed.hostname or "", port=parsed.port)
+            username = unquote(parsed.username) if parsed.username else self._config.username
+            password = unquote(parsed.password) if parsed.password else self._config.password
+            with httpx.Client(transport=httpx.HTTPTransport(retries=0)) as control:
+                response = control.post(
+                    url,
+                    auth=(username, password),
+                    params={
+                        "database": self._config.database, "default_format": "JSONEachRow",
+                        **{key: str(value) for key, value in (settings or {}).items()
+                           if key != "query_id" and value is not None},
+                        **STRICT_CONTROL_SETTINGS,
+                        "wait_end_of_query": "1",
+                        **({"query_id": query_id} if query_id else {}),
+                    },
+                    headers={"Connection": "close"},
+                    content=statement,
+                    timeout=remaining_control_seconds(deadline),
+                )
+                if response.is_error or response.headers.get("X-ClickHouse-Exception-Code") not in (
+                    None, "", "0",
+                ):
+                    raise DatabaseError(response.text)
+                rows = [json.loads(line) for line in response.text.splitlines() if line.strip()]
+                return QueryResult(column_names=list(rows[0]) if rows else [], rows=rows)
+
+        return run_control_request(request, timeout_ms)
 
     def query(
         self,
@@ -450,6 +535,24 @@ class ClickHouseClient:
         )
 
         return list_table_details(self, databases)
+
+
+class _SingleAttemptPool:
+    """Allow one driver HTTP send and disable urllib3's separate retry budget."""
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+        self._sent = False
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        if self._sent:
+            msg = "A tracked migration request cannot be replayed after a connection failure"
+            raise RuntimeError(msg)
+        self._sent = True
+        return self._pool.request(*args, **{**kwargs, "retries": False})
 
 
 def _use_ts_timeouts(client: Any) -> None:
