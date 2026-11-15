@@ -259,6 +259,36 @@ def _resolve_service_override(
     raise ValueError(msg)
 
 
+_API_URL_FLAG: dict[str, Any] = {
+    "name": "--api-url",
+    "type": "string",
+    "description": "ObsessionDB API base URL",
+}
+# The TS `signup` flags, in its order and words.
+_SIGNUP_FLAGS: list[dict[str, Any]] = [
+    {
+        "name": "--email",
+        "type": "string",
+        "description": "Email to sign up/log in with (skips the prompt)",
+    },
+    {
+        "name": "--code",
+        "type": "string",
+        "description": "One-time code (skips the prompt; for scripts/tests)",
+    },
+    {
+        "name": "--org-name",
+        "type": "string",
+        "description": "Override the auto-created organization name",
+    },
+    {
+        "name": "--request-only",
+        "type": "boolean",
+        "description": "Only send the code and print the follow-up command (step 1 of 2)",
+    },
+]
+
+
 def _resolve_base_url_from_flags(flags: dict[str, Any]) -> str:
     """``--api-url`` overrides anything else; otherwise fall back to env/stored/default."""
     candidate = flags.get("--api-url") or flags.get("api_url")
@@ -313,12 +343,14 @@ def create_obsessiondb_plugin(
                 name="login",
                 description="Authenticate with ObsessionDB",
                 run=_login_run,
+                flags=[_API_URL_FLAG],
                 takes_args=False,
             ),
             ChxPluginCommand(
                 name="signup",
                 description="Sign up or log in with a one-time email code (passwordless)",
                 run=_signup_run,
+                flags=[_API_URL_FLAG, *_SIGNUP_FLAGS],
                 takes_args=False,
             ),
             ChxPluginCommand(
