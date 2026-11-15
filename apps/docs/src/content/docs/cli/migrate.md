@@ -244,6 +244,14 @@ How it stays safe across crashes: tracked runs record a fresh query ID and the t
 
 When a covered statement cannot complete, for example because it keeps failing or its table was recreated, `chkit migrate --abandon <migration> --apply` releases that migration from the recovery, including a migration the recovering run started itself: the recovery ends once nothing else holds it, and the next apply runs the migration again from statement 1, with its before-retry replace. Before it releases anything, `--abandon` stops the recovery's recorded statements and waits up to 30 seconds until none still runs on any replica, so it needs the same cluster access as recovery; when that cannot be shown, the recovery stays and nothing is released.
 
+When the recovering CLI was killed, its claim keeps the [migrate lock](#concurrent-runs) until its lease expires, so `--abandon` alone stops with `migrate_locked`. Stop that CLI, then pass its claim, which the `migrate_locked` error names:
+
+```sh
+chkit migrate --abandon 20260929001110_funnel-model.sql --apply --break-lock 3f1c…
+```
+
+Until then, the killed recovery's statements keep running on the server; this `--abandon` stops them before it releases the migration.
+
 Limits:
 
 - Stop the old CLI first. The replace fences only statements already bound to the old table. Any request that reaches the server after the replace writes to the new table: one from an old CLI that is still running, a delayed or retried request, an async insert queue, or a `Distributed` or `Buffer` table in front.
