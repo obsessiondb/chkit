@@ -58,6 +58,7 @@ import {
   orderByDependencies,
   type DependencyGraph,
 } from './object-dependencies.js'
+import { identifierName, tokenizeSQL } from './sql-lexer.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -767,6 +768,7 @@ export function planDiff(
   const ordered = orderOperations(operations.sort(compareOperations), {
     drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
     create: buildDependencyGraph(newCanonical),
+    addColumn: columnDefaultReads(newCanonical),
   })
 
   const riskSummary: Record<RiskLevel, number> = { safe: 0, caution: 0, danger: 0 }
@@ -819,18 +821,58 @@ function alterRank(op: MigrationOperation): number {
 /**
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
- * first. Alters and create_database keep their place.
+ * first. Alters and create_database keep their place, but an ADD COLUMN
+ * moves behind the ADD COLUMNs its default reads (#681).
  */
 function orderOperations(
   sorted: MigrationOperation[],
-  prerequisites: { drop: DependencyGraph; create: DependencyGraph }
+  prerequisites: { drop: DependencyGraph; create: DependencyGraph; addColumn: DependencyGraph }
 ): MigrationOperation[] {
   const drops = sorted.filter((op) => operationRank(op) === 0)
   const middle = sorted.filter((op) => operationRank(op) === 1 || operationRank(op) === 2)
   const creates = sorted.filter((op) => operationRank(op) >= 3)
   return [
     ...orderByDependencies(drops, (op) => op.key, (key) => prerequisites.drop.get(key) ?? []),
-    ...middle,
+    ...orderColumnAdds(middle, prerequisites.addColumn),
     ...orderByDependencies(creates, (op) => op.key, (key) => prerequisites.create.get(key) ?? []),
   ]
+}
+
+/**
+ * Moves each ADD COLUMN behind the ADD COLUMNs of the columns that its
+ * DEFAULT, MATERIALIZED or ALIAS expression reads (#681). The ADD COLUMNs
+ * fill the positions they had, so every other operation keeps its place.
+ */
+function orderColumnAdds(operations: MigrationOperation[], reads: DependencyGraph): MigrationOperation[] {
+  const isAdd = (op: MigrationOperation) => op.type === 'alter_table_add_column'
+  const adds = orderByDependencies(operations.filter(isAdd), (op) => op.key, (key) => reads.get(key) ?? [])
+  let next = 0
+  return operations.map((op) => (isAdd(op) ? (adds[next++] ?? op) : op))
+}
+
+/**
+ * Column operation key → keys of the other columns of the same table that the
+ * column's default expression names. A name can also be a function or a
+ * lambda parameter; such an extra edge moves an ADD COLUMN later, or makes a
+ * cycle that keeps the key order.
+ */
+function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+  const graph = new Map<string, Set<string>>()
+  for (const def of definitions) {
+    if (def.kind !== 'table') continue
+    const columnKey = (name: string) => `table:${def.database}.${def.name}:column:${name}`
+    const names = new Set(def.columns.map((column) => column.name))
+    for (const column of def.columns) {
+      if (column.default === undefined) continue
+      const parsed = parseColumnDefault(column.default)
+      if (parsed.kind !== 'expression') continue
+      const read = new Set<string>()
+      for (const token of tokenizeSQL(parsed.sql)) {
+        const name = identifierName(token)
+        if (name !== undefined && name !== column.name && names.has(name)) read.add(columnKey(name))
+      }
+      graph.set(columnKey(column.name), read)
+    }
+  }
+  return graph
 }

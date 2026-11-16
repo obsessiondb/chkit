@@ -1,7 +1,9 @@
 import { describe, expect, test } from 'bun:test'
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import type { ResolvedChxConfig } from '@chkit/core'
 import type { ChxPlugin } from '../../plugins.js'
 import { loadPluginRuntime } from '../../runtime/plugin-runtime/index.js'
+import { NULL_EXECUTOR } from '../../runtime/plugin-runtime/null-executor.js'
 
 function makeConfig(plugins: ChxPlugin[]): ResolvedChxConfig {
   return {
@@ -166,5 +168,81 @@ describe('onBeforePluginCommand', () => {
     expect(receivedContext.targetPlugin).toBe('backfill')
     expect(receivedContext.command).toBe('plan')
     expect(receivedContext.args).toEqual(['--window', '7d'])
+  })
+})
+
+describe('resolveContext', () => {
+  function makeExecutor(name: string, events: string[]): ClickHouseExecutor {
+    return {
+      ...NULL_EXECUTOR,
+      close: async () => {
+        events.push(`close:${name}`)
+      },
+    }
+  }
+
+  function makeContextPlugin(
+    name: string,
+    events: string[],
+    executor: ClickHouseExecutor | null,
+  ): ChxPlugin {
+    return {
+      manifest: { name, apiVersion: 1 },
+      hooks: {
+        getContext: () => {
+          events.push(`getContext:${name}`)
+          if (!executor) throw new Error('no service')
+          return { executor }
+        },
+      },
+    }
+  }
+
+  test('runs every getContext hook and the last executor wins', async () => {
+    const events: string[] = []
+    const first = makeExecutor('first', events)
+    const second = makeExecutor('second', events)
+    const runtime = await loadPluginRuntime({
+      config: makeConfig([
+        makeContextPlugin('first', events, first),
+        makeContextPlugin('second', events, second),
+      ]),
+      configPath: '/fake/clickhouse.config.ts',
+      cliVersion: '1.0.0',
+    })
+
+    const ctx = await runtime.resolveContext({
+      config: makeConfig([]),
+      configPath: '/fake/clickhouse.config.ts',
+      command: 'migrate',
+      flags: {},
+    })
+
+    expect(ctx.executor).toBe(second)
+    expect(ctx.hasExecutor).toBe(true)
+    expect(events).toEqual(['getContext:first', 'getContext:second', 'close:first'])
+  })
+
+  test('a getContext error closes the current executor', async () => {
+    const events: string[] = []
+    const first = makeExecutor('first', events)
+    const runtime = await loadPluginRuntime({
+      config: makeConfig([
+        makeContextPlugin('first', events, first),
+        makeContextPlugin('broken', events, null),
+      ]),
+      configPath: '/fake/clickhouse.config.ts',
+      cliVersion: '1.0.0',
+    })
+
+    await expect(
+      runtime.resolveContext({
+        config: makeConfig([]),
+        configPath: '/fake/clickhouse.config.ts',
+        command: 'migrate',
+        flags: {},
+      }),
+    ).rejects.toThrow('Plugin "broken" failed in getContext: no service')
+    expect(events).toEqual(['getContext:first', 'getContext:broken', 'close:first'])
   })
 })

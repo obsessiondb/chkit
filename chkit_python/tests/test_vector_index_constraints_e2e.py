@@ -20,6 +20,7 @@ from chkit.cli.commands.pull import _introspected_table_to_definition
 from chkit.cli.commands.pull_render import render_schema_file
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
 from chkit.clickhouse.introspect import list_table_details
 from chkit.core.model import ChxResolvedClickHouseConfig, TableConstraintDefinition
 from tests.e2e_testkit import (
@@ -159,15 +160,14 @@ def test_vector_index_and_constraints_round_trip(  # noqa: PLR0915
             insert("(3, 'c', [0.1, 0.2, 0.3, 0.4])")
 
         # 2. Pull: the live table renders back to a schema with no drift.
-        with ClickHouseClient.connect(
-            ChxResolvedClickHouseConfig(
-                url=env.clickhouse_url,
-                username=env.clickhouse_user,
-                password=env.clickhouse_password,
-                database=database,
-                secure=env.clickhouse_url.startswith("https:"),
-            )
-        ) as chkit_client:
+        chkit_config = ChxResolvedClickHouseConfig(
+            url=env.clickhouse_url,
+            username=env.clickhouse_user,
+            password=env.clickhouse_password,
+            database=database,
+            secure=env.clickhouse_url.startswith("https:"),
+        )
+        with ClickHouseClient.connect(chkit_config) as chkit_client:
             live = poll_until(
                 lambda: next(
                     (t for t in list_table_details(chkit_client, [database]) if t.name == name),
@@ -186,10 +186,21 @@ def test_vector_index_and_constraints_round_trip(  # noqa: PLR0915
         drift_until(lambda p: p["drifted"] is False)
         schema_path.write_text(_render_schema(database, name, COLUMNS, [VECTOR, RAW], CONSTRAINTS))
 
-        # 3. Out-of-band changes are drift, in both directions.
-        client.command(f"ALTER TABLE {full_name} DROP CONSTRAINT dimension")
-        client.command(f"ALTER TABLE {full_name} ADD CONSTRAINT extra CHECK id < 1000000")
-        client.command(f"ALTER TABLE {full_name} DROP INDEX embedding_hnsw")
+        # 3. Out-of-band changes are drift, in both directions. One ALTER at a
+        # time, each on every replica before the next: on ObsessionDB an ALTER on
+        # a replica that has not applied the previous one writes back its stale
+        # schema and loses that change (#709).
+        def alter(operation_type: str, member: str, change: str) -> None:
+            statement = f"ALTER TABLE {full_name} {change}"
+            client.command(statement)
+            with ClickHouseClient.connect(chkit_config) as waiter:
+                wait_for_ddl_propagation(
+                    waiter, operation_type, f"table:{database}.{name}:{member}", statement=statement
+                )
+
+        alter("alter_table_drop_constraint", "constraint:dimension", "DROP CONSTRAINT dimension")
+        alter("alter_table_add_constraint", "constraint:extra", "ADD CONSTRAINT extra CHECK id < 1000000")
+        alter("alter_table_drop_index", "index:embedding_hnsw", "DROP INDEX embedding_hnsw")
         out_of_band = drift_until(
             lambda p: bool(p["tableDrift"])
             and len(p["tableDrift"][0]["constraintDiffs"]) == 2
@@ -199,11 +210,17 @@ def test_vector_index_and_constraints_round_trip(  # noqa: PLR0915
         assert detail["reasonCodes"] == ["index_mismatch", "constraint_mismatch"]
         assert detail["constraintDiffs"] == ["dimension", "extra"]
         assert detail["indexDiffs"] == ["embedding_hnsw"]
-        client.command(f"ALTER TABLE {full_name} DROP CONSTRAINT extra")
-        client.command(f"ALTER TABLE {full_name} ADD CONSTRAINT dimension CHECK length(embedding) = 4")
-        client.command(
-            f"ALTER TABLE {full_name} ADD INDEX embedding_hnsw embedding "
-            "TYPE vector_similarity('hnsw', 'cosineDistance', 4) GRANULARITY 100000000"
+        alter("alter_table_drop_constraint", "constraint:extra", "DROP CONSTRAINT extra")
+        alter(
+            "alter_table_add_constraint",
+            "constraint:dimension",
+            "ADD CONSTRAINT dimension CHECK length(embedding) = 4",
+        )
+        alter(
+            "alter_table_add_index",
+            "index:embedding_hnsw",
+            "ADD INDEX embedding_hnsw embedding "
+            "TYPE vector_similarity('hnsw', 'cosineDistance', 4) GRANULARITY 100000000",
         )
         drift_until(lambda p: p["drifted"] is False)
 

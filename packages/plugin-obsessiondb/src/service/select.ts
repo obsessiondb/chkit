@@ -75,7 +75,14 @@ export async function selectServiceInteractive(
 		}
 	}
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout })
+	// The prompt goes to stderr so stdout holds only the command's output
+	// (JSON envelopes under --json). Line editing only when both ends are a
+	// terminal: piped input is read as raw text, as chkit-py's input() does.
+	const rl = createInterface({
+		input: process.stdin,
+		output: process.stderr,
+		terminal: Boolean(process.stdin.isTTY && process.stderr.isTTY),
+	})
 	try {
 		const answer = await rl.question(`\nSelect service [1-${choices.length}]: `)
 		const index = parseInt(answer.trim(), 10) - 1

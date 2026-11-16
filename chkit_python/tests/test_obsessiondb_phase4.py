@@ -745,6 +745,10 @@ def test_run_onboarding_account_dispatches_to_login(
         url=f"{BASE}/api/auth/get-session",
         json={"user": {"id": "u", "email": "a@b.com", "name": "A"}},
     )
+    # No service selected yet, so login offers one, as in TS.
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll", json={"json": {"organizations": []}}
+    )
     # Pin the resolve_base_url to our test BASE so the login URL matches the mock.
     monkeypatch.setattr(
         obsessiondb_onboarding, "resolve_base_url", lambda _stored=None: BASE

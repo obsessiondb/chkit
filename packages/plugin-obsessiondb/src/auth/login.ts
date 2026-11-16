@@ -27,6 +27,9 @@ function openBrowser(url: string): void {
 	})
 }
 
+const SELECT_LATER_HINT =
+	'You can select a service later with: chkit obsessiondb service select'
+
 async function promptServiceSelection(
 	baseUrl: string,
 	token: string,
@@ -39,6 +42,13 @@ async function promptServiceSelection(
 	}
 	try {
 		const organizations = await listServiceOrganizations(effectiveCreds)
+		// Without a terminal nobody may answer, and the pipe can stay open, so the
+		// optional pick must not block login (#739).
+		const serviceCount = organizations.flatMap((org) => org.services).length
+		if (serviceCount > 1 && !process.stdin.isTTY) {
+			print(SELECT_LATER_HINT)
+			return
+		}
 		const selected = await selectServiceInteractive(organizations, print)
 		if (selected) {
 			await saveSelectedService(configPath, {
@@ -50,9 +60,7 @@ async function promptServiceSelection(
 	} catch (error) {
 		const msg = error instanceof Error ? error.message : String(error)
 		print(`Could not fetch services: ${msg}`)
-		print(
-			'You can select a service later with: chkit obsessiondb service select',
-		)
+		print(SELECT_LATER_HINT)
 	}
 }
 

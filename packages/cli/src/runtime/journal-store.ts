@@ -3,13 +3,13 @@ import { setTimeout as sleep } from 'node:timers/promises'
 import {
   allReplicas,
   isUnknownDatabaseError,
-  resolveReplicaFanout,
+  resolveReplicaFanoutOrThrow,
   waitForColumn,
   waitForTable,
   type ClickHouseExecutor,
   type ReplicaFanout,
 } from '@chkit/clickhouse'
-import { onClusterClause } from '@chkit/core'
+import { onClusterClause, quoteIdentifier } from '@chkit/core'
 import pRetry from 'p-retry'
 
 import { createTableElementNames } from './create-table-columns.js'
@@ -50,6 +50,12 @@ export interface JournalStore {
   readMigrationState(migrationName: string): Promise<MigrationRowState | null>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
+  /**
+   * Where the migrate lock writes its claims (#716): the journal, created
+   * if missing, with its database and replicas. Null while the database
+   * does not exist.
+   */
+  lockTarget(): Promise<{ database: string; journalTable: string; fanout: ReplicaFanout | undefined } | null>
   readonly databaseMissing: boolean
 }
 
@@ -96,6 +102,16 @@ interface OperationTupleRow {
 
 const OPERATIONS_TUPLE_TYPE =
   'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, \'UTC\'), finished_at Nullable(DateTime64(3, \'UTC\')), last_error String))'
+
+/**
+ * The `operations` tuple with its times as strings. A DateTime64 that
+ * toJSONString or the output format renders follows the user's
+ * date_time_output_format ('1794350634.552' with 'unix_timestamp'), while a
+ * CAST to String always gives 'YYYY-MM-DD HH:MM:SS.mmm' (#672).
+ */
+const OPERATIONS_READ_TYPE =
+  'Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status String, started_at String, finished_at Nullable(String), last_error String))'
+const OPERATIONS_SELECT = `toJSONString(CAST(operations, '${OPERATIONS_READ_TYPE}'))`
 
 /**
  * One fingerprint per entry of `operations`, in the same order (#599). A
@@ -149,6 +165,18 @@ function fingerprintColumnWarning(journalTable: string, error: unknown): string 
     'a later --retry or resume checks the statements it completes by position and "-- operation:" marker only, not by their SQL. ' +
     `The next migration applied by a user that can ALTER ${journalTable} adds the column.`
   )
+}
+
+/** Retries of a journal request while its database reaches the replica (#493). */
+const CREATE_RETRIES = 20
+
+/**
+ * UNKNOWN_DATABASE from either executor: the native client sets `code`, the
+ * ObsessionDB console API sends only the message.
+ */
+function isDatabaseMissing(error: unknown): boolean {
+  if (isUnknownDatabaseError(error)) return true
+  return error instanceof Error && /\bCode: 81\b|UNKNOWN_DATABASE/i.test(error.message)
 }
 
 function isRetryableInsertRace(error: unknown): boolean {
@@ -245,7 +273,7 @@ function rowVersion(appliedAt: string): number {
   return Date.parse(/(Z|[+-]\d{2}:?\d{2})$/.test(iso) ? iso : `${iso}Z`)
 }
 
-export function createJournalStore(db: ClickHouseExecutor, cluster?: string): JournalStore {
+export function createJournalStore(db: ClickHouseExecutor, cluster?: string, fanoutOverride?: ReplicaFanout): JournalStore {
   const journalTable = resolveJournalTableName()
   debug('journal', `journal table: ${journalTable}${process.env.CHKIT_JOURNAL_TABLE ? ' (from CHKIT_JOURNAL_TABLE)' : ''}${cluster ? ` (ON CLUSTER ${cluster})` : ''}`)
   // In cluster mode the journal must be consistent across every node, so it uses
@@ -262,7 +290,10 @@ export function createJournalStore(db: ClickHouseExecutor, cluster?: string): Jo
   const journalEngine = cluster
     ? "ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/chkit_journal', '{shard}_{replica}', applied_at)"
     : 'ReplacingMergeTree(applied_at)'
-  const createTableSql = `CREATE TABLE IF NOT EXISTS ${journalTable}${onCluster} (
+  // Named in its database: the executor retries a statement that fails with
+  // UNKNOWN_DATABASE without the database, which would otherwise create the
+  // journal in the server's default database (#493).
+  const createTableSql = (database: string) => `CREATE TABLE IF NOT EXISTS ${quoteIdentifier(database)}.${journalTable}${onCluster} (
     name String,
     applied_at DateTime64(3, 'UTC'),
     checksum String,
@@ -290,8 +321,19 @@ SETTINGS index_granularity = 1`
   // The user may not read system.columns; the column is then read from the
   // journal's definition in system.tables.
   let columnsUnreadable = false
+  let journalDatabase: Promise<string> | undefined
   // Read-your-writes: the last row version this store wrote per migration.
   const lastWritten = new Map<string, MigrationRowState>()
+  // The newest applied_at version per migration that this store read or
+  // wrote. Each write takes a newer one (#672): ReplacingMergeTree keeps the
+  // newest version and the replicated read either row of a tie, so a write
+  // stamped by a clock that stalls, steps back or runs behind the writer of
+  // the version it read would otherwise be lost.
+  const newestVersion = new Map<string, number>()
+  function noteVersion(name: string, appliedAt: string): void {
+    const version = rowVersion(appliedAt)
+    if (Number.isFinite(version)) newestVersion.set(name, Math.max(newestVersion.get(name) ?? version, version))
+  }
 
   /**
    * Makes sure the journal can be read or, with `create`, written. Only a
@@ -301,54 +343,52 @@ SETTINGS index_granularity = 1`
   async function ensureTable(create: boolean): Promise<void> {
     if (bootstrapped || (tableMissing && !create)) return
     debug('journal', `probing journal table "${journalTable}"`)
+    let probeError: unknown
     try {
       await db.query(`SELECT name, migration_completed, operations FROM ${journalTable} LIMIT 0`)
+    } catch (error) {
+      probeError = error
+    }
+    // Only the probe's own error is read below: a failure of the waits
+    // after it stops the run (#700).
+    if (probeError === undefined) {
       debug('journal', 'journal table exists')
       await waitForEveryReplica()
       fingerprintColumn = await detectFingerprintColumn()
       bootstrapped = true
       tableMissing = false
       return
-    } catch (error) {
-      if (isUnknownDatabaseError(error)) {
-        debug('journal', 'database does not exist')
-        _databaseMissing = true
-        bootstrapped = true
-        return
-      }
-      if (isClickHouseError(error, UNKNOWN_IDENTIFIER)) {
-        debug('journal', 'journal table predates per-operation tracking — upgrading')
-        await ensureSchemaUpgraded()
+    }
+    const error = probeError
+    if (isUnknownDatabaseError(error)) {
+      debug('journal', 'database does not exist')
+      _databaseMissing = true
+      bootstrapped = true
+      return
+    }
+    if (isClickHouseError(error, UNKNOWN_IDENTIFIER)) {
+      debug('journal', 'journal table predates per-operation tracking — upgrading')
+      // Every replica must have the journal before its ALTERs run (#700).
+      await waitForEveryReplica()
+      await ensureSchemaUpgraded()
+      fingerprintColumn = await detectFingerprintColumn()
+      bootstrapped = true
+      return
+    }
+    if (!create) {
+      if (!isClickHouseError(error, UNKNOWN_TABLE)) throw error
+      if (await existsOnAnotherReplica()) {
         await waitForEveryReplica()
         fingerprintColumn = await detectFingerprintColumn()
         bootstrapped = true
         return
       }
-      if (!create) {
-        if (!isClickHouseError(error, UNKNOWN_TABLE)) throw error
-        if (await existsOnAnotherReplica()) {
-          await waitForEveryReplica()
-          fingerprintColumn = await detectFingerprintColumn()
-          bootstrapped = true
-          return
-        }
-        debug('journal', 'journal table does not exist — reading it as empty')
-        tableMissing = true
-        return
-      }
+      debug('journal', 'journal table does not exist — reading it as empty')
+      tableMissing = true
+      return
     }
     debug('journal', 'creating journal table')
-    try {
-      await db.command(createTableSql)
-    } catch (error) {
-      if (isUnknownDatabaseError(error)) {
-        debug('journal', 'database missing on CREATE — deferring')
-        _databaseMissing = true
-        bootstrapped = true
-        return
-      }
-      throw error
-    }
+    await createJournalTable()
     await pRetry(async (attempt) => {
       await db.query(`SELECT name FROM ${journalTable} LIMIT 0`)
       debug('journal', `DDL propagation confirmed (attempt ${attempt})`)
@@ -360,10 +400,79 @@ SETTINGS index_granularity = 1`
     tableMissing = false
   }
 
+  // The probe found the database, so UNKNOWN_DATABASE here means this request
+  // reached a replica that has not applied CREATE DATABASE yet (#493): retry
+  // until it has. A database that never arrives stops the run, so the state
+  // being written is never dropped.
+  async function whileDatabasePropagates<T>(what: string, run: () => Promise<T>): Promise<T> {
+    try {
+      return await pRetry(run, {
+        retries: CREATE_RETRIES,
+        minTimeout: 500,
+        factor: 1,
+        shouldRetry: ({ error, attemptNumber }) => {
+          if (!isDatabaseMissing(error)) return false
+          debug('journal', `database not yet on this replica — retrying to ${what} (attempt ${attemptNumber})`)
+          return true
+        },
+      })
+    } catch (error) {
+      if (!isDatabaseMissing(error)) throw error
+      // The server's message is left out, so the error never reads as a
+      // missing database itself; it stays the cause.
+      throw new Error(
+        `Cannot ${what}: its database is still missing on the replica that received the request after ${CREATE_RETRIES + 1} attempts. Re-run chkit once the database has reached every replica.`,
+        { cause: error },
+      )
+    }
+  }
+
+  async function createJournalTable(): Promise<void> {
+    await whileDatabasePropagates(`create the journal table ${journalTable}`, async () => {
+      await db.command(createTableSql(await databaseName()))
+    })
+  }
+
+  /**
+   * The journal as `database.table`. The executor retries a statement that
+   * fails with UNKNOWN_DATABASE without the database, so every journal
+   * INSERT and ALTER names it, or one that reaches a replica without the
+   * database would write a journal in the server's default database (#700).
+   */
+  async function qualifiedJournal(): Promise<string> {
+    return `${quoteIdentifier(await databaseName())}.${journalTable}`
+  }
+
+  /** currentDatabase(), read once it answers. */
+  async function databaseName(): Promise<string> {
+    if (!journalDatabase) {
+      const read = whileDatabasePropagates(`read the database of ${journalTable}`, currentDatabase)
+      journalDatabase = read
+      read.catch(() => {
+        if (journalDatabase === read) journalDatabase = undefined
+      })
+    }
+    return await journalDatabase
+  }
+
+  /**
+   * The replicas to wait for. A probe that fails for another reason than a
+   * missing cluster or a user that cannot query it stops the run, rather
+   * than skip the waits that keep journal writes off a replica without the
+   * journal (#700).
+   */
+  async function replicaFanout(): Promise<ReplicaFanout | undefined> {
+    // Explicit recovery supplies attested UUID coverage, including one server.
+    if (fanoutOverride) return fanoutOverride.replicas > 1 ? fanoutOverride : undefined
+    return await whileDatabasePropagates('discover the replicas of the journal', () =>
+      resolveReplicaFanoutOrThrow(db, cluster),
+    )
+  }
+
   // On a multi-replica target, the replica that answered the probe may not
   // have applied another process's CREATE yet.
   async function existsOnAnotherReplica(): Promise<boolean> {
-    const fanout = await resolveReplicaFanout(db, cluster)
+    const fanout = await replicaFanout()
     if (!fanout) return false
     const [row] = await db.query<{ replicas: number | string }>(
       `SELECT count() AS replicas FROM ${allReplicas(fanout, 'system.tables')} WHERE database = currentDatabase() AND name = '${journalTable}'`,
@@ -375,8 +484,8 @@ SETTINGS index_granularity = 1`
   // fails while one of them does not have the table yet, e.g. right after the
   // CREATE above or another process's. A single replica needs no wait.
   async function waitForEveryReplica(): Promise<void> {
-    if (!(await resolveReplicaFanout(db, cluster))) return
-    await waitForTable(db, await currentDatabase(), journalTable, { cluster })
+    if (!(await replicaFanout())) return
+    await waitForTable(db, await databaseName(), journalTable, { cluster })
   }
 
   async function currentDatabase(): Promise<string> {
@@ -392,7 +501,7 @@ SETTINGS index_granularity = 1`
    * writes name it.
    */
   async function detectFingerprintColumn(): Promise<boolean> {
-    const fanout = await resolveReplicaFanout(db, cluster)
+    const fanout = await replicaFanout()
     if (!fanout) {
       try {
         await db.query(`SELECT ${FINGERPRINTS_COLUMN} FROM ${journalTable} LIMIT 0`)
@@ -419,7 +528,7 @@ SETTINGS index_granularity = 1`
       debug('journal', `no replica has the ${FINGERPRINTS_COLUMN} column`)
       return false
     }
-    await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
+    await waitForColumn(db, await databaseName(), journalTable, FINGERPRINTS_COLUMN, { cluster })
     return true
   }
 
@@ -485,7 +594,7 @@ SETTINGS index_granularity = 1`
   /** Waits until every replica has the fingerprint column, after this run added it. */
   async function waitForFingerprintColumn(fanout: ReplicaFanout): Promise<void> {
     if (columnsUnreadable) return await waitForFingerprintColumnInTables(fanout)
-    await waitForColumn(db, await currentDatabase(), journalTable, FINGERPRINTS_COLUMN, { cluster })
+    await waitForColumn(db, await databaseName(), journalTable, FINGERPRINTS_COLUMN, { cluster })
   }
 
   /**
@@ -497,13 +606,13 @@ SETTINGS index_granularity = 1`
     if (fingerprintColumn || fingerprintColumnAdded) return
     fingerprintColumnAdded = true
     try {
-      await db.command(`ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS ${FINGERPRINTS_COLUMN_DEFINITION}`)
+      await db.command(`ALTER TABLE ${await qualifiedJournal()}${onCluster} ADD COLUMN IF NOT EXISTS ${FINGERPRINTS_COLUMN_DEFINITION}`)
     } catch (error) {
       debug('journal', `could not add ${FINGERPRINTS_COLUMN} — recording no fingerprints: ${errorText(error)}`)
       console.error(fingerprintColumnWarning(journalTable, error))
       return
     }
-    const fanout = await resolveReplicaFanout(db, cluster)
+    const fanout = await replicaFanout()
     if (fanout) await waitForFingerprintColumn(fanout)
     fingerprintColumn = true
   }
@@ -515,13 +624,13 @@ SETTINGS index_granularity = 1`
     // no data rewrite.
     try {
       await db.command(
-        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
+        `ALTER TABLE ${await qualifiedJournal()}${onCluster} ADD COLUMN IF NOT EXISTS migration_completed Bool DEFAULT true`,
       )
       await db.command(
-        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
+        `ALTER TABLE ${await qualifiedJournal()}${onCluster} ADD COLUMN IF NOT EXISTS operations ${OPERATIONS_TUPLE_TYPE} DEFAULT []`,
       )
       await db.command(
-        `ALTER TABLE ${journalTable}${onCluster} ADD COLUMN IF NOT EXISTS ${FINGERPRINTS_COLUMN_DEFINITION}`,
+        `ALTER TABLE ${await qualifiedJournal()}${onCluster} ADD COLUMN IF NOT EXISTS ${FINGERPRINTS_COLUMN_DEFINITION}`,
       )
     } catch (error) {
       // A read-only user cannot run the ALTER (#402).
@@ -542,9 +651,9 @@ SETTINGS index_granularity = 1`
    */
   async function journalRows(where: string, limit = ''): Promise<MigrationRow[]> {
     const fingerprints = fingerprintColumn
-    const fanout = await resolveReplicaFanout(db, cluster)
+    const fanout = await replicaFanout()
     const fingerprintSelect = `toJSONString(${FINGERPRINTS_COLUMN})`
-    const columns = `name, applied_at, checksum, chkit_version, migration_completed, toJSONString(operations) AS operations${fingerprints ? `, ${fingerprintSelect} AS ${FINGERPRINTS_COLUMN}` : ''}`
+    const columns = `name, toString(applied_at) AS applied_at, checksum, chkit_version, migration_completed, ${OPERATIONS_SELECT} AS operations${fingerprints ? `, ${fingerprintSelect} AS ${FINGERPRINTS_COLUMN}` : ''}`
     if (!fanout) {
       const sql = `SELECT ${columns} FROM ${journalTable} FINAL WHERE ${where} ORDER BY name${limit}`
       try {
@@ -562,15 +671,15 @@ SETTINGS index_granularity = 1`
     const latest = fingerprints ? `, latest.6 AS ${FINGERPRINTS_COLUMN}` : ''
     const versioned = fingerprints ? `, ${fingerprintSelect}` : ''
     return await db.query<MigrationRow>(
-      `SELECT name, latest.1 AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations${latest} FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, toJSONString(operations)${versioned}), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
+      `SELECT name, toString(latest.1) AS applied_at, latest.2 AS checksum, latest.3 AS chkit_version, latest.4 AS migration_completed, latest.5 AS operations${latest} FROM (SELECT name, argMax(tuple(applied_at, checksum, chkit_version, migration_completed, ${OPERATIONS_SELECT}${versioned}), applied_at) AS latest FROM clusterAllReplicas('${escapeSqlString(fanout.cluster)}', currentDatabase(), '${journalTable}') GROUP BY name) WHERE ${where} ORDER BY name${limit}`,
     )
   }
 
   async function insertState(state: MigrationRowState, fingerprints: boolean): Promise<void> {
     const fingerprintColumnName = fingerprints ? `, ${FINGERPRINTS_COLUMN}` : ''
     const fingerprintValue = fingerprints ? `, ${fingerprintsArrayLiteral(state.operations)}` : ''
-    const insertSql = `INSERT INTO ${journalTable} (name, applied_at, checksum, chkit_version, migration_completed, operations${fingerprintColumnName}) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)}${fingerprintValue})`
-    await pRetry(() => db.command(insertSql), {
+    const insertSql = `INSERT INTO ${await qualifiedJournal()} (name, applied_at, checksum, chkit_version, migration_completed, operations${fingerprintColumnName}) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)}${fingerprintValue})`
+    await whileDatabasePropagates(`write to ${journalTable}`, () => pRetry(() => db.command(insertSql), {
       retries: 4,
       minTimeout: 0,
       shouldRetry: async ({ error, attemptNumber }) => {
@@ -579,7 +688,7 @@ SETTINGS index_granularity = 1`
         await sleep(attemptNumber * 150)
         return true
       },
-    })
+    }))
   }
 
   async function trySyncReplica(): Promise<void> {
@@ -635,6 +744,7 @@ SETTINGS index_granularity = 1`
       const rows = await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
       const written = lastWritten.get(migrationName)
       const row = rows[0]
+      if (row) noteVersion(migrationName, row.applied_at)
       if (!row) return written ?? null
       const state: MigrationRowState = {
         name: row.name,
@@ -659,7 +769,15 @@ SETTINGS index_granularity = 1`
       // The release that wrote the state last. migrate checks a state another
       // release wrote before it resumes it, so the statement positions in a
       // state this release wrote are always this release's split (#562).
-      const state = { ...input, chkitVersion: CLI_VERSION }
+      const floor = newestVersion.get(input.name)
+      const requested = rowVersion(input.appliedAt)
+      const version =
+        floor === undefined ? requested : Math.max(Number.isFinite(requested) ? requested : Date.now(), floor + 1)
+      const state = {
+        ...input,
+        appliedAt: version === requested ? input.appliedAt : new Date(version).toISOString().replace('Z', ''),
+        chkitVersion: CLI_VERSION,
+      }
       if (_databaseMissing) {
         debug('journal', 'resetting databaseMissing flag — migration may have created the database')
         _databaseMissing = false
@@ -675,7 +793,18 @@ SETTINGS index_granularity = 1`
       await ensureFingerprintColumn()
       await insertState(state, fingerprintColumn)
       lastWritten.set(state.name, state)
+      noteVersion(state.name, state.appliedAt)
       await trySyncReplica()
+    },
+
+    async lockTarget() {
+      if (_databaseMissing) {
+        _databaseMissing = false
+        bootstrapped = false
+      }
+      await ensureTable(true)
+      if (_databaseMissing) return null
+      return { database: await databaseName(), journalTable, fanout: await replicaFanout() }
     },
 
     async appendEntry(entry: MigrationJournalEntry): Promise<void> {
