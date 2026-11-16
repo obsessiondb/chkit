@@ -78,6 +78,8 @@ def test_a_builtin_command_shows_its_help_before_reading_config(args: list[str])
     [
         ["obsessiondb", "--help"],
         ["obsessiondb", "-h"],
+        ["obsessiondb", "login", "--help"],
+        ["obsessiondb", "signup", "-h"],
         ["obsessiondb", "logout", "--help"],
         ["obsessiondb", "whoami", "-h"],
         ["obsessiondb", "service", "--help"],
@@ -185,33 +187,6 @@ def test_pull_help_is_the_ts_pull_schema_help() -> None:
             "chkit pull [options]",
             "  Introspect live ClickHouse and emit a Python schema file",
         ],
-    )
-
-
-@pytest.mark.parametrize(
-    ("command", "ts_only_flags"),
-    [
-        ("login", ["  --api-url              ObsessionDB API base URL"]),
-        (
-            "signup",
-            [
-                "  --api-url              ObsessionDB API base URL",
-                "  --email                Email to sign up/log in with (skips the prompt)",
-                "  --code                 One-time code (skips the prompt; for scripts/tests)",
-                "  --org-name             Override the auto-created organization name",
-                "  --request-only         Only send the code and print the follow-up command "
-                "(step 1 of 2)",
-            ],
-        ),
-    ],
-)
-def test_obsessiondb_command_help_lists_the_python_flags(
-    command: str, ts_only_flags: list[str]
-) -> None:
-    help_text = _help(["obsessiondb", command, "-h"])
-    assert _only_in_each(FIXTURE[f"obsessiondb {command} --help"], help_text) == (
-        ["", "Options:", *ts_only_flags],
-        [],
     )
 
 

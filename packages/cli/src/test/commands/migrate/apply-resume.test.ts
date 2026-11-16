@@ -2,12 +2,13 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { describe, expect, test } from 'bun:test'
+import { afterEach, beforeEach, describe, expect, type Mock, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
 
 import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
+import { abandonMigrationState } from '../../../commands/migrate/abandon.js'
 import { MigrateError } from '../../../commands/migrate/errors.js'
 import type {
   JournalStore,
@@ -222,6 +223,19 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
   const INSERT = 'INSERT INTO default.t VALUES (1);'
   const SQL = `-- operation: create_table key=table:default.t risk=safe\n${CREATE}\n${INSERT}\n`
 
+  // The monotonic clock the waits time their deadline on is frozen and each
+  // check takes 10 s, so a wait gives up after 3 checks of its 30 s instead of
+  // 30 s of real time (#719).
+  let now = 0
+  let clock: Mock<() => number> | undefined
+  beforeEach(() => {
+    now = 0
+    clock = spyOn(performance, 'now').mockImplementation(() => now)
+  })
+  afterEach(() => {
+    clock?.mockRestore()
+  })
+
   // A single-replica target on which default.t is listed in system.tables
   // only while `visible` is set.
   function propagationDb(events: string[], visible: { value: boolean }) {
@@ -232,6 +246,7 @@ describe('applyMigration resume after a propagation wait timeout (#513)', () => 
       async query(sql: string) {
         if (sql.includes('system.one')) return []
         events.push('propagation-query')
+        now += 10_000
         return visible.value ? [{ x: 1 }] : []
       },
     } as unknown as ClickHouseExecutor
@@ -644,6 +659,114 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     ])
     expect(appended[0]?.checksum).toBe(checksumSQL(EDITED_SQL))
   })
+
+  // #701: an async retry runs under a random query id, so a record the edit
+  // drops is the only trace of an attempt that may still run (a submit that
+  // failed while the server ran it). The edit stops while it runs.
+  for (const running of [true, false]) {
+    test(`an edit that drops the record of an async attempt ${running ? 'stops while it still runs' : 'runs once it stopped'}`, async () => {
+      const dir = writeMigration(EDITED_SQL)
+      const { db: recording, commandCalls } = recordingDb()
+      const statusCalls: Array<{ queryId: string; everyReplica?: boolean; runningOnly?: boolean }> = []
+      const db = {
+        ...recording,
+        async queryStatus(queryId: string, options?: { everyReplica?: boolean; runningOnly?: boolean }) {
+          statusCalls.push({ queryId, ...options })
+          return { status: running ? 'running' : 'unknown' }
+        },
+      } as unknown as ClickHouseExecutor
+      const { store, writes } = createFakeStore(
+        inProgressState('old', [
+          operation(0, 'failed'),
+          { ...operation(1, 'failed', { type: 'load_table_data', key: 'table:t' }), queryId: 'retry-query-id' },
+        ]),
+      )
+
+      const run = applyMigration({
+        db,
+        journalStore: store,
+        pluginRuntime: fakePluginRuntime(),
+        config: CONFIG,
+        tableScope: TABLE_SCOPE,
+        flags: FLAGS,
+        migrationsDir: dir,
+        file: 'm.sql',
+        log: () => {},
+      })
+      if (running) {
+        await expect(run).rejects.toMatchObject({
+          code: 'retry_mismatch',
+          message: expect.stringContaining("KILL QUERY WHERE query_id = 'retry-query-id'"),
+        })
+      } else {
+        await run
+      }
+      rmSync(dir, { recursive: true, force: true })
+
+      expect(statusCalls).toEqual([{ queryId: 'retry-query-id', everyReplica: true, runningOnly: true }])
+      expect(commandCalls).toHaveLength(running ? 0 : 2)
+      expect(writes.length > 0).toBe(!running)
+    })
+  }
+
+  for (const mode of ['sync', 'barrier'] as const) {
+    for (const prior of ['started', 'failed', 'abandoned', 'stopped', 'unreadable', 'no-before-retry'] as const) {
+      test(`a mode-only async to ${mode} edit preserves its attempt until stopped (${prior})`, async () => {
+        const sql = mode === 'barrier' ? 'SELECT query_id FROM system.processes WHERE 0;' : 'INSERT INTO db.a SELECT 1;'
+        const compensation = prior === 'no-before-retry' ? '' : '-- before-retry: TRUNCATE TABLE db.a\n'
+        const original = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n${compensation}${sql}\n`
+        const edited = original.replace('mode=async', `mode=${mode}`)
+        const dir = writeMigration(edited)
+        const recorded = inProgressState(checksumSQL(original), [{
+          ...operation(0, prior === 'failed' || prior === 'stopped' || prior === 'unreadable' ? 'failed' : 'started', { type: 'load_table_data', key: 'table:db.a' }),
+          queryId: 'random-retry-query-id',
+          fingerprint: statementFingerprint(sql),
+        }])
+        const { store, writes, appended, state } = createFakeStore(recorded)
+        // A crash immediately after an ID-clearing write must remain unreachable
+        // while the original attempt runs, so the next run can still find it.
+        const writeState = store.writeMigrationState.bind(store)
+        store.writeMigrationState = async (next) => {
+          await writeState(next)
+          if (prior !== 'stopped' && next.operations[0]?.queryId === '') throw new Error('crash after ID overwrite')
+        }
+        if (prior === 'abandoned') await abandonMigrationState(recorded, { journalStore: store })
+        const { db: recording, commandCalls } = recordingDb()
+        const checks: Array<{ queryId: string; everyReplica?: boolean; runningOnly?: boolean }> = []
+        const db = {
+          ...recording,
+          async query(query: string) { return query.includes('system.tables') ? [{ x: 1 }] : [] },
+          async queryStatus(queryId: string, options?: { everyReplica?: boolean; runningOnly?: boolean }) {
+            checks.push({ queryId, ...options })
+            if (prior === 'unreadable') throw new Error('replica unavailable')
+            return { status: prior === 'stopped' ? 'unknown' : 'running' }
+          },
+        } as unknown as ClickHouseExecutor
+        try {
+          const run = applyMigration({
+            db, journalStore: store, pluginRuntime: fakePluginRuntime(), config: CONFIG,
+            tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql',
+            retry: { previousChecksum: checksumSQL(original), checksum: checksumSQL(edited) }, log: () => {},
+          })
+          if (prior === 'stopped') {
+            await run
+            expect(commandCalls).toEqual(mode === 'sync' ? ['TRUNCATE TABLE db.a', sql] : ['TRUNCATE TABLE db.a'])
+            expect(state()?.migrationCompleted).toBe(true)
+          } else {
+            if (prior === 'unreadable') await expect(run).rejects.toThrow('replica unavailable')
+            else await expect(run).rejects.toMatchObject({ code: 'retry_mismatch' })
+            expect(commandCalls).toEqual([])
+            expect(appended).toEqual([])
+            expect(state()?.operations[0]?.queryId).toBe('random-retry-query-id')
+            expect(writes.every((write) => write.operations[0]?.queryId === 'random-retry-query-id')).toBe(true)
+          }
+          expect(checks).toEqual([{ queryId: 'random-retry-query-id', everyReplica: true, runningOnly: true }])
+        } finally {
+          rmSync(dir, { recursive: true, force: true })
+        }
+      })
+    }
+  }
 
   test('a started statement still requires --retry: it may have run', async () => {
     const dir = writeMigration(EDITED_SQL)

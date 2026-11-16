@@ -79,6 +79,7 @@ export default defineConfig({
 							items: [
 								{ slug: 'plugins/overview' },
 								{ slug: 'plugins/pull' },
+								{ slug: 'plugins/tinybird' },
 								{ slug: 'plugins/codegen' },
 								{ slug: 'plugins/backfill' },
 							],

@@ -27,12 +27,14 @@ from chkit.cli.commands.migrate_async_apply import (
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import (
+    MigrateError,
     PendingNonSelectBarrier,
     in_progress_checksum_mismatch_error,
     non_select_barrier_error,
     recorded_statements_changed_error,
     statement_split_changed_error,
 )
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
     StatementIdentity,
@@ -107,6 +109,7 @@ class ApplyMigrationInput:
     settings: dict[str, str] | None = None
     # The command's parsed flags, keyed as in TS, for the apply hooks.
     flags: dict[str, Any] = field(default_factory=dict)
+    query_tracker: QueryTracker | None = None
 
 
 class StatementError(RuntimeError):
@@ -188,6 +191,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         and initial_state.checksum != migration_checksum
     ):
         _accept_edited_migration(
+            client=input_.client,
             file=file,
             state=initial_state,
             checksum=migration_checksum,
@@ -216,6 +220,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         before_retry=operation.before_retry,
                         log=input_.log,
                         settings=input_.settings,
+                        query_tracker=input_.query_tracker,
                     )
                 )
             except Exception as error:
@@ -257,6 +262,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             if state_before is not None
             else None
         )
+        if prior_attempt is not None:
+            _assert_async_attempt_stopped(input_.client, file, prior_attempt)
         if prior_attempt is not None and operation is not None and operation.before_retry:
             try:
                 _run_before_retry(
@@ -268,6 +275,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     settings=input_.settings,
                     log=input_.log,
                     status=prior_attempt.status,
+                    query_tracker=input_.query_tracker,
+                    query_context=QueryContext(file, index, statement, operation.before_retry),
                 )
             except Exception as error:
                 raise statement_error(
@@ -303,6 +312,14 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     cluster=cluster,
                     settings=input_.settings,
                     log=input_.log,
+                )
+            elif input_.query_tracker is not None:
+                input_.query_tracker.command(
+                    QueryContext(
+                        file, index, statement,
+                        operation.before_retry if operation is not None else None,
+                    ),
+                    "forward", statement, input_.settings,
                 )
             else:
                 input_.client.execute(statement, settings=input_.settings)
@@ -510,6 +527,8 @@ def _run_before_retry(
     settings: dict[str, str] | None,
     log: Callable[[str], None],
     status: OperationStatus,
+    query_tracker: QueryTracker | None = None,
+    query_context: QueryContext | None = None,
 ) -> None:
     """Run a statement's ``-- before-retry:`` SQL before chkit attempts it again
     after an earlier attempt failed or was interrupted (TS ``runBeforeRetry``).
@@ -522,11 +541,15 @@ def _run_before_retry(
         wait_for_exchange(client, statement, cluster=cluster)
     attempt = "failed" if status == "failed" else "was interrupted"
     log(f"  {operation_type}: an earlier attempt {attempt} — running before-retry SQL")
-    client.execute(before_retry, settings=settings)
+    if query_tracker is not None and query_context is not None:
+        query_tracker.command(query_context, "compensation", before_retry, settings)
+    else:
+        client.execute(before_retry, settings=settings)
 
 
 def _accept_edited_migration(
     *,
+    client: ClickHouseClient,
     file: str,
     state: MigrationRowState,
     checksum: str,
@@ -566,14 +589,65 @@ def _accept_edited_migration(
             f"{file} changed since its last failed attempt; no statement is recorded "
             "as completed, so it runs again from statement 1."
         )
-    journal_store.write_migration_state(
-        rebase_in_progress_state(
-            state,
-            checksum=checksum,
-            identities=identities,
-            applied_at=iso_without_zone(datetime.now(tz=UTC)),
-        )
+    rebased = rebase_in_progress_state(
+        state,
+        checksum=checksum,
+        identities=identities,
+        applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
+    _assert_dropped_attempts_stopped(client, file, state, rebased)
+    journal_store.write_migration_state(rebased)
+
+
+def _assert_dropped_attempts_stopped(
+    client: ClickHouseClient,
+    file: str,
+    state: MigrationRowState,
+    rebased: MigrationRowState,
+) -> None:
+    """Stop an edit that drops the record of an async attempt that still runs.
+
+    An async retry runs under a random query id (#701), so the record a
+    rebase drops is the only trace of an attempt that may still run (a submit
+    that failed while the server ran it, an attempt kept by --abandon): the
+    next run would not find it. Every replica is read.
+    """
+    dropped = [
+        op
+        for op in state.operations
+        if op.status != "completed"
+        and op.query_id != ""
+        and not any(kept is op for kept in rebased.operations)
+    ]
+    for op in dropped:
+        _assert_async_attempt_stopped(client, file, op)
+
+
+def _assert_async_attempt_stopped(
+    client: ClickHouseClient, file: str, op: OperationState
+) -> None:
+    """Keep the only record of an async attempt until it stops on every replica."""
+    if op.status == "completed" or op.query_id == "":
+        return
+    try:
+        status = client.query_status(op.query_id, every_replica=True, running_only=True)
+    except Exception as error:
+        msg = (
+            f"Cannot apply {file}: could not check whether the earlier "
+            f"attempt of statement {op.operation_index + 1} (query_id {op.query_id}) is "
+            f"still running ({clickhouse_error_message(error)}). Nothing ran — re-run "
+            "chkit migrate --apply."
+        )
+        raise RuntimeError(msg) from error
+    if status.status == "running":
+        raise MigrateError(
+            "retry_mismatch",
+            f"Cannot apply {file}: the earlier attempt of statement "
+            f"{op.operation_index + 1} (query_id {op.query_id}) is still running on the "
+            "server, and continuing would discard its query id. Wait for it to "
+            f"finish or run KILL QUERY WHERE query_id = '{op.query_id}', then run chkit "
+            "migrate --apply again.",
+        )
 
 
 def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool:

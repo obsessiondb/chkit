@@ -8,13 +8,13 @@ abandon-output,retry-output,empty,apply-resume}.test.ts`` and
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -41,6 +41,7 @@ from chkit.cli.commands.migrate_errors import (
     in_progress_checksum_mismatch_error,
 )
 from chkit.cli.commands.migrate_output import format_retry_notice, render_abandon_text
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     Marker,
     OperationMismatch,
@@ -69,7 +70,7 @@ from chkit.cli.safety_markers import (
     extract_migration_operation_summaries,
 )
 from chkit.cli.table_scope import TableScope
-from chkit.clickhouse.client import QueryResult
+from chkit.clickhouse.client import QueryResult, QueryStatus
 from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_splitter import extract_executable_statements, split_sql_statements
 
@@ -1036,6 +1037,7 @@ def _apply(
     retry: RetryResume | None = None,
     runtime: _FakeRuntime | None = None,
     log: Callable[[str], None] | None = None,
+    query_tracker: QueryTracker | None = None,
 ) -> MigrationJournalEntry:
     return apply_migration(
         ApplyMigrationInput(
@@ -1048,8 +1050,37 @@ def _apply(
             file="m.sql",
             retry=retry,
             log=log or (lambda _line: None),
+            query_tracker=query_tracker,
         )
     )
+
+
+def test_sync_retry_tracks_compensation_and_forward_separately(tmp_path: Path) -> None:
+    statement = "INSERT INTO db.a SELECT 1;"
+    before_retry = "TRUNCATE TABLE db.a"
+    sql = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=sync\n"
+        f"-- before-retry: {before_retry}\n{statement}"
+    )
+    store = FakeStore(in_progress([op(0, "failed", LOAD)], checksum=checksum_sql(sql)))
+    client = _RecordingClient()
+    tracker = MagicMock()
+    phases: list[str] = []
+
+    def command(context: QueryContext, phase: str, text: str, settings: Any) -> None:
+        assert context == QueryContext("m.sql", 0, statement, before_retry)
+        assert settings is None
+        assert store.state is not None
+        assert store.state.operations[0].status == ("failed" if phase == "compensation" else "started")
+        assert text == (before_retry if phase == "compensation" else statement)
+        phases.append(phase)
+
+    tracker.command.side_effect = command
+    _apply(_write(tmp_path, sql), client, store, query_tracker=tracker)
+    assert phases == ["compensation", "forward"]
+    assert client.calls == []
+    assert store.state is not None
+    assert store.state.migration_completed is True
 
 
 def _retry_for(sql: str, previous: str = "old") -> RetryResume:
@@ -1150,17 +1181,7 @@ class _EventStore(FakeStore):
         super().append_entry(entry, chkit_version=chkit_version)
 
 
-@pytest.fixture
-def _fast_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let a propagation wait time out without sleeping between its checks."""
-    from chkit.clickhouse import ddl_propagation  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        ddl_propagation, "time", SimpleNamespace(sleep=lambda _s: None, monotonic=time.monotonic)
-    )
-
-
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: Path) -> None:
     events: list[str] = []
     client = _PropagationClient(events, visible=False)
@@ -1188,7 +1209,7 @@ def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: 
     assert [(e.name, e.checksum) for e in store.appended] == [("m.sql", checksum_sql(_WAIT_SQL))]
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Path) -> None:
     # --abandon keeps every record as failed, so the next run restarts at
     # statement 1 with the abandoned record of statement 2 still in the state.
@@ -1221,7 +1242,7 @@ def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Pat
     assert events == ["propagation-query", f"command {_INSERT_T};", "append"]
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None:
     events: list[str] = []
     client = _PropagationClient(events, visible=False)
@@ -1244,7 +1265,7 @@ def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None
     assert store.appended == []
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
     tmp_path: Path,
 ) -> None:
@@ -1418,6 +1439,122 @@ def test_apply_edited_file_without_progress_runs_from_statement_1(
     ]
     assert store.writes[0].checksum == checksum_sql(EDITED_SQL)
     assert store.appended[0].checksum == checksum_sql(EDITED_SQL)
+
+
+class _StatusClient(_RecordingClient):
+    """Answers the in-flight check of a dropped async attempt."""
+
+    def __init__(self, running: bool | Exception) -> None:
+        super().__init__()
+        self._running = running
+        self.status_calls: list[tuple[str, bool, bool]] = []
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+    ) -> QueryStatus:
+        self.status_calls.append((query_id, every_replica, running_only))
+        if isinstance(self._running, Exception):
+            raise self._running
+        return QueryStatus(status="running" if self._running else "unknown")
+
+
+@pytest.mark.parametrize("running", [True, False], ids=["running", "stopped"])
+def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
+    tmp_path: Path, running: bool
+) -> None:
+    """#701: an async retry runs under a random query id, so a record the edit
+    drops is the only trace of an attempt that may still run (a submit that
+    failed while the server ran it). The edit stops while it runs."""
+    client = _StatusClient(running)
+    store = FakeStore(
+        in_progress(
+            [
+                op(0, "failed"),
+                op(
+                    1,
+                    "failed",
+                    Marker(type="load_table_data", key="table:t"),
+                    query_id="retry-query-id",
+                ),
+            ],
+            checksum="old",
+        )
+    )
+    if running:
+        with pytest.raises(MigrateError) as raised:
+            _apply(_write(tmp_path, EDITED_SQL), client, store)
+        assert raised.value.code == "retry_mismatch"
+        assert "KILL QUERY WHERE query_id = 'retry-query-id'" in raised.value.message
+    else:
+        _apply(_write(tmp_path, EDITED_SQL), client, store)
+    assert client.status_calls == [("retry-query-id", True, True)]
+    assert len(client.calls) == (0 if running else 2)
+    assert (len(store.writes) > 0) is not running
+
+
+@pytest.mark.parametrize("mode", ["sync", "barrier"])
+@pytest.mark.parametrize("prior", ["started", "failed", "abandoned", "stopped", "unreadable", "no-before-retry"])
+def test_mode_only_edit_preserves_async_attempt_until_stopped(
+    tmp_path: Path, mode: str, prior: str
+) -> None:
+    sql = (
+        "SELECT query_id FROM system.processes WHERE 0;"
+        if mode == "barrier" else "INSERT INTO db.a SELECT 1;"
+    )
+    compensation = "" if prior == "no-before-retry" else "-- before-retry: TRUNCATE TABLE db.a\n"
+    original = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"{compensation}{sql}\n"
+    )
+    edited = original.replace("mode=async", f"mode={mode}")
+    recorded = in_progress(
+        [op(
+            0, "failed" if prior in {"failed", "stopped", "unreadable"} else "started",
+            LOAD, query_id="random-retry-query-id",
+        ).model_copy(update={"fingerprint": statement_fingerprint(sql)})],
+        checksum=checksum_sql(original),
+    )
+
+    class CrashStore(FakeStore):
+        def write_migration_state(self, state: MigrationRowState) -> None:
+            super().write_migration_state(state)
+            if prior != "stopped" and state.operations[0].query_id == "":
+                raise RuntimeError("crash after ID overwrite")
+
+    class ModeClient(_StatusClient):
+        def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+            return QueryResult(column_names=["query_id"], rows=[{"x": 1}] if "system.tables" in sql else [])
+
+    store = CrashStore(recorded)
+    if prior == "abandoned":
+        abandon_migration_state(recorded, journal_store=store)
+    client = ModeClient(RuntimeError("replica unavailable") if prior == "unreadable" else prior != "stopped")
+    _write(tmp_path, edited)
+    retry = _retry_for(edited, checksum_sql(original))
+    if prior == "stopped":
+        _apply(tmp_path, client, store, retry=retry)
+        assert client.calls == (["TRUNCATE TABLE db.a", sql] if mode == "sync" else ["TRUNCATE TABLE db.a"])
+        assert store.state is not None
+        assert store.state.migration_completed is True
+    else:
+        if prior == "unreadable":
+            with pytest.raises(RuntimeError, match="replica unavailable"):
+                _apply(tmp_path, client, store, retry=retry)
+        else:
+            with pytest.raises(MigrateError) as raised:
+                _apply(tmp_path, client, store, retry=retry)
+            assert raised.value.code == "retry_mismatch"
+        assert client.calls == []
+        assert store.appended == []
+        assert store.state is not None
+        assert store.state.operations[0].query_id == "random-retry-query-id"
+        assert all(write.operations[0].query_id == "random-retry-query-id" for write in store.writes)
+    assert client.status_calls == [("random-retry-query-id", True, True)]
 
 
 def test_apply_started_statement_still_requires_retry(tmp_path: Path) -> None:

@@ -1,0 +1,15 @@
+NODE joined
+SQL >
+    WITH recent AS (SELECT user_id, max(updated_at) AS updated_at FROM users GROUP BY user_id)
+    SELECT
+        toString(l.user_id) AS session_id,
+        l.user_id AS user_id,
+        r.updated_at AS started_at,
+        toInt8(1) AS sign
+    FROM landing AS l
+    LEFT JOIN recent AS r ON r.user_id = l.user_id
+    ARRAY JOIN [1] AS one
+    WHERE l.amount > 0
+
+TYPE materialized
+DATASOURCE sessions

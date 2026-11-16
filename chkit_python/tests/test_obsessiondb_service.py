@@ -195,7 +195,7 @@ def test_rpc_post_raises_runtime_error_on_5xx(httpx_mock: HTTPXMock) -> None:
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/listAll", status_code=500, text="boom"
     )
-    with pytest.raises(RuntimeError, match="RPC services/listAll failed"):
+    with pytest.raises(RuntimeError, match=r"^Internal Server Error$"):
         list_service_organizations(_creds())
 
 
@@ -262,7 +262,7 @@ def test_rpc_post_keeps_the_404_when_the_service_is_in_the_active_organization(
     httpx_mock: HTTPXMock,
 ) -> None:
     _mock_service_lookup(httpx_mock, active_org_id="org-bench")
-    with pytest.raises(RuntimeError, match="RPC workbench/query/execute failed: 404") as excinfo:
+    with pytest.raises(RuntimeError, match=r"^Not Found$") as excinfo:
         workbench_query_execute(_creds(), service_slug="benchmarks", query="SELECT 1")
     assert not isinstance(excinfo.value, ServiceNotFoundError)
 
@@ -272,7 +272,7 @@ def test_rpc_post_keeps_the_404_when_the_lookup_fails(httpx_mock: HTTPXMock) -> 
         url=f"{BASE}/rpc/workbench/query/execute", status_code=404, text="Not Found"
     )
     httpx_mock.add_response(url=f"{BASE}/rpc/services/listAll", status_code=500, text="boom")
-    with pytest.raises(RuntimeError, match="RPC workbench/query/execute failed: 404"):
+    with pytest.raises(RuntimeError, match=r"^Not Found$"):
         workbench_query_execute(_creds(), service_slug="benchmarks", query="SELECT 1")
 
 
@@ -280,7 +280,7 @@ def test_rpc_post_does_not_look_up_a_404_without_a_service(httpx_mock: HTTPXMock
     httpx_mock.add_response(
         url=f"{BASE}/rpc/services/listAll", status_code=404, text="Not Found"
     )
-    with pytest.raises(RuntimeError, match="RPC services/listAll failed: 404"):
+    with pytest.raises(RuntimeError, match=r"^Not Found$"):
         list_service_organizations(_creds())
     assert len(httpx_mock.get_requests()) == 1
 

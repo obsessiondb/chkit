@@ -134,7 +134,8 @@ def test_planned_modify_remove_rename_and_index_statements_pass_the_wait(ch_clie
 def test_a_definition_the_server_does_not_show_fails_the_wait_naming_the_field(
     ch_client: Any, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.RETRY_DELAY_SECONDS", 0.01)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.RETRY_DELAY_SECONDS", 0.05)
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.DEFINITION_WAIT_DEADLINE_SECONDS", 2.0)
     client = ch_client._client
     live = _LiveClient(client)
     db = client.database

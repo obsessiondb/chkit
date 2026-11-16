@@ -1,0 +1,23 @@
+DESCRIPTION >
+    Raw events landed by the Events API.
+
+SCHEMA >
+    `event_id` UUID `json:$.event_id`,
+    `event_time` DateTime `json:$.event_time`,
+    `event_type` LowCardinality(String) `json:$.event_type`,
+    `user_id` UInt64 `json:$.user_id`,
+    `amount` Decimal(18, 6) `json:$.amount` DEFAULT 0,
+    `country` LowCardinality(Nullable(String)) `json:$.country`,
+    `tags` Array(String) `json:$.tags[:]`,
+    `attributes` Map(String, String) `json:$.attributes`,
+    `payload` String `json:$.payload` CODEC(ZSTD(3)),
+    `ingested_at` DateTime64(3) `json:$.ingested_at` DEFAULT now64(3) CODEC(Delta(8), ZSTD(1))
+
+INDEXES >
+    idx_user user_id TYPE bloom_filter(0.01) GRANULARITY 4
+    idx_type event_type TYPE set(100) GRANULARITY 1
+
+ENGINE "MergeTree"
+ENGINE_PARTITION_KEY "toYYYYMM(event_time)"
+ENGINE_SORTING_KEY "event_type, event_time, user_id"
+ENGINE_TTL "event_time + toIntervalMonth(3)"

@@ -106,9 +106,9 @@ def test_finding_18_client_exposes_introspect_methods_as_methods() -> None:
 # ---------- #12: ChxGetContextInput + getContext hook ----------
 
 
-def test_finding_12_runtime_resolves_first_non_none_get_context() -> None:
-    """Multiple plugins; first plugin returns None (defer), second returns a
-    PluginContext — runtime returns the second.
+def test_finding_12_runtime_runs_every_get_context_and_skips_none() -> None:
+    """Every get_context hook runs (#686). The first plugin returns None, so it
+    gives no executor. The runtime returns the executor of the second plugin.
     """
     pretend_executor = cast(ClickHouseClient, object())
     seen: list[ChxPlugin] = []

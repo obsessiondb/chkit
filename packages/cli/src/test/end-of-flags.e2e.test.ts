@@ -21,7 +21,7 @@ function extraArgs(args: string): string {
 }
 
 describe('@chkit/cli -- ends a core command\'s flags (#614)', () => {
-  test('a trailing -- is ignored; what follows it is a stray argument, even a flag', async () => {
+  test('a trailing -- is ignored; what follows it is a stray argument', async () => {
     const fixture = await createFixture()
     try {
       const c = ['--config', fixture.configPath]
@@ -38,7 +38,15 @@ describe('@chkit/cli -- ends a core command\'s flags (#614)', () => {
         ok: false,
         error: { code: 'usage', message: extraArgs('foo') },
       })
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 30_000)
 
+  test('after --, --help, --json and flags are stray arguments to every core command', async () => {
+    const fixture = await createFixture()
+    try {
+      const c = ['--config', fixture.configPath]
       for (const [args, rest] of [
         // After --, --help and --json are arguments: no help, no JSON mode.
         [['generate', ...c, '--dryrun', '--', '--help'], '--help'],
@@ -57,7 +65,15 @@ describe('@chkit/cli -- ends a core command\'s flags (#614)', () => {
         const result = runCli([...args])
         expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([args, 1, '', extraArgs(rest)])
       }
+    } finally {
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 30_000)
 
+  test('a --json before -- sets JSON mode, and a flag error before -- comes first', async () => {
+    const fixture = await createFixture()
+    try {
+      const c = ['--config', fixture.configPath]
       // A --json before -- sets JSON mode for them; one after it is one of them.
       const both = runCli(['status', ...c, 'foo', '--json', '--', 'bar'])
       expect([both.exitCode, both.stderr.trim(), JSON.parse(both.stdout)]).toEqual([
@@ -71,22 +87,24 @@ describe('@chkit/cli -- ends a core command\'s flags (#614)', () => {
       expect([missing.exitCode, missing.stderr.trim()]).toEqual([1, 'Missing value for --name'])
       const unknown = runCli(['status', ...c, '--bogus', '--', 'x'])
       expect([unknown.exitCode, unknown.stderr.trim()]).toEqual([1, 'Unknown flag: --bogus'])
-      // --config followed by -- has no value (#620); the --json after it is no option.
-      for (const args of [
-        ['generate', '--config', '--', '--json'],
-        ['codegen', '--config', '--', '--json'],
-        ['plugin', 'codegen', 'codegen', '--config', '--', '--json'],
-      ]) {
-        const result = runCli(args)
-        expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([
-          args,
-          1,
-          '',
-          'Missing value for --config',
-        ])
-      }
     } finally {
       await rm(fixture.dir, { recursive: true, force: true })
+    }
+  })
+
+  test('--config followed by -- has no value (#620); the --json after it is no option', () => {
+    for (const args of [
+      ['generate', '--config', '--', '--json'],
+      ['codegen', '--config', '--', '--json'],
+      ['plugin', 'codegen', 'codegen', '--config', '--', '--json'],
+    ]) {
+      const result = runCli(args)
+      expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([
+        args,
+        1,
+        '',
+        'Missing value for --config',
+      ])
     }
   })
 

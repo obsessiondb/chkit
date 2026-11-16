@@ -36,7 +36,7 @@ export function diffSettings(
   expectedSettings: Record<string, string | number | boolean>,
   actualSettings: Record<string, string | number | boolean>
 ): string[] {
-  const settingKeys = Object.keys(expectedSettings).sort()
+  const settingKeys = Object.keys(expectedSettings).sort(compareCodePoints)
   const diffs: string[] = []
   for (const key of settingKeys) {
     const left = key in expectedSettings ? settingValueFingerprint(expectedSettings[key] ?? '') : ''

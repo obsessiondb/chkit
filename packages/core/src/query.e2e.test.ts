@@ -91,9 +91,25 @@ async function pollUntil<T>(read: () => Promise<T>, done: (value: T) => boolean)
   }
 }
 
+// A replica that has not applied the CREATE yet rejects an INSERT with
+// UNKNOWN_TABLE, which writes nothing: re-run it until the replica serving it
+// sees the table (runOnceVisible in @chkit/clickhouse/e2e-testkit) (#712).
+async function runOnceVisible<T>(run: () => Promise<T>): Promise<T> {
+  const deadline = Date.now() + 30_000
+  for (;;) {
+    try {
+      return await run()
+    } catch (error) {
+      const text = `${(error as { type?: unknown }).type ?? ''} ${error instanceof Error ? error.message : String(error)}`
+      if (Date.now() >= deadline || !text.includes('UNKNOWN_TABLE')) throw error
+    }
+    await sleep(500)
+  }
+}
+
 beforeAll(async () => {
   await client.command({ query: toCreateSQL(events) })
-  await client.insert({
+  await runOnceVisible(() => client.insert({
     table: eventsName,
     format: 'JSONEachRow',
     values: [
@@ -101,7 +117,7 @@ beforeAll(async () => {
       { city: 'Berlin', ts: '2026-11-05 10:00:00', clicks: 5 },
       { city: 'Paris', ts: '2026-11-06 10:00:00', clicks: 7 },
     ],
-  })
+  }))
   const countEvents = run`SELECT toUInt32(count()) AS n FROM ${events}`
   await pollUntil(() => countEvents(), (rows) => rows[0]?.n === 3)
 }, 90_000)
@@ -226,6 +242,7 @@ describe('query execution', () => {
       [p('v', t.enum8({ view: 1, "it's": 2 })), "it's", "Enum8('view' = 1, 'it\\'s' = 2)", "it's"],
       [p('v', t.json()), { a: 'x', b: [true] }, 'JSON', '{"a":"x","b":[true]}'],
       [p('v', t.lowCardinality(t.nullable(t.string()))), null, 'LowCardinality(Nullable(String))', null],
+      [p('v', t.lowCardinality(t.string()).nullable()), 'Berlin', 'LowCardinality(Nullable(String))', 'Berlin'],
       [p('v', t.array(t.int128())), [1n, -2], 'Array(Int128)', '[1,-2]'],
       [p('v', t.map(t.uint32(), t.nullable(t.string()))), { 7: 'a', 8: null }, 'Map(UInt32, Nullable(String))', "{7:'a',8:NULL}"],
       [p('v', t.map(t.decimal(8, 2), t.string())), { '1.25': 'a', '-3.50': 'b' }, 'Map(Decimal(8, 2), String)', "{1.25:'a',-3.5:'b'}"],
@@ -252,11 +269,11 @@ describe('query execution', () => {
     )
 
     const row = { city: 'Berlin', kind: "it's", amount: '12.3456', big: 2n ** 256n - 1n, day: '1900-01-01', at: moment, tags: ['a'], counts: { a: 1, b: null } }
-    await client.insert({
+    await runOnceVisible(() => client.insert({
       table: catalogName,
       format: 'JSONEachRow',
       values: [{ ...row, id: '0b6ab9b4-7c4e-4f4b-9a39-2f1c3e1c5a10', big: String(row.big), at: '2026-11-07 12:34:56.789', seen: Math.floor(moment.getTime() / 1000) }],
-    })
+    }))
     const matches = run`
       SELECT toUInt32(count()) AS n FROM ${catalog}
       WHERE city = ${p('city', catalog.column('city'))} AND kind = ${p('kind', catalog.column('kind'))}
