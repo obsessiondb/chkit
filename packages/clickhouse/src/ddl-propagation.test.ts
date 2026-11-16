@@ -261,6 +261,28 @@ describe('waitForDDLPropagation: deadline', () => {
     ).rejects.toThrow('app.events.raw definition not applied on every replica after 1 checks: a check did not return within the 0.5s deadline')
     expect(Date.now() - started).toBeLessThan(3_000)
   })
+
+  test('a check cut off by the deadline keeps the mismatch the checks before it found (#750)', async () => {
+    let polls = 0
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+        polls += 1
+        if (polls > 3) return new Promise<T[]>(() => {})
+        return [row('r1', { type: 'UInt64' }), row('r2', { type: 'UInt32' })] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+
+    await expect(
+      waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        ...FAST,
+        deadlineMs: 500,
+        statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
+      }),
+    ).rejects.toThrow(
+      'app.events.raw definition not applied on every replica after 4 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64" (the last check did not return within the 0.5s deadline)',
+    )
+  })
 })
 
 // chkit-py's tests/test_ddl_propagation.py pins the same budget (#578, #719).

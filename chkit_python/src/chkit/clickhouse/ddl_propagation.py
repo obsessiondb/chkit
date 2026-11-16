@@ -454,14 +454,19 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     Checks 0.5 s apart until the 30 s deadline; a check that does not return
     ends the wait at the deadline, as in TS. chkit-py requests have no read
     timeout (#661). On timeout the error names what was still different on the
-    last check.
+    last check that returned, and says so when the check after it did not
+    return (#750).
     """
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
     detail = ""
     checks = 0
     while True:
         checks += 1
-        mismatch = _check_before(check, deadline)
+        timed_out, mismatch = _check_before(check, deadline)
+        if timed_out:
+            late = f"did not return within the {DEFINITION_WAIT_DEADLINE_SECONDS:g}s deadline"
+            detail = f"{detail} (the last check {late})" if detail else f"a check {late}"
+            break
         if mismatch is None:
             return
         detail = mismatch
@@ -475,13 +480,14 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     raise RuntimeError(msg)
 
 
-def _check_before(check: Callable[[], str | None], deadline: float) -> str | None:
+def _check_before(check: Callable[[], str | None], deadline: float) -> tuple[bool, str | None]:
     """Run ``check`` and stop waiting for it at ``deadline`` (TS ``checkBefore``).
 
-    Returns the mismatch, the error message, or the timeout. The check runs on a
-    daemon thread, so a check that never returns does not keep the process alive.
-    An abandoned check still holds the client's session, so a caller must not
-    send another query on that client after the timeout.
+    Returns whether the check timed out, else its mismatch or error message.
+    The check runs on a daemon thread, so a check that never returns does not
+    keep the process alive. An abandoned check still holds the client's
+    session, so a caller must not send another query on that client after the
+    timeout.
     """
     outcome: list[str | None] = []
 
@@ -495,8 +501,8 @@ def _check_before(check: Callable[[], str | None], deadline: float) -> str | Non
     thread.start()
     thread.join(max(deadline - time.monotonic(), 0))
     if not outcome:
-        return f"a check did not return within the {DEFINITION_WAIT_DEADLINE_SECONDS:g}s deadline"
-    return outcome[0]
+        return True, None
+    return False, outcome[0]
 
 
 def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None) -> None:
