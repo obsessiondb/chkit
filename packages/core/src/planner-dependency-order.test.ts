@@ -653,14 +653,14 @@ describe('planDiff orders ADD COLUMNs by the columns their expressions read (#68
       addedColumns([
         { name: 'a', type: 'UInt64', default: { expression: 'length(n.x) + `n`.`x`[1]' } },
         { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } },
-        { name: 'n', type: 'Tuple(x Array(UInt64))', default: { expression: 'tuple([b])' } },
+        { name: 'n', type: 'Tuple(y Array(UInt64))', default: { expression: 'tuple([b])' } },
         { name: 'n.x', type: 'Array(UInt64)' },
       ])
     ).toEqual([
       'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
       'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length(n.x) + `n`.`x`[1];',
       'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;',
-      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(x Array(UInt64)) DEFAULT tuple([b]);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(y Array(UInt64)) DEFAULT tuple([b]);',
     ])
   })
 

@@ -738,14 +738,14 @@ def test_a_dotted_run_reads_its_longest_leading_column_not_a_shorter_prefix() ->
         {"name": "a", "type": "UInt64",
          "default": SQLExpression(expression="length(n.x) + `n`.`x`[1]")},
         {"name": "b", "type": "UInt64", "default": SQLExpression(expression="a + 1")},
-        {"name": "n", "type": "Tuple(x Array(UInt64))",
+        {"name": "n", "type": "Tuple(y Array(UInt64))",
          "default": SQLExpression(expression="tuple([b])")},
         {"name": "n.x", "type": "Array(UInt64)"},
     ]) == [
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);",
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length(n.x) + `n`.`x`[1];",
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;",
-        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(x Array(UInt64)) DEFAULT tuple([b]);",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(y Array(UInt64)) DEFAULT tuple([b]);",
     ]
 
 
