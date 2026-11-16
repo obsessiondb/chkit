@@ -5,7 +5,16 @@ import type {
   RiskLevel,
   SchemaDefinition,
 } from '@chkit/core'
-import { compareCodePoints, quoteIdentifier, renderIdentifier, renderQualifiedName } from '@chkit/core'
+import {
+  columnRenameKey,
+  compareCodePoints,
+  isColumnStatement,
+  orderColumnStatements,
+  quoteIdentifier,
+  renderIdentifier,
+  renderQualifiedName,
+  type ColumnStatementDefinitions,
+} from '@chkit/core'
 
 import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping } from './rename-mappings.js'
 
@@ -14,9 +23,16 @@ import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping }
 const DROP_RANK = 0
 const CREATE_RANK = 4
 
+/**
+ * Replaces each selected (DROP, ADD) column pair with a RENAME COLUMN, then
+ * orders the column statements again with the renames (#746, #758):
+ * `definitions` is the schema the plan was made from, after table and
+ * dictionary renames, and the schema it reaches.
+ */
 export function applySelectedRenameSuggestions(
   plan: MigrationPlan,
-  selectedSuggestions: ColumnRenameSuggestion[]
+  selectedSuggestions: ColumnRenameSuggestion[],
+  definitions: ColumnStatementDefinitions
 ): MigrationPlan {
   if (selectedSuggestions.length === 0) return plan
 
@@ -28,15 +44,19 @@ export function applySelectedRenameSuggestions(
     operationKeysToRemove.add(suggestion.addOperationKey)
     renameOperations.push({
       type: 'alter_table_rename_column',
-      key: `table:${suggestion.database}.${suggestion.table}:column_rename:${suggestion.from}:${suggestion.to}`,
+      key: columnRenameKey(suggestion),
       risk: 'caution',
       sql: suggestion.confirmationSQL,
     })
   }
 
-  const operations = mergeOperations(
-    plan.operations.filter((operation) => !operationKeysToRemove.has(operation.key)),
-    renameOperations
+  const operations = orderColumnStatements(
+    mergeOperations(
+      plan.operations.filter((operation) => !operationKeysToRemove.has(operation.key)),
+      renameOperations
+    ),
+    definitions,
+    selectedSuggestions
   )
 
   return {
@@ -215,13 +235,14 @@ export function assertCliColumnMappingsResolvable(
  * the planner's order, which is dependency-aware (#231); the classes this
  * pipeline adds to are ordered by key, and operations that share a key keep
  * the planner's order, so a column's `REMOVE DEFAULT` still runs before its
- * `MODIFY COLUMN`. The column ADDs fill their key-order positions in the
- * planner's order, which puts an ADD after the ADDs its default reads (#681).
+ * `MODIFY COLUMN`. The planner's column statements fill their key-order
+ * positions in the planner's order, which is dependency-aware (#681, #745);
+ * `applySelectedRenameSuggestions` orders them again with its renames.
  */
 function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]): MigrationOperation[] {
-  const isAdd = (operation: MigrationOperation) => operation.type === 'alter_table_add_column'
+  const planned = kept.filter(isColumnStatement)
+  const isPlanned = (operation: MigrationOperation) => isColumnStatement(operation) && !added.includes(operation)
   const merged = [...kept, ...added]
-  const adds = merged.filter(isAdd)
   let next = 0
   return merged
     .map((operation, index) => ({ operation, index }))
@@ -232,7 +253,7 @@ function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]
       if (rank === DROP_RANK || rank === CREATE_RANK) return a.index - b.index
       return compareCodePoints(a.operation.key, b.operation.key) || a.index - b.index
     })
-    .map(({ operation }) => (isAdd(operation) ? (adds[next++] ?? operation) : operation))
+    .map(({ operation }) => (isPlanned(operation) ? (planned[next++] ?? operation) : operation))
 }
 
 function rankOperation(op: MigrationOperation): number {

@@ -368,3 +368,178 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
     }
   }, 120_000)
 })
+
+/**
+ * Generates and migrates a change of one table's columns, then checks the
+ * migration order and the columns ClickHouse ends with. `before` and `after`
+ * are the column entries after `id`; `rename` is a `from=to` column rename.
+ */
+async function migrateColumnChange(input: {
+  label: string
+  before: string
+  after: string
+  rename?: string
+  order: string[]
+  columns: string[]
+}): Promise<void> {
+  const liveEnv = getLiveEnv()
+  const executor = createLiveExecutor(liveEnv)
+  const db = liveEnv.clickhouseDatabase
+  const journalTable = createJournalTableName(input.label)
+  const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable, CI: '1' }
+  const name = `${createPrefix(input.label)}t`
+  const dir = await mkdtemp(join(tmpdir(), `chkit-${input.label}-e2e-`))
+  const configPath = join(dir, 'clickhouse.config.ts')
+  const schemaPath = join(dir, 'schema.ts')
+  const migrationsDir = join(dir, 'chkit/migrations')
+  const writeSchema = (columns: string) =>
+    writeFile(
+      schemaPath,
+      `import { schema, table } from '${CORE_ENTRY}'\n\n` +
+        `export default schema(table({ database: '${db}', name: '${name}', columns: [{ name: 'id', type: 'UInt64' }, ${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
+      'utf8'
+    )
+  const generateAndMigrate = async (step: string, migrationId: string, extraArgs: string[]) => {
+    const generated = runCli(
+      dir,
+      ['generate', '--config', configPath, '--name', step, '--migration-id', migrationId, ...extraArgs, '--json'],
+      cliEnv
+    )
+    if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic(`generate (${step}) failed`, generated))
+    const migrated = await runCliWithRetry(
+      dir,
+      ['migrate', '--config', configPath, '--execute', '--allow-destructive', '--json'],
+      { extraEnv: cliEnv }
+    )
+    if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic(`migrate --execute (${step}) failed`, migrated))
+    return readFile(join(migrationsDir, `${migrationId}_${step}.sql`), 'utf8')
+  }
+  const readColumns = async () =>
+    (
+      await executor.query<{ name: string }>(
+        `SELECT name FROM system.columns WHERE database = '${db}' AND table = '${name}' ORDER BY name`
+      )
+    ).map((row) => row.name)
+
+  try {
+    await writeFile(
+      configPath,
+      `export default {\n` +
+        `  schema: '${schemaPath}',\n` +
+        `  outDir: '${join(dir, 'chkit')}',\n` +
+        `  migrationsDir: '${migrationsDir}',\n` +
+        `  metaDir: '${join(dir, 'chkit/meta')}',\n` +
+        `  clickhouse: {\n` +
+        `    url: '${liveEnv.clickhouseUrl}',\n` +
+        `    username: '${liveEnv.clickhouseUser}',\n` +
+        `    password: '${liveEnv.clickhousePassword}',\n` +
+        `    database: '${db}',\n` +
+        `  },\n}\n`,
+      'utf8'
+    )
+    await writeSchema(input.before)
+    await generateAndMigrate('init', '20990101000000', [])
+    await waitForTable(executor, db, name)
+
+    await writeSchema(input.after)
+    const sql = await generateAndMigrate(
+      'change',
+      '20990101000001',
+      input.rename === undefined ? [] : ['--rename-column', `${db}.${name}.${input.rename}`]
+    )
+    expectInOrder(sql, input.order)
+    const expected = [...input.columns].sort()
+    expect(await pollUntil(readColumns, (columns) => columns.join() === expected.join())).toEqual(expected)
+  } finally {
+    await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(name)}`)
+    await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(journalTable)}`)
+    await executor.close()
+    await rm(dir, { recursive: true, force: true })
+  }
+}
+
+// Each change below fails on ClickHouse in the order of an earlier plan: a
+// statement reads a column that does not exist yet, or a DROP COLUMN runs
+// while another column still reads it.
+describe('@chkit/cli migrate orders the column statements of a table (#745, #746, #758)', () => {
+  test('a MODIFY COLUMN runs after the ADD COLUMN its new DEFAULT reads (#745)', async () => {
+    await migrateColumnChange({
+      label: 'modafteradd',
+      before: "{ name: 'Total', type: 'UInt64' }",
+      after: "{ name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } }, { name: 'price', type: 'UInt64' }",
+      order: ['ADD COLUMN IF NOT EXISTS `price` UInt64;', 'MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;'],
+      columns: ['Total', 'id', 'price'],
+    })
+  }, 120_000)
+
+  test('a RENAME COLUMN runs before the ADD COLUMN that reads its new name (#746)', async () => {
+    await migrateColumnChange({
+      label: 'addafterrename',
+      before: "{ name: 'a', type: 'String' }",
+      after: "{ name: 'b', type: 'String' }, { name: 'Copy', type: 'String', defaultKind: 'MATERIALIZED', default: { expression: \"concat(b, '!')\" } }",
+      rename: 'a=b',
+      order: ['RENAME COLUMN IF EXISTS `a` TO `b`;', 'ADD COLUMN IF NOT EXISTS `Copy` String MATERIALIZED'],
+      columns: ['Copy', 'b', 'id'],
+    })
+  }, 120_000)
+
+  test('a RENAME COLUMN runs before the MODIFY COLUMN that reads its new name (#758)', async () => {
+    await migrateColumnChange({
+      label: 'modafterrename',
+      before: "{ name: 'a', type: 'String' }, { name: 'code', type: 'String', default: { expression: 'a' } }",
+      after: "{ name: 'b', type: 'String' }, { name: 'code', type: 'String', default: { expression: 'b' } }",
+      rename: 'a=b',
+      order: ['RENAME COLUMN IF EXISTS `a` TO `b`;', 'MODIFY COLUMN `code` String DEFAULT b;'],
+      columns: ['b', 'code', 'id'],
+    })
+  }, 120_000)
+
+  // Passes on main too; it fails when the DROP keeps its slot while the
+  // MODIFY of `b` moves behind the ADD of `z`.
+  test('a DROP COLUMN runs after the MODIFY of the column whose old DEFAULT reads it', async () => {
+    await migrateColumnChange({
+      label: 'dropaftermod',
+      before: "{ name: 'b', type: 'UInt64', default: { expression: 'c' } }, { name: 'c', type: 'UInt64' }",
+      after:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'z' } }, { name: 'b', type: 'UInt64', default: { expression: 'z' } }, { name: 'z', type: 'UInt64' }",
+      order: ['ADD COLUMN IF NOT EXISTS `z` UInt64;', 'MODIFY COLUMN `b` UInt64 DEFAULT z;', 'DROP COLUMN IF EXISTS `c`;'],
+      columns: ['a', 'b', 'id', 'z'],
+    })
+  }, 120_000)
+
+  test('a DROP COLUMN runs after the dropped column whose expression reads it', async () => {
+    await migrateColumnChange({
+      label: 'dropafterdrop',
+      before: "{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'a + 1' } }",
+      after: "{ name: 'x', type: 'UInt64' }",
+      order: ['DROP COLUMN IF EXISTS `b`;', 'DROP COLUMN IF EXISTS `a`;'],
+      columns: ['id', 'x'],
+    })
+  }, 120_000)
+
+  // Passes on main too; it fails when the ADD and the RENAME move while the
+  // MODIFY of `d` keeps its slot before the ADD of `c`.
+  test('a MODIFY COLUMN stays after the ADD COLUMN it reads when a rename runs too', async () => {
+    await migrateColumnChange({
+      label: 'modaddrename',
+      before: "{ name: 'a', type: 'UInt64' }, { name: 'd', type: 'UInt64' }",
+      after:
+        "{ name: 'c', type: 'UInt64', default: { expression: \"length('abc')\" } }, { name: 'd', type: 'UInt64', default: { expression: 'c + 1' } }, { name: 'length', type: 'UInt64' }",
+      rename: 'a=length',
+      order: ['ADD COLUMN IF NOT EXISTS `c` UInt64', 'MODIFY COLUMN `d` UInt64 DEFAULT c + 1;'],
+      columns: ['c', 'd', 'id', 'length'],
+    })
+  }, 120_000)
+
+  test('a function call named like a new column does not hold back the rename it reads', async () => {
+    await migrateColumnChange({
+      label: 'fnrename',
+      before: "{ name: 'a', type: 'UInt64', default: { expression: \"length('abc')\" } }",
+      after:
+        "{ name: 'b', type: 'UInt64', default: { expression: \"length('abc')\" } }, { name: 'length', type: 'UInt64', default: { expression: 'b + 1' } }",
+      rename: 'a=b',
+      order: ['RENAME COLUMN IF EXISTS `a` TO `b`;', 'ADD COLUMN IF NOT EXISTS `length` UInt64 DEFAULT b + 1;'],
+      columns: ['b', 'id', 'length'],
+    })
+  }, 120_000)
+})
