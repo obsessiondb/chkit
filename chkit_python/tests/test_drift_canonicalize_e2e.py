@@ -53,6 +53,33 @@ def test_canonicalize_sql_fragments_uses_clickhouse_formatting() -> None:
     assert queries["SELECT a,count() GROUP BY a"] == "SELECT a, count() GROUP BY a"
 
 
+def test_canonicalize_keeps_a_select_modifier_name_in_the_expression() -> None:
+    with _connect() as client:
+        expressions = canonicalize_sql_fragments(
+            client,
+            [
+                "all + id",
+                "distinct + id",
+                "id",
+                "`all` + id",
+                "cityHash64(a,b)",
+                "ts + INTERVAL 5 YEAR",
+                "ts + INTERVAL 1 DAY DELETE",
+            ],
+            wrap=True,
+        )
+
+    # Read as `SELECT all + id`, the server would take `all` as the modifier.
+    assert expressions["all + id"] == "`all` + id"
+    assert expressions["all + id"] == expressions["`all` + id"]
+    assert expressions["all + id"] != expressions["id"]
+    assert expressions["distinct + id"] == "`distinct` + id"
+    assert expressions["cityHash64(a,b)"] == "cityHash64(a, b)"
+    assert expressions["ts + INTERVAL 5 YEAR"] == "ts + toIntervalYear(5)"
+    # A TTL element with an action does not parse in parentheses; it formats as before.
+    assert expressions["ts + INTERVAL 1 DAY DELETE"] == "ts + toIntervalDay(1) AS DELETE"
+
+
 def test_expressions_spelled_differently_from_clickhouse_report_no_drift(tmp_path: Path) -> None:
     with _connect() as client:
         database = client.database

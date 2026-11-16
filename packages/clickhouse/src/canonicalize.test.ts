@@ -17,13 +17,13 @@ function fakeExecutor(reply: Array<string | null>, capture: { sql?: string }): C
 describe('canonicalizeSqlFragments', () => {
   test('strips the SELECT wrapper and maps each fragment to its canonical form', async () => {
     const capture: { sql?: string } = {}
-    const executor = fakeExecutor(['SELECT cityHash64(a, b)', 'SELECT (n * 2) + 1'], capture)
+    const executor = fakeExecutor(['SELECT 0, cityHash64(a, b)', 'SELECT 0, (n * 2) + 1'], capture)
 
     const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', 'n*2+1'], { wrap: true })
 
     expect(map.get('cityHash64(a,b)')).toBe('cityHash64(a, b)')
     expect(map.get('n*2+1')).toBe('(n * 2) + 1')
-    expect(capture.sql).toContain("formatQuerySingleLineOrNull('SELECT ' || fragment)")
+    expect(capture.sql).toContain("formatQuerySingleLineOrNull('SELECT 0, ' || fragment)")
   })
 
   test('does not wrap when formatting full queries', async () => {
@@ -39,7 +39,7 @@ describe('canonicalizeSqlFragments', () => {
   })
 
   test('omits fragments ClickHouse could not format (null)', async () => {
-    const executor = fakeExecutor(['SELECT cityHash64(a, b)', null], {})
+    const executor = fakeExecutor(['SELECT 0, cityHash64(a, b)', null], {})
 
     const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', '((bad'], { wrap: true })
 
@@ -49,7 +49,7 @@ describe('canonicalizeSqlFragments', () => {
 
   test('escapes quotes and backslashes, and dedupes blank/empty input', async () => {
     const capture: { sql?: string } = {}
-    const executor = fakeExecutor(["SELECT concat(a, 'x,y')"], capture)
+    const executor = fakeExecutor(["SELECT 0, concat(a, 'x,y')"], capture)
 
     const map = await canonicalizeSqlFragments(executor, ["concat(a,'x,y')", '', '   '], { wrap: true })
 
@@ -78,13 +78,13 @@ describe('canonicalizeSqlFragments', () => {
   // comparison — the feature no-opping exactly where it's needed.
   test('splits large input into multiple bounded queries and merges the results', async () => {
     const sqls: string[] = []
-    // Echo each literal in the received array back as `SELECT <fragment>`, so
+    // Echo each literal in the received array back as `SELECT 0, ok`, so
     // every fragment maps to itself regardless of how batching splits them.
     const executor = {
       async query<T>(sql: string): Promise<T[]> {
         sqls.push(sql)
         const literalCount = (sql.match(/'/g)?.length ?? 0) / 2
-        return [{ formatted: Array.from({ length: literalCount }, () => 'SELECT ok') } as unknown as T]
+        return [{ formatted: Array.from({ length: literalCount }, () => 'SELECT 0, ok') } as unknown as T]
       },
     } as unknown as ClickHouseExecutor
 

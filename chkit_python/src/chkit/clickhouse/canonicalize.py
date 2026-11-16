@@ -16,7 +16,7 @@ from chkit.core.sql_lexer import js_regex, js_trim
 # throw and silently drop the whole run back to string comparison.
 MAX_BATCH_LITERAL_BYTES = 128_000
 
-_SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+(.+)$"), re.IGNORECASE | re.DOTALL)
+_SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+0,\s*(.+)$"), re.IGNORECASE | re.DOTALL)
 
 
 def canonicalize_sql_fragments(
@@ -28,8 +28,9 @@ def canonicalize_sql_fragments(
     precedence parens, ``INTERVAL n UNIT`` -> ``toIntervalUnit(n)`` — which no
     local string normalizer can reproduce.
 
-    ``wrap`` distinguishes a scalar expression (wrapped as ``SELECT <expr>``,
-    prefix stripped back off) from a full ``SELECT`` query (formatted as-is).
+    ``wrap`` distinguishes a scalar expression (wrapped as ``SELECT 0, <expr>``,
+    prefix stripped back off; after ``0,`` a leading ``all`` or ``distinct``
+    column is not read as the SELECT modifier) from a full ``SELECT`` query (formatted as-is).
     Formatting is batched through ``formatQuerySingleLineOrNull``, which yields
     NULL for a fragment it can't parse rather than failing the whole batch;
     those fragments have no entry, so the caller falls back to string
@@ -43,7 +44,7 @@ def canonicalize_sql_fragments(
         return result
 
     format_call = (
-        "formatQuerySingleLineOrNull('SELECT ' || fragment)"
+        "formatQuerySingleLineOrNull('SELECT 0, ' || fragment)"
         if wrap
         else "formatQuerySingleLineOrNull(fragment)"
     )

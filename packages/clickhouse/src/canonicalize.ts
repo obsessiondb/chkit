@@ -5,7 +5,7 @@ function quoteLiteral(value: string): string {
 }
 
 function stripSelectPrefix(formatted: string): string | null {
-  const match = formatted.match(/^SELECT\s+([\s\S]+)$/i)
+  const match = formatted.match(/^SELECT\s+0,\s*([\s\S]+)$/i)
   return match?.[1]?.trim() ?? null
 }
 
@@ -39,8 +39,9 @@ function batchFragments(fragments: readonly string[]): string[][] {
  * `INTERVAL n UNIT` → `toIntervalUnit(n)` — which no local string normalizer can
  * reproduce (#195).
  *
- * `wrap` distinguishes a scalar expression (wrapped as `SELECT <expr>`, prefix
- * stripped back off) from a full `SELECT` query (formatted as-is). Formatting is
+ * `wrap` distinguishes a scalar expression (wrapped as `SELECT 0, <expr>`, prefix
+ * stripped back off; after `0,` a leading `all` or `distinct` column is not read
+ * as the SELECT modifier) from a full `SELECT` query (formatted as-is). Formatting is
  * batched into a single query using `formatQuerySingleLineOrNull`, which yields
  * NULL for a fragment it can't parse rather than failing the whole batch — those
  * are simply left out of the map so the caller falls back to string comparison.
@@ -60,7 +61,7 @@ export async function canonicalizeSqlFragments(
   if (unique.length === 0) return result
 
   const formatCall = options.wrap
-    ? `formatQuerySingleLineOrNull('SELECT ' || fragment)`
+    ? `formatQuerySingleLineOrNull('SELECT 0, ' || fragment)`
     : `formatQuerySingleLineOrNull(fragment)`
 
   for (const batch of batchFragments(unique)) {
