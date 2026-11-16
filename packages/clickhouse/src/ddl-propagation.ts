@@ -614,7 +614,8 @@ function constraintWhere(database: string, tableName: string, constraintName: st
  * the deadline (30 s by default) of the other waits. The deadline is hard:
  * chkit's queries have no request timeout, so a check that does not return
  * ends the wait at the deadline instead of holding the migration. On timeout
- * the error names what was still different on the last check.
+ * the error names what was still different on the last check that returned,
+ * and says so when the check after it did not return (#750).
  */
 async function waitUntilApplied(
   subject: string,
@@ -628,7 +629,12 @@ async function waitUntilApplied(
   let detail = ''
   for (;;) {
     checks += 1
-    const outcome = await checkBefore(check, deadline, deadlineMs)
+    const outcome = await checkBefore(check, deadline)
+    if (outcome.timedOut) {
+      const late = `did not return within the ${deadlineMs / 1000}s deadline`
+      detail = detail ? `${detail} (the last check ${late})` : `a check ${late}`
+      break
+    }
     if (outcome.mismatch === undefined && outcome.failure === undefined) return
     detail = outcome.failure ?? outcome.mismatch ?? ''
     if (performance.now() + pollIntervalMs >= deadline) break
@@ -640,14 +646,10 @@ async function waitUntilApplied(
 async function checkBefore(
   check: () => Promise<string | undefined>,
   deadline: number,
-  deadlineMs: number,
-): Promise<{ mismatch?: string; failure?: string }> {
+): Promise<{ mismatch?: string; failure?: string; timedOut?: true }> {
   let timer: ReturnType<typeof setTimeout> | undefined
-  const expired = new Promise<{ failure: string }>((resolve) => {
-    timer = setTimeout(
-      () => resolve({ failure: `a check did not return within the ${deadlineMs / 1000}s deadline` }),
-      Math.max(deadline - performance.now(), 0),
-    )
+  const expired = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(deadline - performance.now(), 0))
   })
   try {
     return await Promise.race([
