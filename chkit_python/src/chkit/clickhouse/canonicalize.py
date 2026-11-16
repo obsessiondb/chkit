@@ -9,7 +9,7 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from chkit.core.sql_lexer import js_regex, js_trim
+from chkit.core.sql_lexer import is_trivia, js_regex, js_trim, tokenize_sql
 
 # Keep each batched query well under ClickHouse's default max_query_size
 # (262144 bytes) so a large schema doesn't overflow a single query — which would
@@ -51,13 +51,29 @@ def canonicalize_sql_fragments(
         "formatQuerySingleLineOrNull('SELECT 0, ' || fragment)",
         _SELECT_LIST_PREFIX_RE,
     )
-    rest = [fragment for fragment in unique if fragment not in result]
+    rest = [
+        fragment
+        for fragment in unique
+        if fragment not in result and not _starts_with_select_modifier(fragment)
+    ]
     result.update(
         _format_fragments(
             client, rest, "formatQuerySingleLineOrNull('SELECT ' || fragment)", _SELECT_PREFIX_RE
         )
     )
     return result
+
+
+def _starts_with_select_modifier(fragment: str) -> bool:
+    # Right after a bare SELECT, a leading ``all`` or ``distinct`` reads as the
+    # modifier (``SELECT all from`` formats as ``SELECT from``), so such a
+    # fragment is not retried there and falls back to text comparison.
+    first = next((token for token in tokenize_sql(fragment) if not is_trivia(token)), None)
+    return (
+        first is not None
+        and first.kind == "identifier"
+        and first.text.lower() in ("all", "distinct")
+    )
 
 
 def _format_fragments(

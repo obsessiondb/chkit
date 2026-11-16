@@ -228,6 +228,18 @@ def test_canonicalize_formats_a_clause_keyword_name_as_a_bare_select_does() -> N
     assert "from" in expressions
 
 
+def test_canonicalize_does_not_retry_a_fragment_led_by_all_or_distinct() -> None:
+    with _connect() as client:
+        expressions = canonicalize_sql_fragments(
+            client, ["all from", "ALL from", "distinct from", "from"], wrap=True
+        )
+
+    # `SELECT all from` would format as `SELECT from`, matching a live `from`.
+    assert "from" in expressions
+    for fragment in ["all from", "ALL from", "distinct from"]:
+        assert (fragment, expressions.get(fragment)) == (fragment, None)
+
+
 def test_columns_named_from_and_all_read_clean_and_a_changed_default_drifts(
     tmp_path: Path,
 ) -> None:

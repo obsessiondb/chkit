@@ -41,5 +41,19 @@ describe('canonicalizeSqlFragments e2e', () => {
     // `SELECT 0, from` does not parse, so `from` is formatted on its own.
     for (const fragment of fragments) expect([fragment, map.get(fragment) ?? null]).toEqual([fragment, bare.get(fragment) ?? null])
     expect(map.has('from')).toBe(true)
+  }, 60_000)
+
+  test('a fragment led by all or distinct is not retried as a bare SELECT', async () => {
+    const executor = createLiveExecutor(getLiveEnv())
+    const map = await canonicalizeSqlFragments(executor, ['all from', 'ALL from', 'distinct from', 'from'], {
+      wrap: true,
+    })
+    await executor.close()
+
+    // `SELECT all from` would format as `SELECT from`, matching a live `from`.
+    expect(map.get('from')).toBeDefined()
+    for (const fragment of ['all from', 'ALL from', 'distinct from']) {
+      expect([fragment, map.get(fragment) ?? null]).toEqual([fragment, null])
+    }
   })
 })

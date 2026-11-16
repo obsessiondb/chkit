@@ -61,6 +61,24 @@ describe('canonicalizeSqlFragments', () => {
     expect(sqls[1]).toContain("['from', '((bad']")
   })
 
+  test('does not retry a fragment led by all or distinct', async () => {
+    const sqls: string[] = []
+    const executor = {
+      async query<T>(sql: string): Promise<T[]> {
+        sqls.push(sql)
+        return [{ formatted: sqls.length === 1 ? [null, null, null, null] : ['SELECT `from`'] } as unknown as T]
+      },
+    } as unknown as ClickHouseExecutor
+
+    const map = await canonicalizeSqlFragments(executor, ['all from', ' /* c */ DISTINCT from', 'from', '`all` from'], {
+      wrap: true,
+    })
+
+    expect(sqls).toHaveLength(2)
+    expect(sqls[1]).toContain("['from', '`all` from']")
+    expect(map.has('all from')).toBe(false)
+  })
+
   test('escapes quotes and backslashes, and dedupes blank/empty input', async () => {
     const capture: { sql?: string } = {}
     const executor = fakeExecutor(["SELECT 0, concat(a, 'x,y')"], capture)

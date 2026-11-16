@@ -68,6 +68,18 @@ def test_retries_bare_what_did_not_format_after_0_and_omits_what_never_formats()
     assert "['from', '((bad']" in client.sqls[1]
 
 
+def test_does_not_retry_a_fragment_led_by_all_or_distinct() -> None:
+    client = _ReplayClient([[None, None, None, None], ["SELECT `from`"]])
+
+    result = canonicalize_sql_fragments(
+        client, ["all from", " /* c */ DISTINCT from", "from", "`all` from"], wrap=True
+    )
+
+    assert len(client.sqls) == 2
+    assert "['from', '`all` from']" in client.sqls[1]
+    assert "all from" not in result
+
+
 def test_escapes_quotes_and_backslashes_and_drops_blank_input() -> None:
     client = _FakeClient(["SELECT 0, concat(a, 'x,y')"])
 

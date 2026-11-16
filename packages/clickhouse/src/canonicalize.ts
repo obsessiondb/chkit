@@ -1,3 +1,5 @@
+import { isTrivia, tokenizeSQL } from '@chkit/core'
+
 import type { ClickHouseExecutor } from './index.js'
 
 function quoteLiteral(value: string): string {
@@ -69,10 +71,18 @@ export async function canonicalizeSqlFragments(
     `formatQuerySingleLineOrNull('SELECT 0, ' || fragment)`,
     SELECT_LIST_PREFIX
   )
-  const rest = unique.filter((fragment) => !result.has(fragment))
+  const rest = unique.filter((fragment) => !result.has(fragment) && !startsWithSelectModifier(fragment))
   const bare = await formatFragments(executor, rest, `formatQuerySingleLineOrNull('SELECT ' || fragment)`, SELECT_PREFIX)
   for (const [fragment, canonical] of bare) result.set(fragment, canonical)
   return result
+}
+
+// Right after a bare SELECT, a leading `all` or `distinct` reads as the
+// modifier (`SELECT all from` formats as `SELECT from`), so such a fragment is
+// not retried there and falls back to text comparison.
+function startsWithSelectModifier(fragment: string): boolean {
+  const first = tokenizeSQL(fragment).find((token) => !isTrivia(token))
+  return first?.kind === 'identifier' && ['all', 'distinct'].includes(first.text.toLowerCase())
 }
 
 async function formatFragments(
