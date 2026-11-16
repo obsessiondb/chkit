@@ -6,9 +6,12 @@ Wire protocol (mirrors ``@orpc/client/fetch``'s ``RPCLink``):
 
 The token is sent as ``Authorization: Bearer <token>``. HTTP 401 returns are
 translated into ``SessionExpiredError`` so callers can route to a re-login.
-A 404 for a call with a ``serviceSlug`` raises ``ServiceNotFoundError`` when
-the service is in another organization than the session's active one, or in
-none.
+Any other failure raises what TS's ``RPCLink`` throws: a
+:class:`ConsoleApiError` with the oRPC error's message and code, or a
+``RuntimeError`` for a body it cannot parse and for a network failure. A
+``NOT_FOUND`` for a call with a ``serviceSlug`` raises ``ServiceNotFoundError``
+when the service is in another organization than the session's active one, or
+in none.
 
 Subset of the TS contracts ported here:
 
@@ -20,6 +23,7 @@ Subset of the TS contracts ported here:
 
 from __future__ import annotations
 
+import json
 from typing import Any, Literal
 
 import httpx
@@ -112,7 +116,6 @@ ClaimInstanceResult = (
 
 HTTP_TIMEOUT_SECONDS = 30.0
 HTTP_401_UNAUTHORIZED = 401
-HTTP_404_NOT_FOUND = 404
 
 ServiceNotFoundCode = Literal["service_not_in_active_organization", "service_not_found"]
 
@@ -142,9 +145,9 @@ def _rpc_post(
     The oRPC RPC protocol (what TS's ``RPCLink`` speaks) wraps the input as
     ``{"json": ...}`` and the output the same way; the API rejects any other
     body with ``400 Input validation failed``. Translates HTTP 401 into
-    ``SessionExpiredError`` so callers handle session expiry uniformly. Non-2xx
-    for any other code raises ``RuntimeError`` with the response body for
-    debugging.
+    ``SessionExpiredError`` so callers handle session expiry uniformly. Any
+    other failure raises the error TS's ``RPCLink`` throws, with its message:
+    see :func:`_decode_error_body` and :func:`_orpc_error`.
     """
     url = f"{creds.base_url}/rpc/{procedure}"
     body = {"json": payload}
@@ -153,26 +156,150 @@ def _rpc_post(
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
     }
-    with httpx.Client(timeout=timeout) as http:
-        res = http.post(url, json=body, headers=headers)
+    try:
+        with httpx.Client(timeout=timeout) as http:
+            res = http.post(url, json=body, headers=headers)
+    except httpx.TransportError as error:
+        # Node's fetch rejects every network failure with this message.
+        raise RuntimeError(_NETWORK_ERROR) from error
     if res.status_code == HTTP_401_UNAUTHORIZED:
         raise SessionExpiredError
-    service_slug = payload.get("serviceSlug") if isinstance(payload, dict) else None
-    if res.status_code == HTTP_404_NOT_FOUND and isinstance(service_slug, str):
-        # Every call for a service (workbench queries, job submit and list)
-        # passes here, so query, migrate and backfill all get the explanation.
-        explained = explain_service_not_found(creds, service_slug)
-        if explained is not None:
-            raise explained
     if res.status_code >= httpx.codes.BAD_REQUEST:
-        msg = f"RPC {procedure} failed: {res.status_code} {res.text}"
-        raise RuntimeError(msg)
+        orpc_error = _orpc_error(res.status_code, _decode_error_body(res))
+        service_slug = payload.get("serviceSlug") if isinstance(payload, dict) else None
+        if orpc_error.code == "NOT_FOUND" and isinstance(service_slug, str):
+            # Every call for a service (workbench queries, job submit and list)
+            # passes here, so query, migrate and backfill all get the explanation.
+            explained = explain_service_not_found(creds, service_slug)
+            if explained is not None:
+                raise explained
+        raise orpc_error
     try:
         envelope = res.json()
     except ValueError:
-        msg = f"RPC {procedure} returned non-JSON body: {res.text[:200]}"
-        raise RuntimeError(msg)  # noqa: B904
+        raise RuntimeError(_UNPARSABLE_BODY_ERROR) from None
     return envelope["json"] if isinstance(envelope, dict) and "json" in envelope else envelope
+
+
+class ConsoleApiError(RuntimeError):
+    """An error response of the console API, as TS's ``ORPCError``.
+
+    ``code`` is the oRPC error code (e.g. ``INTERNAL_SERVER_ERROR``), which is
+    also the ``--json`` error code, as in TS.
+    """
+
+    def __init__(self, message: str, *, code: str) -> None:
+        super().__init__(message)
+        self.code = code
+
+
+# The messages and codes of ``@orpc/client`` 1.15.4, the version the TS plugin uses.
+_NETWORK_ERROR = "fetch failed"
+_UNPARSABLE_BODY_ERROR = (
+    "Cannot parse response body, please check the response body and content-type."
+)
+_INVALID_FORMAT_ERROR = "Invalid RPC response format."
+_MALFORMED_ERROR_CODE = "MALFORMED_ORPC_ERROR_RESPONSE"
+# ``COMMON_ORPC_ERROR_DEFS``: code -> (HTTP status, default message).
+_COMMON_ORPC_ERRORS: dict[str, tuple[int, str]] = {
+    "BAD_REQUEST": (400, "Bad Request"),
+    "UNAUTHORIZED": (401, "Unauthorized"),
+    "FORBIDDEN": (403, "Forbidden"),
+    "NOT_FOUND": (404, "Not Found"),
+    "METHOD_NOT_SUPPORTED": (405, "Method Not Supported"),
+    "NOT_ACCEPTABLE": (406, "Not Acceptable"),
+    "TIMEOUT": (408, "Request Timeout"),
+    "CONFLICT": (409, "Conflict"),
+    "PRECONDITION_FAILED": (412, "Precondition Failed"),
+    "PAYLOAD_TOO_LARGE": (413, "Payload Too Large"),
+    "UNSUPPORTED_MEDIA_TYPE": (415, "Unsupported Media Type"),
+    "UNPROCESSABLE_CONTENT": (422, "Unprocessable Content"),
+    "TOO_MANY_REQUESTS": (429, "Too Many Requests"),
+    "CLIENT_CLOSED_REQUEST": (499, "Client Closed Request"),
+    "INTERNAL_SERVER_ERROR": (500, "Internal Server Error"),
+    "NOT_IMPLEMENTED": (501, "Not Implemented"),
+    "BAD_GATEWAY": (502, "Bad Gateway"),
+    "SERVICE_UNAVAILABLE": (503, "Service Unavailable"),
+    "GATEWAY_TIMEOUT": (504, "Gateway Timeout"),
+}
+_ORPC_ERROR_KEYS = frozenset({"defined", "code", "status", "message", "data"})
+# JS ``undefined``: the body has no ``json`` value to decode.
+_UNDEFINED: Any = object()
+
+
+def _decode_error_body(res: httpx.Response) -> Any:
+    """What ``RPCLink`` decodes from the body of an error response.
+
+    Mirrors ``toStandardBody`` (``@orpc/standard-server-fetch``) and
+    ``StandardRPCSerializer.deserialize``: only a body without a content type
+    or with an ``application/json`` one is parsed, and the value is the
+    envelope's ``json``. Raises the ``RuntimeError`` ``RPCLink`` throws for a
+    body it cannot parse, or that is ``null``.
+    """
+    if "content-disposition" in res.headers:
+        return _UNDEFINED
+    content_type = res.headers.get("content-type")
+    if content_type and not content_type.startswith("application/json"):
+        return _UNDEFINED
+    # Like ``Response.text()``: UTF-8 whatever the charset, without a BOM.
+    text = res.content.decode("utf-8", errors="replace").removeprefix("﻿")
+    if not text:
+        return _UNDEFINED
+    try:
+        value = json.loads(text, parse_constant=_reject_json_constant)
+    except ValueError:
+        raise RuntimeError(_UNPARSABLE_BODY_ERROR) from None
+    if value is None:
+        raise RuntimeError(_INVALID_FORMAT_ERROR)
+    if isinstance(value, dict):
+        return value.get("json", _UNDEFINED)
+    return _UNDEFINED
+
+
+def _reject_json_constant(constant: str) -> Any:
+    # ``JSON.parse`` rejects NaN and Infinity, which ``json.loads`` accepts.
+    msg = f"invalid JSON constant {constant}"
+    raise ValueError(msg)
+
+
+def _orpc_error(status: int, decoded: Any) -> ConsoleApiError:
+    """The ``ORPCError`` ``RPCLink`` throws for an error response.
+
+    An oRPC error body gives its code and its message, or the code's default
+    message when that is empty. Any other body gives the code of the HTTP
+    status and its default message, or ``MALFORMED_ORPC_ERROR_RESPONSE``.
+    """
+    if _is_orpc_error_json(decoded):
+        return ConsoleApiError(
+            _orpc_error_message(decoded["code"], decoded["message"]), code=decoded["code"]
+        )
+    code = next(
+        (name for name, (code_status, _) in _COMMON_ORPC_ERRORS.items() if code_status == status),
+        _MALFORMED_ERROR_CODE,
+    )
+    return ConsoleApiError(_orpc_error_message(code, ""), code=code)
+
+
+def _orpc_error_message(code: str, message: str) -> str:
+    if message:
+        return message
+    common = _COMMON_ORPC_ERRORS.get(code)
+    return common[1] if common else code
+
+
+def _is_orpc_error_json(value: Any) -> bool:
+    """``isORPCErrorJson``: exactly the fields of a serialized ``ORPCError``."""
+    if not isinstance(value, dict) or not set(value) <= _ORPC_ERROR_KEYS:
+        return False
+    status = value.get("status")
+    return (
+        isinstance(value.get("defined"), bool)
+        and isinstance(value.get("code"), str)
+        and isinstance(status, int | float)
+        and not isinstance(status, bool)
+        and (status < httpx.codes.OK or status >= httpx.codes.BAD_REQUEST)
+        and isinstance(value.get("message"), str)
+    )
 
 
 def explain_service_not_found(
@@ -280,6 +407,7 @@ __all__ = [
     "ClaimInstanceClaimed",
     "ClaimInstanceNoneAvailable",
     "ClaimInstanceResult",
+    "ConsoleApiError",
     "InstanceClaimStatus",
     "InstanceClaimStatusEligible",
     "InstanceClaimStatusIneligible",
