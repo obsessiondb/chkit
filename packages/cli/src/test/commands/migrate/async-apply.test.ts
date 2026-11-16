@@ -1686,7 +1686,14 @@ describe('applyAsyncStatement re-run of a started step', () => {
       },
       async command() {},
       async submit() {
-        throw new Error('Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING')
+        // What @clickhouse/client throws for 216: a ClickHouseError whose code
+        // is the exception code. 216 means the query is still running, so it
+        // is not a rejection: the attempt gets the bounded grace instead of a
+        // failed journal write (#671 review).
+        throw Object.assign(
+          new Error('Code: 216. DB::Exception: Query with id = x is already running. (QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING)'),
+          { code: '216' },
+        )
       },
     } as unknown as ClickHouseExecutor
     const { store, writes } = createFakeJournalStore(null)
@@ -1700,6 +1707,37 @@ describe('applyAsyncStatement re-run of a started step', () => {
     await expect(
       applyAsyncStatement({ ...input, beforeRetry: null, db, journalStore: store, sleep: NO_SLEEP }),
     ).rejects.toThrow(/QUERY_WITH_SAME_ID/)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
+    // Not journaled failed: a re-run attaches to the still-running query.
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+  })
+
+  test('a same-id-still-running submit error lets a running sighting win', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+      ],
+      {
+        failSubmit: () =>
+          Object.assign(
+            new Error('Code: 216. DB::Exception: Query with id = x is already running. (QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING)'),
+            { code: '216' },
+          ),
+      },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
   })
 })

@@ -29,5 +29,17 @@ def test_raise_if_error_without_code_stays_plain() -> None:
     assert getattr(excinfo.value, "code", None) is None
 
 
+def test_raise_if_error_drops_relayed_network_codes() -> None:
+    # Relayed client-side network codes are transport failures, not rejections:
+    # they must not land on the error as a ClickHouse exception code (#671 review).
+    for relayed in (
+        "Code: 209. DB::NetException: Timeout: connect timed out (SOCKET_TIMEOUT)",
+        "Code: 210. DB::NetException: Network error (NETWORK_ERROR)",
+    ):
+        with pytest.raises(RuntimeError) as excinfo:
+            _raise_if_error(_result(relayed))
+        assert getattr(excinfo.value, "code", None) is None
+
+
 def test_raise_if_error_passes_a_clean_result() -> None:
     _raise_if_error(_result(None))

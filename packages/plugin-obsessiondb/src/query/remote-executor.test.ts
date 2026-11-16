@@ -353,6 +353,25 @@ describe('createRemoteExecutor queryStatus', () => {
 			workbench.stop()
 		}
 	})
+
+	// Relayed client-side network codes are transport failures, not rejections:
+	// they must not land on the thrown error as a ClickHouse exception code
+	// (#671 review).
+	test.each([
+		'Code: 209. DB::NetException: Timeout: connect timed out (SOCKET_TIMEOUT)',
+		'Code: 210. DB::NetException: Network error (NETWORK_ERROR)',
+	])('a relayed network code is not kept on the thrown error: %s', async (processesError) => {
+		const workbench = startScriptedWorkbench({ replicas: 1, processesError })
+		try {
+			const remote = connect(workbench.url)
+
+			const error = await remote.queryStatus('qid-1', { everyReplica: true }).catch((e: unknown) => e)
+			expect(error).toBeInstanceOf(Error)
+			expect((error as Error & { code?: string }).code).toBeUndefined()
+		} finally {
+			workbench.stop()
+		}
+	})
 })
 
 // drift and pull read object comments from system.tables.comment, as the

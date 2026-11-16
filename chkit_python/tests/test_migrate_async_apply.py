@@ -11,7 +11,10 @@ from typing import Any
 from unittest.mock import MagicMock
 
 import pytest
-from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+    OperationalError,
+)
 
 from chkit.cli.commands import migrate_async_apply
 from chkit.cli.commands.migrate_async_apply import (
@@ -702,6 +705,23 @@ def test_async_intent_follows_started_write_and_precedes_unchanged_submit_id(
     )]
 
 
+# Real clickhouse-connect error shapes for a failed submit (#671 review): the
+# driver raises DatabaseError for any non-2xx response without a ClickHouse
+# code, and OperationalError (a subclass) for a read timeout or connection
+# reset it retried. None of them means the server rejected the statement.
+GATEWAY_524_ERROR = DatabaseError(
+    "HTTP driver received HTTP status 524, server response: "
+    "<html><head><title>524: A timeout occurred</title></head></html> "
+    "(for url http://localhost:8123)"
+)
+READ_TIMEOUT_ERROR = OperationalError(
+    "Error HTTPSConnectionPool(host='localhost', port=8123): "
+    "Read timed out. (read timeout=10) executing ..."
+)
+CONNECTION_RESET_ERROR = OperationalError("[Errno 104] Connection reset by peer")
+TRANSPORT_SUBMIT_ERRORS = [GATEWAY_524_ERROR, READ_TIMEOUT_ERROR, CONNECTION_RESET_ERROR]
+
+
 @pytest.mark.parametrize("submit_fails", [True, False])
 def test_apply_async_poll_budget_exhausted_names_submit_error(submit_fails: bool) -> None:
     """When polling gives up, the submit error is the only trace of e.g. a
@@ -741,7 +761,7 @@ def test_apply_async_submit_failing_while_query_runs_logs_poller_lines_only() ->
             QueryStatus(status="running", written_rows=9, written_bytes=72),
             QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
         ],
-        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+        submit_raises=GATEWAY_524_ERROR,
     )
     journal = _FakeJournalStore()
     lines: list[str] = []
@@ -768,7 +788,7 @@ def test_apply_async_submit_failing_after_the_query_ran_waits_for_query_log() ->
             QueryStatus(status="unknown"),
             QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
         ],
-        submit_raises=RuntimeError("error code: 524"),
+        submit_raises=GATEWAY_524_ERROR,
     )
     journal = _FakeJournalStore()
     lines: list[str] = []
@@ -791,14 +811,14 @@ def test_apply_async_submit_failing_after_the_query_ran_gives_up_after_the_poll_
             QueryStatus(status="running", written_rows=9, written_bytes=72),
             *[QueryStatus(status="unknown") for _ in range(21)],
         ],
-        submit_raises=RuntimeError("error code: 524"),
+        submit_raises=GATEWAY_524_ERROR,
     )
     journal = _FakeJournalStore()
     with pytest.raises(RuntimeError) as excinfo:
         apply_async_statement(_input(client=client, journal=journal))
     assert str(excinfo.value) == (
         f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
-        "the submit request failed (error code: 524) and polling found no outcome 21\u00d7. "
+        f"the submit request failed ({GATEWAY_524_ERROR}) and polling found no outcome 21\u00d7. "
         "A re-run of `chkit migrate --apply` attaches to the query if it still runs and runs "
         "the statement again if not."
     )
@@ -807,11 +827,14 @@ def test_apply_async_submit_failing_after_the_query_ran_gives_up_after_the_poll_
     assert [w.operations[0].status for w in journal.writes] == ["started"]
 
 
-def test_apply_async_transport_failed_submit_without_running_sighting_completes() -> None:
-    """#671: a transport error on the submit (e.g. HTTP 524) with no poll
-    having seen the query running says nothing about the outcome: the server
-    may be running it unobserved. The same grace as after a seen-running
-    submit failure applies."""
+@pytest.mark.parametrize("transport_error", TRANSPORT_SUBMIT_ERRORS, ids=str)
+def test_apply_async_transport_failed_submit_without_running_sighting_completes(
+    transport_error: BaseException,
+) -> None:
+    """#671: a transport error on the submit (gateway 524, read timeout,
+    connection reset) with no poll having seen the query running says nothing
+    about the outcome: the server may be running it unobserved. The same
+    grace as after a seen-running submit failure applies."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="unknown"),  # initial in-flight check
@@ -819,7 +842,7 @@ def test_apply_async_transport_failed_submit_without_running_sighting_completes(
             QueryStatus(status="unknown"),
             QueryStatus(status="finished", written_rows=25, written_bytes=200, duration_ms=9000),
         ],
-        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+        submit_raises=transport_error,
     )
     journal = _FakeJournalStore()
     result = apply_async_statement(_input(client=client, journal=journal))
@@ -836,14 +859,14 @@ def test_apply_async_transport_failed_submit_without_trace_stays_started() -> No
             QueryStatus(status="unknown"),  # initial in-flight check
             *[QueryStatus(status="unknown") for _ in range(21)],
         ],
-        submit_raises=RuntimeError("HTTP 524: error code: 524"),
+        submit_raises=GATEWAY_524_ERROR,
     )
     journal = _FakeJournalStore()
     with pytest.raises(RuntimeError) as excinfo:
         apply_async_statement(_input(client=client, journal=journal))
     assert str(excinfo.value) == (
         f"Async migration step alter_table_modify_column (query_id {_QUERY_ID}): "
-        "the submit request failed (HTTP 524: error code: 524) and polling found no "
+        f"the submit request failed ({GATEWAY_524_ERROR}) and polling found no "
         "outcome 21\u00d7. A re-run of `chkit migrate --apply` attaches to the query "
         "if it still runs and runs the statement again if not."
     )
@@ -867,6 +890,45 @@ def test_apply_async_console_executor_rejection_fails_at_once() -> None:
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
     assert journal.writes[1].operations[0].last_error == str(rejection)
+
+
+SAME_ID_RUNNING_CONSOLE_ERROR = RuntimeError(
+    "Code: 216. DB::Exception: Query with id = chkit-x is already running. "
+    "(QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING)"
+)
+SAME_ID_RUNNING_CONSOLE_ERROR.code = "216"  # type: ignore[attr-defined]
+SAME_ID_RUNNING_DRIVER_ERROR = DatabaseError(
+    "Received ClickHouse exception, code: 216, server response: Code: 216. "
+    "DB::Exception: Query with id = chkit-x is already running. "
+    "(QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING) (for url http://localhost:8123)"
+)
+
+
+@pytest.mark.parametrize(
+    "same_id_error",
+    [SAME_ID_RUNNING_CONSOLE_ERROR, SAME_ID_RUNNING_DRIVER_ERROR],
+    ids=["console", "driver"],
+)
+def test_apply_async_same_id_still_running_is_not_a_rejection(
+    same_id_error: BaseException,
+) -> None:
+    """Code 216 QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING means a query with that
+    id is still running: journaling the attempt failed would let a re-run
+    start the before-retry while the load runs (#671 review). It gets the
+    transport grace instead, and a poll that sees the query running wins."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),  # initial in-flight check
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
+        ],
+        submit_raises=same_id_error,
+    )
+    journal = _FakeJournalStore()
+    result = apply_async_statement(_input(client=client, journal=journal))
+    assert result.kind == "completed"
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
 
 
 class _OpenSubmitClient(_ScriptedClient):
@@ -1961,13 +2023,18 @@ def test_a_rerun_finds_a_retried_attempt_that_ran_on_a_replica_3s_behind(
 
 
 class _EarlierFinishClient(_ScriptedClient):
-    """query_log holds an earlier attempt's QueryFinish of the id; the submit is rejected."""
+    """query_log holds an earlier attempt's QueryFinish of the id; the submit
+    reports 216, as the real client does with the exception code attached."""
 
     def __init__(self, earlier_start_sec: int) -> None:
-        super().__init__(
-            statuses=[],
-            submit_raises=RuntimeError("Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING"),
+        # Code 216 means a query with that id is still running: not a
+        # rejection, so the attempt gets the transport grace (#671 review).
+        same_id = RuntimeError(
+            "Code: 216. DB::Exception: Query with id = chkit-x is already running. "
+            "(QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING)"
         )
+        same_id.code = "216"  # type: ignore[attr-defined]
+        super().__init__(statuses=[], submit_raises=same_id)
         self._earlier_start_sec = earlier_start_sec
 
     def query_status(
@@ -2006,4 +2073,5 @@ def test_a_first_attempts_polls_ignore_an_earlier_attempt_that_finished_during_t
     with pytest.raises(RuntimeError, match="QUERY_WITH_SAME_ID"):
         apply_async_statement(_rerun_input(client, journal, before_retry=None))
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+    # Not journaled failed: a re-run attaches to the still-running query.
+    assert [w.operations[0].status for w in journal.writes] == ["started"]

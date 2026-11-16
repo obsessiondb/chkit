@@ -70,11 +70,19 @@ const QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS = 2_000
 // can be journaled failed right away. Anything else - a gateway timeout, a
 // proxy 5xx, a network cut - is indeterminate: the server may be running the
 // query without any poll having seen it (#671).
+//
+// Three codes a thrown error can carry do not mean a rejection: 216
+// QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING means a query with that id is still
+// running, and 209 SOCKET_TIMEOUT / 210 NETWORK_ERROR are client-side network
+// codes a proxy can relay in the error text. All three leave the outcome
+// indeterminate.
+const NON_REJECTION_CODES: ReadonlySet<string> = new Set(['209', '210', '216'])
+
 function isServerRejection(error: unknown): boolean {
   if (!(error instanceof Error)) return false
   if ('code' in error) {
     const code = (error as { code?: unknown }).code
-    if (typeof code === 'string' && /^\d+$/.test(code)) return true
+    if (typeof code === 'string' && /^\d+$/.test(code)) return !NON_REJECTION_CODES.has(code)
   }
   return /authentication failed/i.test(error.message)
 }

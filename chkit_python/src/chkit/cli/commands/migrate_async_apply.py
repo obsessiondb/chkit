@@ -49,6 +49,7 @@ from typing import Literal
 
 from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
     DatabaseError,
+    OperationalError,
 )
 
 from chkit import __version__
@@ -245,24 +246,55 @@ def _describe_error(error: BaseException) -> str:
     return clickhouse_error_message(error)
 
 
+# Codes a thrown error can carry without meaning the statement was rejected:
+# 216 QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING means a query with that id is
+# still running; 209 SOCKET_TIMEOUT and 210 NETWORK_ERROR are client-side
+# network codes a proxy can relay in the error text. All three leave the
+# outcome indeterminate.
+_NON_REJECTION_CODES = frozenset({"209", "210", "216"})
+
+
+def _clickhouse_exception_code(message: str) -> str | None:
+    """The ClickHouse exception code a clickhouse-connect DatabaseError carries.
+
+    The driver raises DatabaseError for any non-2xx response. Only a real
+    server answer carries a code: the X-ClickHouse-Exception-Code header,
+    relayed as "Received ClickHouse exception, code: N", or "Code: N" in the
+    server's body. A gateway or proxy failure ("HTTP driver received HTTP
+    status 524") carries neither.
+    """
+    header = re.search(r"Received ClickHouse exception, code: (\d+)", message)
+    if header is not None:
+        return header.group(1)
+    body = re.search(r"server response: Code: (\d+)", message)
+    if body is not None:
+        return body.group(1)
+    return None
+
+
 def _is_server_rejection(error: BaseException) -> bool:
     """Tell a definitive server rejection from a transport failure (#671).
 
     A server rejection (the statement never ran) carries a ClickHouse
-    exception code: clickhouse-connect raises DatabaseError, and the
-    ObsessionDB console executor keeps the code from the server's error text.
-    ``wrap_connection_error`` rethrows an authentication failure as a plain
-    error named by its message. Both mean the query will never appear in
-    system.query_log, so the attempt can be journaled failed right away.
-    Anything else - a gateway timeout, a proxy 5xx, a network cut - is
-    indeterminate: the server may be running the query without any poll
-    having seen it.
+    exception code: clickhouse-connect relays it in the DatabaseError message
+    (header or server body), and the ObsessionDB console executor keeps the
+    code from the server's error text. ``wrap_connection_error`` rethrows an
+    authentication failure as a plain error named by its message. All mean
+    the query will never appear in system.query_log, so the attempt can be
+    journaled failed right away. Anything else - an OperationalError (a read
+    timeout or connection reset the driver retried), a gateway or proxy non-2xx
+    without a ClickHouse code, a network cut, or a code that does not reject
+    the statement (209, 210, 216) - is indeterminate: the server may be
+    running the query without any poll having seen it.
     """
+    if isinstance(error, OperationalError):
+        return False
     if isinstance(error, DatabaseError):
-        return True
+        code = _clickhouse_exception_code(str(error))
+        return code is not None and code not in _NON_REJECTION_CODES
     code = getattr(error, "code", None)
     if isinstance(code, str) and code.isdigit():
-        return True
+        return code not in _NON_REJECTION_CODES
     return re.search(r"authentication failed", str(error), re.IGNORECASE) is not None
 
 

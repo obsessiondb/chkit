@@ -29,9 +29,12 @@ function throwIfError(
 		// The console relays ClickHouse's own error text ("Code: 62. DB::Exception:
 		// ..."). Keep the exception code on the thrown error so callers (async
 		// migrate's poller) can tell a server rejection from a transport failure,
-		// like @clickhouse/client's ClickHouseError.code (#671).
+		// like @clickhouse/client's ClickHouseError.code (#671). Relayed
+		// client-side network codes (209 SOCKET_TIMEOUT, 210 NETWORK_ERROR) are
+		// transport failures: never keep them.
 		const code = /Code: (\d+)/.exec(res.error)?.[1]
-		if (code !== undefined) (error as Error & { code?: string }).code = code
+		if (code !== undefined && code !== '209' && code !== '210')
+			(error as Error & { code?: string }).code = code
 		throw error
 	}
 }
