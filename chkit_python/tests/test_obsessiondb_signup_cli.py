@@ -491,8 +491,10 @@ THREE_SERVICES_MESSAGES = [
 
 # #740: under --json, stdout holds only JSON; the picker prompt goes to stderr.
 def test_login_json_prints_the_service_prompt_on_stderr(
-    console: _ConsoleStub, tmp_path: Path
+    console: _ConsoleStub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    # Login prompts only with a TTY (#739).
+    monkeypatch.setattr(auth_login, "_stdin_is_tty", lambda: True)
     save_credentials(Credentials(access_token="old-token", base_url=console.url))
     console.organizations = THREE_SERVICES
     result = CliRunner().invoke(
