@@ -292,4 +292,81 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
       await rm(dir, { recursive: true, force: true })
     }
   }, 120_000)
+
+  // `column:copy` sorts before `column_rename:a:b`, but the DEFAULT of `copy`
+  // reads `b` (#746). ClickHouse rejects the ADD COLUMN of `copy` before the rename.
+  test('renames a column before the ADD COLUMN whose DEFAULT reads the new name', async () => {
+    const liveEnv = getLiveEnv()
+    const executor = createLiveExecutor(liveEnv)
+    const db = liveEnv.clickhouseDatabase
+    const journalTable = createJournalTableName('renameorder')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable, CI: '1' }
+    const orders = `${createPrefix('renameorder')}orders`
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-renameorder-e2e-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+    const migrationsDir = join(dir, 'chkit/migrations')
+    const writeSchema = (columns: string) =>
+      writeFile(
+        schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\n` +
+          `export default schema(table({ database: '${db}', name: '${orders}', columns: [{ name: 'id', type: 'UInt64' }${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
+        'utf8'
+      )
+    const generateAndMigrate = async (name: string, migrationId: string) => {
+      const generated = runCli(
+        dir,
+        ['generate', '--config', configPath, '--name', name, '--migration-id', migrationId, '--json'],
+        cliEnv
+      )
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic(`generate (${name}) failed`, generated))
+      const migrated = await runCliWithRetry(dir, ['migrate', '--config', configPath, '--execute', '--json'], {
+        extraEnv: cliEnv,
+      })
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic(`migrate --execute (${name}) failed`, migrated))
+      return readFile(join(migrationsDir, `${migrationId}_${name}.sql`), 'utf8')
+    }
+
+    try {
+      await writeFile(
+        configPath,
+        `export default {\n` +
+          `  schema: '${schemaPath}',\n` +
+          `  outDir: '${join(dir, 'chkit')}',\n` +
+          `  migrationsDir: '${migrationsDir}',\n` +
+          `  metaDir: '${join(dir, 'chkit/meta')}',\n` +
+          `  clickhouse: {\n` +
+          `    url: '${liveEnv.clickhouseUrl}',\n` +
+          `    username: '${liveEnv.clickhouseUser}',\n` +
+          `    password: '${liveEnv.clickhousePassword}',\n` +
+          `    database: '${db}',\n` +
+          `  },\n}\n`,
+        'utf8'
+      )
+      await writeSchema(", { name: 'a', type: 'String' }")
+      await generateAndMigrate('init', '20990101000000')
+      await waitForTable(executor, db, orders)
+      await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, a) VALUES (1, 'x')`)
+
+      await writeSchema(
+        `, { name: 'b', type: 'String', renamedFrom: 'a' }, { name: 'copy', type: 'String', default: { expression: "concat(b, '!')" } }`
+      )
+      const renameSql = await generateAndMigrate('rename', '20990101000001')
+      expectInOrder(renameSql, [
+        'RENAME COLUMN IF EXISTS `a` TO `b`;',
+        "ADD COLUMN IF NOT EXISTS `copy` String DEFAULT concat(b, '!');",
+      ])
+      await waitForColumn(executor, db, orders, 'copy')
+
+      const rows = await executor.query<{ b: string; copy: string }>(
+        `SELECT b, copy FROM ${quoteIdent(db)}.${quoteIdent(orders)}`
+      )
+      expect(rows).toEqual([{ b: 'x', copy: 'x!' }])
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(orders)}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 120_000)
 })

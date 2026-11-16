@@ -5,7 +5,15 @@ import type {
   RiskLevel,
   SchemaDefinition,
 } from '@chkit/core'
-import { compareCodePoints, quoteIdentifier, renderIdentifier, renderQualifiedName } from '@chkit/core'
+import {
+  columnDefaultReads,
+  compareCodePoints,
+  orderByDependencies,
+  quoteIdentifier,
+  renderIdentifier,
+  renderQualifiedName,
+  type DependencyGraph,
+} from '@chkit/core'
 
 import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping } from './rename-mappings.js'
 
@@ -14,29 +22,41 @@ import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping }
 const DROP_RANK = 0
 const CREATE_RANK = 4
 
+/**
+ * `nextDefinitions` is the schema the plan was made for; an ADD COLUMN whose
+ * expression reads a column's new name runs after that RENAME COLUMN (#746).
+ */
 export function applySelectedRenameSuggestions(
   plan: MigrationPlan,
-  selectedSuggestions: ColumnRenameSuggestion[]
+  selectedSuggestions: ColumnRenameSuggestion[],
+  nextDefinitions: SchemaDefinition[] = []
 ): MigrationPlan {
   if (selectedSuggestions.length === 0) return plan
 
   const operationKeysToRemove = new Set<string>()
   const renameOperations: MigrationOperation[] = []
+  const renamedColumnKeys = new Map<string, string>()
 
   for (const suggestion of selectedSuggestions) {
     operationKeysToRemove.add(suggestion.dropOperationKey)
     operationKeysToRemove.add(suggestion.addOperationKey)
+    const key = `table:${suggestion.database}.${suggestion.table}:column_rename:${suggestion.from}:${suggestion.to}`
+    renamedColumnKeys.set(key, suggestion.addOperationKey)
     renameOperations.push({
       type: 'alter_table_rename_column',
-      key: `table:${suggestion.database}.${suggestion.table}:column_rename:${suggestion.from}:${suggestion.to}`,
+      key,
       risk: 'caution',
       sql: suggestion.confirmationSQL,
     })
   }
 
-  const operations = mergeOperations(
-    plan.operations.filter((operation) => !operationKeysToRemove.has(operation.key)),
-    renameOperations
+  const operations = orderColumnAddsAfterRenames(
+    mergeOperations(
+      plan.operations.filter((operation) => !operationKeysToRemove.has(operation.key)),
+      renameOperations
+    ),
+    renamedColumnKeys,
+    columnDefaultReads(nextDefinitions)
   )
 
   return {
@@ -233,6 +253,29 @@ function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]
       return compareCodePoints(a.operation.key, b.operation.key) || a.index - b.index
     })
     .map(({ operation }) => (isAdd(operation) ? (adds[next++] ?? operation) : operation))
+}
+
+/**
+ * Moves each ADD COLUMN behind the RENAME COLUMN of a column whose new name
+ * its DEFAULT, MATERIALIZED or ALIAS expression reads (#746). A rename stands
+ * for the ADD COLUMN it replaced (`renamedColumnKeys`), so the planner's
+ * ordering of ADD COLUMNs (#681) carries over. The ADDs and column renames fill
+ * the positions they had, so every other operation keeps its place.
+ */
+function orderColumnAddsAfterRenames(
+  operations: MigrationOperation[],
+  renamedColumnKeys: Map<string, string>,
+  reads: DependencyGraph
+): MigrationOperation[] {
+  const isColumnAdd = (op: MigrationOperation) =>
+    op.type === 'alter_table_add_column' || op.type === 'alter_table_rename_column'
+  const ordered = orderByDependencies(
+    operations.filter(isColumnAdd),
+    (op) => renamedColumnKeys.get(op.key) ?? op.key,
+    (key) => reads.get(key) ?? []
+  )
+  let next = 0
+  return operations.map((op) => (isColumnAdd(op) ? (ordered[next++] ?? op) : op))
 }
 
 function rankOperation(op: MigrationOperation): number {

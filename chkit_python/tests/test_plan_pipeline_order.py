@@ -197,3 +197,40 @@ def test_column_rename_keeps_an_add_column_after_the_add_column_its_default_read
         "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;",
         "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
     ]
+
+
+def test_column_rename_runs_before_an_add_column_whose_expression_reads_the_new_name() -> None:
+    # #746: `column:` keys sort before `column_rename:` keys, so without the
+    # reads both ADDs would run before `b` exists.
+    def t(columns: list[dict[str, Any]]) -> TableDefinition:
+        return table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[{"name": "id", "type": "UInt64"}, *columns],
+        )
+
+    next_definitions = [t([
+        {"name": "b", "type": "String"},
+        {"name": "Copy", "type": "String", "default_kind": "MATERIALIZED",
+         "default": SQLExpression(expression="concat(`b`, '!')")},
+        {"name": "a_len", "type": "UInt64", "default_kind": "ALIAS",
+         "default": SQLExpression(expression="length(b)")},
+        {"name": "c_plain", "type": "String"},
+    ])]
+    planned = plan_diff([t([{"name": "a", "type": "String"}])], next_definitions)
+    plan = apply_selected_rename_suggestions(
+        planned,
+        build_explicit_column_rename_suggestions(
+            planned, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
+        ),
+        next_definitions,
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c_plain` String;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Copy` String MATERIALIZED concat(`b`, '!');",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a_len` UInt64 ALIAS length(b);",
+    ]

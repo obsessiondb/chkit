@@ -171,6 +171,40 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
       'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
     ])
   })
+
+  test('column rename runs before an ADD COLUMN whose expression reads the new name (#746)', () => {
+    // `column:` keys sort before `column_rename:` keys, so without the reads
+    // both ADDs would run before `b` exists.
+    const t = (columns: ColumnDefinition[]) =>
+      table({
+        database: 'app',
+        name: 't',
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      })
+    const next = [
+      t([
+        { name: 'b', type: 'String' },
+        { name: 'Copy', type: 'String', defaultKind: 'MATERIALIZED', default: { expression: "concat(`b`, '!')" } },
+        { name: 'a_len', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'length(b)' } },
+        { name: 'c_plain', type: 'String' },
+      ]),
+    ]
+    const planned = planDiff([t([{ name: 'a', type: 'String' }])], next)
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }]),
+      next
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c_plain` String;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+      "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Copy` String MATERIALIZED concat(`b`, '!');",
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a_len` UInt64 ALIAS length(b);',
+    ])
+  })
 })
 
 describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {

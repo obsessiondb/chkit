@@ -856,7 +856,7 @@ function orderColumnAdds(operations: MigrationOperation[], reads: DependencyGrap
  * lambda parameter; such an extra edge moves an ADD COLUMN later, or makes a
  * cycle that keeps the key order.
  */
-function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue

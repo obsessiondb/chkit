@@ -300,3 +300,67 @@ def test_adds_a_column_before_the_add_column_whose_default_reads_it(
     finally:
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")
+
+
+def test_renames_a_column_before_the_add_column_whose_default_reads_the_new_name(
+    ch_client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `column:copy` sorts before `column_rename:a:b`, but the DEFAULT of `copy`
+    # reads `b` (#746). ClickHouse rejects the ADD COLUMN of `copy` before the rename.
+    client = ch_client._client
+    env = resolve_live_env()
+    db = client.database
+    journal_table = create_journal_table_name("renameorder_py")
+    orders = f"{create_prefix('renameorder')}orders"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
+    monkeypatch.setenv("CI", "1")
+    runner = CliRunner()
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": db,
+            },
+        })
+        + ")\n"
+    )
+
+    def generate_and_migrate(columns: str, name: str, migration_id: str) -> str:
+        (tmp_path / "schema.py").write_text(
+            "from chkit import SQLExpression, schema, table\n\n"
+            f"definitions = schema(table(database={db!r}, name={orders!r}, "
+            f"columns=[{{'name': 'id', 'type': 'UInt64'}}{columns}], engine='MergeTree()', "
+            "primary_key=['id'], order_by=['id']))\n"
+        )
+        gen = runner.invoke(
+            app, ["generate", "--name", name, "--migration-id", migration_id, "--json"])
+        assert gen.exit_code == 0, format_test_diagnostic(f"generate ({name}) failed", gen)
+        migrate = _run_migrate(runner, ["migrate", "--execute", "--json"])
+        assert migrate.exit_code == 0, format_test_diagnostic(f"migrate ({name}) failed", migrate)
+        return (tmp_path / "chkit" / "migrations" / f"{migration_id}_{name}.sql").read_text()
+
+    try:
+        generate_and_migrate(", {'name': 'a', 'type': 'String'}", "init", "20990101000000")
+        client.command(f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, a) VALUES (1, 'x')")
+        rename_sql = generate_and_migrate(
+            ", {'name': 'b', 'type': 'String', 'renamedFrom': 'a'}, {'name': 'copy', "
+            "'type': 'String', 'default': SQLExpression(expression=\"concat(b, '!')\")}",
+            "rename",
+            "20990101000001",
+        )
+        _assert_in_order(rename_sql, [f"table:{db}.{orders}:column_rename:a:b",
+                                      f"table:{db}.{orders}:column:copy"])
+
+        rows = client.query(f"SELECT b, copy FROM {quote_ident(db)}.{quote_ident(orders)}").result_rows
+        assert [tuple(row) for row in rows] == [("x", "x!")]
+    finally:
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")

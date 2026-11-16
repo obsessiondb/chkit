@@ -29,6 +29,8 @@ from chkit.core.model import (
     TableDefinition,
     _RiskSummary,
 )
+from chkit.core.object_dependencies import DependencyGraph, order_by_dependencies
+from chkit.core.planner import _column_default_reads
 
 # Rank used to order operations within a plan. Drops happen first so the
 # subsequent create/alter steps see a clean slate; rename comes after
@@ -45,31 +47,44 @@ _CREATE_RANK = 4
 def apply_selected_rename_suggestions(
     plan: MigrationPlan,
     selected_suggestions: Sequence[ColumnRenameSuggestion],
+    next_definitions: Sequence[SchemaDefinition] = (),
 ) -> MigrationPlan:
-    """Replace pairs of (drop, add) column ops with a single RENAME COLUMN."""
+    """Replace pairs of (drop, add) column ops with a single RENAME COLUMN.
+
+    ``next_definitions`` is the schema the plan was made for; an ADD COLUMN
+    whose expression reads a column's new name runs after that RENAME COLUMN
+    (#746).
+    """
     if not selected_suggestions:
         return plan
 
     keys_to_remove: set[str] = set()
     rename_operations: list[MigrationOperation] = []
+    renamed_column_keys: dict[str, str] = {}
 
     for suggestion in selected_suggestions:
         keys_to_remove.add(suggestion.drop_operation_key)
         keys_to_remove.add(suggestion.add_operation_key)
+        key = (
+            f"table:{suggestion.database}.{suggestion.table}"
+            f":column_rename:{suggestion.from_}:{suggestion.to}"
+        )
+        renamed_column_keys[key] = suggestion.add_operation_key
         rename_operations.append(
             MigrationOperation(
                 type="alter_table_rename_column",
-                key=(
-                    f"table:{suggestion.database}.{suggestion.table}"
-                    f":column_rename:{suggestion.from_}:{suggestion.to}"
-                ),
+                key=key,
                 risk="caution",
                 sql=suggestion.confirmation_sql,
             )
         )
 
     kept = [op for op in plan.operations if op.key not in keys_to_remove]
-    operations = _sorted(kept + rename_operations)
+    operations = _order_column_adds_after_renames(
+        _sorted(kept + rename_operations),
+        renamed_column_keys,
+        _column_default_reads(next_definitions),
+    )
 
     return MigrationPlan(
         operations=operations,
@@ -319,6 +334,29 @@ def _sorted(operations: Sequence[MigrationOperation]) -> list[MigrationOperation
         next(adds) if op.type == "alter_table_add_column" else op
         for op in sorted(operations, key=sort_key)
     ]
+
+
+def _order_column_adds_after_renames(
+    operations: list[MigrationOperation],
+    renamed_column_keys: dict[str, str],
+    reads: DependencyGraph,
+) -> list[MigrationOperation]:
+    """Move each ADD COLUMN behind the RENAME COLUMN of a column whose new name it reads (#746).
+
+    The expression is the column's DEFAULT, MATERIALIZED or ALIAS one. A rename
+    stands for the ADD COLUMN it replaced (``renamed_column_keys``), so the
+    planner's ordering of ADD COLUMNs (#681) carries over. The ADDs and column
+    renames fill the positions they had, so every other operation keeps its place.
+    """
+    column_adds = ("alter_table_add_column", "alter_table_rename_column")
+    ordered = iter(
+        order_by_dependencies(
+            [op for op in operations if op.type in column_adds],
+            lambda op: renamed_column_keys.get(op.key, op.key),
+            lambda key: reads.get(key, ()),
+        )
+    )
+    return [next(ordered) if op.type in column_adds else op for op in operations]
 
 
 def _summarize_risk(operations: Sequence[MigrationOperation]) -> _RiskSummary:

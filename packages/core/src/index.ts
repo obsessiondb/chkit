@@ -19,7 +19,8 @@ export {
   definitionKey,
   type CanonicalizeOptions,
 } from './canonical.js'
-export { planDiff } from './planner.js'
+export { columnDefaultReads, planDiff } from './planner.js'
+export { orderByDependencies, type DependencyGraph } from './object-dependencies.js'
 export {
   AUTO_MINMAX_INDEX_PREFIX,
   DEFAULT_INDEX_GRANULARITY,
