@@ -137,7 +137,10 @@ describe('runLogin service selection', () => {
 
 		expect(await exitWithin(child, 10_000)).toBe(0)
 		const stdout = await new Response(child.stdout as ReadableStream).text()
-		expect(stdout).toContain('Select service [1-3]: ')
+		const stderr = await new Response(child.stderr as ReadableStream).text()
+		// The prompt goes to stderr (#740), the rest to stdout.
+		expect(stderr).toContain('Select service [1-3]: ')
+		expect(stdout).not.toContain('Select service')
 		expect(stdout).toEndWith('Service selected: Acme (acme) / Svc 2\n')
 		expect(await selection()).toEqual({ service_slug: 'svc-2', service_name: 'Svc 2' })
 	}, 20_000)
