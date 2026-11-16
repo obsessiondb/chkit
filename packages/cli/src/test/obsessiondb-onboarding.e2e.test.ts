@@ -226,7 +226,7 @@ describe('@chkit/cli obsessiondb onboarding e2e', () => {
     }
   })
 
-  test('login --json keeps the service prompt off stdout', async () => {
+  test('login --json without a TTY prints only JSON and skips the service prompt', async () => {
     const tempDir = await mkdtemp(join(tmpdir(), 'chkit-onboarding-'))
     const fixture = await createFixture()
     const server = startMockServer()
@@ -257,20 +257,13 @@ describe('@chkit/cli obsessiondb onboarding e2e', () => {
       const messages = parseJsonEnvelopes(result.stdout).map(
         (envelope) => (envelope as { message?: unknown }).message,
       )
+      // stdin is a pipe, so login skips the optional prompt and never reads the "2" (#739).
       expect(messages).toEqual([
         'Already logged in as playground@example.com',
-        '\nAvailable services:',
-        'Acme (acme):',
-        '  1. free-abc (running)',
-        '  2. second (running)',
-        'Service selected: Acme (acme) / second',
+        'You can select a service later with: chkit obsessiondb service select',
       ])
-      expect(result.stderr).toContain('\nSelect service [1-2]: ')
-
-      const selected = JSON.parse(
-        await readFile(join(fixture.dir, '.chkit', 'obsessiondb.json'), 'utf8'),
-      ) as { service_slug?: string }
-      expect(selected.service_slug).toBe('second')
+      expect(result.stderr).not.toContain('Select service')
+      expect(await Bun.file(join(fixture.dir, '.chkit', 'obsessiondb.json')).exists()).toBe(false)
     } finally {
       server.stop()
       await rm(tempDir, { recursive: true, force: true })

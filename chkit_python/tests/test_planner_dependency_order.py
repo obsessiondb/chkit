@@ -8,6 +8,7 @@ from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     DictionaryDefinition,
     SchemaDefinition,
+    SQLExpression,
     TableDefinition,
     ViewDefinition,
     dictionary,
@@ -662,3 +663,61 @@ def test_order_moves_an_item_behind_its_prerequisites_only() -> None:
 
 def test_order_ignores_prerequisites_not_in_the_list() -> None:
     assert order_by_dependencies(["a", "b"], lambda x: x, lambda _: ["zzz"]) == ["a", "b"]
+
+
+# ---------- ADD COLUMN order by the columns an expression reads (#681) ----------
+
+
+def _added_columns(columns: list[dict[str, Any]]) -> list[str]:
+    def orders(extra: list[dict[str, Any]]) -> TableDefinition:
+        return table(
+            database="app",
+            name="orders",
+            columns=[{"name": "id", "type": "UInt64"}, *extra],
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+        )
+
+    return [op.sql for op in plan_diff([orders([])], [orders(columns)]).operations]
+
+
+def test_adds_a_column_before_the_default_that_reads_it() -> None:
+    assert _added_columns([
+        {"name": "price", "type": "UInt64"},
+        {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="price + 1")},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;",
+    ]
+
+
+def test_orders_materialized_and_alias_reads_and_keeps_key_order_otherwise() -> None:
+    assert _added_columns([
+        {"name": "a_alias", "type": "UInt64", "default_kind": "ALIAS",
+         "default": SQLExpression(expression="z_base * 2")},
+        {"name": "b_plain", "type": "UInt64"},
+        {"name": "c_mat", "type": "UInt64", "default_kind": "MATERIALIZED",
+         "default": SQLExpression(expression="`a_alias` + id")},
+        {"name": "z_base", "type": "UInt64"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b_plain` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `z_base` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a_alias` UInt64 ALIAS z_base * 2;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c_mat` UInt64 MATERIALIZED `a_alias` + id;",
+    ]
+
+
+def test_keeps_key_order_for_a_cycle_and_for_names_inside_string_literals() -> None:
+    assert _added_columns([
+        {"name": "a", "type": "UInt64", "default": SQLExpression(expression="b + 1")},
+        {"name": "b", "type": "UInt64", "default": SQLExpression(expression="a + 1")},
+        {"name": "c", "type": "String",
+         "default": SQLExpression(expression="concat('d', toString(id))")},
+        {"name": "d", "type": "String"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT b + 1;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c` String DEFAULT concat('d', toString(id));",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;",
+    ]

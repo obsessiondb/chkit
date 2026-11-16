@@ -16,6 +16,7 @@ import {
   quoteIdent,
   runCli,
   runCliWithRetry,
+  waitForColumn,
   waitForDictionary,
   waitForTable,
   waitForView,
@@ -216,4 +217,79 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
     },
     240_000
   )
+
+  // `Total` sorts before `price` by code point, but its DEFAULT reads `price`
+  // (#681). ClickHouse rejects the ADD COLUMN of `Total` while `price` is missing.
+  test('adds a column before the ADD COLUMN whose DEFAULT reads it', async () => {
+    const liveEnv = getLiveEnv()
+    const executor = createLiveExecutor(liveEnv)
+    const db = liveEnv.clickhouseDatabase
+    const journalTable = createJournalTableName('addorder')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable, CI: '1' }
+    const orders = `${createPrefix('addorder')}orders`
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-addorder-e2e-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+    const migrationsDir = join(dir, 'chkit/migrations')
+    const writeSchema = (columns: string) =>
+      writeFile(
+        schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\n` +
+          `export default schema(table({ database: '${db}', name: '${orders}', columns: [{ name: 'id', type: 'UInt64' }${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
+        'utf8'
+      )
+    const generateAndMigrate = async (name: string, migrationId: string) => {
+      const generated = runCli(
+        dir,
+        ['generate', '--config', configPath, '--name', name, '--migration-id', migrationId, '--json'],
+        cliEnv
+      )
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic(`generate (${name}) failed`, generated))
+      const migrated = await runCliWithRetry(dir, ['migrate', '--config', configPath, '--execute', '--json'], {
+        extraEnv: cliEnv,
+      })
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic(`migrate --execute (${name}) failed`, migrated))
+      return readFile(join(migrationsDir, `${migrationId}_${name}.sql`), 'utf8')
+    }
+
+    try {
+      await writeFile(
+        configPath,
+        `export default {\n` +
+          `  schema: '${schemaPath}',\n` +
+          `  outDir: '${join(dir, 'chkit')}',\n` +
+          `  migrationsDir: '${migrationsDir}',\n` +
+          `  metaDir: '${join(dir, 'chkit/meta')}',\n` +
+          `  clickhouse: {\n` +
+          `    url: '${liveEnv.clickhouseUrl}',\n` +
+          `    username: '${liveEnv.clickhouseUser}',\n` +
+          `    password: '${liveEnv.clickhousePassword}',\n` +
+          `    database: '${db}',\n` +
+          `  },\n}\n`,
+        'utf8'
+      )
+      await writeSchema('')
+      await generateAndMigrate('init', '20990101000000')
+      await waitForTable(executor, db, orders)
+
+      await writeSchema(
+        ", { name: 'price', type: 'UInt64' }, { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } }"
+      )
+      const addSql = await generateAndMigrate('add', '20990101000001')
+      expectInOrder(addSql, [
+        'ADD COLUMN IF NOT EXISTS `price` UInt64;',
+        'ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;',
+      ])
+      await waitForColumn(executor, db, orders, 'Total')
+
+      await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, price) VALUES (1, 41)`)
+      const rows = await executor.query<{ Total: string }>(`SELECT Total FROM ${quoteIdent(db)}.${quoteIdent(orders)}`)
+      expect(rows.map((row) => Number(row.Total))).toEqual([42])
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(orders)}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 120_000)
 })
