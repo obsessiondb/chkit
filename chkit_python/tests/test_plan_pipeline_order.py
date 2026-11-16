@@ -197,3 +197,46 @@ def test_column_rename_keeps_an_add_column_after_the_add_column_its_default_read
         "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;",
         "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
     ]
+
+
+def test_column_rename_keeps_index_constraint_and_projection_drops_before_the_drop_column() -> None:
+    # ClickHouse rejects a DROP COLUMN while a skip index, constraint or
+    # projection still reads the column; plan_diff drops those first (#747).
+    planned = plan_diff(
+        [table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "a", "type": "String"},
+                {"name": "x", "type": "String"},
+            ],
+            indexes=[{"name": "idx_x", "expression": "x", "type": "bloom_filter", "granularity": 1}],
+            constraints=[{"name": "c_x", "check": "x != ''"}],
+            projections=[{"name": "p_x", "query": "SELECT x ORDER BY x"}],
+        )],
+        [table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[{"name": "id", "type": "UInt64"}, {"name": "b", "type": "String"}],
+        )],
+    )
+    plan = apply_selected_rename_suggestions(
+        planned,
+        build_explicit_column_rename_suggestions(
+            planned, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
+        ),
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.t DROP CONSTRAINT IF EXISTS `c_x`;",
+        "ALTER TABLE app.t DROP INDEX IF EXISTS `idx_x`;",
+        "ALTER TABLE app.t DROP PROJECTION IF EXISTS `p_x`;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+    ]

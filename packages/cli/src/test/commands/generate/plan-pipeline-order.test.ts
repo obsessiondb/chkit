@@ -171,6 +171,54 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
       'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
     ])
   })
+
+  // ClickHouse rejects a DROP COLUMN while a skip index, constraint or
+  // projection still reads the column; planDiff drops those first (#747).
+  test('column rename keeps index, constraint and projection drops before the DROP COLUMN they read', () => {
+    const planned = planDiff(
+      [
+        table({
+          database: 'app',
+          name: 't',
+          engine: 'MergeTree()',
+          primaryKey: ['id'],
+          orderBy: ['id'],
+          columns: [
+            { name: 'id', type: 'UInt64' },
+            { name: 'a', type: 'String' },
+            { name: 'x', type: 'String' },
+          ],
+          indexes: [{ name: 'idx_x', expression: 'x', type: 'bloom_filter', granularity: 1 }],
+          constraints: [{ name: 'c_x', check: "x != ''" }],
+          projections: [{ name: 'p_x', query: 'SELECT x ORDER BY x' }],
+        }),
+      ],
+      [
+        table({
+          database: 'app',
+          name: 't',
+          engine: 'MergeTree()',
+          primaryKey: ['id'],
+          orderBy: ['id'],
+          columns: [
+            { name: 'id', type: 'UInt64' },
+            { name: 'b', type: 'String' },
+          ],
+        }),
+      ]
+    )
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }])
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t DROP CONSTRAINT IF EXISTS `c_x`;',
+      'ALTER TABLE app.t DROP INDEX IF EXISTS `idx_x`;',
+      'ALTER TABLE app.t DROP PROJECTION IF EXISTS `p_x`;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+    ])
+  })
 })
 
 describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {
