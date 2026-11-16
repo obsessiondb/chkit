@@ -1,14 +1,45 @@
 import { describe, expect, test } from 'bun:test'
 
-import { canonicalizeSqlFragments, normalizeFunctionNameCase } from './canonicalize.js'
+import {
+  buildFunctionRegistry,
+  canonicalizeSqlFragments,
+  normalizeFunctionNames,
+  type FunctionRegistryRow,
+} from './canonicalize.js'
 import type { ClickHouseExecutor } from './index.js'
 
-// Minimal executor stand-in: records the SQL it was asked to run and replays a
-// canned arrayMap result. Only `query` is exercised by canonicalizeSqlFragments.
-function fakeExecutor(reply: Array<string | null>, capture: { sql?: string }): ClickHouseExecutor {
+// A small system.functions stand-in: the case-insensitive entries the drift
+// tests exercise, plus camelCase natives that must keep their written case.
+const TEST_REGISTRY_ROWS: FunctionRegistryRow[] = [
+  { name: 'floor', case_insensitive: 1, alias_to: '' },
+  { name: 'ceil', case_insensitive: 1, alias_to: '' },
+  { name: 'ceiling', case_insensitive: 1, alias_to: 'ceil' },
+  { name: 'lower', case_insensitive: 1, alias_to: '' },
+  { name: 'lcase', case_insensitive: 1, alias_to: 'lower' },
+  { name: 'count', case_insensitive: 1, alias_to: '' },
+  { name: 'substring', case_insensitive: 1, alias_to: '' },
+  { name: 'cityHash64', case_insensitive: 0, alias_to: '' },
+  { name: 'toUnixTimestamp', case_insensitive: 0, alias_to: '' },
+  { name: 'concat', case_insensitive: 0, alias_to: '' },
+]
+
+const TEST_REGISTRY = buildFunctionRegistry(TEST_REGISTRY_ROWS)
+
+// Minimal executor stand-in: records the SQL it was asked to run, answers the
+// system.functions read from `registryRows` (or throws for it when they are
+// null), and replays a canned arrayMap result for the formatting query.
+function fakeExecutor(
+  reply: Array<string | null>,
+  capture: { sql?: string },
+  registryRows: FunctionRegistryRow[] | null = TEST_REGISTRY_ROWS
+): ClickHouseExecutor {
   return {
     async query<T>(sql: string): Promise<T[]> {
       capture.sql = sql
+      if (sql.includes('system.functions')) {
+        if (registryRows === null) throw new Error('system.functions unreadable')
+        return registryRows as unknown as T[]
+      }
       return [{ formatted: reply } as unknown as T]
     },
   } as unknown as ClickHouseExecutor
@@ -21,7 +52,7 @@ describe('canonicalizeSqlFragments', () => {
 
     const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', 'n*2+1'], { wrap: true })
 
-    expect(map.get('cityHash64(a,b)')).toBe('cityhash64(a, b)')
+    expect(map.get('cityHash64(a,b)')).toBe('cityHash64(a, b)')
     expect(map.get('n*2+1')).toBe('(n * 2) + 1')
     expect(capture.sql).toContain("formatQuerySingleLineOrNull('SELECT ' || fragment)")
   })
@@ -43,7 +74,7 @@ describe('canonicalizeSqlFragments', () => {
 
     const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', '((bad'], { wrap: true })
 
-    expect(map.get('cityHash64(a,b)')).toBe('cityhash64(a, b)')
+    expect(map.get('cityHash64(a,b)')).toBe('cityHash64(a, b)')
     expect(map.has('((bad')).toBe(false)
   })
 
@@ -83,6 +114,7 @@ describe('canonicalizeSqlFragments', () => {
     const executor = {
       async query<T>(sql: string): Promise<T[]> {
         sqls.push(sql)
+        if (sql.includes('system.functions')) return [] as unknown as T[]
         const literalCount = (sql.match(/'/g)?.length ?? 0) / 2
         return [{ formatted: Array.from({ length: literalCount }, () => 'SELECT ok') } as unknown as T]
       },
@@ -100,13 +132,13 @@ describe('canonicalizeSqlFragments', () => {
     expect(map.get(fragments.at(-1)!)).toBe('ok')
   })
 
-  test('lowercases function calls so written case matches stored case (#729)', async () => {
-    // The formatter echoes the written case while the stored query carries
-    // ClickHouse's canonical case; after normalization both sides agree.
+  test('resolves case-insensitive names and aliases like the server (#729)', async () => {
+    // The formatter echoes the written names while the stored query carries
+    // ClickHouse's canonical names; after registry normalization both agree.
     const writtenQuery =
-      'SELECT FLOOR(toUnixTimestamp(ts) / 300) AS bucket FROM drift_repro.events'
+      'SELECT FLOOR(toUnixTimestamp(ts) / 300) AS bucket, CEILING(x), LCASE(s) FROM drift_repro.events'
     const storedQuery =
-      'SELECT floor(toUnixTimestamp(ts) / 300) AS bucket FROM drift_repro.events'
+      'SELECT floor(toUnixTimestamp(ts) / 300) AS bucket, ceil(x), lower(s) FROM drift_repro.events'
     const written = fakeExecutor([writtenQuery], {})
     const stored = fakeExecutor([storedQuery], {})
 
@@ -114,13 +146,39 @@ describe('canonicalizeSqlFragments', () => {
     const storedMap = await canonicalizeSqlFragments(stored, [storedQuery], { wrap: false })
 
     expect(writtenMap.get(writtenQuery)).toBe(storedMap.get(storedQuery))
+    // Registered camelCase names keep their readable case in drift output.
+    expect(writtenMap.get(writtenQuery)).toContain('toUnixTimestamp')
   })
 
-  test('normalizeFunctionNameCase leaves literals, quoted identifiers and aliases alone', () => {
+  test('keeps case-sensitive function names distinct', async () => {
+    // User-defined functions are case-sensitive: lowercasing them would hide
+    // a real change between rv731_f and RV731_F.
+    const a = fakeExecutor(['SELECT rv731_f(x)'], {})
+    const b = fakeExecutor(['SELECT RV731_F(x)'], {})
+
+    const mapA = await canonicalizeSqlFragments(a, ['SELECT rv731_f(x)'], { wrap: false })
+    const mapB = await canonicalizeSqlFragments(b, ['SELECT RV731_F(x)'], { wrap: false })
+
+    expect(mapA.get('SELECT rv731_f(x)')).toBe('SELECT rv731_f(x)')
+    expect(mapB.get('SELECT RV731_F(x)')).toBe('SELECT RV731_F(x)')
+    expect(mapA.get('SELECT rv731_f(x)')).not.toBe(mapB.get('SELECT RV731_F(x)'))
+  })
+
+  test('still formats when system.functions cannot be read', async () => {
+    const executor = fakeExecutor(['SELECT FLOOR(x)'], {}, null)
+
+    const map = await canonicalizeSqlFragments(executor, ['SELECT FLOOR(x)'], { wrap: false })
+
+    // No registry, no name normalization — names stay exactly as formatted.
+    expect(map.get('SELECT FLOOR(x)')).toBe('SELECT FLOOR(x)')
+  })
+
+  test('normalizeFunctionNames leaves literals, quoted identifiers and aliases alone', () => {
     expect(
-      normalizeFunctionNameCase("SELECT FLOOR(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`")
+      normalizeFunctionNames("SELECT FLOOR(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`", TEST_REGISTRY)
     ).toBe("SELECT floor(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`")
-    expect(normalizeFunctionNameCase('count ()')).toBe('count ()')
+    expect(normalizeFunctionNames('count ()', TEST_REGISTRY)).toBe('count ()')
+    expect(normalizeFunctionNames('LCASE(s)', TEST_REGISTRY)).toBe('lower(s)')
+    expect(normalizeFunctionNames('toUnixTimestamp(ts)', TEST_REGISTRY)).toBe('toUnixTimestamp(ts)')
   })
 })
-

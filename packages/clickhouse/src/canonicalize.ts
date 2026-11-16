@@ -34,17 +34,64 @@ function batchFragments(fragments: readonly string[]): string[][] {
   return batches
 }
 
+/** One row of `system.functions` as used for name normalization. */
+export interface FunctionRegistryRow {
+  name: string
+  case_insensitive: number | boolean
+  alias_to: string
+}
+
 /**
- * Lowercase the name of every function call in a SQL fragment.
- *
- * ClickHouse resolves case-insensitive function names to their registered case
- * when it stores a query (`FLOOR(...)` comes back as `floor(...)`), but its
- * formatter keeps the written case — so a view whose schema says `FLOOR`
- * drifts on the stored `floor` (#729). Only an identifier followed by `(` is
- * a call; strings, quoted identifiers, comments and plain names keep their
- * case.
+ * Case-resolution rules for function names, derived from `system.functions`.
+ * `exact` maps every registered name to its canonical form (`alias_to` when
+ * set, else the name itself); `insensitive` does the same keyed by lowercased
+ * name, but only for names ClickHouse resolves case-insensitively.
  */
-export function normalizeFunctionNameCase(sql: string): string {
+export interface FunctionRegistry {
+  exact: ReadonlyMap<string, string>
+  insensitive: ReadonlyMap<string, string>
+}
+
+export function buildFunctionRegistry(rows: readonly FunctionRegistryRow[]): FunctionRegistry {
+  const exact = new Map<string, string>()
+  const insensitive = new Map<string, string>()
+  for (const row of rows) {
+    const canonical = row.alias_to || row.name
+    exact.set(row.name, canonical)
+    if (row.case_insensitive) insensitive.set(row.name.toLowerCase(), canonical)
+  }
+  return { exact, insensitive }
+}
+
+/**
+ * Load the server's function-name resolution rules once for a canonicalize
+ * run. A view written with `FLOOR` or `LCASE` is stored as `floor` / `lower`,
+ * while user-defined (case-sensitive) functions stay as written — only
+ * `system.functions` tells the two apart (#729 review). If the registry
+ * cannot be read, names are left as written: no normalization is safer than
+ * lowercasing case-sensitive names.
+ */
+async function loadFunctionRegistry(executor: ClickHouseExecutor): Promise<FunctionRegistry> {
+  try {
+    const rows = await executor.query<FunctionRegistryRow>(
+      'SELECT name, case_insensitive, alias_to FROM system.functions'
+    )
+    return buildFunctionRegistry(rows)
+  } catch {
+    return buildFunctionRegistry([])
+  }
+}
+
+/**
+ * Resolve every function-call name in a SQL fragment the way ClickHouse does
+ * when it stores a query (#729): a registered name rewrites to its canonical
+ * form (`CEILING` -> `ceil`, `LCASE` -> `lower`), an unregistered or
+ * case-sensitive name keeps its written form — so `rv_f` and `RV_f` still
+ * compare different, and drift output keeps readable case (`toUnixTimestamp`).
+ * Only an identifier followed by `(` is a call; strings, quoted identifiers,
+ * comments and plain names keep their case.
+ */
+export function normalizeFunctionNames(sql: string, registry: FunctionRegistry): string {
   const tokens = tokenizeSQL(sql)
   let out = ''
   for (let i = 0; i < tokens.length; i += 1) {
@@ -58,7 +105,9 @@ export function normalizeFunctionNameCase(sql: string): string {
         next += 1
         following = tokens[next]
       }
-      if (following?.text === '(') text = text.toLowerCase()
+      if (following?.text === '(') {
+        text = registry.exact.get(text) ?? registry.insensitive.get(text.toLowerCase()) ?? text
+      }
     }
     out += text
   }
@@ -70,8 +119,9 @@ export function normalizeFunctionNameCase(sql: string): string {
  * fragment can be compared against what ClickHouse actually stores. The server
  * rewrites expressions on the way in — spacing, operator precedence parens,
  * `INTERVAL n UNIT` → `toIntervalUnit(n)` — which no local string normalizer can
- * reproduce (#195). Function-call names are lowercased afterwards, since the
- * server canonicalizes their case on write but the formatter does not (#729).
+ * reproduce (#195). Function-call names are then resolved through the server's
+ * `system.functions` registry, since the server canonicalizes their case and
+ * aliases on write but the formatter does not (#729).
  *
  * `wrap` distinguishes a scalar expression (wrapped as `SELECT <expr>`, prefix
  * stripped back off) from a full `SELECT` query (formatted as-is). Formatting is
@@ -93,6 +143,8 @@ export async function canonicalizeSqlFragments(
   const unique = [...new Set(fragments.map((fragment) => fragment.trim()).filter((f) => f.length > 0))]
   if (unique.length === 0) return result
 
+  const registry = await loadFunctionRegistry(executor)
+
   const formatCall = options.wrap
     ? `formatQuerySingleLineOrNull('SELECT ' || fragment)`
     : `formatQuerySingleLineOrNull(fragment)`
@@ -108,7 +160,7 @@ export async function canonicalizeSqlFragments(
       const value = formatted[i]
       if (raw === undefined || value == null) continue
       const canonical = options.wrap ? stripSelectPrefix(value) : value.trim()
-      if (canonical) result.set(raw, normalizeFunctionNameCase(canonical))
+      if (canonical) result.set(raw, normalizeFunctionNames(canonical, registry))
     }
   }
   return result

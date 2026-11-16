@@ -6,8 +6,8 @@ Port of ``packages/clickhouse/src/canonicalize.ts`` (#195).
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, TypedDict
 
 from chkit.core.sql_lexer import is_trivia, js_regex, js_trim, tokenize_sql
 
@@ -19,13 +19,53 @@ MAX_BATCH_LITERAL_BYTES = 128_000
 _SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+(.+)$"), re.IGNORECASE | re.DOTALL)
 
 
-def normalize_function_name_case(sql: str) -> str:
-    """Lowercase the name of every function call in a SQL fragment.
+class FunctionRegistry(TypedDict):
+    """Case-resolution rules for function names, from ``system.functions``.
 
-    ClickHouse resolves case-insensitive function names to their registered
-    case when it stores a query (``FLOOR(...)`` comes back as ``floor(...)``),
-    but its formatter keeps the written case — so a view whose schema says
-    ``FLOOR`` drifts on the stored ``floor`` (#729). Only an identifier
+    ``exact`` maps every registered name to its canonical form (``alias_to``
+    when set, else the name itself); ``insensitive`` does the same keyed by
+    lowercased name, but only for names ClickHouse resolves case-insensitively.
+    """
+
+    exact: dict[str, str]
+    insensitive: dict[str, str]
+
+
+def build_function_registry(rows: Sequence[Mapping[str, Any]]) -> FunctionRegistry:
+    exact: dict[str, str] = {}
+    insensitive: dict[str, str] = {}
+    for row in rows:
+        name = str(row["name"])
+        canonical = str(row["alias_to"]) or name
+        exact[name] = canonical
+        if row["case_insensitive"]:
+            insensitive[name.lower()] = canonical
+    return {"exact": exact, "insensitive": insensitive}
+
+
+def _load_function_registry(client: Any) -> FunctionRegistry:
+    """Load the server's function-name resolution rules once for a run.
+
+    A view written with ``FLOOR`` or ``LCASE`` is stored as ``floor`` /
+    ``lower``, while user-defined (case-sensitive) functions stay as written —
+    only ``system.functions`` tells the two apart (#729 review). If the
+    registry cannot be read, names are left as written: no normalization is
+    safer than lowercasing case-sensitive names.
+    """
+    try:
+        rows = client.query("SELECT name, case_insensitive, alias_to FROM system.functions").rows
+    except Exception:
+        rows = []
+    return build_function_registry(rows)
+
+
+def normalize_function_names(sql: str, registry: FunctionRegistry) -> str:
+    """Resolve function-call names the way ClickHouse does on write (#729).
+
+    A registered name rewrites to its canonical form (``CEILING`` -> ``ceil``,
+    ``LCASE`` -> ``lower``); an unregistered or case-sensitive name keeps its
+    written form — so ``rv_f`` and ``RV_f`` still compare different, and drift
+    output keeps readable case (``toUnixTimestamp``). Only an identifier
     followed by ``(`` is a call; strings, quoted identifiers, comments and
     plain names keep their case.
     """
@@ -37,7 +77,10 @@ def normalize_function_name_case(sql: str) -> str:
             while nxt < len(tokens) and is_trivia(tokens[nxt]):
                 nxt += 1
             if nxt < len(tokens) and tokens[nxt].text == "(":
-                out.append(token.text.lower())
+                text = token.text
+                out.append(
+                    registry["exact"].get(text) or registry["insensitive"].get(text.lower()) or text
+                )
                 continue
         out.append(token.text)
     return "".join(out)
@@ -50,9 +93,10 @@ def canonicalize_sql_fragments(
 
     The server rewrites expressions on the way in — spacing, operator
     precedence parens, ``INTERVAL n UNIT`` -> ``toIntervalUnit(n)`` — which no
-    local string normalizer can reproduce. Function-call names are lowercased
-    afterwards, since the server canonicalizes their case on write but the
-    formatter does not (#729).
+    local string normalizer can reproduce. Function-call names are then
+    resolved through the server's ``system.functions`` registry, since the
+    server canonicalizes their case and aliases on write but the formatter
+    does not (#729).
 
     ``wrap`` distinguishes a scalar expression (wrapped as ``SELECT <expr>``,
     prefix stripped back off) from a full ``SELECT`` query (formatted as-is).
@@ -67,6 +111,8 @@ def canonicalize_sql_fragments(
     unique = list(dict.fromkeys(t for t in (js_trim(f) for f in fragments) if t))
     if not unique:
         return result
+
+    registry = _load_function_registry(client)
 
     format_call = (
         "formatQuerySingleLineOrNull('SELECT ' || fragment)"
@@ -86,7 +132,7 @@ def canonicalize_sql_fragments(
                 continue
             canonical = _strip_select_prefix(value) if wrap else js_trim(value)
             if canonical:
-                result[raw] = normalize_function_name_case(canonical)
+                result[raw] = normalize_function_names(canonical, registry)
     return result
 
 
