@@ -8,6 +8,7 @@ from __future__ import annotations
 import contextlib
 import platform
 import subprocess
+import sys
 from collections.abc import Callable
 from pathlib import Path
 
@@ -51,6 +52,13 @@ def _open_browser(url: str) -> None:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+_SELECT_LATER_HINT = "You can select a service later with: chkit obsessiondb service select"
+
+
+def _stdin_is_tty() -> bool:
+    return bool(getattr(sys.stdin, "isatty", lambda: False)())
+
+
 def _prompt_service_selection(
     base_url: str,
     token: str,
@@ -61,6 +69,12 @@ def _prompt_service_selection(
     creds = Credentials(access_token=token, base_url=resolve_base_url(base_url))
     try:
         organizations = list_service_organizations(creds)
+        # Without a terminal nobody may answer, and the pipe can stay open, so the
+        # optional pick must not block login (#739).
+        service_count = sum(len(org.services) for org in organizations)
+        if service_count > 1 and not _stdin_is_tty():
+            print_fn(_SELECT_LATER_HINT)
+            return
         choice = select_service_interactive(organizations, print_fn)
         if choice is not None:
             save_selected_service(
@@ -76,7 +90,7 @@ def _prompt_service_selection(
             print_fn(f"Service selected: {service_choice_label(choice)}")
     except Exception as error:
         print_fn(f"Could not fetch services: {error}")
-        print_fn("You can select a service later with: chkit obsessiondb service select")
+        print_fn(_SELECT_LATER_HINT)
 
 
 def run_login(
