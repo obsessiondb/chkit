@@ -383,6 +383,51 @@ def test_a_polling_query_that_never_returns_ends_the_wait_at_the_deadline(
     assert time.monotonic() - started < 3
 
 
+@dataclass
+class _HangsAfterTarget:
+    """Answers ``answered`` polls with replicas that disagree on the type, then
+    holds every poll until ``release`` is set."""
+
+    answered: int
+    release: threading.Event = field(default_factory=threading.Event)
+    _poll: int = 0
+
+    def query(self, sql: str) -> _Result:
+        if "system.one" in sql:
+            return _Result([{"replicas": 2}])
+        self._poll += 1
+        if self._poll > self.answered:
+            self.release.wait(10)
+            return _Result([])
+        return _Result([_row("r1", type="UInt64"), _row("r2", type="UInt32")])
+
+
+def test_a_check_cut_off_by_the_deadline_keeps_the_mismatch_the_checks_before_it_found(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # On the fake clock checks 1-3 take no time and the sleeps between them
+    # bring the 2 s deadline 0.5 s away, so check 4 hangs for 0.5 s (#750).
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.DEFINITION_WAIT_DEADLINE_SECONDS", 2.0)
+    target = _HangsAfterTarget(answered=3)
+
+    try:
+        with pytest.raises(RuntimeError) as raised:
+            wait_for_ddl_propagation(
+                target,
+                "alter_table_modify_column",
+                KEY,
+                statement="ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;",
+            )
+    finally:
+        target.release.set()
+
+    assert str(raised.value) == (
+        "waitForDDLPropagation: app.events.raw definition not applied on every replica "
+        'after 4 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64" '
+        "(the last check did not return within the 2s deadline)"
+    )
+
+
 # ---------- other column operations ----------
 
 
