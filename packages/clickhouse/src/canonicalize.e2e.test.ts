@@ -23,4 +23,23 @@ describe('canonicalizeSqlFragments e2e', () => {
     // A TTL element with an action does not parse in parentheses; it formats as before.
     expect(map.get('ts + INTERVAL 1 DAY DELETE')).toBe('ts + toIntervalDay(1) AS DELETE')
   })
+
+  test('a name that is a clause keyword formats as a bare SELECT does', async () => {
+    const executor = createLiveExecutor(getLiveEnv())
+    const keywords = ['from', 'where', 'group', 'order', 'limit', 'settings', 'format', 'union', 'except', 'intersect', 'having', 'with']
+    const fragments = [...keywords, ...keywords.map((keyword) => `lower(${keyword})`)]
+    const map = await canonicalizeSqlFragments(executor, fragments, { wrap: true })
+    const bare = new Map<string, string | null>()
+    for (const fragment of fragments) {
+      const rows = await executor.query<{ formatted: string | null }>(
+        `SELECT formatQuerySingleLineOrNull('SELECT ' || '${fragment}') AS formatted`
+      )
+      bare.set(fragment, rows[0]?.formatted?.replace(/^SELECT /, '') ?? null)
+    }
+    await executor.close()
+
+    // `SELECT 0, from` does not parse, so `from` is formatted on its own.
+    for (const fragment of fragments) expect([fragment, map.get(fragment) ?? null]).toEqual([fragment, bare.get(fragment) ?? null])
+    expect(map.has('from')).toBe(true)
+  })
 })

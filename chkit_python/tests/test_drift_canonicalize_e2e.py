@@ -192,3 +192,88 @@ def test_column_expressions_read_clean_as_clickhouse_formats_them(tmp_path: Path
             assert poll_until(observe, lambda seen: seen == ([], ["score"])) == ([], ["score"])
         finally:
             client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")
+
+
+_CLAUSE_KEYWORDS = [
+    "from",
+    "where",
+    "group",
+    "order",
+    "limit",
+    "settings",
+    "format",
+    "union",
+    "except",
+    "intersect",
+    "having",
+    "with",
+]
+
+
+def test_canonicalize_formats_a_clause_keyword_name_as_a_bare_select_does() -> None:
+    fragments = [*_CLAUSE_KEYWORDS, *(f"lower({keyword})" for keyword in _CLAUSE_KEYWORDS)]
+    with _connect() as client:
+        expressions = canonicalize_sql_fragments(client, fragments, wrap=True)
+        bare: dict[str, str | None] = {}
+        for fragment in fragments:
+            rows = client.query(
+                f"SELECT formatQuerySingleLineOrNull('SELECT ' || '{fragment}') AS formatted"
+            ).rows
+            formatted = rows[0]["formatted"]
+            bare[fragment] = None if formatted is None else formatted.removeprefix("SELECT ")
+
+    # `SELECT 0, from` does not parse, so `from` is formatted on its own.
+    for fragment in fragments:
+        assert (fragment, expressions.get(fragment)) == (fragment, bare[fragment])
+    assert "from" in expressions
+
+
+def test_columns_named_from_and_all_read_clean_and_a_changed_default_drifts(
+    tmp_path: Path,
+) -> None:
+    with _connect() as client:
+        database = client.database
+        name = create_prefix("drift_kw_names") + "users"
+        # `from` does not format after `SELECT 0,`, and `all` reads as the
+        # modifier right after `SELECT`.
+        definition = table(
+            database=database,
+            name=name,
+            engine="MergeTree()",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "from", "type": "DateTime"},
+                {"name": "all", "type": "UInt64"},
+                {"name": "score", "type": "UInt64", "default": {"expression": "all + id"}},
+            ],
+            order_by=["id"],
+            indexes=[SkipIndexMinmax(name="idx_from", expression="from", granularity=1)],
+            ttl="from",
+        )
+        snapshot = create_snapshot(canonicalize_definitions([definition]))
+        try:
+            client.execute(to_create_sql(definition))
+            wait_for_table(client, database, name)
+
+            def observe() -> tuple[list[str], list[str]]:
+                payload = build_drift_payload(
+                    client=client, meta_dir=tmp_path, snapshot=snapshot, database=database
+                )
+                return (
+                    [key for key in payload.missing if name in key],
+                    sorted(
+                        code
+                        for detail in payload.table_drift
+                        if name in detail.table
+                        for code in [*detail.reason_codes, *detail.changed_columns]
+                    ),
+                )
+
+            # Each read may land on a replica that has not applied the CREATE yet.
+            assert poll_until(observe, lambda seen: seen == ([], [])) == ([], [])
+
+            client.execute(f"ALTER TABLE {database}.{name} MODIFY COLUMN score UInt64 DEFAULT id")
+            expected: tuple[list[str], list[str]] = ([], ["changed_column", "score"])
+            assert poll_until(observe, lambda seen: seen == expected) == expected
+        finally:
+            client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")

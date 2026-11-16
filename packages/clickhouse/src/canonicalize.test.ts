@@ -38,13 +38,27 @@ describe('canonicalizeSqlFragments', () => {
     expect(capture.sql).toContain('formatQuerySingleLineOrNull(fragment)')
   })
 
-  test('omits fragments ClickHouse could not format (null)', async () => {
-    const executor = fakeExecutor(['SELECT 0, cityHash64(a, b)', null], {})
+  test('retries a fragment that did not format after `0,` bare, and omits one that never formats', async () => {
+    const sqls: string[] = []
+    const replies: Array<Array<string | null>> = [
+      ['SELECT 0, cityHash64(a, b)', null, null],
+      ['SELECT `from`', null],
+    ]
+    const executor = {
+      async query<T>(sql: string): Promise<T[]> {
+        sqls.push(sql)
+        return [{ formatted: replies[sqls.length - 1] } as unknown as T]
+      },
+    } as unknown as ClickHouseExecutor
 
-    const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', '((bad'], { wrap: true })
+    const map = await canonicalizeSqlFragments(executor, ['cityHash64(a,b)', 'from', '((bad'], { wrap: true })
 
     expect(map.get('cityHash64(a,b)')).toBe('cityHash64(a, b)')
+    expect(map.get('from')).toBe('`from`')
     expect(map.has('((bad')).toBe(false)
+    expect(sqls).toHaveLength(2)
+    expect(sqls[1]).toContain("formatQuerySingleLineOrNull('SELECT ' || fragment)")
+    expect(sqls[1]).toContain("['from', '((bad']")
   })
 
   test('escapes quotes and backslashes, and dedupes blank/empty input', async () => {

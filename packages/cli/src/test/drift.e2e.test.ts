@@ -186,6 +186,64 @@ export default schema(table({
     }
   }, 240_000)
 
+  test('columns named from and all read clean in an index, TTL and default, and a changed default drifts', async () => {
+    const executor = createLiveExecutor(liveEnv)
+    const database = liveEnv.clickhouseDatabase
+    const usersTable = `${createPrefix('drift_kw_names')}users`
+    const journalTable = createJournalTableName('drift_kw_names')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const fixture = await createFixture({ database, usersTableName: usersTable })
+    const object = `${quoteIdent(database)}.${quoteIdent(usersTable)}`
+    const args = ['--config', fixture.configPath, '--table', `${database}.${usersTable}`, '--json']
+
+    try {
+      // `from` does not format after `SELECT 0,`, and `all` reads as the
+      // modifier right after `SELECT`.
+      await writeFile(fixture.schemaPath, `import { schema, table } from '${CORE_ENTRY}'
+export default schema(table({
+  database: '${database}', name: '${usersTable}', engine: 'MergeTree()', orderBy: ['id'],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'from', type: 'DateTime' },
+    { name: 'all', type: 'UInt64' },
+    { name: 'score', type: 'UInt64', default: { expression: 'all + id' } },
+  ],
+  indexes: [{ name: 'idx_from', expression: 'from', type: 'minmax', granularity: 1 }],
+  ttl: 'from',
+}))
+`, 'utf8')
+      const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic('keyword names generate failed', generated))
+      const migrated = await runCliWithRetry(
+        fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'], { extraEnv: cliEnv }
+      )
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic('keyword names migrate failed', migrated))
+      await waitForTable(executor, database, usersTable)
+
+      const drift = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(drift.exitCode).toBe(0)
+      expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
+
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN score UInt64 DEFAULT id`)
+      await waitForRows<{ default_expression: string }>(executor,
+        `SELECT default_expression FROM system.columns WHERE database = '${database}' AND table = '${usersTable}' AND name = 'score'`,
+        (rows) => rows[0]?.default_expression === 'id',
+        'score default change'
+      )
+      const changed = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(changed.exitCode).toBe(0)
+      expect(JSON.parse(changed.stdout)).toMatchObject({
+        drifted: true,
+        tableDrift: [{ table: `${database}.${usersTable}`, changedColumns: ['score'], reasonCodes: ['changed_column'] }],
+      })
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${object}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 240_000)
+
   test('every codec form migrates without drift, and server codec changes drift (#383, #465)', async () => {
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase

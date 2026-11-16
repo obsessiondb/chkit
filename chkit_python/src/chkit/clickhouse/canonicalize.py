@@ -16,7 +16,8 @@ from chkit.core.sql_lexer import js_regex, js_trim
 # throw and silently drop the whole run back to string comparison.
 MAX_BATCH_LITERAL_BYTES = 128_000
 
-_SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+0,\s*(.+)$"), re.IGNORECASE | re.DOTALL)
+_SELECT_LIST_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+0,\s*(.+)$"), re.IGNORECASE | re.DOTALL)
+_SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+(.+)$"), re.IGNORECASE | re.DOTALL)
 
 
 def canonicalize_sql_fragments(
@@ -30,7 +31,9 @@ def canonicalize_sql_fragments(
 
     ``wrap`` distinguishes a scalar expression (wrapped as ``SELECT 0, <expr>``,
     prefix stripped back off; after ``0,`` a leading ``all`` or ``distinct``
-    column is not read as the SELECT modifier) from a full ``SELECT`` query (formatted as-is).
+    column is not read as the SELECT modifier) from a full ``SELECT`` query
+    (formatted as-is). A scalar that does not parse there (a bare ``from``
+    column) is retried as ``SELECT <expr>``.
     Formatting is batched through ``formatQuerySingleLineOrNull``, which yields
     NULL for a fragment it can't parse rather than failing the whole batch;
     those fragments have no entry, so the caller falls back to string
@@ -38,17 +41,29 @@ def canonicalize_sql_fragments(
     ``'\\xff'``): its bytes would decode to U+FFFD, and two different literals
     would match.
     """
-    result: dict[str, str] = {}
     unique = list(dict.fromkeys(t for t in (js_trim(f) for f in fragments) if t))
-    if not unique:
-        return result
+    if not wrap:
+        return _format_fragments(client, unique, "formatQuerySingleLineOrNull(fragment)", None)
 
-    format_call = (
-        "formatQuerySingleLineOrNull('SELECT 0, ' || fragment)"
-        if wrap
-        else "formatQuerySingleLineOrNull(fragment)"
+    result = _format_fragments(
+        client,
+        unique,
+        "formatQuerySingleLineOrNull('SELECT 0, ' || fragment)",
+        _SELECT_LIST_PREFIX_RE,
     )
+    rest = [fragment for fragment in unique if fragment not in result]
+    result.update(
+        _format_fragments(
+            client, rest, "formatQuerySingleLineOrNull('SELECT ' || fragment)", _SELECT_PREFIX_RE
+        )
+    )
+    return result
 
+
+def _format_fragments(
+    client: Any, unique: Sequence[str], format_call: str, prefix: re.Pattern[str] | None
+) -> dict[str, str]:
+    result: dict[str, str] = {}
     for batch in _batch_fragments(unique):
         array_literal = ", ".join(_quote_literal(fragment) for fragment in batch)
         rows = client.query(
@@ -59,7 +74,7 @@ def canonicalize_sql_fragments(
         for raw, value in zip(batch, formatted, strict=False):
             if value is None:
                 continue
-            canonical = _strip_select_prefix(value) if wrap else js_trim(value)
+            canonical = js_trim(value) if prefix is None else _strip_prefix(value, prefix)
             if canonical:
                 result[raw] = canonical
     return result
@@ -87,6 +102,6 @@ def _quote_literal(value: str) -> str:
     return f"'{escaped}'"
 
 
-def _strip_select_prefix(formatted: str) -> str | None:
-    match = _SELECT_PREFIX_RE.match(formatted)
+def _strip_prefix(formatted: str, prefix: re.Pattern[str]) -> str | None:
+    match = prefix.match(formatted)
     return js_trim(match.group(1)) if match else None

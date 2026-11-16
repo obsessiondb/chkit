@@ -4,9 +4,11 @@ function quoteLiteral(value: string): string {
   return `'${value.replace(/\\/g, '\\\\').replace(/'/g, "''")}'`
 }
 
-function stripSelectPrefix(formatted: string): string | null {
-  const match = formatted.match(/^SELECT\s+0,\s*([\s\S]+)$/i)
-  return match?.[1]?.trim() ?? null
+const SELECT_LIST_PREFIX = /^SELECT\s+0,\s*([\s\S]+)$/i
+const SELECT_PREFIX = /^SELECT\s+([\s\S]+)$/i
+
+function stripPrefix(formatted: string, prefix: RegExp): string | null {
+  return formatted.match(prefix)?.[1]?.trim() ?? null
 }
 
 // Keep each batched query well under ClickHouse's default max_query_size
@@ -41,7 +43,9 @@ function batchFragments(fragments: readonly string[]): string[][] {
  *
  * `wrap` distinguishes a scalar expression (wrapped as `SELECT 0, <expr>`, prefix
  * stripped back off; after `0,` a leading `all` or `distinct` column is not read
- * as the SELECT modifier) from a full `SELECT` query (formatted as-is). Formatting is
+ * as the SELECT modifier) from a full `SELECT` query (formatted as-is). A scalar
+ * that does not parse there (a bare `from` column) is retried as `SELECT <expr>`.
+ * Formatting is
  * batched into a single query using `formatQuerySingleLineOrNull`, which yields
  * NULL for a fragment it can't parse rather than failing the whole batch — those
  * are simply left out of the map so the caller falls back to string comparison.
@@ -56,14 +60,28 @@ export async function canonicalizeSqlFragments(
   fragments: readonly string[],
   options: { wrap: boolean }
 ): Promise<Map<string, string>> {
-  const result = new Map<string, string>()
   const unique = [...new Set(fragments.map((fragment) => fragment.trim()).filter((f) => f.length > 0))]
-  if (unique.length === 0) return result
+  if (!options.wrap) return formatFragments(executor, unique, `formatQuerySingleLineOrNull(fragment)`, null)
 
-  const formatCall = options.wrap
-    ? `formatQuerySingleLineOrNull('SELECT 0, ' || fragment)`
-    : `formatQuerySingleLineOrNull(fragment)`
+  const result = await formatFragments(
+    executor,
+    unique,
+    `formatQuerySingleLineOrNull('SELECT 0, ' || fragment)`,
+    SELECT_LIST_PREFIX
+  )
+  const rest = unique.filter((fragment) => !result.has(fragment))
+  const bare = await formatFragments(executor, rest, `formatQuerySingleLineOrNull('SELECT ' || fragment)`, SELECT_PREFIX)
+  for (const [fragment, canonical] of bare) result.set(fragment, canonical)
+  return result
+}
 
+async function formatFragments(
+  executor: ClickHouseExecutor,
+  unique: readonly string[],
+  formatCall: string,
+  prefix: RegExp | null
+): Promise<Map<string, string>> {
+  const result = new Map<string, string>()
   for (const batch of batchFragments(unique)) {
     const arrayLiteral = batch.map(quoteLiteral).join(', ')
     const rows = await executor.query<{ formatted: Array<string | null> }>(
@@ -74,7 +92,7 @@ export async function canonicalizeSqlFragments(
       const raw = batch[i]
       const value = formatted[i]
       if (raw === undefined || value == null) continue
-      const canonical = options.wrap ? stripSelectPrefix(value) : value.trim()
+      const canonical = prefix ? stripPrefix(value, prefix) : value.trim()
       if (canonical) result.set(raw, canonical)
     }
   }

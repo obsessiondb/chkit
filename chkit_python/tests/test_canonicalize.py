@@ -41,13 +41,31 @@ def test_does_not_wrap_when_formatting_full_queries() -> None:
     assert "formatQuerySingleLineOrNull(fragment)" in client.sqls[0]
 
 
-def test_omits_fragments_clickhouse_could_not_format() -> None:
-    client = _FakeClient(["SELECT 0, cityHash64(a, b)", None])
+@dataclass
+class _ReplayClient:
+    """Replays one canned arrayMap result per query, in order."""
 
-    result = canonicalize_sql_fragments(client, ["cityHash64(a,b)", "((bad"], wrap=True)
+    replies: list[list[str | None]]
+    sqls: list[str] = field(default_factory=list[str])
+
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        self.sqls.append(sql)
+        return QueryResult(
+            column_names=["formatted"], rows=[{"formatted": self.replies[len(self.sqls) - 1]}]
+        )
+
+
+def test_retries_bare_what_did_not_format_after_0_and_omits_what_never_formats() -> None:
+    client = _ReplayClient([["SELECT 0, cityHash64(a, b)", None, None], ["SELECT `from`", None]])
+
+    result = canonicalize_sql_fragments(client, ["cityHash64(a,b)", "from", "((bad"], wrap=True)
 
     assert result["cityHash64(a,b)"] == "cityHash64(a, b)"
+    assert result["from"] == "`from`"
     assert "((bad" not in result
+    assert len(client.sqls) == 2
+    assert "formatQuerySingleLineOrNull('SELECT ' || fragment)" in client.sqls[1]
+    assert "['from', '((bad']" in client.sqls[1]
 
 
 def test_escapes_quotes_and_backslashes_and_drops_blank_input() -> None:
