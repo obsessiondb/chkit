@@ -18,6 +18,7 @@ from chkit.core.model import (
     ColumnDefinition,
     ProjectionDefinition,
     SkipIndexMinmax,
+    SQLExpression,
     TableDefinition,
     table,
 )
@@ -179,3 +180,168 @@ def test_key_columns_reach_the_canonicalizer_still_quoted() -> None:
     detail = compare_table_shape(expected, actual("(id, `user--b`)"), _CommentAwareCanonicalizer())
     assert detail is not None
     assert detail.reason_codes == ["order_by_mismatch"]
+
+
+# Column default expressions as ClickHouse stores them (#752). Port of the
+# matching suite in drift.test.ts; the real formatter runs in
+# test_drift_canonicalize_e2e.py.
+_FORMATTED_DEFAULTS = {
+    "id*2+1": "(id * 2) + 1",
+    "(id * 2) + 1": "(id * 2) + 1",
+    "ts + INTERVAL 1 DAY": "ts + toIntervalDay(1)",
+    "ts + toIntervalDay(1)": "ts + toIntervalDay(1)",
+}
+
+
+@dataclass(frozen=True)
+class _MapCanonicalizer:
+    formatted: dict[str, str]
+
+    def expression(self, fragment: str) -> str | None:
+        return self.formatted.get(fragment)
+
+    def query(self, fragment: str) -> str | None:
+        return None
+
+
+@dataclass(frozen=True)
+class _SameCanonicalizer:
+    def expression(self, fragment: str) -> str | None:
+        return "same"
+
+    def query(self, fragment: str) -> str | None:
+        return None
+
+
+_ID_TS: list[ColumnDefinition] = [
+    ColumnDefinition(name="id", type="UInt64"),
+    ColumnDefinition(name="ts", type="DateTime"),
+]
+
+
+def _compare_column(
+    declared: ColumnDefinition,
+    stored: ColumnDefinition,
+    canonicalizer: _MapCanonicalizer | _SameCanonicalizer | None = None,
+) -> list[str] | None:
+    detail = compare_table_shape(
+        table(
+            database="app",
+            name="events",
+            engine="MergeTree()",
+            columns=[*_ID_TS, declared],
+            primary_key=["id"],
+            order_by=["id"],
+        ),
+        IntrospectedTable(
+            database="app",
+            name="events",
+            engine="MergeTree()",
+            primary_key="(id)",
+            order_by="(id)",
+            columns=[*_ID_TS, stored],
+            settings={},
+            indexes=[],
+            projections=[],
+        ),
+        canonicalizer,
+    )
+    return None if detail is None else detail.changed_columns
+
+
+def test_column_expressions_read_clean_against_how_clickhouse_stores_them() -> None:
+    canonicalizer = _MapCanonicalizer(_FORMATTED_DEFAULTS)
+    pairs = [
+        (
+            ColumnDefinition(name="v", type="UInt64", default="fn: id*2+1 "),
+            ColumnDefinition(name="v", type="UInt64", default="(id * 2) + 1"),
+        ),
+        (
+            ColumnDefinition(
+                name="v",
+                type="DateTime",
+                default_kind="MATERIALIZED",
+                default=SQLExpression(expression="ts + INTERVAL 1 DAY"),
+            ),
+            ColumnDefinition(
+                name="v", type="DateTime", default_kind="MATERIALIZED", default="ts + toIntervalDay(1)"
+            ),
+        ),
+        (
+            ColumnDefinition(name="v", type="UInt64", default_kind="ALIAS", default="fn:id*2+1"),
+            ColumnDefinition(name="v", type="UInt64", default_kind="ALIAS", default="(id * 2) + 1"),
+        ),
+    ]
+    for declared, stored in pairs:
+        assert _compare_column(declared, stored) == ["v"]
+        assert _compare_column(declared, stored, canonicalizer) is None
+
+
+def test_different_column_expression_drifts_and_unformattable_one_compares_as_before() -> None:
+    canonicalizer = _MapCanonicalizer(_FORMATTED_DEFAULTS)
+    declared = ColumnDefinition(name="v", type="UInt64", default="fn:id*2+1")
+    assert _compare_column(declared, declared.model_copy(update={"default": "id + 1"}), canonicalizer) == ["v"]
+    spaced = ColumnDefinition(name="v", type="UInt64", default="fn:cityHash64(id,id)")
+    stored = spaced.model_copy(update={"default": "cityHash64(id, id)"})
+    assert _compare_column(spaced, stored, canonicalizer) is None
+    other = spaced.model_copy(update={"default": "cityHash64(id, ts)"})
+    assert _compare_column(spaced, other, canonicalizer) == ["v"]
+
+
+def test_literal_and_synthetic_ephemeral_defaults_keep_their_own_comparison() -> None:
+    anything = _SameCanonicalizer()
+    literal = ColumnDefinition(name="v", type="UInt64", default=1)
+    assert _compare_column(literal, literal.model_copy(update={"default": "2"}), anything) == ["v"]
+    assert (
+        _compare_column(
+            literal.model_copy(update={"default": 2.0}),
+            literal.model_copy(update={"default": "2."}),
+            anything,
+        )
+        is None
+    )
+    ephemeral = ColumnDefinition(name="v", type="Int64", default_kind="EPHEMERAL")
+    synthetic = ephemeral.model_copy(update={"default": "fn:defaultValueOfTypeName('Int64')"})
+    assert _compare_column(synthetic, ephemeral, anything) is None
+
+
+def test_collect_gathers_column_expressions_from_both_sides_not_literals() -> None:
+    expected = table(
+        database="app",
+        name="events",
+        engine="MergeTree()",
+        columns=[
+            ColumnDefinition(name="id", type="UInt64"),
+            ColumnDefinition(name="a", type="UInt64", default="fn: id*2+1 "),
+            ColumnDefinition(name="b", type="String", default="x"),
+            ColumnDefinition(
+                name="c",
+                type="Int64",
+                default_kind="EPHEMERAL",
+                default="fn:defaultValueOfTypeName('Int64')",
+            ),
+        ],
+        primary_key=["id"],
+        order_by=["id"],
+    )
+    actual = IntrospectedTable(
+        database="app",
+        name="events",
+        engine="MergeTree()",
+        primary_key="(id)",
+        order_by="(id)",
+        columns=[
+            ColumnDefinition(name="id", type="UInt64"),
+            ColumnDefinition(name="a", type="UInt64", default="(id * 2) + 1"),
+            ColumnDefinition(name="b", type="String", default="'x'"),
+            ColumnDefinition(name="c", type="Int64", default_kind="EPHEMERAL"),
+        ],
+        settings={},
+        indexes=[],
+        projections=[],
+    )
+    expressions = collect_table_sql_fragments(expected, actual).expressions
+    assert "id*2+1" in expressions
+    assert "(id * 2) + 1" in expressions
+    assert "'x'" not in expressions
+    assert "defaultValueOfTypeName('Int64')" not in expressions

@@ -336,15 +336,46 @@ def summarize_drift_reasons(
     )
 
 
-def _normalize_column_shape(column: ColumnDefinition) -> str:
-    rendered = None if column.default is None else render_default(column.default)
+def _live_columns(actual: IntrospectedTable) -> list[ColumnDefinition]:
+    # system.columns stores SQL, whereas schema strings are literals unless fn:-prefixed.
+    return [
+        column.model_copy(update={"default": f"fn:{column.default}"})
+        if isinstance(column.default, str) and not column.default.startswith("fn:")
+        else column
+        for column in actual.columns
+    ]
+
+
+def _column_default_sql(column: ColumnDefinition) -> str | None:
     # ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
     # which introspection reads back as no expression; an explicit one matches it.
+    if column.default is None:
+        return None
+    rendered = render_default(column.default)
+    if column.default_kind == "EPHEMERAL" and is_synthetic_ephemeral_default(rendered):
+        return None
+    return rendered
+
+
+def _canonicalize_default(rendered: str, canonicalizer: SqlCanonicalizer | None) -> str:
+    canonical = None if canonicalizer is None else canonicalizer.expression(js_trim(rendered))
+    return rendered if canonical is None else canonical
+
+
+def _normalize_column_shape(
+    column: ColumnDefinition, canonicalizer: SqlCanonicalizer | None = None
+) -> str:
+    # A DEFAULT, MATERIALIZED or ALIAS expression goes through the canonicalizer,
+    # since ClickHouse re-formats it when it stores it (``id*2+1`` comes back as
+    # ``(id * 2) + 1``). A literal compares by its value (#466).
+    rendered = _column_default_sql(column)
     normalized_default = (
         ""
         if rendered is None
-        or (column.default_kind == "EPHEMERAL" and is_synthetic_ephemeral_default(rendered))
-        else (literal_default_fingerprint(rendered) or sql_expression_fingerprint(rendered))
+        else (
+            literal_default_fingerprint(rendered)
+            or sql_expression_fingerprint(_canonicalize_default(rendered, canonicalizer))
+        )
     )
 
     # Introspection unwraps Nullable(T) into type=T plus nullable=True, and
@@ -663,16 +694,24 @@ def collect_table_sql_fragments(
     """Every SQL fragment ``compare_table_shape`` will look up in a canonicalizer.
 
     Collected at the exact granularity it looks them up (whole expressions for
-    index/ttl, per-element for key/partition clauses, whole query for SELECT
-    projections). The drift command collects these across all compared tables,
-    formats them in one round-trip, and hands back a map-backed canonicalizer.
+    column defaults and index/ttl, per-element for key/partition clauses, whole
+    query for SELECT projections). The drift command collects these across all
+    compared tables, formats them in one round-trip, and hands back a map-backed
+    canonicalizer.
     """
     expressions = [
+        js_trim(sql)
+        for sql in (
+            _column_default_sql(column) for column in [*expected.columns, *_live_columns(actual)]
+        )
+        if sql is not None and literal_default_fingerprint(sql) is None
+    ]
+    expressions.extend(
         _text_index_expression_base(index)
         if isinstance(index, SkipIndexText)
         else _index_expression_base(index)
         for index in [*(expected.indexes or []), *actual.indexes]
-    ]
+    )
     expressions.extend(
         _render_index_type_fingerprint(index)
         for index in [*(expected.indexes or []), *actual.indexes]
@@ -708,14 +747,9 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     that does not show index_granularity."""
     column_diff = diff_by_name(
         expected.columns,
-        [
-            column.model_copy(update={"default": f"fn:{column.default}"})
-            if isinstance(column.default, str) and not column.default.startswith("fn:")
-            else column
-            for column in actual.columns
-        ],
+        _live_columns(actual),
         lambda c: c.name,
-        _normalize_column_shape,
+        lambda c: _normalize_column_shape(c, canonicalizer),
     )
     missing_columns = column_diff.missing
     extra_columns = column_diff.extra

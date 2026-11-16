@@ -105,3 +105,63 @@ def test_expressions_spelled_differently_from_clickhouse_report_no_drift(tmp_pat
             assert "index_mismatch" in detail.reason_codes
         finally:
             client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")
+
+
+def test_column_expressions_read_clean_as_clickhouse_formats_them(tmp_path: Path) -> None:
+    """A DEFAULT, MATERIALIZED or ALIAS expression is compared in ClickHouse's
+    canonical form (#752), and a changed one still drifts."""
+    with _connect() as client:
+        database = client.database
+        name = create_prefix("drift_col_expr") + "users"
+        # ClickHouse stores these as `(id * 2) + 1` and `ts + toIntervalDay(1)`.
+        definition = table(
+            database=database,
+            name=name,
+            engine="MergeTree()",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "ts", "type": "DateTime"},
+                {"name": "score", "type": "UInt64", "default": {"expression": "id * 2 + 1"}},
+                {
+                    "name": "due",
+                    "type": "DateTime",
+                    "defaultKind": "MATERIALIZED",
+                    "default": {"expression": "ts + INTERVAL 1 DAY"},
+                },
+                {
+                    "name": "twice",
+                    "type": "UInt64",
+                    "defaultKind": "ALIAS",
+                    "default": {"expression": "id * 2 + 1"},
+                },
+            ],
+            order_by=["id"],
+        )
+        snapshot = create_snapshot(canonicalize_definitions([definition]))
+        try:
+            client.execute(to_create_sql(definition))
+            wait_for_table(client, database, name)
+
+            def observe() -> tuple[list[str], list[str]]:
+                payload = build_drift_payload(
+                    client=client, meta_dir=tmp_path, snapshot=snapshot, database=database
+                )
+                return (
+                    [key for key in payload.missing if name in key],
+                    sorted(
+                        column
+                        for detail in payload.table_drift
+                        if name in detail.table
+                        for column in detail.changed_columns
+                    ),
+                )
+
+            # Each read may land on a replica that has not applied the CREATE yet.
+            assert poll_until(observe, lambda seen: seen == ([], [])) == ([], [])
+
+            client.execute(
+                f"ALTER TABLE {database}.{name} MODIFY COLUMN score UInt64 DEFAULT id * 3 + 1"
+            )
+            assert poll_until(observe, lambda seen: seen == ([], ["score"])) == ([], ["score"])
+        finally:
+            client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")

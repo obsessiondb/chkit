@@ -1795,3 +1795,112 @@ describe('@chkit/cli drift: text index expressions as ClickHouse stores them', (
     expect(detail?.indexDiffs).toEqual(['idx'])
   })
 })
+
+describe('@chkit/cli drift: column default expressions as ClickHouse stores them (#752)', () => {
+  // Stand-in for ClickHouse's formatter on the fragments under test; the real
+  // formatter runs in drift.e2e.test.ts.
+  const formatted = new Map([
+    ['id*2+1', '(id * 2) + 1'],
+    ['(id * 2) + 1', '(id * 2) + 1'],
+    ['ts + INTERVAL 1 DAY', 'ts + toIntervalDay(1)'],
+    ['ts + toIntervalDay(1)', 'ts + toIntervalDay(1)'],
+  ])
+  const canonicalizer: SqlCanonicalizer = {
+    expression: (fragment) => formatted.get(fragment) ?? null,
+    query: () => null,
+  }
+  const compare = (declared: ColumnDefinition, stored: ColumnDefinition, format?: SqlCanonicalizer) =>
+    compareTableShape(
+      table({
+        database: 'app',
+        name: 'events',
+        engine: 'MergeTree()',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'ts', type: 'DateTime' }, declared],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+      {
+        engine: 'MergeTree()',
+        primaryKey: '(id)',
+        orderBy: '(id)',
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'ts', type: 'DateTime' }, stored],
+        settings: {},
+        indexes: [],
+        projections: [],
+      },
+      format
+    )
+
+  test('DEFAULT, MATERIALIZED and ALIAS expressions read clean against how ClickHouse stores them', () => {
+    const pairs: Array<[ColumnDefinition, ColumnDefinition]> = [
+      [
+        { name: 'v', type: 'UInt64', default: 'fn: id*2+1 ' },
+        { name: 'v', type: 'UInt64', default: '(id * 2) + 1' },
+      ],
+      [
+        { name: 'v', type: 'DateTime', defaultKind: 'MATERIALIZED', default: { expression: 'ts + INTERVAL 1 DAY' } },
+        { name: 'v', type: 'DateTime', defaultKind: 'MATERIALIZED', default: 'ts + toIntervalDay(1)' },
+      ],
+      [
+        { name: 'v', type: 'UInt64', defaultKind: 'ALIAS', default: 'fn:id*2+1' },
+        { name: 'v', type: 'UInt64', defaultKind: 'ALIAS', default: '(id * 2) + 1' },
+      ],
+    ]
+    for (const [declared, stored] of pairs) {
+      expect(compare(declared, stored)?.changedColumns).toEqual(['v'])
+      expect(compare(declared, stored, canonicalizer)).toBeNull()
+    }
+  })
+
+  test('a different expression still drifts, and one the server cannot format compares as before', () => {
+    const declared: ColumnDefinition = { name: 'v', type: 'UInt64', default: 'fn:id*2+1' }
+    expect(compare(declared, { ...declared, default: 'id + 1' }, canonicalizer)?.changedColumns).toEqual(['v'])
+    const spaced: ColumnDefinition = { name: 'v', type: 'UInt64', default: 'fn:cityHash64(id,id)' }
+    expect(compare(spaced, { ...spaced, default: 'cityHash64(id, id)' }, canonicalizer)).toBeNull()
+    expect(compare(spaced, { ...spaced, default: 'cityHash64(id, ts)' }, canonicalizer)?.changedColumns).toEqual(['v'])
+  })
+
+  test('literal and synthetic EPHEMERAL defaults keep their own comparison', () => {
+    const anything: SqlCanonicalizer = { expression: () => 'same', query: () => null }
+    const literal: ColumnDefinition = { name: 'v', type: 'UInt64', default: 1 }
+    expect(compare(literal, { ...literal, default: '2' }, anything)?.changedColumns).toEqual(['v'])
+    expect(compare({ ...literal, default: 2.0 }, { ...literal, default: '2.' }, anything)).toBeNull()
+    const ephemeral: ColumnDefinition = { name: 'v', type: 'Int64', defaultKind: 'EPHEMERAL' }
+    expect(compare({ ...ephemeral, default: "fn:defaultValueOfTypeName('Int64')" }, ephemeral, anything)).toBeNull()
+  })
+
+  test('collectTableSqlFragments gathers column expressions from both sides, not literals', () => {
+    const expected = table({
+      database: 'app',
+      name: 'events',
+      engine: 'MergeTree()',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'a', type: 'UInt64', default: 'fn: id*2+1 ' },
+        { name: 'b', type: 'String', default: 'x' },
+        { name: 'c', type: 'Int64', defaultKind: 'EPHEMERAL', default: "fn:defaultValueOfTypeName('Int64')" },
+      ],
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const actual = {
+      engine: 'MergeTree()',
+      primaryKey: '(id)',
+      orderBy: '(id)',
+      columns: [
+        { name: 'id', type: 'UInt64' },
+        { name: 'a', type: 'UInt64', default: '(id * 2) + 1' },
+        { name: 'b', type: 'String', default: "'x'" },
+        { name: 'c', type: 'Int64', defaultKind: 'EPHEMERAL' as const },
+      ],
+      settings: {},
+      indexes: [],
+      projections: [],
+    }
+    const { expressions } = collectTableSqlFragments(expected, actual)
+    expect(expressions).toContain('id*2+1')
+    expect(expressions).toContain('(id * 2) + 1')
+    expect(expressions).not.toContain("'x'")
+    expect(expressions).not.toContain("defaultValueOfTypeName('Int64')")
+  })
+})
