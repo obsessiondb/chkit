@@ -71,13 +71,17 @@ export function buildFunctionRegistry(rows: readonly FunctionRegistryRow[]): Fun
  * cannot be read, names are left as written: no normalization is safer than
  * lowercasing case-sensitive names.
  */
-async function loadFunctionRegistry(executor: ClickHouseExecutor): Promise<FunctionRegistry> {
+async function loadFunctionRegistry(
+  executor: ClickHouseExecutor,
+  onUnavailable?: (error: unknown) => void
+): Promise<FunctionRegistry> {
   try {
     const rows = await executor.query<FunctionRegistryRow>(
       'SELECT name, case_insensitive, alias_to FROM system.functions'
     )
     return buildFunctionRegistry(rows)
-  } catch {
+  } catch (error) {
+    onUnavailable?.(error)
     return buildFunctionRegistry([])
   }
 }
@@ -88,8 +92,11 @@ async function loadFunctionRegistry(executor: ClickHouseExecutor): Promise<Funct
  * form (`CEILING` -> `ceil`, `LCASE` -> `lower`), an unregistered or
  * case-sensitive name keeps its written form — so `rv_f` and `RV_f` still
  * compare different, and drift output keeps readable case (`toUnixTimestamp`).
- * Only an identifier followed by `(` is a call; strings, quoted identifiers,
- * comments and plain names keep their case.
+ * Only an identifier followed by `(` is a call, and only when it is not
+ * qualified by a dot: `analytics.FLOOR` names a parameterized view, and
+ * ClickHouse normalizes the whole compound name, not its last part — leaving
+ * it as written keeps two differently-cased views distinct. Strings, quoted
+ * identifiers, comments and plain names keep their case.
  */
 export function normalizeFunctionNames(sql: string, registry: FunctionRegistry): string {
   const tokens = tokenizeSQL(sql)
@@ -99,13 +106,19 @@ export function normalizeFunctionNames(sql: string, registry: FunctionRegistry):
     if (token === undefined) continue
     let text = token.text
     if (token.kind === 'identifier') {
+      let previous = i - 1
+      let preceding = tokens[previous]
+      while (preceding !== undefined && isTrivia(preceding)) {
+        previous -= 1
+        preceding = tokens[previous]
+      }
       let next = i + 1
       let following = tokens[next]
       while (following !== undefined && isTrivia(following)) {
         next += 1
         following = tokens[next]
       }
-      if (following?.text === '(') {
+      if (preceding?.text !== '.' && following?.text === '(') {
         text = registry.exact.get(text) ?? registry.insensitive.get(text.toLowerCase()) ?? text
       }
     }
@@ -137,13 +150,13 @@ export function normalizeFunctionNames(sql: string, registry: FunctionRegistry):
 export async function canonicalizeSqlFragments(
   executor: ClickHouseExecutor,
   fragments: readonly string[],
-  options: { wrap: boolean }
+  options: { wrap: boolean; onRegistryUnavailable?: (error: unknown) => void }
 ): Promise<Map<string, string>> {
   const result = new Map<string, string>()
   const unique = [...new Set(fragments.map((fragment) => fragment.trim()).filter((f) => f.length > 0))]
   if (unique.length === 0) return result
 
-  const registry = await loadFunctionRegistry(executor)
+  const registry = await loadFunctionRegistry(executor, options.onRegistryUnavailable)
 
   const formatCall = options.wrap
     ? `formatQuerySingleLineOrNull('SELECT ' || fragment)`

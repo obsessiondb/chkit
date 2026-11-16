@@ -43,7 +43,7 @@ def build_function_registry(rows: Sequence[Mapping[str, Any]]) -> FunctionRegist
     return {"exact": exact, "insensitive": insensitive}
 
 
-def _load_function_registry(client: Any) -> FunctionRegistry:
+def _load_function_registry(client: Any, on_unavailable: Any = None) -> FunctionRegistry:
     """Load the server's function-name resolution rules once for a run.
 
     A view written with ``FLOOR`` or ``LCASE`` is stored as ``floor`` /
@@ -54,7 +54,9 @@ def _load_function_registry(client: Any) -> FunctionRegistry:
     """
     try:
         rows = client.query("SELECT name, case_insensitive, alias_to FROM system.functions").rows
-    except Exception:
+    except Exception as error:
+        if on_unavailable is not None:
+            on_unavailable(error)
         rows = []
     return build_function_registry(rows)
 
@@ -66,17 +68,24 @@ def normalize_function_names(sql: str, registry: FunctionRegistry) -> str:
     ``LCASE`` -> ``lower``); an unregistered or case-sensitive name keeps its
     written form — so ``rv_f`` and ``RV_f`` still compare different, and drift
     output keeps readable case (``toUnixTimestamp``). Only an identifier
-    followed by ``(`` is a call; strings, quoted identifiers, comments and
-    plain names keep their case.
+    followed by ``(`` is a call, and only when it is not qualified by a dot:
+    ``analytics.FLOOR`` names a parameterized view, and ClickHouse normalizes
+    the whole compound name, not its last part — leaving it as written keeps
+    two differently-cased views distinct. Strings, quoted identifiers,
+    comments and plain names keep their case.
     """
     tokens = tokenize_sql(sql)
     out: list[str] = []
     for i, token in enumerate(tokens):
         if token.kind == "identifier":
+            prv = i - 1
+            while prv >= 0 and is_trivia(tokens[prv]):
+                prv -= 1
             nxt = i + 1
             while nxt < len(tokens) and is_trivia(tokens[nxt]):
                 nxt += 1
-            if nxt < len(tokens) and tokens[nxt].text == "(":
+            qualified = prv >= 0 and tokens[prv].text == "."
+            if not qualified and nxt < len(tokens) and tokens[nxt].text == "(":
                 text = token.text
                 out.append(
                     registry["exact"].get(text) or registry["insensitive"].get(text.lower()) or text
@@ -87,7 +96,11 @@ def normalize_function_names(sql: str, registry: FunctionRegistry) -> str:
 
 
 def canonicalize_sql_fragments(
-    client: Any, fragments: Sequence[str], *, wrap: bool
+    client: Any,
+    fragments: Sequence[str],
+    *,
+    wrap: bool,
+    on_registry_unavailable: Any = None,
 ) -> dict[str, str]:
     """Map each fragment to the exact form ClickHouse stores it in.
 
@@ -112,7 +125,7 @@ def canonicalize_sql_fragments(
     if not unique:
         return result
 
-    registry = _load_function_registry(client)
+    registry = _load_function_registry(client, on_registry_unavailable)
 
     format_call = (
         "formatQuerySingleLineOrNull('SELECT ' || fragment)"

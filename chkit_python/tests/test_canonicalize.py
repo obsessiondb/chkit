@@ -184,6 +184,21 @@ def test_still_formats_when_system_functions_cannot_be_read() -> None:
     assert result["SELECT FLOOR(x)"] == "SELECT FLOOR(x)"
 
 
+def test_reports_when_system_functions_cannot_be_read() -> None:
+    client = _FakeClient(["SELECT FLOOR(x)"], registry_rows=None)
+    seen: list[Exception] = []
+
+    canonicalize_sql_fragments(
+        client,
+        ["SELECT FLOOR(x)"],
+        wrap=False,
+        on_registry_unavailable=seen.append,
+    )
+
+    assert len(seen) == 1
+    assert isinstance(seen[0], Exception)
+
+
 def test_normalize_function_names_leaves_literals_and_aliases_alone() -> None:
     assert (
         normalize_function_names(
@@ -194,3 +209,17 @@ def test_normalize_function_names_leaves_literals_and_aliases_alone() -> None:
     assert normalize_function_names("count ()", TEST_REGISTRY) == "count ()"
     assert normalize_function_names("LCASE(s)", TEST_REGISTRY) == "lower(s)"
     assert normalize_function_names("toUnixTimestamp(ts)", TEST_REGISTRY) == "toUnixTimestamp(ts)"
+
+
+def test_normalize_function_names_leaves_dot_qualified_names_alone() -> None:
+    # `analytics.FLOOR` names a parameterized view, not the built-in FLOOR:
+    # rewriting it to `analytics.floor` would merge two different views.
+    assert normalize_function_names("analytics.FLOOR(x = 1)", TEST_REGISTRY) == (
+        "analytics.FLOOR(x = 1)"
+    )
+    assert normalize_function_names("analytics.floor(x = 1)", TEST_REGISTRY) == (
+        "analytics.floor(x = 1)"
+    )
+    assert normalize_function_names("SELECT analytics.CEILING(x), FLOOR(y)", TEST_REGISTRY) == (
+        "SELECT analytics.CEILING(x), floor(y)"
+    )

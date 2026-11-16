@@ -173,6 +173,19 @@ describe('canonicalizeSqlFragments', () => {
     expect(map.get('SELECT FLOOR(x)')).toBe('SELECT FLOOR(x)')
   })
 
+  test('reports when system.functions cannot be read (#731 review)', async () => {
+    const executor = fakeExecutor(['SELECT FLOOR(x)'], {}, null)
+    const seen: unknown[] = []
+
+    await canonicalizeSqlFragments(executor, ['SELECT FLOOR(x)'], {
+      wrap: false,
+      onRegistryUnavailable: (error) => seen.push(error),
+    })
+
+    expect(seen).toHaveLength(1)
+    expect(seen[0]).toBeInstanceOf(Error)
+  })
+
   test('normalizeFunctionNames leaves literals, quoted identifiers and aliases alone', () => {
     expect(
       normalizeFunctionNames("SELECT FLOOR(x) AS FLOOR, 'LOWER(' -- UPPER(\nFROM `MAX(`", TEST_REGISTRY)
@@ -180,5 +193,15 @@ describe('canonicalizeSqlFragments', () => {
     expect(normalizeFunctionNames('count ()', TEST_REGISTRY)).toBe('count ()')
     expect(normalizeFunctionNames('LCASE(s)', TEST_REGISTRY)).toBe('lower(s)')
     expect(normalizeFunctionNames('toUnixTimestamp(ts)', TEST_REGISTRY)).toBe('toUnixTimestamp(ts)')
+  })
+
+  test('normalizeFunctionNames leaves dot-qualified names as written (#731 review)', () => {
+    // `analytics.FLOOR` names a parameterized view, not the built-in FLOOR:
+    // rewriting it to `analytics.floor` would merge two different views.
+    expect(normalizeFunctionNames('analytics.FLOOR(x = 1)', TEST_REGISTRY)).toBe('analytics.FLOOR(x = 1)')
+    expect(normalizeFunctionNames('analytics.floor(x = 1)', TEST_REGISTRY)).toBe('analytics.floor(x = 1)')
+    expect(normalizeFunctionNames('SELECT analytics.CEILING(x), FLOOR(y)', TEST_REGISTRY)).toBe(
+      'SELECT analytics.CEILING(x), floor(y)'
+    )
   })
 })
