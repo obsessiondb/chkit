@@ -36,6 +36,11 @@ from chkit_plugin_obsessiondb.api_client import (
 )
 from chkit_plugin_obsessiondb.api_model import ConsoleApiModel
 from chkit_plugin_obsessiondb.credentials import Credentials
+from chkit_plugin_obsessiondb.orpc_rpc_json import (
+    UNDEFINED,
+    InvalidRpcFormatError,
+    deserialize_rpc_body,
+)
 
 ServiceStatus = Literal[
     "provisioning",
@@ -147,7 +152,7 @@ def _rpc_post(
     body with ``400 Input validation failed``. Translates HTTP 401 into
     ``SessionExpiredError`` so callers handle session expiry uniformly. Any
     other failure raises the error TS's ``RPCLink`` throws, with its message:
-    see :func:`_decode_error_body` and :func:`_orpc_error`.
+    see :func:`_decode_body` and :func:`_orpc_error`.
     """
     url = f"{creds.base_url}/rpc/{procedure}"
     body = {"json": payload}
@@ -156,16 +161,28 @@ def _rpc_post(
         "Content-Type": "application/json",
         "User-Agent": USER_AGENT,
     }
-    try:
-        with httpx.Client(timeout=timeout) as http:
-            res = http.post(url, json=body, headers=headers)
-    except httpx.TransportError as error:
-        # Node's fetch rejects every network failure with this message.
-        raise RuntimeError(_NETWORK_ERROR) from error
-    if res.status_code == HTTP_401_UNAUTHORIZED:
-        raise SessionExpiredError
+    with httpx.Client(timeout=timeout) as http:
+        request = http.build_request("POST", url, json=body, headers=headers)
+        # Like ``fetch``, the request ends with the response headers; the body
+        # is read after, and a failure to read it reads as a parse failure.
+        try:
+            res = http.send(request, stream=True)
+        except httpx.TransportError as error:
+            # Node's fetch rejects every network failure with this message.
+            raise RuntimeError(_NETWORK_ERROR) from error
+        try:
+            if res.status_code == HTTP_401_UNAUTHORIZED:
+                raise SessionExpiredError
+            try:
+                res.read()
+            except httpx.TransportError as error:
+                raise RuntimeError(_UNPARSABLE_BODY_ERROR) from error
+        finally:
+            res.close()
+    # RPCLink decodes the body before it looks at the status.
+    decoded = _decode_body(res)
     if res.status_code >= httpx.codes.BAD_REQUEST:
-        orpc_error = _orpc_error(res.status_code, _decode_error_body(res))
+        orpc_error = _orpc_error(res.status_code, decoded)
         service_slug = payload.get("serviceSlug") if isinstance(payload, dict) else None
         if orpc_error.code == "NOT_FOUND" and isinstance(service_slug, str):
             # Every call for a service (workbench queries, job submit and list)
@@ -223,37 +240,34 @@ _COMMON_ORPC_ERRORS: dict[str, tuple[int, str]] = {
     "GATEWAY_TIMEOUT": (504, "Gateway Timeout"),
 }
 _ORPC_ERROR_KEYS = frozenset({"defined", "code", "status", "message", "data"})
-# JS ``undefined``: the body has no ``json`` value to decode.
-_UNDEFINED: Any = object()
 
 
-def _decode_error_body(res: httpx.Response) -> Any:
-    """What ``RPCLink`` decodes from the body of an error response.
+def _decode_body(res: httpx.Response) -> Any:
+    """What ``RPCLink`` decodes from the body of a response.
 
     Mirrors ``toStandardBody`` (``@orpc/standard-server-fetch``) and
     ``StandardRPCSerializer.deserialize``: only a body without a content type
     or with an ``application/json`` one is parsed, and the value is the
-    envelope's ``json``. Raises the ``RuntimeError`` ``RPCLink`` throws for a
-    body it cannot parse, or that is ``null``.
+    envelope's ``json`` after its ``meta``. Raises the ``RuntimeError``
+    ``RPCLink`` throws for a body it cannot parse or decode.
     """
     if "content-disposition" in res.headers:
-        return _UNDEFINED
+        return UNDEFINED
     content_type = res.headers.get("content-type")
     if content_type and not content_type.startswith("application/json"):
-        return _UNDEFINED
+        return UNDEFINED
     # Like ``Response.text()``: UTF-8 whatever the charset, without a BOM.
-    text = res.content.decode("utf-8", errors="replace").removeprefix("﻿")
+    text = res.content.decode("utf-8", errors="replace").removeprefix(chr(0xFEFF))
     if not text:
-        return _UNDEFINED
+        return UNDEFINED
     try:
         value = json.loads(text, parse_constant=_reject_json_constant)
     except ValueError:
         raise RuntimeError(_UNPARSABLE_BODY_ERROR) from None
-    if value is None:
-        raise RuntimeError(_INVALID_FORMAT_ERROR)
-    if isinstance(value, dict):
-        return value.get("json", _UNDEFINED)
-    return _UNDEFINED
+    try:
+        return deserialize_rpc_body(value)
+    except InvalidRpcFormatError:
+        raise RuntimeError(_INVALID_FORMAT_ERROR) from None
 
 
 def _reject_json_constant(constant: str) -> Any:

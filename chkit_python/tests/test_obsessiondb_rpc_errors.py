@@ -11,6 +11,7 @@ failure.
 from __future__ import annotations
 
 import json
+from collections.abc import Iterator
 from typing import Any
 
 import httpx
@@ -18,7 +19,7 @@ import pytest
 from pytest_httpx import HTTPXMock
 
 from chkit.cli.json_output import json_error_code
-from chkit_plugin_obsessiondb import Credentials
+from chkit_plugin_obsessiondb import Credentials, SessionExpiredError
 from chkit_plugin_obsessiondb.jobs_api import jobs_list
 from chkit_plugin_obsessiondb.service_api import (
     ConsoleApiError,
@@ -212,6 +213,148 @@ def test_network_failure_reads_as_fetch_failed(
     assert str(excinfo.value) == "fetch failed"
     assert json_error_code(excinfo.value) == "error"
     assert excinfo.value.__cause__ is error
+
+
+class _ResetBody(httpx.SyncByteStream):
+    """A body the connection drops after its first bytes, as a reset after the headers."""
+
+    def __iter__(self) -> Iterator[bytes]:
+        yield b'{"json":'
+        msg = "connection reset"
+        raise httpx.ReadError(msg)
+
+
+@pytest.mark.parametrize("status", [200, 404, 500])
+def test_a_body_the_connection_drops_reads_as_unparsable(httpx_mock: HTTPXMock, status: int) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll",
+        status_code=status,
+        headers={"content-type": JSON, "content-length": "500"},
+        stream=_ResetBody(),
+    )
+
+    with pytest.raises(RuntimeError) as excinfo:
+        list_service_organizations(_creds())
+
+    assert str(excinfo.value) == UNPARSABLE
+    assert not isinstance(excinfo.value, ConsoleApiError)
+    assert isinstance(excinfo.value.__cause__, httpx.ReadError)
+
+
+def test_a_401_does_not_read_the_body(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll", status_code=401, stream=_ResetBody()
+    )
+
+    with pytest.raises(SessionExpiredError):
+        list_service_organizations(_creds())
+
+
+# The `meta` of a serialized RPC value (`{"json": ..., "meta": [[type, ...path]]}`)
+# converts values into JS types; TS rejects a body whose `meta` does not apply,
+# and an error whose fields it converts is not an oRPC error. Each case is
+# `application/json`; expected None means TS returned the value.
+META_CASES: list[tuple[str, int, str, tuple[str, str | None] | None]] = [
+    ('meta_object', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":{}}', ('Invalid RPC response format.', None)),
+    ('meta_string', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":"abc"}', ('already exists', 'CONFLICT')),
+    ('meta_number', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":5}', ('Invalid RPC response format.', None)),
+    ('meta_null', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":null}', ('already exists', 'CONFLICT')),
+    ('meta_true', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":true}', ('Invalid RPC response format.', None)),
+    ('meta_item_null', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[null]}', ('Invalid RPC response format.', None)),
+    ('meta_item_number', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[5]}', ('already exists', 'CONFLICT')),
+    ('meta_item_string', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":["1message"]}', ('already exists', 'CONFLICT')),
+    ('meta_item_empty_list', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[[]]}', ('already exists', 'CONFLICT')),
+    ('meta_item_dict', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[{"0":1,"1":"message","length":2}]}', ('Internal Server Error', 'INTERNAL_SERVER_ERROR')),
+    ('meta_item_dict_no_length', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[{"0":1}]}', ('Invalid RPC response format.', None)),
+    ('meta_date_message', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[[1,"message"]]}', ('Internal Server Error', 'INTERNAL_SERVER_ERROR')),
+    ('meta_date_data', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"at":"2026-01-01"}},"meta":[[1,"data","at"]]}', ('already exists', 'CONFLICT')),
+    ('meta_date_null', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"at":null}},"meta":[[1,"data","at"]]}', ('already exists', 'CONFLICT')),
+    ('meta_date_number', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"at":5}},"meta":[[1,"data","at"]]}', ('Invalid RPC response format.', None)),
+    ('meta_missing_segment', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[[1,"nope"]]}', ('Invalid RPC response format.', None)),
+    ('meta_unknown_type', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[[9,"nope"]]}', ('already exists', 'CONFLICT')),
+    ('meta_string_type', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"at":"x"}},"meta":[["1","data","at"]]}', ('already exists', 'CONFLICT')),
+    ('meta_float_type', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"at":"x"}},"meta":[[1,"data","at"]]}', ('already exists', 'CONFLICT')),
+    ('meta_bool_type', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[[true,"message"]]}', ('already exists', 'CONFLICT')),
+    ('meta_bigint_ok', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"n":" -12 "}},"meta":[[0,"data","n"]]}', ('already exists', 'CONFLICT')),
+    ('meta_bigint_hex', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"n":"0x1F"}},"meta":[[0,"data","n"]]}', ('already exists', 'CONFLICT')),
+    ('meta_bigint_empty', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"n":""}},"meta":[[0,"data","n"]]}', ('already exists', 'CONFLICT')),
+    ('meta_bigint_float', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"n":"1.5"}},"meta":[[0,"data","n"]]}', ('Invalid RPC response format.', None)),
+    ('meta_bigint_signed_hex', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"n":"-0x1"}},"meta":[[0,"data","n"]]}', ('Invalid RPC response format.', None)),
+    ('meta_bigint_number', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"n":12}},"meta":[[0,"data","n"]]}', ('Invalid RPC response format.', None)),
+    ('meta_nan_null', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"x":null}},"meta":[[2,"data","x"]]}', ('already exists', 'CONFLICT')),
+    ('meta_nan_number', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"x":1}},"meta":[[2,"data","x"]]}', ('Invalid RPC response format.', None)),
+    ('meta_nan_status', 500, '{"json":{"defined":false,"code":"CONFLICT","status":null,"message":"already exists"},"meta":[[2,"status"]]}', ('Internal Server Error', 'INTERNAL_SERVER_ERROR')),
+    ('meta_undefined_message', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":null},"meta":[[3,"message"]]}', ('Internal Server Error', 'INTERNAL_SERVER_ERROR')),
+    ('meta_undefined_data', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":null},"meta":[[3,"data"]]}', ('already exists', 'CONFLICT')),
+    ('meta_undefined_string', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":"x"},"meta":[[3,"data"]]}', ('Invalid RPC response format.', None)),
+    ('meta_url_ok', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"u":"https://example.com/x"}},"meta":[[4,"data","u"]]}', ('already exists', 'CONFLICT')),
+    ('meta_url_invalid', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"u":"not a url"}},"meta":[[4,"data","u"]]}', ('Invalid RPC response format.', None)),
+    ('meta_url_empty_host', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"u":"http://"}},"meta":[[4,"data","u"]]}', ('Invalid RPC response format.', None)),
+    ('meta_url_mailto', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"u":"mailto:a@b"}},"meta":[[4,"data","u"]]}', ('already exists', 'CONFLICT')),
+    ('meta_regexp_ok', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"r":"/a+/gi"}},"meta":[[5,"data","r"]]}', ('already exists', 'CONFLICT')),
+    ('meta_regexp_bad_flags', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"r":"/a/gg"}},"meta":[[5,"data","r"]]}', ('Invalid RPC response format.', None)),
+    ('meta_regexp_unknown_flag', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"r":"/a/x"}},"meta":[[5,"data","r"]]}', ('Invalid RPC response format.', None)),
+    ('meta_regexp_uv', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"r":"/a/uv"}},"meta":[[5,"data","r"]]}', ('Invalid RPC response format.', None)),
+    ('meta_regexp_no_slash', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"r":"abc"}},"meta":[[5,"data","r"]]}', ('Invalid RPC response format.', None)),
+    ('meta_regexp_newline', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"r":"/a\\nb/"}},"meta":[[5,"data","r"]]}', ('Invalid RPC response format.', None)),
+    ('meta_regexp_invalid_pattern', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"r":"/(/"}},"meta":[[5,"data","r"]]}', ('already exists', 'CONFLICT')),
+    ('meta_set_ok', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"s":[1,1]}},"meta":[[6,"data","s"]]}', ('already exists', 'CONFLICT')),
+    ('meta_set_not_array', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"s":"ab"}},"meta":[[6,"data","s"]]}', ('Invalid RPC response format.', None)),
+    ('meta_map_ok', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"m":[[1,2],{},[]]}},"meta":[[7,"data","m"]]}', ('already exists', 'CONFLICT')),
+    ('meta_map_bad_entry', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"m":[1]}},"meta":[[7,"data","m"]]}', ('Invalid RPC response format.', None)),
+    ('meta_map_null_entry', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"m":[null]}},"meta":[[7,"data","m"]]}', ('Invalid RPC response format.', None)),
+    ('meta_map_string_entry', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"m":["ab"]}},"meta":[[7,"data","m"]]}', ('Invalid RPC response format.', None)),
+    ('meta_twice', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":"2026"},"meta":[[1,"data"],[1,"data"]]}', ('Invalid RPC response format.', None)),
+    ('meta_into_transformed', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"a":["2026"]}},"meta":[[6,"data","a"],[1,"data","a",0]]}', ('Invalid RPC response format.', None)),
+    ('meta_into_string', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"},"meta":[[1,"message",0]]}', ('Invalid RPC response format.', None)),
+    ('meta_array_index', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":["a","2026"]},"meta":[[1,"data",1]]}', ('already exists', 'CONFLICT')),
+    ('meta_array_string_index', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":["a","2026"]},"meta":[[1,"data","1"]]}', ('already exists', 'CONFLICT')),
+    ('meta_array_float_index', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":["a","2026"]},"meta":[[1,"data",1]]}', ('already exists', 'CONFLICT')),
+    ('meta_array_bad_index', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":["a","2026"]},"meta":[[1,"data","01"]]}', ('Invalid RPC response format.', None)),
+    ('meta_array_length', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":["a"]},"meta":[[1,"data","length"]]}', ('Invalid RPC response format.', None)),
+    ('meta_array_out_of_range', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":["a"]},"meta":[[1,"data",3]]}', ('Invalid RPC response format.', None)),
+    ('meta_null_segment', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"null":"x"}},"meta":[[1,"data",null]]}', ('already exists', 'CONFLICT')),
+    ('meta_bool_segment', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"true":"x"}},"meta":[[1,"data",true]]}', ('already exists', 'CONFLICT')),
+    ('meta_number_key', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"1":"x"}},"meta":[[1,"data",1]]}', ('already exists', 'CONFLICT')),
+    ('meta_into_null', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"a":null}},"meta":[[1,"data","a","b"]]}', ('Invalid RPC response format.', None)),
+    ('meta_root_null_date', 500, '{"json":null,"meta":[[1]]}', ('Internal Server Error', 'INTERNAL_SERVER_ERROR')),
+    ('meta_root_missing', 500, '{"meta":[[1]]}', ('Invalid RPC response format.', None)),
+    ('meta_root_missing_unknown', 500, '{"meta":[[9]]}', ('Internal Server Error', 'INTERNAL_SERVER_ERROR')),
+    ('meta_root_whole_set', 500, '{"json":[{"defined":false,"code":"CONFLICT","status":409,"message":"already exists"}],"meta":[[6]]}', ('Internal Server Error', 'INTERNAL_SERVER_ERROR')),
+    ('meta_proto_key', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{"__proto__":"x"}},"meta":[[1,"data","__proto__"]]}', ('already exists', 'CONFLICT')),
+    ('meta_toString_key', 500, '{"json":{"defined":false,"code":"CONFLICT","status":409,"message":"already exists","data":{}},"meta":[[1,"data","toString"]]}', ('Invalid RPC response format.', None)),
+    ('ok_meta_object', 200, '{"json":{"organizations":[]},"meta":{}}', ('Invalid RPC response format.', None)),
+    ('ok_meta_missing_segment', 200, '{"json":{"organizations":[]},"meta":[[1,"x"]]}', ('Invalid RPC response format.', None)),
+    ('ok_meta_valid', 200, '{"json":{"organizations":[],"at":"2026"},"meta":[[1,"at"]]}', None),
+    ('ok_json_null', 200, 'null', ('Invalid RPC response format.', None)),
+]
+
+@pytest.mark.parametrize(
+    ("status", "body", "expected"),
+    [case[1:] for case in META_CASES],
+    ids=[case[0] for case in META_CASES],
+)
+def test_meta_decodes_as_in_ts(
+    httpx_mock: HTTPXMock, status: int, body: str, expected: tuple[str, str | None] | None
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll",
+        status_code=status,
+        headers={"content-type": JSON},
+        content=body.encode(),
+    )
+
+    if expected is None:
+        list_service_organizations(_creds())
+        return
+    message, code = expected
+    with pytest.raises(RuntimeError) as excinfo:
+        list_service_organizations(_creds())
+
+    assert str(excinfo.value) == message
+    assert isinstance(excinfo.value, ConsoleApiError) == (code is not None)
+    assert json_error_code(excinfo.value) == (code or "error")
+
 
 
 # A call for a service explains a NOT_FOUND oRPC error, whatever its HTTP status,
