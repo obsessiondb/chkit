@@ -311,6 +311,13 @@ def _rank_operation(op: MigrationOperation) -> int:
     return _CREATE_RANK
 
 
+# As in plan_diff, these drops run before every other ALTER: a skip index,
+# constraint or projection that reads a column blocks its DROP COLUMN (#747).
+_DEPENDENT_DROPS = frozenset(
+    {"alter_table_drop_index", "alter_table_drop_constraint", "alter_table_drop_projection"}
+)
+
+
 def _sorted(
     kept: Sequence[MigrationOperation], added: Sequence[MigrationOperation]
 ) -> list[MigrationOperation]:
@@ -318,16 +325,19 @@ def _sorted(
 
     Drops and object creates keep the planner's order, which is
     dependency-aware (#231); the classes this pipeline adds to are ordered by
-    key, and operations that share a key keep the planner's order (the sort is
-    stable), so a column's ``REMOVE DEFAULT`` still runs before its
+    key, after the drops of skip indexes, constraints and projections as in
+    plan_diff (#747), and operations that share a key keep the planner's order
+    (the sort is stable), so a column's ``REMOVE DEFAULT`` still runs before its
     ``MODIFY COLUMN``. The planner's column statements fill their key-order
     positions in the planner's order, which is dependency-aware (#681, #745);
     ``apply_selected_rename_suggestions`` orders them again with its renames.
     """
 
-    def sort_key(op: MigrationOperation) -> tuple[int, str]:
+    def sort_key(op: MigrationOperation) -> tuple[int, int, str]:
         rank = _rank_operation(op)
-        return (rank, "" if rank in (_DROP_RANK, _CREATE_RANK) else op.key)
+        if rank in (_DROP_RANK, _CREATE_RANK):
+            return (rank, 0, "")
+        return (rank, 0 if op.type in _DEPENDENT_DROPS else 1, op.key)
 
     added_ids = {id(op) for op in added}
     planned = iter([op for op in kept if is_column_statement(op)])
