@@ -68,8 +68,9 @@ THREE_SERVICES_OUTPUT = (
     "  2. Svc 2 (stopped)\n"
     "Beta:\n"
     "  3. Svc 3 (running)\n"
-    "\nSelect service [1-3]: "
 )
+# The picker prompt goes to stderr, as in TS (#740).
+THREE_SERVICES_PROMPT = "\nSelect service [1-3]: "
 
 
 class _ConsoleStub:
@@ -164,6 +165,11 @@ def console(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Iterator[_Consol
 def _chkit(*args: str, stdin: str = "") -> tuple[int, str]:
     result = CliRunner().invoke(app, ["obsessiondb", *args], input=stdin)
     return result.exit_code, result.stdout
+
+
+def _chkit_streams(*args: str, stdin: str = "") -> tuple[int, str, str]:
+    result = CliRunner().invoke(app, ["obsessiondb", *args], input=stdin)
+    return result.exit_code, result.stdout, result.stderr
 
 
 def _selected_service(tmp_path: Path) -> object:
@@ -300,9 +306,10 @@ def test_login_reads_the_service_choice_from_stdin(
     console: _ConsoleStub, tmp_path: Path, answer: str
 ) -> None:
     console.organizations = THREE_SERVICES
-    assert _chkit("login", "--api-url", console.url, stdin=answer) == (
+    assert _chkit_streams("login", "--api-url", console.url, stdin=answer) == (
         0,
         DEVICE_LOGIN_OUTPUT + THREE_SERVICES_OUTPUT + "Service selected: Acme (acme) / Svc 2\n",
+        THREE_SERVICES_PROMPT,
     )
     assert _selected_service(tmp_path) == {"service_slug": "svc-2", "service_name": "Svc 2"}
 
@@ -315,9 +322,10 @@ def test_login_without_a_valid_choice_selects_nothing_and_succeeds(
     console: _ConsoleStub, tmp_path: Path, answer: str, tail: str
 ) -> None:
     console.organizations = THREE_SERVICES
-    assert _chkit("login", "--api-url", console.url, stdin=answer) == (
+    assert _chkit_streams("login", "--api-url", console.url, stdin=answer) == (
         0,
         DEVICE_LOGIN_OUTPUT + THREE_SERVICES_OUTPUT + tail,
+        THREE_SERVICES_PROMPT,
     )
     assert _selected_service(tmp_path) is None
 
@@ -383,3 +391,56 @@ def test_login_json_prints_each_line_as_a_message_envelope(
         "Service selected: Acme (acme) / Svc 1",
     ]
     assert _selected_service(tmp_path) == {"service_slug": "svc-1", "service_name": "Svc 1"}
+
+
+def _json_messages(stdout: str) -> list[str]:
+    """Decode stdout as back-to-back JSON envelopes; fails on anything else in it."""
+    decoder = json.JSONDecoder()
+    messages: list[str] = []
+    rest = stdout.strip()
+    while rest:
+        envelope, end = decoder.raw_decode(rest)
+        messages.append(envelope["message"])
+        rest = rest[end:].strip()
+    return messages
+
+
+THREE_SERVICES_MESSAGES = [
+    "\nAvailable services:",
+    "Acme (acme):",
+    "  1. Svc 1 (running)",
+    "  2. Svc 2 (stopped)",
+    "Beta:",
+    "  3. Svc 3 (running)",
+    "Service selected: Acme (acme) / Svc 2",
+]
+
+
+# #740: under --json, stdout holds only JSON; the picker prompt goes to stderr.
+def test_login_json_prints_the_service_prompt_on_stderr(
+    console: _ConsoleStub, tmp_path: Path
+) -> None:
+    save_credentials(Credentials(access_token="old-token", base_url=console.url))
+    console.organizations = THREE_SERVICES
+    result = CliRunner().invoke(
+        app, ["obsessiondb", "login", "--api-url", console.url, "--json"], input="2\n"
+    )
+    assert result.exit_code == 0
+    assert _json_messages(result.stdout) == [
+        f"Already logged in as {EMAIL}",
+        *THREE_SERVICES_MESSAGES,
+    ]
+    assert "\nSelect service [1-3]: " in result.stderr
+    assert _selected_service(tmp_path) == {"service_slug": "svc-2", "service_name": "Svc 2"}
+
+
+def test_service_select_json_prints_the_prompt_on_stderr(
+    console: _ConsoleStub, tmp_path: Path
+) -> None:
+    save_credentials(Credentials(access_token="old-token", base_url=console.url))
+    console.organizations = THREE_SERVICES
+    result = CliRunner().invoke(app, ["obsessiondb", "service", "select", "--json"], input="2\n")
+    assert result.exit_code == 0
+    assert _json_messages(result.stdout) == THREE_SERVICES_MESSAGES
+    assert "\nSelect service [1-3]: " in result.stderr
+    assert _selected_service(tmp_path) == {"service_slug": "svc-2", "service_name": "Svc 2"}

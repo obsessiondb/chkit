@@ -75,7 +75,9 @@ export async function selectServiceInteractive(
 		}
 	}
 
-	const rl = createInterface({ input: process.stdin, output: process.stdout })
+	// The prompt goes to stderr so stdout holds only the command's output
+	// (JSON envelopes under --json).
+	const rl = createInterface({ input: process.stdin, output: process.stderr })
 	try {
 		const answer = await rl.question(`\nSelect service [1-${choices.length}]: `)
 		const index = parseInt(answer.trim(), 10) - 1

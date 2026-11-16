@@ -13,7 +13,9 @@ Two surfaces:
 
 from __future__ import annotations
 
+import contextlib
 import re
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -103,8 +105,12 @@ def select_service_interactive(
 
     # Like the TS readline prompt, read the answer from stdin even when it is
     # not a TTY, so `printf '2\n' | chkit obsessiondb service select` works.
+    # The prompt goes to stderr so stdout holds only the command's output
+    # (JSON envelopes under --json), as in TS.
+    sys.stdout.flush()
     try:
-        answer = input(f"\nSelect service [1-{len(choices)}]: ").strip()
+        with contextlib.redirect_stdout(sys.stderr):
+            answer = input(f"\nSelect service [1-{len(choices)}]: ").strip()
     except EOFError:
         return None
     # parseInt semantics: the leading integer counts, trailing text is ignored.
