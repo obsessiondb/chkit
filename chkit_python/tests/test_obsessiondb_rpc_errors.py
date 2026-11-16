@@ -455,3 +455,65 @@ def test_another_error_of_a_404_is_not_explained(
     assert str(excinfo.value) == message
     assert not isinstance(excinfo.value, ServiceNotFoundError)
     assert len(httpx_mock.get_requests()) == 1
+
+
+# Job metadata is the user's, so a response can nest deeply; RPCLink decodes it,
+# with or without `meta`. 900 levels is past what a recursive copy survives and
+# within what `json.loads` parses on Python 3.11 (about 1000 levels).
+
+DEPTH = 900
+
+
+def _jobs_list_body(meta: list[list[Any]] | None) -> str:
+    nested = '{"a":' * DEPTH + '"2026-01-01"' + "}" * DEPTH
+    job = (
+        '{"id":"j1","serviceId":"s1","type":"backfill","target":"t","status":"running",'
+        '"concurrency":1,"totalTasks":1,"completedTasks":0,"failedTasks":0,'
+        f'"metadata":{nested},"createdAt":"2026-01-01","updatedAt":"2026-01-01"}}'
+    )
+    envelope = f'{{"json":{{"jobs":[{job}],"total":1}}'
+    return envelope + ("}" if meta is None else f',"meta":{json.dumps(meta)}}}')
+
+
+def _depth(value: Any) -> int:
+    depth = 0
+    while isinstance(value, dict):
+        value = value["a"]
+        depth += 1
+    assert value == "2026-01-01"
+    return depth
+
+
+_DEEP_PATH = ["jobs", 0, "metadata", *(["a"] * DEPTH)]
+
+
+@pytest.mark.parametrize(
+    "meta",
+    [None, [], [[1, "jobs", 0, "createdAt"]], [[1, *_DEEP_PATH]]],
+    ids=["no_meta", "empty_meta", "shallow_meta", "meta_deep_inside"],
+)
+def test_deeply_nested_job_metadata_decodes(
+    httpx_mock: HTTPXMock, meta: list[list[Any]] | None
+) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/jobs/list",
+        headers={"content-type": JSON},
+        content=_jobs_list_body(meta).encode(),
+    )
+
+    response = jobs_list(_creds(), service_slug="prod")
+
+    [job] = response.jobs
+    assert job.created_at == "2026-01-01"
+    assert _depth(job.metadata) == DEPTH
+
+
+def test_meta_past_the_end_of_deep_metadata_is_invalid(httpx_mock: HTTPXMock) -> None:
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/jobs/list",
+        headers={"content-type": JSON},
+        content=_jobs_list_body([[1, *_DEEP_PATH, "a"]]).encode(),
+    )
+
+    with pytest.raises(RuntimeError, match=r"^Invalid RPC response format\.$"):
+        jobs_list(_creds(), service_slug="prod")

@@ -180,7 +180,7 @@ def _rpc_post(
         finally:
             res.close()
     # RPCLink decodes the body before it looks at the status.
-    decoded = _decode_body(res)
+    envelope, decoded = _decode_body(res)
     if res.status_code >= httpx.codes.BAD_REQUEST:
         orpc_error = _orpc_error(res.status_code, decoded)
         service_slug = payload.get("serviceSlug") if isinstance(payload, dict) else None
@@ -191,10 +191,12 @@ def _rpc_post(
             if explained is not None:
                 raise explained
         raise orpc_error
-    try:
-        envelope = res.json()
-    except ValueError:
-        raise RuntimeError(_UNPARSABLE_BODY_ERROR) from None
+    if envelope is UNDEFINED:
+        # A body RPCLink does not parse as JSON (another content type, or empty).
+        try:
+            envelope = res.json()
+        except ValueError:
+            raise RuntimeError(_UNPARSABLE_BODY_ERROR) from None
     return envelope["json"] if isinstance(envelope, dict) and "json" in envelope else envelope
 
 
@@ -242,30 +244,31 @@ _COMMON_ORPC_ERRORS: dict[str, tuple[int, str]] = {
 _ORPC_ERROR_KEYS = frozenset({"defined", "code", "status", "message", "data"})
 
 
-def _decode_body(res: httpx.Response) -> Any:
-    """What ``RPCLink`` decodes from the body of a response.
+def _decode_body(res: httpx.Response) -> tuple[Any, Any]:
+    """The parsed body of a response, and the value ``RPCLink`` decodes from it.
 
     Mirrors ``toStandardBody`` (``@orpc/standard-server-fetch``) and
     ``StandardRPCSerializer.deserialize``: only a body without a content type
-    or with an ``application/json`` one is parsed, and the value is the
-    envelope's ``json`` after its ``meta``. Raises the ``RuntimeError``
-    ``RPCLink`` throws for a body it cannot parse or decode.
+    or with an ``application/json`` one is parsed (else both are
+    ``UNDEFINED``), and the value is the envelope's ``json`` after its
+    ``meta``. Raises the ``RuntimeError`` ``RPCLink`` throws for a body it
+    cannot parse or decode.
     """
     if "content-disposition" in res.headers:
-        return UNDEFINED
+        return UNDEFINED, UNDEFINED
     content_type = res.headers.get("content-type")
     if content_type and not content_type.startswith("application/json"):
-        return UNDEFINED
+        return UNDEFINED, UNDEFINED
     # Like ``Response.text()``: UTF-8 whatever the charset, without a BOM.
     text = res.content.decode("utf-8", errors="replace").removeprefix(chr(0xFEFF))
     if not text:
-        return UNDEFINED
+        return UNDEFINED, UNDEFINED
     try:
         value = json.loads(text, parse_constant=_reject_json_constant)
     except ValueError:
         raise RuntimeError(_UNPARSABLE_BODY_ERROR) from None
     try:
-        return deserialize_rpc_body(value)
+        return value, deserialize_rpc_body(value)
     except InvalidRpcFormatError:
         raise RuntimeError(_INVALID_FORMAT_ERROR) from None
 

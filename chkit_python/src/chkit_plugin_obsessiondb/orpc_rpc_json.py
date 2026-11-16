@@ -14,7 +14,6 @@ are opaque :class:`JsValue` objects; JS ``undefined`` is :data:`UNDEFINED` and
 
 from __future__ import annotations
 
-import copy
 import re
 from collections.abc import Iterator
 from typing import Any
@@ -61,7 +60,9 @@ _CANONICAL_INDEX = re.compile("0|[1-9][0-9]*")
 def deserialize_rpc_body(body: Any) -> Any:
     """The value ``RPCLink`` decodes from the parsed JSON ``body`` of a response.
 
-    Raises :class:`InvalidRpcFormatError` where TS does.
+    Raises :class:`InvalidRpcFormatError` where TS does. ``body`` is left as it
+    is: like oRPC's ``copyOnWrite``, a ``meta`` item copies only the containers
+    on its path.
     """
     if body is None:
         # ``data.json`` on ``null`` throws.
@@ -69,7 +70,7 @@ def deserialize_rpc_body(body: Any) -> Any:
     if not isinstance(body, dict):
         # A list or primitive has no ``json`` or ``meta``.
         return UNDEFINED
-    root: dict[str, Any] = {"data": copy.deepcopy(body["json"]) if "json" in body else UNDEFINED}
+    root: dict[str, Any] = {"data": body.get("json", UNDEFINED)}
     meta = body.get("meta")
     if meta is None:
         items: list[Any] = []
@@ -80,12 +81,14 @@ def deserialize_rpc_body(body: Any) -> Any:
         items = list(meta)
     else:
         raise InvalidRpcFormatError
+    # The ids of the containers this call copied, which it may change in place.
+    copies: set[int] = set()
     for item in items:
-        _apply_meta_item(root, item)
+        _apply_meta_item(root, item, copies)
     return root["data"]
 
 
-def _apply_meta_item(root: dict[str, Any], item: Any) -> None:
+def _apply_meta_item(root: dict[str, Any], item: Any, copies: set[int]) -> None:
     if item is None:
         raise InvalidRpcFormatError
     if isinstance(item, list):
@@ -108,7 +111,12 @@ def _apply_meta_item(root: dict[str, Any], item: Any) -> None:
     container: Any = root
     key: Any = "data"
     for segment in segments:
-        container = _get(container, key)
+        child = _get(container, key)
+        if isinstance(child, dict | list) and id(child) not in copies:
+            child = child.copy()
+            copies.add(id(child))
+            _set(container, key, child)
+        container = child
         key = _property_key(segment)
         if not _has_own(container, key):
             raise InvalidRpcFormatError
