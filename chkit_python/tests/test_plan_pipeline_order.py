@@ -234,3 +234,43 @@ def test_column_rename_keeps_a_modify_column_after_the_add_column_its_new_defaul
         "ALTER TABLE app.t MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;",
         "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
     ]
+
+
+def test_column_rename_keeps_a_modify_column_before_the_drop_column_its_old_default_reads() -> None:
+    # #745: `b`'s old DEFAULT reads `c`, so `c` can't be dropped before `b` changes.
+    def t(columns: list[dict[str, Any]]) -> TableDefinition:
+        return table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[{"name": "id", "type": "UInt64"}, *columns],
+        )
+
+    planned = plan_diff(
+        [t([
+            {"name": "b", "type": "UInt64", "default": SQLExpression(expression="c")},
+            {"name": "c", "type": "UInt64"},
+            {"name": "r", "type": "String"},
+        ])],
+        [t([
+            {"name": "a", "type": "UInt64", "default": SQLExpression(expression="z")},
+            {"name": "b", "type": "UInt64", "default": SQLExpression(expression="z")},
+            {"name": "s", "type": "String"},
+            {"name": "z", "type": "UInt64"},
+        ])],
+    )
+    plan = apply_selected_rename_suggestions(
+        planned,
+        build_explicit_column_rename_suggestions(
+            planned, [ColumnRenameMapping("app", "t", "r", "s", "cli")]
+        ),
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `c`;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `r` TO `s`;",
+    ]

@@ -321,7 +321,7 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
         cliEnv
       )
       if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic(`generate (${name}) failed`, generated))
-      const migrated = await runCliWithRetry(dir, ['migrate', '--config', configPath, '--execute', '--json'], {
+      const migrated = await runCliWithRetry(dir, ['migrate', '--config', configPath, '--execute', '--allow-destructive', '--json'], {
         extraEnv: cliEnv,
       })
       if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic(`migrate --execute (${name}) failed`, migrated))
@@ -361,6 +361,26 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
       await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, price) VALUES (1, 41)`)
       const rows = await executor.query<{ Total: string }>(`SELECT Total FROM ${quoteIdent(db)}.${quoteIdent(orders)}`)
       expect(rows.map((row) => Number(row.Total))).toEqual([42])
+
+      // `Total`'s old DEFAULT reads `price`, so ClickHouse rejects dropping
+      // `price` before `Total` changes, although `Avg` and `zz` move ahead.
+      await writeSchema(
+        ", { name: 'Avg', type: 'UInt64', default: { expression: 'zz' } }, { name: 'Total', type: 'UInt64', default: { expression: 'zz' } }, { name: 'zz', type: 'UInt64' }"
+      )
+      const dropSql = await generateAndMigrate('drop', '20990101000002')
+      expectInOrder(dropSql, [
+        'ADD COLUMN IF NOT EXISTS `zz` UInt64;',
+        'ADD COLUMN IF NOT EXISTS `Avg` UInt64 DEFAULT zz;',
+        'MODIFY COLUMN `Total` UInt64 DEFAULT zz;',
+        'DROP COLUMN IF EXISTS `price`;',
+      ])
+      await waitForColumn(executor, db, orders, 'zz')
+
+      await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, zz) VALUES (2, 5)`)
+      const added = await executor.query<{ Avg: string; Total: string }>(
+        `SELECT Avg, Total FROM ${quoteIdent(db)}.${quoteIdent(orders)} WHERE id = 2`
+      )
+      expect(added.map((row) => [Number(row.Avg), Number(row.Total)])).toEqual([[5, 5]])
     } finally {
       await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(orders)}`)
       await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(journalTable)}`)

@@ -344,7 +344,7 @@ def test_adds_a_column_before_the_modify_column_whose_new_default_reads_it(
         gen = runner.invoke(
             app, ["generate", "--name", name, "--migration-id", migration_id, "--json"])
         assert gen.exit_code == 0, format_test_diagnostic(f"generate ({name}) failed", gen)
-        migrate = _run_migrate(runner, ["migrate", "--execute", "--json"])
+        migrate = _run_migrate(runner, ["migrate", "--execute", "--allow-destructive", "--json"])
         assert migrate.exit_code == 0, format_test_diagnostic(f"migrate ({name}) failed", migrate)
         return (tmp_path / "chkit" / "migrations" / f"{migration_id}_{name}.sql").read_text()
 
@@ -366,6 +366,26 @@ def test_adds_a_column_before_the_modify_column_whose_new_default_reads_it(
         client.command(f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, price) VALUES (1, 41)")
         rows = client.query(f"SELECT Total FROM {quote_ident(db)}.{quote_ident(orders)}").result_rows
         assert [int(row[0]) for row in rows] == [42]
+
+        # `Total`'s old DEFAULT reads `price`, so ClickHouse rejects dropping
+        # `price` before `Total` changes, although `Avg` and `zz` move ahead.
+        drop_sql = generate_and_migrate(
+            ", {'name': 'Avg', 'type': 'UInt64', 'default': SQLExpression(expression='zz')}, "
+            "{'name': 'Total', 'type': 'UInt64', 'default': SQLExpression(expression='zz')}, "
+            "{'name': 'zz', 'type': 'UInt64'}",
+            "drop",
+            "20990101000002",
+        )
+        _assert_in_order(drop_sql, [f"table:{db}.{orders}:column:zz",
+                                    f"table:{db}.{orders}:column:Avg",
+                                    f"table:{db}.{orders}:column:Total",
+                                    f"table:{db}.{orders}:column:price"])
+
+        client.command(f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, zz) VALUES (2, 5)")
+        added = client.query(
+            f"SELECT Avg, Total FROM {quote_ident(db)}.{quote_ident(orders)} WHERE id = 2"
+        ).result_rows
+        assert [(int(row[0]), int(row[1])) for row in added] == [(5, 5)]
     finally:
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")

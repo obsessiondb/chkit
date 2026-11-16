@@ -769,6 +769,7 @@ export function planDiff(
     drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
     create: buildDependencyGraph(newCanonical),
     addColumn: columnDefaultReads(newCanonical),
+    dropColumn: invertDependencyGraph(columnDefaultReads(oldCanonical)),
   })
 
   const riskSummary: Record<RiskLevel, number> = { safe: 0, caution: 0, danger: 0 }
@@ -822,18 +823,24 @@ function alterRank(op: MigrationOperation): number {
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
  * first. Alters and create_database keep their place, but an ADD or MODIFY
- * COLUMN moves behind the ADD COLUMNs its default reads (#681, #745).
+ * COLUMN moves behind the ADD COLUMNs its default reads (#681, #745), and a
+ * DROP COLUMN behind the MODIFYs of the columns whose old default reads it.
  */
 function orderOperations(
   sorted: MigrationOperation[],
-  prerequisites: { drop: DependencyGraph; create: DependencyGraph; addColumn: DependencyGraph }
+  prerequisites: {
+    drop: DependencyGraph
+    create: DependencyGraph
+    addColumn: DependencyGraph
+    dropColumn: DependencyGraph
+  }
 ): MigrationOperation[] {
   const drops = sorted.filter((op) => operationRank(op) === 0)
   const middle = sorted.filter((op) => operationRank(op) === 1 || operationRank(op) === 2)
   const creates = sorted.filter((op) => operationRank(op) >= 3)
   return [
     ...orderByDependencies(drops, (op) => op.key, (key) => prerequisites.drop.get(key) ?? []),
-    ...orderColumnAdds(middle, prerequisites.addColumn),
+    ...orderColumnAdds(middle, prerequisites.addColumn, prerequisites.dropColumn),
     ...orderByDependencies(creates, (op) => op.key, (key) => prerequisites.create.get(key) ?? []),
   ]
 }
@@ -841,21 +848,35 @@ function orderOperations(
 /**
  * Moves each ADD COLUMN (#681) and MODIFY COLUMN (#745) behind the ADD
  * COLUMNs of the columns that its DEFAULT, MATERIALIZED or ALIAS expression
- * reads. These operations fill the positions they had, so every other
- * operation keeps its place.
+ * reads, and each DROP COLUMN behind the MODIFY COLUMNs of the columns whose
+ * old expression (`readers`) reads it. These operations fill the positions
+ * they had, so every other operation keeps its place.
  */
-function orderColumnAdds(operations: MigrationOperation[], reads: DependencyGraph): MigrationOperation[] {
-  const isAddOrModify = (op: MigrationOperation) =>
-    op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column'
-  const added = new Set(operations.filter((op) => op.type === 'alter_table_add_column').map((op) => op.key))
-  const moved = orderByDependencies(
-    operations.filter(isAddOrModify),
-    (op) => op.key,
-    (key) => [...(reads.get(key) ?? [])].filter((read) => added.has(read))
+function orderColumnAdds(
+  operations: MigrationOperation[],
+  reads: DependencyGraph,
+  readers: DependencyGraph
+): MigrationOperation[] {
+  const isMoved = (op: MigrationOperation) => COLUMN_CHANGES.has(op.type)
+  const keysOf = (type: MigrationOperation['type']) =>
+    new Set(operations.filter((op) => op.type === type).map((op) => op.key))
+  const added = keysOf('alter_table_add_column')
+  const modified = keysOf('alter_table_modify_column')
+  const dropped = keysOf('alter_table_drop_column')
+  const moved = orderByDependencies(operations.filter(isMoved), (op) => op.key, (key) =>
+    dropped.has(key)
+      ? [...(readers.get(key) ?? [])].filter((reader) => modified.has(reader))
+      : [...(reads.get(key) ?? [])].filter((read) => added.has(read))
   )
   let next = 0
-  return operations.map((op) => (isAddOrModify(op) ? (moved[next++] ?? op) : op))
+  return operations.map((op) => (isMoved(op) ? (moved[next++] ?? op) : op))
 }
+
+const COLUMN_CHANGES: ReadonlySet<MigrationOperation['type']> = new Set([
+  'alter_table_add_column',
+  'alter_table_modify_column',
+  'alter_table_drop_column',
+])
 
 /**
  * Column operation key → keys of the other columns of the same table that the

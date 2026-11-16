@@ -685,4 +685,56 @@ describe('planDiff runs a MODIFY COLUMN after the ADD COLUMN its new expression 
       'ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;',
     ])
   })
+
+  test('keeps a MODIFY before the DROP COLUMN of a column its old expression reads', () => {
+    expect(
+      changedColumns(
+        [
+          { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+          { name: 'c', type: 'UInt64' },
+        ],
+        [
+          { name: 'a', type: 'UInt64', default: { expression: 'z' } },
+          { name: 'b', type: 'UInt64', default: { expression: 'z' } },
+          { name: 'z', type: 'UInt64' },
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z;',
+      'ALTER TABLE app.orders MODIFY COLUMN `b` UInt64 DEFAULT z;',
+      'ALTER TABLE app.orders DROP COLUMN IF EXISTS `c`;',
+    ])
+  })
+
+  test('drops a column after the MODIFY of a column whose old expression reads it', () => {
+    expect(
+      changedColumns(
+        [
+          { name: 'Total', type: 'UInt64', default: { expression: 'old + 1' } },
+          { name: 'old', type: 'UInt64' },
+        ],
+        [
+          { name: 'price', type: 'UInt64' },
+          { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } },
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;',
+      'ALTER TABLE app.orders DROP COLUMN IF EXISTS `old`;',
+    ])
+    expect(
+      changedColumns(
+        [
+          { name: 'c', type: 'UInt64' },
+          { name: 'zb', type: 'UInt64', default: { expression: 'c' } },
+        ],
+        [{ name: 'zb', type: 'UInt64', default: { expression: 'id' } }]
+      )
+    ).toEqual([
+      'ALTER TABLE app.orders MODIFY COLUMN `zb` UInt64 DEFAULT id;',
+      'ALTER TABLE app.orders DROP COLUMN IF EXISTS `c`;',
+    ])
+  })
 })

@@ -771,3 +771,49 @@ def test_moves_every_statement_of_the_column_and_keeps_a_modify_reading_no_new_c
         "ALTER TABLE app.orders MODIFY COLUMN `Total` REMOVE COMMENT;",
         "ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;",
     ]
+
+
+def test_keeps_a_modify_before_the_drop_column_of_a_column_its_old_expression_reads() -> None:
+    assert _changed_columns(
+        [
+            {"name": "b", "type": "UInt64", "default": SQLExpression(expression="c")},
+            {"name": "c", "type": "UInt64"},
+        ],
+        [
+            {"name": "a", "type": "UInt64", "default": SQLExpression(expression="z")},
+            {"name": "b", "type": "UInt64", "default": SQLExpression(expression="z")},
+            {"name": "z", "type": "UInt64"},
+        ],
+    ) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `z` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z;",
+        "ALTER TABLE app.orders MODIFY COLUMN `b` UInt64 DEFAULT z;",
+        "ALTER TABLE app.orders DROP COLUMN IF EXISTS `c`;",
+    ]
+
+
+def test_drops_a_column_after_the_modify_of_a_column_whose_old_expression_reads_it() -> None:
+    assert _changed_columns(
+        [
+            {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="old + 1")},
+            {"name": "old", "type": "UInt64"},
+        ],
+        [
+            {"name": "price", "type": "UInt64"},
+            {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="price + 1")},
+        ],
+    ) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;",
+        "ALTER TABLE app.orders DROP COLUMN IF EXISTS `old`;",
+    ]
+    assert _changed_columns(
+        [
+            {"name": "c", "type": "UInt64"},
+            {"name": "zb", "type": "UInt64", "default": SQLExpression(expression="c")},
+        ],
+        [{"name": "zb", "type": "UInt64", "default": SQLExpression(expression="id")}],
+    ) == [
+        "ALTER TABLE app.orders MODIFY COLUMN `zb` UInt64 DEFAULT id;",
+        "ALTER TABLE app.orders DROP COLUMN IF EXISTS `c`;",
+    ]

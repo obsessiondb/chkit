@@ -835,41 +835,59 @@ def _order_operations(
     drop: DependencyGraph,
     create: DependencyGraph,
     add_column: DependencyGraph,
+    drop_column: DependencyGraph,
 ) -> list[MigrationOperation]:
     """Reorder the drop and create segments of a (rank, key)-sorted plan by object dependencies.
 
     Drops run dependents first, creates run dependencies first (#231). Alters
     and create_database keep their place, but an ADD or MODIFY COLUMN moves
-    behind the ADD COLUMNs its default reads (#681, #745).
+    behind the ADD COLUMNs its default reads (#681, #745), and a DROP COLUMN
+    behind the MODIFYs of the columns whose old default reads it.
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
     creates = [op for op in ordered if _rank(op) >= 3]  # noqa: PLR2004
     return [
         *order_by_dependencies(drops, lambda op: op.key, lambda key: drop.get(key, ())),
-        *_order_column_adds(middle, add_column),
+        *_order_column_adds(middle, add_column, drop_column),
         *order_by_dependencies(creates, lambda op: op.key, lambda key: create.get(key, ())),
     ]
 
 
+_COLUMN_CHANGES = ("alter_table_add_column", "alter_table_modify_column", "alter_table_drop_column")
+
+
 def _order_column_adds(
-    operations: list[MigrationOperation], reads: DependencyGraph
+    operations: list[MigrationOperation], reads: DependencyGraph, readers: DependencyGraph
 ) -> list[MigrationOperation]:
     """Move each ADD (#681) or MODIFY (#745) COLUMN behind the ADD COLUMNs of the columns it reads.
 
-    The expression is the column's DEFAULT, MATERIALIZED or ALIAS one. These
-    operations fill the positions they had, so every other operation keeps its place.
+    The expression is the column's DEFAULT, MATERIALIZED or ALIAS one. Each
+    DROP COLUMN moves behind the MODIFY COLUMNs of the columns whose old
+    expression (``readers``) reads it. These operations fill the positions
+    they had, so every other operation keeps its place.
     """
-    types = ("alter_table_add_column", "alter_table_modify_column")
-    added = {op.key for op in operations if op.type == "alter_table_add_column"}
+
+    def keys_of(type_: str) -> set[str]:
+        return {op.key for op in operations if op.type == type_}
+
+    added = keys_of("alter_table_add_column")
+    modified = keys_of("alter_table_modify_column")
+    dropped = keys_of("alter_table_drop_column")
+
+    def prerequisites(key: str) -> list[str]:
+        if key in dropped:
+            return [reader for reader in readers.get(key, ()) if reader in modified]
+        return [read for read in reads.get(key, ()) if read in added]
+
     moved = iter(
         order_by_dependencies(
-            [op for op in operations if op.type in types],
+            [op for op in operations if op.type in _COLUMN_CHANGES],
             lambda op: op.key,
-            lambda key: [read for read in reads.get(key, ()) if read in added],
+            prerequisites,
         )
     )
-    return [next(moved) if op.type in types else op for op in operations]
+    return [next(moved) if op.type in _COLUMN_CHANGES else op for op in operations]
 
 
 def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
@@ -1037,6 +1055,7 @@ def plan_diff(
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
         create=build_dependency_graph(new_canonical),
         add_column=_column_default_reads(new_canonical),
+        drop_column=invert_dependency_graph(_column_default_reads(old_canonical)),
     )
 
     counts: dict[RiskLevel, int] = {"safe": 0, "caution": 0, "danger": 0}

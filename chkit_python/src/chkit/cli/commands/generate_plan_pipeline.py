@@ -306,16 +306,17 @@ def _sorted(operations: Sequence[MigrationOperation]) -> list[MigrationOperation
     dependency-aware (#231); the classes this pipeline adds to are ordered by
     key, and operations that share a key keep the planner's order (the sort is
     stable), so a column's ``REMOVE DEFAULT`` still runs before its
-    ``MODIFY COLUMN``. The column ADDs and MODIFYs fill their key-order
+    ``MODIFY COLUMN``. The column ADDs, MODIFYs and DROPs fill their key-order
     positions in the planner's order, which puts them after the ADDs their
-    default reads (#681, #745).
+    default reads, and a DROP after the MODIFYs whose old default reads it
+    (#681, #745).
     """
 
     def sort_key(op: MigrationOperation) -> tuple[int, str]:
         rank = _rank_operation(op)
         return (rank, "" if rank in (_DROP_RANK, _CREATE_RANK) else op.key)
 
-    types = ("alter_table_add_column", "alter_table_modify_column")
+    types = ("alter_table_add_column", "alter_table_modify_column", "alter_table_drop_column")
     moved = iter([op for op in operations if op.type in types])
     return [next(moved) if op.type in types else op for op in sorted(operations, key=sort_key)]
 

@@ -202,6 +202,46 @@ describe('plan-pipeline keeps the planner order of drops and creates (#231)', ()
       'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
     ])
   })
+
+  test('column rename keeps a MODIFY COLUMN before the DROP COLUMN its old DEFAULT reads (#745)', () => {
+    const t = (columns: ColumnDefinition[]) =>
+      table({
+        database: 'app',
+        name: 't',
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      })
+    const planned = planDiff(
+      [
+        t([
+          { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+          { name: 'c', type: 'UInt64' },
+          { name: 'r', type: 'String' },
+        ]),
+      ],
+      [
+        t([
+          { name: 'a', type: 'UInt64', default: { expression: 'z' } },
+          { name: 'b', type: 'UInt64', default: { expression: 'z' } },
+          { name: 's', type: 'String' },
+          { name: 'z', type: 'UInt64' },
+        ]),
+      ]
+    )
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'r', to: 's', source: 'cli' }])
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `c`;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `r` TO `s`;',
+    ])
+  })
 })
 
 describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {
