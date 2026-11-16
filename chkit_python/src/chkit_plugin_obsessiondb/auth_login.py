@@ -20,11 +20,22 @@ from chkit_plugin_obsessiondb.credentials import (
     Credentials,
     clear_credentials,
     load_credentials,
+    resolve_base_url,
     save_credentials,
 )
 from chkit_plugin_obsessiondb.json_envelope import (
     error_envelope,
     whoami_envelope,
+)
+from chkit_plugin_obsessiondb.service_api import list_service_organizations
+from chkit_plugin_obsessiondb.service_select import (
+    select_service_interactive,
+    service_choice_label,
+)
+from chkit_plugin_obsessiondb.storage import (
+    SelectedService,
+    load_selected_service,
+    save_selected_service,
 )
 
 
@@ -40,6 +51,34 @@ def _open_browser(url: str) -> None:
         subprocess.Popen(cmd, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
 
 
+def _prompt_service_selection(
+    base_url: str,
+    token: str,
+    config_path: Path,
+    print_fn: Callable[[str], None],
+) -> None:
+    """Offer a service after login. Any failure prints a hint; login still succeeds."""
+    creds = Credentials(access_token=token, base_url=resolve_base_url(base_url))
+    try:
+        organizations = list_service_organizations(creds)
+        choice = select_service_interactive(organizations, print_fn)
+        if choice is not None:
+            save_selected_service(
+                config_path,
+                SelectedService(
+                    organization_id=choice.organization.id,
+                    organization_slug=choice.organization.slug,
+                    service_id=choice.service.id,
+                    service_name=choice.service.name,
+                    service_slug=choice.service.slug,
+                ),
+            )
+            print_fn(f"Service selected: {service_choice_label(choice)}")
+    except Exception as error:
+        print_fn(f"Could not fetch services: {error}")
+        print_fn("You can select a service later with: chkit obsessiondb service select")
+
+
 def run_login(
     base_url: str,
     config_path: Path,
@@ -47,11 +86,11 @@ def run_login(
 ) -> int:
     """Device-code login. Returns exit code (0 on success).
 
-    If an existing token still resolves a session, we just confirm and exit.
-    Otherwise we run the full RFC 8628 device-code dance: request → open
-    browser → poll → save → confirm session.
+    If an existing token still resolves a session, we confirm it and offer a
+    service when none is selected yet. Otherwise we run the full RFC 8628
+    device-code dance: request → open browser → poll → save → confirm session,
+    then offer a service.
     """
-    _ = config_path  # used by promptServiceSelection in TS; service flow ports next
     existing = load_credentials()
     if existing is not None:
         try:
@@ -60,6 +99,10 @@ def run_login(
             clear_credentials()
         else:
             print_fn(f"Already logged in as {session.user.email}")
+            if load_selected_service(config_path) is None:
+                _prompt_service_selection(
+                    existing.base_url, existing.access_token, config_path, print_fn
+                )
             return 0
 
     device = request_device_code(base_url)
@@ -77,6 +120,7 @@ def run_login(
     save_credentials(Credentials(access_token=token, base_url=base_url))
     session = get_session(base_url, token)
     print_fn(f"Logged in as {session.user.email}")
+    _prompt_service_selection(base_url, token, config_path, print_fn)
     return 0
 
 

@@ -6,14 +6,14 @@ Two surfaces:
 
 - ``render_service_organizations`` — pure function that returns the lines
   to print for non-interactive output (``chkit obsessiondb service list``).
-- ``select_service_interactive`` — TTY picker that returns the user's
+- ``select_service_interactive`` — stdin picker that returns the user's
   choice (or None on cancellation). Auto-selects when there's a single
   service available.
 """
 
 from __future__ import annotations
 
-import sys
+import re
 from collections.abc import Callable
 from dataclasses import dataclass
 
@@ -73,11 +73,7 @@ def render_service_organizations(
     return lines
 
 
-def _is_tty_stdin() -> bool:
-    return bool(getattr(sys.stdin, "isatty", lambda: False)())
-
-
-def select_service_interactive(  # noqa: PLR0911
+def select_service_interactive(
     organizations: list[ServiceOrganization],
     print_fn: Callable[[str], None],
 ) -> ServiceChoice | None:
@@ -105,22 +101,18 @@ def select_service_interactive(  # noqa: PLR0911
             print_fn(f"  {n}. {service.name} ({service.status})")
             n += 1
 
-    if not _is_tty_stdin():
-        print_fn(
-            "Run this command in an interactive terminal to choose, "
-            "or pass --service <name>."
-        )
-        return None
-
+    # Like the TS readline prompt, read the answer from stdin even when it is
+    # not a TTY, so `printf '2\n' | chkit obsessiondb service select` works.
     try:
         answer = input(f"\nSelect service [1-{len(choices)}]: ").strip()
     except EOFError:
         return None
-    try:
-        index = int(answer) - 1
-    except ValueError:
+    # parseInt semantics: the leading integer counts, trailing text is ignored.
+    number = re.match(r"[+-]?[0-9]+", answer)
+    if number is None:
         print_fn("Invalid selection.")
         return None
+    index = int(number.group()) - 1
     if index < 0 or index >= len(choices):
         print_fn("Invalid selection.")
         return None
