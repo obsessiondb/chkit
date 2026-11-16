@@ -1,0 +1,5 @@
+---
+"@chkit/plugin-obsessiondb": patch
+---
+
+`chkit obsessiondb login` no longer waits for a service choice when stdin is not a terminal and you have several services; it prints the hint to run `chkit obsessiondb service select` and exits 0.

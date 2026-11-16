@@ -12,6 +12,8 @@ against the same responses.
 from __future__ import annotations
 
 import json
+import subprocess
+import sys
 import threading
 from collections.abc import Iterator
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -38,6 +40,7 @@ DEVICE_LOGIN_OUTPUT = (
     "Waiting for authorization...\n"
     f"Logged in as {EMAIL}\n"
 )
+SELECT_LATER_HINT = "You can select a service later with: chkit obsessiondb service select\n"
 
 
 def _service(n: int, status: str = "running") -> dict[str, object]:
@@ -294,11 +297,12 @@ def test_login_auto_selects_the_only_service(console: _ConsoleStub, tmp_path: Pa
     assert _selected_service(tmp_path) == {"service_slug": "svc-1", "service_name": "Svc 1"}
 
 
-# stdin is not a TTY here; TS still reads the answer, with parseInt ("2x" picks 2).
+# With a TTY, login reads the answer like TS, with parseInt ("2x" picks 2).
 @pytest.mark.parametrize("answer", ["2\n", "2x\n"])
 def test_login_reads_the_service_choice_from_stdin(
-    console: _ConsoleStub, tmp_path: Path, answer: str
+    console: _ConsoleStub, tmp_path: Path, monkeypatch: pytest.MonkeyPatch, answer: str
 ) -> None:
+    monkeypatch.setattr(auth_login, "_stdin_is_tty", lambda: True)
     console.organizations = THREE_SERVICES
     assert _chkit("login", "--api-url", console.url, stdin=answer) == (
         0,
@@ -312,12 +316,81 @@ def test_login_reads_the_service_choice_from_stdin(
     [("", ""), ("abc\n", "Invalid selection.\n"), ("9\n", "Invalid selection.\n")],
 )
 def test_login_without_a_valid_choice_selects_nothing_and_succeeds(
-    console: _ConsoleStub, tmp_path: Path, answer: str, tail: str
+    console: _ConsoleStub,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    answer: str,
+    tail: str,
 ) -> None:
+    monkeypatch.setattr(auth_login, "_stdin_is_tty", lambda: True)
     console.organizations = THREE_SERVICES
     assert _chkit("login", "--api-url", console.url, stdin=answer) == (
         0,
         DEVICE_LOGIN_OUTPUT + THREE_SERVICES_OUTPUT + tail,
+    )
+    assert _selected_service(tmp_path) is None
+
+
+def test_login_without_a_tty_skips_the_choice_and_prints_the_hint(
+    console: _ConsoleStub, tmp_path: Path
+) -> None:
+    """CliRunner's stdin is not a TTY, so the piped answer is not read (#739)."""
+    console.organizations = THREE_SERVICES
+    assert _chkit("login", "--api-url", console.url, stdin="2\n") == (
+        0,
+        DEVICE_LOGIN_OUTPUT + SELECT_LATER_HINT,
+    )
+    assert _selected_service(tmp_path) is None
+
+
+def test_login_without_a_tty_still_auto_selects_the_only_service(
+    console: _ConsoleStub, tmp_path: Path
+) -> None:
+    console.organizations = ONE_SERVICE
+    assert _chkit("login", "--api-url", console.url) == (
+        0,
+        DEVICE_LOGIN_OUTPUT
+        + "Auto-selected service: Acme (acme) / Svc 1 (running)\n"
+        + "Service selected: Acme (acme) / Svc 1\n",
+    )
+    assert _selected_service(tmp_path) == {"service_slug": "svc-1", "service_name": "Svc 1"}
+
+
+def test_login_returns_while_stdin_is_an_open_pipe_without_data(
+    console: _ConsoleStub, tmp_path: Path
+) -> None:
+    """A parent that keeps the pipe open and sends nothing must not hang login (#739)."""
+    save_credentials(Credentials(access_token="old-token", base_url=console.url))
+    console.organizations = THREE_SERVICES
+    child = subprocess.Popen(
+        [
+            sys.executable,
+            "-c",
+            "from chkit.cli.main import app; app()",
+            "obsessiondb",
+            "login",
+            "--api-url",
+            console.url,
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+        text=True,
+    )
+    # wait(), not communicate(): communicate() closes stdin, which would end the
+    # prompt with EOF. The output is small enough not to fill the pipes.
+    try:
+        returncode = child.wait(timeout=30)
+    finally:
+        child.kill()
+        assert child.stdin is not None
+        child.stdin.close()
+    assert child.stdout is not None
+    assert child.stderr is not None
+    assert (returncode, child.stdout.read(), child.stderr.read()) == (
+        0,
+        f"Already logged in as {EMAIL}\n" + SELECT_LATER_HINT,
+        "",
     )
     assert _selected_service(tmp_path) is None
 
