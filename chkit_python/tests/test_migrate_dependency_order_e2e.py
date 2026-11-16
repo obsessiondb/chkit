@@ -460,6 +460,96 @@ def test_orders_the_column_statements_of_a_table(
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")
 
 
+def test_drops_a_skip_index_before_the_column_it_reads_when_a_column_rename_is_applied(
+    ch_client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The DROP INDEX sorts after the DROP COLUMN by key (`column` < `index`);
+    # the planner runs it first, and a rename in the same plan must keep that
+    # (#747). ClickHouse rejects dropping `x` while `idx_x` reads it.
+    client = ch_client._client
+    env = resolve_live_env()
+    db = client.database
+    journal_table = create_journal_table_name("idxdrop_py")
+    events = f"{create_prefix('idxdrop')}events"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
+    monkeypatch.setenv("CI", "1")
+    runner = CliRunner()
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": db,
+            },
+        })
+        + ")\n"
+    )
+
+    def generate_and_migrate(
+        columns: str, indexes: str, name: str, migration_id: str, extra_args: list[str]
+    ) -> str:
+        (tmp_path / "schema.py").write_text(
+            "from chkit import schema, table\n\n"
+            f"definitions = schema(table(database={db!r}, name={events!r}, "
+            f"columns=[{{'name': 'id', 'type': 'UInt64'}}{columns}], indexes=[{indexes}], "
+            "engine='MergeTree()', primary_key=['id'], order_by=['id']))\n"
+        )
+        gen = runner.invoke(
+            app,
+            ["generate", "--name", name, "--migration-id", migration_id, *extra_args, "--json"],
+        )
+        assert gen.exit_code == 0, format_test_diagnostic(f"generate ({name}) failed", gen)
+        migrate = _run_migrate(runner, ["migrate", "--execute", "--allow-destructive", "--json"])
+        assert migrate.exit_code == 0, format_test_diagnostic(f"migrate ({name}) failed", migrate)
+        return (tmp_path / "chkit" / "migrations" / f"{migration_id}_{name}.sql").read_text()
+
+    def read_columns() -> list[str]:
+        rows = client.query(
+            "SELECT name FROM system.columns WHERE database = {db:String} AND table = {t:String} "
+            "ORDER BY name",
+            parameters={"db": db, "t": events},
+        ).result_rows
+        return [str(row[0]) for row in rows]
+
+    try:
+        generate_and_migrate(
+            ", {'name': 'a', 'type': 'String'}, {'name': 'x', 'type': 'String'}",
+            "{'name': 'idx_x', 'expression': 'x', 'type': 'bloom_filter', 'granularity': 1}",
+            "init",
+            "20990101000000",
+            [],
+        )
+        drop_sql = generate_and_migrate(
+            ", {'name': 'b', 'type': 'String'}",
+            "",
+            "drop",
+            "20990101000001",
+            ["--rename-column", f"{db}.{events}.a=b"],
+        )
+        _assert_in_order(drop_sql, [
+            f"table:{db}.{events}:index:idx_x",
+            f"table:{db}.{events}:column:x",
+            f"table:{db}.{events}:column_rename:a:b",
+        ])
+
+        deadline = time.monotonic() + 60
+        columns = read_columns()
+        while columns != ["b", "id"] and time.monotonic() < deadline:
+            time.sleep(1)
+            columns = read_columns()
+        assert columns == ["b", "id"]
+    finally:
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(events)}")
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")
+
+
 def test_adds_a_dotted_column_before_the_add_column_whose_default_reads_it_unquoted(
     ch_client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

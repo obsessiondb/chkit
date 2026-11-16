@@ -367,6 +367,89 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
       await rm(dir, { recursive: true, force: true })
     }
   }, 120_000)
+
+  // The column DROP INDEX sorts after the DROP COLUMN by key (`column` <
+  // `index`); the planner runs it first, and a rename in the same plan must
+  // keep that (#747). ClickHouse rejects dropping `x` while `idx_x` reads it.
+  test('drops a skip index before the column it reads when a column rename is applied', async () => {
+    const liveEnv = getLiveEnv()
+    const executor = createLiveExecutor(liveEnv)
+    const db = liveEnv.clickhouseDatabase
+    const journalTable = createJournalTableName('idxdrop')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable, CI: '1' }
+    const events = `${createPrefix('idxdrop')}events`
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-idxdrop-e2e-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+    const migrationsDir = join(dir, 'chkit/migrations')
+    const writeSchema = (columns: string, indexes: string) =>
+      writeFile(
+        schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\n` +
+          `export default schema(table({ database: '${db}', name: '${events}', columns: [{ name: 'id', type: 'UInt64' }${columns}], indexes: [${indexes}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
+        'utf8'
+      )
+    const generateAndMigrate = async (name: string, migrationId: string, extraArgs: string[]) => {
+      const generated = runCli(
+        dir,
+        ['generate', '--config', configPath, '--name', name, '--migration-id', migrationId, ...extraArgs, '--json'],
+        cliEnv
+      )
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic(`generate (${name}) failed`, generated))
+      const migrated = await runCliWithRetry(
+        dir,
+        ['migrate', '--config', configPath, '--execute', '--allow-destructive', '--json'],
+        { extraEnv: cliEnv }
+      )
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic(`migrate --execute (${name}) failed`, migrated))
+      return readFile(join(migrationsDir, `${migrationId}_${name}.sql`), 'utf8')
+    }
+
+    try {
+      await writeFile(
+        configPath,
+        `export default {\n` +
+          `  schema: '${schemaPath}',\n` +
+          `  outDir: '${join(dir, 'chkit')}',\n` +
+          `  migrationsDir: '${migrationsDir}',\n` +
+          `  metaDir: '${join(dir, 'chkit/meta')}',\n` +
+          `  clickhouse: {\n` +
+          `    url: '${liveEnv.clickhouseUrl}',\n` +
+          `    username: '${liveEnv.clickhouseUser}',\n` +
+          `    password: '${liveEnv.clickhousePassword}',\n` +
+          `    database: '${db}',\n` +
+          `  },\n}\n`,
+        'utf8'
+      )
+      await writeSchema(
+        ", { name: 'a', type: 'String' }, { name: 'x', type: 'String' }",
+        "{ name: 'idx_x', expression: 'x', type: 'bloom_filter', granularity: 1 }"
+      )
+      await generateAndMigrate('init', '20990101000000', [])
+      await waitForColumn(executor, db, events, 'x')
+
+      await writeSchema(", { name: 'b', type: 'String' }", '')
+      const dropSql = await generateAndMigrate('drop', '20990101000001', ['--rename-column', `${db}.${events}.a=b`])
+      expectInOrder(dropSql, [
+        'DROP INDEX IF EXISTS `idx_x`;',
+        'DROP COLUMN IF EXISTS `x`;',
+        'RENAME COLUMN IF EXISTS `a` TO `b`;',
+      ])
+      await waitForColumn(executor, db, events, 'b')
+      const readColumns = async () =>
+        (
+          await executor.query<{ name: string }>(
+            `SELECT name FROM system.columns WHERE database = '${db}' AND table = '${events}' ORDER BY name`
+          )
+        ).map((row) => row.name)
+      expect(await pollUntil(readColumns, (names) => !names.includes('x'))).toEqual(['b', 'id'])
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(events)}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 120_000)
 })
 
 /**

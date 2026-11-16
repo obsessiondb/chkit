@@ -22,6 +22,13 @@ import type { ColumnRenameMapping, DictionaryRenameMapping, TableRenameMapping }
 // dependency-aware (#231); the classes this pipeline adds to sort by key.
 const DROP_RANK = 0
 const CREATE_RANK = 4
+// As in planDiff, these drops run before every other ALTER: a skip index,
+// constraint or projection that reads a column blocks its DROP COLUMN (#747).
+const DEPENDENT_DROPS: ReadonlySet<MigrationOperation['type']> = new Set([
+  'alter_table_drop_index',
+  'alter_table_drop_constraint',
+  'alter_table_drop_projection',
+])
 
 /**
  * Replaces each selected (DROP, ADD) column pair with a RENAME COLUMN, then
@@ -233,11 +240,12 @@ export function assertCliColumnMappingsResolvable(
  * Combines the planner's operations (minus the ones a rename replaces) with the
  * rename/create_database operations added here. Drops and object creates keep
  * the planner's order, which is dependency-aware (#231); the classes this
- * pipeline adds to are ordered by key, and operations that share a key keep
- * the planner's order, so a column's `REMOVE DEFAULT` still runs before its
- * `MODIFY COLUMN`. The planner's column statements fill their key-order
- * positions in the planner's order, which is dependency-aware (#681, #745);
- * `applySelectedRenameSuggestions` orders them again with its renames.
+ * pipeline adds to are ordered by key, after the drops of skip indexes,
+ * constraints and projections as in planDiff (#747), and operations that
+ * share a key keep the planner's order, so a column's `REMOVE DEFAULT` still
+ * runs before its `MODIFY COLUMN`. The planner's column statements fill their
+ * key-order positions in the planner's order, which is dependency-aware (#681,
+ * #745); `applySelectedRenameSuggestions` orders them again with its renames.
  */
 function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]): MigrationOperation[] {
   const planned = kept.filter(isColumnStatement)
@@ -251,7 +259,11 @@ function mergeOperations(kept: MigrationOperation[], added: MigrationOperation[]
       const rankOrder = rank - rankOperation(b.operation)
       if (rankOrder !== 0) return rankOrder
       if (rank === DROP_RANK || rank === CREATE_RANK) return a.index - b.index
-      return compareCodePoints(a.operation.key, b.operation.key) || a.index - b.index
+      return (
+        alterRank(a.operation) - alterRank(b.operation) ||
+        compareCodePoints(a.operation.key, b.operation.key) ||
+        a.index - b.index
+      )
     })
     .map(({ operation }) => (isPlanned(operation) ? (planned[next++] ?? operation) : operation))
 }
@@ -262,6 +274,10 @@ function rankOperation(op: MigrationOperation): number {
   if (op.type === 'alter_table_rename_table' || op.type === 'rename_dictionary') return 2
   if (op.type.startsWith('alter_')) return 3
   return CREATE_RANK
+}
+
+function alterRank(op: MigrationOperation): number {
+  return DEPENDENT_DROPS.has(op.type) ? 0 : 1
 }
 
 function summarizeRisk(operations: MigrationOperation[]): Record<RiskLevel, number> {
