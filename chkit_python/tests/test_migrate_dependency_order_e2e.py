@@ -300,3 +300,72 @@ def test_adds_a_column_before_the_add_column_whose_default_reads_it(
     finally:
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")
+
+
+def test_adds_a_column_before_the_modify_column_whose_new_default_reads_it(
+    ch_client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `Total` sorts before `price` by code point, but its new DEFAULT reads
+    # `price` (#745). ClickHouse rejects the MODIFY COLUMN of `Total` while
+    # `price` is missing.
+    client = ch_client._client
+    env = resolve_live_env()
+    db = client.database
+    journal_table = create_journal_table_name("modorder_py")
+    orders = f"{create_prefix('modorder')}orders"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
+    monkeypatch.setenv("CI", "1")
+    runner = CliRunner()
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": db,
+            },
+        })
+        + ")\n"
+    )
+
+    def generate_and_migrate(columns: str, name: str, migration_id: str) -> str:
+        (tmp_path / "schema.py").write_text(
+            "from chkit import SQLExpression, schema, table\n\n"
+            f"definitions = schema(table(database={db!r}, name={orders!r}, "
+            f"columns=[{{'name': 'id', 'type': 'UInt64'}}{columns}], engine='MergeTree()', "
+            "primary_key=['id'], order_by=['id']))\n"
+        )
+        gen = runner.invoke(
+            app, ["generate", "--name", name, "--migration-id", migration_id, "--json"])
+        assert gen.exit_code == 0, format_test_diagnostic(f"generate ({name}) failed", gen)
+        migrate = _run_migrate(runner, ["migrate", "--execute", "--json"])
+        assert migrate.exit_code == 0, format_test_diagnostic(f"migrate ({name}) failed", migrate)
+        return (tmp_path / "chkit" / "migrations" / f"{migration_id}_{name}.sql").read_text()
+
+    try:
+        generate_and_migrate(
+            ", {'name': 'Total', 'type': 'UInt64', 'default': SQLExpression(expression='id')}",
+            "init",
+            "20990101000000",
+        )
+        modify_sql = generate_and_migrate(
+            ", {'name': 'price', 'type': 'UInt64'}, {'name': 'Total', 'type': 'UInt64', "
+            "'default': SQLExpression(expression='price + 1')}",
+            "modify",
+            "20990101000001",
+        )
+        _assert_in_order(modify_sql, [f"table:{db}.{orders}:column:price",
+                                      f"table:{db}.{orders}:column:Total"])
+
+        client.command(f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, price) VALUES (1, 41)")
+        rows = client.query(f"SELECT Total FROM {quote_ident(db)}.{quote_ident(orders)}").result_rows
+        assert [int(row[0]) for row in rows] == [42]
+    finally:
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")

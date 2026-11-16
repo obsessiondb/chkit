@@ -721,3 +721,53 @@ def test_keeps_key_order_for_a_cycle_and_for_names_inside_string_literals() -> N
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c` String DEFAULT concat('d', toString(id));",
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;",
     ]
+
+
+# ---------- MODIFY COLUMN after the ADD COLUMN its new expression reads (#745) ----------
+
+
+def _changed_columns(before: list[dict[str, Any]], after: list[dict[str, Any]]) -> list[str]:
+    def orders(extra: list[dict[str, Any]]) -> TableDefinition:
+        return table(
+            database="app",
+            name="orders",
+            columns=[{"name": "id", "type": "UInt64"}, *extra],
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+        )
+
+    return [op.sql for op in plan_diff([orders(before)], [orders(after)]).operations]
+
+
+def test_changes_a_default_to_read_a_new_column_after_adding_it() -> None:
+    assert _changed_columns(
+        [{"name": "Total", "type": "UInt64", "default": SQLExpression(expression="id")}],
+        [
+            {"name": "price", "type": "UInt64"},
+            {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="price + 1")},
+        ],
+    ) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;",
+    ]
+
+
+def test_moves_every_statement_of_the_column_and_keeps_a_modify_reading_no_new_column() -> None:
+    assert _changed_columns(
+        [
+            {"name": "Amount", "type": "UInt64", "default": SQLExpression(expression="id")},
+            {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="id * 2"),
+             "comment": "old"},
+        ],
+        [
+            {"name": "Amount", "type": "UInt64", "default": SQLExpression(expression="Total + id")},
+            {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="price + 1")},
+            {"name": "price", "type": "UInt64"},
+        ],
+    ) == [
+        "ALTER TABLE app.orders MODIFY COLUMN `Amount` UInt64 DEFAULT Total + id;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.orders MODIFY COLUMN `Total` REMOVE COMMENT;",
+        "ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;",
+    ]

@@ -821,8 +821,8 @@ function alterRank(op: MigrationOperation): number {
 /**
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
- * first. Alters and create_database keep their place, but an ADD COLUMN
- * moves behind the ADD COLUMNs its default reads (#681).
+ * first. Alters and create_database keep their place, but an ADD or MODIFY
+ * COLUMN moves behind the ADD COLUMNs its default reads (#681, #745).
  */
 function orderOperations(
   sorted: MigrationOperation[],
@@ -839,15 +839,22 @@ function orderOperations(
 }
 
 /**
- * Moves each ADD COLUMN behind the ADD COLUMNs of the columns that its
- * DEFAULT, MATERIALIZED or ALIAS expression reads (#681). The ADD COLUMNs
- * fill the positions they had, so every other operation keeps its place.
+ * Moves each ADD COLUMN (#681) and MODIFY COLUMN (#745) behind the ADD
+ * COLUMNs of the columns that its DEFAULT, MATERIALIZED or ALIAS expression
+ * reads. These operations fill the positions they had, so every other
+ * operation keeps its place.
  */
 function orderColumnAdds(operations: MigrationOperation[], reads: DependencyGraph): MigrationOperation[] {
-  const isAdd = (op: MigrationOperation) => op.type === 'alter_table_add_column'
-  const adds = orderByDependencies(operations.filter(isAdd), (op) => op.key, (key) => reads.get(key) ?? [])
+  const isAddOrModify = (op: MigrationOperation) =>
+    op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column'
+  const added = new Set(operations.filter((op) => op.type === 'alter_table_add_column').map((op) => op.key))
+  const moved = orderByDependencies(
+    operations.filter(isAddOrModify),
+    (op) => op.key,
+    (key) => [...(reads.get(key) ?? [])].filter((read) => added.has(read))
+  )
   let next = 0
-  return operations.map((op) => (isAdd(op) ? (adds[next++] ?? op) : op))
+  return operations.map((op) => (isAddOrModify(op) ? (moved[next++] ?? op) : op))
 }
 
 /**

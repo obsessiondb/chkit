@@ -839,8 +839,8 @@ def _order_operations(
     """Reorder the drop and create segments of a (rank, key)-sorted plan by object dependencies.
 
     Drops run dependents first, creates run dependencies first (#231). Alters
-    and create_database keep their place, but an ADD COLUMN moves behind the
-    ADD COLUMNs its default reads (#681).
+    and create_database keep their place, but an ADD or MODIFY COLUMN moves
+    behind the ADD COLUMNs its default reads (#681, #745).
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
@@ -855,19 +855,21 @@ def _order_operations(
 def _order_column_adds(
     operations: list[MigrationOperation], reads: DependencyGraph
 ) -> list[MigrationOperation]:
-    """Move each ADD COLUMN behind the ADD COLUMNs of the columns its expression reads (#681).
+    """Move each ADD (#681) or MODIFY (#745) COLUMN behind the ADD COLUMNs of the columns it reads.
 
-    The expression is the column's DEFAULT, MATERIALIZED or ALIAS one. The ADD
-    COLUMNs fill the positions they had, so every other operation keeps its place.
+    The expression is the column's DEFAULT, MATERIALIZED or ALIAS one. These
+    operations fill the positions they had, so every other operation keeps its place.
     """
-    adds = iter(
+    types = ("alter_table_add_column", "alter_table_modify_column")
+    added = {op.key for op in operations if op.type == "alter_table_add_column"}
+    moved = iter(
         order_by_dependencies(
-            [op for op in operations if op.type == "alter_table_add_column"],
+            [op for op in operations if op.type in types],
             lambda op: op.key,
-            lambda key: reads.get(key, ()),
+            lambda key: [read for read in reads.get(key, ()) if read in added],
         )
     )
-    return [next(adds) if op.type == "alter_table_add_column" else op for op in operations]
+    return [next(moved) if op.type in types else op for op in operations]
 
 
 def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:

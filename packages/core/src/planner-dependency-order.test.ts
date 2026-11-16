@@ -636,3 +636,53 @@ describe('planDiff orders ADD COLUMNs by the columns their expressions read (#68
     ])
   })
 })
+
+describe('planDiff runs a MODIFY COLUMN after the ADD COLUMN its new expression reads (#745)', () => {
+  const orders = (columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name: 'orders',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+  const changedColumns = (before: ColumnDefinition[], after: ColumnDefinition[]) =>
+    planDiff([orders(before)], [orders(after)]).operations.map((op) => op.sql)
+
+  test('changes a DEFAULT to read a new column after adding it, although its name sorts first', () => {
+    expect(
+      changedColumns(
+        [{ name: 'Total', type: 'UInt64', default: { expression: 'id' } }],
+        [
+          { name: 'price', type: 'UInt64' },
+          { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } },
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;',
+    ])
+  })
+
+  test('moves every statement of the column and keeps a MODIFY that reads no new column in place', () => {
+    expect(
+      changedColumns(
+        [
+          { name: 'Amount', type: 'UInt64', default: { expression: 'id' } },
+          { name: 'Total', type: 'UInt64', default: { expression: 'id * 2' }, comment: 'old' },
+        ],
+        [
+          { name: 'Amount', type: 'UInt64', default: { expression: 'Total + id' } },
+          { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } },
+          { name: 'price', type: 'UInt64' },
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.orders MODIFY COLUMN `Amount` UInt64 DEFAULT Total + id;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders MODIFY COLUMN `Total` REMOVE COMMENT;',
+      'ALTER TABLE app.orders MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;',
+    ])
+  })
+})

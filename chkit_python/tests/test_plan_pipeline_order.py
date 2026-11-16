@@ -197,3 +197,40 @@ def test_column_rename_keeps_an_add_column_after_the_add_column_its_default_read
         "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;",
         "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
     ]
+
+
+def test_column_rename_keeps_a_modify_column_after_the_add_column_its_new_default_reads() -> None:
+    # #745: the rename pipeline re-sorts the alters by key; `Total` sorts
+    # before `price`, but its new DEFAULT reads `price`.
+    def t(columns: list[dict[str, Any]]) -> TableDefinition:
+        return table(
+            database="app",
+            name="t",
+            engine="MergeTree()",
+            primary_key=["id"],
+            order_by=["id"],
+            columns=[{"name": "id", "type": "UInt64"}, *columns],
+        )
+
+    planned = plan_diff(
+        [t([
+            {"name": "a", "type": "String"},
+            {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="id")},
+        ])],
+        [t([
+            {"name": "b", "type": "String"},
+            {"name": "price", "type": "UInt64"},
+            {"name": "Total", "type": "UInt64", "default": SQLExpression(expression="price + 1")},
+        ])],
+    )
+    plan = apply_selected_rename_suggestions(
+        planned,
+        build_explicit_column_rename_suggestions(
+            planned, [ColumnRenameMapping("app", "t", "a", "b", "cli")]
+        ),
+    )
+    assert [op.sql for op in plan.operations] == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+    ]
