@@ -58,7 +58,7 @@ import {
   orderByDependencies,
   type DependencyGraph,
 } from './object-dependencies.js'
-import { identifierName, tokenizeSQL } from './sql-lexer.js'
+import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -851,6 +851,47 @@ function orderColumnAdds(operations: MigrationOperation[], reads: DependencyGrap
 }
 
 /**
+ * The column names that `sql` reads, from runs of bare or quoted names joined
+ * by dots (`n.x`, `` `n`.`x` ``, comments around the dot). Like ClickHouse, a
+ * run reads its longest leading part that is a column: `n.x` reads the column
+ * `n.x` when there is one, and otherwise `n` (a subcolumn of `n`). A run whose
+ * leading parts are no column is read without them, so `t.col` and
+ * `db.t.col` read `col` (#748).
+ */
+function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
+  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  const found: string[] = []
+  let i = 0
+  while (i < tokens.length) {
+    const run: string[] = []
+    for (let name = identifierName(tokens[i]!); name !== undefined; ) {
+      run.push(name)
+      i += 1
+      if (tokens[i]?.text !== '.') break
+      const next = tokens[i + 1]
+      name = next === undefined ? undefined : identifierName(next)
+      if (name !== undefined) i += 1
+    }
+    if (run.length === 0) i += 1
+    for (let start = 0; start < run.length; start += 1) {
+      const name = longestColumnPrefix(run.slice(start), columns)
+      if (name === undefined) continue
+      found.push(name)
+      break
+    }
+  }
+  return found
+}
+
+function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): string | undefined {
+  for (let end = parts.length; end > 0; end -= 1) {
+    const name = parts.slice(0, end).join('.')
+    if (columns.has(name)) return name
+  }
+  return undefined
+}
+
+/**
  * Column operation key → keys of the other columns of the same table that the
  * column's default expression names. A name can also be a function or a
  * lambda parameter; such an extra edge moves an ADD COLUMN later, or makes a
@@ -867,9 +908,8 @@ function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
       const read = new Set<string>()
-      for (const token of tokenizeSQL(parsed.sql)) {
-        const name = identifierName(token)
-        if (name !== undefined && name !== column.name && names.has(name)) read.add(columnKey(name))
+      for (const name of dottedNames(parsed.sql, names)) {
+        if (name !== column.name) read.add(columnKey(name))
       }
       graph.set(columnKey(column.name), read)
     }

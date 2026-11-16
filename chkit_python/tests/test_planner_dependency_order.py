@@ -721,3 +721,44 @@ def test_keeps_key_order_for_a_cycle_and_for_names_inside_string_literals() -> N
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c` String DEFAULT concat('d', toString(id));",
         "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;",
     ]
+
+
+def test_adds_a_dotted_column_before_the_default_that_reads_it_without_backquotes() -> None:
+    assert _added_columns([
+        {"name": "a", "type": "UInt64", "default": SQLExpression(expression="arraySum(n.x)")},
+        {"name": "n.x", "type": "Array(UInt64)"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT arraySum(n.x);",
+    ]
+
+
+def test_a_dotted_run_reads_its_longest_leading_column_not_a_shorter_prefix() -> None:
+    assert _added_columns([
+        {"name": "a", "type": "UInt64",
+         "default": SQLExpression(expression="length(n.x) + `n`.`x`[1]")},
+        {"name": "b", "type": "UInt64", "default": SQLExpression(expression="a + 1")},
+        {"name": "n", "type": "Tuple(x Array(UInt64))",
+         "default": SQLExpression(expression="tuple([b])")},
+        {"name": "n.x", "type": "Array(UInt64)"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length(n.x) + `n`.`x`[1];",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(x Array(UInt64)) DEFAULT tuple([b]);",
+    ]
+
+
+def test_a_qualifier_that_is_no_column_is_dropped_and_a_column_prefix_is_read() -> None:
+    assert _added_columns([
+        {"name": "a", "type": "UInt64",
+         "default": SQLExpression(expression="app.orders.price + orders.qty + t.first")},
+        {"name": "price", "type": "UInt64"},
+        {"name": "qty", "type": "UInt64"},
+        {"name": "t", "type": "Tuple(first UInt64)"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `qty` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `t` Tuple(first UInt64);",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT app.orders.price + orders.qty + t.first;",
+    ]

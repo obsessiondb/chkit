@@ -68,7 +68,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
-from chkit.core.sql_lexer import identifier_name, js_regex, js_trim, tokenize_sql
+from chkit.core.sql_lexer import identifier_name, is_trivia, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
@@ -870,6 +870,47 @@ def _order_column_adds(
     return [next(adds) if op.type == "alter_table_add_column" else op for op in operations]
 
 
+def _dotted_names(sql: str, columns: set[str]) -> list[str]:
+    """The column names that ``sql`` reads, from runs of bare or quoted names joined by dots.
+
+    A run is ``n.x`` with bare or quoted parts and any comments around the dot. Like
+    ClickHouse, a run reads its longest leading part that is a column: ``n.x``
+    reads the column ``n.x`` when there is one, and otherwise ``n`` (a subcolumn
+    of ``n``). A run whose leading parts are no column is read without them, so
+    ``t.col`` and ``db.t.col`` read ``col`` (#748).
+    """
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    found: list[str] = []
+    i = 0
+    while i < len(tokens):
+        run: list[str] = []
+        name = identifier_name(tokens[i])
+        while name is not None:
+            run.append(name)
+            i += 1
+            if i >= len(tokens) or tokens[i].text != ".":
+                break
+            name = identifier_name(tokens[i + 1]) if i + 1 < len(tokens) else None
+            if name is not None:
+                i += 1
+        if not run:
+            i += 1
+        for start in range(len(run)):
+            match = _longest_column_prefix(run[start:], columns)
+            if match is not None:
+                found.append(match)
+                break
+    return found
+
+
+def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
+    for end in range(len(parts), 0, -1):
+        name = ".".join(parts[:end])
+        if name in columns:
+            return name
+    return None
+
+
 def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
@@ -889,9 +930,8 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             if parsed.kind != "expression":
                 continue
             read: set[str] = set()
-            for token in tokenize_sql(parsed.sql):
-                name = identifier_name(token)
-                if name is not None and name != column.name and name in names:
+            for name in _dotted_names(parsed.sql, names):
+                if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
     return graph

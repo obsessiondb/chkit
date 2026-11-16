@@ -635,4 +635,48 @@ describe('planDiff orders ADD COLUMNs by the columns their expressions read (#68
       'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;',
     ])
   })
+
+  test('adds a dotted column before the DEFAULT that reads it without backquotes (#748)', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'arraySum(n.x)' } },
+        { name: 'n.x', type: 'Array(UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT arraySum(n.x);',
+    ])
+  })
+
+  test('a dotted run reads its longest leading column, not a shorter column prefix', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'length(n.x) + `n`.`x`[1]' } },
+        { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } },
+        { name: 'n', type: 'Tuple(x Array(UInt64))', default: { expression: 'tuple([b])' } },
+        { name: 'n.x', type: 'Array(UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length(n.x) + `n`.`x`[1];',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(x Array(UInt64)) DEFAULT tuple([b]);',
+    ])
+  })
+
+  test('a qualifier that is no column is dropped from a dotted run, and a column prefix is read', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'app.orders.price + orders.qty + t.first' } },
+        { name: 'price', type: 'UInt64' },
+        { name: 'qty', type: 'UInt64' },
+        { name: 't', type: 'Tuple(first UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `qty` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `t` Tuple(first UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT app.orders.price + orders.qty + t.first;',
+    ])
+  })
 })
