@@ -776,6 +776,55 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 
+  // ClickHouse resolves `dummy.z` in table `dummy` to the column `z` when the
+  // column `dummy` has no subcolumn `z`, so the run reads `z` too.
+  test('a dotted run reads the column after a column named like its table', () => {
+    expect(
+      sqls(
+        [t([{ name: 'dummy', type: 'UInt64' }], 'dummy')],
+        [
+          t(
+            [
+              { name: 'dummy', type: 'UInt64' },
+              { name: 'a', type: 'UInt64', default: { expression: 'dummy.z' } },
+              { name: 'z', type: 'UInt64' },
+            ],
+            'dummy'
+          ),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.dummy ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      'ALTER TABLE app.dummy ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT dummy.z;',
+    ])
+    expect(
+      sqls(
+        [
+          t(
+            [
+              { name: 'dummy', type: 'UInt64' },
+              { name: 'x', type: 'UInt64' },
+              { name: 'z', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'dummy.x' } },
+            ],
+            'dummy'
+          ),
+        ],
+        [
+          t(
+            [
+              { name: 'dummy', type: 'UInt64' },
+              { name: 'z', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'id' } },
+            ],
+            'dummy'
+          ),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.dummy MODIFY COLUMN `z` UInt64 MATERIALIZED id;',
+      'ALTER TABLE app.dummy DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
   test('a function call named like a column is not a read', () => {
     expect(
       sqls(
