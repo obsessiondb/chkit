@@ -7,17 +7,20 @@ another source, structure, layout, lifetime or settings must drift.
 
 from __future__ import annotations
 
+import contextlib
 from pathlib import Path
+from typing import Any
 
 from chkit.cli.commands.drift_payload import build_drift_payload
-from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_dictionary, wait_for_table
+from chkit.clickhouse.client import ClickHouseClient, QueryResult
+from chkit.clickhouse.ddl_propagation import wait_for_dictionary
 from chkit.clickhouse.introspect import list_dictionary_details
+from chkit.clickhouse.replicas import string_literal
 from chkit.core.canonical import canonicalize_definitions
-from chkit.core.model import ChxResolvedClickHouseConfig, dictionary, table
+from chkit.core.model import ChxResolvedClickHouseConfig, SchemaDefinition, dictionary, table
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import to_create_sql
-from tests.e2e_testkit import create_prefix, poll_until, resolve_live_env
+from tests.e2e_testkit import create_prefix, poll_until, resolve_live_env, run_once_visible
 
 # Dictionaries load lazily, so ClickHouse never connects with these passwords.
 _SCHEMA_SECRET = "drift-492-schema-secret"
@@ -50,7 +53,7 @@ def test_unchanged_dictionaries_read_clean_and_recreated_ones_drift_per_clause(
         # ``Decimal(10,2)``, ``hashed(shards 4)``, ``MAX 600 MIN 60``, a password
         # it stores as '[HIDDEN]', ``\n`` and ``\t`` escapes in a string, and a
         # comment that reads like a SETTINGS clause.
-        definitions = [
+        definitions: list[SchemaDefinition] = [
             table(
                 database=database,
                 name=users,
@@ -124,13 +127,36 @@ def test_unchanged_dictionaries_read_clean_and_recreated_ones_drift_per_clause(
                 f"CREATE DICTIONARY {database}.{null_dict} (id UInt64) PRIMARY KEY id "
                 "SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)"
             )
+            wait_for_dictionary(client, database, null_dict)
             client.execute(
                 f"CREATE TABLE {database}.{null_table} (id UInt64) "
                 f"ENGINE = Dictionary('{database}.{null_dict}')"
             )
-            wait_for_dictionary(client, database, null_dict)
-            wait_for_table(client, database, null_table)
-            listed = [d.name for d in list_dictionary_details(client, [database])]
+            # ObsessionDB shows the ENGINE = Dictionary table on one replica only, and a
+            # read may land on any replica. So each listing also asks, in the same query
+            # and so on the same replica, if that replica has the table, until one does.
+            table_here_sql = (
+                "(SELECT count() FROM system.tables WHERE database = "
+                f"{string_literal(database)} AND name = {string_literal(null_table)})"
+            )
+
+            class SameReplica:
+                table_here = False
+
+                def query(self, statement: str, settings: dict[str, Any] | None = None) -> QueryResult:
+                    result = client.query(
+                        f"SELECT *, {table_here_sql} AS table_here FROM ({statement})", settings
+                    )
+                    self.table_here = any(int(row["table_here"]) > 0 for row in result.rows)
+                    return result
+
+            def list_on_table_replica() -> tuple[bool, list[str]]:
+                same_replica = SameReplica()
+                names = [d.name for d in list_dictionary_details(same_replica, [database])]
+                return same_replica.table_here, names
+
+            table_here, listed = poll_until(list_on_table_replica, lambda seen: seen[0])
+            assert table_here
             assert null_dict in listed
             assert null_table not in listed
 
@@ -193,6 +219,11 @@ def test_unchanged_dictionaries_read_clean_and_recreated_ones_drift_per_clause(
         finally:
             client.execute(f"DROP DICTIONARY IF EXISTS {database}.{users_dict}")
             client.execute(f"DROP DICTIONARY IF EXISTS {database}.{rates_dict}")
-            client.execute(f"DROP TABLE IF EXISTS {database}.{null_table}")
+            # On ObsessionDB only one replica may have the table: re-run the DROP until
+            # it lands there.
+            with contextlib.suppress(Exception):
+                run_once_visible(
+                    lambda: client.execute(f"DROP TABLE {database}.{null_table}"), timeout=10.0
+                )
             client.execute(f"DROP DICTIONARY IF EXISTS {database}.{null_dict}")
             client.execute(f"DROP TABLE IF EXISTS {database}.{users} SYNC")

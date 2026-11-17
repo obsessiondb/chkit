@@ -3,7 +3,7 @@ import { mkdtemp, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { listDictionaryDetails } from '@chkit/clickhouse'
+import { listDictionaryDetails, stringLiteral } from '@chkit/clickhouse'
 
 import {
   CORE_ENTRY,
@@ -12,12 +12,13 @@ import {
   createPrefix,
   formatTestDiagnostic,
   getLiveEnv,
+  pollUntil,
   quoteIdent,
   runCli,
   runCliWithRetry,
+  runOnceVisible,
   waitForCliJson,
   waitForDictionary,
-  waitForTable,
 } from './e2e-testkit.js'
 
 // Dictionaries load lazily, so ClickHouse never connects with these passwords.
@@ -128,12 +129,29 @@ export default schema(users, usersDict, ratesDict)
 
       // A table with ENGINE = Dictionary has the engine name of a dictionary, but it is not one.
       await executor.command(`CREATE DICTIONARY ${q(nullDict)} (id UInt64) PRIMARY KEY id SOURCE(NULL()) LAYOUT(FLAT()) LIFETIME(0)`)
-      await executor.command(`CREATE TABLE ${q(nullTable)} (id UInt64) ENGINE = Dictionary('${database}.${nullDict}')`)
       await waitForDictionary(executor, database, nullDict)
-      await waitForTable(executor, database, nullTable)
-      const listed = (await listDictionaryDetails(executor, [database])).map((item) => item.name)
-      expect(listed).toContain(nullDict)
-      expect(listed).not.toContain(nullTable)
+      await executor.command(`CREATE TABLE ${q(nullTable)} (id UInt64) ENGINE = Dictionary('${database}.${nullDict}')`)
+      // ObsessionDB shows the ENGINE = Dictionary table on one replica only, and a read
+      // may land on any replica. So each listing also asks, in the same query and so on
+      // the same replica, if that replica has the table, until one does.
+      const listOnTableReplica = async () => {
+        let tableHere = false
+        const sameReplica = {
+          async query<T>(sql: string): Promise<T[]> {
+            const rows = await executor.query<T & { table_here: number | string }>(
+              `SELECT *, (SELECT count() FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(nullTable)}) AS table_here FROM (${sql})`
+            )
+            tableHere = rows.some((row) => Number(row.table_here) > 0)
+            return rows
+          },
+        }
+        const names = (await listDictionaryDetails(sameReplica, [database])).map((item) => item.name)
+        return { tableHere, names }
+      }
+      const listed = await pollUntil(listOnTableReplica, (seen) => seen.tableHere)
+      expect(listed.tableHere).toBe(true)
+      expect(listed.names).toContain(nullDict)
+      expect(listed.names).not.toContain(nullTable)
 
       // DROP + CREATE rather than CREATE OR REPLACE, which ObsessionDB does not
       // apply on every replica.
@@ -192,7 +210,8 @@ LAYOUT(RANGE_HASHED()) LIFETIME(0) RANGE(MIN stop MAX start) COMMENT 'uses SETTI
     } finally {
       await executor.command(`DROP DICTIONARY IF EXISTS ${q(usersDict)}`)
       await executor.command(`DROP DICTIONARY IF EXISTS ${q(ratesDict)}`)
-      await executor.command(`DROP TABLE IF EXISTS ${q(nullTable)}`)
+      // On ObsessionDB only one replica may have the table: re-run the DROP until it lands there.
+      await runOnceVisible(() => executor.command(`DROP TABLE ${q(nullTable)}`), { timeoutMs: 10_000 }).catch(() => undefined)
       await executor.command(`DROP DICTIONARY IF EXISTS ${q(nullDict)}`)
       for (const name of [users, journalTable]) {
         await executor.command(`DROP TABLE IF EXISTS ${q(name)}`)
