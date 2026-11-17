@@ -1,0 +1,13 @@
+NODE endpoint
+SQL >
+    %
+    SELECT user_id, count() AS events
+    FROM events
+    WHERE user_id IN {{ Array(users, 'UInt64', default='1,2,3') }}
+    {% if defined(event_type) %}
+      AND event_type = {{ String(event_type) }}
+    {% end %}
+    GROUP BY user_id
+    ORDER BY events DESC
+
+TYPE endpoint

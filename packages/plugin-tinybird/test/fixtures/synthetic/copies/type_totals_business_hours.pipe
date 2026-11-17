@@ -1,0 +1,10 @@
+NODE totals
+SQL >
+    SELECT event_type, sum(amount) AS total, now() AS computed_at
+    FROM daily_amounts
+    GROUP BY event_type
+
+TYPE copy
+TARGET_DATASOURCE type_totals
+COPY_MODE append
+COPY_SCHEDULE 0 9-17 * * 1-5

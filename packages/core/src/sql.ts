@@ -12,7 +12,7 @@ import type {
   ViewDefinition,
 } from './model.js'
 import { codecFingerprint, renderCodec } from './codec.js'
-import { renderDefault } from './column-default.js'
+import { nullableColumnType, renderDefault } from './column-default.js'
 import { constraintExpression, constraintKind, renderConstraint } from './constraint.js'
 import { quoteIdentifier, renderQualifiedName } from './identifier.js'
 import { isMergeTreeEngine, supportsSortOrder } from './engine.js'
@@ -44,7 +44,7 @@ function renderColumn(col: ColumnDefinition): string {
 
 export function renderColumnType(column: Pick<ColumnDefinition, 'type' | 'nullable'>): string {
   const type = String(column.type).trim()
-  return column.nullable ? `Nullable(${type})` : type
+  return column.nullable ? nullableColumnType(type) : type
 }
 
 /** A column codec compared using its rendered type, including Nullable. */

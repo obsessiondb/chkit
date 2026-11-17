@@ -8,13 +8,13 @@ abandon-output,retry-output,empty,apply-resume}.test.ts`` and
 from __future__ import annotations
 
 import json
-import time
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import MagicMock
 
 import pytest
 from typer.testing import CliRunner
@@ -31,6 +31,7 @@ from chkit.cli.commands.migrate_abandon import (
 from chkit.cli.commands.migrate_apply import (
     PROPAGATION_WAIT_PENDING,
     ApplyMigrationInput,
+    StatementError,
     apply_migration,
 )
 from chkit.cli.commands.migrate_empty import find_empty_migrations
@@ -40,6 +41,7 @@ from chkit.cli.commands.migrate_errors import (
     in_progress_checksum_mismatch_error,
 )
 from chkit.cli.commands.migrate_output import format_retry_notice, render_abandon_text
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     Marker,
     OperationMismatch,
@@ -51,8 +53,10 @@ from chkit.cli.commands.migrate_recovery import (
     has_statement_progress,
     normalize_migration_name,
     rebase_in_progress_state,
+    recorded_statement_mismatches,
     resolve_recovery_targets,
     retry_mismatch_error,
+    split_changed_statements,
     statement_identities,
     statement_identity,
     verify_retry_edit,
@@ -61,9 +65,13 @@ from chkit.cli.commands.migrate_retry import RetryNoop, RetryResume, resolve_ret
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.cli.main import app
 from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
-from chkit.cli.safety_markers import MigrationOperationSummary
+from chkit.cli.safety_markers import (
+    MigrationOperationSummary,
+    extract_migration_operation_summaries,
+)
 from chkit.cli.table_scope import TableScope
-from chkit.clickhouse.client import QueryResult
+from chkit.clickhouse.client import QueryResult, QueryStatus
+from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_splitter import extract_executable_statements, split_sql_statements
 
 pytestmark = pytest.mark.usefixtures("single_replica")
@@ -97,6 +105,7 @@ def op(
             if last_error is not None
             else ("Code: 60. Unknown table" if status == "failed" else "")
         ),
+        fingerprint="",
     )
 
 
@@ -205,7 +214,7 @@ def test_statement_identity_uses_marker_or_position() -> None:
     assert statement_identity(operations, 1) == StatementIdentity(
         type="sql_statement", key="statement:1", marked=False
     )
-    assert len(statement_identities(operations, 2)) == 2
+    assert len(statement_identities(operations, [None, None])) == 2
 
 
 def test_verify_retry_edit_accepts_kept_completed_prefix() -> None:
@@ -213,14 +222,14 @@ def test_verify_retry_edit_accepts_kept_completed_prefix() -> None:
         [op(0, "completed", A), op(1, "completed", B), op(2, "failed", V)],
         identities(A, B, Marker(type="create_view", key="view:db.w"), V),
     )
-    assert result == RetryEditOk(completed=2, unmarked_completed=0, resume_index=2)
+    assert result == RetryEditOk(completed=2, unmarked_completed=0, position_only_completed=0, resume_index=2)
 
 
 def test_verify_retry_edit_rejects_changed_marker() -> None:
     result = verify_retry_edit([op(0, "completed", A), op(1, "failed", V)], identities(B, V))
     assert result == RetryEditMismatch(
         mismatches=[
-            OperationMismatch(statement=1, status="completed", query_id="", recorded=A, current=B)
+            OperationMismatch(statement=1, status="completed", query_id="", recorded=A, current=B, sql_changed=False)
         ],
         shared_markers=[],
     )
@@ -230,24 +239,24 @@ def test_verify_retry_edit_rejects_missing_statement() -> None:
     result = verify_retry_edit([op(3, "completed", A)], identities(A, B, V))
     assert isinstance(result, RetryEditMismatch)
     assert result.mismatches == [
-        OperationMismatch(statement=4, status="completed", query_id="", recorded=A, current=None)
+        OperationMismatch(statement=4, status="completed", query_id="", recorded=A, current=None, sql_changed=False)
     ]
 
 
 def test_verify_retry_edit_matches_unmarked_statements_by_position() -> None:
     result = verify_retry_edit(
-        [op(0, "completed"), op(1, "completed")], statement_identities([], 3)
+        [op(0, "completed"), op(1, "completed")], statement_identities([], [None, None, None])
     )
-    assert result == RetryEditOk(completed=2, unmarked_completed=2, resume_index=2)
+    assert result == RetryEditOk(completed=2, unmarked_completed=2, position_only_completed=2, resume_index=2)
 
 
 def test_verify_retry_edit_resume_index_bounds() -> None:
     assert verify_retry_edit([op(0, "failed", A)], identities(B)) == RetryEditOk(
-        completed=0, unmarked_completed=0, resume_index=0
+        completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0
     )
     assert verify_retry_edit(
         [op(0, "completed", A), op(1, "completed", B)], identities(A, B)
-    ) == RetryEditOk(completed=2, unmarked_completed=0, resume_index=None)
+    ) == RetryEditOk(completed=2, unmarked_completed=0, position_only_completed=0, resume_index=None)
 
 
 def test_verify_retry_edit_ignores_failed_and_unsubmitted_started() -> None:
@@ -255,7 +264,7 @@ def test_verify_retry_edit_ignores_failed_and_unsubmitted_started() -> None:
         [op(0, "completed", A), op(1, "failed", V), op(2, "started", B)],
         identities(A, B, V),
     )
-    assert result == RetryEditOk(completed=1, unmarked_completed=0, resume_index=1)
+    assert result == RetryEditOk(completed=1, unmarked_completed=0, position_only_completed=0, resume_index=1)
 
 
 def test_verify_retry_edit_rejects_moved_running_async_statement() -> None:
@@ -265,14 +274,14 @@ def test_verify_retry_edit_rejects_moved_running_async_statement() -> None:
     assert result == RetryEditMismatch(
         mismatches=[
             OperationMismatch(
-                statement=2, status="started", query_id="q-1", recorded=LOAD, current=V
+                statement=2, status="started", query_id="q-1", recorded=LOAD, current=V, sql_changed=False
             )
         ],
         shared_markers=[],
     )
     assert verify_retry_edit(
         [op(1, "started", LOAD, query_id="q-1")], identities(A, LOAD)
-    ) == RetryEditOk(completed=0, unmarked_completed=0, resume_index=0)
+    ) == RetryEditOk(completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0)
 
 
 _REMOVE_THEN_MODIFY = [op(0, "completed", MODIFY_F), op(1, "failed", MODIFY_F)]
@@ -295,7 +304,7 @@ def test_verify_retry_edit_rejects_deleting_completed_shared_marker() -> None:
 
 
 def test_verify_retry_edit_accepts_kept_shared_markers() -> None:
-    ok = RetryEditOk(completed=1, unmarked_completed=0, resume_index=1)
+    ok = RetryEditOk(completed=1, unmarked_completed=0, position_only_completed=0, resume_index=1)
     assert verify_retry_edit(_REMOVE_THEN_MODIFY, identities(MODIFY_F, MODIFY_F)) == ok
     assert verify_retry_edit(_REMOVE_THEN_MODIFY, identities(MODIFY_F, A, MODIFY_F)) == ok
 
@@ -308,7 +317,7 @@ def test_verify_retry_edit_reports_moved_shared_marker_once() -> None:
     assert result == RetryEditMismatch(
         mismatches=[
             OperationMismatch(
-                statement=2, status="completed", query_id="", recorded=MODIFY_F, current=V
+                statement=2, status="completed", query_id="", recorded=MODIFY_F, current=V, sql_changed=False
             )
         ],
         shared_markers=[],
@@ -318,7 +327,7 @@ def test_verify_retry_edit_reports_moved_shared_marker_once() -> None:
 def test_verify_retry_edit_after_abandon_has_no_shared_check() -> None:
     assert verify_retry_edit(
         [op(0, "failed", MODIFY_F), op(1, "failed", MODIFY_F)], identities(MODIFY_F)
-    ) == RetryEditOk(completed=0, unmarked_completed=0, resume_index=0)
+    ) == RetryEditOk(completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0)
 
 
 # ---------- errors ----------
@@ -330,10 +339,10 @@ def test_retry_mismatch_error_names_mismatches_and_kill_query() -> None:
         RetryEditMismatch(
             mismatches=[
                 OperationMismatch(
-                    statement=1, status="completed", query_id="", recorded=A, current=B
+                    statement=1, status="completed", query_id="", recorded=A, current=B, sql_changed=False
                 ),
                 OperationMismatch(
-                    statement=2, status="started", query_id="q-1", recorded=LOAD, current=None
+                    statement=2, status="started", query_id="q-1", recorded=LOAD, current=None, sql_changed=False
                 ),
             ],
             shared_markers=[],
@@ -461,6 +470,7 @@ def _resolve(
     pending: list[str] | None = None,
     empty: list[str] | None = None,
     applied: set[str] | None = None,
+    plugins_rewrite_statements: bool = False,
 ) -> RetryNoop | RetryResume:
     return resolve_retry(
         migration="m.sql",
@@ -469,6 +479,7 @@ def _resolve(
         empty_migrations=empty or [],
         applied_names=applied or set(),
         journal_store=store,
+        plugins_rewrite_statements=plugins_rewrite_statements,
     )
 
 
@@ -508,6 +519,7 @@ def test_resolve_retry_resumes_at_first_incomplete(retry_dir: Path) -> None:
         completed_statements=1,
         resume_at_statement=2,
         unmarked_completed_statements=0,
+        position_only_completed_statements=0,
     )
     assert result.model_dump(by_alias=True) == {
         "action": "resume",
@@ -518,6 +530,7 @@ def test_resolve_retry_resumes_at_first_incomplete(retry_dir: Path) -> None:
         "completedStatements": 1,
         "resumeAtStatement": 2,
         "unmarkedCompletedStatements": 0,
+        "positionOnlyCompletedStatements": 0,
     }
     assert store.writes == []
 
@@ -874,6 +887,7 @@ _RESUME = RetryResume(
     completed_statements=1,
     resume_at_statement=2,
     unmarked_completed_statements=0,
+    position_only_completed_statements=0,
 )
 
 
@@ -882,7 +896,12 @@ def test_format_retry_notice() -> None:
         "Retry m.sql: the file changed after a failed apply. 1 completed statement(s) "
         "will be skipped; resuming at statement 2 of 3."
     ]
-    unmarked = format_retry_notice(_RESUME.model_copy(update={"unmarked_completed_statements": 1}))
+    # Unmarked statements whose fingerprints were checked are not position-only.
+    checked = _RESUME.model_copy(update={"unmarked_completed_statements": 1})
+    assert len(format_retry_notice(checked)) == 1
+    unmarked = format_retry_notice(
+        checked.model_copy(update={"position_only_completed_statements": 1})
+    )
     assert unmarked[1] == (
         '⚠ 1 completed statement(s) have no "-- operation:" marker and were matched by '
         "position only. Do not add, remove, or reorder statements above the first "
@@ -1018,6 +1037,7 @@ def _apply(
     retry: RetryResume | None = None,
     runtime: _FakeRuntime | None = None,
     log: Callable[[str], None] | None = None,
+    query_tracker: QueryTracker | None = None,
 ) -> MigrationJournalEntry:
     return apply_migration(
         ApplyMigrationInput(
@@ -1030,8 +1050,37 @@ def _apply(
             file="m.sql",
             retry=retry,
             log=log or (lambda _line: None),
+            query_tracker=query_tracker,
         )
     )
+
+
+def test_sync_retry_tracks_compensation_and_forward_separately(tmp_path: Path) -> None:
+    statement = "INSERT INTO db.a SELECT 1;"
+    before_retry = "TRUNCATE TABLE db.a"
+    sql = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=sync\n"
+        f"-- before-retry: {before_retry}\n{statement}"
+    )
+    store = FakeStore(in_progress([op(0, "failed", LOAD)], checksum=checksum_sql(sql)))
+    client = _RecordingClient()
+    tracker = MagicMock()
+    phases: list[str] = []
+
+    def command(context: QueryContext, phase: str, text: str, settings: Any) -> None:
+        assert context == QueryContext("m.sql", 0, statement, before_retry)
+        assert settings is None
+        assert store.state is not None
+        assert store.state.operations[0].status == ("failed" if phase == "compensation" else "started")
+        assert text == (before_retry if phase == "compensation" else statement)
+        phases.append(phase)
+
+    tracker.command.side_effect = command
+    _apply(_write(tmp_path, sql), client, store, query_tracker=tracker)
+    assert phases == ["compensation", "forward"]
+    assert client.calls == []
+    assert store.state is not None
+    assert store.state.migration_completed is True
 
 
 def _retry_for(sql: str, previous: str = "old") -> RetryResume:
@@ -1043,6 +1092,7 @@ def _retry_for(sql: str, previous: str = "old") -> RetryResume:
         completed_statements=0,
         resume_at_statement=None,
         unmarked_completed_statements=0,
+        position_only_completed_statements=0,
     )
 
 
@@ -1131,17 +1181,7 @@ class _EventStore(FakeStore):
         super().append_entry(entry, chkit_version=chkit_version)
 
 
-@pytest.fixture
-def _fast_waits(monkeypatch: pytest.MonkeyPatch) -> None:
-    """Let a propagation wait time out without sleeping between its checks."""
-    from chkit.clickhouse import ddl_propagation  # noqa: PLC0415
-
-    monkeypatch.setattr(
-        ddl_propagation, "time", SimpleNamespace(sleep=lambda _s: None, monotonic=time.monotonic)
-    )
-
-
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: Path) -> None:
     events: list[str] = []
     client = _PropagationClient(events, visible=False)
@@ -1169,7 +1209,7 @@ def test_apply_waits_again_for_completed_statement_after_wait_timeout(tmp_path: 
     assert [(e.name, e.checksum) for e in store.appended] == [("m.sql", checksum_sql(_WAIT_SQL))]
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Path) -> None:
     # --abandon keeps every record as failed, so the next run restarts at
     # statement 1 with the abandoned record of statement 2 still in the state.
@@ -1202,7 +1242,7 @@ def test_apply_waits_again_after_abandon_restart_with_later_record(tmp_path: Pat
     assert events == ["propagation-query", f"command {_INSERT_T};", "append"]
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None:
     events: list[str] = []
     client = _PropagationClient(events, visible=False)
@@ -1225,7 +1265,7 @@ def test_apply_does_not_record_when_wait_times_out_again(tmp_path: Path) -> None
     assert store.appended == []
 
 
-@pytest.mark.usefixtures("_fast_waits")
+@pytest.mark.usefixtures("propagation_clock")
 def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
     tmp_path: Path,
 ) -> None:
@@ -1252,21 +1292,12 @@ def test_apply_does_not_wait_again_for_completed_statement_whose_wait_passed(
     assert events == ["command DROP TABLE IF EXISTS default.t;", "propagation-query", "append"]
 
 
-# ---------- an EXCHANGE TABLES marked mode=barrier keeps its replica wait (#577) ----------
-
-# The barrier read runs an EXCHANGE TABLES as ClickHouse would.
-_EXCHANGE_BARRIER_SQL = (
-    "-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n"
-    "EXCHANGE TABLES default.a AND default.b;\n"
-    "-- operation: drop_table key=table:default.b risk=danger\n"
-    "DROP TABLE IF EXISTS default.b SYNC;\n"
-)
-_DROP_B_SENT = "DROP TABLE IF EXISTS default.b SYNC;"
+# ---------- a SELECT barrier has no propagation wait ----------
 
 
 class _TwoReplicaClient:
-    """A two-replica target: no INSERT is running, the replicas agree on both
-    exchanged tables, and the dropped table is gone everywhere."""
+    """A two-replica target where no INSERT is running; every other read (a
+    propagation wait) is recorded."""
 
     def __init__(self) -> None:
         self.events: list[str] = []
@@ -1275,15 +1306,7 @@ class _TwoReplicaClient:
         self.events.append(f"command {statement}")
 
     def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
-        if "EXCHANGE TABLES" in sql or "system.processes" in sql:
-            self.events.append("barrier read")
-        if "uniqExact(uuid)" in sql:
-            self.events.append("exchange wait")
-            rows = [
-                {"database": "default", "name": name, "replicas": 2, "uuids": 1, "sample_uuid": uuid}
-                for name, uuid in (("a", "u1"), ("b", "u2"))
-            ]
-            return QueryResult(column_names=list(rows[0]), rows=rows)
+        self.events.append("barrier read" if "system.processes" in sql else f"query {sql}")
         return QueryResult(column_names=[], rows=[])
 
 
@@ -1302,48 +1325,6 @@ def _two_replicas(single_replica: None, monkeypatch: pytest.MonkeyPatch) -> None
 
 
 @pytest.mark.usefixtures("_two_replicas")
-def test_apply_exchange_barrier_waits_for_every_replica_before_next_statement(
-    tmp_path: Path,
-) -> None:
-    client = _TwoReplicaClient()
-    store = FakeStore()
-    _apply(_write(tmp_path, _EXCHANGE_BARRIER_SQL), cast(Any, client), store)
-    assert client.events == ["barrier read", "exchange wait", f"command {_DROP_B_SENT}"]
-    exchange_records = [
-        (o.status, o.last_error)
-        for state in store.writes
-        for o in state.operations
-        if o.operation_index == 0
-    ]
-    assert exchange_records[:3] == [
-        ("started", ""),
-        ("completed", PROPAGATION_WAIT_PENDING),
-        ("completed", ""),
-    ]
-    assert len(store.appended) == 1
-
-
-@pytest.mark.usefixtures("_two_replicas")
-def test_apply_resumed_exchange_barrier_with_pending_marker_waits_again(tmp_path: Path) -> None:
-    exchange = Marker(type="exchange_tables", key="table:default.a")
-    client = _TwoReplicaClient()
-    store = FakeStore(
-        in_progress(
-            [op(0, "completed", exchange, last_error=PROPAGATION_WAIT_PENDING)],
-            checksum=checksum_sql(_EXCHANGE_BARRIER_SQL),
-        )
-    )
-    _apply(_write(tmp_path, _EXCHANGE_BARRIER_SQL), cast(Any, client), store)
-    assert client.events == ["exchange wait", f"command {_DROP_B_SENT}"]
-    assert store.state is not None
-    assert [(o.operation_index, o.status, o.last_error) for o in store.state.operations] == [
-        (0, "completed", ""),
-        (1, "completed", ""),
-    ]
-    assert len(store.appended) == 1
-
-
-@pytest.mark.usefixtures("_two_replicas")
 def test_apply_select_barrier_has_no_propagation_wait(tmp_path: Path) -> None:
     sql = (
         "-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier "
@@ -1359,6 +1340,32 @@ def test_apply_select_barrier_has_no_propagation_wait(tmp_path: Path) -> None:
         ("completed", ""),
     ]
     assert len(store.appended) == 1
+
+
+@pytest.mark.usefixtures("_two_replicas")
+def test_apply_refuses_a_barrier_a_plugin_rewrote(tmp_path: Path) -> None:
+    sql = (
+        "-- operation: exchange_tables key=table:default.a risk=caution mode=barrier\n"
+        "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';\n"
+        "-- operation: drop_table key=table:default.b risk=danger\n"
+        "DROP TABLE IF EXISTS default.b SYNC;\n"
+    )
+    client = _TwoReplicaClient()
+    store = FakeStore()
+    rewrite = _FakeRuntime(
+        lambda statements: ["EXCHANGE TABLES default.a AND default.b;", *statements[1:]]
+    )
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store, runtime=rewrite)
+    assert info.value.code == "barrier_not_select"
+    assert (
+        "  - m.sql, statement 1 of 2 (-- operation: exchange_tables key=table:default.a "
+        "risk=caution mode=barrier):\n"
+        "      EXCHANGE TABLES default.a AND default.b;"
+    ) in info.value.message
+    assert client.events == []
+    assert store.writes == []
+    assert store.appended == []
 
 
 def test_apply_refuses_edited_file_with_completed_statement(tmp_path: Path) -> None:
@@ -1432,6 +1439,122 @@ def test_apply_edited_file_without_progress_runs_from_statement_1(
     ]
     assert store.writes[0].checksum == checksum_sql(EDITED_SQL)
     assert store.appended[0].checksum == checksum_sql(EDITED_SQL)
+
+
+class _StatusClient(_RecordingClient):
+    """Answers the in-flight check of a dropped async attempt."""
+
+    def __init__(self, running: bool | Exception) -> None:
+        super().__init__()
+        self._running = running
+        self.status_calls: list[tuple[str, bool, bool]] = []
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+    ) -> QueryStatus:
+        self.status_calls.append((query_id, every_replica, running_only))
+        if isinstance(self._running, Exception):
+            raise self._running
+        return QueryStatus(status="running" if self._running else "unknown")
+
+
+@pytest.mark.parametrize("running", [True, False], ids=["running", "stopped"])
+def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
+    tmp_path: Path, running: bool
+) -> None:
+    """#701: an async retry runs under a random query id, so a record the edit
+    drops is the only trace of an attempt that may still run (a submit that
+    failed while the server ran it). The edit stops while it runs."""
+    client = _StatusClient(running)
+    store = FakeStore(
+        in_progress(
+            [
+                op(0, "failed"),
+                op(
+                    1,
+                    "failed",
+                    Marker(type="load_table_data", key="table:t"),
+                    query_id="retry-query-id",
+                ),
+            ],
+            checksum="old",
+        )
+    )
+    if running:
+        with pytest.raises(MigrateError) as raised:
+            _apply(_write(tmp_path, EDITED_SQL), client, store)
+        assert raised.value.code == "retry_mismatch"
+        assert "KILL QUERY WHERE query_id = 'retry-query-id'" in raised.value.message
+    else:
+        _apply(_write(tmp_path, EDITED_SQL), client, store)
+    assert client.status_calls == [("retry-query-id", True, True)]
+    assert len(client.calls) == (0 if running else 2)
+    assert (len(store.writes) > 0) is not running
+
+
+@pytest.mark.parametrize("mode", ["sync", "barrier"])
+@pytest.mark.parametrize("prior", ["started", "failed", "abandoned", "stopped", "unreadable", "no-before-retry"])
+def test_mode_only_edit_preserves_async_attempt_until_stopped(
+    tmp_path: Path, mode: str, prior: str
+) -> None:
+    sql = (
+        "SELECT query_id FROM system.processes WHERE 0;"
+        if mode == "barrier" else "INSERT INTO db.a SELECT 1;"
+    )
+    compensation = "" if prior == "no-before-retry" else "-- before-retry: TRUNCATE TABLE db.a\n"
+    original = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"{compensation}{sql}\n"
+    )
+    edited = original.replace("mode=async", f"mode={mode}")
+    recorded = in_progress(
+        [op(
+            0, "failed" if prior in {"failed", "stopped", "unreadable"} else "started",
+            LOAD, query_id="random-retry-query-id",
+        ).model_copy(update={"fingerprint": statement_fingerprint(sql)})],
+        checksum=checksum_sql(original),
+    )
+
+    class CrashStore(FakeStore):
+        def write_migration_state(self, state: MigrationRowState) -> None:
+            super().write_migration_state(state)
+            if prior != "stopped" and state.operations[0].query_id == "":
+                raise RuntimeError("crash after ID overwrite")
+
+    class ModeClient(_StatusClient):
+        def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+            return QueryResult(column_names=["query_id"], rows=[{"x": 1}] if "system.tables" in sql else [])
+
+    store = CrashStore(recorded)
+    if prior == "abandoned":
+        abandon_migration_state(recorded, journal_store=store)
+    client = ModeClient(RuntimeError("replica unavailable") if prior == "unreadable" else prior != "stopped")
+    _write(tmp_path, edited)
+    retry = _retry_for(edited, checksum_sql(original))
+    if prior == "stopped":
+        _apply(tmp_path, client, store, retry=retry)
+        assert client.calls == (["TRUNCATE TABLE db.a", sql] if mode == "sync" else ["TRUNCATE TABLE db.a"])
+        assert store.state is not None
+        assert store.state.migration_completed is True
+    else:
+        if prior == "unreadable":
+            with pytest.raises(RuntimeError, match="replica unavailable"):
+                _apply(tmp_path, client, store, retry=retry)
+        else:
+            with pytest.raises(MigrateError) as raised:
+                _apply(tmp_path, client, store, retry=retry)
+            assert raised.value.code == "retry_mismatch"
+        assert client.calls == []
+        assert store.appended == []
+        assert store.state is not None
+        assert store.state.operations[0].query_id == "random-retry-query-id"
+        assert all(write.operations[0].query_id == "random-retry-query-id" for write in store.writes)
+    assert client.status_calls == [("random-retry-query-id", True, True)]
 
 
 def test_apply_started_statement_still_requires_retry(tmp_path: Path) -> None:
@@ -1717,3 +1840,373 @@ def test_apply_refuses_when_on_before_apply_moved_statements_without_changing_th
         _apply(_write(tmp_path, sql), client, store, runtime=runtime)
     assert info.value.code == "statement_split_changed"
     assert client.calls == []
+
+
+# ---------- statement fingerprints (#599) ----------
+# A record with a fingerprint is matched by its SQL too.
+
+
+def _with_fingerprint(record: OperationState, fingerprint: str) -> OperationState:
+    return record.model_copy(update={"fingerprint": fingerprint})
+
+
+def _current(marker: Marker, fingerprint: str | None) -> StatementIdentity:
+    return StatementIdentity(
+        type=marker.type, key=marker.key, marked=True, fingerprint=fingerprint
+    )
+
+
+def test_verify_retry_edit_accepts_a_completed_statement_with_the_same_sql() -> None:
+    result = verify_retry_edit(
+        [_with_fingerprint(op(0, "completed", A), "v1:a")],
+        [_current(A, "v1:a"), _current(B, "v1:b")],
+    )
+    assert result == RetryEditOk(completed=1, unmarked_completed=0, position_only_completed=0, resume_index=1)
+
+
+def test_verify_retry_edit_rejects_a_completed_statement_whose_sql_changed() -> None:
+    result = verify_retry_edit(
+        [_with_fingerprint(op(0, "completed", A), "v1:a")], [_current(A, "v1:x")]
+    )
+    assert result == RetryEditMismatch(
+        mismatches=[
+            OperationMismatch(
+                statement=1,
+                status="completed",
+                query_id="",
+                recorded=A,
+                current=A,
+                sql_changed=True,
+            )
+        ],
+        shared_markers=[],
+    )
+
+
+def test_verify_retry_edit_rejects_a_running_async_statement_whose_sql_changed() -> None:
+    result = verify_retry_edit(
+        [_with_fingerprint(op(0, "started", LOAD, query_id="q-1"), "v1:a")],
+        [_current(LOAD, "v1:x")],
+    )
+    assert isinstance(result, RetryEditMismatch)
+    assert [mismatch.sql_changed for mismatch in result.mismatches] == [True]
+
+
+def test_verify_retry_edit_does_not_check_a_failed_statement() -> None:
+    result = verify_retry_edit(
+        [_with_fingerprint(op(0, "failed", A), "v1:a")], [_current(A, "v1:x")]
+    )
+    assert result == RetryEditOk(completed=0, unmarked_completed=0, position_only_completed=0, resume_index=0)
+
+
+def test_verify_retry_edit_matches_by_marker_only_without_a_fingerprint() -> None:
+    assert verify_retry_edit([op(0, "completed", A)], [_current(A, "v1:x")]).ok
+    assert verify_retry_edit(
+        [_with_fingerprint(op(0, "completed", A), "v1:a")], [_current(A, None)]
+    ).ok
+
+
+def test_verify_retry_edit_counts_as_position_only_just_statements_without_a_fingerprint() -> None:
+    s0 = Marker(type="sql_statement", key="statement:0")
+    s1 = Marker(type="sql_statement", key="statement:1")
+    s2 = Marker(type="sql_statement", key="statement:2")
+
+    def unmarked(marker: Marker, fingerprint: str | None) -> StatementIdentity:
+        return StatementIdentity(
+            type=marker.type, key=marker.key, marked=False, fingerprint=fingerprint
+        )
+
+    mixed = [
+        _with_fingerprint(op(0, "completed", s0), "v1:a"),
+        op(1, "completed", s1),
+        _with_fingerprint(op(2, "completed", s2), "v1:c"),
+    ]
+    expected = RetryEditOk(
+        completed=3, unmarked_completed=3, position_only_completed=1, resume_index=None
+    )
+    # Every unmarked completed statement still counts in unmarked_completed.
+    assert (
+        verify_retry_edit(mixed, [unmarked(s0, "v1:a"), unmarked(s1, "v1:b"), unmarked(s2, "v1:c")])
+        == expected
+    )
+    # A check deferred until plugins rewrite the statements still checks the
+    # recorded fingerprints.
+    assert (
+        verify_retry_edit(mixed, [unmarked(s0, None), unmarked(s1, None), unmarked(s2, None)])
+        == expected
+    )
+
+
+def test_recorded_statement_mismatches_lists_completed_and_running_async_statements() -> None:
+    operations = [
+        _with_fingerprint(op(3, "completed", B), "v1:b"),
+        _with_fingerprint(op(0, "completed", A), "v1:a"),
+        _with_fingerprint(op(1, "started", LOAD, query_id="q-1"), "v1:load"),
+        _with_fingerprint(op(2, "failed", V), "v1:v"),
+        _with_fingerprint(op(4, "started", V), "v1:sync"),
+        op(5, "completed", A),
+    ]
+    assert recorded_statement_mismatches(
+        operations, ["v1:x", "v1:y", "v1:z", "v1:b", "v1:w", "v1:a"]
+    ) == [1, 2]
+
+
+def test_recorded_statement_mismatches_empty_when_every_fingerprint_matches() -> None:
+    operations = [_with_fingerprint(op(0, "completed", A), "v1:a")]
+    assert recorded_statement_mismatches(operations, ["v1:a"]) == []
+
+
+def test_recorded_statement_mismatches_statement_past_the_end_of_the_file() -> None:
+    operations = [_with_fingerprint(op(2, "completed", A), "v1:a")]
+    assert recorded_statement_mismatches(operations, ["v1:a"]) == [3]
+
+
+def test_split_changed_statements_leaves_fingerprinted_statements_out() -> None:
+    operations = [_with_fingerprint(op(0, "completed", A), "v1:a"), op(1, "completed", B)]
+    assert split_changed_statements(
+        operations, legacy=["a;", "x;", "b;"], current=["a; x;", "b;"], positions_kept=True
+    ) == [2]
+
+
+def test_resolve_retry_with_fingerprints(retry_dir: Path) -> None:
+    """The first statement of RETRY_SQL is kept; only its recorded SQL varies."""
+    first = extract_executable_statements(RETRY_SQL)[0]
+    marker = statement_identity(extract_migration_operation_summaries(RETRY_SQL), 0)
+    recorded = Marker(type=marker.type, key=marker.key)
+
+    def state_with(sql: str) -> FakeStore:
+        return FakeStore(
+            in_progress(
+                [_with_fingerprint(op(0, "completed", recorded), statement_fingerprint(sql))],
+                checksum="old",
+            )
+        )
+
+    spaced = first.replace(" ", "  /* c */ ", 1)
+    changed = f"{first[:-1]} -- x\n, 1;"
+    assert isinstance(_resolve(retry_dir, state_with(spaced)), RetryResume)
+    with pytest.raises(MigrateError) as info:
+        _resolve(retry_dir, state_with(changed))
+    assert info.value.code == "retry_mismatch"
+    assert (
+        f"statement 1: completed as {recorded.type} {recorded.key}, but the edited file has "
+        "different SQL there"
+    ) in str(info.value)
+    # A plugin may rewrite the statements: apply checks them instead.
+    resumed = _resolve(retry_dir, state_with(changed), plugins_rewrite_statements=True)
+    assert isinstance(resumed, RetryResume)
+
+
+@pytest.mark.parametrize("plugins_rewrite_statements", [False, True])
+def test_resolve_retry_counts_as_position_only_unmarked_statements_without_a_fingerprint(
+    tmp_path: Path, *, plugins_rewrite_statements: bool
+) -> None:
+    """A journal a no-ALTER run continued: statement 1 has a fingerprint, 2 not."""
+    unmarked = [
+        "CREATE TABLE db.a (id UInt64) ENGINE = MergeTree ORDER BY id;",
+        "CREATE TABLE db.b (id UInt64) ENGINE = MergeTree ORDER BY id;",
+        "CREATE TABLE db.c (id UInt64) ENGINE = MergeTree ORDER BY id;",
+    ]
+    (tmp_path / "m.sql").write_text("\n".join(unmarked), encoding="utf-8")
+    store = FakeStore(
+        in_progress(
+            [
+                _with_fingerprint(
+                    op(0, "completed", Marker(type="sql_statement", key="statement:0")),
+                    statement_fingerprint(unmarked[0]),
+                ),
+                op(1, "completed", Marker(type="sql_statement", key="statement:1")),
+                op(2, "failed", Marker(type="sql_statement", key="statement:2")),
+            ],
+            checksum="old",
+        )
+    )
+    resumed = _resolve(tmp_path, store, plugins_rewrite_statements=plugins_rewrite_statements)
+    assert isinstance(resumed, RetryResume)
+    assert resumed.completed_statements == 2
+    assert resumed.unmarked_completed_statements == 2
+    assert resumed.position_only_completed_statements == 1
+
+
+_FP_A = "CREATE TABLE p_a (id UInt64) ENGINE = MergeTree ORDER BY id;"
+_FP_B = "CREATE TABLE p_b (id UInt64) ENGINE = MergeTree ORDER BY id;"
+_FP_C_BROKEN = "CREATE TABLE p_c (id UInt64) ENGINE = MergeTree ORDER BY missing_col;"
+_FP_C = "CREATE TABLE p_c (id UInt64) ENGINE = MergeTree ORDER BY id;"
+_FP_D = "CREATE TABLE p_d (id UInt64) ENGINE = MergeTree ORDER BY id;"
+_FP_ORIGINAL = "\n".join([_FP_A, _FP_B, _FP_C_BROKEN, _FP_D])
+
+
+def _failed_fingerprint_run(tmp_path: Path) -> MigrationRowState:
+    """Run _FP_ORIGINAL until statement 3 fails; the recorded state."""
+    run_dir = tmp_path / "first"
+    run_dir.mkdir()
+    store = FakeStore()
+    with pytest.raises(StatementError, match="failed at statement 3 of 4"):
+        _apply(
+            _write(run_dir, _FP_ORIGINAL),
+            _RecordingClient(fail=lambda s: "missing_col" in s),
+            store,
+        )
+    assert store.state is not None
+    return store.state
+
+
+def test_apply_records_the_fingerprint_of_the_statement_with_every_write(
+    tmp_path: Path,
+) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    assert [(o.operation_index, o.status, o.fingerprint) for o in recorded.operations] == [
+        (0, "completed", statement_fingerprint(_FP_A)),
+        (1, "completed", statement_fingerprint(_FP_B)),
+        (2, "failed", statement_fingerprint(_FP_C_BROKEN)),
+    ]
+
+
+def test_apply_retry_after_comment_only_edit_runs_the_statements_that_never_ran(
+    tmp_path: Path,
+) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    edited = "\n\n".join(
+        [
+            "-- created first\n" + _FP_A.replace("ENGINE", "/* the engine */ ENGINE"),
+            "  " + _FP_B.replace(";", " // b; with a semicolon\n;"),
+            _FP_C,
+            _FP_D,
+        ]
+    )
+    client = _RecordingClient()
+    store = FakeStore(recorded)
+    _apply(_write(tmp_path, edited), client, store, retry=_retry_for(edited, recorded.checksum))
+    assert client.calls == [_FP_C, _FP_D]
+    assert len(store.appended) == 1
+    assert store.state is not None
+    assert [o.fingerprint for o in store.state.operations] == [
+        statement_fingerprint(sql) for sql in (_FP_A, _FP_B, _FP_C, _FP_D)
+    ]
+
+
+def test_apply_retry_refuses_an_edit_that_changed_the_sql_of_a_completed_statement(
+    tmp_path: Path,
+) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    # The completed statement 2 (p_b) was removed and p_c fixed: by position
+    # the fixed statement would be skipped as completed.
+    edited = "\n".join([_FP_A, _FP_C, _FP_D])
+    client = _RecordingClient()
+    store = FakeStore(recorded)
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, edited), client, store, retry=_retry_for(edited, recorded.checksum)
+        )
+    assert info.value.code == "retry_mismatch"
+    message = str(info.value)
+    assert (
+        "statement 2: completed as sql_statement statement:1, but the edited file has "
+        "different SQL there"
+    ) in message
+    assert (
+        "must keep their position, operation marker and SQL (comments and whitespace may change)"
+    ) in message
+    assert client.calls == []
+    assert store.writes == []
+    assert store.appended == []
+
+
+def test_apply_resumes_a_state_without_fingerprints_by_position_and_marker(
+    tmp_path: Path,
+) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    legacy = recorded.model_copy(
+        update={
+            "operations": [o.model_copy(update={"fingerprint": ""}) for o in recorded.operations]
+        }
+    )
+    edited = "\n".join([_FP_A, _FP_C, _FP_D])
+    client = _RecordingClient()
+    _apply(
+        _write(tmp_path, edited),
+        client,
+        FakeStore(legacy),
+        retry=_retry_for(edited, recorded.checksum),
+    )
+    # What every release before #599 does with this state.
+    assert client.calls == [_FP_D]
+
+
+def test_apply_refuses_an_unchanged_file_whose_statements_no_longer_match(
+    tmp_path: Path,
+) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    client = _RecordingClient()
+    store = FakeStore(recorded)
+    # A plugin that now drops the first statement moves every other one.
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, _FP_ORIGINAL),
+            client,
+            store,
+            runtime=_FakeRuntime(lambda statements: statements[1:]),
+        )
+    assert info.value.code == "statement_split_changed"
+    message = str(info.value)
+    assert message.startswith(
+        "Cannot resume m.sql: the journal recorded statements 1, 2 as completed or started, "
+        "but this run gets different SQL from the file at those positions."
+    )
+    assert "chkit migrate --apply --abandon m.sql" in message
+    assert client.calls == []
+    assert store.writes == []
+
+
+def test_apply_resumes_an_unchanged_file_whose_statements_match(tmp_path: Path) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    client = _RecordingClient()
+    _apply(_write(tmp_path, _FP_ORIGINAL), client, FakeStore(recorded))
+    assert client.calls == [_FP_C_BROKEN, _FP_D]
+
+
+class _StaleFirstReadStore(FakeStore):
+    """The first read sees no state (a stale replica); later reads see it."""
+
+    def read_migration_state(self, name: str) -> MigrationRowState | None:
+        self.reads.append(name)
+        return None if len(self.reads) == 1 else self.state
+
+
+def test_apply_checks_the_record_of_every_skip(tmp_path: Path) -> None:
+    recorded = _failed_fingerprint_run(tmp_path)
+    client = _RecordingClient()
+    store = _StaleFirstReadStore(recorded)
+    runtime = _FakeRuntime(lambda all_: [all_[0].replace("p_a", "p_x"), *all_[1:]])
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, _FP_ORIGINAL), client, store, runtime=runtime)
+    assert info.value.code == "statement_split_changed"
+    assert "the journal recorded statement 1 as completed or started" in str(info.value)
+    assert client.calls == []
+
+
+def test_apply_checks_another_releases_fingerprinted_state_by_fingerprint(
+    tmp_path: Path,
+) -> None:
+    """The two splits differ on statement 1; its fingerprint shows the statement
+    there is the one that ran."""
+    sql = (
+        "SELECT 1 // x; SELECT 2\n;\nALTER TABLE t ADD COLUMN b UInt64;\n"
+        "ALTER TABLE t ADD COLUMN c UInt64;\n"
+    )
+    ran = "SELECT 1 // x; SELECT 2\n;"
+    client = _RecordingClient()
+    store = FakeStore(
+        in_progress(
+            [
+                _with_fingerprint(op(0, "completed"), statement_fingerprint(ran)),
+                op(1, "failed"),
+            ],
+            checksum=checksum_sql(sql),
+        )
+    )
+    _apply(_write(tmp_path, sql), client, store)
+    assert client.calls == [
+        "ALTER TABLE t ADD COLUMN b UInt64;",
+        "ALTER TABLE t ADD COLUMN c UInt64;",
+    ]

@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`migrate --apply` no longer writes journal rows into the server's `default` database when a write reaches a replica that has not applied `CREATE DATABASE` yet, and it now stops instead of skipping the replica wait when it cannot tell how many replicas the target has.

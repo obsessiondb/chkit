@@ -287,6 +287,7 @@ def _statement(
         statement_index=0,
         operation_type="load_table_data",
         operation_key=operation_key,
+        fingerprint="",
         before_retry=None,
         log=log,
         poll_interval_seconds=0.25,
@@ -450,6 +451,7 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
                 "startedAt": "2026-10-02 00:00:00.000",
                 "finishedAt": None,
                 "lastError": "",
+                "fingerprint": "",
             }
         )
         journal = _MemoryJournal(
@@ -477,13 +479,15 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
         with pytest.raises(RuntimeError, match="attached attempt failed"):
             apply_async_statement(statement)
         assert any("attaching to in-flight query" in line for line in lines)
-        assert journal.statuses() == ["failed"]
+        # The attach journals the attempt started (#672), then its failure.
+        assert journal.statuses() == ["started", "failed"]
         worker.join(timeout=60)
         assert "attached attempt failed" in attached_outcome[0]
 
-        # The in-flight check looks for any running query with the id. Every
-        # poll after it counts only queries that started after the earlier
-        # attempt had ended.
+        # The in-flight check looks for any running query with the id: the
+        # record has no marker of this release, so query_log is not read (#672).
+        # Every poll after it counts only queries that started after the
+        # earlier attempt had ended.
         in_flight_check, *polls = recording.after_times
         assert in_flight_check is None
         assert polls

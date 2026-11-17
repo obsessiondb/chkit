@@ -1,5 +1,6 @@
 import {
   canonicalizeDefinitions,
+  compareCodePoints,
   type ColumnDefinition,
   type DictionaryDefinition,
   type MaterializedViewDefinition,
@@ -350,8 +351,8 @@ export function generateTypeArtifacts(
       }
     )
     .sort((a, b) => {
-      if (a.database !== b.database) return a.database.localeCompare(b.database)
-      return a.name.localeCompare(b.name)
+      if (a.database !== b.database) return compareCodePoints(a.database, b.database)
+      return compareCodePoints(a.name, b.name)
     })
 
   const resolved = resolveTableNames(sortedDefinitions, normalized.tableNameStyle)

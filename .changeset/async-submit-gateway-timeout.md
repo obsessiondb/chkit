@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`migrate --apply` no longer records an async statement as failed when its submit request fails after the server ran the load.

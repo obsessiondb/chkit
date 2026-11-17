@@ -5,7 +5,7 @@ import type {
   OperationStatus,
 } from '../../runtime/journal-store.js'
 import type { MigrationOperationSummary } from '../../runtime/safety-markers.js'
-import { MigrateError } from './errors.js'
+import { MigrateError, recordedStatementsChangedError } from './errors.js'
 
 export interface RecoveryTargets {
   /** `--retry <migration>` as a file name. */
@@ -14,11 +14,19 @@ export interface RecoveryTargets {
   abandonTarget: string | undefined
 }
 
-export interface StatementIdentity {
+export interface StatementMarker {
   type: string
   key: string
   /** False for a statement without an `-- operation:` marker, matched by position only. */
   marked: boolean
+}
+
+export interface StatementIdentity extends StatementMarker {
+  /**
+   * The `statementFingerprint` of the statement; undefined when its SQL
+   * cannot be checked yet, because a plugin's onBeforeApply may still rewrite it.
+   */
+  fingerprint: string | undefined
 }
 
 export interface OperationMismatch {
@@ -30,6 +38,8 @@ export interface OperationMismatch {
   recorded: { type: string; key: string }
   /** null when the edited file has no statement at that position. */
   current: { type: string; key: string } | null
+  /** The marker matches, but the statement's SQL is not the one that ran (#599). */
+  sqlChanged: boolean
 }
 
 /**
@@ -50,6 +60,8 @@ export type RetryEditCheck =
       ok: true
       completed: number
       unmarkedCompleted: number
+      /** The unmarked ones the journal recorded without a fingerprint: matched by position only. */
+      positionOnlyCompleted: number
       /** 0-based index of the first statement that did not complete; null when all did. */
       resumeIndex: number | null
     }
@@ -95,25 +107,27 @@ export function normalizeMigrationName(raw: string, flag: '--retry' | '--abandon
 export function statementIdentity(
   operations: readonly MigrationOperationSummary[],
   index: number,
-): StatementIdentity {
+): StatementMarker {
   const operation = operations[index]
   return operation === undefined
     ? { type: 'sql_statement', key: `statement:${index}`, marked: false }
     : { type: operation.type, key: operation.key, marked: true }
 }
 
+/** One identity per statement; `fingerprints` has one entry per statement. */
 export function statementIdentities(
   operations: readonly MigrationOperationSummary[],
-  statementCount: number,
+  fingerprints: ReadonlyArray<string | undefined>,
 ): StatementIdentity[] {
-  return Array.from({ length: statementCount }, (_, index) => statementIdentity(operations, index))
+  return fingerprints.map((fingerprint, index) => ({ ...statementIdentity(operations, index), fingerprint }))
 }
 
 /**
  * Whether --retry may resume an in-progress migration with an edited file.
  * apply skips completed statements and re-attaches a running async statement
- * by position, so each of them must keep its position and operation marker.
- * The journal records only type and key per statement, not its SQL.
+ * by position, so each of them must keep its position, operation marker and,
+ * where the journal recorded its fingerprint, its SQL (#599). A record from
+ * an older release has no fingerprint and is matched by position and marker.
  */
 export function verifyRetryEdit(
   operations: readonly OperationState[],
@@ -125,21 +139,27 @@ export function verifyRetryEdit(
   const mismatches: OperationMismatch[] = []
   let completed = 0
   let unmarkedCompleted = 0
+  let positionOnlyCompleted = 0
   for (const op of bound) {
     const current = identities[op.operationIndex]
-    if (current === undefined || !sameIdentity(current, op)) {
+    if (current === undefined || !sameMarker(current, markerOf(op)) || !sameSql(current, op)) {
       mismatches.push({
         statement: op.operationIndex + 1,
         status: op.status,
         queryId: op.queryId,
         recorded: markerOf(op),
         current: current === undefined ? null : { type: current.type, key: current.key },
+        sqlChanged: current !== undefined && sameMarker(current, markerOf(op)),
       })
       continue
     }
     if (op.status !== 'completed') continue
     completed += 1
-    if (!current.marked) unmarkedCompleted += 1
+    if (current.marked) continue
+    unmarkedCompleted += 1
+    // A recorded fingerprint is checked here, or by apply once plugins have
+    // rewritten the statements.
+    if (op.fingerprint === '') positionOnlyCompleted += 1
   }
   const sharedMarkers = findSharedMarkerMismatches(operations, identities, mismatches)
   if (mismatches.length > 0 || sharedMarkers.length > 0) return { ok: false, mismatches, sharedMarkers }
@@ -147,7 +167,13 @@ export function verifyRetryEdit(
     operations.filter((op) => op.status === 'completed').map((op) => op.operationIndex),
   )
   const resumeIndex = identities.findIndex((_, index) => !done.has(index))
-  return { ok: true, completed, unmarkedCompleted, resumeIndex: resumeIndex === -1 ? null : resumeIndex }
+  return {
+    ok: true,
+    completed,
+    unmarkedCompleted,
+    positionOnlyCompleted,
+    resumeIndex: resumeIndex === -1 ? null : resumeIndex,
+  }
 }
 
 export function retryMismatchError(
@@ -164,7 +190,9 @@ export function retryMismatchError(
     const found =
       current === null
         ? `the edited file has no statement ${statement}`
-        : `the edited file has ${current.type} ${current.key} there`
+        : mismatch.sqlChanged
+          ? 'the edited file has different SQL there'
+          : `the edited file has ${current.type} ${current.key} there`
     return `  statement ${statement}: ${label}, but ${found}`
   })
   const sharedLines = sharedMarkers.map((shared) => {
@@ -185,7 +213,7 @@ export function retryMismatchError(
     'retry_mismatch',
     `Cannot retry ${migration}: statements that completed or may still be running no longer match the edited file.\n` +
       `${[...lines, ...sharedLines].join('\n')}\n` +
-      'chkit skips completed statements and re-attaches running async statements by position, so they must keep their position and operation marker.' +
+      'chkit skips completed statements and re-attaches running async statements by position, so they must keep their position, operation marker and SQL (comments and whitespace may change).' +
       sharedHint +
       runningHint.join('') +
       `\nRestore them, or discard the partial run so the next apply starts the file over: chkit migrate --apply --abandon ${migration}`,
@@ -205,7 +233,7 @@ export function rebaseInProgressState(
   const operations = state.operations.filter((op) => {
     if (op.status === 'completed') return true
     const current = input.identities[op.operationIndex]
-    return current !== undefined && sameIdentity(current, op)
+    return current !== undefined && sameMarker(current, markerOf(op))
   })
   return { ...state, checksum: input.checksum, appliedAt: input.appliedAt, operations }
 }
@@ -220,7 +248,8 @@ export function rebaseInProgressState(
  * positions of the split only when the plugins returned them unchanged; when
  * a plugin added, removed, moved or rewrote any, the positions cannot be
  * matched, so every recorded statement counts as changed once the two splits
- * differ.
+ * differ. A statement recorded with its fingerprint is checked by
+ * `recordedStatementMismatches` instead (#599).
  */
 export function splitChangedStatements(
   operations: readonly OperationState[],
@@ -230,10 +259,50 @@ export function splitChangedStatements(
   const same = legacy.length === current.length && legacy.every((statement, index) => statement === current[index])
   if (same) return []
   return operations
-    .filter((op) => op.status === 'completed' || op.status === 'started')
+    .filter((op) => (op.status === 'completed' || op.status === 'started') && op.fingerprint === '')
     .filter((op) => !positionsKept || legacy[op.operationIndex] !== current[op.operationIndex])
     .map((op) => op.operationIndex + 1)
     .sort((a, b) => a - b)
+}
+
+/**
+ * The statements (1-based) that an in-progress state records as completed,
+ * or as a running async statement, with a fingerprint that the statement at
+ * that position no longer has (#599). `fingerprints` holds one per statement
+ * this run would execute. apply would skip or re-attach those statements by
+ * position, though they are not the statements that ran.
+ */
+export function recordedStatementMismatches(
+  operations: readonly OperationState[],
+  fingerprints: readonly string[],
+): number[] {
+  return operations
+    .filter((op) => isBoundToPosition(op) && op.fingerprint !== '')
+    .filter((op) => fingerprints[op.operationIndex] !== op.fingerprint)
+    .map((op) => op.operationIndex + 1)
+    .sort((a, b) => a - b)
+}
+
+/**
+ * Throws when the journal records statement `index` as completed with a
+ * fingerprint the statement this run would skip does not have (#599). Every
+ * skip checks the record it reads, not only the state the run started with:
+ * a later read can return a version the first check never saw.
+ */
+export function assertCompletedStatement(
+  state: MigrationRowState,
+  input: { migration: string; index: number; fingerprint: string; cliVersion: string },
+): void {
+  const recorded = state.operations.find(
+    (op) => op.operationIndex === input.index && op.status === 'completed',
+  )
+  if (recorded === undefined || recorded.fingerprint === '' || recorded.fingerprint === input.fingerprint) return
+  throw recordedStatementsChangedError({
+    migration: input.migration,
+    statements: [input.index + 1],
+    recordedBy: state.chkitVersion,
+    cliVersion: input.cliVersion,
+  })
 }
 
 /** Whether any statement of an in-progress state completed or may have run. */
@@ -275,8 +344,10 @@ function isBoundToPosition(op: OperationState): boolean {
   return op.status === 'completed' || (op.status === 'started' && op.queryId !== '')
 }
 
-function sameIdentity(identity: StatementIdentity, op: OperationState): boolean {
-  return sameMarker(identity, markerOf(op))
+// A record without a fingerprint, or a statement that cannot be checked yet,
+// is matched by position and marker only.
+function sameSql(identity: StatementIdentity, op: OperationState): boolean {
+  return op.fingerprint === '' || identity.fingerprint === undefined || identity.fingerprint === op.fingerprint
 }
 
 function markerOf(op: OperationState): { type: string; key: string } {

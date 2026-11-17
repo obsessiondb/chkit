@@ -1,0 +1,12 @@
+SCHEMA >
+    `session_id` String,
+    `user_id` UInt64,
+    `started_at` DateTime,
+    `sign` Int8
+
+ENGINE "CollapsingMergeTree"
+ENGINE_PARTITION_KEY "toStartOfHour(started_at)"
+ENGINE_SORTING_KEY "user_id, session_id"
+ENGINE_PRIMARY_KEY "user_id"
+ENGINE_SIGN "sign"
+ENGINE_TTL "started_at + toIntervalDay(1)"

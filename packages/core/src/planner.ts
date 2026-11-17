@@ -1,4 +1,5 @@
 import { type CanonicalizeOptions, canonicalizeDefinitions, definitionKey } from './canonical.js'
+import { compareCodePoints } from './order.js'
 import { diffByName, diffClauses, diffSettings } from './diff-primitives.js'
 import type {
   ColumnDefaultValue,
@@ -57,6 +58,7 @@ import {
   orderByDependencies,
   type DependencyGraph,
 } from './object-dependencies.js'
+import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -305,11 +307,11 @@ function inferColumnRenameSuggestions(
   }
 
   return suggestions.sort((a, b) => {
-    const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+    const tableOrder = compareCodePoints(`${a.database}.${a.table}`, `${b.database}.${b.table}`)
     if (tableOrder !== 0) return tableOrder
-    const fromOrder = a.from.localeCompare(b.from)
+    const fromOrder = compareCodePoints(a.from, b.from)
     if (fromOrder !== 0) return fromOrder
-    return a.to.localeCompare(b.to)
+    return compareCodePoints(a.to, b.to)
   })
 }
 
@@ -759,13 +761,15 @@ export function planDiff(
     pushCreateOperation(operations, newDef, 'safe')
   }
 
-  for (const database of [...databasesToCreate].sort((a, b) => a.localeCompare(b))) {
+  for (const database of [...databasesToCreate].sort((a, b) => compareCodePoints(a, b))) {
     pushCreateDatabaseOperation(operations, database, 'safe')
   }
 
   const ordered = orderOperations(operations.sort(compareOperations), {
     drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
     create: buildDependencyGraph(newCanonical),
+    previous: oldCanonical,
+    next: newCanonical,
   })
 
   const riskSummary: Record<RiskLevel, number> = { safe: 0, caution: 0, danger: 0 }
@@ -777,11 +781,11 @@ export function planDiff(
     operations: ordered,
     riskSummary,
     renameSuggestions: renameSuggestions.sort((a, b) => {
-      const tableOrder = `${a.database}.${a.table}`.localeCompare(`${b.database}.${b.table}`)
+      const tableOrder = compareCodePoints(`${a.database}.${a.table}`, `${b.database}.${b.table}`)
       if (tableOrder !== 0) return tableOrder
-      const fromOrder = a.from.localeCompare(b.from)
+      const fromOrder = compareCodePoints(a.from, b.from)
       if (fromOrder !== 0) return fromOrder
-      return a.to.localeCompare(b.to)
+      return compareCodePoints(a.to, b.to)
     }),
   }
 }
@@ -808,7 +812,7 @@ function operationRank(op: MigrationOperation): number {
 // The sort is stable, so operations that share a key keep the order diffTables
 // pushed them in: a column's REMOVE DEFAULT before its MODIFY COLUMN.
 function compareOperations(a: MigrationOperation, b: MigrationOperation): number {
-  return operationRank(a) - operationRank(b) || alterRank(a) - alterRank(b) || a.key.localeCompare(b.key)
+  return operationRank(a) - operationRank(b) || alterRank(a) - alterRank(b) || compareCodePoints(a.key, b.key)
 }
 
 function alterRank(op: MigrationOperation): number {
@@ -818,18 +822,139 @@ function alterRank(op: MigrationOperation): number {
 /**
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
- * first. Alters and create_database keep their place.
+ * first. Alters and create_database keep their place, except that the column
+ * statements of a table are ordered by the columns they read and remove.
  */
 function orderOperations(
   sorted: MigrationOperation[],
-  prerequisites: { drop: DependencyGraph; create: DependencyGraph }
+  prerequisites: { drop: DependencyGraph; create: DependencyGraph } & ColumnStatementDefinitions
 ): MigrationOperation[] {
   const drops = sorted.filter((op) => operationRank(op) === 0)
   const middle = sorted.filter((op) => operationRank(op) === 1 || operationRank(op) === 2)
   const creates = sorted.filter((op) => operationRank(op) >= 3)
   return [
     ...orderByDependencies(drops, (op) => op.key, (key) => prerequisites.drop.get(key) ?? []),
-    ...middle,
+    ...orderColumnStatements(middle, prerequisites, []),
     ...orderByDependencies(creates, (op) => op.key, (key) => prerequisites.create.get(key) ?? []),
   ]
+}
+
+/** The schema before and after a plan, which the column statement order reads. */
+export interface ColumnStatementDefinitions {
+  previous: SchemaDefinition[]
+  next: SchemaDefinition[]
+}
+
+/** The columns a RENAME COLUMN operation renames. */
+export type ColumnRename = Pick<ColumnRenameSuggestion, 'database' | 'table' | 'from' | 'to'>
+
+const COLUMN_STATEMENTS: ReadonlySet<MigrationOperation['type']> = new Set([
+  'alter_table_add_column',
+  'alter_table_modify_column',
+  'alter_table_drop_column',
+  'alter_table_rename_column',
+])
+
+export function isColumnStatement(op: MigrationOperation): boolean {
+  return COLUMN_STATEMENTS.has(op.type)
+}
+
+/** Key of the RENAME COLUMN operation of `rename`. */
+export function columnRenameKey(rename: ColumnRename): string {
+  return `table:${rename.database}.${rename.table}:column_rename:${rename.from}:${rename.to}`
+}
+
+/**
+ * Orders the column statements (ADD, MODIFY, DROP and RENAME COLUMN) of every
+ * table in one dependency sort, from their key order (#681, #745, #746, #758):
+ * - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression reads
+ *   column X runs after the ADD of X or the RENAME to X;
+ * - a DROP of X runs after the MODIFY or DROP of every column whose old
+ *   expression reads X, since ClickHouse refuses to drop a column another
+ *   column still reads. A RENAME away from X needs no such wait: ClickHouse
+ *   rewrites the expressions that read X to the new name;
+ * - statements of the same column keep their order.
+ * Members of a cycle keep their key order. The statements fill the positions
+ * the column statements had, so every other operation keeps its place, and a
+ * table's statements never move past another table's (they share no edge).
+ * `renames` names the columns of each RENAME COLUMN in `operations`.
+ */
+export function orderColumnStatements(
+  operations: MigrationOperation[],
+  definitions: ColumnStatementDefinitions,
+  renames: readonly ColumnRename[]
+): MigrationOperation[] {
+  const reads = columnDefaultReads(definitions.next)
+  const oldReads = columnDefaultReads(definitions.previous)
+  const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
+  const statements = operations
+    .filter(isColumnStatement)
+    .sort((a, b) => compareCodePoints(a.key, b.key))
+
+  const providers = new Map<string, number[]>()
+  const releasers = new Map<string, number[]>()
+  const append = (map: Map<string, number[]>, key: string, index: number) =>
+    map.set(key, [...(map.get(key) ?? []), index])
+  statements.forEach((op, index) => {
+    if (op.type === 'alter_table_add_column') append(providers, op.key, index)
+    const renamed = renamedTo.get(op.key)
+    if (op.type === 'alter_table_rename_column' && renamed !== undefined) append(providers, renamed, index)
+    if (op.type === 'alter_table_modify_column' || op.type === 'alter_table_drop_column') {
+      for (const read of oldReads.get(op.key) ?? []) append(releasers, read, index)
+    }
+  })
+
+  const prerequisites = statements.map((op, index) => {
+    const found = new Set<number>()
+    if (op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column') {
+      for (const read of reads.get(op.key) ?? []) for (const other of providers.get(read) ?? []) found.add(other)
+    }
+    if (op.type === 'alter_table_drop_column') {
+      for (const other of releasers.get(op.key) ?? []) found.add(other)
+    }
+    if (index > 0 && statements[index - 1]?.key === op.key) found.add(index - 1)
+    found.delete(index)
+    return [...found].map(String)
+  })
+
+  const ordered = orderByDependencies(
+    statements.map((op, index) => ({ op, index })),
+    (item) => String(item.index),
+    (key) => prerequisites[Number(key)] ?? []
+  )
+  let next = 0
+  return operations.map((op) => (isColumnStatement(op) ? (ordered[next++]?.op ?? op) : op))
+}
+
+function columnKey(table: { database: string; table: string }, column: string): string {
+  return `table:${table.database}.${table.table}:column:${column}`
+}
+
+/**
+ * Column operation key → keys of the other columns of the same table that the
+ * column's default expression names. A name followed by `(` is a function
+ * call, not a column. A name can also be a lambda parameter; such an extra
+ * edge moves a statement later, or makes a cycle that keeps the key order.
+ */
+function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+  const graph = new Map<string, Set<string>>()
+  for (const def of definitions) {
+    if (def.kind !== 'table') continue
+    const keyOf = (name: string) => columnKey({ database: def.database, table: def.name }, name)
+    const names = new Set(def.columns.map((column) => column.name))
+    for (const column of def.columns) {
+      if (column.default === undefined) continue
+      const parsed = parseColumnDefault(column.default)
+      if (parsed.kind !== 'expression') continue
+      const read = new Set<string>()
+      const tokens = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
+      tokens.forEach((token, index) => {
+        const name = identifierName(token)
+        if (name === undefined || tokens[index + 1]?.text === '(') return
+        if (name !== column.name && names.has(name)) read.add(keyOf(name))
+      })
+      graph.set(keyOf(column.name), read)
+    }
+  }
+  return graph
 }

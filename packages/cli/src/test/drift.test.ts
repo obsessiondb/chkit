@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { diffNamedShapeMaps, diffSettings } from '../commands/drift/diff.js'
+
 import {
   type ColumnDefinition,
   type SkipIndexDefinition,
@@ -193,7 +195,7 @@ describe('@chkit/cli drift comparer', () => {
   })
 
   test('equates inline Nullable types with the introspected nullable property', () => {
-    for (const type of ['String', "DateTime64(3, 'UTC')", 'Decimal(12, 3)', 'LowCardinality(String)']) {
+    for (const type of ['String', "DateTime64(3, 'UTC')", 'Decimal(12, 3)']) {
       const inline = { name: 'value', type: `Nullable(${type})` }
       const property = { name: 'value', type, nullable: true }
       expect(compareColumn(inline, property)).toBeNull()
@@ -202,13 +204,19 @@ describe('@chkit/cli drift comparer', () => {
     }
   })
 
+  test('equates a nullable LowCardinality column with the stored LowCardinality(Nullable(T))', () => {
+    const stored = { name: 'value', type: 'LowCardinality(Nullable(String))' }
+    const property = { name: 'value', type: 'LowCardinality(String)', nullable: true }
+    expect(compareColumn(property, stored)).toBeNull()
+    expect(compareColumn(stored, property)).toBeNull()
+  })
+
   test('preserves real type, nullability and wrapper differences', () => {
     const differences: Array<[ColumnDefinition, ColumnDefinition]> = [
       [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'String' }],
       [{ name: 'value', type: 'String' }, { name: 'value', type: 'String', nullable: true }],
       [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'UInt64', nullable: true }],
       [{ name: 'value', type: 'Nullable(String)', nullable: true }, { name: 'value', type: 'String', nullable: true }],
-      [{ name: 'value', type: 'LowCardinality(Nullable(String))' }, { name: 'value', type: 'LowCardinality(String)', nullable: true }],
       [{ name: 'value', type: 'Array(Nullable(String))' }, { name: 'value', type: 'Array(String)' }],
     ]
     for (const [expected, actual] of differences) {
@@ -719,6 +727,147 @@ describe('@chkit/cli drift comparer', () => {
 
     expect(result).toBeNull()
   })
+
+  // ObsessionDB and ClickHouse Cloud store Replicated* as Shared*, without the path and replica (#669).
+  const replicatedOnShared: Array<[string, string, boolean]> = [
+    ['ReplicatedMergeTree()', 'SharedMergeTree', false],
+    ["ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')", 'SharedMergeTree', false],
+    ["ReplicatedReplacingMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}', v)", 'SharedReplacingMergeTree(v)', false],
+    ['ReplicatedReplacingMergeTree(v)', 'SharedReplacingMergeTree(v)', false],
+    // ObsessionDB keeps an expression path as written.
+    [
+      "ReplicatedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+      "SharedReplacingMergeTree(concat('/clickhouse/tables/', currentDatabase()), '{replica}', v)",
+      false,
+    ],
+    ['ReplicatedReplacingMergeTree($$/clickhouse/tables/{uuid}$$, $${replica}$$, v)', 'SharedReplacingMergeTree(v)', false],
+    ['ReplicatedVersionedCollapsingMergeTree(id, v)', 'SharedVersionedCollapsingMergeTree(id, v)', false],
+    ['ReplicatedReplacingMergeTree(v)', 'SharedMergeTree', true],
+    ["ReplicatedReplacingMergeTree('/p', '{replica}', v)", 'SharedReplacingMergeTree(id)', true],
+    // A server without Shared engines really has a non-replicated table.
+    ['ReplicatedMergeTree()', 'MergeTree', true],
+  ]
+  for (const [expectedEngine, actualEngine, mismatch] of replicatedOnShared) {
+    test(`${expectedEngine} against ${actualEngine} ${mismatch ? 'is' : 'is not'} an engine mismatch`, () => {
+      const expected = table({
+        database: 'app',
+        name: 'users',
+        engine: expectedEngine,
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'v', type: 'UInt64' }],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      })
+
+      const result = compareTableShape(expected, {
+        engine: actualEngine,
+        primaryKey: '(id)',
+        orderBy: '(id)',
+        uniqueKey: undefined,
+        partitionBy: undefined,
+        columns: [{ name: 'id', type: 'UInt64' }, { name: 'v', type: 'UInt64' }],
+        settings: {},
+        indexes: [],
+        projections: [],
+        ttl: undefined,
+      })
+
+      expect(result?.engineMismatch ?? false).toBe(mismatch)
+    })
+  }
+
+  // Column names and string literals in engine arguments are case-sensitive (#673).
+  // The server rewrites the case of function names and operator keywords only.
+  const engineArgumentCase: Array<[string, string, boolean]> = [
+    ['CollapsingMergeTree(Sign)', 'CollapsingMergeTree(sign)', true],
+    ['ReplacingMergeTree(Ver)', 'ReplacingMergeTree(ver)', true],
+    ['VersionedCollapsingMergeTree(Sign, Version)', 'VersionedCollapsingMergeTree(sign, Version)', true],
+    ['SummingMergeTree((Value, Version))', 'SummingMergeTree((value, Version))', true],
+    ["GraphiteMergeTree('graphite_rollup')", "GraphiteMergeTree('Graphite_Rollup')", true],
+    ["ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", 'SharedReplacingMergeTree(ver)', true],
+    ["Distributed(c, app, t, Sign)", "Distributed('c', 'app', 't', sign)", true],
+    ['ReplacingMergeTree(And)', 'ReplacingMergeTree(and)', true],
+    ['SummingMergeTree((From, Value))', 'SummingMergeTree((from, Value))', true],
+    ['CollapsingMergeTree(Sign)', 'CollapsingMergeTree(Sign)', false],
+    ['ReplacingMergeTree( Ver )', 'ReplacingMergeTree(Ver)', false],
+    ["ReplicatedReplacingMergeTree('/p', '{replica}', Ver)", 'SharedReplacingMergeTree(Ver)', false],
+    ['Distributed(c, app, t, RAND())', "Distributed('c', 'app', 't', rand())", false],
+    ['Distributed(c, app, t, If(Sign > 1, 1, 0))', "Distributed('c', 'app', 't', if(Sign > 1, 1, 0))", false],
+    ['Distributed(c, app, t, Path is not null and TRUE)', "Distributed('c', 'app', 't', Path IS NOT NULL AND true)", false],
+    ['Distributed(c, app, t, id is distinct from 0)', "Distributed('c', 'app', 't', id IS DISTINCT FROM 0)", false],
+    ["Distributed(c, app, t, s not like 'a')", "Distributed('c', 'app', 't', s NOT LIKE 'a')", false],
+  ]
+  // A quoted name compares as the server writes it back (#679).
+  const engineQuoting: Array<[string, string, boolean]> = [
+    // The server writes the Null engine as `Null`.
+    ['Null', '`Null`', false],
+    ['Null()', '`Null`', false],
+    ['`Null`', '`Null`', false],
+    // It writes a quoted name bare unless the name needs its quotes.
+    ['ReplacingMergeTree(`Ver`)', 'ReplacingMergeTree(Ver)', false],
+    ['ReplacingMergeTree("Ver")', 'ReplacingMergeTree(Ver)', false],
+    ['`ReplacingMergeTree`(Ver)', 'ReplacingMergeTree(Ver)', false],
+    ['ReplacingMergeTree(`from`)', 'ReplacingMergeTree(from)', false],
+    ['ReplacingMergeTree(`And`)', 'ReplacingMergeTree(And)', false],
+    ['SummingMergeTree((`Value`, `my v`))', 'SummingMergeTree((Value, `my v`))', false],
+    ['Distributed(c, app, t, sipHash64(`my id`, `id`))', "Distributed('c', 'app', 't', sipHash64(`my id`, id))", false],
+    ['ReplacingMergeTree(`my ver`)', 'ReplacingMergeTree(`my ver`)', false],
+    ['ReplacingMergeTree("my ver")', 'ReplacingMergeTree(`my ver`)', false],
+    ['ReplacingMergeTree(`a.b`)', 'ReplacingMergeTree(`a.b`)', false],
+    ['ReplacingMergeTree(`1v`)', 'ReplacingMergeTree(`1v`)', false],
+    ['ReplacingMergeTree(`a``b`)', 'ReplacingMergeTree(`a\\`b`)', false],
+    ['ReplacingMergeTree(`null`)', 'ReplacingMergeTree(`null`)', false],
+    ['ReplacingMergeTree(`select`)', 'ReplacingMergeTree(`select`)', false],
+    // Newer servers quote `cube` as a keyword, older ones write it bare.
+    ['ReplacingMergeTree(`cube`)', 'ReplacingMergeTree(cube)', false],
+    ['ReplacingMergeTree(`cube`)', 'ReplacingMergeTree(`cube`)', false],
+    // Quoting that changes the name or what it means still counts: a bare `true` or `nan` is a literal.
+    ['ReplacingMergeTree(`Ver`)', 'ReplacingMergeTree(ver)', true],
+    ['ReplacingMergeTree(`from`)', 'ReplacingMergeTree(From)', true],
+    ['ReplacingMergeTree(`my ver`)', 'ReplacingMergeTree(`my Ver`)', true],
+    ['ReplacingMergeTree(`a.b`)', 'ReplacingMergeTree(a.b)', true],
+    ['ReplacingMergeTree(`ab`)', 'ReplacingMergeTree(`a\\`b`)', true],
+    ['ReplacingMergeTree(`Null`)', 'ReplacingMergeTree(`null`)', true],
+    ['ReplacingMergeTree(`true`)', 'ReplacingMergeTree(true)', true],
+    ['ReplacingMergeTree(`nan`)', 'ReplacingMergeTree(nan)', true],
+    // In an expression, as the server writes a sharding key back.
+    ['Distributed(c, app, t, cityHash64(`And` + 1))', "Distributed('c', 'app', 't', cityHash64(And + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`And` + 1))', "Distributed('c', 'app', 't', cityHash64(and + 1))", true],
+    ['Distributed(c, app, t, if(`And` > 1, 1, 0))', "Distributed('c', 'app', 't', if(And > 1, 1, 0))", false],
+    ['Distributed(c, app, t, if(And > 1, 1, 0))', "Distributed('c', 'app', 't', if(and > 1, 1, 0))", true],
+    ['Distributed(c, app, t, `And` AND `and`)', "Distributed('c', 'app', 't', And AND and)", false],
+    ['Distributed(c, app, t, `and` AND `And`)', "Distributed('c', 'app', 't', And AND and)", true],
+    ['Distributed(c, app, t, cityHash64(`cube` + 1))', "Distributed('c', 'app', 't', cityHash64(cube + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`select` + 1))', "Distributed('c', 'app', 't', cityHash64(`select` + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`my v` + 1))', "Distributed('c', 'app', 't', cityHash64(`my v` + 1))", false],
+    ['Distributed(c, app, t, cityHash64(`true` + 1))', "Distributed('c', 'app', 't', cityHash64(true + 1))", true],
+  ]
+  for (const [expectedEngine, actualEngine, mismatch] of [...engineArgumentCase, ...engineQuoting]) {
+    test(`engine ${expectedEngine} against ${actualEngine} ${mismatch ? 'is' : 'is not'} a mismatch`, () => {
+      const expected = table({
+        database: 'app',
+        name: 'events',
+        engine: expectedEngine,
+        columns: [{ name: 'id', type: 'UInt64' }],
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      })
+
+      const result = compareTableShape(expected, {
+        engine: actualEngine,
+        primaryKey: '(id)',
+        orderBy: '(id)',
+        uniqueKey: undefined,
+        partitionBy: undefined,
+        columns: [{ name: 'id', type: 'UInt64' }],
+        settings: {},
+        indexes: [],
+        projections: [],
+        ttl: undefined,
+      })
+
+      expect(result?.engineMismatch ?? false).toBe(mismatch)
+    })
+  }
 
   test('emits reason codes for semantic drift', () => {
     const expected = table({
@@ -1493,6 +1642,29 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
     expect(compareViewShape(expected, live, 'app', canonicalizer)).toEqual([])
     const elsewhere = { query: "SELECT id, dictGet('other.users', 'name', id) AS n, dictHas('app.users', id) AS h FROM t" }
     expect(compareViewShape(expected, elsewhere, 'app', canonicalizer)).toMatchObject([{ code: 'query_mismatch' }])
+  })
+
+  test('named shape diffs are ordered by code point, not UTF-16 units', () => {
+    const high = '\u{1F600}'
+    const privateUse = '\uE000'
+    const expected = new Map([
+      [high, 'a'],
+      [privateUse, 'b'],
+    ])
+    const actual = new Map([
+      [high, 'c'],
+      [privateUse, 'd'],
+    ])
+
+    // A bare sort() compares UTF-16 units and puts the surrogate pair first;
+    // Python's str order, and everything else in drift, puts U+E000 first.
+    expect(diffNamedShapeMaps(expected, actual)).toEqual([privateUse, high])
+  })
+
+  test('setting diffs are ordered by code point, not UTF-16 units (#703)', () => {
+    const high = 'a\u{1F600}'
+    const fullwidth = 'a\uFF5E'
+    expect(diffSettings({ [high]: 1, [fullwidth]: 1 }, { [high]: 2, [fullwidth]: 2 })).toEqual([fullwidth, high])
   })
 })
 

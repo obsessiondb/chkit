@@ -23,9 +23,9 @@ from __future__ import annotations
 
 import os
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field, replace
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, TypeVar, cast
 
 import typer
 from typer.exceptions import TyperException
@@ -45,11 +45,35 @@ from chkit.cli.commands.migrate_abandon import (
     read_abandonable_state,
 )
 from chkit.cli.commands.migrate_apply import ApplyMigrationInput, apply_migration
+from chkit.cli.commands.migrate_barrier import find_pending_non_select_barriers
+from chkit.cli.commands.migrate_cancellation import (
+    FreshRecoveryClient,
+    abandon_recovery,
+    assert_cancellation_clear,
+    assert_cancellation_unfinished,
+    cancel_predecessor,
+    expand_recovery_plan,
+    finish_recovery,
+    mark_cancellation_pending,
+    prepare_cancellation,
+    resolve_query_identity,
+    settle_compensation,
+)
 from chkit.cli.commands.migrate_empty import find_empty_migrations
 from chkit.cli.commands.migrate_errors import (
     EMPTY_MIGRATIONS_SUMMARY,
     MigrateError,
     empty_migrations_error,
+    journal_changed_error,
+    non_select_barrier_error,
+)
+from chkit.cli.commands.migrate_lock import (
+    GuardedClient,
+    LockTarget,
+    MigrateLock,
+    TakeoverReservation,
+    acquire_migrate_lock,
+    migrate_lock_disabled,
 )
 from chkit.cli.commands.migrate_output import (
     render_abandon_plan_only_notice,
@@ -64,6 +88,13 @@ from chkit.cli.commands.migrate_prompts import (
     is_background_or_ci,
     print_destructive_operation_details,
 )
+from chkit.cli.commands.migrate_query_intents import (
+    QueryContext,
+    QueryIdentity,
+    QueryRecovery,
+    QueryTracker,
+    query_tracking_disabled,
+)
 from chkit.cli.commands.migrate_recovery import resolve_recovery_targets
 from chkit.cli.commands.migrate_retry import (
     RetryResolution,
@@ -76,7 +107,7 @@ from chkit.cli.commands.migrate_settings import parse_setting_flags
 from chkit.cli.config_loader import load_config
 from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
-from chkit.cli.journal_store import JournalStore
+from chkit.cli.journal_store import JournalStore, MigrationRowState
 from chkit.cli.json_output import emit_json, emit_json_error, json_error_code
 from chkit.cli.migration_metadata import extract_migration_metadata
 from chkit.cli.migration_store import (
@@ -91,6 +122,8 @@ from chkit.cli.safety_markers import (
     DestructiveOperationMarker,
     collect_destructive_operation_markers,
     collect_unmarked_destructive_statements,
+    extract_executable_statements,
+    extract_migration_operation_summaries,
 )
 from chkit.cli.shared_engine_flags import ForceSharedEnginesOption, NoSharedEnginesOption
 from chkit.cli.table_scope import (
@@ -100,6 +133,7 @@ from chkit.cli.table_scope import (
     table_keys_from_definitions,
 )
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
+from chkit.clickhouse.replicas import ReplicaFanout
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, configured_index_granularity
 from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
@@ -127,6 +161,20 @@ class _MigrateContext:
     applied_names: set[str]
     pending_all: list[str]
     retry_target: str | None
+    # Runs ``fn`` holding the migrate lock (#716).
+    with_lock: WithLock
+    query_tracker: Callable[[], QueryTracker | None] = field(default=lambda: None)
+    complete_recovery: Callable[[], None] = field(default=lambda: None)
+
+
+_T = TypeVar("_T")
+
+
+class WithLock:
+    """Runs a function holding the migrate lock (#716)."""
+
+    def __call__(self, fn: Callable[[], _T]) -> _T:
+        return fn()
 
 
 @dataclass(frozen=True, slots=True)
@@ -140,6 +188,7 @@ class AbandonContext:
     applied_names: set[str]
     files: list[str]
     meta_dir: Path
+    with_lock: WithLock | None = None
 
 
 @dataclass(slots=True)
@@ -203,6 +252,17 @@ def run(  # noqa: PLR0917
             ),
         ),
     ] = None,
+    break_lock: Annotated[
+        str | None,
+        typer.Option(
+            "--break-lock",
+            metavar="<claim>",
+            help=(
+                "Release the migrate lock claim of a run that is no longer running, "
+                "then take the lock"
+            ),
+        ),
+    ] = None,
     setting: Annotated[
         list[str] | None,
         typer.Option(
@@ -214,6 +274,16 @@ def run(  # noqa: PLR0917
             ),
         ),
     ] = None,
+    cancel_lock_queries: Annotated[
+        bool,
+        typer.Option(
+            "--cancel-lock-queries",
+            help=(
+                "Cancel the tracked queries of the stopped --break-lock run "
+                "before recovery (requires --apply)"
+            ),
+        ),
+    ] = False,
     output_json: Annotated[
         bool,
         typer.Option("--json", help="Emit a JSON-formatted summary."),
@@ -234,6 +304,8 @@ def run(  # noqa: PLR0917
             "--table": table_selector,
             "--retry": retry,
             "--abandon": abandon,
+            "--break-lock": break_lock,
+            "--cancel-lock-queries": cancel_lock_queries,
             "--setting": setting,
             "--json": output_json,
             "--force-shared-engines": force_shared_engines,
@@ -249,6 +321,8 @@ def run(  # noqa: PLR0917
             table_selector=table_selector,
             retry=retry,
             abandon=abandon,
+            break_lock=break_lock,
+            cancel_lock_queries=cancel_lock_queries,
             setting=setting,
             output_json=output_json,
             service=service,
@@ -275,6 +349,8 @@ def _run(
     table_selector: str | None,
     retry: str | None,
     abandon: str | None,
+    break_lock: str | None,
+    cancel_lock_queries: bool,
     setting: list[str] | None,
     output_json: bool,
     service: str | None,
@@ -287,6 +363,16 @@ def _run(
         table=table_selector,
         allow_destructive=allow_destructive,
     )
+    if cancel_lock_queries and (
+        hook_flags.get("--apply") is not True or not break_lock
+        or targets.abandon_target is not None or migrate_lock_disabled()
+        or query_tracking_disabled()
+    ):
+        raise MigrateError(
+            "invalid_usage",
+            "--cancel-lock-queries requires explicit --apply, --break-lock <claim>, "
+            "an enabled migrate lock and query tracking, and no --abandon.",
+        )
     settings = parse_setting_flags(setting)
     config = load_config(config_path, ChxConfigEnv(command="migrate"))
     plugin_runtime = load_plugin_runtime(
@@ -344,11 +430,31 @@ def _run(
         )
         raise MigrateError("migration_not_found", msg)
 
-    with open_client(executor, config.clickhouse) as client:
+    with open_client(executor, config.clickhouse) as configured_client:
+        raw_client = (
+            FreshRecoveryClient(configured_client) if cancel_lock_queries else configured_client
+        )
+        initial_identity = resolve_query_identity(
+            raw_client, config.clickhouse.cluster if config.clickhouse else None,
+        ) if cancel_lock_queries else None
+        recovery_coverage = None
+        if initial_identity is not None:
+            if not initial_identity.cluster:
+                raise MigrateError(
+                    "migrate_cancellation_failed", "Recovery requires an attested cluster.",
+                )
+            recovery_coverage = ReplicaFanout(
+                initial_identity.cluster, len(initial_identity.server_uuids),
+            )
+        # Every request of the run, journal writes included, first checks
+        # that the run still holds the migrate lock, once it took it (#716).
+        lock_holder = _LockHolder()
+        client = cast(ClickHouseClient, GuardedClient(raw_client, lock_holder.check))
         # ``cluster`` opts the journal into ReplicatedReplacingMergeTree
         # created ``ON CLUSTER`` so history stays consistent across nodes.
         journal_store = JournalStore(
-            client, cluster=config.clickhouse.cluster if config.clickhouse else None
+            client, cluster=config.clickhouse.cluster if config.clickhouse else None,
+            **({"fanout_override": recovery_coverage} if recovery_coverage else {}),
         )
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
@@ -370,6 +476,26 @@ def _run(
             applied_names=applied_names,
             pending_all=[f for f in files if f not in applied_names],
             retry_target=targets.retry_target,
+            with_lock=_MigrateLockRunner(
+                raw_client=raw_client,
+                journal_store=journal_store,
+                initial_identity=initial_identity,
+                migrations_dir=migrations_dir,
+                holder=lock_holder,
+                break_lock=break_lock,
+                json_mode=output_json,
+                cancel_queries=cancel_lock_queries,
+                configured_cluster=config.clickhouse.cluster if config.clickhouse else None,
+                migration_hooks=any(
+                    entry.plugin.hooks is not None and (
+                        getattr(entry.plugin.hooks, "on_before_apply", None) is not None
+                        or getattr(entry.plugin.hooks, "on_after_apply", None) is not None
+                    )
+                    for entry in plugin_runtime.plugins
+                ),
+            ),
+            query_tracker=lambda: lock_holder.tracker,
+            complete_recovery=lock_holder.complete_recovery,
         )
         if targets.abandon_target is not None:
             run_abandon(
@@ -382,6 +508,7 @@ def _run(
                     applied_names=applied_names,
                     files=files,
                     meta_dir=meta_dir,
+                    with_lock=ctx.with_lock,
                 ),
             )
             return
@@ -392,11 +519,19 @@ def _run(
         _run_checksum_gate(ctx, journal)
         plan = _resolve_pending_plan(ctx)
         if not plan.pending:
+            runner = ctx.with_lock
+            # Only a recovery needs the lock with nothing to apply: it may still finish.
+            if isinstance(runner, _MigrateLockRunner) and runner.cancel_queries:
+                runner(lambda: _render_nothing_pending(ctx, plan))
+                return
+            if execute_requested and isinstance(runner, _MigrateLockRunner):
+                runner.assert_recovery_clear()
             _render_nothing_pending(ctx, plan)
             return
         if _render_plan(ctx, plan):
             return
         _run_empty_migration_gate(ctx, plan.empty_migrations)
+        _run_barrier_gate(ctx, plan.pending)
         if not _run_confirm_gate(ctx):
             return
         _run_destructive_gate(ctx, plan.pending)
@@ -439,17 +574,41 @@ def run_abandon(
         if not confirm(migration):
             typer.echo("Abandon cancelled by user.")
             return
-        abandon_migration_state(state, journal_store=ctx.journal_store)
+        _abandon_under_lock(ctx, migration, state)
         typer.echo(f"Abandoned in-progress migration {migration}.")
         return
 
-    abandon_migration_state(state, journal_store=ctx.journal_store)
+    _abandon_under_lock(ctx, migration, state)
     if ctx.json_mode:
         _emit_abandon_json("execute", ctx.table_scope, report)
         return
     render_abandon_text(
         report, performed=True, file_exists=file_exists, snapshot_file=snapshot_file
     )
+
+
+def _abandon_under_lock(ctx: AbandonContext, migration: str, state: MigrationRowState) -> None:
+    """Resets the state the user saw, holding the migrate lock, so --abandon
+    never rewrites a migration that a running apply is recording (#716)."""
+
+    def abandon() -> None:
+        current = read_abandonable_state(
+            migration=migration,
+            applied_names=ctx.applied_names,
+            journal_store=ctx.journal_store,
+        )
+        if current.applied_at != state.applied_at:
+            raise journal_changed_error(
+                f"the journal state of {migration} is no longer the one shown"
+            )
+        abandon_migration_state(current, journal_store=ctx.journal_store)
+
+    if ctx.with_lock is None:
+        abandon()
+    elif isinstance(ctx.with_lock, _MigrateLockRunner):
+        ctx.with_lock(abandon, abandon=migration)
+    else:
+        ctx.with_lock(abandon)
 
 
 def _run_checksum_gate(ctx: _MigrateContext, journal: MigrationJournal) -> None:
@@ -493,6 +652,7 @@ def _resolve_pending_plan(ctx: _MigrateContext) -> _PendingPlan:
             empty_migrations=plan.empty_migrations,
             applied_names=ctx.applied_names,
             journal_store=ctx.journal_store,
+            plugins_rewrite_statements=ctx.plugin_runtime.rewrites_statements(),
         )
     return plan
 
@@ -520,6 +680,7 @@ def _resolve_pending_scope(ctx: _MigrateContext) -> _PendingPlan:
 
 def _render_nothing_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     """Nothing to apply: say why, with what --retry did."""
+    ctx.complete_recovery()
     if plan.no_scope_match:
         selector = ctx.table_scope.selector or ""
         if ctx.json_mode:
@@ -628,6 +789,20 @@ def _run_empty_migration_gate(ctx: _MigrateContext, empty_migrations: list[str])
     raise typer.Exit(code=1)
 
 
+def _run_barrier_gate(ctx: _MigrateContext, pending: list[str]) -> None:
+    """Refuse to apply when a pending file marks a statement other than a
+    SELECT ``mode=barrier`` (#634), before any migration runs; a plan-only
+    run does not check."""
+    apply_possible = ctx.execute_requested or (
+        not ctx.json_mode and not is_background_or_ci()
+    )
+    if not apply_possible:
+        return
+    barriers = find_pending_non_select_barriers(ctx.migrations_dir, pending)
+    if barriers:
+        raise non_select_barrier_error(barriers)
+
+
 def _run_confirm_gate(ctx: _MigrateContext) -> bool:
     """In plan mode, stop unless the user confirms an interactive apply."""
     if ctx.execute_requested:
@@ -708,7 +883,299 @@ def _run_destructive_gate(ctx: _MigrateContext, pending: list[str]) -> None:
 
 
 def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
-    """Apply each pending migration, journal it, and emit the final summary."""
+    """Apply each pending migration holding the migrate lock (#716), journal
+    it, and emit the final summary."""
+    def apply() -> None:
+        _apply_plan(ctx, _replan_under_lock(ctx, plan))
+    if isinstance(ctx.with_lock, _MigrateLockRunner):
+        ctx.with_lock(apply, selected_files=plan.pending)
+    else:
+        ctx.with_lock(apply)
+
+
+def _replan_under_lock(ctx: _MigrateContext, plan: _PendingPlan) -> _PendingPlan:
+    """The plan again, from the journal as it is now that this run holds the
+    lock: a run that held it meanwhile may have applied some of the pending
+    migrations, which this run then skips. Anything the plan the user saw
+    does not cover stops the run."""
+    journal = ctx.journal_store.read_journal(project_files=ctx.files)
+    applied_names = {entry.name for entry in journal.applied}
+    mismatches = find_checksum_mismatches(ctx.migrations_dir, journal)
+    if mismatches:
+        names = ", ".join(item.name for item in mismatches)
+        raise journal_changed_error(f"the journal now records {names} with another checksum")
+    current = _resolve_pending_plan(
+        replace(
+            ctx,
+            applied_names=applied_names,
+            pending_all=[f for f in ctx.files if f not in applied_names],
+        )
+    )
+    added = [f for f in current.pending if f not in plan.pending]
+    if added:
+        raise journal_changed_error(f"{', '.join(added)} became pending")
+    if current.retry != plan.retry:
+        raise journal_changed_error(f"--retry {ctx.retry_target} now resolves differently")
+    skipped = [f for f in plan.pending if f not in current.pending]
+    if skipped:
+        pronoun = "it" if len(skipped) == 1 else "them"
+        typer.echo(
+            f"Skipping {', '.join(skipped)}: another migrate run applied {pronoun} meanwhile.",
+            err=ctx.json_mode,
+        )
+    return current
+
+
+class _LockHolder:
+    """The migrate lock this run holds, if any, checked before each request."""
+
+    __slots__ = ("completion", "lock", "tracker")
+
+    def __init__(self) -> None:
+        self.lock: MigrateLock | None = None
+        self.tracker: QueryTracker | None = None
+        self.completion: Callable[[], None] | None = None
+
+    def complete_recovery(self) -> None:
+        if self.completion is not None:
+            self.completion()
+            self.completion = None
+
+    def check(self) -> None:
+        if self.lock is not None:
+            self.lock.assert_held()
+
+
+class _MigrateLockRunner(WithLock):
+    """Runs a function holding the migrate lock, as TS's ``withLock``."""
+
+    def __init__(
+        self,
+        *,
+        raw_client: Any,
+        journal_store: JournalStore,
+        holder: _LockHolder,
+        break_lock: str | None,
+        json_mode: bool,
+        cancel_queries: bool = False,
+        configured_cluster: str | None = None,
+        migration_hooks: bool = False,
+        migrations_dir: Path | None = None,
+        initial_identity: QueryIdentity | None = None,
+    ) -> None:
+        self._raw_client = raw_client
+        self._initial_identity = initial_identity
+        self._journal_store = journal_store
+        self._holder = holder
+        self._break_lock = break_lock
+        self._json_mode = json_mode
+        self._cancel_queries = cancel_queries
+        self._configured_cluster = configured_cluster
+        self._migration_hooks = migration_hooks
+        self._migrations_dir = migrations_dir
+
+    @property
+    def cancel_queries(self) -> bool:
+        return self._cancel_queries
+
+    def _check_recovery_clear(
+        self, target: LockTarget | None, allowed: str | None = None,
+        identity: QueryIdentity | None = None,
+    ) -> None:
+        # With query tracking off, ordinary runs skip the recovery barrier entirely.
+        if target is None or (query_tracking_disabled() and not self._cancel_queries):
+            return
+        assert_cancellation_clear(self._raw_client, target, allowed, identity)
+
+    def _lock_target(self) -> LockTarget | None:
+        found = self._journal_store.lock_target()
+        if found is None:
+            return None
+        database, table, fanout = found
+        return LockTarget(database=database, journal_table=table, fanout=fanout)
+
+    def assert_recovery_clear(self) -> None:
+        """Fails while a stopped run's recovery is unfinished; read-only, no lock."""
+        self._check_recovery_clear(self._lock_target())
+
+    def __call__(
+        self, fn: Callable[[], _T], selected_files: list[str] | None = None,
+        abandon: str | None = None,
+    ) -> _T:
+        """`abandon` names the migration --abandon resets, which also leaves unfinished recovery."""
+        if migrate_lock_disabled():
+            typer.echo(
+                "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "
+                "concurrent migrate can apply the same statements.",
+                err=True,
+            )
+            unlocked = self._lock_target()
+            if abandon is None:
+                self._check_recovery_clear(unlocked)
+            result = fn()
+            if abandon is not None and unlocked is not None and not query_tracking_disabled():
+                abandon_recovery(self._raw_client, unlocked, abandon)
+            return result
+        found = self._journal_store.lock_target()
+        if found is None:
+            if self._cancel_queries:
+                raise MigrateError(
+                    "migrate_cancellation_failed",
+                    "The database/journal does not exist; cancellation cannot be verified.",
+                )
+            typer.echo(
+                "⚠ The target database does not exist yet, so the journal cannot hold the "
+                "migrate lock: this run takes none. Do not start another migrate against "
+                "this target until it finishes.",
+                err=True,
+            )
+            return fn()
+        database, table, fanout = found
+        # The heartbeat runs while the run's own requests are in flight; a
+        # client with an HTTP session takes one query at a time.
+        open_concurrent = getattr(self._raw_client, "open_concurrent", None)
+        heartbeat_client = open_concurrent() if callable(open_concurrent) else None
+
+        def log(line: str) -> None:
+            typer.echo(line, err=self._json_mode)
+
+        try:
+            target = LockTarget(database=database, journal_table=table, fanout=fanout)
+            identity: QueryIdentity | None = self._initial_identity
+            if (
+                identity is None
+                and not query_tracking_disabled()
+                and callable(getattr(self._raw_client, "execute_tracked", None))
+                and callable(getattr(self._raw_client, "query_control", None))
+            ):
+                try:
+                    identity = resolve_query_identity(self._raw_client, self._configured_cluster)
+                except Exception:
+                    if self._cancel_queries:
+                        raise
+            if self._cancel_queries and identity is None:
+                raise MigrateError(
+                    "migrate_cancellation_failed",
+                    "This executor cannot safely track/cancel queries.",
+                )
+            cancellation = (
+                prepare_cancellation(self._raw_client, target, identity, self._break_lock)
+                if self._cancel_queries and identity is not None and self._break_lock is not None
+                else None
+            )
+            if cancellation is not None:
+                contexts: list[QueryContext] = []
+                for filename in selected_files or []:
+                    state = self._journal_store.read_migration_state(filename)
+                    if state is not None and any(
+                        op.status != "completed" and op.query_id != "" for op in state.operations
+                    ):
+                        raise MigrateError(
+                            "migrate_cancellation_failed",
+                            "Explicit recovery cannot attach the historical async attempt "
+                            f"in {filename}. "
+                            "Finish async recovery before using --cancel-lock-queries.",
+                        )
+                    if self._migrations_dir is None:
+                        raise MigrateError(
+                            "migrate_cancellation_failed", "Recovery has no migration directory.",
+                        )
+                    sql = (self._migrations_dir / filename).read_text(encoding="utf-8")
+                    summaries = extract_migration_operation_summaries(sql)
+                    for index, forward_sql in enumerate(extract_executable_statements(sql)):
+                        operation = summaries[index] if index < len(summaries) else None
+                        if operation is not None and operation.mode != "sync":
+                            raise MigrateError(
+                                "migrate_cancellation_failed",
+                                "Explicit recovery requires a fully synchronous selected plan.",
+                            )
+                        contexts.append(QueryContext(
+                            filename, index, forward_sql,
+                            operation.before_retry if operation else None,
+                        ))
+                cancellation = expand_recovery_plan(
+                    self._raw_client, target, cancellation, contexts,
+                )
+            allowed = cancellation.claim if cancellation is not None else None
+            recovery_identity = cancellation.identity if cancellation is not None else None
+            if abandon is None:
+                self._check_recovery_clear(target, allowed, recovery_identity)
+            if self._cancel_queries and self._migration_hooks:
+                raise MigrateError(
+                    "migrate_cancellation_failed",
+                    "Cancellation cannot cover arbitrary migration plugin hooks.",
+                )
+            tracked_identity = None if self._migration_hooks else identity
+            lock = acquire_migrate_lock(
+                self._raw_client,
+                target,
+                break_lock=allowed or self._break_lock,
+                log=log,
+                heartbeat_client=heartbeat_client,
+                query_tracking=tracked_identity,
+                takeover=(
+                    TakeoverReservation(
+                        cancellation.claim, cancellation.holder,
+                        lambda: mark_cancellation_pending(self._raw_client, target, cancellation),
+                        (
+                            lambda reservations: assert_cancellation_unfinished(
+                                self._raw_client, target, cancellation, reservations,
+                            )
+                        ),
+                    )
+                    if cancellation is not None else None
+                ),
+            )
+            self._holder.lock = lock
+            try:
+                if abandon is None:
+                    self._check_recovery_clear(target, allowed, recovery_identity)
+                active_recovery = (
+                    cancel_predecessor(self._raw_client, target, cancellation, lock)
+                    if cancellation is not None else None
+                )
+                self._holder.completion = (
+                    lambda: finish_recovery(self._raw_client, target, active_recovery, lock)
+                ) if active_recovery is not None else None
+                recovery = None
+                if cancellation is not None and active_recovery is not None:
+                    plan = cancellation
+                    statements = [*active_recovery.obligations, *cancellation.extra]
+                    recovery = QueryRecovery(
+                        [item.target for item in statements],
+                        lambda table: settle_compensation(
+                            self._raw_client, target, plan, table, lock,
+                        ),
+                        tuple(item.source for item in statements if item.source is not None),
+                        tuple(statements),
+                    )
+                self._holder.tracker = (
+                    QueryTracker(
+                        self._raw_client, target, tracked_identity, lock, recovery, log=log,
+                    )
+                    if tracked_identity is not None else None
+                )
+                result = fn()
+                self._holder.complete_recovery()
+                if abandon is not None and not query_tracking_disabled():
+                    abandon_recovery(self._raw_client, target, abandon, lock)
+                return result
+            except BaseException:
+                # A step that retries or wraps the guard's error (a poll loop,
+                # a statement error) reports the lost lock, with its code.
+                lock.assert_held()
+                raise
+            finally:
+                self._holder.lock = None
+                self._holder.tracker = None
+                self._holder.completion = None
+                lock.release()
+        finally:
+            if heartbeat_client is not None:
+                heartbeat_client.close()
+
+
+def _apply_plan(ctx: _MigrateContext, plan: _PendingPlan) -> None:
     # Progress lines go to stderr in --json mode, so stdout stays one JSON document.
     def log(line: str) -> None:
         typer.echo(line, err=ctx.json_mode)
@@ -739,12 +1206,14 @@ def _apply_pending(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                 log=log,
                 settings=ctx.settings,
                 flags=ctx.flags,
+                query_tracker=ctx.query_tracker(),
             )
         )
         applied_now.append(entry)
         if not ctx.json_mode:
             typer.echo(f"Applied: {filename}")
 
+    ctx.complete_recovery()
     if ctx.json_mode:
         payload: dict[str, object] = {
             "mode": "execute",

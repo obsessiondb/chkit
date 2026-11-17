@@ -79,7 +79,7 @@ def _basic_table(database: str, name: str) -> TableDefinition:
 
 def test_apply_selected_renames_returns_input_when_empty() -> None:
     plan = _empty_plan()
-    out = apply_selected_rename_suggestions(plan, [])
+    out = apply_selected_rename_suggestions(plan, [], previous_definitions=[], next_definitions=[])
     assert out is plan
 
 
@@ -93,7 +93,7 @@ def test_apply_selected_renames_replaces_drop_add_with_rename() -> None:
         risk_summary=_RiskSummary(safe=1, caution=0, danger=1),
         rename_suggestions=[sug],
     )
-    out = apply_selected_rename_suggestions(plan, [sug])
+    out = apply_selected_rename_suggestions(plan, [sug], previous_definitions=[], next_definitions=[])
     [op] = out.operations
     assert op.type == "alter_table_rename_column"
     assert op.key == "table:db.t:column_rename:old:new"
@@ -116,7 +116,7 @@ def test_apply_selected_renames_preserves_unrelated_operations() -> None:
         risk_summary=_RiskSummary(safe=2, caution=0, danger=1),
         rename_suggestions=[],
     )
-    out = apply_selected_rename_suggestions(plan, [sug])
+    out = apply_selected_rename_suggestions(plan, [sug], previous_definitions=[], next_definitions=[])
     keys = [op.key for op in out.operations]
     assert "table:db.other" in keys
     assert any("column_rename" in k for k in keys)
@@ -133,7 +133,7 @@ def test_apply_selected_renames_keeps_unselected_suggestions() -> None:
         risk_summary=_RiskSummary(safe=1, caution=0, danger=1),
         rename_suggestions=[selected, other],
     )
-    out = apply_selected_rename_suggestions(plan, [selected])
+    out = apply_selected_rename_suggestions(plan, [selected], previous_definitions=[], next_definitions=[])
     assert out.rename_suggestions == [other]
 
 

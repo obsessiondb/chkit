@@ -1,6 +1,7 @@
 import { generateArtifacts, generateEmptyMigration } from '@chkit/codegen'
 import {
   applyOnClusterToPlan,
+  canonicalizeDefinitions,
   ChxValidationError,
   collectDefinitionWarnings,
   configuredIndexGranularity,
@@ -196,7 +197,10 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   plan = applyExplicitTableRenames(plan, activeTableMappings)
   plan = applyExplicitDictionaryRenames(plan, activeDictionaryMappings)
   assertCliColumnMappingsResolvable(cliColumnMappings, plan, definitions)
-  plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings))
+  plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings), {
+    previous: remappedPreviousDefinitions,
+    next: definitions,
+  })
 
   plan = await pluginRuntime.runOnPlanCreated(
     {
@@ -240,7 +244,8 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   plan = applyOnClusterToPlan(plan, config.clickhouse?.cluster)
 
   const warnings = [
-    ...collectDefinitionWarnings(schemaDefinitions).map((issue) => issue.message),
+    // A plugin hook may leave definitions noncanonical; warn on what the planner sees, as chkit-py does.
+    ...collectDefinitionWarnings(canonicalizeDefinitions(schemaDefinitions, { indexGranularity })).map((issue) => issue.message),
     ...detectDictionaryPasswordWarnings(plan),
     ...detectExperimentalCodecWarnings(plan),
     ...plan.operations.flatMap((operation) => operation.warning ? [operation.warning] : []),

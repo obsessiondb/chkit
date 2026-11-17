@@ -578,3 +578,215 @@ describe('orderByDependencies', () => {
     expect(orderByDependencies(['a', 'b'], (x) => x, () => ['zzz'])).toEqual(['a', 'b'])
   })
 })
+
+describe('planDiff orders ADD COLUMNs by the columns their expressions read (#681)', () => {
+  const orders = (columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name: 'orders',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+  const addedColumns = (columns: ColumnDefinition[]) =>
+    planDiff([orders([])], [orders(columns)]).operations.map((op) => op.sql)
+
+  test('adds a column before the DEFAULT that reads it, although its name sorts later', () => {
+    expect(
+      addedColumns([
+        { name: 'price', type: 'UInt64' },
+        { name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `Total` UInt64 DEFAULT price + 1;',
+    ])
+  })
+
+  test('orders MATERIALIZED and ALIAS reads and keeps key order for the other columns', () => {
+    expect(
+      addedColumns([
+        { name: 'a_alias', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'z_base * 2' } },
+        { name: 'b_plain', type: 'UInt64' },
+        { name: 'c_mat', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: '`a_alias` + id' } },
+        { name: 'z_base', type: 'UInt64' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b_plain` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `z_base` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a_alias` UInt64 ALIAS z_base * 2;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c_mat` UInt64 MATERIALIZED `a_alias` + id;',
+    ])
+  })
+
+  test('keeps key order for a cycle and for names inside string literals', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'b + 1' } },
+        { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } },
+        { name: 'c', type: 'String', default: { expression: "concat('d', toString(id))" } },
+        { name: 'd', type: 'String' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT b + 1;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;',
+      "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `c` String DEFAULT concat('d', toString(id));",
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;',
+    ])
+  })
+})
+
+describe('planDiff orders the column statements of a table by the columns they read and remove (#745)', () => {
+  const t = (columns: ColumnDefinition[], name = 't') =>
+    table({
+      database: 'app',
+      name,
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+  const sqls = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => op.sql)
+
+  test('runs a MODIFY COLUMN after the ADD COLUMN its new DEFAULT reads (#745)', () => {
+    expect(
+      sqls(
+        [t([{ name: 'Total', type: 'UInt64' }])],
+        [t([{ name: 'Total', type: 'UInt64', default: { expression: 'price + 1' } }, { name: 'price', type: 'UInt64' }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `Total` UInt64 DEFAULT price + 1;',
+    ])
+  })
+
+  // Sorting only the ADDs and MODIFYs left DROP `c` in its slot, before the
+  // MODIFY of `b`, so `c` was dropped while `b` still read it.
+  test('drops a column only after the MODIFY of the column whose old DEFAULT reads it', () => {
+    expect(
+      sqls(
+        [t([{ name: 'b', type: 'UInt64', default: { expression: 'c' } }, { name: 'c', type: 'UInt64' }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'z' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'z' } },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `c`;',
+    ])
+  })
+
+  test('drops a column after the MODIFY that stops reading it, although its name sorts first', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'a * 2' } },
+          ]),
+        ],
+        [t([{ name: 'b', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'id * 2' } }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 MATERIALIZED id * 2;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;',
+    ])
+  })
+
+  test('drops a column after the dropped column whose expression reads it', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'a + 1' } },
+          ]),
+        ],
+        [t([])]
+      )
+    ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;'])
+  })
+
+  test('a function call named like a column is not a read', () => {
+    expect(
+      sqls(
+        [t([{ name: 'length', type: 'UInt64' }])],
+        [t([{ name: 'a', type: 'UInt64', default: { expression: "length ('abc')" } }])]
+      )
+    ).toEqual([
+      "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length ('abc');",
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `length`;',
+    ])
+  })
+
+  test('keeps key order for a cycle', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'a' } },
+          ]),
+        ],
+        [t([])]
+      )
+    ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;'])
+  })
+
+  test('keeps the other statements, other tables and same-column statements in place', () => {
+    const previous = [
+      table({
+        database: 'app',
+        name: 't',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'b', type: 'UInt64', default: { expression: 'c' }, comment: 'old', codec: 'ZSTD(1)' },
+          { name: 'c', type: 'UInt64' },
+          { name: 'x', type: 'String' },
+        ],
+        indexes: [{ name: 'idx_c', expression: 'c', type: 'minmax', granularity: 1 }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+      }),
+      t([{ name: 'x', type: 'UInt64' }], 'u'),
+    ]
+    const next = [
+      table({
+        database: 'app',
+        name: 't',
+        columns: [
+          { name: 'id', type: 'UInt64' },
+          { name: 'b', type: 'UInt64', default: { expression: 'z' } },
+          { name: 'x', type: 'String' },
+          { name: 'z', type: 'UInt64' },
+        ],
+        indexes: [{ name: 'idx_z', expression: 'z', type: 'minmax', granularity: 1 }],
+        engine: 'MergeTree()',
+        primaryKey: ['id'],
+        orderBy: ['id'],
+        settings: { ttl_only_drop_parts: 1 },
+      }),
+      t([{ name: 'w', type: 'UInt64', default: { expression: 'x' } }, { name: 'x', type: 'UInt64' }], 'u'),
+    ]
+    expect(sqls(previous, next)).toEqual([
+      'ALTER TABLE app.t DROP INDEX IF EXISTS `idx_c`;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE COMMENT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE CODEC;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT z;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `c`;',
+      'ALTER TABLE app.t ADD INDEX IF NOT EXISTS `idx_z` (z) TYPE minmax GRANULARITY 1;',
+      'ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;',
+      'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `w` UInt64 DEFAULT x;',
+    ])
+  })
+})

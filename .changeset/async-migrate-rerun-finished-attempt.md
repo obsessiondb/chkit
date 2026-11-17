@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+A re-run of `chkit migrate --apply` no longer runs an async statement again when its earlier attempt, left started by a killed or timed-out run, finished on the server: it reads the outcome from `system.query_log` and records the statement as completed.

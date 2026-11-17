@@ -591,6 +591,32 @@ def test_refuses_missing_or_nullable_keys() -> None:
     )
     assert len(found) == 1
     assert "key column id is Nullable" in found[0]
+    for type_ in [
+        "Nullable(UInt64)",
+        "LowCardinality(Nullable(String))",
+        " LowCardinality ( Nullable (String))",
+        # ClickHouse skips comments and reads quoted type names (#699).
+        "LowCardinality(/* c */ Nullable(String))",
+        "`LowCardinality`(Nullable(String))",
+        "`Nullable`(UInt64)",
+        '"Nullable" /* c */ (UInt64)',
+        "-- c\nLowCardinality(`Nullable`(String))",
+        # ClickHouse reads Unicode whitespace and “…” quotes too.
+        "Nullable\u00a0(UInt64)",
+        "LowCardinality(\u3000Nullable(String))",
+        "\u201cNullable\u201d(UInt64)",
+        "LowCardinality(\u201cNullable\u201d (String))",
+        "Nullable\u0085\u180e(UInt64)",
+        "\u200bNullable\u200c(UInt64)",
+        "LowCardinality(\u200dNullable\u2060(String))",
+    ]:
+        inline: list[Any] = [{"name": "id", "type": type_}, *COLUMNS[1:]]
+        found = messages(
+            old_def=events(["id"], columns=inline),
+            new_def=events(["user_id"], columns=inline),
+        )
+        assert len(found) == 1, type_
+        assert "key column id is Nullable" in found[0], type_
 
 
 def test_refuses_a_column_type_change() -> None:
@@ -1109,6 +1135,7 @@ def _op_state(index: int, status: str, type_: str, key: str) -> OperationState:
         started_at="2026-10-24 00:00:00.000",
         finished_at=None if status == "started" else "2026-10-24 00:00:01.000",
         last_error="",
+        fingerprint="",
     )
 
 

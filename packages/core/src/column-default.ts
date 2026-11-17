@@ -81,6 +81,7 @@ const LOW_CARDINALITY_REJECTED_FAMILIES: ReadonlySet<string> = new Set([
 ])
 
 const FUNCTION_CALL_START = /^[A-Za-z_][A-Za-z0-9_]*\s*\(/
+const LOW_CARDINALITY = /^LowCardinality\s*\(([\s\S]*)\)$/
 
 export type ParsedColumnDefault =
   | { kind: 'expression'; sql: string }
@@ -173,6 +174,16 @@ export function literalDefaultFingerprint(sql: string): string | undefined {
 
 export function isSQLExpression(value: unknown): value is SQLExpression {
   return typeof value === 'object' && value !== null && 'expression' in value && typeof value.expression === 'string'
+}
+
+/**
+ * The type of a column with `nullable: true`. ClickHouse rejects
+ * `Nullable(LowCardinality(T))`, so `LowCardinality(T)` becomes
+ * `LowCardinality(Nullable(T))`, the form ClickHouse stores.
+ */
+export function nullableColumnType(type: string): string {
+  const inner = LOW_CARDINALITY.exec(type)?.[1]
+  return inner === undefined ? `Nullable(${type})` : `LowCardinality(Nullable(${inner.trim()}))`
 }
 
 /** Whether a quoted string literal is a valid value of `type`, whatever its Nullable or LowCardinality wrappers. */

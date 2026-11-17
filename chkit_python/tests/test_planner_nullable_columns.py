@@ -31,12 +31,20 @@ def _op_types(old: list[SchemaDefinition], new: list[SchemaDefinition]) -> list[
     return [operation.type for operation in plan_diff(old, new).operations]
 
 
-@pytest.mark.parametrize(
-    "type_", ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)", "LowCardinality(String)"]
-)
+@pytest.mark.parametrize("type_", ["String", "DateTime64(3, 'UTC')", "Decimal(12, 3)"])
 def test_inline_nullable_and_nullable_property_plan_nothing(type_: str) -> None:
     inline = _definition({"name": "value", "type": f"Nullable({type_})"})
     prop = _definition({"name": "value", "type": type_, "nullable": True})
+    assert to_create_sql(inline[0]) == to_create_sql(prop[0])
+    assert plan_diff(inline, prop).operations == []
+    assert plan_diff(prop, inline).operations == []
+
+
+# ClickHouse rejects Nullable(LowCardinality(T)) and stores LowCardinality(Nullable(T)).
+def test_nullable_low_cardinality_renders_low_cardinality_nullable() -> None:
+    inline = _definition({"name": "value", "type": "LowCardinality(Nullable(String))"})
+    prop = _definition({"name": "value", "type": "LowCardinality(String)", "nullable": True})
+    assert "`value` LowCardinality(Nullable(String))" in to_create_sql(prop[0])
     assert to_create_sql(inline[0]) == to_create_sql(prop[0])
     assert plan_diff(inline, prop).operations == []
     assert plan_diff(prop, inline).operations == []
@@ -54,10 +62,6 @@ def test_inline_nullable_and_nullable_property_plan_nothing(type_: str) -> None:
         (
             {"name": "value", "type": "Nullable(String)", "nullable": True},
             {"name": "value", "type": "String", "nullable": True},
-        ),
-        (
-            {"name": "value", "type": "LowCardinality(Nullable(String))"},
-            {"name": "value", "type": "LowCardinality(String)", "nullable": True},
         ),
         ({"name": "value", "type": "Array(Nullable(String))"}, {"name": "value", "type": "Array(String)"}),
     ],

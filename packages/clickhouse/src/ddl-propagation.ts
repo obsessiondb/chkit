@@ -5,8 +5,10 @@ import type { ClickHouseExecutor } from './index.js'
 import { allReplicas, resolveReplicaFanout, stringLiteral, type ReplicaFanout } from './replicas.js'
 
 const RETRY_OPTIONS = { retries: 20, minTimeout: 500, factor: 1 }
-// Upper bound on a column definition or rename wait, including slow queries.
-const DEFINITION_WAIT_DEADLINE_MS = 30_000
+// How long a propagation wait gives every replica to show the change,
+// including slow queries. A loaded ObsessionDB service can take well over
+// 10 s to show a CREATE or DROP on every replica (#719).
+const WAIT_DEADLINE_MS = 30_000
 
 // The `system.columns` fields a column definition wait compares.
 const COLUMN_FIELDS = ['type', 'default_kind', 'default_expression', 'comment', 'compression_codec'] as const
@@ -58,7 +60,7 @@ export interface PropagationOptions {
   statement?: string
   /** Delay between checks. Defaults to 500 ms. */
   pollIntervalMs?: number
-  /** Upper bound on a column definition, column rename or exchange wait. Defaults to 30 s. */
+  /** Upper bound on a wait. Defaults to 30 s. */
   deadlineMs?: number
 }
 
@@ -119,9 +121,9 @@ export async function waitForDictionary(
   const where = `database = ${stringLiteral(database)} AND name = ${stringLiteral(dictionaryName)} AND engine = 'Dictionary'`
   const label = `waitForDictionary: ${database}.${dictionaryName} not yet visible`
   const fanout = await resolveReplicaFanout(executor, options?.cluster)
-  await pRetry(async () => {
+  await pollUntilDeadline(async () => {
     if (!(await dictionaryCatalogVisible(executor, where, fanout))) throw new Error(label)
-  }, retryOptions(options))
+  }, options)
 }
 
 export async function waitForColumn(
@@ -185,8 +187,8 @@ async function waitForColumnDefinition(
   const expected = await expectedColumnValues(executor, intent)
   const source = fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'
   const sql = `SELECT hostName() AS replica, ${COLUMN_FIELDS.join(', ')} FROM ${source} WHERE ${columnWhere(database, tableName, columnName)}`
-  await waitUntilApplied(`${database}.${tableName}.${columnName} definition`, options, async () =>
-    columnDefinitionMismatch(await executor.query<ColumnDefinitionRow>(sql), fanout?.replicas ?? 1, expected),
+  await waitUntilApplied(executor, `${database}.${tableName}.${columnName} definition`, options, async (reader) =>
+    columnDefinitionMismatch(await reader.query<ColumnDefinitionRow>(sql), fanout?.replicas ?? 1, expected),
   )
 }
 
@@ -202,8 +204,8 @@ async function waitForColumnRename(
   const replicas = fanout?.replicas ?? 1
   const source = fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'
   const sql = `SELECT hostName() AS replica, name FROM ${source} WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name IN (${stringLiteral(rename.from)}, ${stringLiteral(rename.to)})`
-  await waitUntilApplied(`${database}.${tableName} rename of column ${rename.from} to ${rename.to}`, options, async () => {
-    const rows = await executor.query<{ replica: string; name: string }>(sql)
+  await waitUntilApplied(executor, `${database}.${tableName} rename of column ${rename.from} to ${rename.to}`, options, async (reader) => {
+    const rows = await reader.query<{ replica: string; name: string }>(sql)
     const stale = rows.filter((row) => row.name === rename.from).map((row) => row.replica)
     if (stale.length > 0) return `replica ${stale.join(', ')} still lists column ${rename.from}`
     const renamed = new Set(rows.filter((row) => row.name === rename.to).map((row) => row.replica))
@@ -289,8 +291,8 @@ export async function waitForExchange(
   const [first, second] = tables
   const where = `(database = ${stringLiteral(first.database)} AND name = ${stringLiteral(first.name)}) OR (database = ${stringLiteral(second.database)} AND name = ${stringLiteral(second.name)})`
   const sql = `SELECT database, name, count(DISTINCT hostName()) AS replicas, uniqExact(uuid) AS uuids, any(toString(uuid)) AS sample_uuid FROM ${allReplicas(fanout, 'system.tables')} WHERE ${where} GROUP BY database, name`
-  await waitUntilApplied(`EXCHANGE TABLES ${first.database}.${first.name} AND ${second.database}.${second.name}`, options, async () => {
-    const rows = await executor.query<{ database: string; name: string; replicas: number | string; uuids: number | string; sample_uuid: string }>(sql)
+  await waitUntilApplied(executor, `EXCHANGE TABLES ${first.database}.${first.name} AND ${second.database}.${second.name}`, options, async (reader) => {
+    const rows = await reader.query<{ database: string; name: string; replicas: number | string; uuids: number | string; sample_uuid: string }>(sql)
     if (rows.length < 2) return `only ${rows.length} of the 2 tables are listed`
     for (const row of rows) {
       if (Number(row.replicas) < fanout.replicas) return `${row.database}.${row.name} is listed on ${row.replicas} of ${fanout.replicas} replicas`
@@ -534,13 +536,28 @@ async function waitForSystemRows(
   options: PropagationOptions | undefined,
 ): Promise<void> {
   const fanout = await resolveReplicaFanout(executor, options?.cluster)
-  await pRetry(async () => {
+  await pollUntilDeadline(async () => {
     if (!(await systemRowsMatch(executor, wait, fanout))) throw new Error(wait.label)
-  }, retryOptions(options))
+  }, options)
 }
 
-function retryOptions(options: PropagationOptions | undefined): typeof RETRY_OPTIONS {
-  return { ...RETRY_OPTIONS, minTimeout: options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout }
+/**
+ * Runs `attempt` until it stops throwing, `pollIntervalMs` (500 ms) apart, and
+ * starts no check that would begin at or after the deadline (30 s), as
+ * `waitUntilApplied` does. Both time the deadline on the monotonic clock, as
+ * chkit-py does, so a wall-clock change cannot stretch or end a wait. The last error is thrown. A TypeError that is not a
+ * fetch network failure is a bug in the check, not lag, and p-retry throws it
+ * at once.
+ */
+async function pollUntilDeadline(attempt: () => Promise<void>, options: PropagationOptions | undefined): Promise<void> {
+  const pollIntervalMs = options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout
+  const deadline = performance.now() + (options?.deadlineMs ?? WAIT_DEADLINE_MS)
+  await pRetry(attempt, {
+    retries: Number.POSITIVE_INFINITY,
+    minTimeout: pollIntervalMs,
+    factor: 1,
+    shouldRetry: () => performance.now() + pollIntervalMs < deadline,
+  })
 }
 
 async function dictionaryCatalogVisible(
@@ -593,29 +610,47 @@ function constraintWhere(database: string, tableName: string, constraintName: st
 }
 
 /**
- * Polls `check` until it reports no mismatch, with the retry budget of the
- * other waits (21 checks, 500 ms apart by default) and a hard deadline: chkit's queries
- * have no request timeout, so a check that does not return ends the wait at
- * the deadline instead of holding the migration. On timeout the error names
- * what was still different on the last check.
+ * Polls `check` until it reports no mismatch, 500 ms apart by default, until
+ * the deadline (30 s by default) of the other waits. The deadline is hard:
+ * chkit's queries have no request timeout, so a check that does not return
+ * ends the wait at the deadline instead of holding the migration. On timeout
+ * the error names what was still different on the last check that returned,
+ * and says so when the check after it did not return (#750).
+ *
+ * A check cut off at the deadline is still in flight, so the checks go through
+ * `executor.openConcurrent()` when the executor has a session: ClickHouse runs
+ * one query at a time per session, and a check left running on the caller's
+ * session would lock out its next request (SESSION_IS_LOCKED).
  */
 async function waitUntilApplied(
+  executor: ClickHouseExecutor,
   subject: string,
   options: PropagationOptions | undefined,
-  check: () => Promise<string | undefined>,
+  check: (reader: ClickHouseExecutor) => Promise<string | undefined>,
 ): Promise<void> {
   const pollIntervalMs = options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout
-  const deadlineMs = options?.deadlineMs ?? DEFINITION_WAIT_DEADLINE_MS
-  const deadline = Date.now() + deadlineMs
+  const deadlineMs = options?.deadlineMs ?? WAIT_DEADLINE_MS
+  const deadline = performance.now() + deadlineMs
+  const concurrent = executor.openConcurrent?.()
+  const reader = concurrent ?? executor
   let checks = 0
   let detail = ''
-  for (;;) {
-    checks += 1
-    const outcome = await checkBefore(check, deadline, deadlineMs)
-    if (outcome.mismatch === undefined && outcome.failure === undefined) return
-    detail = outcome.failure ?? outcome.mismatch ?? ''
-    if (checks > RETRY_OPTIONS.retries || Date.now() + pollIntervalMs >= deadline) break
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+  try {
+    for (;;) {
+      checks += 1
+      const outcome = await checkBefore(() => check(reader), deadline)
+      if (outcome.timedOut) {
+        const late = `did not return within the ${deadlineMs / 1000}s deadline`
+        detail = detail ? `${detail} (the last check ${late})` : `a check ${late}`
+        break
+      }
+      if (outcome.mismatch === undefined && outcome.failure === undefined) return
+      detail = outcome.failure ?? outcome.mismatch ?? ''
+      if (performance.now() + pollIntervalMs >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+    }
+  } finally {
+    await concurrent?.close()
   }
   throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
 }
@@ -623,14 +658,10 @@ async function waitUntilApplied(
 async function checkBefore(
   check: () => Promise<string | undefined>,
   deadline: number,
-  deadlineMs: number,
-): Promise<{ mismatch?: string; failure?: string }> {
+): Promise<{ mismatch?: string; failure?: string; timedOut?: true }> {
   let timer: ReturnType<typeof setTimeout> | undefined
-  const expired = new Promise<{ failure: string }>((resolve) => {
-    timer = setTimeout(
-      () => resolve({ failure: `a check did not return within the ${deadlineMs / 1000}s deadline` }),
-      Math.max(deadline - Date.now(), 0),
-    )
+  const expired = new Promise<{ timedOut: true }>((resolve) => {
+    timer = setTimeout(() => resolve({ timedOut: true }), Math.max(deadline - performance.now(), 0))
   })
   try {
     return await Promise.race([

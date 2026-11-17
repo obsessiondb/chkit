@@ -121,15 +121,16 @@ async function assertDistributedLifecycle(
   expect(pulledPlan.exitCode, formatTestDiagnostic('generate from pulled schema', pulledPlan)).toBe(0)
   expect((JSON.parse(pulledPlan.stdout) as { operations: unknown[] }).operations).toEqual([])
 
-  // 5. Add a column to both tables: two ALTERs, one per table.
+  // 5. Add a column to both tables: two ALTERs, one per table, in code-point
+  // order of their keys, as in chkit-py (#489).
   await writeSchema(fixture, [{ name: 'country', type: 'String' }])
   const alterPlan = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--dryrun', '--json'], fixture.cliEnv)
   expect(alterPlan.exitCode, formatTestDiagnostic('generate add column', alterPlan)).toBe(0)
   expect(
     (JSON.parse(alterPlan.stdout) as { operations: Array<{ sql: string }> }).operations.map((op) => op.sql)
   ).toEqual([
-    `ALTER TABLE ${database}.${local} ADD COLUMN IF NOT EXISTS \`country\` String;`,
     `ALTER TABLE ${database}.${distributed} ADD COLUMN IF NOT EXISTS \`country\` String;`,
+    `ALTER TABLE ${database}.${local} ADD COLUMN IF NOT EXISTS \`country\` String;`,
   ])
   await generateAndMigrate(fixture, 'add_country')
   await waitForColumn(executor, database, local, 'country')

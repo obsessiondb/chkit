@@ -225,3 +225,55 @@ def test_a_read_only_user_runs_the_read_only_commands(
             admin.execute(
                 f"DROP TABLE IF EXISTS {quote_ident(env.clickhouse_database)}.{quote_ident(name)} SYNC"
             )
+
+
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
+def test_a_user_without_alter_on_an_older_journal_migrates_with_one_warning_on_stderr(
+    admin: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A user that cannot ALTER a journal an older release created migrates
+    without fingerprints and says so, once, on stderr only (#599)."""
+    env = resolve_live_env()
+    database = quote_ident(env.clickhouse_database)
+    table, journal_table = _project(tmp_path, monkeypatch, "noalter_py")
+    user, password = f"{create_prefix('noalter_py')}user", secrets.token_hex(16)
+    as_admin = _cli(_write_config(tmp_path, env.clickhouse_user, env.clickhouse_password))
+    user_config = _write_config(tmp_path, user, password)
+    try:
+        admin.execute(f"CREATE USER {quote_ident(user)} IDENTIFIED BY '{password}'")
+        admin.execute(f"GRANT SELECT, INSERT, CREATE DATABASE, CREATE TABLE ON {database}.* TO {quote_ident(user)}")
+        admin.execute(
+            f"CREATE TABLE {database}.{quote_ident(journal_table)} "
+            "(name String, applied_at DateTime64(3, 'UTC'), checksum String, chkit_version String, migration_completed Bool DEFAULT true, operations Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), finished_at Nullable(DateTime64(3, 'UTC')), last_error String)) DEFAULT []) ENGINE = ReplacingMergeTree(applied_at) ORDER BY name"
+        )
+        as_admin("generate", "--name", "init")
+        _reset_for_testing()
+
+        apply = CliRunner().invoke(app, ["migrate", "--apply", "--json", "--config", user_config])
+
+        assert apply.exit_code == 0, format_test_diagnostic("migrate --apply (no ALTER)", apply)
+        assert json.loads(apply.stdout)["mode"] == "execute"
+        assert "operation_fingerprints" not in apply.stdout
+        warnings = [line for line in apply.stderr.splitlines() if "operation_fingerprints" in line]
+        assert len(warnings) == 1
+        assert warnings[0].startswith(
+            f"⚠ Could not add the operation_fingerprints column to {journal_table} "
+            f"({user}: Not enough privileges."
+        )
+        assert warnings[0].endswith(
+            "so this run records no statement fingerprints: a later --retry or resume checks "
+            'the statements it completes by position and "-- operation:" marker only, not by '
+            f"their SQL. The next migration applied by a user that can ALTER {journal_table} "
+            "adds the column."
+        )
+        columns = admin.query(
+            "SELECT name FROM system.columns "
+            f"WHERE database = '{env.clickhouse_database}' AND table = '{journal_table}' "
+            "AND name = 'operation_fingerprints'"
+        ).rows
+        assert columns == []
+    finally:
+        admin.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
+        for name in (table, journal_table):
+            admin.execute(f"DROP TABLE IF EXISTS {database}.{quote_ident(name)} SYNC")
+

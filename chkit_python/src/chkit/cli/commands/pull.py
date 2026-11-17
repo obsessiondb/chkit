@@ -20,13 +20,17 @@ obsessiondb plugin port.
 
 from __future__ import annotations
 
+import contextlib
 import os
 import re
+import secrets
+import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated
+from typing import Annotated, Any
 
 import typer
+from typer.exceptions import TyperException
 
 from chkit.cli.command_target import (
     ServiceOption,
@@ -44,9 +48,9 @@ from chkit.cli.commands.pull_view_parser import (
 from chkit.cli.config_loader import load_config
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
-from chkit.cli.plugin_runtime import load_plugin_runtime
+from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
 from chkit.cli.table_scope import TableScope
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.clickhouse.create_dictionary_parser import (
     parse_dictionary_attributes_from_create_dictionary_query,
     parse_dictionary_primary_key_from_create_dictionary_query,
@@ -56,10 +60,7 @@ from chkit.clickhouse.create_dictionary_parser import (
     parse_lifetime_from_create_dictionary_query,
     parse_source_from_create_dictionary_query,
 )
-from chkit.clickhouse.index_granularity import (
-    IndexGranularityMismatchError,
-    assert_server_index_granularity,
-)
+from chkit.clickhouse.index_granularity import assert_server_index_granularity
 from chkit.clickhouse.introspect import (
     IntrospectedTable,
     infer_schema_kind_from_engine,
@@ -73,7 +74,6 @@ from chkit.core.model import (
     ChxConfigEnv,
     ChxResolvedConfig,
     DictionaryDefinition,
-    MaterializedViewDefinition,
     MaterializedViewRefresh,
     SchemaDefinition,
     SkipIndexBloomFilter,
@@ -87,7 +87,6 @@ from chkit.core.model import (
     SQLExpression,
     TableDefinition,
     TableRef,
-    ViewDefinition,
     configured_index_granularity,
     dictionary,
     materialized_view,
@@ -244,22 +243,6 @@ def _refresh_shape_to_model(
         append=shape.append or None,
         empty=shape.empty or None,
     )
-
-
-def _assert_index_granularity(
-    client: ClickHouseClient, config: ChxResolvedConfig, *, output_json: bool
-) -> None:
-    """Stop when the server's MergeTree index_granularity default is not
-    ``clickhouse.indexGranularity``, reported as TS pull reports an error
-    (``wrapPluginRun``): on stdout, exit 1."""
-    try:
-        assert_server_index_granularity(client, configured_index_granularity(config))
-    except IndexGranularityMismatchError as error:
-        if output_json:
-            print_output({"ok": False, "command": "schema", "error": str(error)}, json_mode=True)
-        else:
-            typer.echo(f"Pull schema failed: {error}")
-        raise typer.Exit(code=1) from error
 
 
 def _pull_definitions(
@@ -481,20 +464,27 @@ def _kafka_setting_warnings(definitions: Sequence[SchemaDefinition]) -> list[str
     return warnings
 
 
+class PullConfigError(Exception):
+    """A config error, for which pull exits 2 (TS ``PullConfigError``)."""
+
+
 def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None:
-    if out_file.exists() and not overwrite:
+    # A dangling symlink is an existing entry that the rename would replace (#702).
+    if (out_file.exists() or out_file.is_symlink()) and not overwrite:
         msg = (
-            f"Output file already exists: {out_file}. "
-            f"Pass --force / --overwrite to replace it."
+            f"Output file already exists at {out_file}. "
+            "Re-run with --force or set plugin option overwrite=true."
         )
-        raise typer.BadParameter(msg)
+        raise PullConfigError(msg)
     out_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp_file = out_file.with_suffix(out_file.suffix + ".tmp")
+    # A random hidden name, as TS: a fixed ``<name>.tmp`` could be the target
+    # of a symlinked output file and be moved away by the rename (#702).
+    tmp_file = out_file.parent / f".{int(time.time() * 1000)}-{secrets.token_hex(6)}.tmp"
     tmp_file.write_text(content, encoding="utf-8")
     tmp_file.replace(out_file)
 
 
-def run(  # noqa: PLR0912, PLR0917
+def run(  # noqa: PLR0917
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -569,50 +559,114 @@ def run(  # noqa: PLR0912, PLR0917
             output_json=output_json,
         ),
     )
-    if executor is None and config.clickhouse is None:
+    try:
+        _run(
+            config,
+            plugin_runtime,
+            executor,
+            hook_flags=hook_flags,
+            database=database,
+            out_file=out_file,
+            dryrun=dryrun,
+            overwrite=overwrite,
+            output_json=output_json,
+        )
+    except (typer.Exit, typer.Abort, TyperException):
+        raise
+    except Exception as error:
         # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
-        # a config error on stdout and exits 2.
+        # an error on stdout and exits 2 for a config error, else 1.
+        message = clickhouse_error_message(error)
+        if output_json:
+            print_output({"ok": False, "command": "schema", "error": message}, json_mode=True)
+        else:
+            typer.echo(f"Pull schema failed: {message}")
+        raise typer.Exit(code=2 if isinstance(error, PullConfigError) else 1) from error
+
+
+def _introspect(
+    config: ChxResolvedConfig,
+    plugin_runtime: PluginRuntime,
+    executor: ClickHouseClient | None,
+    *,
+    hook_flags: dict[str, Any],
+    selected: list[str],
+) -> tuple[list[str], list[object], list[SchemaDefinition], list[str]]:
+    """Return the databases, the listed objects, the definitions and warnings."""
+    raw_objects: list[object] = []  # objects from system.tables (for skipped count)
+    inner_storage_warnings: list[str] = []
+    with contextlib.ExitStack() as stack:
+        client: ClickHouseClient | None = None
+        # As in TS, a custom introspector reads elsewhere, but without
+        # --database pull first lists the target's objects: they select the
+        # databases the hook gets and count what it skipped (#698).
+        custom_introspect = plugin_runtime.has_on_pull_introspect()
+        if custom_introspect and not selected:
+            client = stack.enter_context(open_client(executor, config.clickhouse))
+            raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
+            selected = sorted({getattr(o, "database", "") for o in raw_objects})
+
+        # Allow a registered plugin to bypass the SQL-based pull entirely
+        # (e.g. ObsessionDB's metadata API). Plugins implement
+        # ``on_pull_introspect`` and return a list of SchemaDefinition.
+        custom = (
+            plugin_runtime.run_on_pull_introspect(
+                ChxOnPullIntrospectContext(
+                    command="pull",
+                    config=config,
+                    table_scope=TableScope(enabled=False),
+                    flags=hook_flags,
+                    clickhouse=config.clickhouse,
+                    databases=selected,
+                )
+            )
+            if custom_introspect
+            else None
+        )
+        if custom is not None:
+            definitions = list(custom)
+        else:
+            listed = client is not None
+            if client is None:
+                client = stack.enter_context(open_client(executor, config.clickhouse))
+            # The pulled tables are compared later against definitions
+            # canonicalized with clickhouse.indexGranularity, which must be this
+            # server's default. A custom introspector reads elsewhere.
+            assert_server_index_granularity(client, configured_index_granularity(config))
+            if not listed:
+                # Capture objects so we can summarize what got skipped, even when
+                # --database was passed explicitly.
+                raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
+                if not selected:
+                    selected = sorted({getattr(o, "database", "") for o in raw_objects})
+            definitions, inner_storage_warnings = _pull_definitions(client, selected)
+    return selected, raw_objects, definitions, inner_storage_warnings
+
+
+def _run(
+    config: ChxResolvedConfig,
+    plugin_runtime: PluginRuntime,
+    executor: ClickHouseClient | None,
+    *,
+    hook_flags: dict[str, Any],
+    database: list[str] | None,
+    out_file: Path,
+    dryrun: bool,
+    overwrite: bool,
+    output_json: bool,
+) -> None:
+    if executor is None and config.clickhouse is None:
         msg = (
             "pull needs a target: set CLICKHOUSE_URL or select an ObsessionDB service "
             "(chkit obsessiondb service select)"
         )
-        if output_json:
-            print_output({"ok": False, "command": "schema", "error": msg}, json_mode=True)
-        else:
-            typer.echo(f"Pull schema failed: {msg}")
-        raise typer.Exit(code=2)
+        raise PullConfigError(msg)
 
     selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
 
-    # Allow a registered plugin to bypass the SQL-based pull entirely
-    # (e.g. ObsessionDB's metadata API). Plugins implement
-    # ``on_pull_introspect`` and return a list of SchemaDefinition.
-    custom = plugin_runtime.run_on_pull_introspect(
-        ChxOnPullIntrospectContext(
-            command="pull",
-            config=config,
-            table_scope=TableScope(enabled=False),
-            flags=hook_flags,
-            clickhouse=config.clickhouse,
-            databases=selected,
-        )
+    selected, raw_objects, definitions, inner_storage_warnings = _introspect(
+        config, plugin_runtime, executor, hook_flags=hook_flags, selected=selected
     )
-    raw_objects: list[object] = []  # objects from system.tables (for skipped count)
-    inner_storage_warnings: list[str] = []
-    if custom is not None:
-        definitions = list(custom)
-    else:
-        with open_client(executor, config.clickhouse) as client:
-            # The pulled tables are compared later against definitions
-            # canonicalized with clickhouse.indexGranularity, which must be this
-            # server's default. A custom introspector reads elsewhere.
-            _assert_index_granularity(client, config, output_json=output_json)
-            # Capture objects so we can summarize what got skipped, even when
-            # --database was passed explicitly.
-            raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
-            if not selected:
-                selected = sorted({getattr(o, "database", "") for o in raw_objects})
-            definitions, inner_storage_warnings = _pull_definitions(client, selected)
     definitions = [d for d in definitions if _is_pulled_object(d)]
 
     # ObsessionDB reports the engine as Shared*, which rendering canonicalizes away.
@@ -627,7 +681,10 @@ def run(  # noqa: PLR0912, PLR0917
         definitions, index_granularity=configured_index_granularity(config)
     )
     content = render_schema_file(definitions, shared_tables=shared_tables)
-    out_file_abs = (Path.cwd() / out_file).resolve()
+    # Made absolute by text, as TS ``resolve(process.cwd(), outFile)``: a
+    # symlink is not followed, so pull writes (and reports) the path it was
+    # given and replaces a symlink there rather than writing through it (#702).
+    out_file_abs = Path(os.path.abspath(Path.cwd() / out_file))
 
     if not dryrun:
         _write_schema_file(out_file_abs, content, overwrite=overwrite)
@@ -644,22 +701,16 @@ def run(  # noqa: PLR0912, PLR0917
         *_kafka_setting_warnings(definitions),
     ]
 
+    # The same keys, in the same order, as the TS pull plugin (#487).
     payload: dict[str, object] = {
-        "command": "schema",
         "ok": True,
+        "command": "schema",
         "outFile": str(out_file_abs),
         "definitionCount": len(definitions),
         "tableCount": sum(1 for d in definitions if isinstance(d, TableDefinition)),
-        "viewCount": sum(1 for d in definitions if isinstance(d, ViewDefinition)),
-        "materializedViewCount": sum(
-            1 for d in definitions if isinstance(d, MaterializedViewDefinition)
-        ),
-        "dictionaryCount": sum(
-            1 for d in definitions if isinstance(d, DictionaryDefinition)
-        ),
         "databases": selected,
-        "dryrun": dryrun,
         "skippedObjects": skipped_objects,
+        "dryrun": dryrun,
         "warnings": warnings,
     }
     if dryrun:

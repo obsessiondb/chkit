@@ -27,21 +27,25 @@ the parser and the splitter together.
 from __future__ import annotations
 
 import re
+from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from chkit.core.sql_lexer import is_trivia, tokenize_sql
+from chkit.core.sql_lexer import SQLToken, is_trivia, tokenize_sql
 from chkit.core.sql_splitter import extract_executable_statements
 
 __all__ = [
     "DestructiveOperationMarker",
     "MigrationOperationMode",
     "MigrationOperationSummary",
+    "NonSelectBarrier",
     "ScannedDestructiveStatement",
     "collect_destructive_operation_markers",
     "collect_unmarked_destructive_statements",
     "extract_executable_statements",
     "extract_migration_operation_summaries",
+    "find_non_select_barriers",
+    "is_select_statement",
     "migration_contains_danger_operation",
     "migration_contains_destructive_sql",
     "scan_destructive_sql_statements",
@@ -197,6 +201,77 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
         if parsed is not None:
             summaries.append(parsed)
     return summaries
+
+
+@dataclass(frozen=True, slots=True)
+class NonSelectBarrier:
+    # 0-based position among the statements.
+    index: int
+    statement: str
+    # The ``-- operation:`` marker text after the prefix.
+    summary: str
+
+
+def find_non_select_barriers(
+    statements: Sequence[str], operations: Sequence[MigrationOperationSummary]
+) -> list[NonSelectBarrier]:
+    """The statements marked ``mode=barrier`` that are not a SELECT (#634); the
+    n-th operation marker belongs to the n-th statement.
+
+    The barrier read runs its statement as a query, once and then every
+    second, and nothing waits for a change it makes to reach the other
+    replicas, so migrate refuses any other statement there.
+    """
+    found: list[NonSelectBarrier] = []
+    for index, statement in enumerate(statements):
+        operation = operations[index] if index < len(operations) else None
+        if operation is None or operation.mode != "barrier" or is_select_statement(statement):
+            continue
+        found.append(NonSelectBarrier(index=index, statement=statement, summary=operation.summary))
+    return found
+
+
+def is_select_statement(statement: str) -> bool:
+    """A SELECT, possibly in parentheses, a ``WITH ... SELECT`` or a FROM-first
+    ``FROM ... SELECT``.
+
+    ClickHouse also reads ``WITH ... INSERT INTO``, and runs the statements
+    joined by ``PARALLEL WITH`` even when it then rejects a SELECT among them,
+    so an ``INSERT INTO`` or a ``PARALLEL WITH`` outside a subquery makes it
+    something else. A column or alias named ``parallel`` followed by a WITH
+    modifier (``GROUP BY parallel WITH TOTALS``) there has to be quoted.
+    """
+    tokens = [token for token in tokenize_sql(statement) if not is_trivia(token)]
+    start = 0
+    while start < len(tokens) and _is_punctuation(tokens[start], "("):
+        start += 1
+    first = _keyword(tokens[start]) if start < len(tokens) else None
+    if first not in ("SELECT", "WITH", "FROM"):
+        return False
+    depth = 0
+    for index, token in enumerate(tokens):
+        if _is_punctuation(token, "("):
+            depth += 1
+        elif _is_punctuation(token, ")"):
+            depth -= 1
+        elif depth <= start and _is_other_statement_keyword(
+            token, tokens[index + 1] if index + 1 < len(tokens) else None
+        ):
+            return False
+    return True
+
+
+def _is_other_statement_keyword(token: SQLToken, following: SQLToken | None) -> bool:
+    pair = (_keyword(token), _keyword(following) if following is not None else None)
+    return pair in (("INSERT", "INTO"), ("PARALLEL", "WITH"))
+
+
+def _is_punctuation(token: SQLToken, text: str) -> bool:
+    return token.kind == "punctuation" and token.text == text
+
+
+def _keyword(token: SQLToken) -> str | None:
+    return token.text.upper() if token.kind == "identifier" else None
 
 
 def _describe_destructive_operation(

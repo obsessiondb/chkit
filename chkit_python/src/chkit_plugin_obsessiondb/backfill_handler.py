@@ -45,6 +45,7 @@ from chkit_plugin_obsessiondb.jobs_api import (
     jobs_list,
 )
 from chkit_plugin_obsessiondb.json_envelope import error_envelope
+from chkit_plugin_obsessiondb.service_api import ConsoleApiError
 from chkit_plugin_obsessiondb.storage import load_selected_service
 
 _REMOTE_SUBCOMMANDS = frozenset({"status", "cancel", "list"})
@@ -244,8 +245,10 @@ def handle_backfill_command(  # noqa: PLR0911
         )
         return ChxOnBeforePluginCommandHandled(exit_code=1)
     except Exception as error:
+        # As TS, an oRPC error reports `error`: its code is transport-level.
+        code = "error" if isinstance(error, ConsoleApiError) else json_error_code(error)
         context.print(
-            error_envelope(command_id, json_error_code(error), str(error))
+            error_envelope(command_id, code, str(error))
             if context.json_mode
             else f"Backfill {context.command} failed: {error}"
         )
