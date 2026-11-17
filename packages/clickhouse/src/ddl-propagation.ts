@@ -26,6 +26,7 @@ interface ExpectedColumnValue {
 // object it changes. Creates and drops use the bare key.
 const KEY_SUFFIXES: ReadonlyMap<string, string> = new Map<MigrationOperationType, string>([
   ['alter_materialized_view_modify_refresh', ':refresh'],
+  ['alter_materialized_view_modify_query', ':query'],
   ['alter_table_add_column', ':column:'],
   ['alter_table_modify_column', ':column:'],
   ['alter_table_drop_column', ':column:'],
@@ -228,6 +229,33 @@ async function waitForIndex(
     want,
     label: `waitForIndex: ${database}.${tableName}.${indexName} ${want === 'present' ? 'not yet visible' : 'still present'}`,
   }, options)
+}
+
+/**
+ * Waits until every replica lists the materialized view with one query
+ * (`system.tables.as_select`). The replica that ran MODIFY QUERY has applied it
+ * when the statement returns, so once every replica agrees, all have. A
+ * replica that still runs the old query would refuse a following DROP COLUMN
+ * of a column the old query reads.
+ */
+async function waitForViewQuery(
+  executor: ClickHouseExecutor,
+  database: string,
+  viewName: string,
+  options?: PropagationOptions,
+): Promise<void> {
+  const fanout = await resolveReplicaFanout(executor, options?.cluster)
+  const replicas = fanout?.replicas ?? 1
+  const source = fanout ? allReplicas(fanout, 'system.tables') : 'system.tables'
+  const sql = `SELECT count(DISTINCT hostName()) AS replicas, uniqExact(as_select) AS queries FROM ${source} WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(viewName)}`
+  await waitUntilApplied(executor, `${database}.${viewName} query`, options, async (reader) => {
+    const [row] = await reader.query<{ replicas: number | string; queries: number | string }>(sql)
+    const listed = Number(row?.replicas ?? 0)
+    if (listed < replicas) return `the view is listed on ${listed} of ${replicas} replicas`
+    const queries = Number(row?.queries ?? 0)
+    if (queries > 1) return `the replicas report ${queries} different queries`
+    return undefined
+  })
 }
 
 /**
@@ -458,6 +486,9 @@ export async function waitForDDLPropagation(
 
     case 'create_dictionary':
       return waitForDictionary(executor, parsed.database, parsed.table, options)
+
+    case 'alter_materialized_view_modify_query':
+      return waitForViewQuery(executor, parsed.database, parsed.table, options)
 
     // ADD COLUMN IF NOT EXISTS leaves an existing column as it is, so only
     // agreement between replicas is checked; MODIFY also checks what it sets.

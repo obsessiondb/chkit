@@ -793,6 +793,7 @@ MigrationOperationType: TypeAlias = Literal[
     "create_materialized_view",
     "drop_materialized_view",
     "alter_materialized_view_modify_refresh",
+    "alter_materialized_view_modify_query",
     "alter_table_add_column",
     "alter_table_modify_column",
     "alter_table_drop_column",

@@ -29,6 +29,7 @@ import {
   renderAlterDropProjection,
   renderAlterModifyColumn,
   renderAlterModifyComment,
+  renderAlterModifyQuery,
   renderAlterModifyRefresh,
   renderAlterModifySetting,
   renderAlterModifyTTL,
@@ -322,21 +323,31 @@ function refreshEqual(
   return shapeKey(oldRefresh ?? null) === shapeKey(newRefresh ?? null)
 }
 
+/**
+ * A new query on the same target is a MODIFY QUERY, which swaps the query of a
+ * view that keeps feeding its target, so no INSERT into its source is missed.
+ * The view is dropped and recreated instead when it is refreshable (after
+ * MODIFY QUERY it keeps its last result until the next scheduled refresh,
+ * while CREATE refreshes at once) or when it reads or writes an object the
+ * migration creates, which ClickHouse cannot analyze before that create runs.
+ */
 function diffMaterializedView(
   oldDef: MaterializedViewDefinition,
-  newDef: MaterializedViewDefinition
+  newDef: MaterializedViewDefinition,
+  readsCreatedObject: boolean
 ): MigrationOperation[] {
   const oldAppend = oldDef.refresh?.append === true
   const newAppend = newDef.refresh?.append === true
   const hasOldRefresh = oldDef.refresh !== undefined
   const hasNewRefresh = newDef.refresh !== undefined
+  const queryChanged = newDef.as !== oldDef.as
 
   const structuralChange =
-    newDef.as !== oldDef.as ||
     newDef.to.database !== oldDef.to.database ||
     newDef.to.name !== oldDef.to.name ||
     hasOldRefresh !== hasNewRefresh ||
-    oldAppend !== newAppend
+    oldAppend !== newAppend ||
+    (queryChanged && (hasNewRefresh || readsCreatedObject))
 
   if (structuralChange) {
     return [
@@ -355,6 +366,16 @@ function diffMaterializedView(
     ]
   }
 
+  const queryOps: MigrationOperation[] = queryChanged
+    ? [
+        {
+          type: 'alter_materialized_view_modify_query',
+          key: `${definitionKey(newDef)}:query`,
+          risk: 'caution',
+          sql: renderAlterModifyQuery(newDef),
+        },
+      ]
+    : []
   const refreshOps: MigrationOperation[] =
     hasNewRefresh && !refreshEqual(oldDef.refresh, newDef.refresh)
       ? [
@@ -366,7 +387,29 @@ function diffMaterializedView(
           },
         ]
       : []
-  return [...refreshOps, ...diffComment(oldDef, newDef)]
+  return [...queryOps, ...refreshOps, ...diffComment(oldDef, newDef)]
+}
+
+/**
+ * Plans the materialized views both schemas hold; `operations` is the rest of
+ * the plan. The views are planned in create order, so a view whose new query
+ * reads a view this plan recreates is recreated after it.
+ */
+function diffMaterializedViews(
+  changedViews: ReadonlyArray<[MaterializedViewDefinition, MaterializedViewDefinition]>,
+  operations: readonly MigrationOperation[],
+  createGraph: DependencyGraph
+): MigrationOperation[] {
+  const created = new Set(operations.filter((op) => op.type.startsWith('create_')).map((op) => op.key))
+  const planned: MigrationOperation[] = []
+  for (const [oldDef, newDef] of orderByDependencies(changedViews, ([, def]) => definitionKey(def), (key) => createGraph.get(key) ?? [])) {
+    const key = definitionKey(newDef)
+    const readsCreatedObject = [...(createGraph.get(key) ?? [])].some((dependency) => created.has(dependency))
+    const viewOps = diffMaterializedView(oldDef, newDef, readsCreatedObject)
+    if (viewOps.some((op) => op.type === 'create_materialized_view')) created.add(key)
+    planned.push(...viewOps)
+  }
+  return planned
 }
 
 // `chkit pull` writes ClickHouse's own introspection placeholder
@@ -701,9 +744,11 @@ export function planDiff(
   assertValidDefinitions(newCanonical)
   const oldMap = createMap(oldCanonical)
   const newMap = createMap(newCanonical)
+  const createGraph = buildDependencyGraph(newCanonical)
   const operations: MigrationOperation[] = []
   const renameSuggestions: ColumnRenameSuggestion[] = []
   const databasesToCreate = new Set<string>()
+  const changedViews: Array<[MaterializedViewDefinition, MaterializedViewDefinition]> = []
 
   for (const oldDef of oldCanonical) {
     if (newMap.has(definitionKey(oldDef))) continue
@@ -737,8 +782,7 @@ export function planDiff(
       newDef.kind === 'materialized_view' &&
       oldDef.kind === 'materialized_view'
     ) {
-      const mvOps = diffMaterializedView(oldDef, newDef)
-      operations.push(...mvOps)
+      changedViews.push([oldDef, newDef])
       continue
     }
 
@@ -761,13 +805,15 @@ export function planDiff(
     pushCreateOperation(operations, newDef, 'safe')
   }
 
+  operations.push(...diffMaterializedViews(changedViews, operations, createGraph))
+
   for (const database of [...databasesToCreate].sort((a, b) => compareCodePoints(a, b))) {
     pushCreateDatabaseOperation(operations, database, 'safe')
   }
 
   const ordered = orderOperations(operations.sort(compareOperations), {
     drop: invertDependencyGraph(buildDependencyGraph(oldCanonical)),
-    create: buildDependencyGraph(newCanonical),
+    create: createGraph,
     previous: oldCanonical,
     next: newCanonical,
   })
@@ -823,7 +869,8 @@ function alterRank(op: MigrationOperation): number {
  * Reorders the drop and create segments of a (rank, key)-sorted plan by object
  * dependencies (#231): drops run dependents first, creates run dependencies
  * first. Alters and create_database keep their place, except that the column
- * statements of a table are ordered by the columns they read and remove.
+ * statements of a table are ordered by the columns they read and remove, and a
+ * materialized view's MODIFY QUERY by the tables its query reads.
  */
 function orderOperations(
   sorted: MigrationOperation[],
@@ -856,6 +903,7 @@ const COLUMN_STATEMENTS: ReadonlySet<MigrationOperation['type']> = new Set([
   'alter_table_drop_column',
   'alter_table_rename_column',
   'alter_table_modify_ttl',
+  'alter_materialized_view_modify_query',
 ])
 
 export function isColumnStatement(op: MigrationOperation): boolean {
@@ -869,8 +917,9 @@ export function columnRenameKey(rename: ColumnRename): string {
 
 /**
  * Orders the column statements (ADD, MODIFY, DROP and RENAME COLUMN) and the
- * table TTL statement of every table in one dependency sort, from their key
- * order (#681, #745, #746, #758, #769):
+ * table TTL statement of every table, and the MODIFY QUERY of every
+ * materialized view, in one dependency sort, from their key order (#681,
+ * #745, #746, #758, #760, #769):
  * - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
  *   a table TTL that reads column X runs after the ADD of X or the RENAME to X;
  * - a DROP of X runs after the MODIFY or DROP of every column whose old
@@ -880,10 +929,13 @@ export function columnRenameKey(rename: ColumnRename): string {
  *   the TTL that read X to the new name;
  * - a MODIFY whose new expression would close a cycle with an old expression
  *   runs after the MODIFY that removes that old read (`cycleReleases`);
+ * - a MODIFY QUERY runs after the ADD, MODIFY and RENAME of every column of the
+ *   tables its new query reads or writes, since ClickHouse analyzes the new
+ *   query, and before the DROP of a column of a table its old query reads or
+ *   writes, since ClickHouse refuses to drop a column a view still reads;
  * - statements of the same column keep their order.
  * Members of a cycle keep their key order. The statements fill the positions
- * the column statements had, so every other operation keeps its place, and a
- * table's statements never move past another table's (they share no edge).
+ * the column statements had, so every other operation keeps its place.
  * `renames` names the columns of each RENAME COLUMN in `operations`.
  */
 export function orderColumnStatements(
@@ -896,6 +948,10 @@ export function orderColumnStatements(
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
+  const queryReads = materializedViewQueryReads(definitions.next)
+  const oldQueryReads = materializedViewQueryReads(definitions.previous)
+  const changesColumnOf = (op: MigrationOperation, tables: ReadonlySet<string> | undefined) =>
+    [...(tables ?? [])].some((table) => op.key.startsWith(`${table}:column:`) || op.key.startsWith(`${table}:column_rename:`))
   const statements = operations
     .filter(isColumnStatement)
     .sort((a, b) => compareCodePoints(a.key, b.key))
@@ -936,6 +992,17 @@ export function orderColumnStatements(
         for (const other of modifies.get(column) ?? []) found.add(other)
       }
     }
+    statements.forEach((other, otherIndex) => {
+      const viewReadsChangedTable =
+        op.type === 'alter_materialized_view_modify_query' &&
+        other.type !== 'alter_table_drop_column' &&
+        changesColumnOf(other, queryReads.get(op.key))
+      const dropWaitsForView =
+        op.type === 'alter_table_drop_column' &&
+        other.type === 'alter_materialized_view_modify_query' &&
+        changesColumnOf(op, oldQueryReads.get(other.key))
+      if (viewReadsChangedTable || dropWaitsForView) found.add(otherIndex)
+    })
     if (index > 0 && statements[index - 1]?.key === op.key) found.add(index - 1)
     found.delete(index)
     return [...found].map(String)
@@ -993,6 +1060,16 @@ function cycleReleases(
     }
   }
   return [...released]
+}
+
+/** MODIFY QUERY operation key → keys of the definitions the view reads, its target included. */
+function materializedViewQueryReads(definitions: SchemaDefinition[]): DependencyGraph {
+  const graph = buildDependencyGraph(definitions)
+  return new Map(
+    definitions
+      .filter((def) => def.kind === 'materialized_view')
+      .map((def) => [`${definitionKey(def)}:query`, graph.get(definitionKey(def)) ?? new Set<string>()])
+  )
 }
 
 function columnKey(table: { database: string; table: string }, column: string): string {

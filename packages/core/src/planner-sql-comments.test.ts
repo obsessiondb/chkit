@@ -187,12 +187,12 @@ describe('planDiff against a snapshot written before #232', () => {
     expect(operationTypes(plan)).toEqual(['drop_view', 'create_view'])
   })
 
-  test('a materialized view cut short by a comment is recreated in full', () => {
+  test('a materialized view cut short by a comment gets its full query', () => {
     const mv = (as: string) =>
       materializedView({ database: 'app', name: 'mv', to: { database: 'app', name: 'agg' }, as })
     const source = 'SELECT id -- per id\nFROM app.events GROUP BY id'
     const plan = planDiff([mv(legacyNormalize(source))], [mv(source)])
-    expect(operationTypes(plan)).toEqual(['drop_materialized_view', 'create_materialized_view'])
+    expect(operationTypes(plan)).toEqual(['alter_materialized_view_modify_query'])
   })
 
   test('block comments and trailing comments plan nothing', () => {
