@@ -2,4 +2,4 @@
 "chkit": patch
 ---
 
-Outside a project, a stray argument, an unknown flag or a missing flag value is now reported as such, as in chkit-py, instead of as a missing config.
+Outside a project, an argument error, a missing `query` SQL string or an unknown command is now reported as such, and `--help-plugins` prints the help, as in chkit-py, instead of a missing config error.

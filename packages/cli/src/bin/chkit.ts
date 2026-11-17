@@ -4,10 +4,11 @@ import { format } from 'node:util'
 import { type ChxPluginRegistration, expandShortFlags, type FlagDef, MissingFlagValueError, type ParsedFlags } from '@chkit/core'
 
 import { cmdInit } from '../commands/init.js'
+import { querySql } from '../commands/query.js'
 import { cmdSkills } from '../commands/skills.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
 import { normalizeGlobalArgs } from '../runtime/argv.js'
-import { parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
+import { parseCommandArgs, parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { ConfigNotFoundError, type LoadedConfig, loadConfig, profileFallbackPlugins } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
@@ -153,12 +154,10 @@ function collectPluginCommands(runtime: Awaited<ReturnType<typeof loadPluginRunt
   })
 }
 
-function createInternalRegistry(
-  pluginExtensions: Parameters<typeof createCommandRegistry>[0]['pluginExtensions'] = [],
-): ReturnType<typeof createCommandRegistry> {
+function createInternalRegistry(): ReturnType<typeof createCommandRegistry> {
   return createCommandRegistry({
     globalFlags: GLOBAL_FLAGS,
-    pluginExtensions,
+    pluginExtensions: [],
     pluginCommands: getInternalPlugins().map((plugin) => ({
       pluginName: plugin.manifest.name,
       manifestName: plugin.manifest.name,
@@ -167,22 +166,80 @@ function createInternalRegistry(
   })
 }
 
+/** The `pull` plugin when it is installed: `pull` is a built-in command in chkit-py (#687). */
+async function pullFallbackPlugins(): Promise<ChxPluginRegistration[]> {
+  try {
+    const mod = (await import('@chkit/plugin-pull')) as { pull?: () => ChxPluginRegistration }
+    return typeof mod.pull === 'function' ? [mod.pull()] : []
+  } catch {
+    return []
+  }
+}
+
 /**
- * Reports an argument error of a built-in command when no project config
- * loaded, as chkit-py does (#687), with the flags that `registrations` add
- * to it. Returns whether it did.
+ * The commands chkit knows when no project config gives the plugins: the
+ * built-in commands, `pull`, and the commands and flags of `registrations`.
  */
-function reportsBuiltinArgError(
-  argv: string[],
-  commandName: string,
+async function createConfiglessRegistry(
   registrations: readonly ChxPluginRegistration[],
-): boolean {
+): Promise<ReturnType<typeof createCommandRegistry>> {
   const plugins = registrations.map(normalizePluginRegistration).filter((entry) => entry.enabled)
-  const registry = createInternalRegistry(
-    plugins.map(({ plugin }) => ({ pluginName: plugin.manifest.name, extensions: plugin.extendCommands ?? [] })),
-  )
+  if (!plugins.some(({ plugin }) => plugin.manifest.name === 'pull')) {
+    plugins.push(...(await pullFallbackPlugins()).map(normalizePluginRegistration))
+  }
+  return createCommandRegistry({
+    globalFlags: GLOBAL_FLAGS,
+    pluginExtensions: plugins.map(({ plugin }) => ({
+      pluginName: plugin.manifest.name,
+      extensions: plugin.extendCommands ?? [],
+    })),
+    pluginCommands: [...getInternalPlugins(), ...plugins.map(({ plugin }) => plugin)].map((plugin) => ({
+      pluginName: plugin.manifest.name,
+      manifestName: plugin.manifest.name,
+      commands: plugin.commands ?? [],
+    })),
+  })
+}
+
+/**
+ * Reports what chkit-py reports when no project config loaded (#687): the
+ * help, an unknown command, or an argument error. Returns whether it did. If
+ * not, the missing config is the error.
+ */
+async function reportsWithoutProjectConfig(input: {
+  argv: string[]
+  commandName: string
+  registrations: readonly ChxPluginRegistration[]
+  wantsHelp: boolean
+  jsonMode: boolean
+}): Promise<boolean> {
+  const { argv, commandName } = input
+  const registry = await createConfiglessRegistry(input.registrations)
   const resolved = registry.get(commandName)
-  return resolved !== undefined && parseInitFlags({ argv, commandName, resolved, registry, plugins: [] }) === null
+  if (!resolved) {
+    // A plugin in the config can add this command.
+    if (WELL_KNOWN_PLUGIN_COMMANDS[commandName]) return false
+    reportUsageError({
+      command: commandName,
+      code: 'unknown_command',
+      message: `Unknown command: ${commandName}`,
+      jsonMode: input.jsonMode,
+      onText: () => console.log(formatGlobalHelp(registry, CLI_VERSION)),
+    })
+    return true
+  }
+  if (input.wantsHelp) {
+    console.log(formatCommandHelp(resolved, registry.globalFlags, firstPluginPositional(argv)))
+    return true
+  }
+  if (commandName === 'query') {
+    const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
+    if (!parsed) return true
+    // Throws the same error as `chkit query` in a project.
+    querySql(parsed.positionals)
+    return false
+  }
+  return parseInitFlags({ argv, commandName, resolved, registry, plugins: [] }) === null
 }
 
 async function run(): Promise<void> {
@@ -265,17 +322,28 @@ async function run(): Promise<void> {
       allowSynthesizedProfileConfig: allowsConfiglessObsessionDBBootstrap(commandName, argv),
     })
   } catch (error) {
-    // An argument error comes first (#687). The flags that `chkit obsessiondb login`,
-    // which the error names, adds count as valid.
-    if (!wantsHelp && error instanceof ConfigNotFoundError) {
-      if (reportsBuiltinArgError(argv, commandName, await profileFallbackPlugins())) return
-    }
+    if (!(error instanceof ConfigNotFoundError)) throw error
+    // The flags that `chkit obsessiondb login`, which the error names, adds count as valid.
+    const registrations = await profileFallbackPlugins()
+    const jsonMode = options.includes('--json')
+    if (await reportsWithoutProjectConfig({ argv, commandName, registrations, wantsHelp, jsonMode })) return
     throw error
   }
   const { config, path: configPath, source: configSource } = loaded
 
   if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
-    if (!wantsHelp && reportsBuiltinArgError(argv, commandName, config.plugins)) return
+    if (
+      !wantsHelp &&
+      (await reportsWithoutProjectConfig({
+        argv,
+        commandName,
+        registrations: config.plugins,
+        wantsHelp: false,
+        jsonMode: options.includes('--json'),
+      }))
+    ) {
+      return
+    }
     reportUsageError({
       command: commandName,
       code: 'project_config_required',
@@ -414,7 +482,16 @@ async function printGlobalHelp(argv: string[]): Promise<void> {
   let registry = createInternalRegistry()
   if (optionArgs(argv).includes('--help-plugins')) {
     const configPathArg = extractConfigPath(argv)
-    const { config, path: configPath } = await loadConfig(configPathArg)
+    let loaded: LoadedConfig
+    try {
+      loaded = await loadConfig(configPathArg)
+    } catch (error) {
+      // Without a project config there are no plugins to list, as in chkit-py (#687).
+      if (!(error instanceof ConfigNotFoundError)) throw error
+      console.log(formatGlobalHelp(registry, CLI_VERSION))
+      return
+    }
+    const { config, path: configPath } = loaded
     const pluginRuntime = await loadPluginRuntime({
       config,
       configPath,

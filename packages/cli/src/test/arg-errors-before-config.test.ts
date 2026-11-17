@@ -46,6 +46,10 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
         [['status', '--service'], 'Missing value for --service'],
         [['generate', '--no-shared-engines', '--name'], 'Missing value for --name'],
         [['check', '--service', 'prod', '-t'], 'Missing value for --table'],
+        // `pull` is a built-in command in chkit-py.
+        [['pull', 'foo'], 'Got unexpected extra argument(s) (foo)'],
+        [['pull', '--bogus'], 'Unknown flag: --bogus'],
+        [['pull', '-o'], 'Missing value for --out-file'],
       ] as const) {
         expect([args, ...usageResult(run(args))]).toEqual([args, 1, '', message])
       }
@@ -53,20 +57,31 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
       for (const [args, message] of [
         [['status', 'foo', '--json'], 'Got unexpected extra argument(s) (foo)'],
         [['status', '--bogus', '--json'], 'Unknown flag: --bogus'],
+        [['pull', 'foo', '--json'], 'Got unexpected extra argument(s) (foo)'],
       ] as const) {
         const result = run(args)
         expect([args, result.exitCode, result.stderr.trim()]).toEqual([args, 1, message])
         expect(JSON.parse(result.stdout)).toEqual({
-          command: 'status',
+          command: args[0],
           schemaVersion: 1,
           ok: false,
           error: { code: 'usage', message },
         })
       }
 
-      const help = run(['status', 'foo', '--help'])
-      expect([help.exitCode, help.stderr]).toEqual([0, ''])
-      expect(help.stdout).toContain('chkit status [options]')
+      for (const [args, usage] of [
+        [['status', 'foo', '--help'], 'chkit status [options]'],
+        [['status', '--help-plugins', 'foo'], 'chkit status [options]'],
+        [['pull', '--help'], 'chkit pull <command> [options]'],
+        [['pull', '--help-plugins'], 'chkit pull <command> [options]'],
+        [['--help-plugins'], 'chkit <command> [options]'],
+      ] as const) {
+        const help = run(args)
+        expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+        expect(help.stdout).toContain(usage)
+      }
+      // As in chkit-py, --help-plugins lists the flags that `chkit obsessiondb login` adds.
+      expect(run(['status', '--help-plugins']).stdout).toContain('--service')
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -82,9 +97,39 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
       ] as const) {
         expect([args, ...usageResult(run(args))]).toEqual([args, 1, '', message])
       }
+      for (const [args, message] of [
+        [['query'], 'query requires a SQL string as the first positional argument (e.g. `chkit query "SELECT 1"`)'],
+        [['query', 'SELECT', '1'], 'query accepts a single SQL string. Wrap it in quotes if it contains spaces.'],
+      ] as const) {
+        expect([args, ...usageResult(run(args))]).toEqual([args, 1, '', message])
+        const json = run([...args, '--json'])
+        expect([args, json.exitCode, json.stderr.trim()]).toEqual([args, 1, message])
+        expect(JSON.parse(json.stdout)).toEqual({ command: 'query', schemaVersion: 1, ok: false, error: { code: 'error', message } })
+      }
       // snapshot rebuild checks its own arguments once the config is loaded, as in chkit-py.
       const rebuild = run(['snapshot', 'rebuild', 'foo'])
       expect([rebuild.exitCode, rebuild.stderr]).toEqual([1, expect.stringContaining('Config not found at ')])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('an unknown command reports itself', async () => {
+    const { dir, run } = await createEmptyDir()
+    try {
+      for (const args of [['nosuch'], ['nosuch', '--bogus'], ['nosuch', '--help'], ['nosuch', '--help-plugins']]) {
+        const result = run(args)
+        expect([args, result.exitCode, result.stderr.trim()]).toEqual([args, 1, 'Unknown command: nosuch'])
+        expect(result.stdout).toContain('chkit <command> [options]')
+      }
+      const json = run(['nosuch', '--bogus', '--json'])
+      expect([json.exitCode, json.stderr.trim()]).toEqual([1, 'Unknown command: nosuch'])
+      expect(JSON.parse(json.stdout)).toEqual({
+        command: 'nosuch',
+        schemaVersion: 1,
+        ok: false,
+        error: { code: 'unknown_command', message: 'Unknown command: nosuch' },
+      })
     } finally {
       await rm(dir, { recursive: true, force: true })
     }
@@ -97,6 +142,7 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
         [['status', '--bogus'], 'Unknown flag: --bogus'],
         [['generate', '--bogus'], 'Unknown flag: --bogus'],
         [['drift', 'foo'], 'Got unexpected extra argument(s) (foo)'],
+        [['pull', 'foo'], 'Got unexpected extra argument(s) (foo)'],
       ] as const) {
         expect([args, ...usageResult(run(args))]).toEqual([args, 1, '', message])
       }
@@ -112,9 +158,10 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
     try {
       // The config names the plugins. Outside a project, a plugin command and
       // a valid ObsessionDB flag report the missing config, as in chkit-py. A
-      // flag that only another plugin adds is unknown.
+      // flag that only another plugin adds is unknown. Valid `pull` flags need
+      // the config too.
       for (const args of [
-        ['pull', '--bogus'],
+        ['pull', '--dryrun'],
         ['codegen', '--bogus'],
         ['plugin', '--bogus'],
         ['status', '--service', 'prod'],
