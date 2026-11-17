@@ -132,3 +132,37 @@ def test_write_records_this_release_on_every_write() -> None:
     state = store.read_migration_state("001_init.sql")
     assert state is not None
     assert state.chkit_version == __version__
+
+
+# #672: ReplacingMergeTree keeps the newest applied_at, so a write stamped by a
+# clock that stalls, steps back or runs behind the writer of the row it read
+# must still carry a newer version. Same cases as journal-store.test.ts.
+def _inserted_versions(client: _LaggingClient) -> list[str]:
+    return [
+        sql.split("VALUES ('001_init.sql', '", 1)[1].split("'", 1)[0]
+        for sql in client.executed
+        if sql.startswith("INSERT INTO")
+    ]
+
+
+def test_each_write_carries_a_newer_version_than_the_last_write_on_a_stalled_clock() -> None:
+    client = _LaggingClient([])
+    store = _store(client)
+    store.write_migration_state(_state("2026-10-09T12:00:00.200", ["started"]))
+    store.write_migration_state(_state("2026-10-09T12:00:00.200", ["started"]))
+    store.write_migration_state(_state("2026-10-09T12:00:00.150", ["completed"]))
+
+    assert _inserted_versions(client) == [
+        "2026-10-09T12:00:00.200",
+        "2026-10-09T12:00:00.201",
+        "2026-10-09T12:00:00.202",
+    ]
+
+
+def test_a_write_carries_a_newer_version_than_the_row_it_read_when_its_clock_is_behind() -> None:
+    client = _LaggingClient([_stale_row("2026-10-09 12:00:00.300")])
+    store = _store(client)
+    store.read_migration_state("001_init.sql")
+    store.write_migration_state(_state("2026-10-09T12:00:00.200", ["completed"]))
+
+    assert _inserted_versions(client) == ["2026-10-09T12:00:00.301"]

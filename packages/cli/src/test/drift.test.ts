@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import { diffNamedShapeMaps } from '../commands/drift/diff.js'
+import { diffNamedShapeMaps, diffSettings } from '../commands/drift/diff.js'
 
 import {
   type ColumnDefinition,
@@ -1659,6 +1659,12 @@ describe('@chkit/cli drift: view and materialized view queries (#382)', () => {
     // A bare sort() compares UTF-16 units and puts the surrogate pair first;
     // Python's str order, and everything else in drift, puts U+E000 first.
     expect(diffNamedShapeMaps(expected, actual)).toEqual([privateUse, high])
+  })
+
+  test('setting diffs are ordered by code point, not UTF-16 units (#703)', () => {
+    const high = 'a\u{1F600}'
+    const fullwidth = 'a\uFF5E'
+    expect(diffSettings({ [high]: 1, [fullwidth]: 1 }, { [high]: 2, [fullwidth]: 2 })).toEqual([fullwidth, high])
   })
 })
 

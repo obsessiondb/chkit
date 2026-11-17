@@ -253,5 +253,5 @@ def test_backfill_status_json_envelope_keeps_error_for_a_plain_failure(
     [printed] = msgs
     assert printed["error"] == {
         "code": "error",
-        "message": "RPC jobs/list failed: 500 boom",
+        "message": "Internal Server Error",
     }

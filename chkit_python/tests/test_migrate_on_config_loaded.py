@@ -78,6 +78,11 @@ class _EmptyJournalStore:
     def read_journal(self, **_kwargs: Any) -> MigrationJournal:
         return MigrationJournal(applied=[])
 
+    def lock_target(self) -> None:
+        # The isolated hook test has no database; even an empty apply now
+        # enters the lock path to check for interrupted cancellation.
+        return None
+
 
 @pytest.fixture
 def project(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:

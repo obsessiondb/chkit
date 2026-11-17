@@ -40,7 +40,7 @@ def _stub_store(cluster: str | None) -> tuple[JournalStore, MagicMock]:
 
 def test_create_table_uses_replicated_engine_and_on_cluster_when_cluster_set() -> None:
     store, _fake = _stub_store("prod")
-    sql = store._create_table_sql()
+    sql = store._create_table_sql("default")
     assert " ON CLUSTER 'prod' " in sql
     assert _REPLICATED_ENGINE in sql
     assert "ReplacingMergeTree(applied_at)" not in sql
@@ -48,14 +48,14 @@ def test_create_table_uses_replicated_engine_and_on_cluster_when_cluster_set() -
 
 def test_create_table_keeps_plain_engine_when_cluster_absent() -> None:
     store, _fake = _stub_store(None)
-    sql = store._create_table_sql()
+    sql = store._create_table_sql("default")
     assert "ON CLUSTER" not in sql
     assert "ENGINE = ReplacingMergeTree(applied_at)" in sql
 
 
 def test_create_table_uses_macro_form_when_cluster_is_macro() -> None:
     store, _fake = _stub_store("{cluster}")
-    sql = store._create_table_sql()
+    sql = store._create_table_sql("default")
     assert " ON CLUSTER '{cluster}' " in sql
 
 
@@ -73,7 +73,7 @@ def test_ensure_schema_upgraded_stamps_on_cluster_on_both_alter_statements() -> 
     executed = _captured_sql(fake)
     assert len(executed) == 3
     for sql in executed:
-        assert sql.startswith("ALTER TABLE _chkit_migrations ON CLUSTER 'prod-eu-1'")
+        assert sql.startswith("ALTER TABLE `default`._chkit_migrations ON CLUSTER 'prod-eu-1'")
         assert "ADD COLUMN IF NOT EXISTS" in sql
     assert "migration_completed" in executed[0]
     assert "operations" in executed[1]

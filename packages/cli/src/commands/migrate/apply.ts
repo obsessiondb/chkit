@@ -10,6 +10,7 @@ import {
   type ClickHouseExecutor,
   type ClickHouseSettings,
   type QualifiedTable,
+  type QueryStatus,
 } from '@chkit/clickhouse'
 import { extractLegacyExecutableStatements, statementFingerprint, type ResolvedChxConfig } from '@chkit/core'
 
@@ -29,6 +30,7 @@ import {
   type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
+import type { QueryContext, QueryTracker } from './query-intents.js'
 import {
   applyAsyncStatement,
   freshMigrationState,
@@ -37,6 +39,7 @@ import {
 } from './async-apply.js'
 import {
   inProgressChecksumMismatchError,
+  MigrateError,
   nonSelectBarrierError,
   recordedStatementsChangedError,
   statementSplitChangedError,
@@ -196,6 +199,7 @@ export async function applyMigration(input: {
   file: string
   /** --setting values, sent with every statement of the migration (sync, async, barrier, before-retry). */
   settings?: ClickHouseSettings
+  queryTracker?: QueryTracker
   /** Set when --retry verified an edit of this in-progress migration before the run (#233). */
   retry?: { previousChecksum: string; checksum: string }
   /** Progress lines; the command sends them to stderr in --json mode. */
@@ -283,6 +287,7 @@ export async function applyMigration(input: {
     initialState.checksum !== migrationChecksum
   ) {
     await acceptEditedMigration({
+      db,
       file,
       state: initialState,
       checksum: migrationChecksum,
@@ -310,6 +315,7 @@ export async function applyMigration(input: {
           fingerprint: fingerprints[i] ?? '',
           beforeRetry: operation.beforeRetry,
           settings,
+          queryTracker: input.queryTracker,
           log,
         })
       } catch (error) {
@@ -345,6 +351,7 @@ export async function applyMigration(input: {
       continue
     }
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
+    if (priorAttempt !== undefined) await assertAsyncAttemptStopped(db, file, priorAttempt)
     if (priorAttempt !== undefined && operation?.beforeRetry) {
       try {
         await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
@@ -352,6 +359,8 @@ export async function applyMigration(input: {
           settings,
           log,
           status: priorAttempt.status,
+          queryTracker: input.queryTracker,
+          queryContext: { migration: file, statementIndex: i, forwardSQL: statement, beforeRetry: operation.beforeRetry },
         })
       } catch (error) {
         throw statementError({ file, index: i, total: statements.length, statement, error })
@@ -373,7 +382,9 @@ export async function applyMigration(input: {
       if (operation?.mode === 'barrier') {
         await waitForInsertBarrier(db, statement, { cluster: config.clickhouse?.cluster, settings, log })
       } else {
-        await db.command(statement, settings)
+        if (input.queryTracker) {
+          await input.queryTracker.command({ migration: file, statementIndex: i, forwardSQL: statement, beforeRetry: operation?.beforeRetry ?? null }, 'forward', statement, settings)
+        } else await db.command(statement, settings)
       }
     } catch (error) {
       const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
@@ -468,13 +479,17 @@ async function runBeforeRetry(
     settings: ClickHouseSettings | undefined
     log: (line: string) => void
     status: OperationStatus
+    queryTracker?: QueryTracker
+    queryContext?: QueryContext
   },
 ): Promise<void> {
   if (operationType === 'exchange_tables') {
     await waitForExchange(db, statement, { cluster: options.cluster })
   }
   options.log(`  ${operationType}: an earlier attempt ${options.status === 'failed' ? 'failed' : 'was interrupted'} — running before-retry SQL`)
-  await db.command(beforeRetry, options.settings)
+  if (options.queryTracker && options.queryContext) {
+    await options.queryTracker.command(options.queryContext, 'compensation', beforeRetry, options.settings)
+  } else await db.command(beforeRetry, options.settings)
 }
 
 // An in-progress migration whose file changed resumes when this run's --retry
@@ -483,6 +498,7 @@ async function runBeforeRetry(
 // the file then runs again from statement 1. The state is re-keyed to the new
 // checksum before anything runs, so a later failure resumes without --retry.
 async function acceptEditedMigration(input: {
+  db: ClickHouseExecutor
   file: string
   state: MigrationRowState
   checksum: string
@@ -512,7 +528,48 @@ async function acceptEditedMigration(input: {
       `${file} changed since its last failed attempt; no statement is recorded as completed, so it runs again from statement 1.`,
     )
   }
-  await journalStore.writeMigrationState(
-    rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) }),
+  const rebased = rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) })
+  await assertDroppedAttemptsStopped(input.db, file, state, rebased)
+  await journalStore.writeMigrationState(rebased)
+}
+
+// An async retry runs under a random query id (#701), so the record a rebase
+// drops is the only trace of an attempt that may still run (a submit that
+// failed while the server ran it, an attempt kept by --abandon): the next run
+// would not find it. Every replica is read, and an edit stops while one runs.
+async function assertDroppedAttemptsStopped(
+  db: ClickHouseExecutor,
+  file: string,
+  state: MigrationRowState,
+  rebased: MigrationRowState,
+): Promise<void> {
+  const dropped = state.operations.filter(
+    (op) => op.status !== 'completed' && op.queryId !== '' && !rebased.operations.includes(op),
   )
+  for (const op of dropped) await assertAsyncAttemptStopped(db, file, op)
+}
+
+// A non-async path must not compensate or replace a recorded async attempt
+// while it still runs: its random query id is the only way to find it later.
+async function assertAsyncAttemptStopped(
+  db: ClickHouseExecutor,
+  file: string,
+  op: OperationState,
+): Promise<void> {
+  if (op.status === 'completed' || op.queryId === '') return
+  let status: QueryStatus
+  try {
+    status = await db.queryStatus(op.queryId, { everyReplica: true, runningOnly: true })
+  } catch (error) {
+    throw new Error(
+      `Cannot apply ${file}: could not check whether the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running (${error instanceof Error ? error.message : String(error)}). Nothing ran — re-run chkit migrate --apply.`,
+      { cause: error },
+    )
+  }
+  if (status.status === 'running') {
+    throw new MigrateError(
+      'retry_mismatch',
+      `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
+    )
+  }
 }

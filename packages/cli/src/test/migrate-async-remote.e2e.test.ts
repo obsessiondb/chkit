@@ -150,11 +150,13 @@ describe('async migrate statements through the ObsessionDB remote executor (live
 
       await expect(applyAsyncStatement(statement)).rejects.toThrow(/attached attempt failed/)
       expect(lines.some((line) => line.includes('attaching to in-flight query'))).toBe(true)
-      expect(journal.statuses()).toEqual(['failed'])
+      // The attach journals the attempt started (#672), then its failure.
+      expect(journal.statuses()).toEqual(['started', 'failed'])
       expect(await attached).toContain('attached attempt failed')
 
-      // The in-flight check looks for any running query with the id. Every
-      // poll after it counts only queries that started after the earlier
+      // The in-flight check looks for any running query with the id: the
+      // record has no marker of this release, so query_log is not read (#672).
+      // Every poll after it counts only queries that started after the earlier
       // attempt had ended.
       const [inFlightCheck, ...polls] = afterTimes
       expect(inFlightCheck).toBeUndefined()

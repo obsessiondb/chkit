@@ -19,7 +19,14 @@ export {
   definitionKey,
   type CanonicalizeOptions,
 } from './canonical.js'
-export { planDiff } from './planner.js'
+export {
+  columnRenameKey,
+  isColumnStatement,
+  orderColumnStatements,
+  planDiff,
+  type ColumnRename,
+  type ColumnStatementDefinitions,
+} from './planner.js'
 export {
   AUTO_MINMAX_INDEX_PREFIX,
   DEFAULT_INDEX_GRANULARITY,

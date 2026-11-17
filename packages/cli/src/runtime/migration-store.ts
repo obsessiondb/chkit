@@ -5,7 +5,7 @@ import { join } from 'node:path'
 
 import fg from 'fast-glob'
 
-import type { CanonicalizeOptions, MigrationOperation, Snapshot } from '@chkit/core'
+import { compareCodePoints, type CanonicalizeOptions, type MigrationOperation, type Snapshot } from '@chkit/core'
 
 import { parseSnapshotDocument, type SnapshotUnreadableReason } from './snapshot-document.js'
 
@@ -62,7 +62,7 @@ export function summarizePlan(operations: MigrationOperation[]): string[] {
 
 export async function listMigrations(migrationsDir: string): Promise<string[]> {
   const files = await fg('*.sql', { cwd: migrationsDir, onlyFiles: true })
-  return files.sort()
+  return files.sort(compareCodePoints)
 }
 
 function checksum(value: string): string {

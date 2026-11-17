@@ -530,6 +530,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         plan = apply_selected_rename_suggestions(
             plan,
             build_explicit_column_rename_suggestions(plan, column_mappings),
+            previous_definitions=remapped_old_defs,
+            next_definitions=canonical,
         )
     except ChxValidationError as error:
         _exit_validation_failed(error, output_json=output_json)

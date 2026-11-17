@@ -73,7 +73,7 @@ def _service_path(config_path: str | Path) -> Path:
 def _read_json(path: Path) -> dict[str, Any] | None:
     try:
         raw = path.read_text(encoding="utf-8")
-    except OSError:
+    except (OSError, UnicodeDecodeError):
         return None
     try:
         parsed: Any = json.loads(raw)

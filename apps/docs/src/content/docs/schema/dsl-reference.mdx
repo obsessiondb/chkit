@@ -1361,4 +1361,4 @@ Changing a structural property on an existing table generates a `DROP TABLE` fol
 
 A comment change never recreates a view, materialized view or dictionary: recreating a materialized view would lose the rows its source receives in between. A change that recreates the object anyway, such as a new query, carries the new comment in its `CREATE`.
 
-On ObsessionDB, `MODIFY COMMENT` currently changes only the replica that runs it ([#407](https://github.com/obsessiondb/chkit/issues/407)), so `chkit drift` may report a `comment_mismatch` for a table, view, materialized view or dictionary until the server fix ships. Column comments are not affected.
+On ObsessionDB, `MODIFY COMMENT` currently changes only the replica that runs it, so `chkit drift` may report a `comment_mismatch` for a table, view, materialized view or dictionary until the server fix ships. Column comments are not affected.
