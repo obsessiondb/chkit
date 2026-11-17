@@ -34,6 +34,15 @@ def client() -> Iterator[Any]:
     live.close()
 
 
+@pytest.fixture(scope="module")
+def replicas(client: Any) -> int:
+    return int(
+        client.query(
+            "SELECT count(DISTINCT hostName()) FROM clusterAllReplicas('default', system.one)"
+        ).result_rows[0][0]
+    )
+
+
 @pytest.fixture
 def table_definition(client: Any) -> Iterator[TableDefinition]:
     name = f"{create_prefix('ident')}we`ird\\name"
@@ -60,34 +69,44 @@ def _exec(client: Any, sql: str) -> None:
     client.command(sql.removesuffix(";"), settings={"wait_end_of_query": 1})
 
 
-def _column_names(client: Any, definition: TableDefinition) -> list[str]:
+def _column_names(client: Any, definition: TableDefinition) -> list[list[str]]:
+    """The column names on each replica that lists the table.
+
+    ObsessionDB exposes its replicas as the ``default`` cluster, and each
+    request lands on any of them. An ALTER that runs on a replica that has not
+    applied the previous DDL writes back its stale schema and loses that
+    change (#709), so the names are read on every replica.
+    """
     rows = client.query(
-        "SELECT name FROM system.columns WHERE database = {db:String} "
-        "AND table = {table:String} ORDER BY position",
+        "SELECT hostName() AS replica, name FROM clusterAllReplicas('default', system.columns) "
+        "WHERE database = {db:String} AND table = {table:String} ORDER BY replica, position",
         parameters={"db": definition.database, "table": definition.name},
     ).result_rows
-    return [str(row[0]) for row in rows]
+    names: dict[str, list[str]] = {}
+    for replica, name in rows:
+        names.setdefault(str(replica), []).append(str(name))
+    return list(names.values())
 
 
 def test_create_table_preserves_names_verbatim(
-    client: Any, table_definition: TableDefinition
+    client: Any, replicas: int, table_definition: TableDefinition
 ) -> None:
     definition = table_definition
-    expected = ["id", EVIL_COLUMN, "a.b"]
+    expected = [["id", EVIL_COLUMN, "a.b"]] * replicas
     assert poll_until(lambda: _column_names(client, definition), lambda n: n == expected) == expected
 
 
 def test_add_and_drop_column_target_the_exact_names(
-    client: Any, table_definition: TableDefinition
+    client: Any, replicas: int, table_definition: TableDefinition
 ) -> None:
     definition = table_definition
     added = "new`col\\with slash"
     run_once_visible(
         lambda: _exec(client, render_alter_add_column(definition, {"name": added, "type": "String"}))
     )
-    expected = ["id", EVIL_COLUMN, "a.b", added]
+    expected = [["id", EVIL_COLUMN, "a.b", added]] * replicas
     assert poll_until(lambda: _column_names(client, definition), lambda n: n == expected) == expected
 
     _exec(client, render_alter_drop_column(definition, EVIL_COLUMN))
-    expected = ["id", "a.b", added]
+    expected = [["id", "a.b", added]] * replicas
     assert poll_until(lambda: _column_names(client, definition), lambda n: n == expected) == expected
