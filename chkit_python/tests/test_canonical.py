@@ -3,10 +3,10 @@
 from __future__ import annotations
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
-from chkit.core.model import ColumnDefinition, table
+from chkit.core.model import ColumnDefinition, ColumnInput, table
 
 
-def _events() -> list[ColumnDefinition]:
+def _events() -> list[ColumnInput]:
     return [
         ColumnDefinition(name="ts", type="DateTime"),
         ColumnDefinition(name="user_id", type="UInt64"),
@@ -30,7 +30,7 @@ def test_canonical_trims_and_sorts() -> None:
     # `order_by` is only present on TableDefinition; the dispatch via the
     # discriminated union upgrades the type after the kind check.
     assert only.kind == "table"
-    assert only.order_by == ["ts", "user_id"]  # type: ignore[union-attr]
+    assert only.order_by == ["ts", "user_id"]
 
 
 def test_definition_key_is_kind_db_name() -> None:

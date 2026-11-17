@@ -60,6 +60,7 @@ Review the whole diff before choosing a release path:
 
 - **Template-only:** Changes to distributed registry source, dependencies, or metadata use the integration's independent version, changelog, and generated release artifact. Do not create a package changeset or bump `chkit` or the fixed npm package group.
 - **Package behavior:** User-facing shared-runtime, CLI, plugin, or library changes require ordinary package changesets, even when they support registry templates.
+- **chkit-py behavior:** Add one fragment of one or two user-facing sentences in `chkit_python/changelog.d/` (`<issue>.<type>.md` or `+<slug>.<type>.md`, type `added`, `changed` or `fixed`) instead of editing `chkit_python/CHANGELOG.md`.
 - **Mixed:** Release the affected templates and packages separately. Registry files in a PR never exempt package changes.
 - **Docs or tooling only:** No release is needed unless the changed files are distributed as part of a template or change published package behavior.
 

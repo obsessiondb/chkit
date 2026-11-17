@@ -5,10 +5,11 @@ from __future__ import annotations
 import re
 
 from chkit.core.key_clause import split_top_level_comma
+from chkit.core.sql_lexer import js_regex, js_trim
 
 
 def is_kafka_engine(engine: str) -> bool:
-    return re.match(r"^Kafka\s*(?:\(|$)", engine.strip(), re.IGNORECASE) is not None
+    return re.match(js_regex(r"^Kafka\s*(?:\(|$)"), js_trim(engine), re.IGNORECASE) is not None
 
 
 def render_kafka_setting(value: str | int | float | bool) -> str:
@@ -21,7 +22,7 @@ def render_kafka_setting(value: str | int | float | bool) -> str:
 
 
 def parse_kafka_setting(value: str) -> str | int | float | bool:
-    trimmed = value.strip()
+    trimmed = js_trim(value)
     if trimmed.startswith("'") and trimmed.endswith("'"):
         escapes: dict[str, str] = {
             "n": "\n",
@@ -70,10 +71,10 @@ def kafka_setting_fingerprint(value: str | int | float | bool) -> str:
 
 
 def normalize_kafka_engine(engine: str) -> str:
-    match = re.fullmatch(r"Kafka\s*\(([\s\S]*)\)", engine.strip(), re.IGNORECASE)
+    match = re.fullmatch(js_regex(r"Kafka\s*\(([\s\S]*)\)"), js_trim(engine), re.IGNORECASE)
     args = split_top_level_comma(match.group(1) if match else "")
     normalized = [
-        render_kafka_setting(parse_kafka_setting(arg)) if arg.startswith("'") else arg.strip()
+        render_kafka_setting(parse_kafka_setting(arg)) if arg.startswith("'") else js_trim(arg)
         for arg in args
     ]
     return f"Kafka({', '.join(normalized)})"

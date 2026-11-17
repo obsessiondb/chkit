@@ -173,6 +173,23 @@ def test_workbench_query_execute_propagates_error(httpx_mock: HTTPXMock) -> None
     assert out.error == "Syntax error"
 
 
+def test_workbench_query_execute_waits_as_long_as_node_fetch(httpx_mock: HTTPXMock) -> None:
+    # TS sends the query with Node's fetch: 10 s to connect, 300 s for the
+    # response. The 30 s of the other console calls cut a long statement.
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [], "meta": [], "rows": 0},
+    )
+    workbench_query_execute(_creds(), service_slug=SVC, query="OPTIMIZE TABLE t FINAL")
+    [request] = httpx_mock.get_requests()
+    assert request.extensions["timeout"] == {
+        "connect": 10.0,
+        "read": 300.0,
+        "write": 300.0,
+        "pool": 300.0,
+    }
+
+
 # ---------- normalize_query_data ----------
 
 
@@ -727,6 +744,10 @@ def test_run_onboarding_account_dispatches_to_login(
     httpx_mock.add_response(
         url=f"{BASE}/api/auth/get-session",
         json={"user": {"id": "u", "email": "a@b.com", "name": "A"}},
+    )
+    # No service selected yet, so login offers one, as in TS.
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/services/listAll", json={"json": {"organizations": []}}
     )
     # Pin the resolve_base_url to our test BASE so the login URL matches the mock.
     monkeypatch.setattr(

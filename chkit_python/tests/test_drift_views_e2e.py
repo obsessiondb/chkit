@@ -11,10 +11,12 @@ from pathlib import Path
 
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_view
+from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     ChxResolvedClickHouseConfig,
+    ColumnInput,
+    SchemaDefinition,
     dictionary,
     materialized_view,
     table,
@@ -46,8 +48,11 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
         report, orders_mv = f"{prefix}report", f"{prefix}orders_mv"
         statuses = f"{prefix}statuses"
         mv_query = f"SELECT day, amount FROM {orders} WHERE status != 'Refunded'"
-        target_columns = [{"name": "day", "type": "Date"}, {"name": "amount", "type": "UInt64"}]
-        definitions = [
+        target_columns: list[ColumnInput] = [
+            {"name": "day", "type": "Date"},
+            {"name": "amount", "type": "UInt64"},
+        ]
+        definitions: list[SchemaDefinition] = [
             table(
                 database=database,
                 name=orders,
@@ -122,20 +127,31 @@ def test_unchanged_views_read_clean_and_changed_query_or_target_drifts(tmp_path:
             ]
 
         try:
+            # Each request can land on another replica: wait for every CREATE on
+            # all of them before the next one reads it (the report view calls
+            # dictGet on the dictionary) (#712).
             for definition in definitions:
                 client.execute(to_create_sql(definition))
-            wait_for_view(client, database, report)
-            wait_for_view(client, database, orders_mv)
+                wait_for_ddl_propagation(
+                    client,
+                    f"create_{definition.kind}",
+                    f"{definition.kind}:{definition.database}.{definition.name}",
+                )
             assert poll_until(view_drift, lambda seen: seen == []) == []
 
             # DROP + CREATE rather than CREATE OR REPLACE, which ObsessionDB does not
-            # apply on every replica.
+            # apply on every replica. Each CREATE waits for its DROP on every
+            # replica, or it can land on one that still lists the view (#712).
             client.execute(f"DROP VIEW {database}.{report} SYNC")
+            wait_for_ddl_propagation(client, "drop_view", f"view:{database}.{report}")
             client.execute(
                 f"CREATE VIEW {database}.{report} AS SELECT day, sum(amount) AS revenue "
                 f"FROM {database}.{orders} WHERE status != 'Refunded' GROUP BY day"
             )
             client.execute(f"DROP VIEW {database}.{orders_mv} SYNC")
+            wait_for_ddl_propagation(
+                client, "drop_materialized_view", f"materialized_view:{database}.{orders_mv}"
+            )
             client.execute(
                 f"CREATE MATERIALIZED VIEW {database}.{orders_mv} TO {database}.{by_day_alt} "
                 f"AS {mv_query} AND amount > 0"

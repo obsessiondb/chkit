@@ -14,9 +14,14 @@ export interface AbandonReport {
   checksum: string
   /** Statements that completed, including those an earlier --abandon marked failed. */
   completedStatements: number
-  /** The recorded per-statement progress, sorted by statement index. */
-  operations: OperationState[]
+  /**
+   * The recorded per-statement progress, sorted by statement index, without
+   * the statement fingerprints, which only resume checks read.
+   */
+  operations: ReportedOperation[]
 }
+
+export type ReportedOperation = Omit<OperationState, 'fingerprint'>
 
 const OPERATION_STATUSES: readonly OperationStatus[] = ['completed', 'failed', 'started']
 
@@ -56,7 +61,9 @@ export async function abandonMigrationState(
 }
 
 export function abandonReport(state: MigrationRowState): AbandonReport {
-  const operations = [...state.operations].sort((a, b) => a.operationIndex - b.operationIndex)
+  const operations = [...state.operations]
+    .sort((a, b) => a.operationIndex - b.operationIndex)
+    .map(({ fingerprint: _fingerprint, ...op }) => op)
   return {
     migration: state.name,
     checksum: state.checksum,
@@ -70,7 +77,7 @@ export function abandonReport(state: MigrationRowState): AbandonReport {
  * recorded status when no abandon touched it. A statement that completed
  * before an abandon stays applied in ClickHouse.
  */
-export function statusBeforeAbandon(op: OperationState): OperationStatus {
+export function statusBeforeAbandon(op: ReportedOperation): OperationStatus {
   return abandonedFrom(op) ?? op.status
 }
 
@@ -95,7 +102,7 @@ function abandonedState(state: MigrationRowState, now: string): MigrationRowStat
 }
 
 /** The status before an earlier --abandon, or undefined when no abandon marked this statement. */
-function abandonedFrom(op: OperationState): OperationStatus | undefined {
+function abandonedFrom(op: ReportedOperation): OperationStatus | undefined {
   if (op.status !== 'failed') return undefined
   return OPERATION_STATUSES.find((status) => op.lastError === abandonedError(status))
 }

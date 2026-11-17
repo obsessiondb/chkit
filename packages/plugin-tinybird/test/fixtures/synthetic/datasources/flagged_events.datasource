@@ -1,0 +1,10 @@
+SCHEMA >
+    `event_time` DateTime,
+    `user_id` UInt64,
+    `flag` LowCardinality(String),
+    `amount` Decimal(18, 6)
+
+ENGINE "MergeTree"
+ENGINE_PARTITION_KEY "toYYYYMM(event_time)"
+ENGINE_SORTING_KEY "flag, event_time"
+ENGINE_TTL "event_time + toIntervalMonth(6)"

@@ -12,7 +12,7 @@ no statement is recorded as completed or started (#233).
 from __future__ import annotations
 
 import re
-from collections.abc import Callable
+from collections.abc import Callable, Sequence
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from pathlib import Path
@@ -27,14 +27,21 @@ from chkit.cli.commands.migrate_async_apply import (
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import (
+    MigrateError,
+    PendingNonSelectBarrier,
     in_progress_checksum_mismatch_error,
+    non_select_barrier_error,
+    recorded_statements_changed_error,
     statement_split_changed_error,
 )
+from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
     StatementIdentity,
+    assert_completed_statement,
     has_statement_progress,
     rebase_in_progress_state,
+    recorded_statement_mismatches,
     retry_mismatch_error,
     split_changed_statements,
     statement_identities,
@@ -53,6 +60,7 @@ from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
     extract_migration_operation_summaries,
+    find_non_select_barriers,
 )
 from chkit.cli.table_scope import TableScope
 from chkit.clickhouse.async_insert_guard import assert_no_fire_and_forget_async_inserts
@@ -64,13 +72,14 @@ from chkit.clickhouse.ddl_propagation import (
 )
 from chkit.clickhouse.insert_barrier import wait_for_insert_barrier
 from chkit.core.model import ChxResolvedConfig
+from chkit.core.sql_fingerprint import statement_fingerprint
+from chkit.core.sql_lexer import JS_WHITESPACE_RUN, js_trim
 from chkit.core.sql_splitter import (
     extract_executable_statements,
     extract_legacy_executable_statements,
 )
 from chkit.plugins import ChxOnAfterApplyContext, ChxOnBeforeApplyContext
 
-_WHITESPACE_RE = re.compile(r"\s+")
 _CUTOVER_START_KEY = re.compile(r"^table:([^.]+)\.(.+):cutover:start$")
 
 # ``last_error`` of a completed sync statement whose DDL propagation wait has
@@ -100,6 +109,7 @@ class ApplyMigrationInput:
     settings: dict[str, str] | None = None
     # The command's parsed flags, keyed as in TS, for the apply hooks.
     flags: dict[str, Any] = field(default_factory=dict)
+    query_tracker: QueryTracker | None = None
 
 
 class StatementError(RuntimeError):
@@ -126,7 +136,15 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             )
         )
     )
+    # migrate refused a file's non-SELECT barrier before the run; a plugin may
+    # have rewritten the statements since (#634).
+    barriers = non_select_barriers(file, statements, operation_summaries)
+    if barriers:
+        raise non_select_barrier_error(barriers)
+
     migration_checksum = checksum_sql(sql)
+    # What the journal records for each statement run, and checks against (#599).
+    fingerprints = [statement_fingerprint(statement) for statement in statements]
 
     initial_state = journal_store.read_migration_state(file)
     # Releases before #562 did not know `//` and `#` comments, so the statement
@@ -150,16 +168,34 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 recorded_by=initial_state.chkit_version,
                 cli_version=__version__,
             )
+    # The file is unchanged, so the statements this run gets should be those
+    # the journal recorded. They are not when the split or a plugin's
+    # on_before_apply changed since: then positions do not hold (#599). An
+    # edited file is checked by --retry below.
+    if (
+        initial_state is not None
+        and not initial_state.migration_completed
+        and initial_state.checksum == migration_checksum
+    ):
+        mismatched = recorded_statement_mismatches(initial_state.operations, fingerprints)
+        if mismatched:
+            raise recorded_statements_changed_error(
+                migration=file,
+                statements=mismatched,
+                recorded_by=initial_state.chkit_version,
+                cli_version=__version__,
+            )
     if (
         initial_state is not None
         and not initial_state.migration_completed
         and initial_state.checksum != migration_checksum
     ):
         _accept_edited_migration(
+            client=input_.client,
             file=file,
             state=initial_state,
             checksum=migration_checksum,
-            identities=statement_identities(operation_summaries, len(statements)),
+            identities=statement_identities(operation_summaries, fingerprints),
             retry=input_.retry,
             journal_store=journal_store,
             log=input_.log,
@@ -180,9 +216,11 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         statement_index=index,
                         operation_type=operation.type,
                         operation_key=operation.key,
+                        fingerprint=fingerprints[index],
                         before_retry=operation.before_retry,
                         log=input_.log,
                         settings=input_.settings,
+                        query_tracker=input_.query_tracker,
                     )
                 )
             except Exception as error:
@@ -196,7 +234,15 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         state_before = journal_store.read_migration_state(file)
         cluster = input_.config.clickhouse.cluster if input_.config.clickhouse else None
         identity = statement_identity(operation_summaries, index)
+        fingerprint = fingerprints[index]
         if state_before is not None and _operation_is_completed(state_before, index):
+            assert_completed_statement(
+                state_before,
+                migration=file,
+                index=index,
+                fingerprint=fingerprint,
+                cli_version=__version__,
+            )
             if _propagation_wait_pending(state_before, index):
                 # The run that completed it stopped before its propagation
                 # wait passed (#513): wait again before the next statement runs.
@@ -205,6 +251,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     fallback_state=state_before,
                     index=index,
                     identity=identity,
+                    fingerprint=fingerprint,
                     operation=operation,
                     statement=statement,
                     cluster=cluster,
@@ -215,6 +262,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             if state_before is not None
             else None
         )
+        if prior_attempt is not None:
+            _assert_async_attempt_stopped(input_.client, file, prior_attempt)
         if prior_attempt is not None and operation is not None and operation.before_retry:
             try:
                 _run_before_retry(
@@ -226,6 +275,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     settings=input_.settings,
                     log=input_.log,
                     status=prior_attempt.status,
+                    query_tracker=input_.query_tracker,
+                    query_context=QueryContext(file, index, statement, operation.before_retry),
                 )
             except Exception as error:
                 raise statement_error(
@@ -249,7 +300,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         journal_store.write_migration_state(
             upsert_operation(
                 base_state,
-                _sync_operation_state(index, identity.type, identity.key, "started"),
+                _sync_operation_state(index, identity, fingerprint, "started"),
                 iso_without_zone(datetime.now(tz=UTC)),
             )
         )
@@ -262,6 +313,14 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     settings=input_.settings,
                     log=input_.log,
                 )
+            elif input_.query_tracker is not None:
+                input_.query_tracker.command(
+                    QueryContext(
+                        file, index, statement,
+                        operation.before_retry if operation is not None else None,
+                    ),
+                    "forward", statement, input_.settings,
+                )
             else:
                 input_.client.execute(statement, settings=input_.settings)
         except Exception as error:
@@ -271,8 +330,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     state_on_error,
                     _sync_operation_state(
                         index,
-                        identity.type,
-                        identity.key,
+                        identity,
+                        fingerprint,
                         "failed",
                         clickhouse_error_message(error),
                     ),
@@ -294,8 +353,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 state_after,
                 _sync_operation_state(
                     index,
-                    identity.type,
-                    identity.key,
+                    identity,
+                    fingerprint,
                     "completed",
                     PROPAGATION_WAIT_PENDING if waits else "",
                 ),
@@ -308,6 +367,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 fallback_state=state_after,
                 index=index,
                 identity=identity,
+                fingerprint=fingerprint,
                 operation=operation,
                 statement=statement,
                 cluster=cluster,
@@ -337,8 +397,26 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
 
 def preview_statement(sql: str, max_length: int = 120) -> str:
     """One-line, length-capped preview of a SQL statement for error messages."""
-    one_line = _WHITESPACE_RE.sub(" ", sql).strip()
+    one_line = js_trim(JS_WHITESPACE_RUN.sub(" ", sql))
     return f"{one_line[:max_length]}…" if len(one_line) > max_length else one_line
+
+
+def non_select_barriers(
+    migration: str,
+    statements: Sequence[str],
+    operations: Sequence[MigrationOperationSummary],
+) -> list[PendingNonSelectBarrier]:
+    """A migration's statements marked ``mode=barrier`` that are not a SELECT (#634)."""
+    return [
+        PendingNonSelectBarrier(
+            migration=migration,
+            statement=barrier.index + 1,
+            total=len(statements),
+            operation=barrier.summary,
+            preview=preview_statement(barrier.statement),
+        )
+        for barrier in find_non_select_barriers(statements, operations)
+    ]
 
 
 def statement_error(
@@ -364,9 +442,9 @@ def _propagation_wait_pending(state: MigrationRowState, index: int) -> bool:
 
 
 def _has_propagation_wait(operation: MigrationOperationSummary | None) -> bool:
-    return operation is not None and (
-        operation.type == "exchange_tables" or operation.mode != "barrier"
-    )
+    """A barrier changes no object, so it has no wait: migrate refuses a
+    barrier statement that is not a SELECT before anything runs (#634)."""
+    return operation is not None and operation.mode != "barrier"
 
 
 def _complete_propagation(
@@ -375,6 +453,7 @@ def _complete_propagation(
     fallback_state: MigrationRowState,
     index: int,
     identity: StatementIdentity,
+    fingerprint: str,
     operation: MigrationOperationSummary | None,
     statement: str,
     cluster: str | None,
@@ -387,7 +466,7 @@ def _complete_propagation(
     input_.journal_store.write_migration_state(
         upsert_operation(
             state,
-            _sync_operation_state(index, identity.type, identity.key, "completed"),
+            _sync_operation_state(index, identity, fingerprint, "completed"),
             iso_without_zone(datetime.now(tz=UTC)),
         )
     )
@@ -401,14 +480,14 @@ def _wait_for_propagation(
 ) -> None:
     """Wait until a sync statement's DDL reaches every replica. A wait that
     times out stops the migration, as in TS."""
-    if operation is None:
+    if operation is None or operation.mode == "barrier":
         return
     if operation.type == "exchange_tables":
         # A swap that has not reached every replica stops the migration (as
         # in TS): the cutover steps after it would read a replica that
         # still has the old names.
         wait_for_exchange(client, statement, cluster=cluster)
-    elif operation.mode != "barrier":
+    else:
         # Poll system.tables / system.columns until the DDL is visible.
         # Critical for Replicated / ObsessionDB Shared engines.
         wait_for_ddl_propagation(
@@ -448,6 +527,8 @@ def _run_before_retry(
     settings: dict[str, str] | None,
     log: Callable[[str], None],
     status: OperationStatus,
+    query_tracker: QueryTracker | None = None,
+    query_context: QueryContext | None = None,
 ) -> None:
     """Run a statement's ``-- before-retry:`` SQL before chkit attempts it again
     after an earlier attempt failed or was interrupted (TS ``runBeforeRetry``).
@@ -460,11 +541,15 @@ def _run_before_retry(
         wait_for_exchange(client, statement, cluster=cluster)
     attempt = "failed" if status == "failed" else "was interrupted"
     log(f"  {operation_type}: an earlier attempt {attempt} — running before-retry SQL")
-    client.execute(before_retry, settings=settings)
+    if query_tracker is not None and query_context is not None:
+        query_tracker.command(query_context, "compensation", before_retry, settings)
+    else:
+        client.execute(before_retry, settings=settings)
 
 
 def _accept_edited_migration(
     *,
+    client: ClickHouseClient,
     file: str,
     state: MigrationRowState,
     checksum: str,
@@ -504,14 +589,65 @@ def _accept_edited_migration(
             f"{file} changed since its last failed attempt; no statement is recorded "
             "as completed, so it runs again from statement 1."
         )
-    journal_store.write_migration_state(
-        rebase_in_progress_state(
-            state,
-            checksum=checksum,
-            identities=identities,
-            applied_at=iso_without_zone(datetime.now(tz=UTC)),
-        )
+    rebased = rebase_in_progress_state(
+        state,
+        checksum=checksum,
+        identities=identities,
+        applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
+    _assert_dropped_attempts_stopped(client, file, state, rebased)
+    journal_store.write_migration_state(rebased)
+
+
+def _assert_dropped_attempts_stopped(
+    client: ClickHouseClient,
+    file: str,
+    state: MigrationRowState,
+    rebased: MigrationRowState,
+) -> None:
+    """Stop an edit that drops the record of an async attempt that still runs.
+
+    An async retry runs under a random query id (#701), so the record a
+    rebase drops is the only trace of an attempt that may still run (a submit
+    that failed while the server ran it, an attempt kept by --abandon): the
+    next run would not find it. Every replica is read.
+    """
+    dropped = [
+        op
+        for op in state.operations
+        if op.status != "completed"
+        and op.query_id != ""
+        and not any(kept is op for kept in rebased.operations)
+    ]
+    for op in dropped:
+        _assert_async_attempt_stopped(client, file, op)
+
+
+def _assert_async_attempt_stopped(
+    client: ClickHouseClient, file: str, op: OperationState
+) -> None:
+    """Keep the only record of an async attempt until it stops on every replica."""
+    if op.status == "completed" or op.query_id == "":
+        return
+    try:
+        status = client.query_status(op.query_id, every_replica=True, running_only=True)
+    except Exception as error:
+        msg = (
+            f"Cannot apply {file}: could not check whether the earlier "
+            f"attempt of statement {op.operation_index + 1} (query_id {op.query_id}) is "
+            f"still running ({clickhouse_error_message(error)}). Nothing ran — re-run "
+            "chkit migrate --apply."
+        )
+        raise RuntimeError(msg) from error
+    if status.status == "running":
+        raise MigrateError(
+            "retry_mismatch",
+            f"Cannot apply {file}: the earlier attempt of statement "
+            f"{op.operation_index + 1} (query_id {op.query_id}) is still running on the "
+            "server, and continuing would discard its query id. Wait for it to "
+            f"finish or run KILL QUERY WHERE query_id = '{op.query_id}', then run chkit "
+            "migrate --apply again.",
+        )
 
 
 def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool:
@@ -525,8 +661,8 @@ def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool
 
 def _sync_operation_state(
     index: int,
-    operation_type: str,
-    operation_key: str,
+    identity: StatementIdentity,
+    fingerprint: str,
     status: OperationStatus,
     last_error: str = "",
 ) -> OperationState:
@@ -534,12 +670,13 @@ def _sync_operation_state(
     return OperationState.model_validate(
         {
             "operationIndex": index,
-            "operationKey": operation_key,
-            "operationType": operation_type,
+            "operationKey": identity.key,
+            "operationType": identity.type,
             "queryId": "",
             "status": status,
             "startedAt": timestamp,
             "finishedAt": None if status == "started" else timestamp,
             "lastError": last_error,
+            "fingerprint": fingerprint,
         }
     )

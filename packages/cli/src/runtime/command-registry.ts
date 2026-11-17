@@ -6,6 +6,8 @@ export interface RegisteredCommand {
   flags: readonly FlagDef[]
   pluginFlags: Array<{ pluginName: string; flags: readonly FlagDef[] }>
   pluginName?: string
+  /** `false` for a plugin command that takes no positional arguments (#659). */
+  takesArgs?: boolean
   subcommands?: RegisteredCommand[]
 }
 
@@ -41,6 +43,7 @@ export function createCommandRegistry(input: {
           flags: cmd.flags ?? [],
           pluginFlags: [],
           pluginName,
+          takesArgs: cmd.takesArgs,
         }
         commands.push(registered)
         byName.set(cmd.name, registered)
@@ -54,6 +57,7 @@ export function createCommandRegistry(input: {
       flags: cmd.flags ?? [],
       pluginFlags: [],
       pluginName,
+      takesArgs: cmd.takesArgs,
     }))
     const registered: RegisteredCommand = {
       name: pluginName,

@@ -84,6 +84,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'run',
         description: 'Execute the selected ingestion streams from their journaled checkpoints',
+        takesArgs: false,
         flags: RUN_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -136,6 +137,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'list',
         description: 'List the ingestion streams in the loaded definition graph',
+        takesArgs: false,
         flags: SELECTION_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -158,6 +160,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'doctor',
         description: 'Validate journal evidence and diagnose uncertain run histories',
+        takesArgs: false,
         flags: RECOVERY_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -193,6 +196,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'repair',
         description: 'Review recovery; --apply materializes a verified journal for explicit configuration activation',
+        takesArgs: false,
         flags: REPAIR_FLAGS,
         optionsSchema,
         run: runCommand({
@@ -241,6 +245,7 @@ export function createIngestPlugin(options: IngestPluginOptions = {}) {
       {
         name: 'status',
         description: 'Show the committed checkpoint of each selected stream',
+        takesArgs: false,
         flags: SELECTION_FLAGS,
         optionsSchema,
         run: runCommand({

@@ -13,7 +13,9 @@ explicitly after ``bun run cluster:2shard:up`` with
 
 from __future__ import annotations
 
+import functools
 import json
+import operator
 import os
 from collections.abc import Callable
 from pathlib import Path
@@ -239,7 +241,7 @@ definitions = schema(
                 ).rows
                 return [{key: str(value) for key, value in row.items()} for row in rows]
 
-            rows = poll_until(read, lambda value, expected=expected: value == expected)
+            rows = poll_until(read, functools.partial(operator.eq, expected))
             assert rows == expected, NODES[index]
     finally:
         shard1.execute(f"DROP TABLE IF EXISTS {source} ON CLUSTER '{CLUSTER}' SYNC")

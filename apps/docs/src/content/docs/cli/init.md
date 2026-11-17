@@ -17,7 +17,7 @@ chkit init [flags]
 
 | Flag | Type | Default | Description |
 |------|------|---------|-------------|
-| `--connect <choice>` | string | — | Preselect a connection path: `claim`, `account`, `clickhouse`, or `later`. Skips the interactive prompt. |
+| `--connect <choice>` | string | — | Preselect a connection path: `claim`, `account`, `clickhouse`, or `later`. Skips the interactive prompt; any other value is rejected. |
 | `--email <email>` | string | — | Email for the ObsessionDB `claim` / `account` paths (implies an interactive connect step). |
 | `--code <code>` | string | — | One-time email code, to verify a signup without re-prompting. |
 | `--org-name <name>` | string | — | Override the auto-created ObsessionDB organization name. |

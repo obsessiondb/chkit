@@ -458,9 +458,11 @@ mirrors this via a new ``on_pull_introspect`` plugin hook:
 - ``PluginRuntime.run_on_pull_introspect`` returns the first non-None
   list returned by any plugin's ``on_pull_introspect`` method
   (deferring otherwise).
-- ``chkit pull`` (``src/chkit/cli/commands/pull.py``) calls it BEFORE
-  opening a ``ClickHouseClient``; if a plugin handled introspection,
-  pull skips the SQL path entirely.
+- ``chkit pull`` (``src/chkit/cli/commands/pull.py``) calls it before
+  any SQL introspection; if a plugin handled introspection, pull skips
+  the SQL path entirely. With ``--database`` it never contacts
+  ClickHouse; without it, pull first lists the server's objects to pick
+  the databases and count skipped objects, as TS does (#698).
 
 The obsessiondb plugin can adopt this hook in a future iteration; the
 plumbing is in place.
@@ -617,10 +619,8 @@ empty — every item in the checklist has a decision recorded somewhere.
    pull/drift), we should propose them back to TS too to keep parity, or accept
    one-way drift here.
 
-4. **TS plan-pipeline sort uses `localeCompare` (locale-aware).** Python uses default
-   string ordering (codepoint). For ASCII-only migration keys this is equivalent;
-   for non-ASCII it could differ. All current keys are ASCII so no real divergence,
-   but worth noting for future-proofing.
+4. **Name order (resolved, #489).** TS sorted names with `localeCompare`; it now
+   sorts them by code point, as Python does.
 
 5. **Bytecode cache for end-user `clickhouse.config.py`.** Side effect of the
    mtime-cache fix: even if the user's config never changes between runs, each
@@ -749,9 +749,14 @@ Findings are numbered as they appeared in the aggregate report.
   service is selected). Runtime exposes `resolveContext(input)` +
   `disposeContext(ctx)`.
 - **Fix:** [plugin_runtime.py](src/chkit/cli/plugin_runtime.py) — added
-  `resolve_context` (returns first non-None plugin) + `dispose_context`
+  `resolve_context` ~~(returns first non-None plugin)~~ + `dispose_context`
   (best-effort `close()`, swallows errors). Tests: `test_finding_12_*` (3
   tests covering input constructibility, resolution chain, error swallowing).
+- RESOLVED (#686): `resolve_context` runs every `get_context` hook, and the
+  last plugin executor wins, as in TS. Two differences stay. chkit-py does
+  not close the default executor, because the caller owns it and closes it.
+  `dispose_context` hides a close error on an overridden executor, where TS
+  fails with `failed in getContext`.
 
 ### #13 onboarding missing `package_manager` parameter — FIXED
 
@@ -1911,3 +1916,14 @@ stabilizations (#238/#241/#245/#247/#264), the uncommitted backfill
   (`bind_query` calls `rstrip(";")`) before sending, as
   `@clickhouse/client` does (`removeTrailingSemi`). Both CLIs send the same SQL.
 - `test/fixtures/sql-splitter.json` holds the cases both suites check.
+
+### `pull` output matches TS (#487)
+- `pull --json` emits the TS keys in the TS order (`ok`, `command`,
+  `outFile`, `definitionCount`, `tableCount`, `databases`, `skippedObjects`, `dryrun`,
+  `warnings`, `content` under `--dryrun`); the Python-only `viewCount`,
+  `materializedViewCount` and `dictionaryCount` are gone. Errors (#664), a missing
+  primary key (#518) and column codecs through the console API (#517) were fixed earlier.
+- Left: the `on_pull_introspect` hook is not the TS `pull({ introspect })` option: it
+  returns definitions, not introspected objects. Without `--database`, pull now lists the
+  server's objects first, as TS does, so the hook gets the target databases and the
+  payload reports them and the skipped objects (#698).

@@ -55,13 +55,15 @@ Check these properties against `SHOW CREATE` output.
 
 When comparing engines, `SharedMergeTree` is normalized to `MergeTree`. This prevents false positives on managed environments (e.g. [ObsessionDB](https://obsessiondb.com)) where the server transparently substitutes `SharedMergeTree` for `MergeTree`.
 
+Whitespace in engine arguments is ignored, and so is the case of function names and operator keywords, which ClickHouse rewrites (`RAND()` reads back as `rand()`). Column names and strings in engine arguments are case-sensitive and compare as written: `CollapsingMergeTree(Sign)` does not match `CollapsingMergeTree(sign)`. Quotes the server leaves out when it stores the engine do not count: ``ReplacingMergeTree(`Ver`)`` matches `ReplacingMergeTree(Ver)`, and `Null` matches the stored `` `Null` ``. A name that needs its quotes, such as `` `my ver` ``, or one that would read as a literal without them, such as `` `true` ``, keeps them.
+
 ### Nullable columns
 
 Column types are compared as rendered SQL types, in the spacing ClickHouse stores: `Decimal(10,2)` matches the stored `Decimal(10, 2)`, while text in quotes (an `Enum` label, a time zone) is compared as written. `type: 'Nullable(String)'` and `type: 'String', nullable: true` both render `Nullable(String)` and do not report drift. Changes to nullability or the underlying type still report `changed_column`.
 
 ### Expression normalization
 
-ClickHouse rewrites SQL expressions when it stores them — it spaces argument separators and operators, adds precedence parentheses, and rewrites `INTERVAL 5 YEAR` to `toIntervalYear(5)`. So a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` expression written as `cityHash64(a,b)` is stored as `cityHash64(a, b)`. To avoid reporting these as drift, `drift` normalizes expressions through ClickHouse's own formatter before comparing, so equivalent expressions match regardless of spelling. When the connected server can't format an expression, comparison falls back to plain text matching.
+ClickHouse rewrites SQL expressions when it stores them — it spaces argument separators and operators, adds precedence parentheses, and rewrites `INTERVAL 5 YEAR` to `toIntervalYear(5)`. So a skip index, `PARTITION BY`, `ORDER BY`, or `TTL` expression written as `cityHash64(a,b)` is stored as `cityHash64(a, b)`. To avoid reporting these as drift, `drift` normalizes expressions through ClickHouse's own formatter before comparing, so equivalent expressions match regardless of spelling. This includes the expression of a [full-text index](/schema/dsl-reference/#full-text-indexes), so `NOT a AND b` matches the stored `(NOT a) AND b`; its tokenizer and other parameters are compared one by one. When the connected server can't format an expression, comparison falls back to plain text matching.
 
 ### View and materialized view queries
 
@@ -121,7 +123,7 @@ Column codecs are compared with `compression_codec` in `system.columns`. ClickHo
 | `setting_mismatch` | Table setting value differs |
 | `index_mismatch` | Index definition differs |
 | `ttl_mismatch` | TTL expression differs |
-| `engine_mismatch` | Table engine differs (after normalization) |
+| `engine_mismatch` | Table engine differs (after normalization). A `Shared*` engine matches the same engine without the prefix, and a `Replicated*` engine in the schema matches the `Shared*` engine that ObsessionDB and ClickHouse Cloud store it as, which drops the Keeper path and replica name |
 | `primary_key_mismatch` | Primary key expression differs |
 | `order_by_mismatch` | ORDER BY expression differs |
 | `partition_by_mismatch` | PARTITION BY expression differs |

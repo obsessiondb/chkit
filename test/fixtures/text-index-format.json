@@ -22,5 +22,21 @@
   { "sql": "x = in(a, b)", "expected": "x = in(a, b)" },
   { "sql": "a AND and(b, c)", "expected": "a AND and(b, c)" },
   { "sql": "has(arr, like(s, 'a'))", "expected": "has(arr, like(s, 'a'))" },
-  { "sql": "splitByString(['  '])", "expected": "splitByString(['  '])" }
+  { "sql": "splitByString(['  '])", "expected": "splitByString(['  '])" },
+  { "sql": "lower(s)[1]", "expected": "lower(s)[1]" },
+  { "sql": "lower(s) [1]", "expected": "lower(s)[1]" },
+  { "sql": "arr[1]", "expected": "arr[1]" },
+  { "sql": "arr [1][2]", "expected": "arr[1][2]" },
+  { "sql": "splitByChar(',', lower(s))[1]", "expected": "splitByChar(',', lower(s))[1]" },
+  { "sql": "m['k']", "expected": "m['k']" },
+  { "sql": "`a b`[1]", "expected": "`a b`[1]" },
+  { "sql": "'abc'[1]", "expected": "'abc'[1]" },
+  { "sql": "[1,2][1]", "expected": "[1, 2][1]" },
+  { "sql": "if(s = '', ['a','b'], arr)[1]", "expected": "if(s = '', ['a', 'b'], arr)[1]" },
+  { "sql": "x IN [1]", "expected": "x IN [1]" },
+  { "sql": "x NOT IN[1]", "expected": "x NOT IN [1]" },
+  { "sql": "NOT[1]", "expected": "NOT [1]" },
+  { "sql": "x = [1, 2]", "expected": "x = [1, 2]" },
+  { "sql": "has(arr, s) AND[1]", "expected": "has(arr, s) AND [1]" },
+  { "sql": "CASE WHEN a THEN[1] ELSE[2] END", "expected": "CASE WHEN a THEN [1] ELSE [2] END" }
 ]

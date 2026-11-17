@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Literal, Protocol, TypeAlias
 
 from chkit.cli.commands.drift_diff import (
@@ -42,6 +42,7 @@ from chkit.clickhouse.introspect import (
 from chkit.clickhouse.replicas import string_literal
 from chkit.core.column_default import literal_default_fingerprint, render_default
 from chkit.core.constraint import constraint_expression, constraint_kind
+from chkit.core.engine import replicated_engine_as_shared
 from chkit.core.jsnum import js_number_to_string
 from chkit.core.kafka import is_kafka_engine, kafka_setting_fingerprint, parse_kafka_settings
 from chkit.core.key_clause import key_clause_fingerprint, split_top_level_comma
@@ -52,6 +53,7 @@ from chkit.core.model import (
     ProjectionDefinition,
     SkipIndexDefinition,
     SkipIndexRaw,
+    SkipIndexText,
     SkipIndexVectorSimilarity,
     TableConstraintDefinition,
     TableDefinition,
@@ -80,7 +82,11 @@ from chkit.core.sql_normalizer import (
 )
 from chkit.core.sql_scan import find_matching_paren
 from chkit.core.table_settings import DEFAULT_INDEX_GRANULARITY, with_default_index_granularity
-from chkit.core.text_index import render_text_index_type, text_index_fingerprint
+from chkit.core.text_index import (
+    canonicalize_text_index,
+    render_text_index_type,
+    text_index_fingerprint,
+)
 from chkit.core.vector_index import render_vector_index_type
 
 ObjectDriftReasonCode: TypeAlias = Literal[
@@ -374,7 +380,7 @@ def _normalize_column_shape(column: ColumnDefinition) -> str:
         f"type={column_type_fingerprint(column)}",
         f"default={normalized_default}",
         f"defaultKind={column.default_kind or 'DEFAULT'}",
-        f"comment={(column.comment or '').strip()}",
+        f"comment={js_trim(column.comment or '')}",
         f"codec={column_codec_fingerprint(column)}",
     ]
     return "|".join(parts)
@@ -433,11 +439,30 @@ def _index_expression_base(index: SkipIndexDefinition) -> str:
         expression = js_trim(expression[tokens[0].end : tokens[-1].start])
 
 
+def _text_index_expression_base(index: SkipIndexText) -> str:
+    """The text index expression as the canonicalizer looks it up.
+
+    ClickHouse re-formats a text index expression when it stores it, e.g.
+    ``NOT a AND b`` comes back as ``(NOT a) AND b``, so the expression goes
+    through the canonicalizer like any other index expression. It is read with
+    the text index lexer rather than ``normalize_sql_fragment``, which would
+    collapse the spaces inside its string literals.
+    """
+    return canonicalize_text_index(index).expression
+
+
 def _normalize_index_shape(
     index: SkipIndexDefinition, canonicalizer: SqlCanonicalizer | None = None
 ) -> str:
-    if index.type == "text":
-        return text_index_fingerprint(index)
+    if isinstance(index, SkipIndexText):
+        canonical = (
+            None
+            if canonicalizer is None
+            else canonicalizer.expression(_text_index_expression_base(index))
+        )
+        return text_index_fingerprint(
+            index if canonical is None else index.model_copy(update={"expression": canonical})
+        )
     expression = _canonicalize_expression(_index_expression_base(index), canonicalizer)
     return "|".join(
         [
@@ -544,10 +569,119 @@ def _table_clauses(
     }
 
 
+# Keywords the server rewrites in engine arguments: ``is null`` reads back as
+# ``IS NULL``, ``TRUE`` as ``true``. A bare ``true``, ``false`` or ``null`` is always a literal.
+_ENGINE_LITERAL_KEYWORDS = frozenset({"null", "true", "false"})
+_ENGINE_OPERATOR_KEYWORDS = frozenset(
+    {"and", "or", "not", "is", "in", "like", "ilike", "distinct", "from", "global"}
+)
+# The operator keywords that can open an expression (``NOT x``, ``count(DISTINCT x)``);
+# the others always follow an operand.
+_ENGINE_PREFIX_KEYWORDS = frozenset({"not", "distinct"})
+# Names the server keeps quoted because they read back as a literal when bare
+# (writeProbablyQuotedStringImpl): ``true`` is a Bool, ```true``` a column.
+_ENGINE_LITERAL_NAMES = frozenset({"null", "true", "false", "inf", "infinity", "nan"})
+# Keywords the server quotes as names from some version on: 26.3 writes a
+# ``cube`` column bare, later versions ```cube```.
+_ENGINE_KEYWORD_NAMES = frozenset(
+    {"distinct", "all", "some", "table", "select", "cube", "rollup", "recursive"}
+)
+_BARE_NAME_RE = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _normalize_engine_for_compare(value: str | None) -> str:
+    """Column names and string literals in engine arguments are case-sensitive,
+    so they keep their case (#673). Function names (``RAND()`` reads back as
+    ``rand()``) and operator keywords do not, and whitespace between tokens is
+    insignificant. An operator keyword where an operand belongs
+    (``if(And > 1, 1, 0)``) can only be a column. A quoted name compares as the
+    server writes it back (#679)."""
     if not value:
         return ""
-    return normalize_engine(normalize_sql_fragment(value)).lower()
+    lexed = [
+        token
+        for token in tokenize_sql(normalize_engine(normalize_sql_fragment(value)))
+        if not is_trivia(token)
+    ]
+    tokens = [
+        _unquote_engine_name(
+            token,
+            lexed[index - 1] if index > 0 else None,
+            lexed[index + 1] if index + 1 < len(lexed) else None,
+        )
+        for index, token in enumerate(lexed)
+    ]
+
+    def normalized(index: int) -> str:
+        token = tokens[index]
+        if token.kind != "identifier":
+            return token.text
+        lower = token.text.lower()
+        previous = tokens[index - 1] if index > 0 else None
+        following = tokens[index + 1] if index + 1 < len(tokens) else None
+        keyword = lower in _ENGINE_LITERAL_KEYWORDS or _is_operator_keyword(
+            lower, previous, following
+        )
+        function = following is not None and following.text == "("
+        return lower if function or keyword else token.text
+
+    return " ".join(normalized(index) for index in range(len(tokens)))
+
+
+def _unquote_engine_name(
+    token: SQLToken, previous: SQLToken | None, following: SQLToken | None
+) -> SQLToken:
+    """The server writes a quoted name bare when the quotes are not needed:
+    ``Ver`` for ```Ver``` or ``"Ver"``, and ``Null`` for an engine or function
+    name, which the server itself writes as ```Null```. A name that needs its
+    quotes keeps them, in backticks, so different names never compare equal. An
+    unquoted name stays a quoted identifier, so it keeps its case even where a
+    keyword could be."""
+    name = identifier_name(token) if token.kind == "quoted_identifier" else None
+    if name is None:
+        return token
+    if _BARE_NAME_RE.fullmatch(name) is None:
+        return replace(token, text="`" + name.replace("\\", "\\\\").replace("`", "\\`") + "`")
+    if following is not None and following.text == "(":
+        return replace(token, kind="identifier", text=name)
+    lower = name.lower()
+    keeps_quotes = lower in _ENGINE_LITERAL_NAMES or (
+        lower in _ENGINE_KEYWORD_NAMES and (_ends_operand(previous) or _starts_operand(following))
+    )
+    return replace(token, text=f"`{name}`" if keeps_quotes else name)
+
+
+def _is_operator_keyword(lower: str, previous: SQLToken | None, following: SQLToken | None) -> bool:
+    if lower not in _ENGINE_OPERATOR_KEYWORDS:
+        return False
+    return _ends_operand(previous) or (
+        lower in _ENGINE_PREFIX_KEYWORDS and _starts_operand(following)
+    )
+
+
+def _ends_operand(token: SQLToken | None) -> bool:
+    return token is not None and (_is_value_token(token) or token.text in (")", "]"))
+
+
+def _starts_operand(token: SQLToken | None) -> bool:
+    return token is not None and (_is_value_token(token) or token.text == "(")
+
+
+def _is_value_token(token: SQLToken) -> bool:
+    return token.kind in ("identifier", "quoted_identifier", "number", "string")
+
+
+def _engines_match(expected: str | None, actual: str | None) -> bool:
+    """ObsessionDB and ClickHouse Cloud store a ``Replicated*MergeTree`` table as
+    ``Shared*MergeTree``, without the Keeper path and replica name (#669)."""
+    if _normalize_engine_for_compare(expected) == _normalize_engine_for_compare(actual):
+        return True
+    if not expected or not actual or not js_trim(actual).startswith("Shared"):
+        return False
+    shared = replicated_engine_as_shared(expected)
+    return shared is not None and _normalize_engine_for_compare(
+        shared
+    ) == _normalize_engine_for_compare(actual)
 
 
 def collect_table_sql_fragments(
@@ -561,9 +695,10 @@ def collect_table_sql_fragments(
     formats them in one round-trip, and hands back a map-backed canonicalizer.
     """
     expressions = [
-        _index_expression_base(index)
+        _text_index_expression_base(index)
+        if isinstance(index, SkipIndexText)
+        else _index_expression_base(index)
         for index in [*(expected.indexes or []), *actual.indexes]
-        if index.type != "text"
     ]
     expressions.extend(
         _render_index_type_fingerprint(index)
@@ -647,9 +782,7 @@ def compare_table_shape(  # noqa: PLR0912, PLR0915
     )
     ttl_mismatch = expected_ttl != actual_ttl
 
-    engine_mismatch = _normalize_engine_for_compare(
-        expected.engine
-    ) != _normalize_engine_for_compare(actual.engine)
+    engine_mismatch = not _engines_match(expected.engine, actual.engine)
 
     clauses = _table_clauses(expected, actual)
     expected_pk = _normalize_clause(clauses["primary_key"][0], canonicalizer)

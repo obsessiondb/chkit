@@ -9,14 +9,14 @@ import re
 from collections.abc import Sequence
 from typing import Any
 
-from chkit.core.sql_lexer import js_trim
+from chkit.core.sql_lexer import js_regex, js_trim
 
 # Keep each batched query well under ClickHouse's default max_query_size
 # (262144 bytes) so a large schema doesn't overflow a single query — which would
 # throw and silently drop the whole run back to string comparison.
 MAX_BATCH_LITERAL_BYTES = 128_000
 
-_SELECT_PREFIX_RE = re.compile(r"^SELECT\s+(.+)$", re.IGNORECASE | re.DOTALL)
+_SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+(.+)$"), re.IGNORECASE | re.DOTALL)
 
 
 def canonicalize_sql_fragments(
@@ -33,7 +33,9 @@ def canonicalize_sql_fragments(
     Formatting is batched through ``formatQuerySingleLineOrNull``, which yields
     NULL for a fragment it can't parse rather than failing the whole batch;
     those fragments have no entry, so the caller falls back to string
-    comparison.
+    comparison. So does a result that is not valid UTF-8 (a literal such as
+    ``'\\xff'``): its bytes would decode to U+FFFD, and two different literals
+    would match.
     """
     result: dict[str, str] = {}
     unique = list(dict.fromkeys(t for t in (js_trim(f) for f in fragments) if t))
@@ -49,7 +51,8 @@ def canonicalize_sql_fragments(
     for batch in _batch_fragments(unique):
         array_literal = ", ".join(_quote_literal(fragment) for fragment in batch)
         rows = client.query(
-            f"SELECT arrayMap(fragment -> {format_call}, [{array_literal}]) AS formatted"
+            "SELECT arrayMap(f -> if(isValidUTF8(f), f, NULL), "
+            f"arrayMap(fragment -> {format_call}, [{array_literal}])) AS formatted"
         ).rows
         formatted: list[str | None] = list(rows[0]["formatted"]) if rows else []
         for raw, value in zip(batch, formatted, strict=False):

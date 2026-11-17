@@ -1,3 +1,5 @@
+import { compareCodePoints } from '@chkit/core'
+
 import { loadCredentials, resolveBaseUrl } from '../auth/index.js'
 import { errorEnvelope, serviceListEnvelope } from '../json-envelope.js'
 import { listServiceOrganizations, listServices } from './api.js'
@@ -63,6 +65,8 @@ async function runServiceSelect(
 	return 0
 }
 
+// chkit before #624 passed the command name in args on `chkit obsessiondb service ...`;
+// dropping it keeps this plugin working with those CLIs.
 function serviceArgs(args: string[]): string[] {
 	return args[0] === 'service' ? args.slice(1) : args
 }
@@ -198,7 +202,7 @@ async function runServiceAlias(context: PluginCommandContext): Promise<number> {
 	if (action === 'list' || action === 'ls') {
 		const aliases = await loadServiceAliases(context.configPath)
 		const entries = Object.entries(aliases).sort(([a], [b]) =>
-			a.localeCompare(b),
+			compareCodePoints(a, b),
 		)
 		if (entries.length === 0) {
 			print('No service aliases defined.')

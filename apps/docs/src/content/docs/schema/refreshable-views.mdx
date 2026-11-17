@@ -1,6 +1,6 @@
 ---
 title: Refreshable Materialized Views
-description: Schedule ClickHouse materialized views to refresh on a cron-like cadence, with APPEND mode, DEPENDS ON chains, and the three hard rules chkit enforces.
+description: Schedule ClickHouse materialized views to refresh on a cron-like cadence, with APPEND mode, DEPENDS ON chains, and the three server rules chkit handles.
 sidebar:
   order: 2
 ---
@@ -156,7 +156,7 @@ Use `dependsOn` to ensure an RMV runs only after its upstream MVs have refreshed
 
 `DEPENDS ON` is only supported with `REFRESH EVERY` — ClickHouse rejects it when paired with `REFRESH AFTER`. chkit enforces this at `generate` / `check` time (`refresh_depends_on_requires_every`).
 
-## Three hard rules chkit enforces
+## Three server rules chkit handles
 
 These come from the ClickHouse server's actual behavior, not the docs. Each rule has a validation code you'll see in `chkit check --json`.
 
@@ -170,11 +170,11 @@ Any change to `refresh.append` between the old and new definition triggers **dro
 
 Omitting `APPEND` in `MODIFY REFRESH` for an existing APPEND MV is interpreted as "remove APPEND" and rejected. chkit always re-emits `APPEND` in the generated `ALTER` when the MV has `append: true`, so you never need to think about it.
 
-### Rule 3 — Non-APPEND RMV + replicated target is rejected
+### Rule 3 — Non-APPEND RMV + `Replicated*` target needs a replicated database
 
-On any `SharedMergeTree` / `Replicated*` target (e.g. [ObsessionDB](https://obsessiondb.com)), a non-APPEND RMV is refused outright with: *"This combination doesn't work: refreshable materialized view, no APPEND, non-replicated database, replicated table. Each refresh would replace the replicated table locally, but other replicas wouldn't see it. Refusing to create."*
+In a non-replicated database (the open-source default, `Atomic`), ClickHouse refuses a non-APPEND RMV whose target is a `Replicated*` table: *"This combination doesn't work: refreshable materialized view, no APPEND, non-replicated database, replicated table. Each refresh would replace the replicated table locally, but other replicas wouldn't see it. Refusing to create."*
 
-chkit validates this at `generate` / `check` time whenever the target table is defined in the same schema. Validation code: `refresh_append_required_for_replicated_target`. Fix: set `refresh.append = true`, or target a non-replicated table.
+Replace mode does work on [ObsessionDB](https://obsessiondb.com), on ClickHouse Cloud, and in a `Replicated` database: there each refresh replaces the target on every replica. chkit can't see the database engine when it validates the schema, so it warns instead of failing: `generate` and `check` print a warning whenever the target table is defined in the same schema (code `refresh_append_required_for_replicated_target`). On a non-replicated database, set `refresh.append = true` or target a non-replicated table. `SharedMergeTree` targets get no warning. On ObsessionDB, review the [caveats for refreshable views](https://obsessiondb.com/docs/feature-status) on its feature-status page.
 
 ## Generated SQL
 

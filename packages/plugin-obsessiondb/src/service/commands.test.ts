@@ -96,7 +96,7 @@ describe('service command', () => {
 		const printed: unknown[] = []
 		const code = await SERVICE_COMMAND.run({
 			configPath,
-			args: ['service', 'list'],
+			args: ['list'],
 			flags: {},
 			print: (value) => printed.push(value),
 		})
@@ -126,7 +126,7 @@ describe('service command', () => {
 		const printed: unknown[] = []
 		const code = await SERVICE_COMMAND.run({
 			configPath,
-			args: ['service', 'select'],
+			args: ['select'],
 			flags: {},
 			print: (value) => printed.push(value),
 		})

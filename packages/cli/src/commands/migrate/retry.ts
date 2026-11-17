@@ -1,6 +1,8 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
 
+import { statementFingerprint } from '@chkit/core'
+
 import type { JournalStore } from '../../runtime/journal-store.js'
 import { checksumSQL } from '../../runtime/migration-store.js'
 import {
@@ -18,8 +20,13 @@ export interface RetryResume {
   completedStatements: number
   /** 1-based number of the first statement that runs; null when every statement already completed. */
   resumeAtStatement: number | null
-  /** Completed statements without an `-- operation:` marker, matched by position only. */
+  /** Completed statements without an `-- operation:` marker. */
   unmarkedCompletedStatements: number
+  /**
+   * The unmarked completed statements the journal recorded without a
+   * fingerprint, so nothing checks their SQL: matched by position only.
+   */
+  positionOnlyCompletedStatements: number
 }
 
 export type RetryNoopReason =
@@ -51,6 +58,12 @@ export async function resolveRetry(
     /** Pending files without executable statements, which apply refuses. */
     emptyMigrations: readonly string[]
     appliedNames: ReadonlySet<string>
+    /**
+     * Whether a plugin's onBeforeApply may rewrite the statements. The SQL of
+     * the statements that ran is then checked by apply, against what the
+     * plugins return, instead of here (#599).
+     */
+    pluginsRewriteStatements: boolean
   },
   deps: { journalStore: JournalStore },
 ): Promise<RetryResolution> {
@@ -66,9 +79,10 @@ export async function resolveRetry(
   if (state.checksum === checksum) return { action: 'none', migration, reason: 'checksum_unchanged' }
   // The file's statements before onBeforeApply; apply checks again against the
   // statements the plugins return.
+  const statements = extractExecutableStatements(sql)
   const identities = statementIdentities(
     extractMigrationOperationSummaries(sql),
-    extractExecutableStatements(sql).length,
+    statements.map((statement) => (input.pluginsRewriteStatements ? undefined : statementFingerprint(statement))),
   )
   const check = verifyRetryEdit(state.operations, identities)
   if (!check.ok) throw retryMismatchError(migration, check)
@@ -81,5 +95,6 @@ export async function resolveRetry(
     completedStatements: check.completed,
     resumeAtStatement: check.resumeIndex === null ? null : check.resumeIndex + 1,
     unmarkedCompletedStatements: check.unmarkedCompleted,
+    positionOnlyCompletedStatements: check.positionOnlyCompleted,
   }
 }

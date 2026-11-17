@@ -4,7 +4,7 @@ import { type ColumnDefinition, planDiff, table, toCreateSQL } from './index.js'
 
 describe('nullable column types', () => {
   test('renders and compares inline Nullable and nullable properties equivalently', () => {
-    for (const type of ['String', "DateTime64(3, 'UTC')", 'Decimal(12, 3)', 'LowCardinality(String)']) {
+    for (const type of ['String', "DateTime64(3, 'UTC')", 'Decimal(12, 3)']) {
       const inline = definition({ name: 'value', type: `Nullable(${type})` })
       const property = definition({ name: 'value', type, nullable: true })
       expect(toCreateSQL(inline)).toBe(toCreateSQL(property))
@@ -13,13 +13,22 @@ describe('nullable column types', () => {
     }
   })
 
+  // ClickHouse rejects Nullable(LowCardinality(T)) and stores LowCardinality(Nullable(T)).
+  test('renders a nullable LowCardinality column as LowCardinality(Nullable(T))', () => {
+    const inline = definition({ name: 'value', type: 'LowCardinality(Nullable(String))' })
+    const property = definition({ name: 'value', type: 'LowCardinality(String)', nullable: true })
+    expect(toCreateSQL(property)).toContain('`value` LowCardinality(Nullable(String))')
+    expect(toCreateSQL(inline)).toBe(toCreateSQL(property))
+    expect(planDiff([inline], [property]).operations).toEqual([])
+    expect(planDiff([property], [inline]).operations).toEqual([])
+  })
+
   test('still modifies real type, nullability and nested wrapper changes', () => {
     const differences: Array<[ColumnDefinition, ColumnDefinition]> = [
       [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'String' }],
       [{ name: 'value', type: 'String' }, { name: 'value', type: 'String', nullable: true }],
       [{ name: 'value', type: 'Nullable(String)' }, { name: 'value', type: 'UInt64', nullable: true }],
       [{ name: 'value', type: 'Nullable(String)', nullable: true }, { name: 'value', type: 'String', nullable: true }],
-      [{ name: 'value', type: 'LowCardinality(Nullable(String))' }, { name: 'value', type: 'LowCardinality(String)', nullable: true }],
       [{ name: 'value', type: 'Array(Nullable(String))' }, { name: 'value', type: 'Array(String)' }],
     ]
     for (const [oldColumn, newColumn] of differences) {

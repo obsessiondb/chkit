@@ -26,11 +26,11 @@ import {
   formatTestDiagnostic,
   getLiveEnv,
   runCli,
+  startCli,
   type CliResult,
 } from './e2e-testkit.js'
 
 const WORKSPACE_ROOT = join(import.meta.dir, '../../../..')
-const CLI_ENTRY = join(WORKSPACE_ROOT, 'packages/cli/src/bin/chkit.ts')
 const BACKFILL_ENTRY = join(WORKSPACE_ROOT, 'packages/plugin-backfill/src/index.ts')
 const HISTORIC_ROWS = 20_000
 const BATCH_ROWS = 200
@@ -214,20 +214,9 @@ export function cli(project: CutoverProject, args: string[]): CliResult {
 
 /** Like `cli`, without blocking the event loop, so writers keep inserting meanwhile. */
 async function cliAsync(project: CutoverProject, args: string[]): Promise<CliResult> {
-  const proc = Bun.spawn(['bun', CLI_ENTRY, ...args, '--config', project.configPath], {
-    cwd: project.dir,
-    env: { ...process.env, ...project.env },
-    stdout: 'pipe',
-    stderr: 'pipe',
-  })
-  const timer = setTimeout(() => proc.kill(), MIGRATE_TIMEOUT_MS)
-  const [stdout, stderr, exitCode] = await Promise.all([
-    new Response(proc.stdout).text(),
-    new Response(proc.stderr).text(),
-    proc.exited,
-  ])
-  clearTimeout(timer)
-  return { exitCode, stdout, stderr }
+  return startCli(project.dir, [...args, '--config', project.configPath], project.env, {
+    timeoutMs: MIGRATE_TIMEOUT_MS,
+  }).result
 }
 
 function expectOk(result: CliResult, label: string): CliResult {

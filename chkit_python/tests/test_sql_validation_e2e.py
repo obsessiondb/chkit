@@ -10,7 +10,8 @@ env vars. See ``conftest.py``.
 
 from __future__ import annotations
 
-from typing import Any
+from collections.abc import Callable
+from typing import Any, TypeAlias
 
 import pytest
 
@@ -37,8 +38,12 @@ from chkit.core.sql import (
 # ---------------------------------------------------------------------------
 
 
+AssertValidSql: TypeAlias = Callable[[str], None]
+"""The ``assert_valid_sql`` fixture from ``conftest.py``."""
+
+
 def _base_table(**overrides: Any) -> TableDefinition:
-    base = {
+    base: dict[str, Any] = {
         "database": "default",
         "name": "test_table",
         "columns": [{"name": "id", "type": "UInt64"}],
@@ -80,7 +85,7 @@ _PRIMITIVE_TYPES = [
 
 
 @pytest.mark.parametrize("type_", _PRIMITIVE_TYPES)
-def test_create_table_primitive_column_type(assert_valid_sql, type_: str) -> None:
+def test_create_table_primitive_column_type(assert_valid_sql: AssertValidSql, type_: str) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -107,7 +112,7 @@ _PARAMETERIZED_TYPES = [
 
 
 @pytest.mark.parametrize("type_", _PARAMETERIZED_TYPES)
-def test_create_table_parameterized_type(assert_valid_sql, type_: str) -> None:
+def test_create_table_parameterized_type(assert_valid_sql: AssertValidSql, type_: str) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -141,7 +146,7 @@ _COMPLEX_TYPES = [
 
 
 @pytest.mark.parametrize("type_", _COMPLEX_TYPES)
-def test_create_table_complex_type(assert_valid_sql, type_: str) -> None:
+def test_create_table_complex_type(assert_valid_sql: AssertValidSql, type_: str) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -184,14 +189,14 @@ _DEFAULT_CASES = [
 
 @pytest.mark.parametrize(("label", "col"), _DEFAULT_CASES)
 def test_create_table_column_default(
-    assert_valid_sql, label: str, col: dict[str, Any]
+    assert_valid_sql: AssertValidSql, label: str, col: dict[str, Any]
 ) -> None:
     def_ = _base_table(columns=[{"name": "id", "type": "UInt64"}, col])
     assert_valid_sql(to_create_sql(def_))
 
 
 def test_create_table_expression_default_with_line_comment_before_another_column(
-    assert_valid_sql,
+    assert_valid_sql: AssertValidSql,
 ) -> None:
     # #234: rendered as written, the `--` comment would swallow the comma
     # before the next column.
@@ -226,13 +231,13 @@ _CODEC_CASES = [
 
 @pytest.mark.parametrize(("label", "col"), _CODEC_CASES)
 def test_create_table_column_codec(
-    assert_valid_sql, label: str, col: dict[str, Any]
+    assert_valid_sql: AssertValidSql, label: str, col: dict[str, Any]
 ) -> None:
     def_ = _base_table(columns=[{"name": "id", "type": "UInt64"}, col])
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_codec_plus_default_combined(assert_valid_sql) -> None:
+def test_create_table_codec_plus_default_combined(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -247,7 +252,7 @@ def test_create_table_codec_plus_default_combined(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_codec_on_nullable_column(assert_valid_sql) -> None:
+def test_create_table_codec_on_nullable_column(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -262,12 +267,12 @@ def test_create_table_codec_on_nullable_column(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_alter_modify_column_with_codec(assert_valid_sql) -> None:
+def test_alter_modify_column_with_codec(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(
         render_alter_modify_column(
             def_,
-            {  # type: ignore[arg-type]
+            {
                 "name": "value",
                 "type": "String",
                 "codec": {"kind": "ZSTD", "level": 6},
@@ -276,7 +281,7 @@ def test_alter_modify_column_with_codec(assert_valid_sql) -> None:
     )
 
 
-def test_alter_modify_column_remove_codec(assert_valid_sql) -> None:
+def test_alter_modify_column_remove_codec(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(render_alter_remove_codec(def_, "payload"))
 
@@ -286,7 +291,7 @@ def test_alter_modify_column_remove_codec(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_create_table_column_with_comment(assert_valid_sql) -> None:
+def test_create_table_column_with_comment(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -296,7 +301,7 @@ def test_create_table_column_with_comment(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_column_with_escaped_quote_in_comment(assert_valid_sql) -> None:
+def test_create_table_column_with_escaped_quote_in_comment(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -306,7 +311,7 @@ def test_create_table_column_with_escaped_quote_in_comment(assert_valid_sql) -> 
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_nullable_column(assert_valid_sql) -> None:
+def test_create_table_nullable_column(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -316,7 +321,7 @@ def test_create_table_nullable_column(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_nullable_column_with_default_and_comment(assert_valid_sql) -> None:
+def test_create_table_nullable_column_with_default_and_comment(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -382,7 +387,7 @@ _ENGINE_CASES: list[tuple[str, dict[str, Any]]] = [
 
 @pytest.mark.parametrize(("engine", "extra"), _ENGINE_CASES)
 def test_create_table_engine_family(
-    assert_valid_sql, engine: str, extra: dict[str, Any]
+    assert_valid_sql: AssertValidSql, engine: str, extra: dict[str, Any]
 ) -> None:
     def_ = _base_table(engine=engine, **extra)
     assert_valid_sql(to_create_sql(def_))
@@ -401,7 +406,7 @@ _PARTITION_CASES = [
 
 
 @pytest.mark.parametrize(("label", "expr"), _PARTITION_CASES)
-def test_create_table_partition_by(assert_valid_sql, label: str, expr: str) -> None:
+def test_create_table_partition_by(assert_valid_sql: AssertValidSql, label: str, expr: str) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -418,7 +423,7 @@ def test_create_table_partition_by(assert_valid_sql, label: str, expr: str) -> N
 # =========================================================================
 
 
-def test_create_table_multi_column_order_by(assert_valid_sql) -> None:
+def test_create_table_multi_column_order_by(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "tenant_id", "type": "UInt64"},
@@ -431,7 +436,7 @@ def test_create_table_multi_column_order_by(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_expression_in_order_by(assert_valid_sql) -> None:
+def test_create_table_expression_in_order_by(assert_valid_sql: AssertValidSql) -> None:
     # Bypasses chkit validation since to_create_sql would reject an expression
     # in orderBy. We still want ClickHouse to confirm the syntax.
     sql = (
@@ -451,7 +456,7 @@ def test_create_table_expression_in_order_by(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_create_table_simple_ttl(assert_valid_sql) -> None:
+def test_create_table_simple_ttl(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -462,7 +467,7 @@ def test_create_table_simple_ttl(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_ttl_with_delete(assert_valid_sql) -> None:
+def test_create_table_ttl_with_delete(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -478,12 +483,12 @@ def test_create_table_ttl_with_delete(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_create_table_numeric_setting(assert_valid_sql) -> None:
+def test_create_table_numeric_setting(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(settings={"index_granularity": 8192})
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_multiple_settings(assert_valid_sql) -> None:
+def test_create_table_multiple_settings(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         settings={"index_granularity": 8192, "min_bytes_for_wide_part": 0}
     )
@@ -578,7 +583,7 @@ _INDEX_CASES: list[tuple[str, dict[str, Any]]] = [
 
 @pytest.mark.parametrize(("label", "idx"), _INDEX_CASES)
 def test_create_table_skip_index(
-    assert_valid_sql, label: str, idx: dict[str, Any]
+    assert_valid_sql: AssertValidSql, label: str, idx: dict[str, Any]
 ) -> None:
     def_ = _base_table(
         columns=[
@@ -599,7 +604,7 @@ def test_create_table_skip_index(
 # =========================================================================
 
 
-def test_create_table_simple_projection(assert_valid_sql) -> None:
+def test_create_table_simple_projection(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -612,7 +617,7 @@ def test_create_table_simple_projection(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_projection_with_order_by(assert_valid_sql) -> None:
+def test_create_table_projection_with_order_by(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -628,17 +633,17 @@ def test_create_table_projection_with_order_by(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_create_table_table_comment(assert_valid_sql) -> None:
+def test_create_table_table_comment(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(comment="Main events table")
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_table_comment_with_escaped_quote(assert_valid_sql) -> None:
+def test_create_table_table_comment_with_escaped_quote(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(comment="User's activity log")
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_kitchen_sink(assert_valid_sql) -> None:
+def test_create_table_kitchen_sink(assert_valid_sql: AssertValidSql) -> None:
     def_ = table(
         database="default",
         name="kitchen_sink",
@@ -674,7 +679,7 @@ def test_create_table_kitchen_sink(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_many_columns(assert_valid_sql) -> None:
+def test_create_table_many_columns(assert_valid_sql: AssertValidSql) -> None:
     columns: list[dict[str, Any]] = [{"name": "id", "type": "UInt64"}]
     for i in range(25):
         columns.append(
@@ -684,7 +689,7 @@ def test_create_table_many_columns(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_reserved_word_column_names(assert_valid_sql) -> None:
+def test_create_table_reserved_word_column_names(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -697,7 +702,7 @@ def test_create_table_reserved_word_column_names(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_table_deeply_nested_type(assert_valid_sql) -> None:
+def test_create_table_deeply_nested_type(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table(
         columns=[
             {"name": "id", "type": "UInt64"},
@@ -712,12 +717,12 @@ def test_create_table_deeply_nested_type(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_create_view_simple(assert_valid_sql) -> None:
+def test_create_view_simple(assert_valid_sql: AssertValidSql) -> None:
     def_ = view(database="default", name="test_view", as_="SELECT 1 AS x")
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_view_with_comment(assert_valid_sql) -> None:
+def test_create_view_with_comment(assert_valid_sql: AssertValidSql) -> None:
     def_ = view(
         database="default",
         name="test_view_comment",
@@ -732,7 +737,7 @@ def test_create_view_with_comment(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_create_mv_with_target_table(assert_valid_sql) -> None:
+def test_create_mv_with_target_table(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_mv",
@@ -742,7 +747,7 @@ def test_create_mv_with_target_table(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_mv_with_comment(assert_valid_sql) -> None:
+def test_create_mv_with_comment(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_mv_comment",
@@ -753,7 +758,7 @@ def test_create_mv_with_comment(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_refreshable_mv_with_append_empty_and_comment(assert_valid_sql) -> None:
+def test_create_refreshable_mv_with_append_empty_and_comment(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_rmv_comment",
@@ -765,7 +770,7 @@ def test_create_refreshable_mv_with_append_empty_and_comment(assert_valid_sql) -
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_mv_with_aggregation_select(assert_valid_sql) -> None:
+def test_create_mv_with_aggregation_select(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_mv_agg",
@@ -778,7 +783,7 @@ def test_create_mv_with_aggregation_select(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_refreshable_mv_refresh_every(assert_valid_sql) -> None:
+def test_create_refreshable_mv_refresh_every(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_rmv",
@@ -790,7 +795,7 @@ def test_create_refreshable_mv_refresh_every(assert_valid_sql) -> None:
 
 
 def test_create_refreshable_mv_append_offset_randomize_settings(
-    assert_valid_sql, ch_server_version: tuple[int, ...]
+    assert_valid_sql: AssertValidSql, ch_server_version: tuple[int, ...]
 ) -> None:
     if ch_server_version < (25, 0):
         pytest.xfail(
@@ -816,7 +821,7 @@ def test_create_refreshable_mv_append_offset_randomize_settings(
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_refreshable_mv_refresh_after(assert_valid_sql) -> None:
+def test_create_refreshable_mv_refresh_after(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_rmv_after",
@@ -827,7 +832,7 @@ def test_create_refreshable_mv_refresh_after(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_refreshable_mv_with_depends_on(assert_valid_sql) -> None:
+def test_create_refreshable_mv_with_depends_on(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_rmv_deps",
@@ -841,7 +846,7 @@ def test_create_refreshable_mv_with_depends_on(assert_valid_sql) -> None:
     assert_valid_sql(to_create_sql(def_))
 
 
-def test_create_refreshable_mv_empty_clause(assert_valid_sql) -> None:
+def test_create_refreshable_mv_empty_clause(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_rmv_empty",
@@ -857,7 +862,7 @@ def test_create_refreshable_mv_empty_clause(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_alter_modify_refresh_every(assert_valid_sql) -> None:
+def test_alter_modify_refresh_every(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_rmv",
@@ -869,7 +874,7 @@ def test_alter_modify_refresh_every(assert_valid_sql) -> None:
 
 
 def test_alter_modify_refresh_with_append_preserved(
-    assert_valid_sql, ch_server_version: tuple[int, ...]
+    assert_valid_sql: AssertValidSql, ch_server_version: tuple[int, ...]
 ) -> None:
     if ch_server_version < (25, 0):
         pytest.xfail(
@@ -886,7 +891,7 @@ def test_alter_modify_refresh_with_append_preserved(
     assert_valid_sql(render_alter_modify_refresh(def_))
 
 
-def test_alter_modify_refresh_after_randomize_settings(assert_valid_sql) -> None:
+def test_alter_modify_refresh_after_randomize_settings(assert_valid_sql: AssertValidSql) -> None:
     def_ = materialized_view(
         database="default",
         name="test_rmv",
@@ -923,10 +928,10 @@ _ADD_COLUMN_CASES = [
 
 @pytest.mark.parametrize(("label", "col"), _ADD_COLUMN_CASES)
 def test_alter_add_column(
-    assert_valid_sql, label: str, col: dict[str, Any]
+    assert_valid_sql: AssertValidSql, label: str, col: dict[str, Any]
 ) -> None:
     def_ = _base_table()
-    assert_valid_sql(render_alter_add_column(def_, col))  # type: ignore[arg-type]
+    assert_valid_sql(render_alter_add_column(def_, col))
 
 
 # =========================================================================
@@ -934,27 +939,27 @@ def test_alter_add_column(
 # =========================================================================
 
 
-def test_alter_modify_column_type_change(assert_valid_sql) -> None:
+def test_alter_modify_column_type_change(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(
-        render_alter_modify_column(def_, {"name": "id", "type": "UInt128"})  # type: ignore[arg-type]
+        render_alter_modify_column(def_, {"name": "id", "type": "UInt128"})
     )
 
 
-def test_alter_modify_column_nullable_change(assert_valid_sql) -> None:
+def test_alter_modify_column_nullable_change(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(
         render_alter_modify_column(
-            def_, {"name": "value", "type": "String", "nullable": True}  # type: ignore[arg-type]
+            def_, {"name": "value", "type": "String", "nullable": True}
         )
     )
 
 
-def test_alter_modify_column_default_change(assert_valid_sql) -> None:
+def test_alter_modify_column_default_change(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(
         render_alter_modify_column(
-            def_, {"name": "value", "type": "String", "default": "unknown"}  # type: ignore[arg-type]
+            def_, {"name": "value", "type": "String", "default": "unknown"}
         )
     )
 
@@ -964,7 +969,7 @@ def test_alter_modify_column_default_change(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_alter_drop_column(assert_valid_sql) -> None:
+def test_alter_drop_column(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(render_alter_drop_column(def_, "old_column"))
 
@@ -1038,10 +1043,10 @@ _ALTER_ADD_INDEX_CASES: list[tuple[str, dict[str, Any]]] = [
 
 @pytest.mark.parametrize(("label", "idx"), _ALTER_ADD_INDEX_CASES)
 def test_alter_add_index(
-    assert_valid_sql, label: str, idx: dict[str, Any]
+    assert_valid_sql: AssertValidSql, label: str, idx: dict[str, Any]
 ) -> None:
     def_ = _base_table()
-    assert_valid_sql(render_alter_add_index(def_, idx))  # type: ignore[arg-type]
+    assert_valid_sql(render_alter_add_index(def_, idx))
 
 
 # =========================================================================
@@ -1049,7 +1054,7 @@ def test_alter_add_index(
 # =========================================================================
 
 
-def test_alter_drop_index(assert_valid_sql) -> None:
+def test_alter_drop_index(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(render_alter_drop_index(def_, "idx_old"))
 
@@ -1059,12 +1064,12 @@ def test_alter_drop_index(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_alter_add_projection(assert_valid_sql) -> None:
+def test_alter_add_projection(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(
         render_alter_add_projection(
             def_,
-            {  # type: ignore[arg-type]
+            {
                 "name": "proj_status",
                 "query": "SELECT status, count() GROUP BY status",
             },
@@ -1072,7 +1077,7 @@ def test_alter_add_projection(assert_valid_sql) -> None:
     )
 
 
-def test_alter_drop_projection(assert_valid_sql) -> None:
+def test_alter_drop_projection(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(render_alter_drop_projection(def_, "proj_old"))
 
@@ -1082,12 +1087,12 @@ def test_alter_drop_projection(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_alter_modify_setting(assert_valid_sql) -> None:
+def test_alter_modify_setting(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(render_alter_modify_setting(def_, "index_granularity", 4096))
 
 
-def test_alter_reset_setting(assert_valid_sql) -> None:
+def test_alter_reset_setting(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(render_alter_reset_setting(def_, "index_granularity"))
 
@@ -1097,14 +1102,14 @@ def test_alter_reset_setting(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_alter_modify_ttl(assert_valid_sql) -> None:
+def test_alter_modify_ttl(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(
         render_alter_modify_ttl(def_, "created_at + INTERVAL 30 DAY")
     )
 
 
-def test_alter_remove_ttl(assert_valid_sql) -> None:
+def test_alter_remove_ttl(assert_valid_sql: AssertValidSql) -> None:
     def_ = _base_table()
     assert_valid_sql(render_alter_modify_ttl(def_, None))
 
@@ -1114,21 +1119,21 @@ def test_alter_remove_ttl(assert_valid_sql) -> None:
 # =========================================================================
 
 
-def test_plan_new_table_creation_sql_valid(assert_valid_sql) -> None:
+def test_plan_new_table_creation_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     plan = plan_diff([], [_base_table(name="new_events")])
     assert len(plan.operations) > 0
     for op in plan.operations:
         assert_valid_sql(op.sql)
 
 
-def test_plan_table_drop_sql_valid(assert_valid_sql) -> None:
+def test_plan_table_drop_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     plan = plan_diff([_base_table(name="old_events")], [])
     assert len(plan.operations) > 0
     for op in plan.operations:
         assert_valid_sql(op.sql)
 
 
-def test_plan_additive_changes_sql_valid(assert_valid_sql) -> None:
+def test_plan_additive_changes_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     old = _base_table(name="events")
     new = _base_table(
         name="events",
@@ -1148,7 +1153,7 @@ def test_plan_additive_changes_sql_valid(assert_valid_sql) -> None:
         assert_valid_sql(op.sql)
 
 
-def test_plan_destructive_changes_sql_valid(assert_valid_sql) -> None:
+def test_plan_destructive_changes_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     old = _base_table(
         name="events",
         columns=[
@@ -1167,7 +1172,7 @@ def test_plan_destructive_changes_sql_valid(assert_valid_sql) -> None:
         assert_valid_sql(op.sql)
 
 
-def test_plan_structural_recreate_sql_valid(assert_valid_sql) -> None:
+def test_plan_structural_recreate_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     old = _base_table(name="events", engine="MergeTree()")
     new = _base_table(name="events", engine="ReplacingMergeTree()")
     plan = plan_diff([old], [new])
@@ -1176,7 +1181,7 @@ def test_plan_structural_recreate_sql_valid(assert_valid_sql) -> None:
         assert_valid_sql(op.sql)
 
 
-def test_plan_view_modification_sql_valid(assert_valid_sql) -> None:
+def test_plan_view_modification_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     old_v = view(database="default", name="events_view", as_="SELECT 1 AS x")
     new_v = view(
         database="default", name="events_view", as_="SELECT 1 AS x, 2 AS y"
@@ -1187,7 +1192,7 @@ def test_plan_view_modification_sql_valid(assert_valid_sql) -> None:
         assert_valid_sql(op.sql)
 
 
-def test_plan_materialized_view_modification_sql_valid(assert_valid_sql) -> None:
+def test_plan_materialized_view_modification_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     old_mv = materialized_view(
         database="default",
         name="events_mv",
@@ -1206,7 +1211,7 @@ def test_plan_materialized_view_modification_sql_valid(assert_valid_sql) -> None
         assert_valid_sql(op.sql)
 
 
-def test_plan_create_database_sql_valid(assert_valid_sql) -> None:
+def test_plan_create_database_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     new = table(
         database="analytics",
         name="events",
@@ -1222,7 +1227,7 @@ def test_plan_create_database_sql_valid(assert_valid_sql) -> None:
         assert_valid_sql(op.sql)
 
 
-def test_plan_multiple_operations_sql_valid(assert_valid_sql) -> None:
+def test_plan_multiple_operations_sql_valid(assert_valid_sql: AssertValidSql) -> None:
     old = [_base_table(name="users"), _base_table(name="events")]
     new = [
         _base_table(

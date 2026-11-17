@@ -10,8 +10,10 @@ import {
   stringLiteral,
 } from '@chkit/clickhouse'
 import {
+  canonicalizeTextIndex,
   columnCodecFingerprint,
   columnTypeFingerprint,
+  compareCodePoints,
   DEFAULT_INDEX_GRANULARITY,
   literalDefaultFingerprint,
   constraintExpression,
@@ -40,8 +42,10 @@ import {
   type SkipIndexDefinition,
   type SQLToken,
   textIndexFingerprint,
+  type TextSkipIndex,
   tokenizeSQL,
   renderVectorIndexType,
+  replicatedEngineAsShared,
   type MaterializedViewDefinition,
   type TableConstraintDefinition,
   type TableDefinition,
@@ -365,8 +369,20 @@ function indexExpressionBase(index: SkipIndexDefinition): string {
   }
 }
 
+// ClickHouse re-formats a text index expression when it stores it, e.g.
+// `NOT a AND b` comes back as `(NOT a) AND b`, so the expression goes through
+// the canonicalizer like any other index expression. It is read with the text
+// index lexer rather than normalizeSQLFragment, which would collapse the spaces
+// inside its string literals.
+function textIndexExpressionBase(index: TextSkipIndex): string {
+  return canonicalizeTextIndex(index).expression
+}
+
 function normalizeIndexShape(index: SkipIndexDefinition, canonicalizer?: SqlCanonicalizer): string {
-  if (index.type === 'text') return textIndexFingerprint(index)
+  if (index.type === 'text') {
+    const expression = canonicalizer?.expression(textIndexExpressionBase(index))
+    return textIndexFingerprint(expression == null ? index : { ...index, expression })
+  }
   return [
     `expr=${canonicalizeExpression(indexExpressionBase(index), canonicalizer)}`,
     // A raw type is compared as ClickHouse formats it, so a structured index on
@@ -450,9 +466,90 @@ function tableClauses(expected: TableDefinition, actual: ActualTableShape) {
   } satisfies Record<string, [string | undefined, string | undefined]>
 }
 
+// Keywords the server rewrites in engine arguments: `is null` reads back as
+// `IS NULL`, `TRUE` as `true`. A bare `true`, `false` or `null` is always a literal.
+const ENGINE_LITERAL_KEYWORDS = new Set(['null', 'true', 'false'])
+const ENGINE_OPERATOR_KEYWORDS = new Set(['and', 'or', 'not', 'is', 'in', 'like', 'ilike', 'distinct', 'from', 'global'])
+// The operator keywords that can open an expression (`NOT x`, `count(DISTINCT x)`);
+// the others always follow an operand.
+const ENGINE_PREFIX_KEYWORDS = new Set(['not', 'distinct'])
+// Names the server keeps quoted because they read back as a literal when bare
+// (writeProbablyQuotedStringImpl): `true` is a Bool, `` `true` `` a column.
+const ENGINE_LITERAL_NAMES = new Set(['null', 'true', 'false', 'inf', 'infinity', 'nan'])
+// Keywords the server quotes as names from some version on: 26.3 writes a
+// `cube` column bare, later versions `` `cube` ``.
+const ENGINE_KEYWORD_NAMES = new Set(['distinct', 'all', 'some', 'table', 'select', 'cube', 'rollup', 'recursive'])
+const BARE_NAME = /^[A-Za-z_][A-Za-z0-9_]*$/
+
+/**
+ * Column names and string literals in engine arguments are case-sensitive, so
+ * they keep their case (#673). Function names (`RAND()` reads back as `rand()`)
+ * and operator keywords do not, and whitespace between tokens is insignificant.
+ * An operator keyword where an operand belongs (`if(And > 1, 1, 0)`) can only be
+ * a column. A quoted name compares as the server writes it back (#679).
+ */
 function normalizeEngine(value: string | undefined): string {
   if (!value) return ''
-  return coreNormalizeEngine(normalizeSQLFragment(value)).toLowerCase()
+  const tokens = tokenizeSQL(coreNormalizeEngine(normalizeSQLFragment(value)))
+    .filter((token) => !isTrivia(token))
+    .map((token, index, all) => unquoteEngineName(token, all[index - 1], all[index + 1]))
+  return tokens
+    .map((token, index) => {
+      if (token.kind !== 'identifier') return token.text
+      const lower = token.text.toLowerCase()
+      const previous = tokens[index - 1]
+      const next = tokens[index + 1]
+      const keyword = ENGINE_LITERAL_KEYWORDS.has(lower) || isOperatorKeyword(lower, previous, next)
+      return next?.text === '(' || keyword ? lower : token.text
+    })
+    .join(' ')
+}
+
+/**
+ * The server writes a quoted name bare when the quotes are not needed: `Ver`
+ * for `` `Ver` `` or `"Ver"`, and `Null` for an engine or function name, which
+ * the server itself writes as `` `Null` ``. A name that needs its quotes keeps
+ * them, in backticks, so different names never compare equal. An unquoted name
+ * stays a quoted identifier, so it keeps its case even where a keyword could be.
+ */
+function unquoteEngineName(token: SQLToken, previous: SQLToken | undefined, next: SQLToken | undefined): SQLToken {
+  const name = token.kind === 'quoted_identifier' ? identifierName(token) : undefined
+  if (name === undefined || !BARE_NAME.test(name)) {
+    return name === undefined ? token : { ...token, text: `\`${name.replaceAll('\\', '\\\\').replaceAll('`', '\\`')}\`` }
+  }
+  if (next?.text === '(') return { ...token, kind: 'identifier', text: name }
+  const lower = name.toLowerCase()
+  const keepsQuotes =
+    ENGINE_LITERAL_NAMES.has(lower) || (ENGINE_KEYWORD_NAMES.has(lower) && (endsOperand(previous) || startsOperand(next)))
+  return keepsQuotes ? { ...token, text: `\`${name}\`` } : { ...token, text: name }
+}
+
+function isOperatorKeyword(lower: string, previous: SQLToken | undefined, next: SQLToken | undefined): boolean {
+  if (!ENGINE_OPERATOR_KEYWORDS.has(lower)) return false
+  return endsOperand(previous) || (ENGINE_PREFIX_KEYWORDS.has(lower) && startsOperand(next))
+}
+
+function endsOperand(token: SQLToken | undefined): boolean {
+  return token !== undefined && (isValueToken(token) || token.text === ')' || token.text === ']')
+}
+
+function startsOperand(token: SQLToken | undefined): boolean {
+  return token !== undefined && (isValueToken(token) || token.text === '(')
+}
+
+function isValueToken(token: SQLToken): boolean {
+  return ['identifier', 'quoted_identifier', 'number', 'string'].includes(token.kind)
+}
+
+/**
+ * ObsessionDB and ClickHouse Cloud store a `Replicated*MergeTree` table as
+ * `Shared*MergeTree`, without the Keeper path and replica name (#669).
+ */
+function enginesMatch(expected: string | undefined, actual: string | undefined): boolean {
+  if (normalizeEngine(expected) === normalizeEngine(actual)) return true
+  if (!expected || !actual || !actual.trim().startsWith('Shared')) return false
+  const shared = replicatedEngineAsShared(expected)
+  return shared !== undefined && normalizeEngine(shared) === normalizeEngine(actual)
 }
 
 /**
@@ -470,7 +567,7 @@ export function collectTableSqlFragments(
   const queries: string[] = []
 
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
-    if (index.type !== 'text') expressions.push(indexExpressionBase(index))
+    expressions.push(index.type === 'text' ? textIndexExpressionBase(index) : indexExpressionBase(index))
   }
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
     if (index.type !== 'text') expressions.push(renderIndexTypeFingerprint(index))
@@ -541,7 +638,7 @@ export function compareTableShape(
   )
   const ttlMismatch = expectedTTL !== actualTTL
 
-  const engineMismatch = normalizeEngine(expected.engine) !== normalizeEngine(actual.engine)
+  const engineMismatch = !enginesMatch(expected.engine, actual.engine)
   const clauses = tableClauses(expected, actual)
   const expectedPrimaryKey = normalizeClause(clauses.primaryKey[0], canonicalizer)
   const actualPrimaryKey = normalizeClause(clauses.primaryKey[1], canonicalizer)
@@ -595,9 +692,9 @@ export function compareTableShape(
   return {
     table: `${expected.database}.${expected.name}`,
     reasonCodes,
-    missingColumns: missingColumns.sort((a, b) => a.localeCompare(b)),
-    extraColumns: extraColumns.sort((a, b) => a.localeCompare(b)),
-    changedColumns: changedColumns.sort((a, b) => a.localeCompare(b)),
+    missingColumns: missingColumns.sort((a, b) => compareCodePoints(a, b)),
+    extraColumns: extraColumns.sort((a, b) => compareCodePoints(a, b)),
+    changedColumns: changedColumns.sort((a, b) => compareCodePoints(a, b)),
     settingDiffs,
     indexDiffs,
     ttlMismatch,
@@ -872,7 +969,7 @@ function dictionaryStructure(query: string): string {
 function dictionarySettings(query: string): string {
   const settings = parseDictionarySettingsFromCreateDictionaryQuery(query) ?? {}
   return Object.keys(settings)
-    .sort()
+    .sort(compareCodePoints)
     .map((key) => {
       const value = settings[key] ?? ''
       return `${key} = ${typeof value === 'string' ? stringLiteral(value) : value}`
@@ -941,7 +1038,7 @@ function renderSourcePairs(pairs: SourcePair[], sorted: boolean, nested = false)
       ? `${key} ${value}`
       : `${key}${nested ? ' ' : ''}(${renderSourcePairs(value, sorted, true)})`
   )
-  return (sorted ? rendered.sort() : rendered).join(' ')
+  return (sorted ? rendered.sort(compareCodePoints) : rendered).join(' ')
 }
 
 function sourceValueText(token: SQLToken): string {

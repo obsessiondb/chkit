@@ -656,6 +656,7 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                     " plan state"
                 ),
                 run=_guarded(_plan, "plan", "Backfill plan"),
+                takes_args=False,
                 flags=list(PLAN_FLAGS),
             ),
             ChxPluginCommand(
@@ -665,6 +666,7 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                     "(e.g. ObsessionDB) instead of running it locally"
                 ),
                 run=_guarded(_submit, "submit", "Backfill submit"),
+                takes_args=False,
                 flags=list(SUBMIT_FLAGS),
             ),
             ChxPluginCommand(
@@ -674,18 +676,21 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                     " and polling"
                 ),
                 run=_guarded(_run, "run", "Backfill run"),
+                takes_args=False,
                 flags=list(RUN_FLAGS),
             ),
             ChxPluginCommand(
                 name="resume",
                 description="Resume a backfill run from last checkpoint",
                 run=_guarded(_resume, "resume", "Backfill resume"),
+                takes_args=False,
                 flags=list(RESUME_FLAGS),
             ),
             ChxPluginCommand(
                 name="status",
                 description="Show checkpoint and chunk progress for a backfill run",
                 run=_guarded(_status, "status", "Backfill status"),
+                takes_args=False,
                 flags=list(PLAN_ID_FLAGS),
             ),
             ChxPluginCommand(
@@ -695,6 +700,7 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                     " chunk execution"
                 ),
                 run=_guarded(_cancel, "cancel", "Backfill cancel"),
+                takes_args=False,
                 flags=list(PLAN_ID_FLAGS),
             ),
             ChxPluginCommand(
@@ -704,6 +710,7 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                     " backfill runs"
                 ),
                 run=_guarded(_doctor, "doctor", "Backfill doctor"),
+                takes_args=False,
                 flags=list(PLAN_ID_FLAGS),
             ),
             ChxPluginCommand(
@@ -713,6 +720,7 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                     " (e.g. ObsessionDB)"
                 ),
                 run=_guarded(_list, "list", "Backfill list"),
+                takes_args=False,
             ),
         ],
         options_schema=PluginConfig,

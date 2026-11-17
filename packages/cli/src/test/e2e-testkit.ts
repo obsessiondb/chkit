@@ -8,22 +8,28 @@
 import { join, resolve } from 'node:path'
 import { setTimeout as sleep } from 'node:timers/promises'
 
-import { spawnWithTimeout } from './spawn-cli.js'
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
+import { quoteIdent } from '@chkit/clickhouse/e2e-testkit'
+
+import { createIsolatedCliEnv, spawnWithTimeout } from './spawn-cli.js'
 
 // Re-export all shared utilities so CLI tests only need one import
 export {
   getLiveEnv,
   createLiveExecutor,
   createStatelessLiveExecutor,
+  dropDatabase,
   quoteIdent,
   createPrefix,
   createJournalTableName,
   waitForTable,
+  waitForTableAbsent,
   waitForView,
   waitForColumn,
   waitForDictionary,
   waitForRows,
   pollUntil,
+  runOnceVisible,
 } from '@chkit/clickhouse/e2e-testkit'
 
 const WORKSPACE_ROOT = resolve(import.meta.dir, '../../../..')
@@ -59,9 +65,10 @@ export function startCli(
   extraEnv: Record<string, string> = {},
   { timeoutMs = 120_000 }: { timeoutMs?: number } = {}
 ): { result: Promise<CliResult>; kill: () => void } {
+  const isolated = createIsolatedCliEnv(extraEnv)
   const proc = Bun.spawn(['bun', CLI_ENTRY, ...args], {
     cwd,
-    env: { ...process.env, ...extraEnv },
+    env: isolated.env,
     stdout: 'pipe',
     stderr: 'pipe',
     timeout: timeoutMs,
@@ -71,7 +78,9 @@ export function startCli(
     new Response(proc.stdout).text(),
     new Response(proc.stderr).text(),
     proc.exited,
-  ]).then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }))
+  ])
+    .then(([stdout, stderr, exitCode]) => ({ exitCode, stdout, stderr }))
+    .finally(isolated.cleanup)
   return { result, kill: () => proc.kill('SIGKILL') }
 }
 
@@ -172,4 +181,22 @@ export function formatTestDiagnostic(
     parts.push(`extra: ${JSON.stringify(extra, null, 2)}`)
   }
   return parts.join('\n')
+}
+
+/**
+ * The migrate lock claim that a killed run left behind in the journal
+ * (#716), for `--break-lock`.
+ */
+export async function heldLockClaim(
+  executor: ClickHouseExecutor,
+  database: string,
+  journalTable: string,
+): Promise<string> {
+  const rows = await executor.query<{ claim: string }>(
+    `SELECT substring(name, ${'__chkit_migrate_lock__/'.length + 1}) AS claim FROM ${quoteIdent(database)}.${quoteIdent(journalTable)} ` +
+      "WHERE startsWith(name, '__chkit_migrate_lock__/') GROUP BY name " +
+      "HAVING max(applied_at) < toDateTime64('2299-01-01 00:00:00', 3, 'UTC') SETTINGS select_sequential_consistency = 1",
+  )
+  if (rows.length !== 1) throw new Error(`expected one held migrate lock claim, found ${JSON.stringify(rows)}`)
+  return (rows[0] as { claim: string }).claim
 }

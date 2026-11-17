@@ -91,6 +91,7 @@ describe('query definitions', () => {
       [p('v', t.array(t.lowCardinality(t.string()))), 'Array(LowCardinality(String))'],
       [p('v', t.map(t.string(), t.nullable(t.uint8()))), 'Map(String, Nullable(UInt8))'],
       [p('v', t.lowCardinality(t.nullable(t.string()))), 'LowCardinality(Nullable(String))'],
+      [p('v', t.lowCardinality(t.string()).optional()), 'LowCardinality(Nullable(String))'],
       [p('v', t.simpleAggregateFunction('max', t.dateTime())), 'SimpleAggregateFunction(max, DateTime)'],
       [p('v', z.string()), 'String'],
       [p('v', z.int()), 'Int64'],
@@ -145,6 +146,15 @@ describe('query definitions', () => {
     expect(() => query`SELECT ${p('tags', z.array(z.string())).optional()}`).toThrow(
       'query: param "tags": ClickHouse has no Nullable(Array(String)); use .default() instead of .optional() or .nullable()',
     )
+  })
+
+  test('a Nullable type stays as written when made optional, so both forms share a param', () => {
+    const city = t.string().meta({ clickhouse: 'Nullable(String) ' })
+    expect(query`SELECT ${p('v', city)}, ${p('v', city.optional())}`.sql).toBe('SELECT {v:Nullable(String) }, {v:Nullable(String) }')
+    const padded = t.string().meta({ clickhouse: 'String ' })
+    const wrapped = t.string().meta({ clickhouse: 'Nullable(String )' })
+    expect(query`SELECT ${p('v', padded.optional())}, ${p('v', wrapped)}`.sql).toBe('SELECT {v:Nullable(String )}, {v:Nullable(String )}')
+    expect(query`SELECT ${p('v', padded.nullable())}, ${p('v', wrapped)}`.sql).toBe('SELECT {v:Nullable(String )}, {v:Nullable(String )}')
   })
 
   test('p throws for a type ClickHouse cannot take as a param', () => {

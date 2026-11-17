@@ -226,6 +226,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'plan',
         description: 'Build a deterministic backfill plan and persist immutable plan state',
+        takesArgs: false,
         flags: PLAN_FLAGS,
         optionsSchema: planOptionsSchema,
         flagMapping: PLAN_FLAG_MAP,
@@ -287,6 +288,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'submit',
         description: 'Submit a backfill plan to a managed job backend (e.g. ObsessionDB) instead of running it locally',
+        takesArgs: false,
         flags: SUBMIT_FLAGS,
         optionsSchema: submitOptionsSchema,
         flagMapping: SUBMIT_FLAG_MAP,
@@ -309,6 +311,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'run',
         description: 'Execute a planned backfill with async query submission and polling',
+        takesArgs: false,
         flags: RUN_FLAGS,
         optionsSchema: runOptionsSchema,
         flagMapping: RUN_FLAG_MAP,
@@ -342,6 +345,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'resume',
         description: 'Resume a backfill run from last checkpoint',
+        takesArgs: false,
         flags: RESUME_FLAGS,
         optionsSchema: resumeOptionsSchema,
         flagMapping: RESUME_FLAG_MAP,
@@ -399,6 +403,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'status',
         description: 'Show checkpoint and chunk progress for a backfill run',
+        takesArgs: false,
         flags: PLAN_ID_FLAGS,
         optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
@@ -433,6 +438,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'cancel',
         description: 'Cancel an in-progress backfill run and prevent further chunk execution',
+        takesArgs: false,
         flags: PLAN_ID_FLAGS,
         optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
@@ -462,6 +468,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'doctor',
         description: 'Provide actionable remediation steps for failed or pending backfill runs',
+        takesArgs: false,
         flags: PLAN_ID_FLAGS,
         optionsSchema: statusOptionsSchema,
         flagMapping: PLAN_ID_FLAG_MAP,
@@ -494,6 +501,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
       {
         name: 'list',
         description: 'List the backfill jobs of a managed job backend service (e.g. ObsessionDB)',
+        takesArgs: false,
         run: runCommand({
           command: 'list',
           label: 'Backfill list',

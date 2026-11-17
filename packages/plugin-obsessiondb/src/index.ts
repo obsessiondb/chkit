@@ -2,6 +2,7 @@ import { resolve } from 'node:path'
 
 import {
 	type ChxInlinePluginRegistration,
+	compareCodePoints,
 	isDistributedEngine,
 	isMergeTreeEngine,
 	type MigrationPlan,
@@ -30,6 +31,7 @@ export {
 } from './auth/index.js'
 export { createJobsClient, type JobsClient } from './backfill/index.js'
 export {
+	CONNECT_CHOICES,
 	type ConnectChoice,
 	type OnboardingOptions,
 	runOnboarding,
@@ -214,7 +216,7 @@ async function resolveServiceOverride(input: {
 
 	const availableServices =
 		services.map((candidate) => candidate.name).join(', ') || '<none>'
-	const availableAliases = Object.keys(aliases).sort().join(', ') || '<none>'
+	const availableAliases = Object.keys(aliases).sort(compareCodePoints).join(', ') || '<none>'
 	throw new Error(
 		`obsessiondb: service "${input.name}" not found. Available services: ${availableServices}. Available aliases: ${availableAliases}`,
 	)

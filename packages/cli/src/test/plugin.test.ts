@@ -185,12 +185,14 @@ describe('plugin runtime', () => {
       // A -- before the names ends the flags; the names still come first.
       expect(run(['plugin', '--', 'echoer', 'echo', '--loud']).args).toEqual(['--loud'])
       expect(run(['plugin', 'echoer', '--', 'echo', '-z']).args).toEqual(['-z'])
-      // The shortcut path passes the subcommand name too, as before.
+      // The shortcut gives the command the same args as `chkit plugin`, without its name (#624).
       expect(run(['echoer', 'echo', 'alpha', '--name', 'ada', '--', '--loud', '-z'])).toEqual({
-        args: ['echo', 'alpha', '--loud', '-z'],
+        args: ['alpha', '--loud', '-z'],
         name: 'ada',
         loud: null,
       })
+      expect(run(['echoer', '--', 'echo', 'echo', '-z']).args).toEqual(['echo', '-z'])
+      expect(run(['echoer', 'echo']).args).toEqual([])
 
       // A flag value is never the --.
       const missing = runCli(['plugin', '--config', fixture.configPath, 'echoer', 'echo', '--name', '--', 'beta'])

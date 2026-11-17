@@ -6,7 +6,7 @@ Direct ports of the #176/#178 tests in ``packages/core/src/index.test.ts``.
 from __future__ import annotations
 
 from chkit.core.key_clause import normalize_key_columns
-from chkit.core.model import table
+from chkit.core.model import ColumnInput, table
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
 from chkit.core.validate import validate_definitions
@@ -53,7 +53,7 @@ def test_quotes_declared_columns_even_when_the_name_needs_quoting() -> None:
 
 
 def test_no_recreate_when_key_expression_differs_only_by_whitespace() -> None:
-    columns = [
+    columns: list[ColumnInput] = [
         {"name": "sso_id", "type": "String"},
         {"name": "session_end", "type": "DateTime"},
     ]
@@ -83,7 +83,7 @@ def test_no_recreate_when_key_expression_differs_only_by_whitespace() -> None:
 
 
 def test_no_recreate_when_key_column_differs_only_by_identifier_quoting() -> None:
-    columns = [
+    columns: list[ColumnInput] = [
         {"name": "user-id", "type": "String"},
         {"name": "ts", "type": "DateTime"},
     ]

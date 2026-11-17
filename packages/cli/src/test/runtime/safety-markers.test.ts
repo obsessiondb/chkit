@@ -5,6 +5,8 @@ import {
   collectUnmarkedDestructiveStatements,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  findNonSelectBarriers,
+  isSelectStatement,
   migrationContainsDestructiveSql,
   scanDestructiveSqlStatements,
 } from '../../runtime/safety-markers.js'
@@ -214,6 +216,59 @@ describe('scanDestructiveSqlStatements (defense-in-depth for unmarked SQL)', () 
     expect(migrationContainsDestructiveSql(sql)).toBe(false)
   })
 
+  // #642: every comment form ClickHouse reads, plus string literals and quoted
+  // names, is text the scan must not read as SQL.
+  const ignored: Array<[string, string]> = [
+    ['a // comment', '// DROP TABLE default.events\nSELECT 1;'],
+    ['a # comment', '# DROP TABLE default.events\nSELECT 1;'],
+    ['a #! comment', '#! DROP TABLE default.events\nSELECT 1;'],
+    ['a block comment', '/* DROP TABLE default.events */ SELECT 1;'],
+    ['a nested block comment', '/* a /* b */ TRUNCATE TABLE default.events */ SELECT 1;'],
+    ['a // comment after code', 'SELECT 1 // DROP TABLE default.events\n;'],
+    ['a string literal', "INSERT INTO default.log VALUES ('DROP TABLE default.events');"],
+    ['a heredoc', 'SELECT $x$DETACH TABLE default.events$x$;'],
+    ['a backtick-quoted name', 'SELECT 1 AS `DROP TABLE default.events`;'],
+    ['a double-quoted name', 'SELECT 1 AS "ALTER TABLE t DROP COLUMN c";'],
+  ]
+  for (const [label, sql] of ignored) {
+    test(`does NOT flag a destructive statement inside ${label}`, () => {
+      expect(scanDestructiveSqlStatements(sql)).toEqual([])
+    })
+  }
+
+  const flagged: Array<[string, string, string, string]> = [
+    ['a block comment between the keywords', 'DROP /* hand-written */ TABLE default.events;', 'drop_table', 'default.events'],
+    ['an empty block comment between the keywords', 'DROP/**/TABLE default.events;', 'drop_table', 'default.events'],
+    ['a line comment between the keywords', 'ALTER TABLE default.events DROP // why\nCOLUMN email;', 'alter_table_drop_column', 'default.events'],
+    ['a # comment between the keywords', 'TRUNCATE # all of it\nTABLE default.events;', 'truncate_table', 'default.events'],
+    ['a comment before it', '// cleanup\nDROP TABLE default.events;', 'drop_table', 'default.events'],
+    ['a comment naming another table before it', '/* TABLE default.wrong */ DROP TABLE default.events;', 'drop_table', 'default.events'],
+    ['a comment and a string around it', "DROP TABLE default.events /* 'x */ -- y\n;", 'drop_table', 'default.events'],
+    ['a quoted name', 'DETACH TABLE `events`;', 'detach', 'events'],
+    // ClickHouse reads U+2018...U+2019 as a string, so the ASCII quotes inside are text;
+    // the chkit lexer does not, and pairs them across the DROP.
+    [
+      'Unicode-quoted strings holding ASCII quotes around it',
+      "ALTER TABLE t COMMENT COLUMN x ‘it's’, DROP COLUMN y, COMMENT COLUMN z ‘it's’;",
+      'alter_table_drop_column',
+      't',
+    ],
+    ['a Unicode-quoted string holding a comment opener before it', 'ALTER TABLE t COMMENT COLUMN x ‘/*’, DROP COLUMN y;', 'alter_table_drop_column', 't'],
+  ]
+  for (const [label, sql, type, key] of flagged) {
+    test(`flags a destructive statement with ${label}`, () => {
+      const markers = collectUnmarkedDestructiveStatements('20260101_handwritten.sql', sql)
+      expect(markers.map((marker) => [marker.type, marker.key])).toEqual([[type, key]])
+    })
+  }
+
+  test('flags only the real statement after a commented-out one', () => {
+    const sql = 'SELECT 1 /* DROP TABLE default.a */; # DROP TABLE default.b\nTRUNCATE TABLE default.events;'
+    const found = scanDestructiveSqlStatements(sql)
+    expect(found.map((f) => f.type)).toEqual(['truncate_table'])
+    expect(found[0]?.statement).toBe('# DROP TABLE default.b\nTRUNCATE TABLE default.events;')
+  })
+
   test('does NOT flag a non-destructive migration', () => {
     const sql = `CREATE TABLE default.events (id UInt64) ENGINE = MergeTree ORDER BY id;\nINSERT INTO default.events SELECT * FROM s3('...');`
     expect(migrationContainsDestructiveSql(sql)).toBe(false)
@@ -304,5 +359,88 @@ describe('collectDestructiveOperationMarkers table-recreate warning (#23)', () =
     const markers = collectDestructiveOperationMarkers('20260101_swap.sql', sql)
     expect(markers).toHaveLength(1)
     expect(markers[0]?.warningCode).toBe('drop_table_data_loss')
+  })
+})
+
+describe('isSelectStatement (#634)', () => {
+  const selects = [
+    "SELECT query_id FROM system.processes WHERE query_kind IN ('Insert', 'AsyncInsertFlush');",
+    'select 1',
+    '  /* note */ -- line\n( (SELECT 1) ) UNION ALL (SELECT 2);',
+    '// note\nWITH 1 AS x SELECT x;',
+    '# note\nWITH x AS (SELECT 1), y AS (SELECT 2) SELECT * FROM x;',
+    'WITH (SELECT 1) AS x SELECT x',
+    '(WITH 1 AS x SELECT x);',
+    'WITH 1 AS x SELECT `insert` FROM t',
+    'SELECT * FROM (SELECT 1 AS insert, 2 AS parallel)',
+    "SELECT query_id FROM system.processes AS insert WHERE query_kind = 'Insert'",
+    'WITH 1 AS insert SELECT insert.x FROM t AS insert',
+    "FROM system.processes SELECT query_id WHERE query_kind = 'Insert';",
+  ]
+  const others = [
+    'CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    'EXCHANGE TABLES default.a AND default.b;',
+    'INSERT INTO default.t SELECT 1;',
+    'WITH 1 AS x INSERT INTO default.t SELECT x;',
+    'with 1 as x insert into default.t values (1);',
+    '(WITH 1 AS x INSERT INTO default.t SELECT x)',
+    'SELECT 1 PARALLEL WITH CREATE TABLE default.t (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    '(SELECT 1) parallel /* c */ with DROP TABLE default.t',
+    'WITH 1 AS x SELECT x PARALLEL WITH DROP TABLE default.t',
+    '`SELECT` 1',
+    "'SELECT'",
+    'EXPLAIN SELECT 1',
+    'FROM default.t SELECT 1 PARALLEL WITH DROP TABLE default.t',
+    'SHOW PROCESSLIST',
+    '/* SELECT */ DROP TABLE default.t',
+    '',
+  ]
+
+  for (const statement of selects) {
+    test(`a SELECT: ${JSON.stringify(statement)}`, () => {
+      expect(isSelectStatement(statement)).toBe(true)
+    })
+  }
+  for (const statement of others) {
+    test(`not a SELECT: ${JSON.stringify(statement)}`, () => {
+      expect(isSelectStatement(statement)).toBe(false)
+    })
+  }
+})
+
+describe('findNonSelectBarriers (#634)', () => {
+  test('lists the statements marked mode=barrier that are not a SELECT, by position', () => {
+    const sql = [
+      '-- operation: create_table key=table:default.a risk=safe',
+      'CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;',
+      '-- operation: cutover_wait_for_inserts key=table:default.a:cutover:mirror_barrier risk=safe mode=barrier',
+      "SELECT query_id FROM system.processes WHERE query_kind = 'Insert';",
+      '-- operation: create_table key=table:default.b risk=safe mode=barrier',
+      'CREATE TABLE default.b (id UInt64) ENGINE = MergeTree ORDER BY id;',
+      '-- operation: exchange_tables key=table:default.a risk=caution mode=barrier',
+      'EXCHANGE TABLES default.a AND default.b;',
+      '',
+    ].join('\n')
+
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([
+      {
+        index: 2,
+        statement: 'CREATE TABLE default.b (id UInt64) ENGINE = MergeTree ORDER BY id;',
+        summary: 'create_table key=table:default.b risk=safe mode=barrier',
+      },
+      {
+        index: 3,
+        statement: 'EXCHANGE TABLES default.a AND default.b;',
+        summary: 'exchange_tables key=table:default.a risk=caution mode=barrier',
+      },
+    ])
+  })
+
+  test('ignores statements without the barrier mode', () => {
+    const sql =
+      '-- operation: create_table key=table:default.a risk=safe mode=async\n' +
+      'CREATE TABLE default.a (id UInt64) ENGINE = MergeTree ORDER BY id;\n' +
+      'DROP TABLE default.b;\n'
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([])
   })
 })

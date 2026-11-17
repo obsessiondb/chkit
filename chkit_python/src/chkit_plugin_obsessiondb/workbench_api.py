@@ -13,10 +13,16 @@ from __future__ import annotations
 
 from typing import Any
 
+import httpx
 from pydantic import BaseModel, ConfigDict
 
 from chkit_plugin_obsessiondb.credentials import Credentials
 from chkit_plugin_obsessiondb.service_api import _rpc_post
+
+# The TS executor sends a query with Node's fetch, which waits 10 s to connect
+# and 300 s for the response headers and between body chunks; a query that
+# runs longer fails there too. The other console calls keep their 30 s.
+QUERY_TIMEOUT = httpx.Timeout(300.0, connect=10.0)
 
 
 class WorkbenchColumn(BaseModel):
@@ -37,6 +43,7 @@ class WorkbenchExecuteResult(BaseModel):
     statistics: dict[str, Any] | None = None
     query_id: str | None = None
     error: str | None = None
+    truncated: bool = False
 
 
 def workbench_query_execute(
@@ -46,6 +53,7 @@ def workbench_query_execute(
     query: str,
     settings: dict[str, Any] | None = None,
     query_id: str | None = None,
+    timeout: httpx.Timeout | float = QUERY_TIMEOUT,
 ) -> WorkbenchExecuteResult:
     """``workbench.query.execute`` — proxy a SQL string through ObsessionDB.
 
@@ -57,5 +65,5 @@ def workbench_query_execute(
         payload["settings"] = settings
     if query_id is not None:
         payload["queryId"] = query_id
-    body = _rpc_post(creds, "workbench/query/execute", payload)
+    body = _rpc_post(creds, "workbench/query/execute", payload, timeout=timeout)
     return WorkbenchExecuteResult.model_validate(body)

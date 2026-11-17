@@ -233,7 +233,7 @@ async function run(): Promise<void> {
     configPathArg = extractConfigPath(argv)
   } catch (error) {
     if (!(error instanceof MissingFlagValueError)) throw error
-    reportUsageError({ command: commandName, code: 'usage', message: error.message, jsonMode: argv.includes('--json') })
+    reportUsageError({ command: commandName, code: 'usage', message: error.message, jsonMode: options.includes('--json') })
     return
   }
   const env = { command: commandName, mode: process.env.NODE_ENV }

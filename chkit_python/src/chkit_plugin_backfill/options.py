@@ -18,6 +18,7 @@ from typing import Any
 from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 from chkit.core.jsnum import parse_js_number
+from chkit.core.sql_lexer import js_regex, js_trim
 from chkit_plugin_backfill.errors import BackfillConfigError
 
 _GiB = 1024**3
@@ -26,7 +27,7 @@ _GiB = 1024**3
 
 
 def _normalize_timestamp(raw: str, flag_name: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not value:
         msg = f"Missing value for {flag_name}"
         raise BackfillConfigError(msg)
@@ -47,7 +48,7 @@ _TARGET_RE = re.compile(r"^[A-Za-z0-9_]+\.[A-Za-z0-9_]+$")
 
 
 def _normalize_target(raw: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not _TARGET_RE.match(value):
         msg = "Invalid value for --target. Expected <database.table>."
         raise BackfillConfigError(msg)
@@ -55,7 +56,7 @@ def _normalize_target(raw: str) -> str:
 
 
 def _normalize_cutover_target(raw: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not _TARGET_RE.match(value):
         msg = "Invalid value for --cutover. Expected <database.table>."
         raise BackfillConfigError(msg)
@@ -68,11 +69,11 @@ _BYTE_SUFFIXES: dict[str, int] = {
     "M": 1024**2,
     "K": 1024,
 }
-_BYTE_RE = re.compile(r"^(\d+(?:\.\d+)?)\s*([TGMK])?$")
+_BYTE_RE = re.compile(js_regex(r"^(\d+(?:\.\d+)?)\s*([TGMK])?$"))
 
 
 def parse_byte_size(raw: str) -> int:
-    trimmed = raw.strip().upper()
+    trimmed = js_trim(raw).upper()
     match = _BYTE_RE.match(trimmed)
     if not match:
         msg = f"Invalid byte size: {raw}. Expected a number with optional suffix (K, M, G, T)."
@@ -91,7 +92,7 @@ _PLAN_ID_RE = re.compile(r"^[a-f0-9]{16}$")
 
 
 def _normalize_plan_id(raw: str) -> str:
-    value = raw.strip()
+    value = js_trim(raw)
     if not _PLAN_ID_RE.match(value):
         msg = "Invalid value for --plan-id. Expected a 16-char lowercase hex id."
         raise BackfillConfigError(msg)

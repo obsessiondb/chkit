@@ -138,6 +138,15 @@ ignore = [
 # (every error path falls through to the "database missing" check).
 "src/chkit/cli/journal_store.py" = ["BLE001"]
 
+[tool.towncrier]
+directory = "changelog.d"
+filename = "CHANGELOG.md"
+title_format = "## {version} — {project_date}"
+
+[tool.towncrier.fragment.added]
+[tool.towncrier.fragment.changed]
+[tool.towncrier.fragment.fixed]
+
 [tool.pytest.ini_options]
 minversion = "8.0"
 addopts = "-ra --strict-markers --strict-config"

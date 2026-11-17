@@ -11,6 +11,7 @@ Hard-fails (never skips) when the server is unreachable.
 
 from __future__ import annotations
 
+import functools
 import threading
 
 from chkit.clickhouse.client import ClickHouseClient, QueryResult, QueryStatus
@@ -45,7 +46,7 @@ def test_chunk_running_on_another_replica_resumes_as_running() -> None:
             worker.start()
             workers.append(worker)
             hosts = poll_until(
-                lambda query_id=query_id: _running_hosts(observer, fanout, query_id),
+                functools.partial(_running_hosts, observer, fanout, query_id),
                 lambda found: len(found) > 0,
                 interval=0.1,
             )

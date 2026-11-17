@@ -280,6 +280,7 @@ export default defineConfig({
 | `@chkit/plugin-pull` | `bun add -d @chkit/plugin-pull` | `chkit pull` | Introspect live ClickHouse into schema files |
 | `@chkit/plugin-backfill` | `bun add -d @chkit/plugin-backfill` | `chkit plugin backfill` | Partition/sort-key replay with checkpoints |
 | `@chkit/plugin-obsessiondb` | `bun add -d @chkit/plugin-obsessiondb` | `chkit query --service <name>` | Route commands through an ObsessionDB service |
+| `@chkit/plugin-tinybird` | `bun add -d @chkit/plugin-tinybird` | `chkit plugin tinybird import` | Import a Tinybird project; the `chkit-tinybird` skill covers the whole move |
 
 ## Common Workflows
 

@@ -74,6 +74,7 @@ describe('service alias command', () => {
 				),
 		) as typeof fetch
 
+		// chkit before #624 also passed the command name, as here: still accepted.
 		const exitCode = await SERVICE_COMMAND.run({
 			configPath,
 			args: ['service', 'alias', 'set', 'prod', 'production'],
@@ -101,7 +102,7 @@ describe('service alias command', () => {
 			const printed: unknown[] = []
 			const exitCode = await SERVICE_COMMAND.run({
 				configPath,
-				args: ['service', 'alias', 'set', alias, 'production'],
+				args: ['alias', 'set', alias, 'production'],
 				flags: {},
 				print: (value) => printed.push(value),
 			})

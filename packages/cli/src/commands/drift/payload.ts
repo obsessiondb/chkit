@@ -10,6 +10,7 @@ import {
   type SchemaObjectRef,
 } from '@chkit/clickhouse'
 import {
+  compareCodePoints,
   configuredIndexGranularity,
   type ChxConfig,
   type DictionaryDefinition,
@@ -225,14 +226,14 @@ export async function buildDriftPayload(
   const tableDrift = pairs
     .map(({ expected, actual }) => compareTableShape(expected, actual, canonicalizer, configuredIndexGranularity(config)))
     .filter((item): item is NonNullable<typeof item> => item !== null)
-    .sort((a, b) => a.table.localeCompare(b.table))
+    .sort((a, b) => compareCodePoints(a.table, b.table))
   const objectShapeDrift = [
     ...viewPairs.flatMap(({ expected, actual }) =>
       compareViewShape(expected, actual, currentDatabase ?? '', canonicalizer)
     ),
     ...dictionaryPairs.flatMap(({ expected, queries }) => compareDictionaryShape(expected, queries, canonicalizer)),
     ...compareObjectComments(expectedObjects, actualInScope),
-  ].sort((a, b) => a.object.localeCompare(b.object))
+  ].sort((a, b) => compareCodePoints(a.object, b.object))
   const objectDriftWithViews = [...objectDrift, ...objectShapeDrift]
 
   debug('drift', `comparison: missing=${missing.length}, extra=${extra.length}, kindMismatches=${kindMismatches.length}, objectDrift=${objectDrift.length}, tableDrift=${tableDrift.length}, viewDrift=${objectShapeDrift.length}`)

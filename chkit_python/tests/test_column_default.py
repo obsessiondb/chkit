@@ -861,6 +861,13 @@ def test_names_the_ephemeral_clause_and_null_reads() -> None:
         day(type="DateTime", nullable=True, default_kind="EPHEMERAL", default="now()")
     ])
     assert "which ClickHouse accepts for type Nullable(DateTime) but reads as NULL." in message
+    [message] = issue_messages([
+        day(type="LowCardinality(DateTime)", nullable=True, default_kind="EPHEMERAL", default="now()")
+    ])
+    assert (
+        "which ClickHouse accepts for type LowCardinality(Nullable(DateTime)) but reads as NULL."
+        in message
+    )
 
 
 @pytest.mark.parametrize(
