@@ -21,6 +21,7 @@ from tests.cutover_scenario import (
     CutoverTarget,
     run_backfill_scenario,
     run_keep_scenario,
+    run_refused_at_start_scenario,
     run_retry_scenario,
     run_undeclared_primary_key_scenario,
 )
@@ -90,3 +91,33 @@ def test_cuts_over_a_table_created_with_only_order_by(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
     run_undeclared_primary_key_scenario(target, "cutover_pk", tmp_path)
+
+
+# cityHash64 hashes both pairs alike, so the verify step after the copy would miss them.
+MISTYPED = "stores a column with another type than the schema declares"
+
+
+def test_stops_before_it_creates_anything_on_uint32_where_the_schema_says_uint64(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_uint",
+        tmp_path,
+        columns="id UInt32, user_id UInt64, payload String",
+        engine=lambda _table: target.engine,
+        message=MISTYPED,
+    )
+
+
+def test_stops_before_it_creates_anything_on_low_cardinality_where_the_schema_says_string(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_lowcard",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload LowCardinality(String)",
+        engine=lambda _table: target.engine,
+        message=MISTYPED,
+    )

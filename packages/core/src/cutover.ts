@@ -428,7 +428,8 @@ function buildOperations(input: {
  * not attach to one that declares PRIMARY KEY (#524). A Replicated table
  * keeps the old definition unless its path in the schema has {uuid}: ClickHouse
  * expands {table} when it creates a table, also in a default_replica_path that
- * chkit cannot see, so a copy could register at the table's own path.
+ * chkit cannot see, so a copy could register at the table's own path. The
+ * first statement checks that the path the server stores has {uuid} too.
  */
 function createSnapshotSQL(input: {
   oldDef: TableDefinition
@@ -519,6 +520,19 @@ function createCutoverSql(input: {
   const storedColumns = `FROM system.columns WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(table)} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')`
   const undeclaredColumns = `(SELECT countIf(NOT (has(${literals(oldColumns.map((column) => column.name))}, name)${nested.length > 0 ? ` OR arrayExists(column -> startsWith(name, concat(column, '.')), ${literals(nested)})` : ''})) ${storedColumns}) AS undeclared_columns`
   const declaredColumns = `(${tableCount(table)} = 0 OR (SELECT hasAll(groupArray(name), ${literals(columns.filter((column) => !nested.includes(column)))}) ${storedColumns})) AS declared_columns`
+  // The snapshot takes the column types the server stores, and the copy then
+  // converts each value to the new type. The verify hash does not see every
+  // change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
+  // `Decimal(10, 2)` for `Decimal(10,2)`, so the types are compared without spaces.
+  const typed = oldColumns.filter((column) => !nested.includes(column.name))
+  const typePairs = `[${typed.map((column) => `(${stringLiteral(column.name)}, ${stringLiteral(renderColumnType(column).replace(/\s+/g, ''))})`).join(', ')}]`
+  const mistypedColumns = `(SELECT countIf(has(${literals(typed.map((column) => column.name))}, name) AND NOT has(${typePairs}, (name, replaceAll(type, ' ', '')))) ${storedColumns}) AS mistyped_columns`
+  // AS copies the replication path the server stores, which can differ from
+  // the schema's. Without {uuid} the snapshot would register at the table's
+  // own path, and ClickHouse refuses that only after the mirror exists.
+  const uuidPath = snapshotFromDefinition
+    ? undefined
+    : `(${tableCount(table)} = 0 OR (SELECT any(NOT startsWith(engine, 'Replicated') OR position(engine_full, '{uuid}') > 0) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)})) AS uuid_path`
   // A snapshot rendered from the old definition always declares PRIMARY KEY.
   // Before ClickHouse 26.7 parts attach only between tables that both declare
   // it or both leave it out; 26.7 compares the key by value.
@@ -600,6 +614,12 @@ function createCutoverSql(input: {
       `  throwIf(min(present) = 0, ${stringLiteral(`Table ${target} does not exist.`)}),`,
       `  throwIf(max(undeclared_columns) > 0, ${stringLiteral(`${target} stores a column that the schema does not declare, so its values would not reach the new table. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
       `  throwIf(min(declared_columns) = 0, ${stringLiteral(`${target} lacks a column that the schema declares, so the mirror cannot read it. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
+      `  throwIf(max(mistyped_columns) > 0, ${stringLiteral(`${target} stores a column with another type than the schema declares, so the copy would convert its values. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
+      ...(uuidPath
+        ? [
+            `  throwIf(min(uuid_path) = 0, ${stringLiteral(`The replication path that ${target} stores has no {uuid}, so a snapshot created AS the table would register at the same path. Nothing was created or copied. Set the replication path in the schema to the one the table was created with, and generate the cutover again.`)}),`,
+          ]
+        : []),
       ...(declaredKey
         ? [
             `  throwIf(min(declared_key) = 0, ${stringLiteral(`${target} was created without PRIMARY KEY. Its replication path in the schema has no {uuid}, so the cutover's snapshot is created from the schema with PRIMARY KEY, and before ClickHouse 26.7 the table's parts do not attach to it. Nothing was created or copied. Recreate the table with PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" in the cutover guide.`)}),`,
@@ -618,6 +638,8 @@ function createCutoverSql(input: {
           `${tableCount(table)} AS present,`,
           `${undeclaredColumns},`,
           `${declaredColumns},`,
+          `${mistypedColumns},`,
+          ...(uuidPath ? [`${uuidPath},`] : []),
           ...(declaredKey ? [`${declaredKey},`] : []),
           `${tableCount(names.shadow)} + ${tableCount(names.mirror)} + ${tableCount(names.snapshot)} + ${tableCount(names.reconcile)} AS leftovers,`,
           `${pendingMutations} AS mutations${settingsMatch ? ',' : ''}`,

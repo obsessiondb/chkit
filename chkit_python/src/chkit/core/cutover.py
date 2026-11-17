@@ -548,7 +548,8 @@ def _create_snapshot_sql(
     not attach to one that declares PRIMARY KEY (#524). A Replicated table
     keeps the old definition unless its path in the schema has {uuid}: ClickHouse
     expands {table} when it creates a table, also in a default_replica_path that
-    chkit cannot see, so a copy could register at the table's own path. TS
+    chkit cannot see, so a copy could register at the table's own path. The
+    first statement checks that the path the server stores has {uuid} too. TS
     ``createSnapshotSQL``."""
     comment = format_cutover_metadata(metadata)
     if _snapshot_from_definition(old_def):
@@ -683,6 +684,37 @@ def _create_cutover_sql(
         f"({table_count(table)} = 0 OR (SELECT hasAll(groupArray(name), "
         f"{literals([column for column in columns if column not in nested])}) "
         f"{stored_columns})) AS declared_columns"
+    )
+    # The snapshot takes the column types the server stores, and the copy then
+    # converts each value to the new type. The verify hash does not see every
+    # change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
+    # `Decimal(10, 2)` for `Decimal(10,2)`, so the types are compared without spaces.
+    typed = [column for column in old_columns if column.name not in nested]
+    type_pairs = (
+        "["
+        + ", ".join(
+            f"({_string_literal(column.name)}, {_string_literal(spaceless)})"
+            for column in typed
+            for spaceless in [re.sub(r"\s+", "", render_column_type(column))]
+        )
+        + "]"
+    )
+    mistyped_columns = (
+        f"(SELECT countIf(has({literals([column.name for column in typed])}, name) AND NOT "
+        f"has({type_pairs}, (name, replaceAll(type, ' ', '')))) {stored_columns}) "
+        "AS mistyped_columns"
+    )
+    # AS copies the replication path the server stores, which can differ from
+    # the schema's. Without {uuid} the snapshot would register at the table's
+    # own path, and ClickHouse refuses that only after the mirror exists.
+    uuid_path = (
+        None
+        if snapshot_from_definition
+        else (
+            f"({table_count(table)} = 0 OR (SELECT any(NOT startsWith(engine, 'Replicated') OR "
+            "position(engine_full, '{uuid}') > 0) FROM system.tables WHERE database = "
+            f"{_string_literal(database)} AND name = {_string_literal(table)})) AS uuid_path"
+        )
     )
     # A snapshot rendered from the old definition always declares PRIMARY KEY.
     # Before ClickHouse 26.7 parts attach only between tables that both declare
@@ -836,6 +868,8 @@ def _create_cutover_sql(
             f"{table_count(table)} AS present,",
             f"{undeclared_columns},",
             f"{declared_columns},",
+            f"{mistyped_columns},",
+            *([f"{uuid_path},"] if uuid_path else []),
             *([f"{declared_key},"] if declared_key else []),
             f"{table_count(names.shadow)} + {table_count(names.mirror)} + "
             f"{table_count(names.snapshot)} + {table_count(names.reconcile)} AS leftovers,",
@@ -869,6 +903,27 @@ def _create_cutover_sql(
                 "the table, and generate the cutover again."
             )
             + "),",
+            "  throwIf(max(mistyped_columns) > 0, "
+            + _string_literal(
+                f"{target} stores a column with another type than the schema declares, so the "
+                "copy would convert its values. Nothing was created or copied. Run chkit drift, "
+                "change the schema to match the table, and generate the cutover again."
+            )
+            + "),",
+            *(
+                [
+                    "  throwIf(min(uuid_path) = 0, "
+                    + _string_literal(
+                        f"The replication path that {target} stores has no {{uuid}}, so a "
+                        "snapshot created AS the table would register at the same path. Nothing "
+                        "was created or copied. Set the replication path in the schema to the one "
+                        "the table was created with, and generate the cutover again."
+                    )
+                    + "),"
+                ]
+                if uuid_path
+                else []
+            ),
             *(
                 [
                     "  throwIf(min(declared_key) = 0, "

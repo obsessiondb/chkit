@@ -187,6 +187,29 @@ describe('planCutover', () => {
     expect(start).not.toContain('declared_key')
   })
 
+  test('checks the table stores the column types of the old definition, before it creates anything', () => {
+    // The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs UInt64.
+    // chkit-py's test_cutover.py asserts the same.
+    const typed = [...columns, { name: 'price', type: 'Decimal(10, 2)', nullable: true }, { name: 'n', type: 'Nested(x UInt8)' }] as TableDefinition['columns']
+    const start = plan({ oldDef: events({ columns: typed }), newDef: events({ columns: typed, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
+    expect(start).toContain(
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price'], name) AND NOT has([('id', 'UInt64'), ('user_id', 'UInt64'), ('payload', 'String'), ('price', 'Nullable(Decimal(10,2))')], (name, replaceAll(type, ' ', '')))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+    )
+    expect(start).toContain("throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type than the schema declares")
+  })
+
+  test('checks on every replica that the table stores {uuid} in its replication path when the snapshot is created AS it', () => {
+    // AS copies the path the server stores, not the schema's.
+    // chkit-py's test_cutover.py asserts the same.
+    const engine = "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')"
+    const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    expect(start).toContain(
+      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(NOT startsWith(engine, 'Replicated') OR position(engine_full, '{uuid}') > 0) FROM system.tables WHERE database = 'app' AND name = 'events')) AS uuid_path"
+    )
+    expect(start).toContain("throwIf(min(uuid_path) = 0, 'The replication path that app.events stores has no {uuid}")
+    expect(start).toContain("FROM clusterAllReplicas('c2', view(")
+  })
+
   test('checks a table whose snapshot comes from the old definition declares PRIMARY KEY, before ClickHouse 26.7', () => {
     // chkit-py's test_cutover.py asserts the same.
     const engine = 'ReplicatedMergeTree'
@@ -195,6 +218,7 @@ describe('planCutover', () => {
       "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = 'app' AND name = 'events') OR toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
     )
     expect(start).toContain("throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY.")
+    expect(start).not.toContain('uuid_path')
   })
 
   test('mirrors the copied columns and copies only rows whose key the shadow lacks', () => {

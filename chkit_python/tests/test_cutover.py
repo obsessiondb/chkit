@@ -444,6 +444,52 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
     assert "declared_key" not in start
 
 
+def test_checks_the_table_stores_the_old_column_types() -> None:
+    # The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs
+    # UInt64. Before it creates anything; TS cutover.test.ts asserts the same.
+    typed: list[Any] = [
+        *COLUMNS,
+        {"name": "price", "type": "Decimal(10, 2)", "nullable": True},
+        {"name": "n", "type": "Nested(x UInt8)"},
+    ]
+    start = plan(
+        old_def=events(["id"], columns=typed), new_def=events(["user_id", "id"], columns=typed)
+    ).operations[0].sql
+    assert (
+        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price'], name) AND NOT has("
+        "[('id', 'UInt64'), ('user_id', 'UInt64'), ('payload', 'String'), "
+        "('price', 'Nullable(Decimal(10,2))')], (name, replaceAll(type, ' ', '')))) "
+        "FROM system.columns WHERE database = 'app' AND table = 'events' "
+        "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+    ) in start
+    assert (
+        "throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type "
+        "than the schema declares"
+    ) in start
+
+
+def test_checks_every_replica_stores_uuid_in_the_path_when_the_snapshot_is_created_as_it() -> (
+    None
+):
+    # AS copies the path the server stores, not the schema's. TS cutover.test.ts
+    # asserts the same.
+    engine = "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')"
+    start = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    ).operations[0].sql
+    assert (
+        "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
+        "(SELECT any(NOT startsWith(engine, 'Replicated') OR position(engine_full, '{uuid}') > 0) "
+        "FROM system.tables WHERE database = 'app' AND name = 'events')) AS uuid_path"
+    ) in start
+    assert (
+        "throwIf(min(uuid_path) = 0, 'The replication path that app.events stores has no {uuid}"
+    ) in start
+    assert "FROM clusterAllReplicas('c2', view(" in start
+
+
 def test_checks_primary_key_before_26_7_when_the_snapshot_comes_from_the_definition() -> None:
     # TS cutover.test.ts asserts the same.
     engine = "ReplicatedMergeTree"
@@ -459,6 +505,7 @@ def test_checks_primary_key_before_26_7_when_the_snapshot_comes_from_the_definit
         "* 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key"
     ) in start
     assert "throwIf(min(declared_key) = 0, 'app.events was created without PRIMARY KEY." in start
+    assert "uuid_path" not in start
 
 
 def test_cluster_runs_data_steps_on_every_shard() -> None:

@@ -578,6 +578,46 @@ export async function runUndeclaredPrimaryKeyScenario(target: CutoverTarget, lab
   }
 }
 
+/**
+ * The table is created outside chkit with `columns` and the engine that
+ * `engine` returns for its name, which differ from the schema. The snapshot is created AS the table, so it would take the
+ * server's state: the cutover must stop at its first statement, before it
+ * creates anything.
+ */
+export async function runRefusedAtStartScenario(
+  target: CutoverTarget,
+  label: string,
+  created: { columns: string; engine: (table: string) => string },
+  message: string,
+): Promise<void> {
+  const project = await createCutoverProject(target, label)
+  try {
+    const fqn = `${target.database}.${project.table}`
+    const cluster = target.connection.cluster
+    const onCluster = cluster ? ` ON CLUSTER '${cluster}'` : ''
+    await target.admin.command(`DROP TABLE ${fqn}${onCluster} SYNC`)
+    await target.admin.command(`CREATE TABLE ${fqn}${onCluster} (${created.columns}) ENGINE = ${created.engine(project.table)} ORDER BY id`)
+    await pollUntil(
+      () => target.admin.query<{ name: string }>(`SELECT name FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
+      (found) => found.length > 0,
+    )
+
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${fqn}=id`, '--json']), 'generate --cutover')
+    const refused = cli(project, ['migrate', '--apply', '--json'])
+    if (refused.exitCode === 0 || !`${refused.stdout}${refused.stderr}`.includes(message)) {
+      throw new Error(formatTestDiagnostic(`migrate --apply must stop with "${message}"`, refused))
+    }
+    const tables = cluster ? `clusterAllReplicas('${cluster}', system.tables)` : 'system.tables'
+    const leftovers = await target.admin.query<{ name: string }>(
+      `SELECT name FROM ${tables} WHERE database = '${target.database}' AND startsWith(name, '${project.table}__cutover_')`,
+    )
+    if (leftovers.length > 0) throw new Error(`the cutover must create nothing, found ${JSON.stringify(leftovers)}`)
+  } finally {
+    await dropCutoverProject(target, project)
+  }
+}
+
 /** Replaces the SQL of operation `step` (0-based) with a statement that fails, keeping its marker lines. */
 function injectFailure(blocks: string[], step: number): string {
   return blocks

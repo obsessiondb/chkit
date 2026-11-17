@@ -651,6 +651,57 @@ def run_undeclared_primary_key_scenario(
         drop_cutover_project(target, project)
 
 
+def run_refused_at_start_scenario(
+    target: CutoverTarget,
+    label: str,
+    directory: Path,
+    *,
+    columns: str,
+    engine: Callable[[str], str],
+    message: str,
+) -> None:
+    """The table is created outside chkit with ``columns`` and the engine that
+    ``engine`` returns for its name, which differ from the schema. The snapshot
+    is created AS the table, so it would take the server's state: the cutover
+    must stop at its first statement, before it creates anything. TS
+    ``runRefusedAtStartScenario``."""
+    project = create_cutover_project(target, label, directory)
+    try:
+        fqn = f"{target.database}.{project.table}"
+        on_cluster = f" ON CLUSTER '{target.cluster}'" if target.cluster else ""
+        target.admin.execute(f"DROP TABLE {fqn}{on_cluster} SYNC")
+        target.admin.execute(
+            f"CREATE TABLE {fqn}{on_cluster} ({columns}) "
+            f"ENGINE = {engine(project.table)} ORDER BY id"
+        )
+        created = poll_until(
+            lambda: target.admin.query(
+                "SELECT name FROM system.tables "
+                f"WHERE database = '{target.database}' AND name = '{project.table}'"
+            ).rows,
+            bool,
+        )
+        assert created, "the table is not listed"
+
+        _generate_cutover(target, project)
+        refused = cli(["migrate", "--apply", "--json"])
+        diagnostic = format_test_diagnostic(f'migrate --apply must stop with "{message}"', refused)
+        assert refused.exit_code != 0, diagnostic
+        assert message in refused.output, diagnostic
+        tables = (
+            f"clusterAllReplicas('{target.cluster}', system.tables)"
+            if target.cluster
+            else "system.tables"
+        )
+        leftovers = target.admin.query(
+            f"SELECT name FROM {tables} WHERE database = '{target.database}' "
+            f"AND startsWith(name, '{project.table}__cutover_')"
+        ).rows
+        assert leftovers == [], f"the cutover must create nothing, found {leftovers}"
+    finally:
+        drop_cutover_project(target, project)
+
+
 def _inject_failure(blocks: list[str], step: int) -> str:
     """Replace the SQL of operation ``step`` (0-based) with a statement that
     fails, keeping its marker lines."""
