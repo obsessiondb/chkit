@@ -186,7 +186,7 @@
     },
     "packages/plugin-tinybird": {
       "name": "@chkit/plugin-tinybird",
-      "version": "0.2.0-beta.15",
+      "version": "0.2.0-beta.16",
       "dependencies": {
         "@chkit/clickhouse": "workspace:*",
         "@chkit/core": "workspace:*",

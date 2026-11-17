@@ -195,13 +195,19 @@ describe('@chkit/clickhouse waitForDDLPropagation e2e', () => {
  */
 async function recordPollingQueries(executor: ClickHouseExecutor) {
   const queries: string[] = []
-  const recording: ClickHouseExecutor = {
-    ...executor,
-    async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
-      queries.push(sql)
-      return executor.query<T>(sql, settings)
-    },
+  // The definition waits poll through openConcurrent(), so record those too.
+  const record = (target: ClickHouseExecutor): ClickHouseExecutor => {
+    const open = target.openConcurrent?.bind(target)
+    return {
+      ...target,
+      async query<T>(sql: string, settings?: ClickHouseSettings): Promise<T[]> {
+        queries.push(sql)
+        return target.query<T>(sql, settings)
+      },
+      ...(open ? { openConcurrent: () => record(open()) } : {}),
+    }
   }
+  const recording = record(executor)
   const fanout = await resolveReplicaFanout(recording)
   const polled = (source: string, where: string) =>
     fanout

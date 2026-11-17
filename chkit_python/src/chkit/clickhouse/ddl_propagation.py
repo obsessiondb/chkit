@@ -411,8 +411,9 @@ def wait_for_column_definition(
     )
     replicas = fanout.replicas if fanout else 1
     _wait_until_applied(
+        client,
         f"{database}.{table_name}.{column_name} definition",
-        lambda: _column_definition_mismatch(client.query(sql).rows, replicas, expected),
+        lambda reader: _column_definition_mismatch(reader.query(sql).rows, replicas, expected),
     )
 
 
@@ -435,8 +436,8 @@ def wait_for_column_rename(
         f"AND name IN ('{_quote(from_)}', '{_quote(to)}')"
     )
 
-    def _check() -> str | None:
-        rows = client.query(sql).rows
+    def _check(reader: Any) -> str | None:
+        rows = reader.query(sql).rows
         stale = [str(row.get("replica")) for row in rows if row.get("name") == from_]
         if stale:
             return f"replica {', '.join(stale)} still lists column {from_}"
@@ -445,10 +446,10 @@ def wait_for_column_rename(
             return f"column {to} is listed on {len(renamed)} of {replicas} replicas"
         return None
 
-    _wait_until_applied(f"{database}.{table_name} rename of column {from_} to {to}", _check)
+    _wait_until_applied(client, f"{database}.{table_name} rename of column {from_} to {to}", _check)
 
 
-def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
+def _wait_until_applied(client: Any, subject: str, check: Callable[[Any], str | None]) -> None:
     """Poll ``check`` until it reports no mismatch.
 
     Checks 0.5 s apart until the 30 s deadline; a check that does not return
@@ -456,23 +457,35 @@ def _wait_until_applied(subject: str, check: Callable[[], str | None]) -> None:
     timeout (#661). On timeout the error names what was still different on the
     last check that returned, and says so when the check after it did not
     return (#750).
+
+    A check cut off at the deadline is still in flight, so the checks go
+    through ``client.open_concurrent()`` when the client has one: ClickHouse
+    runs one query at a time per session, and a check left running on the
+    caller's session would lock out its next request (TS ``waitUntilApplied``).
     """
     deadline = time.monotonic() + DEFINITION_WAIT_DEADLINE_SECONDS
+    open_concurrent = getattr(client, "open_concurrent", None)
+    concurrent = open_concurrent() if callable(open_concurrent) else None
+    reader = concurrent or client
     detail = ""
     checks = 0
-    while True:
-        checks += 1
-        timed_out, mismatch = _check_before(check, deadline)
-        if timed_out:
-            late = f"did not return within the {DEFINITION_WAIT_DEADLINE_SECONDS:g}s deadline"
-            detail = f"{detail} (the last check {late})" if detail else f"a check {late}"
-            break
-        if mismatch is None:
-            return
-        detail = mismatch
-        if time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
-            break
-        time.sleep(RETRY_DELAY_SECONDS)
+    try:
+        while True:
+            checks += 1
+            timed_out, mismatch = _check_before(lambda: check(reader), deadline)
+            if timed_out:
+                late = f"did not return within the {DEFINITION_WAIT_DEADLINE_SECONDS:g}s deadline"
+                detail = f"{detail} (the last check {late})" if detail else f"a check {late}"
+                break
+            if mismatch is None:
+                return
+            detail = mismatch
+            if time.monotonic() + RETRY_DELAY_SECONDS >= deadline:
+                break
+            time.sleep(RETRY_DELAY_SECONDS)
+    finally:
+        if concurrent is not None:
+            concurrent.close()
     msg = (
         f"waitForDDLPropagation: {subject} not applied on every replica "
         f"after {checks} checks: {detail}"
@@ -485,9 +498,7 @@ def _check_before(check: Callable[[], str | None], deadline: float) -> tuple[boo
 
     Returns whether the check timed out, else its mismatch or error message.
     The check runs on a daemon thread, so a check that never returns does not
-    keep the process alive. An abandoned check still holds the client's
-    session, so a caller must not send another query on that client after the
-    timeout.
+    keep the process alive.
     """
     outcome: list[str | None] = []
 
@@ -538,8 +549,8 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
         f"FROM {all_replicas(fanout, 'system.tables')} WHERE {where} GROUP BY database, name"
     )
 
-    def _check() -> str | None:
-        rows = client.query(sql).rows
+    def _check(reader: Any) -> str | None:
+        rows = reader.query(sql).rows
         if len(rows) < 2:  # noqa: PLR2004 - the two exchanged tables
             return f"only {len(rows)} of the 2 tables are listed"
         for row in rows:
@@ -554,7 +565,7 @@ def wait_for_exchange(client: Any, statement: str, *, cluster: str | None = None
             return "both names report the same uuid"
         return None
 
-    _wait_until_applied(f"EXCHANGE TABLES {db1}.{t1} AND {db2}.{t2}", _check)
+    _wait_until_applied(client, f"EXCHANGE TABLES {db1}.{t1} AND {db2}.{t2}", _check)
 
 
 _QUOTED_OR_BARE = r"(?:`(?:[^`\\]|\\.)*`|[^\s.`;]+)"
