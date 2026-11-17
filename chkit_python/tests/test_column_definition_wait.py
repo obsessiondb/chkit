@@ -428,6 +428,73 @@ def test_a_check_cut_off_by_the_deadline_keeps_the_mismatch_the_checks_before_it
     )
 
 
+@dataclass
+class _Concurrent:
+    """A client without a session whose polls hold until ``release`` is set."""
+
+    release: threading.Event
+    closed: bool = False
+
+    def query(self, sql: str) -> _Result:
+        self.release.wait(10)
+        return _Result([])
+
+    def close(self) -> None:
+        self.closed = True
+
+
+@dataclass
+class _SessionTarget:
+    """A session runs one query at a time: a poll that never returns holds it."""
+
+    release: threading.Event = field(default_factory=threading.Event)
+    concurrent: list[_Concurrent] = field(default_factory=list[_Concurrent])
+    _held: bool = False
+
+    def query(self, sql: str) -> _Result:
+        self._refuse_while_held()
+        if "system.one" in sql:
+            return _Result([{"replicas": 2}])
+        self._held = True
+        self.release.wait(10)
+        return _Result([])
+
+    def execute(self, sql: str) -> None:
+        self._refuse_while_held()
+
+    def open_concurrent(self) -> _Concurrent:
+        self.concurrent.append(_Concurrent(self.release))
+        return self.concurrent[-1]
+
+    def _refuse_while_held(self) -> None:
+        if self._held:
+            msg = "Attempt to execute concurrent queries within the same session."
+            raise RuntimeError(msg)
+
+
+def test_a_check_cut_off_by_the_deadline_leaves_the_session_free_for_the_next_request(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    monkeypatch.setattr("chkit.clickhouse.ddl_propagation.DEFINITION_WAIT_DEADLINE_SECONDS", 0.5)
+    target = _SessionTarget()
+
+    try:
+        with pytest.raises(
+            RuntimeError, match=re.escape("a check did not return within the 0.5s deadline")
+        ):
+            wait_for_ddl_propagation(
+                target,
+                "alter_table_modify_column",
+                KEY,
+                statement="ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;",
+            )
+        target.execute("DROP TABLE app.events")
+    finally:
+        target.release.set()
+
+    assert [client.closed for client in target.concurrent] == [True]
+
+
 # ---------- other column operations ----------
 
 
