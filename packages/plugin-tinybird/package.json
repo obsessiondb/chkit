@@ -1,6 +1,6 @@
 {
   "name": "@chkit/plugin-tinybird",
-  "version": "0.2.0-beta.15",
+  "version": "0.2.0-beta.16",
   "description": "Import a Tinybird project as a chkit schema: datasources, materialized views, copy pipes and endpoints",
   "license": "MIT",
   "author": "ObsessionDB",
