@@ -520,28 +520,29 @@ function githubReleaseExists(tag: string): boolean {
  * manual dispatch skips the commit check and releases whatever main is at.
  */
 function detectRelease(): void {
-	ensureTools(['git', 'npm', 'gh'])
-	const version = readReleaseVersion()
-
+	let claimed: string | null = null
 	if (process.env.GITHUB_EVENT_NAME !== 'workflow_dispatch') {
 		const subject = runCommand('git', [
 			'log',
 			'-1',
 			'--format=%s',
 		]).stdout.trim()
-		const claimed = parseReleaseSubject(subject)
+		claimed = parseReleaseSubject(subject)
 		if (claimed === null) {
 			logLine('Not a release commit.')
 			writeGithubOutput({ release: 'false' })
 			return
 		}
-		if (claimed !== version) {
-			fail(
-				`Release commit claims v${claimed}, but the packages are at ${version}.`,
-			)
-		}
 	}
 
+	const version = readReleaseVersion()
+	if (claimed !== null && claimed !== version) {
+		fail(
+			`Release commit claims v${claimed}, but the packages are at ${version}.`,
+		)
+	}
+
+	ensureTools(['npm', 'gh'])
 	const complete =
 		readWorkspacePackages()
 			.filter(({ pkg }) => !pkg.private && pkg.name)
