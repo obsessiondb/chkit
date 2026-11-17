@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import json
-from collections.abc import Callable, Sequence
+from collections.abc import Callable, Sequence, Set
 
+from chkit.core.canonical import definition_key
 from chkit.core.column_cycle_repair import _cycle_releases, _repaired_order
 from chkit.core.column_reads import (
     _column_default_reads,
@@ -18,11 +19,12 @@ from chkit.core.column_reads import (
 from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.model import (
     ColumnRenameSuggestion,
+    MaterializedViewDefinition,
     MigrationOperation,
     SchemaDefinition,
     TableDefinition,
 )
-from chkit.core.object_dependencies import order_by_dependencies
+from chkit.core.object_dependencies import build_dependency_graph, order_by_dependencies
 from chkit.core.sql import column_type_fingerprint
 
 # The table TTL statement (MODIFY or REMOVE TTL) sorts with the column
@@ -34,6 +36,7 @@ _COLUMN_STATEMENTS = frozenset(
         "alter_table_drop_column",
         "alter_table_rename_column",
         "alter_table_modify_ttl",
+        "alter_materialized_view_modify_query",
     }
 )
 
@@ -42,17 +45,18 @@ def is_column_statement(op: MigrationOperation) -> bool:
     return op.type in _COLUMN_STATEMENTS
 
 
-def order_column_statements(
+def order_column_statements(  # noqa: PLR0915
     operations: Sequence[MigrationOperation],
     *,
     previous: Sequence[SchemaDefinition],
     next_: Sequence[SchemaDefinition],
     renames: Sequence[ColumnRenameSuggestion],
 ) -> list[MigrationOperation]:
-    """Order the column and TTL statements of every table in one sort (TS orderColumnStatements).
+    """Order the column, TTL and view query statements in one sort (TS orderColumnStatements).
 
     The statements are ADD, MODIFY, DROP and RENAME COLUMN and the table TTL
-    statement, from their key order (#681, #745, #746, #758, #769, #775):
+    statement of every table, and the MODIFY QUERY of every materialized view,
+    from their key order (#681, #745, #746, #758, #760, #769, #775):
 
     - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
       a table TTL that reads column X runs after the ADD of X or the RENAME to X;
@@ -69,12 +73,18 @@ def order_column_statements(
     - when the order still closes a cycle in a table whose reads are certain
       (``_repaired_order``), the first breaker in key order runs before the
       MODIFY that closes it (``_break_closed_cycles``, #775);
+    - a MODIFY QUERY runs after the ADD, MODIFY and RENAME of every column of
+      the tables its new query reads or writes, since ClickHouse analyzes the
+      new query, and before the DROP of a column of a table its old query
+      reads or writes, since ClickHouse refuses to drop a column a view still
+      reads;
     - statements of the same column keep their order.
 
     Members of a cycle keep their key order. The statements fill the positions
     the column statements had, so every other operation keeps its place, and
-    a table's statements never move past another table's (they share no
-    edge). ``renames`` names the columns of each RENAME COLUMN in ``operations``.
+    a table's statements move past another table's only through a MODIFY
+    QUERY that reads both (they share no other edge). ``renames`` names the
+    columns of each RENAME COLUMN in ``operations``.
     """
     reads = _column_default_reads(next_, column_key_of=_column_object_id)
     old_reads = _column_default_reads(previous, column_key_of=_column_object_id)
@@ -87,7 +97,20 @@ def order_column_statements(
         _rename_object_id(rename): _column_object_id(rename.database, rename.table, rename.to)
         for rename in renames
     }
+    query_reads = _materialized_view_query_reads(next_)
+    old_query_reads = _materialized_view_query_reads(previous)
+
+    def changes_column_of(op: MigrationOperation, tables: Set[str]) -> bool:
+        return any(
+            op.key.startswith((f"{table}:column:", f"{table}:column_rename:")) for table in tables
+        )
+
     statements = sorted((op for op in operations if is_column_statement(op)), key=lambda op: op.key)
+    queries = [
+        index
+        for index, op in enumerate(statements)
+        if op.type == "alter_materialized_view_modify_query"
+    ]
     ids = _statement_object_ids(statements, previous, next_, renames)
     # The statements of one object (``ids``) are next to each other in key order.
     last_of: dict[str, int] = {}
@@ -134,6 +157,15 @@ def order_column_statements(
         if op.type == "alter_table_drop_column":
             for other in releasers.get(id_, []):
                 found[other] = None
+            for query in queries:
+                if changes_column_of(op, old_query_reads.get(statements[query].key, set())):
+                    found[query] = None
+        if op.type == "alter_materialized_view_modify_query":
+            for candidate_index, candidate in enumerate(statements):
+                if candidate.type != "alter_table_drop_column" and changes_column_of(
+                    candidate, query_reads.get(op.key, set())
+                ):
+                    found[candidate_index] = None
         # A column's last statement is the MODIFY COLUMN that sets its new expression.
         if op.type == "alter_table_modify_column" and last_of[id_] == index:
             for column in releases.get(id_, []):
@@ -167,6 +199,21 @@ def order_column_statements(
         )
     )
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
+
+
+def _materialized_view_query_reads(
+    definitions: Sequence[SchemaDefinition],
+) -> dict[str, set[str]]:
+    """MODIFY QUERY operation key to the keys of the definitions the view reads.
+
+    The view's target is one of them.
+    """
+    graph = build_dependency_graph(definitions)
+    return {
+        f"{definition_key(definition)}:query": graph.get(definition_key(definition), set())
+        for definition in definitions
+        if isinstance(definition, MaterializedViewDefinition)
+    }
 
 
 def _statement_object_ids(

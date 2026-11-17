@@ -52,6 +52,7 @@ from chkit.core.sql import (
     render_alter_drop_projection,
     render_alter_modify_column,
     render_alter_modify_comment,
+    render_alter_modify_query,
     render_alter_modify_refresh,
     render_alter_modify_setting,
     render_alter_modify_ttl,
@@ -333,19 +334,33 @@ def _refresh_equal(
 
 
 def _diff_materialized_view(
-    old: MaterializedViewDefinition, new: MaterializedViewDefinition
+    old: MaterializedViewDefinition,
+    new: MaterializedViewDefinition,
+    *,
+    reads_created_object: bool,
 ) -> list[MigrationOperation]:
+    """Plan a changed materialized view (TS diffMaterializedView).
+
+    A new query on the same target is a MODIFY QUERY, which swaps the query of
+    a view that keeps feeding its target, so no INSERT into its source is
+    missed. The view is dropped and recreated instead when it is refreshable
+    (after MODIFY QUERY it keeps its last result until the next scheduled
+    refresh, while CREATE refreshes at once) or when it reads or writes an
+    object the migration creates, which ClickHouse cannot analyze before that
+    create runs.
+    """
     old_append = old.refresh is not None and old.refresh.append is True
     new_append = new.refresh is not None and new.refresh.append is True
     has_old_refresh = old.refresh is not None
     has_new_refresh = new.refresh is not None
+    query_changed = new.as_ != old.as_
 
     structural = (
-        new.as_ != old.as_
-        or new.to.database != old.to.database
+        new.to.database != old.to.database
         or new.to.name != old.to.name
         or has_old_refresh != has_new_refresh
         or old_append != new_append
+        or (query_changed and (has_new_refresh or reads_created_object))
     )
 
     if structural:
@@ -364,6 +379,18 @@ def _diff_materialized_view(
             ),
         ]
 
+    query_ops = (
+        [
+            MigrationOperation(
+                type="alter_materialized_view_modify_query",
+                key=f"{definition_key(new)}:query",
+                risk="caution",
+                sql=render_alter_modify_query(new),
+            )
+        ]
+        if query_changed
+        else []
+    )
     refresh_ops = (
         [
             MigrationOperation(
@@ -376,7 +403,39 @@ def _diff_materialized_view(
         if has_new_refresh and not _refresh_equal(old.refresh, new.refresh)
         else []
     )
-    return [*refresh_ops, *_diff_comment(old, new)]
+    return [*query_ops, *refresh_ops, *_diff_comment(old, new)]
+
+
+def _diff_materialized_views(
+    changed_views: Sequence[tuple[MaterializedViewDefinition, MaterializedViewDefinition]],
+    operations: Sequence[MigrationOperation],
+    create_graph: DependencyGraph,
+) -> list[MigrationOperation]:
+    """Plan the materialized views both schemas hold (TS diffMaterializedViews).
+
+    ``operations`` is the rest of the plan. The views are planned in create
+    order, so a view whose new query reads a view this plan recreates is
+    recreated after it.
+    """
+    created = {op.key for op in operations if op.type.startswith("create_")}
+    planned: list[MigrationOperation] = []
+    for old_view, new_view in order_by_dependencies(
+        changed_views,
+        lambda pair: definition_key(pair[1]),
+        lambda key: create_graph.get(key, ()),
+    ):
+        key = definition_key(new_view)
+        view_ops = _diff_materialized_view(
+            old_view,
+            new_view,
+            reads_created_object=any(
+                dependency in created for dependency in create_graph.get(key, ())
+            ),
+        )
+        if any(op.type == "create_materialized_view" for op in view_ops):
+            created.add(key)
+        planned.extend(view_ops)
+    return planned
 
 
 def _recreate_drop_risk(old: TableDefinition) -> RiskLevel:
@@ -805,7 +864,8 @@ def _order_operations(
 
     Drops run dependents first, creates run dependencies first (#231). Alters
     and create_database keep their place, except that the column statements
-    of a table are ordered by the columns they read and remove.
+    of a table are ordered by the columns they read and remove, and a
+    materialized view's MODIFY QUERY by the tables its query reads.
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
@@ -892,9 +952,11 @@ def plan_diff(
     assert_valid_definitions(new_canonical)
     old_map = _map_by_key(old_canonical)
     new_map = _map_by_key(new_canonical)
+    create_graph = build_dependency_graph(new_canonical)
     operations: list[MigrationOperation] = []
     rename_suggestions: list[ColumnRenameSuggestion] = []
     databases_to_create: set[str] = set()
+    changed_views: list[tuple[MaterializedViewDefinition, MaterializedViewDefinition]] = []
 
     for old_def in old_canonical:
         if definition_key(old_def) in new_map:
@@ -924,7 +986,7 @@ def plan_diff(
         if isinstance(new_def, MaterializedViewDefinition) and isinstance(
             matched, MaterializedViewDefinition
         ):
-            operations.extend(_diff_materialized_view(matched, new_def))
+            changed_views.append((matched, new_def))
             continue
 
         if isinstance(new_def, DictionaryDefinition) and isinstance(
@@ -944,6 +1006,8 @@ def plan_diff(
         databases_to_create.add(new_def.database)
         _push_create(operations, new_def, "safe")
 
+    operations.extend(_diff_materialized_views(changed_views, operations, create_graph))
+
     for database in sorted(databases_to_create):
         _push_create_database(operations, database, "safe")
 
@@ -953,7 +1017,7 @@ def plan_diff(
     operations = _order_operations(
         operations,
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
-        create=build_dependency_graph(new_canonical),
+        create=create_graph,
         previous=old_canonical,
         next_=new_canonical,
     )
