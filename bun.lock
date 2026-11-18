@@ -74,7 +74,9 @@
         "@types/semver": "^7.7.0",
       },
       "optionalDependencies": {
+        "@chkit/plugin-codegen": "workspace:*",
         "@chkit/plugin-obsessiondb": "workspace:*",
+        "@chkit/plugin-pull": "workspace:*",
       },
     },
     "packages/clickhouse": {

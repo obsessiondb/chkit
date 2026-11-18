@@ -11,6 +11,7 @@ import {
 } from './index'
 import type { ColumnDefinition, SchemaDefinition } from './index'
 import { buildDependencyGraph, orderByDependencies } from './object-dependencies.js'
+import { columnDefaultReads } from './planner.js'
 
 const appTable = (name: string, columns: ColumnDefinition[] = [{ name: 'id', type: 'UInt64' }]) =>
   table({ database: 'app', name, columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
@@ -635,6 +636,50 @@ describe('planDiff orders ADD COLUMNs by the columns their expressions read (#68
       'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;',
     ])
   })
+
+  test('adds a dotted column before the DEFAULT that reads it without backquotes (#748)', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'arraySum(n.x)' } },
+        { name: 'n.x', type: 'Array(UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT arraySum(n.x);',
+    ])
+  })
+
+  test('a dotted run reads its longest leading column, not a shorter column prefix', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'length(n.x) + `n`.`x`[1]' } },
+        { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } },
+        { name: 'n', type: 'Tuple(y Array(UInt64))', default: { expression: 'tuple([b])' } },
+        { name: 'n.x', type: 'Array(UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length(n.x) + `n`.`x`[1];',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(y Array(UInt64)) DEFAULT tuple([b]);',
+    ])
+  })
+
+  test('a qualifier that is no column is dropped from a dotted run, and a column prefix is read', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'app.orders.price + orders.qty + t.first' } },
+        { name: 'price', type: 'UInt64' },
+        { name: 'qty', type: 'UInt64' },
+        { name: 't', type: 'Tuple(first UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `qty` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `t` Tuple(first UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT app.orders.price + orders.qty + t.first;',
+    ])
+  })
 })
 
 describe('planDiff orders the column statements of a table by the columns they read and remove (#745)', () => {
@@ -715,6 +760,23 @@ describe('planDiff orders the column statements of a table by the columns they r
     ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;'])
   })
 
+  test('drops a dotted column after the MODIFY of the column whose old expression reads it unquoted', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'n.x', type: 'Array(UInt64)' },
+            { name: 'z', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'arraySum(n.x)' } },
+          ]),
+        ],
+        [t([{ name: 'z', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'id' } }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 MATERIALIZED id;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `n.x`;',
+    ])
+  })
+
   test('a function call named like a column is not a read', () => {
     expect(
       sqls(
@@ -724,6 +786,120 @@ describe('planDiff orders the column statements of a table by the columns they r
     ).toEqual([
       "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length ('abc');",
       'ALTER TABLE app.t DROP COLUMN IF EXISTS `length`;',
+    ])
+  })
+
+  // Reading the lambda parameter `c` as the column `c` ran MODIFY `a` last, so
+  // MODIFY `b` DEFAULT a met the old `a DEFAULT b`: Cyclic alias detected (#768).
+  test('a lambda parameter named like a column is not a read', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'id' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(c -> c, [1]))' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'a' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'id' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  test('a CAST type named like a column is not a read', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'A', type: 'UInt64', default: { expression: 'CAST(id AS UInt64)' } },
+            { name: 'UInt64', type: 'UInt64', default: { expression: 'A' } },
+          ]),
+        ],
+        [t([])]
+      )
+    ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `UInt64`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `A`;'])
+  })
+
+  test('an alias inside a CAST argument does not hide the reads after it', () => {
+    expect(
+      sqls(
+        [t([])],
+        [
+          t([
+            { name: 'a', type: 'Array(UInt64)', default: { expression: "CAST([id AS q, z], 'Array(UInt64)')" } },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` Array(UInt64) DEFAULT CAST([id AS q, z], 'Array(UInt64)');",
+    ])
+  })
+
+  test('a dotted run followed by ( is a function call, not a read', () => {
+    expect(
+      sqls(
+        [t([])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'n.x(1)' } },
+            { name: 'n', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT n.x(1);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;',
+    ])
+  })
+
+  // `n.a` reads the element `a` of the tuple `n`, not the column `a`; reading
+  // `a` too made a cycle with `a DEFAULT z + 1` that kept the key order.
+  test('a dotted run reads only its longest leading column, not a later part', () => {
+    expect(
+      sqls(
+        [t([{ name: 'n', type: 'Tuple(a UInt64)' }])],
+        [
+          t([
+            { name: 'n', type: 'Tuple(a UInt64)' },
+            { name: 'a', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'z', type: 'UInt64', default: { expression: 'n.a' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT n.a;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z + 1;',
+    ])
+  })
+
+  // `t.1.a.b` is a path into the tuple `t`; reading its suffix as the column
+  // `a.b` made a cycle with `a.b DEFAULT z + 1` that kept the key order.
+  test('a dotted run ends at a tuple element by position', () => {
+    expect(
+      sqls(
+        [t([{ name: 't', type: 'Tuple(u Tuple(a Tuple(b UInt64)))' }])],
+        [
+          t([
+            { name: 't', type: 'Tuple(u Tuple(a Tuple(b UInt64)))' },
+            { name: 'a.b', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'z', type: 'UInt64', default: { expression: 't.1.a.b' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT t.1.a.b;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a.b` UInt64 DEFAULT z + 1;',
     ])
   })
 
@@ -788,5 +964,240 @@ describe('planDiff orders the column statements of a table by the columns they r
       'ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;',
       'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `w` UInt64 DEFAULT x;',
     ])
+  })
+})
+
+describe('planDiff orders MODIFY read releases and table TTL changes (#769)', () => {
+  const t = (columns: ColumnDefinition[], extra: { ttl?: string; settings?: Record<string, number> } = {}) =>
+    table({
+      database: 'app',
+      name: 't',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      ...extra,
+    })
+  const sqls = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => op.sql)
+
+  test('removes the old DEFAULT that reads a column before that column reads it back', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'z', type: 'UInt64', default: { expression: 'a' } }])],
+        [t([{ name: 'a', type: 'UInt64', default: { expression: 'z' } }, { name: 'z', type: 'UInt64' }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `z` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;',
+    ])
+  })
+
+  test('releases a read that closes a longer cycle through an unchanged column', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'a' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'id' } },
+          ]),
+        ]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;'])
+  })
+
+  // `b` → `a` → `c` → `b` once `a` is added, which runs first.
+  test('releases a read that closes a cycle through an added column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'b', type: 'UInt64' }, { name: 'c', type: 'UInt64', default: { expression: 'b' } }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'a' } },
+            { name: 'c', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT c;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;',
+    ])
+  })
+
+  // `y` reads `a` only in the new schema, so `a` → `x` → `y` → `a` never
+  // exists at once: the key order works and stays.
+  test('keeps key order when the read back only appears after the release', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'x', type: 'UInt64', default: { expression: 'y' } },
+            { name: 'y', type: 'UInt64' },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'x' } },
+            { name: 'x', type: 'UInt64', default: { expression: 'id' } },
+            { name: 'y', type: 'UInt64', default: { expression: 'a' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT x;',
+      'ALTER TABLE app.t MODIFY COLUMN `x` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT a;',
+    ])
+  })
+
+  test('changes the table TTL after the ADD of the column it reads and before the DROP of the column it stops reading', () => {
+    expect(
+      sqls(
+        [t([{ name: 'x', type: 'DateTime' }], { ttl: 'x + INTERVAL 1 DAY' })],
+        [t([{ name: 'y', type: 'DateTime' }], { ttl: 'y + INTERVAL 1 DAY' })]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  test('removes the table TTL before the DROP of the column it reads', () => {
+    expect(sqls([t([{ name: 'x', type: 'DateTime' }], { ttl: 'x + INTERVAL 1 DAY' })], [t([])])).toEqual([
+      'ALTER TABLE app.t REMOVE TTL;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  // The statements fill the column statement slots: the DROP moves to the
+  // TTL statement's slot, after the setting change.
+  test('a DROP held back by the TTL takes a later slot and other statements stay in place', () => {
+    expect(
+      sqls(
+        [t([{ name: 'b', type: 'UInt64' }, { name: 'x', type: 'DateTime' }], { ttl: 'x + INTERVAL 1 DAY' })],
+        [
+          t([{ name: 'b', type: 'String' }, { name: 'y', type: 'DateTime' }], {
+            ttl: 'y + INTERVAL 1 DAY',
+            settings: { ttl_only_drop_parts: 1 },
+          }),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` String;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  // The TTL is read like a column expression: the CAST type is no column, so
+  // the DROP of a column named `DateTime` does not wait for the TTL change.
+  test('a CAST type in the TTL is not a read of a column with that name', () => {
+    expect(
+      sqls(
+        [t([{ name: 'DateTime', type: 'UInt64' }, { name: 'ts', type: 'UInt64' }], { ttl: 'CAST(ts AS DateTime) + INTERVAL 1 DAY' })],
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'ts', type: 'UInt64' }], { ttl: 'CAST(ts AS DateTime) + INTERVAL 2 DAY' })]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `DateTime`;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64;',
+      'ALTER TABLE app.t MODIFY TTL CAST(ts AS DateTime) + INTERVAL 2 DAY;',
+    ])
+  })
+
+  test('a TTL change that reads no changed column keeps its slot', () => {
+    expect(
+      sqls(
+        [t([{ name: 'ts', type: 'DateTime' }, { name: 'x', type: 'UInt64' }], { ttl: 'ts + INTERVAL 1 DAY' })],
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'ts', type: 'DateTime' }], { ttl: 'ts + INTERVAL 2 DAY' })]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+      'ALTER TABLE app.t MODIFY TTL ts + INTERVAL 2 DAY;',
+    ])
+  })
+})
+
+describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () => {
+  const columns = ['a', 'arr', 'c', 'id', 'n.x', 'threshold', 'UInt64', 'x', 'y']
+  const readsOf = (expression: string) => {
+    const definition = table({
+      database: 'app',
+      name: 't',
+      columns: [
+        ...columns.map((name) => ({ name, type: 'UInt64' })),
+        { name: 'v', type: 'UInt64', default: { expression } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const reads = columnDefaultReads([definition]).get('table:app.t:column:v') ?? new Set<string>()
+    return [...reads].map((key) => key.slice('table:app.t:column:'.length)).sort()
+  }
+
+  test.each<[string, string[]]>([
+    ['arrayMap(c -> c, [1])', []],
+    ['arrayMap((x, y) -> x + y, arr, arr)', ['arr']],
+    ['arrayMap((`x`, y) -> `x` * y, arr, arr)', ['arr']],
+    ['arrayMap(a -> a.x, arr)', ['arr']],
+    ['arrayMap(a -> a.x.y + c, arr)', ['arr', 'c']],
+    ['arrayFilter(x -> x > threshold, arr)', ['arr', 'threshold']],
+    ['arrayMap(x -> arrayMap(y -> x + y + c, arr), [arr])', ['arr', 'c']],
+    ['arrayMap(x -> arrayMap(x -> x, [x]), [1])', []],
+    ['arrayMap(x -> x, [1]) + x', ['x']],
+    ['arrayMap(x -> x, x)', ['x']],
+    ['arrayMap(x -> (x, y), arr)', ['arr', 'y']],
+    ['arrayMap(x -> c.x, arr)', ['arr', 'c']],
+    ['arrayMap(n -> n.x, arr)', ['arr']],
+    ['arrayMap(`n` -> `n`.`x`, arr)', ['arr']],
+    ['arrayMap(y -> y + n.x, arr)', ['arr', 'n.x']],
+    ['arrayMap(n -> n.x, arr) + n.x', ['arr', 'n.x']],
+  ])('lambda: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test.each<[string, string[]]>([
+    ['CAST(id AS UInt64)', ['id']],
+    ['cast(id AS Nullable(UInt64))', ['id']],
+    ['CAST(id AS Array(Tuple(a UInt64, x String)))', ['id']],
+    ["CAST(id AS DateTime64(3, 'UTC'))", ['id']],
+    ['CAST(CAST(a AS UInt8) AS UInt64)', ['a']],
+    ['CAST(a AS UInt64) + UInt64', ['UInt64', 'a']],
+    ['id::UInt64', ['id']],
+    ['id::Nullable(UInt64) + x', ['id', 'x']],
+    ['id::Array(Tuple(a UInt64)) + c', ['c', 'id']],
+    ["CAST([id AS q, c], 'Array(UInt64)')", ['c', 'id']],
+    ['CAST([id AS q, c] AS Array(UInt64))', ['c', 'id']],
+    ['CAST((id AS q, c) AS Tuple(UInt64, UInt64))', ['c', 'id']],
+    ['[id, c]::Array(UInt64)', ['c', 'id']],
+  ])('type: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test.each<[string, string[]]>([
+    ['-> x', ['x']],
+    ['(x, y -> x', ['x']],
+    ['() -> x', ['x']],
+    ['CAST(a AS', ['a']],
+    ['a::', ['a']],
+  ])('incomplete: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
   })
 })
