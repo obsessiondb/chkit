@@ -194,6 +194,25 @@ async function codegenFallbackPlugins(): Promise<ChxPluginRegistration[]> {
 }
 
 /**
+ * The plugin that a project config does not register but chkit-py has anyway
+ * (#776): `pull`, a built-in command in chkit-py, and the `codegen` help.
+ * A registration with that name, also a disabled one, keeps its own.
+ */
+async function projectFallbackPlugins(
+  registrations: readonly ChxPluginRegistration[],
+  commandName: string,
+  wantsHelp: boolean,
+): Promise<ChxPluginRegistration[]> {
+  const registered = registrations.some(
+    (entry) => normalizePluginRegistration(entry).plugin?.manifest?.name === commandName,
+  )
+  if (registered) return []
+  if (commandName === 'pull') return pullFallbackPlugins()
+  if (commandName === 'codegen' && wantsHelp) return codegenFallbackPlugins()
+  return []
+}
+
+/**
  * The commands chkit knows when no project config gives the plugins: the
  * built-in commands, `pull`, `codegen`, the ObsessionDB flags (as chkit-py
  * shows them also for a user profile that lists no plugins, #771), and the
@@ -382,8 +401,9 @@ async function run(): Promise<void> {
     return
   }
 
+  const fallbackPlugins = await projectFallbackPlugins(config.plugins, commandName, wantsHelp)
   const pluginRuntime = await loadPluginRuntime({
-    config,
+    config: fallbackPlugins.length > 0 ? { ...config, plugins: [...config.plugins, ...fallbackPlugins] } : config,
     configPath,
     cliVersion: CLI_VERSION,
     internalPlugins: getInternalPlugins(),
@@ -396,9 +416,9 @@ async function run(): Promise<void> {
   })
 
   const resolved = registry.get(commandName)
-  // Outside a project, `chkit obsessiondb` reads its command name as
-  // `chkit plugin obsessiondb` does, as in chkit-py (#771).
-  const forwardsCommandName = commandName === 'obsessiondb' && configSource !== 'project'
+  // `chkit obsessiondb` reads its command name as `chkit plugin obsessiondb`
+  // does, as in chkit-py (#771, #776).
+  const forwardsCommandName = commandName === 'obsessiondb'
   let initFlags: ParsedFlags = {}
   if (resolved && !wantsHelp) {
     const parsed = parseInitFlags({

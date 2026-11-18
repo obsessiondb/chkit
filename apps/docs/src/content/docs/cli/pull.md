@@ -26,10 +26,7 @@ Global flags documented on [CLI Overview](/cli/overview/#global-flags).
 
 ## Behavior
 
-This command delegates to the pull plugin's `schema` command. The pull plugin must be registered in your config's `plugins` array with `manifest.name` equal to `"pull"`.
-
-If the pull plugin is not configured, the command fails with:
-_"Pull plugin is not configured. Add a plugin with manifest.name "pull" to config.plugins."_
+This command delegates to the pull plugin's `schema` command. Register the pull plugin in your config's `plugins` array to set its options (`outFile`, `databases`, ...). Without a registration, `chkit pull` runs the installed pull plugin with its defaults, as chkit-py does. A pull plugin registered with `enabled: false` stays off: the command then fails with exit code 1 and _"Pull plugin is not configured. Add it to config.plugins first."_
 
 In chkit-py, `pull` is a built-in command, so there is no plugin to register. As in TypeScript, `chkit pull schema` and `chkit plugin pull schema` run the same command.
 
