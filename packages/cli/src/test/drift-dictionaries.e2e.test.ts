@@ -19,6 +19,7 @@ import {
   runOnceVisible,
   waitForCliJson,
   waitForDictionary,
+  waitForTableAbsent,
 } from './e2e-testkit.js'
 
 // Dictionaries load lazily, so ClickHouse never connects with these passwords.
@@ -156,12 +157,16 @@ export default schema(users, usersDict, ratesDict)
       // DROP + CREATE rather than CREATE OR REPLACE, which ObsessionDB does not
       // apply on every replica.
       await executor.command(`DROP DICTIONARY ${q(usersDict)} SYNC`)
+      // The CREATE below can land on a replica that hasn't applied the DROP yet.
+      await waitForTableAbsent(executor, database, usersDict)
       await executor.command(
         `CREATE DICTIONARY ${q(usersDict)} (id UInt64, name String DEFAULT 'n/a', price Decimal(10, 2) DEFAULT 0, age UInt8)
 PRIMARY KEY id SOURCE(CLICKHOUSE(TABLE '${users}_v2' DB '${database}' USER 'default' PASSWORD '${LIVE_SECRET}'))
 LAYOUT(FLAT()) LIFETIME(300) SETTINGS(format_csv_allow_single_quotes = 1)`
       )
       await executor.command(`DROP DICTIONARY ${q(ratesDict)} SYNC`)
+      // The CREATE below can land on a replica that hasn't applied the DROP yet.
+      await waitForTableAbsent(executor, database, ratesDict)
       await executor.command(
         `CREATE DICTIONARY ${q(ratesDict)} (id UInt64, start Date, stop Date, price Decimal(10, 2) DEFAULT 0)
 PRIMARY KEY id SOURCE(CLICKHOUSE(QUERY 'SELECT id, start, stop, price\\nFROM\\t${users}' DB '${database}'))

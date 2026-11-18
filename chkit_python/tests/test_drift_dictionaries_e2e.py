@@ -13,7 +13,7 @@ from typing import Any
 
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.clickhouse.client import ClickHouseClient, QueryResult
-from chkit.clickhouse.ddl_propagation import wait_for_dictionary
+from chkit.clickhouse.ddl_propagation import wait_for_dictionary, wait_for_table_absent
 from chkit.clickhouse.introspect import list_dictionary_details
 from chkit.clickhouse.replicas import string_literal
 from chkit.core.canonical import canonicalize_definitions
@@ -163,6 +163,8 @@ def test_unchanged_dictionaries_read_clean_and_recreated_ones_drift_per_clause(
             # DROP + CREATE rather than CREATE OR REPLACE, which ObsessionDB does not
             # apply on every replica.
             client.execute(f"DROP DICTIONARY {database}.{users_dict} SYNC")
+            # The CREATE below can land on a replica that hasn't applied the DROP yet.
+            wait_for_table_absent(client, database, users_dict)
             client.execute(
                 f"CREATE DICTIONARY {database}.{users_dict} "
                 "(id UInt64, name String DEFAULT 'n/a', price Decimal(10, 2) DEFAULT 0, age UInt8) "
@@ -171,6 +173,8 @@ def test_unchanged_dictionaries_read_clean_and_recreated_ones_drift_per_clause(
                 "LAYOUT(FLAT()) LIFETIME(300) SETTINGS(format_csv_allow_single_quotes = 1)"
             )
             client.execute(f"DROP DICTIONARY {database}.{rates_dict} SYNC")
+            # The CREATE below can land on a replica that hasn't applied the DROP yet.
+            wait_for_table_absent(client, database, rates_dict)
             client.execute(
                 f"CREATE DICTIONARY {database}.{rates_dict} "
                 "(id UInt64, start Date, stop Date, price Decimal(10, 2) DEFAULT 0) "
