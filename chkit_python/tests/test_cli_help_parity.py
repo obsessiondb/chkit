@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit import __version__
+from chkit.cli.json_output import _reset_for_testing
 from chkit.cli.main import app
 
 FIXTURE: dict[str, str] = json.loads(
@@ -209,3 +210,61 @@ def test_pull_schema_help_is_the_ts_pull_schema_help(args: list[str]) -> None:
 
 def test_an_unknown_obsessiondb_command_shows_the_plugin_help() -> None:
     assert _help(["obsessiondb", "nope", "-h"]) == FIXTURE["obsessiondb --help"]
+
+
+def _write_project(root: Path, plugins: str) -> None:
+    (root / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n"
+        "from chkit_plugin_obsessiondb import obsessiondb\n\n"
+        f'config = define_config({{"schema": "./schema.py", "plugins": [{plugins}]}})\n'
+    )
+    (root / "schema.py").write_text("")
+
+
+def _without_service_section(help_text: str) -> str:
+    section = (
+        "Plugin: obsessiondb\n"
+        "  --service              Override the selected ObsessionDB service by name "
+        "for this command\n\n"
+    )
+    assert section in help_text
+    return help_text.replace(section, "")
+
+
+@pytest.fixture
+def empty_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    return tmp_path
+
+
+@pytest.mark.parametrize("command", [["pull"], ["pull", "schema"]])
+@pytest.mark.parametrize("flag", ["--help", "--help-plugins"])
+def test_pull_help_lists_the_flags_of_the_configured_plugins(
+    empty_home: Path, command: list[str], flag: str
+) -> None:
+    # TS loads the config for the help of pull, a plugin command there (#771).
+    expected = FIXTURE[f"{' '.join(command)} --help"]
+    _write_project(empty_home, "")
+    assert _help([*command, flag]) == _without_service_section(expected)
+    _write_project(empty_home, "obsessiondb()")
+    assert _help([*command, flag]) == expected
+
+
+def test_pull_help_reports_a_config_that_fails_to_load(empty_home: Path) -> None:
+    message = "Unable to load config module from /dev/null"
+    text = CliRunner().invoke(app, ["pull", "schema", "-c", "/dev/null", "--help"])
+    assert (text.exit_code, text.stdout, text.stderr) == (1, "", f"{message}\n")
+    _reset_for_testing()
+    as_json = CliRunner().invoke(app, ["pull", "schema", "--json", "-c", "/dev/null", "--help"])
+    _reset_for_testing()
+    assert (as_json.exit_code, as_json.stderr) == (1, f"{message}\n")
+    assert json.loads(as_json.stdout) == {
+        "command": "pull",
+        "schemaVersion": 1,
+        "ok": False,
+        "error": {"code": "error", "message": message},
+    }
+    # A --config that names no file is no config, as in TS: the help.
+    assert _help(["pull", "--help", "-c", "missing.py"]) == FIXTURE["pull --help"]

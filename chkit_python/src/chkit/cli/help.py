@@ -23,6 +23,8 @@ TABLE_FLAG_HELP = "Limit command scope to tables by exact name or trailing wildc
 # ``ctx.meta`` keys the CLI's parser sets for the help (``chkit.cli.main``).
 HELP_PLUGINS_META = "chkit.help_plugins"
 HELP_SUBCOMMAND_META = "chkit.help_subcommand"
+# Whether the help of pull lists the ObsessionDB --service flag (``chkit.cli.main``).
+HELP_PULL_SERVICE_META = "chkit.help_pull_service"
 
 INIT_HELP_DESCRIPTION = "Create a Python config and example schema."
 
@@ -230,8 +232,12 @@ def command_help_text(command: Any, meta: Mapping[str, Any]) -> str:
     )
     plugin_flags: tuple[tuple[str, tuple[HelpFlag, ...]], ...] = ()
     # TS loads the config for the help of pull, a plugin command there, so
-    # it shows the plugins' flags without --help-plugins.
-    if meta.get(HELP_PLUGINS_META) or command.name == "pull":
+    # it shows the flags of the configured plugins, with or without
+    # --help-plugins.
+    shows_plugin_flags = meta.get(
+        HELP_PULL_SERVICE_META if command.name == "pull" else HELP_PLUGINS_META
+    )
+    if shows_plugin_flags:
         plugin_flags = tuple(
             (plugin, tuple(_option_flag(options[name]) for name in names if name in options))
             for plugin, names in _PLUGIN_FLAG_GROUPS

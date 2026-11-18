@@ -42,6 +42,10 @@ PROJECT_ONLY_COMMANDS = frozenset(
 )
 
 
+class ConfigNotFoundError(FileNotFoundError):
+    """No config file where one was looked for (TS ``ConfigNotFoundError``)."""
+
+
 class ProjectConfigRequiredError(RuntimeError):
     """A project-only command ran from the user profile alone."""
 
@@ -131,7 +135,7 @@ def load_config(
     shown_path = _resolve_like_node(path)
     if config_path is not None:
         msg = f"Config not found at {shown_path}."
-        raise FileNotFoundError(msg)
+        raise ConfigNotFoundError(msg)
 
     command = env.command if env is not None else None
     profile = _read_profile_layer(env, allow_synthesized=allow_synthesized_profile)
@@ -149,7 +153,7 @@ def load_config(
                 "Either run 'chkit init' in your project, or run "
                 "'chkit obsessiondb login' to use chkit from any directory."
             )
-        raise FileNotFoundError(msg)
+        raise ConfigNotFoundError(msg)
     if command in PROJECT_ONLY_COMMANDS:
         msg = (
             f'Command "{command}" requires a project config ({DEFAULT_CONFIG_FILE}) '

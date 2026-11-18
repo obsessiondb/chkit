@@ -19,6 +19,7 @@ from typer.testing import CliRunner
 
 from chkit.cli.json_output import _reset_for_testing
 from chkit.cli.main import app
+from chkit.clickhouse.client import ClickHouseClient
 from tests.e2e_testkit import create_prefix, format_test_diagnostic, resolve_live_env
 
 
@@ -37,8 +38,9 @@ def empty_dir(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
     return tmp_path
 
 
-@pytest.fixture
-def project(empty_dir: Path) -> Path:
+def _write_project(root: Path, *, plugins: str = "") -> Path:
+    """A project with the local test target; ``plugins`` is the config's
+    ``plugins`` list, after an import of ``obsessiondb``."""
     env = resolve_live_env()
     clickhouse = json.dumps(
         {
@@ -48,18 +50,25 @@ def project(empty_dir: Path) -> Path:
             "database": env.clickhouse_database,
         }
     )
-    (empty_dir / "clickhouse.config.py").write_text(
-        "from chkit import define_config\n\n"
+    (root / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n"
+        "from chkit_plugin_obsessiondb import obsessiondb\n\n"
         "config = define_config({\n"
         '    "schema": "./schema.py",\n'
         '    "outDir": "./chkit",\n'
         '    "migrationsDir": "./chkit/migrations",\n'
         '    "metaDir": "./chkit/meta",\n'
         f'    "clickhouse": {clickhouse},\n'
+        f'    "plugins": [{plugins}],\n'
         "})\n"
     )
-    (empty_dir / "schema.py").write_text("")
-    return empty_dir
+    (root / "schema.py").write_text("")
+    return root
+
+
+@pytest.fixture
+def project(empty_dir: Path) -> Path:
+    return _write_project(empty_dir)
 
 
 def _run(*args: str) -> Any:
@@ -157,7 +166,11 @@ def test_pull_schema_writes_the_file_as_pull_does(project: Path) -> None:
     assert (project / "schema").is_file()
 
 
-def test_plugin_pull_is_the_pull_plugin_in_a_project(project: Path) -> None:
+# As TS runs the installed pull plugin when the config does not register one
+# (#771), with or without other plugins.
+@pytest.mark.parametrize("plugins", ["", "obsessiondb()"])
+def test_plugin_pull_is_the_pull_plugin_in_a_project(empty_dir: Path, plugins: str) -> None:
+    project = _write_project(empty_dir, plugins=plugins)
     description = "Pull live ClickHouse table schema and write chkit schema file"
     assert _outcome(_run("plugin", "pull")) == (
         0,
@@ -195,3 +208,43 @@ def test_plugin_pull_is_the_pull_plugin_in_a_project(project: Path) -> None:
         "error": {"code": "usage", "message": stray},
     }
     assert not (project / "src").exists()
+
+
+def test_database_values_split_on_commas_in_both_routes(project: Path) -> None:
+    # As TS parses a string[] flag: split on commas, trimmed, also repeated.
+    prefix = create_prefix("pull_alias_py")
+    names = [f"{prefix}a", f"{prefix}b", f"{prefix}c"]
+    args = ["-d", f"{names[0]}, {names[1]}", "--database", names[2], "--dryrun", "--json"]
+    outcomes = [_outcome(_run(*route, *args)) for route in (["pull"], ["plugin", "pull", "schema"])]
+    assert outcomes[0] == outcomes[1]
+    assert outcomes[0][0] == 0, outcomes[0]
+    assert json.loads(outcomes[0][1])["databases"] == names
+
+
+@pytest.mark.parametrize("route", [["pull"], ["plugin", "pull", "schema"]])
+def test_pull_closes_each_client_once(
+    project: Path, monkeypatch: pytest.MonkeyPatch, route: list[str]
+) -> None:
+    # `chkit plugin` opens a client and closes it; pull closes only the
+    # clients it opens itself (#771).
+    closes: dict[int, int] = {}
+    close = ClickHouseClient.close
+
+    def counting_close(self: ClickHouseClient) -> None:
+        closes[id(self)] = closes.get(id(self), 0) + 1
+        close(self)
+
+    monkeypatch.setattr(ClickHouseClient, "close", counting_close)
+    args = ["--database", f"{create_prefix('pull_alias_py')}db", "-o", "pulled.py"]
+    ok = _run(*route, *args, "--json")
+    assert ok.exit_code == 0, format_test_diagnostic("chkit pull", ok)
+    assert len(closes) > 0
+    assert set(closes.values()) == {1}, closes
+
+    closes.clear()
+    # The file exists now: pull fails after reading the server.
+    failed = _run(*route, *args, "--json")
+    assert failed.exit_code == 2, format_test_diagnostic("chkit pull", failed)
+    assert json.loads(failed.stdout)["ok"] is False
+    assert len(closes) > 0
+    assert set(closes.values()) == {1}, closes

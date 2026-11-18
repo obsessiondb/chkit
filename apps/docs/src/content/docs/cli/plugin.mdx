@@ -79,7 +79,7 @@ An unknown plugin fails with exit code 1 and `Unknown plugin "<name>". Available
 Some plugins have top-level CLI shortcuts:
 
 - `chkit codegen` is equivalent to `chkit plugin codegen codegen`
-- `chkit pull` is equivalent to `chkit plugin pull schema` (in Python `pull` is a built-in command with no plugin behind it, and `chkit plugin pull schema` runs it too)
+- `chkit pull` is equivalent to `chkit plugin pull schema`. Both run the installed pull plugin with its defaults when `config.plugins` does not register it (in Python `pull` is a built-in command with no plugin behind it)
 - `chkit obsessiondb <command>` is equivalent to `chkit plugin obsessiondb <command>`
 
 In the TypeScript CLI, a plugin's commands can also be called as `chkit <plugin-name> <command> [args...]`. A shortcut gives the command the same `args` as its `chkit plugin` form: the positionals after the command name, without the name itself.

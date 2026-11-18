@@ -541,6 +541,8 @@ def run(  # noqa: PLR0917
             f"Got unexpected extra argument(s) ({' '.join(stray)})",
             json_mode=output_json,
         )
+    # As TS parses a string[] flag: comma-separated and repeated values (#771).
+    database = _database_names(database) if database is not None else None
     # As in TS, the hooks get the flags that were passed, keyed by long name.
     hook_flags = passed_flags(
         {
@@ -600,6 +602,12 @@ def run(  # noqa: PLR0917
         raise
     except Exception as error:
         raise typer.Exit(code=_report_failure(error, output_json=output_json)) from error
+
+
+def _database_names(values: list[str]) -> list[str]:
+    """The ``--database`` values as TS ``parseFlags`` reads a ``string[]`` flag
+    (``chkit.core.flags``): each split on commas, trimmed, empty ones dropped."""
+    return [name for value in values for name in (js_trim(v) for v in value.split(",")) if name]
 
 
 def _report_failure(error: Exception, *, output_json: bool) -> int:
@@ -679,12 +687,25 @@ def _run_schema_command(ctx: ChxPluginCommandContext) -> int:
             dryrun=flags.get("--dryrun") is True,
             overwrite=flags.get("--force") is True or flags.get("--overwrite") is True,
             output_json=ctx.json_mode,
+            # `chkit plugin` opened this client and closes it.
+            executor_borrowed=True,
         )
     except (typer.Exit, typer.Abort, TyperException):
         raise
     except Exception as error:
         return _report_failure(error, output_json=ctx.json_mode)
     return 0
+
+
+def _open_client(
+    executor: ClickHouseClient | None, config: ChxResolvedConfig, *, borrowed: bool
+) -> contextlib.AbstractContextManager[ClickHouseClient]:
+    """The client pull reads with. Pull closes a client it opens, and the plugin
+    executor of ``chkit pull``, but not one it borrows from ``chkit plugin``,
+    whose dispatcher closes it."""
+    if borrowed and executor is not None:
+        return contextlib.nullcontext(executor)
+    return open_client(executor, config.clickhouse)
 
 
 def _introspect(
@@ -694,6 +715,7 @@ def _introspect(
     *,
     hook_flags: dict[str, Any],
     selected: list[str],
+    executor_borrowed: bool,
 ) -> tuple[list[str], list[object], list[SchemaDefinition], list[str]]:
     """Return the databases, the listed objects, the definitions and warnings."""
     raw_objects: list[object] = []  # objects from system.tables (for skipped count)
@@ -705,7 +727,7 @@ def _introspect(
         # databases the hook gets and count what it skipped (#698).
         custom_introspect = plugin_runtime.has_on_pull_introspect()
         if custom_introspect and not selected:
-            client = stack.enter_context(open_client(executor, config.clickhouse))
+            client = stack.enter_context(_open_client(executor, config, borrowed=executor_borrowed))
             raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
             selected = sorted({getattr(o, "database", "") for o in raw_objects})
 
@@ -731,7 +753,9 @@ def _introspect(
         else:
             listed = client is not None
             if client is None:
-                client = stack.enter_context(open_client(executor, config.clickhouse))
+                client = stack.enter_context(
+                    _open_client(executor, config, borrowed=executor_borrowed)
+                )
             # The pulled tables are compared later against definitions
             # canonicalized with clickhouse.indexGranularity, which must be this
             # server's default. A custom introspector reads elsewhere.
@@ -757,6 +781,7 @@ def _run(
     dryrun: bool,
     overwrite: bool,
     output_json: bool,
+    executor_borrowed: bool = False,
 ) -> None:
     if executor is None and config.clickhouse is None:
         msg = (
@@ -768,7 +793,12 @@ def _run(
     selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
 
     selected, raw_objects, definitions, inner_storage_warnings = _introspect(
-        config, plugin_runtime, executor, hook_flags=hook_flags, selected=selected
+        config,
+        plugin_runtime,
+        executor,
+        hook_flags=hook_flags,
+        selected=selected,
+        executor_borrowed=executor_borrowed,
     )
     definitions = [d for d in definitions if _is_pulled_object(d)]
 

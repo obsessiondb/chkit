@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from pathlib import Path
 from typing import Any, NoReturn
 
 import typer
@@ -29,9 +30,15 @@ from chkit.cli.commands import (
     snapshot,
     status,
 )
+from chkit.cli.config_loader import (
+    ConfigNotFoundError,
+    ProjectConfigRequiredError,
+    load_config,
+)
 from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.help import (
     HELP_PLUGINS_META,
+    HELP_PULL_SERVICE_META,
     HELP_SUBCOMMAND_META,
     PLUGIN_FLAG_NAMES,
     command_help_text,
@@ -46,6 +53,7 @@ from chkit.core.flags import (
     UnknownFlagError,
     expand_short_flags,
 )
+from chkit.core.model import ChxConfigEnv
 
 _HELP_OPTION_NAMES = ("-h", "--help")
 _HELP_PLUGINS_OPTION = "--help-plugins"
@@ -326,6 +334,26 @@ def _check_config_value(args: list[str], params: list[Any]) -> None:
             raise MissingFlagValueError("--config")
 
 
+def _pull_help_lists_service(args: list[str]) -> bool:
+    """Whether ``chkit pull -h`` lists the ObsessionDB ``--service`` flag. TS
+    loads the config for the help of pull, a plugin command there (#771): a
+    config that fails to load is the error, a config lists the flag when it
+    registers ``obsessiondb()``, and without a project config the help lists
+    the flags that ``chkit obsessiondb login`` adds."""
+    config_path = extract_config_path(expand_short_flags(args, GLOBAL_FLAGS))
+    try:
+        config = load_config(
+            Path(config_path) if config_path is not None else None,
+            ChxConfigEnv(command="pull"),
+        )
+    except (ConfigNotFoundError, ProjectConfigRequiredError):
+        return True
+    return any(
+        getattr(getattr(plugin, "manifest", None), "name", None) == "obsessiondb"
+        for plugin in config.plugins
+    )
+
+
 def _first_plugin_positional(args: list[str]) -> str | None:
     """Port of TS ``firstPluginPositional``, the subcommand whose help a
     forwarder shows: the first token that is not a global flag (or ``--table``)
@@ -399,6 +427,8 @@ class _ChkitCommand(TyperCommand):
                             )
                         ],
                     )
+                if self.name == "pull":
+                    ctx.meta[HELP_PULL_SERVICE_META] = _pull_help_lists_service(args)
                 normalized = ["--help"]
             else:
                 # query first moves its SQL arguments behind `--` (#584), so SQL
