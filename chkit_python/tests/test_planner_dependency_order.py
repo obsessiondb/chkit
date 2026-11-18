@@ -6,7 +6,6 @@ import json
 import os
 import subprocess
 import sys
-import time
 from collections.abc import Callable
 from typing import Any
 
@@ -15,7 +14,6 @@ import pytest
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     DictionaryDefinition,
-    MigrationOperation,
     SchemaDefinition,
     SQLExpression,
     TableDefinition,
@@ -26,7 +24,7 @@ from chkit.core.model import (
     view,
 )
 from chkit.core.object_dependencies import build_dependency_graph, order_by_dependencies
-from chkit.core.planner import _column_default_reads, plan_diff
+from chkit.core.planner import _column_default_reads, _cycle_repair_work, plan_diff
 
 
 def app_table(name: str, columns: list[dict[str, Any]] | None = None) -> TableDefinition:
@@ -1209,29 +1207,26 @@ def test_keeps_key_order_when_no_statement_closes_a_cycle() -> None:
     ]
 
 
-def test_plans_a_wide_table_whose_every_modify_closes_a_cycle_in_time_that_grows_with_its_width() -> None:
+def test_repairs_a_wide_table_whose_every_modify_closes_a_cycle_with_work_that_grows() -> None:
     # Each column reads the one before it and changes to read the one two
     # places ahead, so every MODIFY waits for a breaker. Four times the columns
-    # take about four times as long; a quadratic repair would take sixteen.
+    # take about four times the work; a quadratic repair would take sixteen.
     def name(i: int) -> str:
         return f"c{i:04d}"
 
-    def plan(count: int) -> tuple[float, list[str]]:
+    def plan(count: int) -> tuple[int, list[str]]:
         before = [_u(name(i), "1" if i == 0 else name(i - 1)) for i in range(count)]
         after = [_u(name(i), name(i + 2) if i + 2 < count else "1") for i in range(count)]
-        best = float("inf")
-        operations: list[MigrationOperation] = []
-        for _ in range(3):
-            start = time.perf_counter()
-            operations = plan_diff([_t(before)], [_t(after)]).operations
-            best = min(best, time.perf_counter() - start)
-        return best, [op.key[len("table:app.t:column:"):] for op in operations[:3]]
+        operations = plan_diff([_t(before)], [_t(after)]).operations
+        return _cycle_repair_work.units, [
+            op.key[len("table:app.t:column:"):] for op in operations[:3]
+        ]
 
     narrow, _ = plan(1200)
     wide, first = plan(4800)
     assert first == ["c4798", "c4797", "c4796"]
-    assert wide < max(10 * narrow, 0.05)
-    assert wide < 5
+    assert narrow > 0
+    assert wide <= 5 * narrow
 
 
 @pytest.mark.parametrize(
@@ -1476,31 +1471,22 @@ def test_a_table_whose_name_has_column_is_a_table_of_its_own() -> None:
     ) == [f"{other}.b", f"{other}.a", f"{other}.c"]
 
 
-def test_plans_the_acyclic_groups_fixture_in_time_that_grows_with_its_width() -> None:
-    # Old and new reads that form no cycle are not replayed: every `a` and `z`
-    # goes through the `b` chain. Four times the columns take about four
-    # times as long.
+def test_does_no_repair_work_on_the_acyclic_groups_fixture() -> None:
+    # Old and new reads that form no cycle are not replayed at all: every `a`
+    # and `z` goes through the `b` chain.
     def name(prefix: str, i: int) -> str:
         return f"{prefix}{i:05d}"
 
-    def plan(n: int) -> float:
-        greatest = "greatest(" + ", ".join(name("z", j) for j in range(n)) + ")"
-        before = [_u(name(prefix, i)) for prefix in "abz" for i in range(n)]
-        after = (
-            [_u(name("a", i), greatest if i == 0 else name("a", i - 1)) for i in range(n)]
-            + [_u(name("b", i), "id" if i == 0 else name("b", i - 1)) for i in range(n)]
-            + [_u(name("z", i), name("b", n - 1)) for i in range(n)]
-        )
-        best = float("inf")
-        for _ in range(3):
-            start = time.perf_counter()
-            plan_diff([_t(before)], [_t(after)])
-            best = min(best, time.perf_counter() - start)
-        return best
-
-    narrow = plan(500)
-    wide = plan(2000)
-    assert wide < max(10 * narrow, 0.05)
+    n = 2000
+    greatest = "greatest(" + ", ".join(name("z", j) for j in range(n)) + ")"
+    before = [_u(name(prefix, i)) for prefix in "abz" for i in range(n)]
+    after = (
+        [_u(name("a", i), greatest if i == 0 else name("a", i - 1)) for i in range(n)]
+        + [_u(name("b", i), "id" if i == 0 else name("b", i - 1)) for i in range(n)]
+        + [_u(name("z", i), name("b", n - 1)) for i in range(n)]
+    )
+    plan_diff([_t(before)], [_t(after)])
+    assert _cycle_repair_work.units == 0
 
 
 def test_a_bare_null_is_no_read_of_a_column_named_null() -> None:
@@ -1616,25 +1602,144 @@ def _never_closed_tables(tables: int) -> tuple[list[SchemaDefinition], list[Sche
     return before, after
 
 
-@pytest.mark.parametrize("schemas", [_unbreakable_tables, _never_closed_tables])
-def test_plans_many_tables_in_time_that_grows_with_their_number(
+def _shared_chain(size: int) -> tuple[list[SchemaDefinition], list[SchemaDefinition]]:
+    n = size // 4
+
+    def pad(prefix: str, i: int) -> str:
+        return f"{prefix}{i:04d}"
+
+    before: list[dict[str, Any]] = []
+    after: list[dict[str, Any]] = []
+    for i in range(n):
+        before += [_u(pad("a", i)), _u(pad("b", i), pad("z", i)), _u(pad("z", i), pad("a", i))]
+        after += [_u(pad("a", i), pad("b", i)), _u(pad("b", i), pad("p", 0)), _u(pad("z", i), "id")]
+    for j in range(n):
+        reads = " + ".join(pad("b", i) for i in range(n)) if j == 0 else pad("p", j - 1)
+        before.append(_u(pad("p", j), reads))
+        after.append(_u(pad("p", j), pad("p", j + 1) if j + 1 < n else "id"))
+    return [_t(before)], [_t(after)]
+
+
+def _many_reads(size: int) -> tuple[list[SchemaDefinition], list[SchemaDefinition]]:
+    extras = [_u(f"p{i:03d}") for i in range(30)]
+    tail = "".join(f" + {column['name']}" for column in extras)
+    before: list[dict[str, Any]] = list(extras)
+    after: list[dict[str, Any]] = list(extras)
+    for i in range(size // 32):
+        before += [_u(f"a{i:03d}"), _u(f"b{i:03d}", f"c{i:03d}{tail}"), _u(f"c{i:03d}", f"a{i:03d}{tail}")]
+        after += [_u(f"a{i:03d}", f"b{i:03d}{tail}"), _u(f"b{i:03d}", f"id{tail}"), _u(f"c{i:03d}", f"id{tail}")]
+    return [_t(before)], [_t(after)]
+
+
+@pytest.mark.parametrize(
+    "schemas", [_unbreakable_tables, _never_closed_tables, _shared_chain, _many_reads]
+)
+def test_plans_with_work_that_grows_with_the_size(
     schemas: Callable[[int], tuple[list[SchemaDefinition], list[SchemaDefinition]]],
 ) -> None:
-    # Each table is replayed on its own, so many tables, or tables whose
-    # cycles no statement breaks, cost about as much as their statements:
-    # four times the tables take about four times as long.
-    def plan(tables: int) -> float:
-        previous, next_ = schemas(tables)
-        best = float("inf")
-        for _ in range(3):
-            start = time.perf_counter()
-            plan_diff(previous, next_)
-            best = min(best, time.perf_counter() - start)
-        return best
+    # Each table is replayed on its own with its own budget, so many tables,
+    # tables whose cycles no statement breaks, a prerequisite chain every
+    # breaker check walks, and breakers that read many other columns cost work
+    # that grows with the plan: four times the size takes at most about four
+    # times the work.
+    def work(size: int) -> int:
+        previous, next_ = schemas(size)
+        plan_diff(previous, next_)
+        return _cycle_repair_work.units
 
-    narrow = plan(512)
-    wide = plan(2048)
-    assert wide < max(10 * narrow, 0.05)
+    narrow = work(512)
+    wide = work(2048)
+    assert narrow > 0
+    assert wide <= 5 * narrow
+
+
+def test_repairs_cycles_whose_breakers_read_many_other_columns() -> None:
+    # A table with breakers that read many other columns still has enough
+    # work to repair all its cycles.
+    previous, next_ = _many_reads(640)
+    assert _order_of(previous, next_)[:2] == ["t.b000", "t.a000"]
+
+
+@pytest.mark.parametrize(
+    ("expression", "name"),
+    [
+        ("toString(date_add(day, if(true, 1, 0), toDateTime(id)))", "day"),
+        ("toString(not - toInt64(id))", "not"),
+    ],
+)
+def test_a_bare_special_word_is_no_read_of_a_column_with_that_name(expression: str, name: str) -> None:
+    # The unit of `date_add`, `dateDiff` and the like, a bare NOT and a bare
+    # SELECT are not reads even when a column has that name, so these tables
+    # keep their sorted order: the ALIAS `b` runs after `a` changes to String.
+    assert _order_of(
+        [_t([_u("a"), _u(name, "z"), _u("z", "length(toString(a))")])],
+        [_t([
+            _text("a", expression),
+            _u("b", "match(a, 'x')", type="UInt8", default_kind="ALIAS"),
+            _u(name, "id"),
+            _u("z", "id"),
+        ])],
+    ) == ["t.a", "t.b", f"t.{name}", "t.z"]
+
+
+def test_a_datediff_unit_is_no_read_of_a_column_with_that_name() -> None:
+    assert _order_of(
+        [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _text("hour", "c")])],
+        [_t([
+            _u("a", "dateDiff(hour, toDateTime(0), toDateTime(id))"),
+            _u("b", "a + 1"),
+            _text("c", "'x'"),
+            _text("hour", "'y'"),
+        ])],
+    ) == ["t.a", "t.b", "t.c", "t.hour"]
+
+
+def test_a_bare_select_keeps_the_sorted_order_even_with_a_column_of_that_name() -> None:
+    extra = [_u("SELECT"), _u("extra", "toUInt64((SELECT + 1))")]
+    assert _order_of(
+        [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]
+    ) == ["t.a", "t.b", "t.c"]
+
+
+@pytest.mark.parametrize(
+    "expression", ["CAST(tuple(id) AS Tuple(`a-b` UInt64))", "tuple(id)::Tuple(`a-b` UInt64)"]
+)
+def test_an_unchanged_quoted_tuple_field_keeps_the_repair(expression: str) -> None:
+    # A quoted Tuple element name is part of the type, in both casts.
+    extra = {"name": "extra", "type": "Tuple(`a-b` UInt64)", "default": _expr(expression)}
+    assert _order_of(
+        [_t([*_CYCLE_BEFORE, extra])], [_t([*_CYCLE_AFTER, extra])]
+    ) == ["t.b", "t.a", "t.c"]
+
+
+def test_a_deeply_nested_cast_in_an_unchanged_table_plans_nothing() -> None:
+    # A deeply nested cast is not parsed, and an unchanged table is not looked at.
+    nested = "CAST(id AS " + "Array(" * 1050 + "UInt64" + ")" * 1050 + ")"
+    deep = {"name": "deep", "type": "String", "default": _expr(nested)}
+    assert plan_diff([_t([_u("a"), deep])], [_t([_u("a"), deep])]).operations == []
+
+
+def test_a_prerequisite_between_two_tables_keeps_both_in_their_sorted_order() -> None:
+    # Column `x:column:a` of `t` and column `a` of `t:column:x` share a key, so
+    # a prerequisite links the two tables' statements. `t:column:x` keeps its
+    # sorted order because of its INTERVAL, so `t` keeps its order too: the
+    # plan is main's.
+    interval = _u("k", "toUInt64(toDateTime(id) + INTERVAL 1 day)")
+    previous = [
+        _t([_u("x:column:a"), _u("y", "z"), _u("z", "x:column:a")], "t"),
+        _t([_u("b", "1"), interval], "t:column:x"),
+    ]
+    next_ = [
+        _t([_u("x:column:a", "y"), _u("y", "id"), _u("z", "id")], "t"),
+        _t([_u("a"), _u("b", "id"), interval], "t:column:x"),
+    ]
+    assert [op.sql for op in plan_diff(previous, next_).operations] == [
+        "ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;",
+        "ALTER TABLE app.`t:column:x` ADD COLUMN IF NOT EXISTS `a` UInt64;",
+        "ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;",
+    ]
 
 
 # ---------- the column reads skip lambda parameters and CAST types (#768) ----------

@@ -895,10 +895,8 @@ export function orderColumnStatements(
   definitions: ColumnStatementDefinitions,
   renames: readonly ColumnRename[]
 ): MigrationOperation[] {
-  const facts = expressionFacts(definitions.next)
-  const oldFacts = expressionFacts(definitions.previous)
-  const reads = facts.reads
-  const oldReads = oldFacts.reads
+  const reads = columnDefaultReads(definitions.next)
+  const oldReads = columnDefaultReads(definitions.previous)
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
@@ -947,10 +945,16 @@ export function orderColumnStatements(
     return [...found]
   })
 
-  const ordered = repairedOrder(prerequisites, statements, definitions, renames, oldFacts, facts)
+  const ordered = repairedOrder(prerequisites, statements, definitions, renames)
   let next = 0
   return operations.map((op) => (isColumnStatement(op) ? (statements[ordered[next++] ?? -1] ?? op) : op))
 }
+
+/**
+ * The units of work the cycle repair did in the last `orderColumnStatements`,
+ * the same in both ports, for tests that bound it.
+ */
+export const cycleRepairWork = { units: 0 }
 
 /**
  * The sorted statement order, with the temporary default cycles it closes
@@ -960,53 +964,69 @@ export function orderColumnStatements(
  * those edges gives the order. A table is left out, and keeps its sorted
  * order, when it has a RENAME COLUMN in `renames` (the replay does not
  * rename), when one of its expressions is not plain (`plainReads`), when a
- * statement's key could be one of its columns or another table's, when no
- * statement can break its cycle, or when its replay runs out of work. Only
- * the columns that `cycleCandidates` finds take part.
+ * statement's key could be one of its columns or another table's, when a
+ * prerequisite links its statements to another table's (keys of two tables
+ * can be the same), when no statement can break its cycle, or when its
+ * replay runs out of work. Only the columns that `cycleCandidates` finds
+ * take part.
  */
 function repairedOrder(
   prerequisites: number[][],
   statements: MigrationOperation[],
   definitions: ColumnStatementDefinitions,
-  renames: readonly ColumnRename[],
-  oldFacts: ExpressionFacts,
-  facts: ExpressionFacts
+  renames: readonly ColumnRename[]
 ): number[] {
+  cycleRepairWork.units = 0
   const sorted = orderByDependencies(
     prerequisites.map((_, index) => index),
     String,
     (key) => (prerequisites[Number(key)] ?? []).map(String)
   )
   const columns = statementColumns(statements, definitions)
-  const excluded = new Set([...oldFacts.uncertain, ...facts.uncertain, ...columns.ambiguous])
+  const excluded = new Set(columns.ambiguous)
   for (const rename of renames) excluded.add(tableId(rename.database, rename.table))
+  // Statements connected through prerequisites. A connection to another
+  // table's statement, or to a statement of no known table, leaves the
+  // tables out: the repair must not move a statement of a table that keeps
+  // its sorted order.
+  const component = connectedStatements(prerequisites)
+  const owners = statementTables(statements, columns.of, definitions, renames)
+  const tablesOf = new Map<number, Set<string | undefined>>()
+  component.forEach((root, index) => {
+    const tables = tablesOf.get(root)
+    if (tables === undefined) tablesOf.set(root, new Set([owners[index]]))
+    else tables.add(owners[index])
+  })
+  for (const tables of tablesOf.values()) {
+    if (tables.size > 1) for (const table of tables) if (table !== undefined) excluded.add(table)
+  }
   // Only a table with a column statement can close a cycle while the plan runs.
   const active = new Set<string>()
   for (const column of columns.of) {
     if (column !== undefined && !excluded.has(column.table)) active.add(column.table)
   }
   if (active.size === 0) return sorted
+  const oldPlain = plainFacts(definitions.previous, active)
+  const newPlain = plainFacts(definitions.next, active)
+  for (const table of [...oldPlain.uncertain, ...newPlain.uncertain]) active.delete(table)
   // Per table: the columns that may close a cycle, the size of its replay
-  // and its old expressions.
+  // (those columns and all their reads) and its old expressions.
   const candidates = new Map<string, Set<string>>()
   const size = new Map<string, number>()
   const initial = new Map<string, Array<[string, ReadonlySet<string>]>>()
   for (const table of active) {
-    const graphs = [oldFacts.plain.get(table), facts.plain.get(table)].filter((graph) => graph !== undefined)
+    const graphs = [oldPlain.plain.get(table), newPlain.plain.get(table)].filter((graph) => graph !== undefined)
     const found = cycleCandidates(graphs)
     if (found.size === 0) continue
     candidates.set(table, found)
     let total = found.size
     for (const graph of graphs) {
-      for (const [column, reads] of graph) {
-        if (!found.has(column)) continue
-        for (const read of reads) if (found.has(read)) total += 1
-      }
+      for (const [column, reads] of graph) if (found.has(column)) total += reads.size
     }
     size.set(table, total)
     initial.set(
       table,
-      [...(oldFacts.plain.get(table) ?? [])].filter(([column]) => found.has(column))
+      [...(oldPlain.plain.get(table) ?? [])].filter(([column]) => found.has(column))
     )
   }
   // The statements each table replays.
@@ -1020,15 +1040,12 @@ function repairedOrder(
     else list.push(index)
   })
   if (replayed.size === 0) return sorted
-  const changes = replayChanges(statements, columns.of, facts.plain)
+  const changes = replayChanges(statements, columns.of, newPlain.plain)
   const groups = stronglyConnectedComponents(prerequisites).map((members) => [...members].sort((a, b) => a - b))
   const groupOf = new Array<number>(prerequisites.length).fill(0)
   groups.forEach((members, group) => {
     for (const member of members) groupOf[member] = group
   })
-  // Statements connected through prerequisites, in key order; a table's
-  // statements share no prerequisite with another table's.
-  const component = connectedStatements(prerequisites)
   const connected = new Map<number, number[]>()
   component.forEach((root, index) => {
     const list = connected.get(root)
@@ -1037,10 +1054,14 @@ function repairedOrder(
   })
   const added: Array<[number, number]> = []
   for (const [table, list] of replayed) {
-    const replay = defaultReplay(initial.get(table) ?? [], 8 * (size.get(table) ?? 0) + 1024)
     const roots = [...new Set(list.map((index) => component[index] ?? index))]
     const scheduled = roots.flatMap((root) => connected.get(root) ?? []).sort((a, b) => a - b)
+    // The budget also covers the prerequisites the breaker checks walk.
+    let total = size.get(table) ?? 0
+    for (const index of scheduled) total += prerequisites[index]?.length ?? 0
+    const replay = defaultReplay(initial.get(table) ?? [], 8 * total + 1024)
     const edges = breakClosedCycles(scheduled, new Set(list), statements, prerequisites, groups, groupOf, ids, changes, replay)
+    cycleRepairWork.units += replay.used()
     if (edges !== undefined) added.push(...edges)
   }
   if (added.length === 0) return sorted
@@ -1159,17 +1180,22 @@ function breakClosedCycles(
       const cycle = change === undefined ? new Set<string>() : replay.closedCycle(column, change)
       if (cycle === undefined) return undefined
       if (cycle.size > 0) {
-        const breaker = [...cycle]
+        const candidates = [...cycle]
           .filter((other) => other !== column)
           .flatMap((other) => changing.get(other) ?? [])
           .filter((j) => !placed.has(j) && groupOf[j] !== group)
           .sort((a, b) => a - b)
-          .find((j) => {
-            const other = columns[j] ?? ''
-            const after = changes.get(j) ?? new Set<string>()
-            const removes = (replay.reads(other) ?? []).some((read) => cycle.has(read) && !after.has(read))
-            return removes && !waitsFor(prerequisites, extra, j, target)
-          })
+        let breaker: number | undefined
+        for (const j of candidates) {
+          const after = changes.get(j) ?? new Set<string>()
+          if (!(replay.reads(columns[j] ?? '') ?? []).some((read) => cycle.has(read) && !after.has(read))) continue
+          const waits = waitsFor(prerequisites, extra, j, target, placed, replay)
+          if (waits === undefined) return undefined
+          if (!waits) {
+            breaker = j
+            break
+          }
+        }
         if (breaker === undefined) return undefined
         for (const [undone, reads] of undo.reverse()) replay.assign(undone, reads)
         added.push([target, breaker])
@@ -1242,18 +1268,30 @@ function siftDown(values: number[], start: number): void {
   }
 }
 
-/** Whether statement `from` runs after statement `target` through `prerequisites` and `extra`. */
-function waitsFor(prerequisites: number[][], extra: ReadonlyMap<number, number[]>, from: number, target: number): boolean {
+/**
+ * Whether statement `from` runs after statement `target` through
+ * `prerequisites` and `extra`, or undefined when `replay` runs out of work.
+ * A `placed` statement has run, so it does not wait for `target`, which has
+ * not. Each prerequisite it looks at uses one unit of the replay's work.
+ */
+function waitsFor(
+  prerequisites: number[][],
+  extra: ReadonlyMap<number, number[]>,
+  from: number,
+  target: number,
+  placed: ReadonlySet<number>,
+  replay: DefaultReplay
+): boolean | undefined {
   const seen = new Set([from])
   const pending = [from]
   for (let index = pending.pop(); index !== undefined; index = pending.pop()) {
     for (const list of [prerequisites[index], extra.get(index)]) {
       for (const other of list ?? []) {
+        if (!replay.spend()) return undefined
         if (other === target) return true
-        if (!seen.has(other)) {
-          seen.add(other)
-          pending.push(other)
-        }
+        if (placed.has(other) || seen.has(other)) continue
+        seen.add(other)
+        pending.push(other)
       }
     }
   }
@@ -1281,6 +1319,26 @@ function connectedStatements(prerequisites: number[][]): number[] {
     }
   })
   return parent.map((_, index) => find(index))
+}
+
+/**
+ * The `tableId` of each statement: its column's table (`statementColumns`),
+ * the table of a table TTL statement or of a RENAME COLUMN in `renames`, or
+ * none when no single table owns its key.
+ */
+function statementTables(
+  statements: MigrationOperation[],
+  columns: ReadonlyArray<StatementColumn | undefined>,
+  definitions: ColumnStatementDefinitions,
+  renames: readonly ColumnRename[]
+): Array<string | undefined> {
+  const owners = new Map<string, string | undefined>()
+  const own = (key: string, table: string) => owners.set(key, owners.has(key) && owners.get(key) !== table ? undefined : table)
+  for (const def of [...definitions.previous, ...definitions.next]) {
+    if (def.kind === 'table') own(`table:${def.database}.${def.name}:ttl`, tableId(def.database, def.name))
+  }
+  for (const rename of renames) own(columnRenameKey(rename), tableId(rename.database, rename.table))
+  return statements.map((op, index) => columns[index]?.table ?? owners.get(op.key))
 }
 
 /** The column a statement changes, as it was and as it will be. */
@@ -1391,6 +1449,10 @@ interface DefaultReplay {
   closedCycle: (column: string, reads: ReadonlySet<string>) => Set<string> | undefined
   /** Gives `column` the `reads` (none removes it); they must close no cycle. */
   assign: (column: string, reads: Iterable<string> | undefined) => void
+  /** Uses one unit of work; false once the work has run out. */
+  spend: () => boolean
+  /** The units of work used so far. */
+  used: () => number
 }
 
 /**
@@ -1526,6 +1588,11 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
       return cycle
     },
     assign,
+    spend: () => {
+      left -= 1
+      return left >= 0
+    },
+    used: () => budget - Math.max(left, 0),
   }
 }
 
@@ -1588,7 +1655,28 @@ const PAIRED_OPERATORS: ReadonlySet<string> = new Set(['<=', '>=', '!=', '<>', '
 // Bare words ClickHouse reads as literals (any case), whatever the columns.
 const LITERAL_WORDS: ReadonlySet<string> = new Set(['false', 'inf', 'infinity', 'nan', 'null', 'true'])
 // Bare words that are not function names even before `(`.
-const NOT_FUNCTIONS: ReadonlySet<string> = new Set(['lambda', 'select', 'with'])
+const NOT_FUNCTIONS: ReadonlySet<string> = new Set(['exists', 'lambda', 'select', 'with'])
+// Keywords of ClickHouse's expression grammar (operators, literals and the
+// words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
+// bare one may not read a column of that name, so its expression is not
+// plain. Only a quoted name reads such a column.
+const EXPRESSION_KEYWORDS: ReadonlySet<string> = new Set([
+  'all', 'and', 'any', 'array', 'as', 'asc', 'ascending', 'between', 'both', 'by', 'case', 'cast', 'collate',
+  'columns', 'current', 'date', 'desc', 'descending', 'distinct', 'div', 'else', 'end', 'escape', 'except',
+  'exists', 'extract', 'filter', 'first', 'following', 'for', 'from', 'global', 'ignore', 'ilike', 'in',
+  'interval', 'is', 'lambda', 'last', 'leading', 'like', 'mod', 'not', 'nulls', 'or', 'order', 'over',
+  'partition', 'position', 'preceding', 'range', 'regexp', 'replace', 'respect', 'row', 'rows', 'select',
+  'substring', 'then', 'ties', 'timestamp', 'trailing', 'trim', 'unbounded', 'when', 'where', 'window', 'with',
+  'within',
+])
+// Functions whose bare-name arguments are units or keywords, not reads
+// (`date_add(day, 1, ts)`, `dateDiff(hour, a, b)`).
+const SPECIAL_ARGUMENT_FUNCTIONS: ReadonlySet<string> = new Set([
+  'date_add', 'date_diff', 'date_sub', 'dateadd', 'datediff', 'datesub', 'extract', 'timestamp_add',
+  'timestamp_diff', 'timestamp_sub', 'timestampadd', 'timestampdiff', 'timestampsub',
+])
+// Deeper types than this are not parsed: the expression is not plain.
+const TYPE_DEPTH = 32
 
 /**
  * The columns an expression reads when its reads are certain (#775), or
@@ -1606,7 +1694,7 @@ const NOT_FUNCTIONS: ReadonlySet<string> = new Set(['lambda', 'select', 'with'])
  */
 function plainReads(tokens: SQLToken[], columns: ReadonlySet<string>): string[] | undefined {
   const reads: string[] = []
-  const frames: Array<'group' | 'call' | 'cast'> = []
+  const frames: Array<'group' | 'call' | 'cast' | 'special'> = []
   const adjacent = (i: number, text?: string) => {
     const next = tokens[i + 1]
     return next !== undefined && next.start === tokens[i]?.end && (text === undefined || next.text === text)
@@ -1628,13 +1716,16 @@ function plainReads(tokens: SQLToken[], columns: ReadonlySet<string>): string[] 
         if (tokens[i + 1]?.text === ')') {
           i += 1
           operand = false
-        } else frames.push(word === 'cast' ? 'cast' : 'call')
+        } else frames.push(word === 'cast' ? 'cast' : SPECIAL_ARGUMENT_FUNCTIONS.has(word) ? 'special' : 'call')
+      } else if (word === 'not' && !columns.has(text)) {
+        // Unary NOT; the operand follows.
+      } else if (word !== undefined && (EXPRESSION_KEYWORDS.has(word) || frames[frames.length - 1] === 'special')) {
+        return undefined
       } else if (token.kind === 'identifier' || token.kind === 'quoted_identifier') {
         const name = identifierName(token)
-        if (name !== undefined && columns.has(name)) {
-          reads.push(name)
-          operand = false
-        } else if (word !== 'not') return undefined
+        if (name === undefined || !columns.has(name)) return undefined
+        reads.push(name)
+        operand = false
       } else if (text === '(') frames.push('group')
       else if (text !== '-' && text !== '+') return undefined
       continue
@@ -1644,7 +1735,7 @@ function plainReads(tokens: SQLToken[], columns: ReadonlySet<string>): string[] 
     } else if (text === ',') {
       const top = frames.length - 1
       if (top < 0 || frames[top] === 'group') return undefined
-      frames[top] = 'call'
+      if (frames[top] === 'cast') frames[top] = 'call'
       operand = true
     } else if (word === 'as' && frames[frames.length - 1] === 'cast') {
       const end = parseType(tokens, i + 1)
@@ -1669,10 +1760,12 @@ function plainReads(tokens: SQLToken[], columns: ReadonlySet<string>): string[] 
 /**
  * The index after the type that starts at `at`, or -1: a bare name, with
  * arguments in parentheses that are types, numbers (`-` allowed), strings,
- * `'name' = number` (Enum) or a name and its type (`Tuple(a UInt64)`).
+ * `'name' = number` (Enum) or an element name, bare or quoted, and its type
+ * (`Tuple(a UInt64)`, `` Tuple(`a-b` UInt64) ``). Types nested deeper than
+ * `TYPE_DEPTH` are not parsed.
  */
-function parseType(tokens: SQLToken[], at: number): number {
-  if (tokens[at]?.kind !== 'identifier') return -1
+function parseType(tokens: SQLToken[], at: number, depth = 0): number {
+  if (depth > TYPE_DEPTH || tokens[at]?.kind !== 'identifier') return -1
   if (tokens[at + 1]?.text !== '(') return at + 1
   let j = at + 2
   for (;;) {
@@ -1687,10 +1780,13 @@ function parseType(tokens: SQLToken[], at: number): number {
         if (tokens[j]?.kind !== 'number') return -1
         j += 1
       }
-    } else {
-      j = parseType(tokens, j)
+    } else if (token?.kind === 'quoted_identifier' && tokens[j + 1]?.kind === 'identifier') {
+      j = parseType(tokens, j + 1, depth + 1)
       if (j === -1) return -1
-      if (tokens[j]?.kind === 'identifier') j = parseType(tokens, j)
+    } else {
+      j = parseType(tokens, j, depth + 1)
+      if (j === -1) return -1
+      if (tokens[j]?.kind === 'identifier') j = parseType(tokens, j, depth + 1)
       if (j === -1) return -1
     }
     if (tokens[j]?.text === ')') return j + 1
@@ -1812,54 +1908,61 @@ function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): str
  * call, not a column, and neither are the names `notColumnNames` finds.
  */
 export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
-  return expressionFacts(definitions).reads
-}
-
-/** What the column expressions of some definitions read. */
-interface ExpressionFacts {
-  /** `columnDefaultReads`. */
-  reads: DependencyGraph
-  /**
-   * `tableId` → `columnId` → the `columnId`s its expression reads, for the
-   * expressions `plainReads` accepts.
-   */
-  plain: Map<string, Map<string, Set<string>>>
-  /** The `tableId` of every table with an expression `plainReads` does not accept. */
-  uncertain: Set<string>
-}
-
-function expressionFacts(definitions: SchemaDefinition[]): ExpressionFacts {
   const graph = new Map<string, Set<string>>()
-  const plain = new Map<string, Map<string, Set<string>>>()
-  const uncertain = new Set<string>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
-    const table = tableId(def.database, def.name)
-    const tablePlain = new Map<string, Set<string>>()
-    plain.set(table, tablePlain)
     const keyOf = (name: string) => columnKey({ database: def.database, table: def.name }, name)
     const names = new Set(def.columns.map((column) => column.name))
     for (const column of def.columns) {
       if (column.default === undefined) continue
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
-      const tokens = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
-      const certain = plainReads(tokens, names)
-      if (certain === undefined) uncertain.add(table)
-      else {
-        tablePlain.set(
-          `${table}\u0000${column.name}`,
-          new Set(certain.filter((name) => name !== column.name).map((name) => `${table}\u0000${name}`))
-        )
-      }
       const read = new Set<string>()
-      for (const name of namesRead(tokens, names)) {
+      for (const name of dottedNames(parsed.sql, names)) {
         if (name !== column.name) read.add(keyOf(name))
       }
       graph.set(keyOf(column.name), read)
     }
   }
-  return { reads: graph, plain, uncertain }
+  return graph
+}
+
+/**
+ * For the `tables`: `tableId` → `columnId` → the `columnId`s its expression
+ * reads (`plainReads`), and the tables with an expression that is not plain.
+ */
+function plainFacts(
+  definitions: SchemaDefinition[],
+  tables: ReadonlySet<string>
+): { plain: Map<string, Map<string, Set<string>>>; uncertain: Set<string> } {
+  const plain = new Map<string, Map<string, Set<string>>>()
+  const uncertain = new Set<string>()
+  for (const def of definitions) {
+    if (def.kind !== 'table') continue
+    const table = tableId(def.database, def.name)
+    if (!tables.has(table)) continue
+    const tablePlain = new Map<string, Set<string>>()
+    plain.set(table, tablePlain)
+    const names = new Set(def.columns.map((column) => column.name))
+    for (const column of def.columns) {
+      if (column.default === undefined) continue
+      const parsed = parseColumnDefault(column.default)
+      if (parsed.kind !== 'expression') continue
+      const certain = plainReads(
+        tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token)),
+        names
+      )
+      if (certain === undefined) {
+        uncertain.add(table)
+        continue
+      }
+      tablePlain.set(
+        `${table}\u0000${column.name}`,
+        new Set(certain.filter((name) => name !== column.name).map((name) => `${table}\u0000${name}`))
+      )
+    }
+  }
+  return { plain, uncertain }
 }
 
 /**

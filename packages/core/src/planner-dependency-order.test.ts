@@ -9,9 +9,9 @@ import {
   table,
   view,
 } from './index'
-import type { ColumnDefinition, MigrationOperation, SchemaDefinition } from './index'
+import type { ColumnDefinition, SchemaDefinition } from './index'
 import { buildDependencyGraph, orderByDependencies } from './object-dependencies.js'
-import { columnDefaultReads } from './planner.js'
+import { columnDefaultReads, cycleRepairWork } from './planner.js'
 
 const appTable = (name: string, columns: ColumnDefinition[] = [{ name: 'id', type: 'UInt64' }]) =>
   table({ database: 'app', name, columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
@@ -1281,27 +1281,21 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
 
   // Each column reads the one before it and changes to read the one two
   // places ahead, so every MODIFY waits for a breaker. Four times the columns
-  // take about four times as long; a quadratic repair would take sixteen.
-  test('plans a wide table whose every MODIFY closes a cycle in time that grows with its width', () => {
+  // take about four times the work; a quadratic repair would take sixteen.
+  test('repairs a wide table whose every MODIFY closes a cycle with work that grows with its width', () => {
     const name = (i: number) => `c${String(i).padStart(4, '0')}`
     const plan = (count: number) => {
       const before = Array.from({ length: count }, (_, i) => u(name(i), i === 0 ? '1' : name(i - 1)))
       const after = Array.from({ length: count }, (_, i) => u(name(i), i + 2 < count ? name(i + 2) : '1'))
-      let best = Number.POSITIVE_INFINITY
-      let operations: MigrationOperation[] = []
-      for (let run = 0; run < 3; run += 1) {
-        const start = performance.now()
-        operations = planDiff([t(before)], [t(after)]).operations
-        best = Math.min(best, performance.now() - start)
-      }
-      return { best, first: operations.slice(0, 3).map((op) => op.key.slice('table:app.t:column:'.length)) }
+      const operations = planDiff([t(before)], [t(after)]).operations
+      return { units: cycleRepairWork.units, first: operations.slice(0, 3).map((op) => op.key.slice('table:app.t:column:'.length)) }
     }
     const narrow = plan(1200)
     const wide = plan(4800)
     expect(wide.first).toEqual(['c4798', 'c4797', 'c4796'])
-    expect(wide.best).toBeLessThan(Math.max(10 * narrow.best, 50))
-    expect(wide.best).toBeLessThan(5_000)
-  }, 60_000)
+    expect(narrow.units).toBeGreaterThan(0)
+    expect(wide.units).toBeLessThanOrEqual(5 * narrow.units)
+  })
 
   // Each expression reads `day` after an INTERVAL. The reads keep it, so the
   // ADD of `day` runs first.
@@ -1499,10 +1493,8 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     ])
   })
 
-  // Old and new reads that form no cycle are not replayed, so deep chains
-  // take about as long as the plan itself: `chains` keeps each `a` chain
-  // read and adds the last `b`, `groups` sends every `a` and `z` through the
-  // `b` chain. Four times the columns take about four times as long.
+  // Old and new reads that form no cycle are not replayed at all: `groups`
+  // sends every `a` and `z` through the `b` chain.
   test.each<[string, (n: number) => [ColumnDefinition[], ColumnDefinition[]]]>([
     [
       'groups',
@@ -1519,21 +1511,11 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
         ]
       },
     ],
-  ])('plans the acyclic %s fixture in time that grows with its width', (_, columns) => {
-    const plan = (n: number) => {
-      const [before, after] = columns(n)
-      let best = Number.POSITIVE_INFINITY
-      for (let run = 0; run < 3; run += 1) {
-        const start = performance.now()
-        planDiff([t(before)], [t(after)])
-        best = Math.min(best, performance.now() - start)
-      }
-      return best
-    }
-    const narrow = plan(500)
-    const wide = plan(2000)
-    expect(wide).toBeLessThan(Math.max(10 * narrow, 50))
-  }, 60_000)
+  ])('does no repair work on the acyclic %s fixture', (_, columns) => {
+    const [before, after] = columns(2000)
+    planDiff([t(before)], [t(after)])
+    expect(cycleRepairWork.units).toBe(0)
+  })
 
   // A bare NULL is a literal even when a column is named `null`, so these
   // tables keep their sorted order: the ALIAS `b` runs after `a` changes to
@@ -1583,9 +1565,11 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     expect(orderOf([t([...cycleBefore, extra])], [t([...cycleAfter, extra])])).toEqual(order)
   })
 
-  // Each table is replayed on its own, so many tables, or tables whose
-  // cycles no statement breaks, cost about as much as their statements:
-  // four times the tables take about four times as long.
+  // Each table is replayed on its own with its own budget, so many tables,
+  // tables whose cycles no statement breaks, a prerequisite chain every
+  // breaker check walks, and breakers that read many other columns cost work
+  // that grows with the plan: four times the size takes at most about four
+  // times the work.
   test.each<[string, (tables: number) => [SchemaDefinition[], SchemaDefinition[]]]>([
     [
       'tables whose cycle no statement breaks',
@@ -1616,19 +1600,127 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
         ]
       },
     ],
-  ])('plans %s in time that grows with their number', (_, schemas) => {
-    const plan = (tables: number) => {
-      const [previous, next] = schemas(tables)
-      let best = Number.POSITIVE_INFINITY
-      for (let run = 0; run < 3; run += 1) {
-        const start = performance.now()
-        planDiff(previous, next)
-        best = Math.min(best, performance.now() - start)
-      }
-      return best
+    [
+      'a prerequisite chain that every breaker check walks',
+      (size) => {
+        const n = size / 4
+        const pad = (p: string, i: number) => `${p}${String(i).padStart(4, '0')}`
+        const range = Array.from({ length: n }, (_, i) => i)
+        const before: ColumnDefinition[] = []
+        const after: ColumnDefinition[] = []
+        for (const i of range) {
+          before.push(u(pad('a', i)), u(pad('b', i), pad('z', i)), u(pad('z', i), pad('a', i)))
+          after.push(u(pad('a', i), pad('b', i)), u(pad('b', i), pad('p', 0)), u(pad('z', i), 'id'))
+        }
+        for (const j of range) {
+          before.push(u(pad('p', j), j === 0 ? range.map((i) => pad('b', i)).join(' + ') : pad('p', j - 1)))
+          after.push(u(pad('p', j), j + 1 < n ? pad('p', j + 1) : 'id'))
+        }
+        return [[t(before)], [t(after)]]
+      },
+    ],
+    [
+      'breakers that read many other columns',
+      (size) => {
+        const extras = Array.from({ length: 30 }, (_, i) => u(`p${String(i).padStart(3, '0')}`))
+        const tail = extras.map((column) => ` + ${column.name}`).join('')
+        const before: ColumnDefinition[] = [...extras]
+        const after: ColumnDefinition[] = [...extras]
+        for (let i = 0; i < size / 32; i += 1) {
+          const g = (x: string) => x + String(i).padStart(3, '0')
+          before.push(u(g('a')), u(g('b'), g('c') + tail), u(g('c'), g('a') + tail))
+          after.push(u(g('a'), g('b') + tail), u(g('b'), `id${tail}`), u(g('c'), `id${tail}`))
+        }
+        return [[t(before)], [t(after)]]
+      },
+    ],
+  ])('plans %s with work that grows with its size', (_, schemas) => {
+    const work = (size: number) => {
+      const [previous, next] = schemas(size)
+      planDiff(previous, next)
+      return cycleRepairWork.units
     }
-    const narrow = plan(512)
-    const wide = plan(2048)
-    expect(wide).toBeLessThan(Math.max(10 * narrow, 50))
-  }, 120_000)
+    const narrow = work(512)
+    const wide = work(2048)
+    expect(narrow).toBeGreaterThan(0)
+    expect(wide).toBeLessThanOrEqual(5 * narrow)
+  })
+
+  // A table with breakers that read many other columns still has enough work
+  // to repair all its cycles.
+  test('repairs cycles whose breakers read many other columns', () => {
+    const extras = Array.from({ length: 30 }, (_, i) => u(`p${String(i).padStart(3, '0')}`))
+    const tail = extras.map((column) => ` + ${column.name}`).join('')
+    const before: ColumnDefinition[] = [...extras]
+    const after: ColumnDefinition[] = [...extras]
+    for (let i = 0; i < 20; i += 1) {
+      const g = (x: string) => x + String(i).padStart(3, '0')
+      before.push(u(g('a')), u(g('b'), g('c') + tail), u(g('c'), g('a') + tail))
+      after.push(u(g('a'), g('b') + tail), u(g('b'), `id${tail}`), u(g('c'), `id${tail}`))
+    }
+    const order = orderOf([t(before)], [t(after)])
+    expect(order.slice(0, 2)).toEqual(['t.b000', 't.a000'])
+  })
+
+  // The unit of `date_add`, `dateDiff` and the like, a bare NOT and a bare
+  // SELECT are not reads even when a column has that name, so these tables
+  // keep their sorted order: the ALIAS `b` runs after `a` changes to String.
+  test.each<[string, string, string]>([
+    ['date_add', 'toString(date_add(day, if(true, 1, 0), toDateTime(id)))', 'day'],
+    ['not', 'toString(not - toInt64(id))', 'not'],
+  ])('a bare %s word is no read of a column with that name', (_, expression, name) => {
+    expect(
+      orderOf(
+        [t([u('a'), u(name, 'z'), u('z', 'length(toString(a))')])],
+        [t([text('a', expression), u('b', "match(a, 'x')", { type: 'UInt8', defaultKind: 'ALIAS' }), u(name, 'id'), u('z', 'id')])]
+      )
+    ).toEqual(['t.a', 't.b', `t.${name}`, 't.z'])
+  })
+
+  test('a dateDiff unit is no read of a column with that name', () => {
+    expect(
+      orderOf(
+        [t([{ name: 'a', type: 'String' }, u('b'), text('c', 'a'), text('hour', 'c')])],
+        [t([u('a', 'dateDiff(hour, toDateTime(0), toDateTime(id))'), u('b', 'a + 1'), text('c', "'x'"), text('hour', "'y'")])]
+      )
+    ).toEqual(['t.a', 't.b', 't.c', 't.hour'])
+  })
+
+  test('a bare SELECT keeps the sorted order even with a column of that name', () => {
+    const extra = [u('SELECT'), u('extra', 'toUInt64((SELECT + 1))')]
+    expect(orderOf([t([...cycleBefore, ...extra])], [t([...cycleAfter, ...extra])])).toEqual(['t.a', 't.b', 't.c'])
+  })
+
+  // A quoted Tuple element name is part of the type, in both casts.
+  test.each(['CAST(tuple(id) AS Tuple(`a-b` UInt64))', 'tuple(id)::Tuple(`a-b` UInt64)'])(
+    'an unchanged DEFAULT %s keeps the repair',
+    (expression) => {
+      const extra = { name: 'extra', type: 'Tuple(`a-b` UInt64)', default: { expression } }
+      expect(orderOf([t([...cycleBefore, extra])], [t([...cycleAfter, extra])])).toEqual(['t.b', 't.a', 't.c'])
+    }
+  )
+
+  // A deeply nested cast is not parsed, and an unchanged table is not looked at.
+  test('a deeply nested cast in an unchanged table plans nothing', () => {
+    const nested = `CAST(id AS ${'Array('.repeat(1050)}UInt64${')'.repeat(1050)})`
+    const deep = { name: 'deep', type: 'String', default: { expression: nested } }
+    expect(planDiff([t([u('a'), deep])], [t([u('a'), deep])]).operations).toEqual([])
+  })
+
+  // Column `x:column:a` of `t` and column `a` of `t:column:x` share a key, so
+  // a prerequisite links the two tables' statements. `t:column:x` keeps its
+  // sorted order because of its INTERVAL, so `t` keeps its order too: the
+  // plan is main's.
+  test('a prerequisite between two tables keeps both in their sorted order', () => {
+    const interval = u('k', 'toUInt64(toDateTime(id) + INTERVAL 1 day)')
+    const previous = [named('t', [u('x:column:a'), u('y', 'z'), u('z', 'x:column:a')]), named('t:column:x', [u('b', '1'), interval])]
+    const next = [named('t', [u('x:column:a', 'y'), u('y', 'id'), u('z', 'id')]), named('t:column:x', [u('a'), u('b', 'id'), interval])]
+    expect(planDiff(previous, next).operations.map((op) => op.sql)).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;',
+      'ALTER TABLE app.`t:column:x` ADD COLUMN IF NOT EXISTS `a` UInt64;',
+      'ALTER TABLE app.`t:column:x` MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
+    ])
+  })
 })
