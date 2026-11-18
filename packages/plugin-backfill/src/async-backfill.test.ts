@@ -1833,3 +1833,61 @@ test('a zero-row failure of a target whose failures cannot be proven is unknown'
     .rejects.toThrow(`chunk c1 (query_id backfill-${PLAN_ID}-c1): ${reason}.`)
   expect(submits).toHaveLength(1)
 })
+
+// Coordinator follow-up: the interrupt never waits without end behind a
+// checkpoint write. A write under way ends within the interrupt's bounded
+// wait, or the lock stays; no write starts after the interrupt returns.
+describe('an interrupt while a checkpoint write is under way', () => {
+  const HUNG = 'The checkpoint write under way did not finish in time: it may still complete while this process runs, so the plan\'s lock stays in place.'
+
+  async function interruptDuringWrite(writeMs: number | undefined) {
+    const controller = new AbortController()
+    const writes: string[] = []
+    let writing = false
+    const run = executeBackfill({
+      executor: createMockExecutor(new Map([[`backfill-${PLAN_ID}-c1`, [{ status: 'running' }]]])),
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }],
+      buildQuery: () => 'INSERT INTO t SELECT 1',
+      pollIntervalMs: 1,
+      signal: controller.signal,
+      handoffTimeoutMs: 300,
+      onProgress: (progress) => {
+        writes.push(progress.c1?.status ?? '')
+        if (progress.c1?.status !== 'submitted') return
+        writing = true
+        // The write that records the chunk submitted is slow, or hangs.
+        return new Promise<void>((resolve) => {
+          if (writeMs !== undefined) setTimeout(resolve, writeMs)
+        })
+      },
+    })
+    while (!writing) await new Promise((resolve) => setTimeout(resolve, 5))
+    const started = Date.now()
+    controller.abort()
+    const error = await run.then(() => undefined, (rejection: unknown) => rejection)
+    const elapsed = Date.now() - started
+    const written = writes.length
+    await new Promise((resolve) => setTimeout(resolve, 100))
+    return { error, elapsed, written, writes }
+  }
+
+  test('a hung write: the interrupt returns after its bounded wait and keeps the lock', async () => {
+    const { error, elapsed, written, writes } = await interruptDuringWrite(undefined)
+
+    expect(error).toBeInstanceOf(BackfillInterruptedError)
+    expect(error).toMatchObject({ keepLock: true, note: HUNG })
+    expect(elapsed).toBeLessThan(2_000)
+    expect(writes).toHaveLength(written)
+  })
+
+  test('a slow write that ends in time: the interrupt waits for it and releases the lock', async () => {
+    const { error, elapsed, written, writes } = await interruptDuringWrite(100)
+
+    expect(error).toBeInstanceOf(BackfillInterruptedError)
+    expect(error).toMatchObject({ keepLock: false })
+    expect(elapsed).toBeGreaterThanOrEqual(80)
+    // No write starts after the interrupt returned.
+    expect(writes).toHaveLength(written)
+  })
+})

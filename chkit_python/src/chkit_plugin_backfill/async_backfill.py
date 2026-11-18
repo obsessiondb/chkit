@@ -669,14 +669,26 @@ def _unknown_outcome_error(plan_id: str, unknown: list[_UnknownAttempt]) -> Unkn
 
 
 def _interrupted_error(
-    plan_id: str, abandoned: list[str] | None = None, alive: list[str] | None = None
+    plan_id: str,
+    abandoned: list[str] | None = None,
+    alive: list[str] | None = None,
+    *,
+    write_hung: bool = False,
 ) -> BackfillInterruptedError:
     message = (
         f"Backfill plan {plan_id}: interrupted. No new chunk was submitted; a chunk "
         "already submitted keeps running on the server, and a resume attaches to it."
     )
+    hung = (
+        "The checkpoint write under way did not finish in time: it may still complete "
+        "while this process runs, so the plan's lock stays in place."
+        if write_hung
+        else None
+    )
     if not abandoned:
-        return BackfillInterruptedError(message)
+        if hung is None:
+            return BackfillInterruptedError(message)
+        return BackfillInterruptedError(message, note=hung, keep_lock=True)
     chunks = f"chunk{'' if len(abandoned) == 1 else 's'} {', '.join(abandoned)}"
     if not alive:
         note = (
@@ -690,7 +702,9 @@ def _interrupted_error(
             "while this process runs, so its attempt stays recorded as one that may have run "
             "and the plan's lock stays in place."
         )
-    return BackfillInterruptedError(message, note=note, keep_lock=bool(alive))
+    if hung is not None:
+        note = f"{note} {hung}"
+    return BackfillInterruptedError(message, note=note, keep_lock=bool(alive) or write_hung)
 
 
 def _admits_at_transport(executor: object) -> bool:
@@ -908,14 +922,29 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     # server shows failed is recorded failed, and the other chunks keep running.
     dispatch_stopped = threading.Event()
 
-    def emit_progress() -> None:
-        if on_progress is not None:
-            with persist_lock:
-                if closed.is_set():
+    def write_checkpoint(*, after_close: bool) -> None:
+        """Report the progress, one write at a time. A write starts only
+        before close() seals the run, and after close() began only for an
+        admitted chunk's own record (``after_close``). close() never waits
+        for the write lock, only for the write under way, through ``writing``."""
+        if on_progress is None:
+            return
+        with persist_lock:
+            with admission:
+                if sealed[0] or (closed.is_set() and not after_close):
                     return
+                writing[0] += 1
+            try:
                 with lock:
                     snapshot = dict(progress)
                 on_progress(snapshot)
+            finally:
+                with admission:
+                    writing[0] -= 1
+                    admission.notify_all()
+
+    def emit_progress() -> None:
+        write_checkpoint(after_close=False)
 
     # Chunks between their admission and their request's handoff to the
     # transport (or their refusal and saved-back state). close() waits for
@@ -929,6 +958,10 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     abandons: dict[str, Callable[[], None]] = {}
     # Set once close() abandons the sends that did not hand off in time.
     abandoning = [False]
+    # The checkpoint write under way, and whether close() sealed the run: no
+    # write starts after that.
+    writing = [0]
+    sealed = [False]
     single_send = _admits_at_transport(executor)
 
     def stopping() -> bool:
@@ -956,32 +989,46 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
             admission.notify_all()
 
     def close() -> BackfillInterruptedError:
-        """Stop the run, and wait for the admitted chunks to hand off (or be
-        refused and saved back). A chunk that does not within
-        ``handoff_timeout_ms`` is abandoned: no more of its request is
-        written, then its admission is released."""
-        with persist_lock, admission:
+        """Stop the run without waiting for the write lock. Within
+        ``handoff_timeout_ms``, the admitted chunks hand off (or are refused
+        and saved back) and the checkpoint write under way ends. A chunk that
+        does not hand off in time is abandoned: no more of its request is
+        written, then its admission is released. Then the run is sealed: no
+        checkpoint write starts after close() returns. A send or a write
+        still under way then keeps the plan's lock."""
+        deadline = time.monotonic() + handoff_timeout_ms / 1000
+
+        def left(at_least: float = 0.0) -> float:
+            return max(at_least, deadline - time.monotonic())
+
+        with admission:
             closed.set()
             dispatch_stopped.set()
-        with admission:
-            if admission.wait_for(lambda: admitted[0] == 0, handoff_timeout_ms / 1000):
-                return _interrupted_error(plan_id)
-            abandoning[0] = True
-            abandoned = sorted(in_flight)
-            stuck = [
-                (abandons[chunk_id], in_flight[chunk_id])
-                for chunk_id in abandoned
-                if chunk_id in abandons
-            ]
+            handed = admission.wait_for(lambda: admitted[0] == 0, left())
+            abandoned: list[str] = []
+            stuck: list[tuple[Callable[[], None], Callable[[], None]]] = []
+            if not handed:
+                abandoning[0] = True
+                abandoned = sorted(in_flight)
+                stuck = [
+                    (abandons[chunk_id], in_flight[chunk_id])
+                    for chunk_id in abandoned
+                    if chunk_id in abandons
+                ]
         # A request at the transport is stopped first, then released; one
         # that has not reached it yet is refused there, and ends on its own.
         for abandon, release_chunk in stuck:
             abandon()
             release_chunk()
+        grace = _ABANDON_GRACE_MS / 1000
         with admission:
-            admission.wait_for(lambda: admitted[0] == 0, _ABANDON_GRACE_MS / 1000)
-            alive = sorted(in_flight)
-        return _interrupted_error(plan_id, abandoned, alive)
+            if abandoned:
+                admission.wait_for(lambda: admitted[0] == 0, grace)
+            admission.wait_for(lambda: writing[0] == 0, left(grace if abandoned else 0.0))
+            sealed[0] = True
+            alive = sorted(in_flight) if abandoned else []
+            write_hung = writing[0] > 0
+        return _interrupted_error(plan_id, abandoned, alive, write_hung=write_hung)
 
     # Save the reconciled state, every chunk included, before anything is
     # submitted: a chunk this checkpoint lists as pending without a query id
@@ -1116,15 +1163,11 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         )
 
     def record(chunk_id: str, next_state: BackfillChunkState) -> None:
-        """An admitted chunk's own record, saved even after close() began:
-        close() waits for it."""
+        """An admitted chunk's own record, saved even after close() began
+        (close() waits for it), never after close() sealed the run."""
         with lock:
             progress[chunk_id] = next_state
-        if on_progress is not None:
-            with persist_lock:
-                with lock:
-                    snapshot = dict(progress)
-                on_progress(snapshot)
+        write_checkpoint(after_close=True)
 
     def send(
         chunk_id: str, previous: BackfillChunkState, attempt: BackfillChunkState

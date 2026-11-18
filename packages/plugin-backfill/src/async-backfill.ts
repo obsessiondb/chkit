@@ -646,15 +646,34 @@ export function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefine
 
 function interruptedError(
   planId: string,
-  sends: { abandoned: string[]; alive: string[] } = { abandoned: [], alive: [] },
+  sends: { abandoned: string[]; alive: string[]; writeHung?: boolean } = { abandoned: [], alive: [] },
 ): BackfillInterruptedError {
   const message = `Backfill plan ${planId}: interrupted. No new chunk was submitted; a chunk already submitted keeps running on the server, and a resume attaches to it.`
-  if (sends.abandoned.length === 0) return new BackfillInterruptedError(message)
+  const hung = sends.writeHung
+    ? 'The checkpoint write under way did not finish in time: it may still complete while this process runs, so the plan\'s lock stays in place.'
+    : undefined
+  if (sends.abandoned.length === 0) {
+    return hung === undefined ? new BackfillInterruptedError(message) : new BackfillInterruptedError(message, { note: hung, keepLock: true })
+  }
   const chunks = `chunk${sends.abandoned.length === 1 ? '' : 's'} ${sends.abandoned.join(', ')}`
   const note = sends.alive.length === 0
     ? `The send of ${chunks} did not reach the server in time and was abandoned: it may still have reached it, so its attempt stays recorded as one that may have run.`
     : `The send of ${chunks} did not reach the server in time and could not be stopped (chunk${sends.alive.length === 1 ? '' : 's'} ${sends.alive.join(', ')}): it may still be sent while this process runs, so its attempt stays recorded as one that may have run and the plan's lock stays in place.`
-  return new BackfillInterruptedError(message, { note, keepLock: sends.alive.length > 0 })
+  return new BackfillInterruptedError(message, {
+    note: hung === undefined ? note : `${note} ${hung}`,
+    keepLock: sends.alive.length > 0 || hung !== undefined,
+  })
+}
+
+/** Whether `work` settles within `ms` (at once when it already has). */
+async function endsWithin(work: Promise<unknown>, ms: number): Promise<boolean> {
+  let timer: ReturnType<typeof setTimeout> | undefined
+  const ended = await Promise.race([
+    work.then(() => true, () => true),
+    new Promise<boolean>((resolve) => { timer = setTimeout(() => resolve(false), Math.max(0, ms)) }),
+  ])
+  clearTimeout(timer)
+  return ended
 }
 
 /** Whether every promise in `pending` (as it changes) settles within `ms`. */
@@ -831,8 +850,12 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   }
   // An admitted chunk's own records, saved even after an interrupt: the
   // interrupt waits for them (see `send`).
+  // Set once an interrupt has seen the last checkpoint write end: no write
+  // starts after that, not even an admitted chunk's own record.
+  let sealed = false
   const record = (id: string, next: BackfillChunkState) => {
     progress = updateChunk(progress, id, next)
+    if (sealed) return lastReport
     lastReport = Promise.resolve(onProgress?.(progress))
     return lastReport
   }
@@ -893,9 +916,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
       // back, before the interrupt returns. One that does not within
       // `handoffTimeoutMs` is abandoned: its request is destroyed first, so
       // none of it is written after the interrupt returns.
-      void stopSends()
-        .then((outcome) => lastReport.then(() => outcome, () => outcome))
-        .then((outcome) => reject(interruptedError(planId, outcome)))
+      void stopSends().then((outcome) => reject(interruptedError(planId, outcome)))
     }
     if (signal?.aborted) return onAbort()
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -909,12 +930,33 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   if (stopError) throw stopError.error
   if (pollUnknown.length > 0) throw unknownOutcomeError(planId, pollUnknown)
 
-  async function stopSends(): Promise<{ abandoned: string[]; alive: string[] }> {
-    if (await settlesWithin(handoffs, handoffTimeoutMs)) return { abandoned: [], alive: [] }
-    const abandoned = [...handoffs.keys()]
-    sendsAbandoned.abort()
-    await settlesWithin(handoffs, ABANDON_GRACE_MS)
-    return { abandoned, alive: [...handoffs.keys()] }
+  /**
+   * Within `handoffTimeoutMs`, the admitted chunks hand off (or are refused
+   * and saved back) and the checkpoint write under way ends. A chunk that
+   * does not hand off in time is abandoned: its request is destroyed. Then
+   * the run is sealed: no checkpoint write starts after the interrupt
+   * returns. A send or a write still under way then keeps the plan's lock.
+   */
+  async function stopSends(): Promise<{ abandoned: string[]; alive: string[]; writeHung: boolean }> {
+    const deadline = Date.now() + handoffTimeoutMs
+    let abandoned: string[] = []
+    let alive: string[] = []
+    if (!(await settlesWithin(handoffs, handoffTimeoutMs))) {
+      abandoned = [...handoffs.keys()]
+      sendsAbandoned.abort()
+      await settlesWithin(handoffs, ABANDON_GRACE_MS)
+      alive = [...handoffs.keys()]
+    }
+    for (;;) {
+      const current = lastReport
+      const left = Math.max(abandoned.length > 0 ? ABANDON_GRACE_MS : 0, deadline - Date.now())
+      const ended = await endsWithin(current, left)
+      // Checked and sealed in one synchronous step: no write starts between.
+      if (!ended || current === lastReport) {
+        sealed = true
+        return { abandoned, alive, writeHung: !ended }
+      }
+    }
   }
 
   async function runChunk(chunk: { id: string; from?: string; to?: string }): Promise<UnknownAttempt | undefined> {

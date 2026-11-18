@@ -324,6 +324,35 @@ describe('run lock durability and ownership (#765, round 3)', () => {
     expect(result.stderr).toContain(`Backfill plan ${PLAN_ID}: cancel interrupted (SIGINT); the lock is released.`)
     await rm(join(runsDir, '..'), { recursive: true, force: true })
   }, 30_000)
+
+  test('a second SIGINT during a cancel exits at once and leaves the lock, with the cancel message', async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+    // The cancel's body keeps going after the first SIGINT.
+    const script = `
+      const { withRunLock } = await import(${JSON.stringify(RUN_LOCK_MODULE)})
+      await withRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)}, async (signal) => {
+        console.log('ready')
+        await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+        await new Promise((resolve) => setTimeout(resolve, 30_000))
+      }, { command: 'cancel' })
+    `
+    const run = runScript(script)
+    await new Promise<void>((resolve) => {
+      run.child.stdout?.on('data', (chunk) => { if (String(chunk).includes('ready')) resolve() })
+    })
+
+    run.child.kill('SIGINT')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    run.child.kill('SIGINT')
+    const result = await run
+
+    expect(result.code).toBe(130)
+    expect(existsSync(lockPath)).toBe(true)
+    expect(result.stderr).toContain(`Backfill plan ${PLAN_ID}: SIGINT again, exiting at once. The lock ${lockPath} stays in place. Once this process has exited, delete the lock and re-run.`)
+    expect(result.stderr).not.toContain('a chunk being sent')
+    await rm(join(runsDir, '..'), { recursive: true, force: true })
+  }, 30_000)
 })
 
 // The sources on Bun, and the built packages on Node.

@@ -2539,3 +2539,78 @@ def test_a_zero_row_failure_of_a_target_whose_failures_cannot_be_proven_is_unkno
         run({"c1": submitted}, replay_failed=True)
     assert f"chunk c1 (query_id backfill-{PLAN_ID}-c1): {reason}." in str(raised.value)
     assert len(executor.submit_order) == 1
+
+
+# Coordinator follow-up: the interrupt never waits without end behind a
+# checkpoint write. A write under way ends within the interrupt's bounded
+# wait, or the lock stays; no write starts after the interrupt returns.
+_HUNG_WRITE = (
+    "The checkpoint write under way did not finish in time: it may still complete "
+    "while this process runs, so the plan's lock stays in place."
+)
+
+
+def _interrupt_during_write(write_s: float | None) -> tuple[BaseException, float, int, list[str]]:
+    writes: list[str] = []
+    writing = threading.Event()
+    stop = threading.Event()
+    outcome: list[BaseException] = []
+
+    def on_progress(progress: BackfillProgress) -> None:
+        status = progress["c1"].status if "c1" in progress else ""
+        writes.append(status)
+        if status != "submitted":
+            return
+        writing.set()
+        # The write that records the chunk submitted is slow, or hangs.
+        if write_s is None:
+            threading.Event().wait(30)
+        else:
+            time.sleep(write_s)
+
+    def run() -> None:
+        try:
+            execute_backfill(
+                executor=MockExecutor({f"backfill-{PLAN_ID}-c1": [QueryStatus(status="running")]}),
+                plan_id=PLAN_ID,
+                chunk_ids=["c1"],
+                build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+                poll_interval_ms=1,
+                stop=stop,
+                handoff_timeout_ms=300,
+                on_progress=on_progress,
+            )
+        except BaseException as error:
+            outcome.append(error)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert writing.wait(5)
+    started = time.monotonic()
+    stop.set()
+    worker.join(5)
+    elapsed = time.monotonic() - started
+    written = len(writes)
+    time.sleep(0.1)
+    assert len(outcome) == 1
+    return outcome[0], elapsed, written, writes
+
+
+def test_a_hung_checkpoint_write_keeps_the_lock_after_the_bounded_wait() -> None:
+    error, elapsed, written, writes = _interrupt_during_write(None)
+
+    assert isinstance(error, BackfillInterruptedError)
+    assert error.keep_lock is True
+    assert error.note == _HUNG_WRITE
+    assert elapsed < 2
+    assert len(writes) == written
+
+
+def test_a_slow_checkpoint_write_that_ends_in_time_releases_the_lock() -> None:
+    error, elapsed, written, writes = _interrupt_during_write(0.1)
+
+    assert isinstance(error, BackfillInterruptedError)
+    assert error.keep_lock is False
+    assert elapsed >= 0.08
+    # No write starts after the interrupt returned.
+    assert len(writes) == written

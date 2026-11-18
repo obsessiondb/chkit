@@ -144,9 +144,9 @@ export async function withRunLock<T>(
 }
 
 function secondSignalMessage(planId: string, signal: string, command: 'run' | 'cancel', lockPath: string | undefined): string {
-  const sending = command === 'cancel' ? '' : ' a chunk being sent may still reach the server, and its attempt stays recorded as one that may have run.'
+  const sending = command === 'cancel' ? '.' : ': a chunk being sent may still reach the server, and its attempt stays recorded as one that may have run.'
   const lock = lockPath
-    ? `The lock ${lockPath} stays in place:${sending} Once this process has exited, delete the lock and re-run.`
+    ? `The lock ${lockPath} stays in place${sending} Once this process has exited, delete the lock and re-run.`
     : 'The lock is not held.'
   return `Backfill plan ${planId}: ${signal} again, exiting at once. ${lock}`
 }

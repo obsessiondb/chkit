@@ -244,13 +244,13 @@ def _second_signal_message(
     plan_id: str, name: str, command: str, lock_path: str | None
 ) -> str:
     sending = (
-        ""
+        "."
         if command == "cancel"
-        else " a chunk being sent may still reach the server, and its attempt stays "
+        else ": a chunk being sent may still reach the server, and its attempt stays "
         "recorded as one that may have run."
     )
     lock = (
-        f"The lock {lock_path} stays in place:{sending} Once this process has exited, "
+        f"The lock {lock_path} stays in place{sending} Once this process has exited, "
         "delete the lock and re-run."
         if lock_path is not None
         else "The lock is not held."
