@@ -268,3 +268,25 @@ def test_pull_help_reports_a_config_that_fails_to_load(empty_home: Path) -> None
     }
     # A --config that names no file is no config, as in TS: the help.
     assert _help(["pull", "--help", "-c", "missing.py"]) == FIXTURE["pull --help"]
+
+
+def test_pull_help_reads_an_empty_config_value_as_no_path(empty_home: Path) -> None:
+    assert _help(["pull", "--config=", "--help"]) == FIXTURE["pull --help"]
+    _write_project(empty_home, "")
+    # The project config, without obsessiondb(), as in TS.
+    expected = _without_service_section(FIXTURE["pull --help"])
+    assert _help(["pull", "--config=", "--help"]) == expected
+
+
+def test_pull_help_loads_a_user_profile_used_alone(empty_home: Path) -> None:
+    profile = empty_home / "chkit" / "config.py"
+    profile.parent.mkdir()
+    profile.write_text('config = {"clickhouse": {"url": "http://localhost:8123"}}\n')
+    assert _help(["pull", "--help"]) == FIXTURE["pull --help"]
+    # As in TS, a profile that fails to resolve is the error.
+    profile.write_text(
+        'config = {"clickhouse": {"url": "http://localhost:8123", "indexGranularity": 0}}\n'
+    )
+    result = CliRunner().invoke(app, ["pull", "--help"])
+    assert (result.exit_code, result.stdout) == (1, "")
+    assert "indexGranularity" in result.stderr

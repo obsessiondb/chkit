@@ -30,11 +30,7 @@ from chkit.cli.commands import (
     snapshot,
     status,
 )
-from chkit.cli.config_loader import (
-    ConfigNotFoundError,
-    ProjectConfigRequiredError,
-    load_config,
-)
+from chkit.cli.config_loader import DEFAULT_CONFIG_FILE, ConfigNotFoundError, load_config
 from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.help import (
     HELP_PLUGINS_META,
@@ -339,14 +335,16 @@ def _pull_help_lists_service(args: list[str]) -> bool:
     loads the config for the help of pull, a plugin command there (#771): a
     config that fails to load is the error, a config lists the flag when it
     registers ``obsessiondb()``, and without a project config the help lists
-    the flags that ``chkit obsessiondb login`` adds."""
-    config_path = extract_config_path(expand_short_flags(args, GLOBAL_FLAGS))
+    the flags that ``chkit obsessiondb login`` adds. As in TS, a user profile
+    used alone must load too, and an empty ``--config`` value is no path."""
+    config_path = extract_config_path(expand_short_flags(args, GLOBAL_FLAGS)) or None
+    path = Path(config_path) if config_path is not None else None
     try:
-        config = load_config(
-            Path(config_path) if config_path is not None else None,
-            ChxConfigEnv(command="pull"),
-        )
-    except (ConfigNotFoundError, ProjectConfigRequiredError):
+        config = load_config(path, ChxConfigEnv(command="pull"), allow_profile_only=True)
+    except ConfigNotFoundError:
+        return True
+    if not (path or Path(DEFAULT_CONFIG_FILE)).exists():
+        # The profile alone: TS lists the profile's plugins and those flags.
         return True
     return any(
         getattr(getattr(plugin, "manifest", None), "name", None) == "obsessiondb"

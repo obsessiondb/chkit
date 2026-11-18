@@ -106,6 +106,7 @@ def load_config(
     env: ChxConfigEnv | None = None,
     *,
     allow_synthesized_profile: bool = False,
+    allow_profile_only: bool = False,
 ) -> ChxResolvedConfig:
     """Resolve a ``ChxResolvedConfig`` from a config file.
 
@@ -122,7 +123,8 @@ def load_config(
     stand in for a profile that registers ``obsessiondb()``.
 
     Without a project config (and no explicit ``config_path``) the profile is
-    used alone, except for :data:`PROJECT_ONLY_COMMANDS` (``env.command``).
+    used alone, except for :data:`PROJECT_ONLY_COMMANDS` (``env.command``)
+    unless ``allow_profile_only``.
     """
     path = config_path if config_path is not None else Path(DEFAULT_CONFIG_FILE)
     if path.exists():
@@ -154,7 +156,7 @@ def load_config(
                 "'chkit obsessiondb login' to use chkit from any directory."
             )
         raise ConfigNotFoundError(msg)
-    if command in PROJECT_ONLY_COMMANDS:
+    if command in PROJECT_ONLY_COMMANDS and not allow_profile_only:
         msg = (
             f'Command "{command}" requires a project config ({DEFAULT_CONFIG_FILE}) '
             "in the current directory.\n"
