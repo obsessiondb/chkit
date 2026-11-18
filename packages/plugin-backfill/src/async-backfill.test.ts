@@ -730,7 +730,7 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
   const runOnce = (
     server: ReturnType<typeof createSimulatedServer>,
     resumeFrom: BackfillProgress | undefined,
-    extra: { replayFailed?: boolean; acceptUnknown?: boolean; maxPollErrors?: number } = {},
+    extra: { replayFailed?: boolean; acceptUnknown?: boolean; maxPollErrors?: number; outcomeRecheckIntervalMs?: number } = {},
   ) =>
     executeBackfill({
       executor: server.executor,
@@ -815,6 +815,18 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
       expect(server.submits[0]?.startsWith(`${firstId}-`)).toBe(true)
       expect(accepted.progress.c1).toMatchObject({ status: 'done', queryId: server.submits[0] })
     }
+  })
+
+  // The submit returns when the INSERT ends, so every poll starts in the
+  // query_log flush gap. A short poll interval must not shorten the wait.
+  test('polls wait out a flush gap longer than maxPollErrors polls, and the attempt ends done', async () => {
+    const server = createSimulatedServer({ nextOutcomes: ['finished'], unflushedLogReads: 15 })
+
+    const result = await runOnce(server, undefined, { maxPollErrors: 3, outcomeRecheckIntervalMs: 100 })
+
+    expect(server.submits).toEqual([firstId])
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: firstId, writtenRows: 42 })
+    expect(server.logQueries.length).toBeGreaterThan(3)
   })
 
   test('a replay that started and has no outcome stops the resume before anything is submitted', async () => {

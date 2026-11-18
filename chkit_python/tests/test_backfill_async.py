@@ -899,6 +899,7 @@ def _run_once(
     replay_failed: bool = False,
     accept_unknown: bool = False,
     max_poll_errors: int = 10,
+    outcome_recheck_interval_ms: int = 1,
 ) -> BackfillResult:
     return execute_backfill(
         executor=server,
@@ -908,7 +909,7 @@ def _run_once(
         poll_interval_ms=1,
         max_poll_errors=max_poll_errors,
         outcome_recheck_attempts=3,
-        outcome_recheck_interval_ms=1,
+        outcome_recheck_interval_ms=outcome_recheck_interval_ms,
         resume_from=resume_from,
         replay_failed=replay_failed,
         accept_unknown=accept_unknown,
@@ -1014,6 +1015,19 @@ def test_a_recorded_attempt_with_no_row_stops_the_resume_and_accept_unknown_repl
         "done",
         server.submits[0],
     )
+
+
+# The submit returns when the INSERT ends, so every poll starts in the
+# query_log flush gap. A short poll interval must not shorten the wait.
+def test_polls_wait_out_a_flush_gap_longer_than_max_poll_errors_polls() -> None:
+    server = SimulatedServer(next_outcomes=["finished"], unflushed_log_reads=15)
+
+    result = _run_once(server, None, max_poll_errors=3, outcome_recheck_interval_ms=100)
+
+    assert server.submits == [FIRST_ID]
+    c1 = result.progress["c1"]
+    assert (c1.status, c1.query_id, c1.written_rows) == ("done", FIRST_ID, 42)
+    assert len(server.log_queries) > 3
 
 
 @pytest.mark.parametrize("replay_failed", [False, True])

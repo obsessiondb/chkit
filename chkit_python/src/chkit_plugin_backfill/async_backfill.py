@@ -616,10 +616,9 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     outcome_recheck_interval_ms: int = _OUTCOME_RECHECK_INTERVAL_MS,
 ) -> BackfillResult:
     """Run the chunks. ``max_poll_errors`` is how many consecutive polls may
-    fail, or find a chunk neither running nor with an outcome in
-    system.query_log, before its outcome is recorded unknown and the run
-    stops. ``replay_failed`` replays chunks whose last attempt the server
-    shows failed; ``accept_unknown`` replays those whose outcome is unknown
+    fail before the chunk's outcome is recorded unknown and the run stops.
+    ``replay_failed`` replays chunks whose last attempt the server shows
+    failed; ``accept_unknown`` replays those whose outcome is unknown
     instead of stopping, which can write their rows twice."""
     progress: BackfillProgress = {}
     for chunk_id in chunk_ids:
@@ -693,6 +692,13 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     if unknown:
         raise _unknown_outcome_error(plan_id, unknown)
 
+    # How long polls wait for a finished attempt's outcome to reach query_log:
+    # never shorter than the resume's recheck window, whatever the poll interval.
+    empty_window_ms = max(
+        outcome_recheck_attempts * outcome_recheck_interval_ms,
+        max_poll_errors * poll_interval_ms,
+    )
+
     def set_chunk(chunk_id: str, next_state: BackfillChunkState) -> None:
         with lock:
             progress[chunk_id] = next_state
@@ -716,32 +722,39 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         system.processes (as query_status does, with its metrics); once the
         attempt is not running, the outcome is classified as the resume's
         sync does it, on every replica, so a shared-id failure is never taken
-        for the attempt's own. Polls that fail, or find no outcome, count
-        towards ``max_poll_errors``; the last has no time bound, and then the
-        outcome is unknown: the chunk keeps its state, and the run stops once
+        for the attempt's own. After ``max_poll_errors`` consecutive poll
+        errors, or once polls have found the attempt neither running nor with
+        an outcome for ``empty_window_ms`` (the query_log flush gap every
+        finished attempt goes through), the outcome is unknown: the last read
+        has no time bound, the chunk keeps its state, and the run stops once
         the other chunks end."""
         state = initial
-        misses = 0
+        errors = 0
+        empty_since: float | None = None
         while state.status in {"submitted", "running"}:
             time.sleep(poll_interval_ms / 1000)
             query_id = state.query_id
             if query_id is None:
                 break
-            final = misses + 1 >= max_poll_errors
+            final = (
+                empty_since is not None
+                and time.monotonic() * 1000 - empty_since >= empty_window_ms
+            )
             try:
                 outcome = poll_once(state, chunk_id, query_id, final=final)
             except Exception as error:
-                misses += 1
-                if misses >= max_poll_errors:
+                errors += 1
+                if errors >= max_poll_errors:
                     return _UnknownAttempt(
                         chunk_id,
                         query_id,
-                        f"lost contact with the server after {misses} consecutive "
+                        f"lost contact with the server after {errors} consecutive "
                         f"poll errors ({error})",
                     )
                 continue
+            errors = 0
             if isinstance(outcome, QueryStatus) or outcome.kind == "running":
-                misses = 0
+                empty_since = None
                 if isinstance(outcome, QueryStatus):
                     next_state, changed = _apply_query_status(state, outcome)
                 else:
@@ -755,8 +768,8 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                 set_chunk(chunk_id, state)
             elif outcome.kind == "unknown":
                 return _UnknownAttempt(chunk_id, query_id, outcome.reason or "")
-            else:
-                misses += 1
+            elif empty_since is None:
+                empty_since = time.monotonic() * 1000
         return None
 
     def run_chunk(chunk_id: str) -> _UnknownAttempt | None:

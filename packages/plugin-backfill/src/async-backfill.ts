@@ -28,8 +28,7 @@ export interface BackfillOptions {
   concurrency?: number
   /** Polling interval in ms. Default: 5000 */
   pollIntervalMs?: number
-  /** Max consecutive polls that fail, or find a chunk neither running nor
-   *  with an outcome in system.query_log, before its outcome is recorded
+  /** Max consecutive poll errors before the chunk's outcome is recorded
    *  unknown and the run stops. Default: 10 */
   maxPollErrors?: number
   /** Called whenever progress changes. Use this to persist state. */
@@ -506,26 +505,28 @@ function unknownOutcomeError(planId: string, unknown: UnknownAttempt[]): Error {
  * system.processes (as queryStatus does, with its metrics); once the attempt
  * is not running, the outcome is classified as the resume's sync does it, on
  * every replica, so a shared-id failure is never taken for the attempt's
- * own. Polls that fail, or find no outcome, count towards `maxPollErrors`;
- * the last has no time bound, and then the outcome is unknown: the chunk
- * keeps its state, and the run stops once the other chunks end.
+ * own. After `maxPollErrors` consecutive poll errors, or once polls have
+ * found the attempt neither running nor with an outcome for `emptyWindowMs`
+ * (the query_log flush gap every finished attempt goes through), the
+ * outcome is unknown: the last read has no time bound, the chunk keeps its
+ * state, and the run stops once the other chunks end.
  */
 async function pollChunk(
   executor: ClickHouseExecutor,
   target: { planId: string; chunkId: string; cluster?: string },
   initial: BackfillChunkState,
-  pollIntervalMs: number,
-  maxPollErrors: number,
+  limits: { pollIntervalMs: number; maxPollErrors: number; emptyWindowMs: number },
   onChanged: (state: BackfillChunkState) => void | Promise<void>,
 ): Promise<UnknownAttempt | undefined> {
   const { planId, chunkId, cluster } = target
   let state = initial
-  let misses = 0
+  let errors = 0
+  let emptySince: number | undefined
   while (state.status === 'submitted' || state.status === 'running') {
-    await sleep(pollIntervalMs)
+    await sleep(limits.pollIntervalMs)
     const queryId = state.queryId
     if (!queryId) break
-    const final = misses + 1 >= maxPollErrors
+    const final = emptySince !== undefined && Date.now() - emptySince >= limits.emptyWindowMs
     let outcome: AttemptOutcome | { kind: 'metrics'; status: QueryStatus }
     try {
       const qs = await executor.queryStatus(queryId, { runningOnly: true })
@@ -539,14 +540,15 @@ async function pollChunk(
           { final, verifyFailed: false },
         )
     } catch (error) {
-      misses++
-      if (misses >= maxPollErrors) {
-        return { chunkId, queryId, reason: `lost contact with the server after ${misses} consecutive poll errors (${errorMessage(error)})` }
+      errors++
+      if (errors >= limits.maxPollErrors) {
+        return { chunkId, queryId, reason: `lost contact with the server after ${errors} consecutive poll errors (${errorMessage(error)})` }
       }
       continue
     }
+    errors = 0
     if (outcome.kind === 'metrics' || outcome.kind === 'running') {
-      misses = 0
+      emptySince = undefined
       const result = outcome.kind === 'metrics'
         ? applyQueryStatus(state, outcome.status)
         : { state: { ...state, status: 'running' as const }, changed: state.status !== 'running' }
@@ -560,7 +562,7 @@ async function pollChunk(
     } else if (outcome.kind === 'unknown') {
       return { chunkId, queryId, reason: outcome.reason }
     } else {
-      misses++
+      emptySince ??= Date.now()
     }
   }
   return undefined
@@ -637,6 +639,14 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // rows: submitting the chunk again could write them twice (#765).
   if (unknown.length > 0) throw unknownOutcomeError(planId, unknown)
 
+  // How long polls wait for a finished attempt's outcome to reach query_log:
+  // never shorter than the resume's recheck window, whatever the poll interval.
+  const pollLimits = {
+    pollIntervalMs,
+    maxPollErrors,
+    emptyWindowMs: Math.max(outcomeRecheckAttempts * outcomeRecheckIntervalMs, maxPollErrors * pollIntervalMs),
+  }
+
   const setChunk = (id: string, next: BackfillChunkState) => {
     progress = updateChunk(progress, id, next)
     return onProgress?.(progress)
@@ -674,7 +684,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
       if (!state.queryId) {
         await setChunk(chunk.id, { ...state, status: 'pending' })
       } else {
-        return pollChunk(executor, target, state, pollIntervalMs, maxPollErrors, (s) => setChunk(chunk.id, s))
+        return pollChunk(executor, target, state, pollLimits, (s) => setChunk(chunk.id, s))
       }
     }
 
@@ -694,7 +704,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     }
     await setChunk(chunk.id, submitted)
 
-    return pollChunk(executor, target, submitted, pollIntervalMs, maxPollErrors, (s) => setChunk(chunk.id, s))
+    return pollChunk(executor, target, submitted, pollLimits, (s) => setChunk(chunk.id, s))
   }
 
   const completed = chunks.filter((c) => getChunk(progress, c.id).status === 'done').length

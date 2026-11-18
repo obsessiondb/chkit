@@ -358,7 +358,6 @@ describe('e2e: executeBackfill against a live cluster', () => {
       buildQuery: ({ id }) => sqlForChunk(id),
       concurrency: 3,
       pollIntervalMs: 1500,
-      outcomeRecheckIntervalMs: 200,
       resumeFrom,
       replayFailed: true,
       acceptUnknown,
@@ -511,7 +510,6 @@ describe('e2e: executeBackfill against a live cluster', () => {
       chunks: plan.chunks,
       buildQuery: ({ id }) => sqlForChunk(id),
       pollIntervalMs: 100,
-      outcomeRecheckIntervalMs: 200,
       acceptUnknown,
       resumeFrom: {
         [recordedId]: { status: 'pending', queryId: attemptId, submittedAt: new Date(Date.now() - 60 * 60_000).toISOString() },

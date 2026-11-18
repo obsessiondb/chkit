@@ -288,7 +288,6 @@ def test_replay_failed_re_runs_a_failed_chunk_and_restores_the_full_row_count(
             build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
             concurrency=3,
             poll_interval_ms=250,
-            outcome_recheck_interval_ms=200,
             resume_from=resume_from,
             replay_failed=True,
             accept_unknown=accept_unknown,
@@ -467,7 +466,6 @@ def test_a_resume_stops_on_a_recorded_attempt_query_log_has_no_row_of(
             chunk_ids=chunk_ids,
             build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
             poll_interval_ms=100,
-            outcome_recheck_interval_ms=200,
             accept_unknown=accept_unknown,
             resume_from={
                 recorded_id: BackfillChunkState(
