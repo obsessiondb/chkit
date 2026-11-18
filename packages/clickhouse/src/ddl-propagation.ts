@@ -187,8 +187,8 @@ async function waitForColumnDefinition(
   const expected = await expectedColumnValues(executor, intent)
   const source = fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'
   const sql = `SELECT hostName() AS replica, ${COLUMN_FIELDS.join(', ')} FROM ${source} WHERE ${columnWhere(database, tableName, columnName)}`
-  await waitUntilApplied(`${database}.${tableName}.${columnName} definition`, options, async () =>
-    columnDefinitionMismatch(await executor.query<ColumnDefinitionRow>(sql), fanout?.replicas ?? 1, expected),
+  await waitUntilApplied(executor, `${database}.${tableName}.${columnName} definition`, options, async (reader) =>
+    columnDefinitionMismatch(await reader.query<ColumnDefinitionRow>(sql), fanout?.replicas ?? 1, expected),
   )
 }
 
@@ -204,8 +204,8 @@ async function waitForColumnRename(
   const replicas = fanout?.replicas ?? 1
   const source = fanout ? allReplicas(fanout, 'system.columns') : 'system.columns'
   const sql = `SELECT hostName() AS replica, name FROM ${source} WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(tableName)} AND name IN (${stringLiteral(rename.from)}, ${stringLiteral(rename.to)})`
-  await waitUntilApplied(`${database}.${tableName} rename of column ${rename.from} to ${rename.to}`, options, async () => {
-    const rows = await executor.query<{ replica: string; name: string }>(sql)
+  await waitUntilApplied(executor, `${database}.${tableName} rename of column ${rename.from} to ${rename.to}`, options, async (reader) => {
+    const rows = await reader.query<{ replica: string; name: string }>(sql)
     const stale = rows.filter((row) => row.name === rename.from).map((row) => row.replica)
     if (stale.length > 0) return `replica ${stale.join(', ')} still lists column ${rename.from}`
     const renamed = new Set(rows.filter((row) => row.name === rename.to).map((row) => row.replica))
@@ -291,8 +291,8 @@ export async function waitForExchange(
   const [first, second] = tables
   const where = `(database = ${stringLiteral(first.database)} AND name = ${stringLiteral(first.name)}) OR (database = ${stringLiteral(second.database)} AND name = ${stringLiteral(second.name)})`
   const sql = `SELECT database, name, count(DISTINCT hostName()) AS replicas, uniqExact(uuid) AS uuids, any(toString(uuid)) AS sample_uuid FROM ${allReplicas(fanout, 'system.tables')} WHERE ${where} GROUP BY database, name`
-  await waitUntilApplied(`EXCHANGE TABLES ${first.database}.${first.name} AND ${second.database}.${second.name}`, options, async () => {
-    const rows = await executor.query<{ database: string; name: string; replicas: number | string; uuids: number | string; sample_uuid: string }>(sql)
+  await waitUntilApplied(executor, `EXCHANGE TABLES ${first.database}.${first.name} AND ${second.database}.${second.name}`, options, async (reader) => {
+    const rows = await reader.query<{ database: string; name: string; replicas: number | string; uuids: number | string; sample_uuid: string }>(sql)
     if (rows.length < 2) return `only ${rows.length} of the 2 tables are listed`
     for (const row of rows) {
       if (Number(row.replicas) < fanout.replicas) return `${row.database}.${row.name} is listed on ${row.replicas} of ${fanout.replicas} replicas`
@@ -616,29 +616,41 @@ function constraintWhere(database: string, tableName: string, constraintName: st
  * ends the wait at the deadline instead of holding the migration. On timeout
  * the error names what was still different on the last check that returned,
  * and says so when the check after it did not return (#750).
+ *
+ * A check cut off at the deadline is still in flight, so the checks go through
+ * `executor.openConcurrent()` when the executor has a session: ClickHouse runs
+ * one query at a time per session, and a check left running on the caller's
+ * session would lock out its next request (SESSION_IS_LOCKED).
  */
 async function waitUntilApplied(
+  executor: ClickHouseExecutor,
   subject: string,
   options: PropagationOptions | undefined,
-  check: () => Promise<string | undefined>,
+  check: (reader: ClickHouseExecutor) => Promise<string | undefined>,
 ): Promise<void> {
   const pollIntervalMs = options?.pollIntervalMs ?? RETRY_OPTIONS.minTimeout
   const deadlineMs = options?.deadlineMs ?? WAIT_DEADLINE_MS
   const deadline = performance.now() + deadlineMs
+  const concurrent = executor.openConcurrent?.()
+  const reader = concurrent ?? executor
   let checks = 0
   let detail = ''
-  for (;;) {
-    checks += 1
-    const outcome = await checkBefore(check, deadline)
-    if (outcome.timedOut) {
-      const late = `did not return within the ${deadlineMs / 1000}s deadline`
-      detail = detail ? `${detail} (the last check ${late})` : `a check ${late}`
-      break
+  try {
+    for (;;) {
+      checks += 1
+      const outcome = await checkBefore(() => check(reader), deadline)
+      if (outcome.timedOut) {
+        const late = `did not return within the ${deadlineMs / 1000}s deadline`
+        detail = detail ? `${detail} (the last check ${late})` : `a check ${late}`
+        break
+      }
+      if (outcome.mismatch === undefined && outcome.failure === undefined) return
+      detail = outcome.failure ?? outcome.mismatch ?? ''
+      if (performance.now() + pollIntervalMs >= deadline) break
+      await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
     }
-    if (outcome.mismatch === undefined && outcome.failure === undefined) return
-    detail = outcome.failure ?? outcome.mismatch ?? ''
-    if (performance.now() + pollIntervalMs >= deadline) break
-    await new Promise((resolve) => setTimeout(resolve, pollIntervalMs))
+  } finally {
+    await concurrent?.close()
   }
   throw new Error(`waitForDDLPropagation: ${subject} not applied on every replica after ${checks} checks: ${detail}`)
 }

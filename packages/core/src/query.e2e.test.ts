@@ -118,8 +118,14 @@ beforeAll(async () => {
       { city: 'Paris', ts: '2026-11-06 10:00:00', clicks: 7 },
     ],
   }))
-  const countEvents = run`SELECT toUInt32(count()) AS n FROM ${events}`
-  await pollUntil(() => countEvents(), (rows) => rows[0]?.n === 3)
+  // A read answers from whichever replica it lands on, and one that has not
+  // loaded the inserted part yet counts no rows. ObsessionDB exposes its
+  // replicas as the `default` cluster: wait until every one counts all three.
+  const replicas = (await run`SELECT toUInt32(count(DISTINCT hostName())) AS n FROM clusterAllReplicas('default', system.one)`())[0]?.n
+  const countOnEveryReplica = run`
+    SELECT hostName() AS replica, toUInt32(count()) AS n FROM clusterAllReplicas('default', ${events}) GROUP BY replica
+  `
+  await pollUntil(() => countOnEveryReplica(), (rows) => rows.length === replicas && rows.every((row) => row.n === 3))
 }, 90_000)
 
 // ObsessionDB users have no CREATE USER (or any access-management) grant

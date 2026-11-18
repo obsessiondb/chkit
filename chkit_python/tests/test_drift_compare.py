@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import pytest
 
@@ -13,8 +14,10 @@ from chkit.cli.commands.drift_compare import (
     ObjectDriftDetail,
     SchemaObjectShape,
     TableDriftDetail,
+    collect_dictionary_sql_queries,
     collect_table_sql_fragments,
     collect_view_sql_queries,
+    compare_dictionary_shape,
     compare_schema_objects,
     compare_table_shape,
     compare_view_shape,
@@ -25,18 +28,23 @@ from chkit.cli.commands.drift_diff import (
     diff_named_shape_maps,
     diff_settings,
 )
-from chkit.clickhouse.introspect import IntrospectedTable, IntrospectedView
+from chkit.cli.commands.drift_payload import build_drift_payload
+from chkit.clickhouse.client import QueryResult
+from chkit.clickhouse.introspect import IntrospectedDictionary, IntrospectedTable, IntrospectedView
 from chkit.core.codec import parse_codec
 from chkit.core.model import (
     ColumnDefinition,
     ColumnInput,
+    DictionaryDefinition,
     ProjectionDefinition,
     ProjectionInput,
     SettingValue,
     SkipIndexBloomFilter,
     SkipIndexInput,
     SkipIndexMinmax,
+    SnapshotV1,
     TableDefinition,
+    dictionary,
     materialized_view,
     table,
     view,
@@ -707,6 +715,200 @@ def test_view_query_strips_the_session_database_clickhouse_adds_to_a_dictionary_
     )
     drift = compare_view_shape(expected, elsewhere, "app", _FormatCanonicalizer())
     assert [d.code for d in drift] == ["query_mismatch"]
+
+
+# ---------- compare_dictionary_shape SOURCE (#492) ----------
+# Without a canonicalizer, compare_dictionary_shape compares only SOURCE.
+
+
+def _with_source(source: str) -> DictionaryDefinition:
+    return dictionary(
+        database="app",
+        name="rates",
+        attributes=[{"name": "id", "type": "UInt64"}],
+        primary_key=["id"],
+        source=source,
+        layout="FLAT()",
+        lifetime="0",
+    )
+
+
+def _live_dictionary(source: str) -> IntrospectedDictionary:
+    return IntrospectedDictionary(
+        database="app",
+        name="rates",
+        create_query=(
+            f"CREATE DICTIONARY app.rates (`id` UInt64) PRIMARY KEY id SOURCE({source}) "
+            "LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"
+        ),
+    )
+
+
+def _compare(expected: DictionaryDefinition, live: IntrospectedDictionary) -> list[ObjectDriftDetail]:
+    return compare_dictionary_shape(expected, collect_dictionary_sql_queries(expected, live))
+
+
+_HTTP = _with_source(
+    "http(url 'https://u:url-secret@example.com/a.tsv' format 'TSV' "
+    "credentials(user 'u' password 'pw-secret') "
+    "headers(header(name 'X-Token' value 'tok-secret')))"
+)
+_MONGO = _with_source("mongodb(uri 'mongodb://u:uri-secret@h:27017/db' collection 'c')")
+_HTTP_TAIL = "FORMAT 'TSV' CREDENTIALS (USER 'u' PASSWORD '[HIDDEN]') HEADERS ('[HIDDEN]'))"
+
+
+def test_dictionary_source_values_clickhouse_hides_read_clean_in_any_case_and_spacing() -> None:
+    stored_26 = f"HTTP(URL 'https://u:url-secret@example.com/a.tsv' {_HTTP_TAIL}"
+    stored_later = f"HTTP(URL 'https://[HIDDEN]@example.com/a.tsv' {_HTTP_TAIL}"
+    assert _compare(_HTTP, _live_dictionary(stored_26)) == []
+    assert _compare(_HTTP, _live_dictionary(stored_later)) == []
+    for uri in ("mongodb://u:[HIDDEN]@h:27017/db", "mongodb://[HIDDEN]@h:27017/db"):
+        live = _live_dictionary(f"MONGODB(URI '{uri}' COLLECTION 'c')")
+        assert _compare(_MONGO, live) == []
+
+
+def test_dictionary_source_with_a_changed_url_drifts_and_shows_no_schema_secret() -> None:
+    changed = _live_dictionary(f"HTTP(URL 'https://u:url-secret@example.com/b.tsv' {_HTTP_TAIL}")
+    assert _compare(_HTTP, changed) == [
+        ObjectDriftDetail(
+            code="source_mismatch",
+            object="app.rates",
+            expected=f"HTTP(URL 'https://[HIDDEN]@example.com/a.tsv' {_HTTP_TAIL}",
+            actual=f"HTTP(URL 'https://[HIDDEN]@example.com/b.tsv' {_HTTP_TAIL}",
+        )
+    ]
+
+
+def test_dictionary_source_with_a_value_no_rule_explains_is_not_compared() -> None:
+    expected = _with_source("CLICKHOUSE(TABLE 'users' NAMED_SECRET 'x')")
+    live = _live_dictionary("CLICKHOUSE(TABLE 'users_v2' NAMED_SECRET '[HIDDEN]')")
+    assert _compare(expected, live) == []
+
+
+def test_dictionary_source_hides_every_secret_key_also_those_26_3_stores_in_clear() -> None:
+    odbc = _with_source("odbc(connection_string 'DSN=x;UID=u;PWD=odbc-secret' table 't')")
+    live = _live_dictionary("ODBC(CONNECTION_STRING 'DSN=x;UID=u;PWD=odbc-secret' TABLE 't2')")
+    assert _compare(odbc, live) == [
+        ObjectDriftDetail(
+            code="source_mismatch",
+            object="app.rates",
+            expected="ODBC(CONNECTION_STRING '[HIDDEN]' TABLE 't')",
+            actual="ODBC(CONNECTION_STRING '[HIDDEN]' TABLE 't2')",
+        )
+    ]
+    mysql = _with_source("mysql(user 'u' password 'pw' ssl_key_passphrase 'kp-secret' table 't')")
+    stored = "MYSQL(USER 'u' PASSWORD '[HIDDEN]' SSL_KEY_PASSPHRASE 'kp-secret' TABLE 't')"
+    assert _compare(mysql, _live_dictionary(stored)) == []
+
+
+def test_dictionary_source_with_a_function_call_value_is_not_compared() -> None:
+    current = _with_source(
+        "clickhouse(db currentDatabase() table 'users' user 'default' password 'pw-secret')"
+    )
+    stored = "CLICKHOUSE(DB 'default' TABLE 'users_v2' USER 'default' PASSWORD '[HIDDEN]')"
+    assert _compare(current, _live_dictionary(stored)) == []
+
+
+def test_dictionary_source_keys_in_another_order_read_clean() -> None:
+    prices = _with_source("clickhouse(table 'prices' db 'v492')")
+    assert _compare(prices, _live_dictionary("CLICKHOUSE(DB 'v492' TABLE 'prices')")) == []
+    changed = _live_dictionary("CLICKHOUSE(DB 'v492' TABLE 'prices_v2')")
+    assert [d.code for d in _compare(prices, changed)] == ["source_mismatch"]
+
+
+def test_dictionary_source_hides_the_values_of_secret_url_query_parameters() -> None:
+    query = "?user=u&password=pw-secret&access_token=tok-secret&%73ig=sig-secret&design=a"
+    hidden = "?user=u&password=[HIDDEN]&access_token=[HIDDEN]&%73ig=[HIDDEN]&design=a"
+    url_source = _with_source(f"http(url 'http://h/data{query}' format 'TSV')")
+    master = _live_dictionary(f"HTTP(URL 'http://h/data{hidden}' FORMAT 'TSV')")
+    assert _compare(url_source, master) == []
+    changed = _live_dictionary(f"HTTP(URL 'http://h/data2{query}' FORMAT 'TSV')")
+    assert _compare(url_source, changed) == [
+        ObjectDriftDetail(
+            code="source_mismatch",
+            object="app.rates",
+            expected=f"HTTP(URL 'http://h/data{hidden}' FORMAT 'TSV')",
+            actual=f"HTTP(URL 'http://h/data2{hidden}' FORMAT 'TSV')",
+        )
+    ]
+
+
+def test_dictionary_source_escapes_in_a_string_compare_as_clickhouse_stores_them() -> None:
+    query = _with_source(
+        "clickhouse(query 'SELECT 1 AS id, ''x'' AS v\nFROM\tsystem.one WHERE s LIKE ''a\\%''')"
+    )
+    stored = (
+        "CLICKHOUSE(QUERY 'SELECT 1 AS id, \\'x\\' AS v\\nFROM\\tsystem.one "
+        "WHERE s LIKE \\'a\\\\%\\'')"
+    )
+    assert _compare(query, _live_dictionary(stored)) == []
+    changed = stored.replace("system.one", "system.two")
+    assert _compare(query, _live_dictionary(changed)) == [
+        ObjectDriftDetail(code="source_mismatch", object="app.rates", expected=stored, actual=changed)
+    ]
+
+
+def test_dictionary_source_signed_number_is_a_value() -> None:
+    replica = _with_source("clickhouse(table 'a' priority -1)")
+    assert _compare(replica, _live_dictionary("CLICKHOUSE(TABLE 'a' PRIORITY -1)")) == []
+    changed = _live_dictionary("CLICKHOUSE(TABLE 'b' PRIORITY -1)")
+    assert [d.code for d in _compare(replica, changed)] == ["source_mismatch"]
+
+
+def test_dictionary_source_with_unbalanced_parentheses_is_not_compared() -> None:
+    extra_paren = _with_source("CLICKHOUSE(TABLE 'users'))")
+    assert _compare(extra_paren, _live_dictionary("CLICKHOUSE(TABLE 'users_v2')")) == []
+
+
+def test_a_source_in_a_quoted_name_never_sends_the_credentials_to_the_formatter(
+    tmp_path: Path,
+) -> None:
+    source = "HTTP(URL 'https://user:fake-password@host/data?token=fake-token' FORMAT 'TSV')"
+    create_query = (
+        "CREATE DICTIONARY app.rates (`SOURCE(x)` UInt64) PRIMARY KEY `SOURCE(x)` "
+        f"SOURCE({source}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"
+    )
+    expected = dictionary(
+        database="app",
+        name="rates",
+        attributes=[{"name": "SOURCE(x)", "type": "UInt64"}],
+        primary_key=["SOURCE(x)"],
+        source=source,
+        layout="FLAT()",
+        lifetime="0",
+    )
+    calls: list[tuple[object, ...]] = []
+
+    class _Client:
+        def query(self, *args: object, **kwargs: object) -> QueryResult:
+            calls.append((*args, kwargs))
+            sql = str(args[0])
+            rows: list[dict[str, Any]] = []
+            if "engine = 'Dictionary'" in sql:
+                rows = [{"database": "app", "name": "rates", "create_table_query": create_query}]
+            elif "formatQuerySingleLineOrNull" in sql:
+                rows = [{"formatted": []}]
+            elif "NOT startsWith(name, '_chkit_')" in sql:
+                rows = [{"database": "app", "name": "rates", "engine": "Dictionary", "comment": ""}]
+            return QueryResult(column_names=[], rows=rows)
+
+        def command(self, *args: object, **kwargs: object) -> None:
+            calls.append((*args, kwargs))
+
+    snapshot = SnapshotV1.model_validate(
+        {"version": 1, "generatedAt": "2026-01-01T00:00:00.000Z", "definitions": [expected]}
+    )
+
+    payload = build_drift_payload(
+        client=_Client(), meta_dir=tmp_path, snapshot=snapshot, database=None
+    )
+
+    assert any("formatQuerySingleLineOrNull" in str(call[0]) for call in calls)
+    sent = repr(calls)
+    printed = repr(payload)
+    for marker in ("fake-password", "fake-token", "user:"):
+        assert marker not in sent
+        assert marker not in printed
 
 
 # #383: a codec added, removed or changed on the server is drift, while the
