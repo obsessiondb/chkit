@@ -516,3 +516,22 @@ def test_on_complete_error_after_a_failure_keeps_the_original_error(
     assert result.exit_code == 1, result.output
     assert result.stderr.strip() == 'Plugin "probe" failed in command:boom: boom failed'
     assert _calls(project)[-1] == ["on_complete", "plugin", 1, False]
+
+
+def test_plugin_pull_runs_pull_as_a_plugin_command(project: Path) -> None:
+    # As TS runs its pull plugin through `chkit plugin` (#771): no
+    # on_config_loaded, and the plugin command hooks name pull's `schema`.
+    # Nothing listens on the target, so the pull itself fails.
+    result = _invoke(["plugin", "pull", "schema", "--dryrun", "--json"])
+
+    assert result.exit_code == 1, result.output
+    payload = json.loads(result.stdout)
+    assert (payload["ok"], payload["command"]) == (False, "schema")
+    flags = {"--json": True, "--dryrun": True}
+    assert _calls(project) == [
+        ["on_init", "plugin", flags, True],
+        ["get_context", "plugin", {"--json": True}],
+        ["on_before_plugin_command", "pull:schema", flags],
+        ["get_context", "schema", flags],
+        ["on_complete", "plugin", 1, True],
+    ]

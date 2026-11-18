@@ -8,7 +8,7 @@ import { querySql } from '../commands/query.js'
 import { cmdSkills } from '../commands/skills.js'
 import { getInternalPlugins } from '../internal-plugins/index.js'
 import { normalizeGlobalArgs } from '../runtime/argv.js'
-import { parseCommandArgs, parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
+import { forwardedPluginName, parseCommandArgs, parseInitFlags, runResolvedCommand } from '../runtime/command-dispatch.js'
 import { createCommandRegistry } from '../runtime/command-registry.js'
 import { ConfigNotFoundError, type LoadedConfig, loadConfig, profileFallbackPlugins } from '../runtime/config.js'
 import { debug } from '../runtime/debug.js'
@@ -195,19 +195,22 @@ async function codegenFallbackPlugins(): Promise<ChxPluginRegistration[]> {
 
 /**
  * The plugin that a project config does not register but chkit-py has anyway
- * (#776): `pull`, a built-in command in chkit-py, and the `codegen` help.
- * A registration with that name, also a disabled one, keeps its own.
+ * (#776): `pull`, a built-in command in chkit-py, also as `chkit plugin pull`
+ * (#771), and the `codegen` help. A registration with that name, also a
+ * disabled one, keeps its own.
  */
 async function projectFallbackPlugins(
   registrations: readonly ChxPluginRegistration[],
-  commandName: string,
+  argv: string[],
   wantsHelp: boolean,
 ): Promise<ChxPluginRegistration[]> {
+  const commandName = argv[0]
+  const pluginName = commandName === 'plugin' ? forwardedPluginName(argv.slice(1)) : commandName
   const registered = registrations.some(
-    (entry) => normalizePluginRegistration(entry).plugin?.manifest?.name === commandName,
+    (entry) => normalizePluginRegistration(entry).plugin?.manifest?.name === pluginName,
   )
   if (registered) return []
-  if (commandName === 'pull') return pullFallbackPlugins()
+  if (pluginName === 'pull') return pullFallbackPlugins()
   if (commandName === 'codegen' && wantsHelp) return codegenFallbackPlugins()
   return []
 }
@@ -401,7 +404,7 @@ async function run(): Promise<void> {
     return
   }
 
-  const fallbackPlugins = await projectFallbackPlugins(config.plugins, commandName, wantsHelp)
+  const fallbackPlugins = await projectFallbackPlugins(config.plugins, argv, wantsHelp)
   const pluginRuntime = await loadPluginRuntime({
     config: fallbackPlugins.length > 0 ? { ...config, plugins: [...config.plugins, ...fallbackPlugins] } : config,
     configPath,
