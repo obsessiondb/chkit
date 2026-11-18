@@ -660,68 +660,12 @@ def _create_cutover_sql(
             f"AND name = {_string_literal(name)})"
         )
 
-    # The snapshot holds every column the table stores, but the mirror and the
-    # copy move only the columns of the old definition: a column only the server
-    # has would not reach the new table, and a copied column it lacks stops the
-    # mirror. ClickHouse stores `n Nested(x T)` as the column `n.x Array(T)`.
-    def literals(values: list[str]) -> str:
-        return "[" + ", ".join(_string_literal(value) for value in values) + "]"
-
-    leaves = [
-        (leaf_name, leaf_type, column.name, _is_stored(column))
-        for column in old_columns
-        for leaf_name, leaf_type in _column_leaves(column)
-    ]
-    stored = [leaf for leaf in leaves if leaf[3]]
-    live_columns = (
-        f"FROM system.columns WHERE database = {_string_literal(database)} "
-        f"AND table = {_string_literal(table)}"
-    )
-    stored_columns = f"{live_columns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
-    undeclared_columns = (
-        f"(SELECT countIf(NOT has({literals([leaf[0] for leaf in leaves])}, name)) "
-        f"{stored_columns}) AS undeclared_columns"
-    )
-    declared_columns = (
-        f"({table_count(table)} = 0 OR (SELECT hasAll(groupArray(name), "
-        f"{literals([leaf[0] for leaf in stored if leaf[2] in columns])}) "
-        f"{stored_columns})) AS declared_columns"
-    )
-    # The mirror, the copy and the verify skip a column the schema declares
-    # ALIAS or EPHEMERAL. If the table stores that column, its values would not
-    # reach the new table, so the kinds must match too.
-    kind_pairs = (
-        "["
-        + ", ".join(f"({_string_literal(leaf[0])}, {1 if leaf[3] else 0})" for leaf in leaves)
-        + "]"
-    )
-    column_kinds = (
-        f"(SELECT countIf(has({literals([leaf[0] for leaf in leaves])}, name) AND NOT "
-        f"has({kind_pairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
-        f"{live_columns}) AS column_kinds"
-    )
-    # The snapshot takes the column types the server stores, and the copy then
-    # converts each value to the new type. The verify hash does not see every
-    # change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
-    # some types in another spelling (`Decimal64(2)` as `Decimal(18, 2)`), so the
-    # server gives the schema's type in its stored form too.
-    # toTypeName prints a named Tuple over several lines, and system.columns
-    # on one: the line breaks go. A newline in an Enum label is escaped, so no
-    # label changes.
-    def stored_type(type_: str) -> str:
-        return (
-            "replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName("
-            f"{_string_literal(type_)})), ',\\n *', ', '), '\\n *', '')"
-        )
-
-    type_pairs = (
-        "["
-        + ", ".join(f"({_string_literal(leaf[0])}, {stored_type(leaf[1])})" for leaf in stored)
-        + "]"
-    )
-    mistyped_columns = (
-        f"(SELECT countIf(has({literals([leaf[0] for leaf in stored])}, name) AND NOT "
-        f"has({type_pairs}, (name, type))) {stored_columns}) AS mistyped_columns"
+    undeclared_columns, declared_columns, column_kinds, mistyped_columns = _column_checks(
+        database=database,
+        table=table,
+        old_columns=old_columns,
+        columns=columns,
+        table_present=table_count(table),
     )
 
     def stored_table(condition: str, alias: str) -> str:
@@ -1345,6 +1289,81 @@ def _is_stored(column: ColumnDefinition) -> bool:
 
 def _is_insertable(column: ColumnDefinition) -> bool:
     return column.default_kind in (None, "DEFAULT")
+
+
+def _column_checks(
+    *,
+    database: str,
+    table: str,
+    old_columns: list[ColumnDefinition],
+    columns: list[str],
+    table_present: str,
+) -> tuple[str, str, str, str]:
+    """The first statement's column checks: undeclared, declared, kinds and types."""
+    # The snapshot holds every column the table stores, but the mirror and the
+    # copy move only the columns of the old definition: a column only the server
+    # has would not reach the new table, and a copied column it lacks stops the
+    # mirror. ClickHouse stores `n Nested(x T)` as the column `n.x Array(T)`.
+    def literals(values: list[str]) -> str:
+        return "[" + ", ".join(_string_literal(value) for value in values) + "]"
+
+    leaves = [
+        (leaf_name, leaf_type, column.name, _is_stored(column))
+        for column in old_columns
+        for leaf_name, leaf_type in _column_leaves(column)
+    ]
+    stored = [leaf for leaf in leaves if leaf[3]]
+    live_columns = (
+        f"FROM system.columns WHERE database = {_string_literal(database)} "
+        f"AND table = {_string_literal(table)}"
+    )
+    stored_columns = f"{live_columns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
+    undeclared_columns = (
+        f"(SELECT countIf(NOT has({literals([leaf[0] for leaf in leaves])}, name)) "
+        f"{stored_columns}) AS undeclared_columns"
+    )
+    declared_columns = (
+        f"({table_present} = 0 OR (SELECT hasAll(groupArray(name), "
+        f"{literals([leaf[0] for leaf in stored if leaf[2] in columns])}) "
+        f"{stored_columns})) AS declared_columns"
+    )
+    # The mirror, the copy and the verify skip a column the schema declares
+    # ALIAS or EPHEMERAL. If the table stores that column, its values would not
+    # reach the new table, so the kinds must match too.
+    kind_pairs = (
+        "["
+        + ", ".join(f"({_string_literal(leaf[0])}, {1 if leaf[3] else 0})" for leaf in leaves)
+        + "]"
+    )
+    column_kinds = (
+        f"(SELECT countIf(has({literals([leaf[0] for leaf in leaves])}, name) AND NOT "
+        f"has({kind_pairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
+        f"{live_columns}) AS column_kinds"
+    )
+    # The snapshot takes the column types the server stores, and the copy then
+    # converts each value to the new type. The verify hash does not see every
+    # change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
+    # some types in another spelling (`Decimal64(2)` as `Decimal(18, 2)`), so the
+    # server gives the schema's type in its stored form too.
+    # toTypeName prints a named Tuple over several lines, and system.columns
+    # on one: the line breaks go. A newline in an Enum label is escaped, so no
+    # label changes.
+    def stored_type(type_: str) -> str:
+        return (
+            "replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName("
+            f"{_string_literal(type_)})), ',\\n *', ', '), '\\n *', '')"
+        )
+
+    type_pairs = (
+        "["
+        + ", ".join(f"({_string_literal(leaf[0])}, {stored_type(leaf[1])})" for leaf in stored)
+        + "]"
+    )
+    mistyped_columns = (
+        f"(SELECT countIf(has({literals([leaf[0] for leaf in stored])}, name) AND NOT "
+        f"has({type_pairs}, (name, type))) {stored_columns}) AS mistyped_columns"
+    )
+    return undeclared_columns, declared_columns, column_kinds, mistyped_columns
 
 
 # The first argument of a stored Replicated*MergeTree engine: its replication path.
