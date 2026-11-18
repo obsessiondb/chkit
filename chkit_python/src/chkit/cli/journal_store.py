@@ -47,6 +47,7 @@ from chkit.clickhouse.client import (
     clickhouse_error_message,
     is_unknown_database_error,
 )
+from chkit.clickhouse.control import STRICT_CONTROL_SETTINGS
 from chkit.clickhouse.ddl_propagation import (
     MAX_RETRIES,
     RETRY_DELAY_SECONDS,
@@ -199,10 +200,17 @@ def every_copy_read(
     A row without a replica name, or a member no row names, leaves the read
     uncovered; otherwise the newest record among them is the record.
     """
-    if not rows or any(str(row["replica"]) == "" for row in rows):
+    if not rows or any(not isinstance(row["replica"], str) or row["replica"] == "" for row in rows):
         return EveryCopyRead(covered=False, op=None)
-    read = {str(row["replica"]) for row in rows}
-    members = {str(member) for row in rows for member in row["members"]}
+    read = {row["replica"] for row in rows}
+    # Each server answers once: a duplicate reply (one server listed twice, or
+    # two that share a name) leaves the read uncovered.
+    if len(read) != len(rows):
+        return EveryCopyRead(covered=False, op=None)
+    member_lists = [_decode_members(row["members"]) for row in rows]
+    if any(members is None for members in member_lists):
+        return EveryCopyRead(covered=False, op=None)
+    members = {member for members in member_lists for member in members or []}
     if not members or not members <= read:
         return EveryCopyRead(covered=False, op=None)
     present = [row for row in rows if int(row["present"]) > 0]
@@ -212,6 +220,28 @@ def every_copy_read(
     return EveryCopyRead(
         covered=True, op=find_op(newest["operations"], newest["operation_fingerprints"])
     )
+
+
+def _decode_members(value: Any) -> list[str] | None:
+    """A JSON array of non-empty strings, or None when it is anything else.
+
+    The replica set comes as JSON text: the Workbench API returns every cell
+    as a string.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return None
+    if not isinstance(decoded, list) or any(
+        not isinstance(member, str) or member == "" for member in decoded
+    ):
+        return None
+    return decoded
+
+
+_SERVER_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 class _UnknownDatabaseError(Exception):
@@ -956,20 +986,27 @@ class JournalStore:
         # copy only on a single server: every server of the cluster answers by
         # its server UUID, and there must be one.
         per_copy = (
-            "SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, "
+            "SELECT r.replica_name AS replica, toJSONString(mapKeys(r.replica_is_active)) "
+            "AS members, "
             f"{columns} FROM system.replicas AS r CROSS JOIN {latest} WHERE r.database = "
             f"'{_escape_sql_string(database)}' AND r.table = '{self._table}'"
             if replicated
-            else "SELECT toString(serverUUID()) AS replica, [toString(serverUUID())] AS "
-            f"members, {columns} FROM {latest}"
+            else "SELECT toString(serverUUID()) AS replica, toJSONString([toString(serverUUID())]) "
+            f"AS members, {columns} FROM {latest}"
         )
         override = self._fanout_override
         cluster = override.cluster if override is not None else (self._cluster or "default")
+        # Every server of the cluster answers, or the read fails: an
+        # unavailable one is never skipped, and no limit cuts the reply short.
         copies = self._client.query(
             "SELECT replica, members, present, applied_at, operations, operation_fingerprints "
-            f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))"
+            f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))",
+            settings={**STRICT_CONTROL_SETTINGS, "skip_unavailable_shards": 0},
         ).rows
-        if not replicated and len({str(row["replica"]) for row in copies}) != 1:
+        # Not replicated: exactly one server, named by its UUID.
+        if not replicated and (
+            len(copies) != 1 or not _SERVER_UUID.match(str(copies[0]["replica"]))
+        ):
             return EveryCopyRead(covered=False, op=None)
 
         def find_op(operations: Any, fingerprints_value: Any) -> OperationState | None:

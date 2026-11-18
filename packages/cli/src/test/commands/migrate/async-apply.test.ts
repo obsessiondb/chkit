@@ -10,6 +10,7 @@ import {
 } from '../../../commands/migrate/async-apply.js'
 import { abandonMigrationState } from '../../../commands/migrate/abandon.js'
 import {
+  createJournalStore,
   type JournalStore,
   type MigrationRowState,
   operationAsStored,
@@ -868,6 +869,36 @@ describe('applyAsyncStatement', () => {
       else await expect(run).rejects.toThrow('UNKNOWN_TABLE')
       expect(signal?.aborted).toBe(true)
       expect(writes.at(-1)?.operations[0]?.status).toBe(label === 'QueryFinish' ? 'completed' : 'failed')
+    })
+  }
+
+  // #767 (round 7): a terminal journal write that is rejected detaches the
+  // submit too, and the run stops with the journal's error.
+  for (const [label, status] of [
+    ['QueryFinish', { status: 'finished' as const, writtenRows: 1, durationMs: 10 }],
+    ['ExceptionBeforeStart', { status: 'failed' as const, error: 'Code: 60. UNKNOWN_TABLE', beforeStart: true }],
+  ] as const) {
+    test(`a rejected journal write after a ${label} aborts a submit that never settles`, async () => {
+      const fake = createFakeExecutor([{ status: 'unknown' }, status])
+      let signal: AbortSignal | undefined
+      const db = {
+        ...fake.db,
+        submit: (_sql: string, _queryId?: string, _settings?: unknown, options?: { signal?: AbortSignal }) => {
+          signal = options?.signal
+          return new Promise(() => {})
+        },
+      } as unknown as ClickHouseExecutor
+      const { store } = createFakeJournalStore(null)
+      const write = store.writeMigrationState.bind(store)
+      store.writeMigrationState = async (state) => {
+        if (state.operations[0]?.status !== 'started') throw new Error('journal write rejected')
+        await write(state)
+      }
+
+      await expect(
+        applyAsyncStatement({ ...BASE_INPUT, db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+      ).rejects.toThrow('journal write rejected')
+      expect(signal?.aborted).toBe(true)
     })
   }
 
@@ -1917,4 +1948,44 @@ describe('applyAsyncStatement re-run of a started step', () => {
     ).rejects.toThrow(/the journal did not return the attempt's record, so it was not submitted/)
     expect(fake.submitCalls).toEqual([])
   })
+})
+
+// #767 (round 7): through the real journal store, a fan-out that answers one
+// server twice, or that a server added since cannot answer, never lets a
+// prepared attempt run again: the run stops with nothing submitted.
+describe('applyAsyncStatement recovery through the journal store', () => {
+  const UUID_A = '2dea4dea-c7d6-439c-b8ef-5eaa1d275f14'
+  const operations = JSON.stringify([{ operation_index: 0, operation_key: BASE_INPUT.operationKey, operation_type: BASE_INPUT.operationType, query_id: 'prepared-id', status: 'started', started_at: '2026-05-26 10:00:00.000', finished_at: null, last_error: PREPARED_RECORD_MARKER }])
+  const copy = { replica: UUID_A, members: JSON.stringify([UUID_A]), present: '1', applied_at: '2026-05-26 10:00:00.000', operations, operation_fingerprints: '[]' }
+
+  for (const [label, everyCopy] of [
+    ['one server answering twice', () => [copy, copy]],
+    ['a server added since that cannot be reached', () => {
+      throw new Error('Code: 279. ALL_CONNECTION_TRIES_FAILED')
+    }],
+  ] as const) {
+    test(`${label}: nothing is submitted`, async () => {
+      const submits: string[] = []
+      const db = {
+        async command() {},
+        async query<T>(sql: string): Promise<T[]> {
+          if (sql.includes('SELECT engine FROM system.tables')) return [{ engine: 'ReplacingMergeTree' }] as T[]
+          if (sql.includes('now_ms')) return [{ now_ms: String(SERVER_NOW_MS), database: SERVER_DATABASE }] as T[]
+          if (sql.includes('currentDatabase() AS database')) return [{ database: SERVER_DATABASE }] as T[]
+          if (sql.includes('view(')) return (everyCopy as () => T[])()
+          if (sql.includes('FINAL WHERE')) {
+            return [{ name: BASE_INPUT.migrationName, applied_at: '2026-05-26 10:00:00.000', checksum: BASE_INPUT.migrationChecksum, chkit_version: '', migration_completed: 'false', operations }] as T[]
+          }
+          return []
+        },
+        async queryStatus() { return { status: 'unknown' } },
+        async submit(sql: string) { submits.push(sql); return 'x' },
+      } as unknown as ClickHouseExecutor
+
+      await expect(
+        applyAsyncStatement({ ...BASE_INPUT, db, journalStore: createJournalStore(db), log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+      ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('query_id prepared-id') })
+      expect(submits).toEqual([])
+    })
+  }
 })

@@ -449,12 +449,16 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(
-          upsertOperation(baseState, finishedOp, now),
-        )
-        // The outcome is journaled: a proxy holding the submit's response
-        // does not keep the run, or its migrate lock (#767).
-        abandonSubmit()
+        // Once the outcome's journal write settled, written or rejected, a
+        // proxy holding the submit's response does not keep the run, or its
+        // migrate lock (#767).
+        try {
+          await journalStore.writeMigrationState(
+            upsertOperation(baseState, finishedOp, now),
+          )
+        } finally {
+          abandonSubmit()
+        }
         log(
           `  ${operationType}: finished — written=${formatRows(status.writtenRows)} (${formatBytes(status.writtenBytes)}) in ${finishedSec}s`,
         )
@@ -486,10 +490,13 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(
-          upsertOperation(baseState, failedOp, now),
-        )
-        abandonSubmit()
+        try {
+          await journalStore.writeMigrationState(
+            upsertOperation(baseState, failedOp, now),
+          )
+        } finally {
+          abandonSubmit()
+        }
         throw new Error(
           `Async migration step ${operationType} failed (query_id ${queryId}): ${status.error ?? '<unknown>'}`,
         )

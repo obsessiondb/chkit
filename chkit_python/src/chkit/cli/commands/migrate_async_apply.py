@@ -627,7 +627,10 @@ def _poll_until_terminal(
 ) -> AsyncApplyResult:
     """Poll, then wait for the submit request to close, as TS does.
 
-    Only an ``Exception`` waits for it: on Ctrl-C the run stops at once.
+    Only an ``Exception`` waits for it. On Ctrl-C (any ``BaseException``) the
+    run gives the submit up first, through its guard, which waits for a
+    connect or a write under way (#767), then stops without waiting for the
+    response: the migrate lock is released only after that.
     """
     try:
         result = _poll(
@@ -645,12 +648,16 @@ def _poll_until_terminal(
         if submission is not None and not submission.abandoned:
             submission.wait()
         raise
+    except BaseException:
+        if submission is not None:
+            submission.abandon()
+        raise
     if submission is not None and not submission.abandoned:
         submission.wait()
     return result
 
 
-def _poll(  # noqa: PLR0912 - one branch per poll outcome
+def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
     *,
     input_: AsyncApplyInput,
     migration_state: MigrationRowState | None,
@@ -739,17 +746,20 @@ def _poll(  # noqa: PLR0912 - one branch per poll outcome
                 last_error="",
                 fingerprint=fingerprint,
             )
-            input_.journal_store.write_migration_state(
-                upsert_operation(
-                    base_state,
-                    finished_op,
-                    iso_without_zone(datetime.now(tz=UTC)),
+            # Once the outcome's journal write settled, written or rejected, a
+            # proxy holding the submit's response does not keep the run, or
+            # its migrate lock (#767).
+            try:
+                input_.journal_store.write_migration_state(
+                    upsert_operation(
+                        base_state,
+                        finished_op,
+                        iso_without_zone(datetime.now(tz=UTC)),
+                    )
                 )
-            )
-            # The outcome is journaled: a proxy holding the submit's response
-            # does not keep the run, or its migrate lock (#767).
-            if submission is not None:
-                submission.abandon()
+            finally:
+                if submission is not None:
+                    submission.abandon()
             # TS reads the duration as a double and prints the result as String(n).
             finished_sec = js_number_to_string(
                 js_math_round(float(status.duration_ms or 0) / 1000)
@@ -784,15 +794,17 @@ def _poll(  # noqa: PLR0912 - one branch per poll outcome
                 # A rejection the server recorded for this id: a re-run may retry it.
                 attempt_fenced=True,
             )
-            input_.journal_store.write_migration_state(
-                upsert_operation(
-                    base_state,
-                    failed_op,
-                    iso_without_zone(datetime.now(tz=UTC)),
+            try:
+                input_.journal_store.write_migration_state(
+                    upsert_operation(
+                        base_state,
+                        failed_op,
+                        iso_without_zone(datetime.now(tz=UTC)),
+                    )
                 )
-            )
-            if submission is not None:
-                submission.abandon()
+            finally:
+                if submission is not None:
+                    submission.abandon()
             msg = (
                 f"Async migration step {input_.operation_type} failed "
                 f"(query_id {query_id}): {status.error or '<unknown>'}"

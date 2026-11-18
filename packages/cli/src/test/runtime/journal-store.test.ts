@@ -1327,7 +1327,7 @@ describe('createJournalStore', () => {
 describe('everyCopyRead', () => {
   const row = (replica: string, appliedAt: string, members = ['r1', 'r2']): CopyRow => ({
     replica,
-    members,
+    members: JSON.stringify(members),
     present: 1,
     applied_at: appliedAt,
     operations: appliedAt,
@@ -1347,6 +1347,15 @@ describe('everyCopyRead', () => {
     expect(everyCopyRead([row('r1', '2026-11-18 10:00:00.000'), row('r1', '2026-11-18 10:00:00.000')], findOp)).toEqual({ covered: false })
   })
 
+  test('a duplicate reply covering every member: not covered', () => {
+    expect(everyCopyRead([row('r1', 'a'), row('r2', 'b'), row('r2', 'b')], findOp)).toEqual({ covered: false })
+  })
+
+  test('a replica set that is not a JSON array of names: not covered', () => {
+    expect(everyCopyRead([{ ...row('r1', 'a'), members: 'r1' }], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([{ ...row('r1', 'a'), members: '[""]' }], findOp)).toEqual({ covered: false })
+  })
+
   test('a server that cannot name its replica, or no answer at all: not covered', () => {
     expect(everyCopyRead([row('r1', 'a'), row('', 'b')], findOp)).toEqual({ covered: false })
     expect(everyCopyRead([], findOp)).toEqual({ covered: false })
@@ -1362,17 +1371,20 @@ describe('everyCopyRead', () => {
 // same query, and only positive evidence of a single server counts a journal
 // that is not replicated as one copy.
 describe('readOperationOnEveryCopy topology', () => {
-  const prepared = JSON.stringify([[0, 'k', 'load_table_data', 'qid', 'started', '2026-11-18 10:00:00.000', null, 'prepared under its own query id; not submitted yet']])
-  const copy = (replica: string) => ({ replica, members: [replica], present: 1, applied_at: '2026-11-18 10:00:00.000', operations: prepared, operation_fingerprints: '[]' })
+  const UUID_A = '2dea4dea-c7d6-439c-b8ef-5eaa1d275f14'
+  const UUID_B = '6f1c2a9e-0b7d-4f3e-9a51-3c8d2e7b4a10'
+  const prepared = JSON.stringify([{ operation_index: 0, operation_key: 'k', operation_type: 'load_table_data', query_id: 'qid', status: 'started', started_at: '2026-11-18 10:00:00.000', finished_at: null, last_error: 'prepared under its own query id; not submitted yet' }])
+  // As the Workbench API returns it: every cell a string.
+  const copy = (replica: string) => ({ replica, members: JSON.stringify([replica]), present: '1', applied_at: '2026-11-18 10:00:00.000', operations: prepared, operation_fingerprints: '[]' })
   function storeAnswering(engine: string, everyCopy: () => unknown[]) {
-    const reads: string[] = []
+    const reads: Array<{ sql: string; settings: unknown }> = []
     const db = {
       async command() {},
-      async query<T>(sql: string): Promise<T[]> {
+      async query<T>(sql: string, settings?: unknown): Promise<T[]> {
         if (sql.includes('SELECT engine FROM system.tables')) return [{ engine }] as T[]
         if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
         if (sql.includes('view(')) {
-          reads.push(sql)
+          reads.push({ sql, settings })
           return everyCopy() as T[]
         }
         return []
@@ -1381,11 +1393,26 @@ describe('readOperationOnEveryCopy topology', () => {
     return { store: createJournalStore(db), reads }
   }
 
-  test('one server answers: covered, with its record', async () => {
-    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy('uuid-a')])
+  test('one server answers, every cell a string: covered, with its prepared record', async () => {
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A)])
     const read = await store.readOperationOnEveryCopy('m.sql', 0)
-    expect(read.covered).toBe(true)
-    expect(reads[0]).toContain("clusterAllReplicas('default', view(SELECT toString(serverUUID())")
+    expect(read).toMatchObject({ covered: true, op: { queryId: 'qid', status: 'started', lastError: 'prepared under its own query id; not submitted yet' } })
+    expect(reads[0]?.sql).toContain("clusterAllReplicas('default', view(SELECT toString(serverUUID())")
+    // An unavailable server fails the read; no limit cuts the reply short.
+    expect(reads[0]?.settings).toMatchObject({ skip_unavailable_shards: 0, result_overflow_mode: 'throw', read_overflow_mode: 'throw' })
+  })
+
+  test('a replicated journal read whose cells are strings: covered, with its record', async () => {
+    const { store } = storeAnswering('ReplicatedReplacingMergeTree', () => [
+      { ...copy('ch1'), members: '["ch1","ch2"]' },
+      { ...copy('ch2'), members: '["ch1","ch2"]' },
+    ])
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toMatchObject({ covered: true, op: { queryId: 'qid' } })
+  })
+
+  test('one server replying twice, or a reply without a server UUID: not covered', async () => {
+    expect(await storeAnswering('ReplacingMergeTree', () => [copy(UUID_A), copy(UUID_A)]).store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(await storeAnswering('ReplacingMergeTree', () => [copy('uuid-a')]).store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
   })
 
   test('a cluster the user may not read, or that does not exist, fails the read', async () => {
@@ -1400,15 +1427,15 @@ describe('readOperationOnEveryCopy topology', () => {
   })
 
   test('two servers behind one hostname: not covered', async () => {
-    const { store } = storeAnswering('ReplacingMergeTree', () => [copy('uuid-a'), copy('uuid-b')])
+    const { store } = storeAnswering('ReplacingMergeTree', () => [copy(UUID_A), copy(UUID_B)])
     expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
   })
 
   test('a server added after the first read: the next read is not covered', async () => {
-    let servers = [copy('uuid-a')]
+    let servers = [copy(UUID_A)]
     const { store, reads } = storeAnswering('ReplacingMergeTree', () => servers)
     expect((await store.readOperationOnEveryCopy('m.sql', 0)).covered).toBe(true)
-    servers = [copy('uuid-a'), copy('uuid-b')]
+    servers = [copy(UUID_A), copy(UUID_B)]
     expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
     expect(reads).toHaveLength(2)
   })

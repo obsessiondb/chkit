@@ -4,6 +4,7 @@ import {
   allReplicas,
   isUnknownDatabaseError,
   resolveReplicaFanoutOrThrow,
+  STRICT_CONTROL_SETTINGS,
   waitForColumn,
   waitForTable,
   type ClickHouseExecutor,
@@ -131,7 +132,8 @@ export type EveryCopyRead = { covered: false } | { covered: true; op: OperationS
 
 export interface CopyRow extends Record<string, unknown> {
   replica: string
-  members: string[]
+  /** The replica set as JSON text: the Workbench API returns every cell as a string. */
+  members: string
   present: number | string
   applied_at: string
   operations: string
@@ -311,15 +313,35 @@ export function everyCopyRead(
   rows: CopyRow[],
   findOp: (operations: unknown, fingerprints: unknown) => OperationState | undefined,
 ): EveryCopyRead {
-  if (rows.length === 0 || rows.some((row) => row.replica === '')) return { covered: false }
+  if (rows.length === 0 || rows.some((row) => typeof row.replica !== 'string' || row.replica === '')) return { covered: false }
   const read = new Set(rows.map((row) => row.replica))
-  const members = new Set(rows.flatMap((row) => row.members))
+  // Each server answers once: a duplicate reply (one server listed twice, or
+  // two that share a name) leaves the read uncovered.
+  if (read.size !== rows.length) return { covered: false }
+  const memberLists = rows.map((row) => decodeMembers(row.members))
+  if (memberLists.some((list) => list === undefined)) return { covered: false }
+  const members = new Set(memberLists.flatMap((list) => list ?? []))
   if (members.size === 0 || [...members].some((member) => !read.has(member))) return { covered: false }
   const newest = rows
     .filter((row) => Number(row.present) > 0)
     .reduce<CopyRow | undefined>((best, row) => (best === undefined || row.applied_at > best.applied_at ? row : best), undefined)
   return { covered: true, op: newest ? findOp(newest.operations, newest.operation_fingerprints) : undefined }
 }
+
+/** A JSON array of non-empty strings, or undefined when it is anything else. */
+function decodeMembers(value: unknown): string[] | undefined {
+  if (typeof value !== 'string') return undefined
+  let decoded: unknown
+  try {
+    decoded = JSON.parse(value)
+  } catch {
+    return undefined
+  }
+  if (!Array.isArray(decoded) || decoded.some((member) => typeof member !== 'string' || member === '')) return undefined
+  return decoded as string[]
+}
+
+const SERVER_UUID = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
 function parseOperations(value: unknown, fingerprintsValue: unknown): OperationState[] {
   const decoded = parseJsonArray(value)
@@ -846,12 +868,16 @@ SETTINGS index_granularity = 1`
       // copy only on a single server: every server of the cluster answers by
       // its server UUID, and there must be one.
       const perCopy = replicated
-        ? `SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, ${columns} FROM system.replicas AS r CROSS JOIN ${latest} WHERE r.database = '${escapeSqlString(database)}' AND r.table = '${journalTable}'`
-        : `SELECT toString(serverUUID()) AS replica, [toString(serverUUID())] AS members, ${columns} FROM ${latest}`
+        ? `SELECT r.replica_name AS replica, toJSONString(mapKeys(r.replica_is_active)) AS members, ${columns} FROM system.replicas AS r CROSS JOIN ${latest} WHERE r.database = '${escapeSqlString(database)}' AND r.table = '${journalTable}'`
+        : `SELECT toString(serverUUID()) AS replica, toJSONString([toString(serverUUID())]) AS members, ${columns} FROM ${latest}`
+      // Every server of the cluster answers, or the read fails: an
+      // unavailable one is never skipped, and no limit cuts the reply short.
       const rows = await db.query<CopyRow>(
         `SELECT replica, members, present, applied_at, operations, operation_fingerprints FROM clusterAllReplicas('${escapeSqlString(fanoutOverride?.cluster ?? cluster ?? 'default')}', view(${perCopy}))`,
+        { ...STRICT_CONTROL_SETTINGS, skip_unavailable_shards: 0 },
       )
-      if (!replicated && new Set(rows.map((row) => row.replica)).size !== 1) return { covered: false }
+      // Not replicated: exactly one server, named by its UUID.
+      if (!replicated && (rows.length !== 1 || !SERVER_UUID.test(String(rows[0]?.replica)))) return { covered: false }
       return everyCopyRead(rows, (operations, fingerprintsValue) =>
         parseOperations(operations, fingerprintsValue).find((op) => op.operationIndex === statementIndex),
       )

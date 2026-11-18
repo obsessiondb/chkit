@@ -12,12 +12,14 @@ import inspect
 import socket
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, cast
 
 import httpcore
 import httpx
 import pytest
 
+from chkit.cli.commands import migrate_async_apply
 from chkit.cli.commands.migrate_async_apply import _Submission
 from chkit.clickhouse import client as client_module
 from chkit_plugin_obsessiondb import service_api
@@ -453,3 +455,91 @@ def test_the_httpx_guard_reaches_every_pool_through_its_network_backend(
         assert isinstance(pool._network_backend, service_api._GuardedBackend)
         # httpcore builds each connection with that backend.
         assert "network_backend" in inspect.signature(httpcore.HTTPConnection).parameters
+
+
+def _interrupted_poll(submission: _Submission, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The poller, interrupted by Ctrl-C at its first sleep."""
+
+    def interrupt(_seconds: float) -> None:
+        raise KeyboardInterrupt
+
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", interrupt)
+    migrate_async_apply._poll_until_terminal(
+        input_=cast(Any, SimpleNamespace(poll_interval_seconds=0)),
+        migration_state=None,
+        query_id="qid",
+        poll_after_time="",
+        submission=submission,
+        started_at="",
+        fingerprint="",
+    )
+
+
+@pytest.mark.parametrize("transport", ["native", "remote"])
+def test_ctrl_c_while_the_submit_connects_never_lets_it_send(
+    transport: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 7): Ctrl-C gives the submit up through its guard before the
+    run unwinds to the lock release, so a submit still connecting never
+    writes its request once it connects."""
+    monkeypatch.setattr(migrate_async_apply, "SUBMIT_CONNECT_TIMEOUT_SECONDS", -4.9)
+    server = _Server()
+    paused: list[_PausedBeforeFirstWrite] = []
+
+    def submit(guard: _Submission) -> None:
+        pausing = _PausedBeforeFirstWrite(guard)
+        paused.append(pausing)
+        _submit_through(transport, server.port, pausing, b"INSERT INTO t SELECT 1")
+
+    submission = _Submission(submit)
+    deadline = threading.Event()
+    while not paused and not deadline.wait(0.01):
+        pass
+    assert paused[0].paused.wait(timeout=5)
+    with pytest.raises(KeyboardInterrupt):
+        _interrupted_poll(submission, monkeypatch)
+    assert submission.abandoned
+    paused[0].release.set()
+    error = submission.wait()
+    server.close()
+    assert server.received == b""
+    assert error is not None
+    assert "not sent" in str(error)
+
+
+@pytest.mark.parametrize("transport", ["native", "remote"])
+def test_ctrl_c_while_the_submit_writes_waits_for_the_write(
+    transport: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 7): Ctrl-C during a blocked request write unwinds, and so
+    releases the lock, only once the write ended."""
+    monkeypatch.setattr(migrate_async_apply, "SUBMIT_CONNECT_TIMEOUT_SECONDS", -4.9)
+    server = _Server()
+    paused: list[_PausedWhileWriting] = []
+
+    def submit(guard: _Submission) -> None:
+        pausing = _PausedWhileWriting(guard)
+        paused.append(pausing)
+        _submit_through(transport, server.port, pausing, b"INSERT INTO t SELECT 1")
+
+    submission = _Submission(submit)
+    deadline = threading.Event()
+    while not paused and not deadline.wait(0.01):
+        pass
+    assert paused[0].paused.wait(timeout=5)
+    unwound = threading.Event()
+
+    def poll() -> None:
+        with contextlib.suppress(KeyboardInterrupt):
+            _interrupted_poll(submission, monkeypatch)
+        unwound.set()
+
+    polling = threading.Thread(target=poll)
+    polling.start()
+    assert not unwound.wait(timeout=1)
+    paused[0].release.set()
+    assert unwound.wait(timeout=10)
+    polling.join(timeout=5)
+    submission.wait()
+    server.close()
+    assert b"INSERT INTO t SELECT 1" in server.received

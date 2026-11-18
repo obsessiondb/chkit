@@ -2453,3 +2453,33 @@ def test_a_settled_outcome_does_not_wait_for_a_submit_that_never_settles(
     assert writes[-1].operations[0].status == (
         "completed" if outcome == "QueryFinish" else "failed"
     )
+
+
+class _RejectingTerminalJournal(_FakeJournalStore):
+    def write_migration_state(self, state: MigrationRowState) -> None:
+        if state.operations[0].status != "started":
+            msg = "journal write rejected"
+            raise RuntimeError(msg)
+        super().write_migration_state(state)
+
+
+@pytest.mark.parametrize("outcome", ["QueryFinish", "ExceptionBeforeStart"])
+def test_a_rejected_terminal_journal_write_does_not_wait_for_a_submit_that_never_settles(
+    outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 7): a terminal journal write that is rejected detaches the
+    submit too, and the run stops with the journal's error."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    settled = (
+        QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        if outcome == "QueryFinish"
+        else QueryStatus(status="failed", error="Code: 60. UNKNOWN_TABLE", before_start=True)
+    )
+    client = _NeverSettlingSubmitClient([QueryStatus(status="unknown"), settled])
+    started = time.monotonic()
+    try:
+        with pytest.raises(RuntimeError, match="journal write rejected"):
+            apply_async_statement(_input(client=client, journal=_RejectingTerminalJournal()))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
