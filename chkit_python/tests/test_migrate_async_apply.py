@@ -307,6 +307,16 @@ def _input(
     return AsyncApplyInput(**defaults)
 
 
+def test_started_records_name_their_bound_in_the_same_text_as_ts() -> None:
+    """TS and chkit-py read each other's journals: the markers are
+    byte-identical in async-apply.test.ts (#767)."""
+    assert attempt_record_error("2023-11-14T22:14:58.000Z") == (
+        "submitted; a retry reads its outcome from system.query_log entries "
+        "started at or after 2023-11-14T22:14:58.000Z"
+    )
+    assert PENDING_ATTEMPT_MARKER == "not submitted yet; its system.query_log bound is not recorded"
+
+
 def test_apply_async_happy_path_writes_started_then_completed() -> None:
     client = _ScriptedClient(
         statuses=[

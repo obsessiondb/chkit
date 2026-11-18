@@ -185,6 +185,15 @@ describe('applyAsyncStatement', () => {
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   })
 
+  // TS and chkit-py read each other's journals: the markers are byte-identical
+  // in test_migrate_async_apply.py (#767).
+  test('started records name their query_log bound in the same text as chkit-py', () => {
+    expect(attemptRecordError('2023-11-14T22:14:58.000Z')).toBe(
+      'submitted; a retry reads its outcome from system.query_log entries started at or after 2023-11-14T22:14:58.000Z',
+    )
+    expect(PENDING_ATTEMPT_MARKER).toBe('not submitted yet; its system.query_log bound is not recorded')
+  })
+
   test('first attempt: writes started, submits, polls to completion', async () => {
     const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
