@@ -2075,3 +2075,50 @@ def test_a_first_attempts_polls_ignore_an_earlier_attempt_that_finished_during_t
     assert journal.writes is not None
     # Not journaled failed: a re-run attaches to the still-running query.
     assert [w.operations[0].status for w in journal.writes] == ["started"]
+
+
+def _legacy_driver_error(code: int, form: str) -> str:
+    prefix = "HTTPDriver for http://localhost:8123"
+    header = f"{prefix} received ClickHouse error code {code}"
+    body = f"Code: {code}. DB::Exception: Syntax error. (SYNTAX_ERROR)"
+    if form == "header":
+        return header
+    if form == "body":
+        return f"{prefix} returned response code 400\n {body}"
+    return f"{header}\n {body}"
+
+
+@pytest.mark.parametrize("form", ["header", "body", "combined"])
+def test_legacy_driver_rejection_fails_without_polling_grace(form: str) -> None:
+    error = DatabaseError(_legacy_driver_error(62, form))
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="unknown")] * 3,
+        submit_raises=error,
+        strict=True,
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(DatabaseError):
+        apply_async_statement(_input(client=client, journal=journal))
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "failed"]
+
+
+@pytest.mark.parametrize("form", ["header", "body", "combined"])
+@pytest.mark.parametrize("code", [209, 210, 216])
+def test_legacy_driver_transport_codes_are_not_rejections(form: str, code: int) -> None:
+    assert not migrate_async_apply._is_server_rejection(
+        DatabaseError(_legacy_driver_error(code, form))
+    )
+
+
+@pytest.mark.parametrize("form", ["header", "body", "combined"])
+def test_legacy_driver_operational_errors_are_not_rejections(form: str) -> None:
+    assert not migrate_async_apply._is_server_rejection(
+        OperationalError(_legacy_driver_error(62, form))
+    )
+
+
+def test_legacy_driver_http_status_alone_is_not_rejection() -> None:
+    assert not migrate_async_apply._is_server_rejection(
+        DatabaseError("HTTPDriver for http://localhost:8123 returned response code 524")
+    )

@@ -259,9 +259,11 @@ def _clickhouse_exception_code(message: str) -> str | None:
 
     The driver raises DatabaseError for any non-2xx response. Only a real
     server answer carries a code: the X-ClickHouse-Exception-Code header,
-    relayed as "Received ClickHouse exception, code: N", or "Code: N" in the
-    server's body. A gateway or proxy failure ("HTTP driver received HTTP
-    status 524") carries neither.
+    relayed as "Received ClickHouse exception, code: N" (newer clients) or
+    "HTTPDriver for ... received ClickHouse error code N" (0.8.x), or
+    "Code: N" in the server's body. The 0.8.x driver appends that body on a
+    new line. A gateway or proxy failure without a ClickHouse code carries
+    neither.
     """
     header = re.search(r"Received ClickHouse exception, code: (\d+)", message)
     if header is not None:
@@ -269,6 +271,17 @@ def _clickhouse_exception_code(message: str) -> str | None:
     body = re.search(r"server response: Code: (\d+)", message)
     if body is not None:
         return body.group(1)
+    legacy_header = re.search(
+        r"^HTTPDriver for [^\n]+ received ClickHouse error code (\d+)", message
+    )
+    if legacy_header is not None:
+        return legacy_header.group(1)
+    legacy_body = re.search(
+        r"^HTTPDriver for [^\n]+ returned response code \d+\n[ \t]*Code: (\d+)",
+        message,
+    )
+    if legacy_body is not None:
+        return legacy_body.group(1)
     return None
 
 
