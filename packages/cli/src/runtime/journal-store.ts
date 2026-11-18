@@ -89,6 +89,12 @@ export interface JournalStore {
    * last write this process made (#767): what an async submit requires.
    */
   readStoredOperation(migrationName: string, statementIndex: number): Promise<OperationState | undefined>
+  /**
+   * Whether the journal stores an async attempt's fence (#767): it has, or
+   * this run adds, the operation_fingerprints column. A journal not created
+   * yet gets it with the table.
+   */
+  storesAttemptFences(): Promise<boolean>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
   /**
@@ -778,6 +784,13 @@ SETTINGS index_granularity = 1`
           checksum: row.checksum,
         })),
       }
+    },
+
+    async storesAttemptFences(): Promise<boolean> {
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return true
+      await ensureFingerprintColumn()
+      return fingerprintColumn
     },
 
     async readStoredOperation(migrationName: string, statementIndex: number): Promise<OperationState | undefined> {

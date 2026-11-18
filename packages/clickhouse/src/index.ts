@@ -47,12 +47,25 @@ export interface QueryStatus {
 	elapsedMs?: number
 	durationMs?: number
 	error?: string
+	/** A failure the server logged before the query started (ExceptionBeforeStart). */
+	beforeStart?: boolean
 }
 
 export interface QueryStatusOptions {
 	afterTime?: string
 	everyReplica?: boolean
 	runningOnly?: boolean
+	/**
+	 * Count an ExceptionBeforeStart entry (a statement the server rejected) as
+	 * the query's failure. Only for an id that names one attempt alone (#767):
+	 * a reused id can find an earlier attempt's entry.
+	 */
+	includeBeforeStart?: boolean
+}
+
+export interface SubmitOptions {
+	/** Aborts the request, also one not sent yet (#767). */
+	signal?: AbortSignal
 }
 
 export type { ClickHouseSettings }
@@ -144,7 +157,7 @@ export interface ClickHouseExecutor {
 	 *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
 	 *  @param settings - Optional ClickHouse settings sent with the query.
 	 *  @returns The query_id assigned to this query. */
-	submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string>
+	submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string>
 
 	/** Check the status of a previously submitted query.
 	 *  Checks system.processes first (running?), then system.query_log (finished/failed?).
@@ -1091,7 +1104,7 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			}
 		},
-		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
+		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string> {
 			const id = queryId ?? crypto.randomUUID()
 			// A query_id in the settings would put a second query_id on the URL, and
 			// the server could run the query under an id queryStatus() never sees (#353).
@@ -1101,6 +1114,7 @@ export function createExecutorWithClient(
 					query: sql,
 					query_id: id,
 					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
+					...(options?.signal ? { abort_signal: options.signal } : {}),
 				})
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
@@ -1161,14 +1175,18 @@ export function createExecutorWithClient(
 				// than the server's; toDate32, as a Date before 1970 wraps around.
 				// A query the server rejected before it started (a syntax error, an
 				// unknown table) is logged as ExceptionBeforeStart: its failure, as
-				// the server recorded it under the id (#767).
+				// the server recorded it under the id, for a caller whose id names
+				// one attempt alone (#767).
+				const types = options?.includeBeforeStart
+					? "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+					: "'QueryFinish', 'ExceptionWhileProcessing'"
 				const queryLogFrom = from('query_log')
 				const log = await client.query({
 					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart')
+  AND type IN (${types})
   AND is_initial_query = 1
   AND query_start_time >= parseDateTimeBestEffort({after:String})
   AND event_date >= toDate32(parseDateTimeBestEffort({after:String})) - 1
@@ -1207,6 +1225,7 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					status: 'failed',
 					durationMs: Number(row.query_duration_ms),
 					error: row.exception,
+					...(row.type === 'ExceptionBeforeStart' ? { beforeStart: true } : {}),
 				}
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)

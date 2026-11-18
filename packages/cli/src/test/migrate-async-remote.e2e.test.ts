@@ -62,7 +62,7 @@ describe('async migrate statements through the ObsessionDB remote executor (live
     try {
       await run.createTable()
       expect((await applyAsyncStatement(statement)).kind).toBe('completed')
-      expect(journal.statuses()).toEqual(['started', 'completed'])
+      expect(journal.statuses()).toEqual(['started', 'started', 'completed'])
       expect((await applyAsyncStatement(statement)).kind).toBe('skipped')
       expect(await run.countRows(30)).toBe(30)
     } finally {
@@ -83,7 +83,7 @@ describe('async migrate statements through the ObsessionDB remote executor (live
     try {
       await run.createTable()
       expect((await applyAsyncStatement(statement)).kind).toBe('completed')
-      expect(journal.statuses()).toEqual(['started', 'completed'])
+      expect(journal.statuses()).toEqual(['started', 'started', 'completed'])
       expect(await run.countRows(3)).toBe(3)
     } finally {
       await run.cleanup()
@@ -104,7 +104,7 @@ describe('async migrate statements through the ObsessionDB remote executor (live
     })
     try {
       await expect(applyAsyncStatement(statement)).rejects.toThrow(/SYNTAX_ERROR/)
-      expect(journal.statuses()).toEqual(['started', 'failed'])
+      expect(journal.statuses()).toEqual(['started', 'started', 'failed'])
     } finally {
       await run.cleanup()
     }

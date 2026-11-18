@@ -15,6 +15,7 @@ export type MigrateErrorCode =
   | 'journal_changed'
   | 'async_outcome_unknown'
   | 'async_attempt_unfenced'
+  | 'async_needs_lock'
 
 /** A migrate failure with a stable code for `--json` consumers. */
 export class MigrateError extends Error {

@@ -883,6 +883,18 @@ class JournalStore:
             )
         )
 
+    def stores_attempt_fences(self) -> bool:
+        """Whether the journal stores an async attempt's fence (#767).
+
+        It has, or this run adds, the operation_fingerprints column. A journal
+        not created yet gets it with the table.
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return True
+        self._ensure_fingerprint_column()
+        return self._fingerprint_column
+
     def read_stored_operation(
         self, migration_name: str, statement_index: int
     ) -> OperationState | None:

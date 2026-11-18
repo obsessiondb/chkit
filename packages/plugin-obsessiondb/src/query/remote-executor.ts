@@ -211,7 +211,9 @@ export function createRemoteExecutor(deps: {
 			throwIfError(res)
 		},
 
-		async submit(sql, queryId?, settings?) {
+		async submit(sql, queryId?, settings?, options?) {
+			// Never start a request after the caller gave up on it (#767).
+			options?.signal?.throwIfAborted()
 			const apiSettings = toApiSettings(settings)
 			const res = await client.workbench.query.execute({
 				serviceSlug,
@@ -269,7 +271,7 @@ export function createRemoteExecutor(deps: {
 FROM ${from('system.query_log')}
 WHERE user = currentUser()
   AND query_id = '${queryId}'
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart')
+  AND type IN (${options?.includeBeforeStart ? "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'" : "'QueryFinish', 'ExceptionWhileProcessing'"})
   ${afterFilter}
 ORDER BY event_time DESC
 LIMIT 1
@@ -292,6 +294,7 @@ ${readSettings}`,
 				status: 'failed' as const,
 				durationMs: Number(row.query_duration_ms),
 				error: row.exception,
+				...(row.type === 'ExceptionBeforeStart' ? { beforeStart: true } : {}),
 			} satisfies QueryStatus
 		},
 

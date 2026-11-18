@@ -110,6 +110,8 @@ class QueryStatus(BaseModel):
     elapsed_ms: int | None = None
     duration_ms: int | None = None
     error: str | None = None
+    # A failure the server logged before the query started (ExceptionBeforeStart).
+    before_start: bool = False
 
 
 class ClickHouseClient:
@@ -218,10 +220,19 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
+    def _write_settings(self) -> dict[str, Any]:
+        """No asynchronous INSERT, as TS sends with every write, so a write is
+        stored when it returns. A user that cannot change the setting
+        (readonly = 1) cannot write either, so it is left out there, where
+        clickhouse-connect would refuse it before the server's own error."""
+        setting = self._client.server_settings.get("async_insert")
+        return {"async_insert": 0} if setting is not None and not setting.readonly else {}
+
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
     ) -> None:
         """Check ownership before each command attempt, including an internal retry."""
+        settings = {**self._write_settings(), **(settings or {})}
         check()
         try:
             self._client.command(statement, settings=settings)
@@ -351,8 +362,13 @@ class ClickHouseClient:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Callable[[], None] | None = None,
     ) -> str:
         """Send a query that ``query_status`` follows. Returns its query_id.
+
+        ``before_send`` runs right before the request is sent, and raises to
+        stop a request the caller gave up on (#767).
 
         Used by ``chkit migrate --apply`` for long-running ``ALTER`` /
         ``OPTIMIZE`` statements: the server starts processing immediately
@@ -371,9 +387,12 @@ class ClickHouseClient:
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
-        self._submit_driver().command(
-            statement, settings={**(settings or {}), "query_id": qid}
-        )
+        driver = self._submit_driver()
+        _SUBMIT_SEND.before_send = before_send
+        try:
+            driver.command(statement, settings={**(settings or {}), "query_id": qid})
+        finally:
+            _SUBMIT_SEND.before_send = None
         return qid
 
     def _submit_driver(self) -> Any:
@@ -432,8 +451,14 @@ class ClickHouseClient:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         """Check whether a previously-submitted query is running / finished / failed.
+
+        ``include_before_start`` counts an ExceptionBeforeStart entry (a
+        statement the server rejected) as the query's failure, for an id that
+        names one attempt alone (#767): a reused id can find an earlier
+        attempt's entry.
 
         Polls ``system.processes`` first (running?), then falls back to
         ``system.query_log`` for the terminal state. The query runs on the
@@ -476,11 +501,16 @@ class ClickHouseClient:
         # event_date prunes query_log's partitions: the entry is logged no earlier
         # than the query started. A day of slack covers a session time zone other
         # than the server's; toDate32, as a Date before 1970 wraps around.
+        types = (
+            "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+            if include_before_start
+            else "'QueryFinish', 'ExceptionWhileProcessing'"
+        )
         log_sql = (
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' "
-            "AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart') "
+            f"AND type IN ({types}) "
             "AND is_initial_query = 1 "
             f"AND query_start_time >= parseDateTimeBestEffort('{after}') "
             f"AND event_date >= toDate32(parseDateTimeBestEffort('{after}')) - 1 "
@@ -502,6 +532,7 @@ class ClickHouseClient:
             status="failed",
             duration_ms=_safe_int(row.get("query_duration_ms")),
             error=str(row.get("exception") or "") or None,
+            before_start=str(row.get("type")) == "ExceptionBeforeStart",
         )
 
     def list_databases(self) -> list[str]:
@@ -559,6 +590,11 @@ class _SingleAttemptPool:
         return self._pool.request(*args, **{**kwargs, "retries": False})
 
 
+# The check a submit runs right before its request is sent, per thread: the
+# submit driver is shared by concurrent submits (#767).
+_SUBMIT_SEND = threading.local()
+
+
 class _NoReplayPool:
     """Never replay a sent request, for clients whose requests run concurrently.
 
@@ -576,6 +612,10 @@ class _NoReplayPool:
         return getattr(self._pool, name)
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
+        # The submitting thread's check, right before the physical send (#767).
+        before_send = getattr(_SUBMIT_SEND, "before_send", None)
+        if before_send is not None:
+            before_send()
         try:
             return self._pool.request(*args, **{**kwargs, "retries": False})
         except HTTPError as error:

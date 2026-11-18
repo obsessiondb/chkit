@@ -140,6 +140,8 @@ def summary(type_: str, key: str) -> MigrationOperationSummary:
 @dataclass
 class FakeStore:
     state: MigrationRowState | None = None
+    # Whether the journal stores an async attempt's fence (#767).
+    fences: bool = True
     reads: list[str] = field(default_factory=list)
     writes: list[MigrationRowState] = field(default_factory=list)
     appended: list[MigrationJournalEntry] = field(default_factory=list)
@@ -152,6 +154,9 @@ class FakeStore:
         if self.state is None:
             return None
         return next((op for op in self.state.operations if op.operation_index == index), None)
+
+    def stores_attempt_fences(self) -> bool:
+        return self.fences
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)
@@ -1127,6 +1132,7 @@ class _ModeOnlyEditClient(_RecordingClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         assert every_replica
         self.checks.append((query_id, after_time, running_only))
@@ -1181,18 +1187,19 @@ def test_a_mode_only_edit_records_an_attempt_that_finished_as_completed_and_runs
     assert store.state.migration_completed is True
 
 
-def test_a_mode_only_edit_journals_a_server_failure_before_its_before_retry_sql(
+def test_a_mode_only_edit_journals_a_server_rejection_before_its_before_retry_sql(
     tmp_path: Path,
 ) -> None:
     _store, client, run, statement = _mode_only_edit(
-        tmp_path, QueryStatus(status="failed", error="Code: 241. MEMORY_LIMIT_EXCEEDED")
+        tmp_path,
+        QueryStatus(status="failed", error="Code: 60. UNKNOWN_TABLE", before_start=True),
     )
     run()
     assert client.calls == ["TRUNCATE TABLE db.a", statement]
     recorded = client.record_at_command[0]
     assert recorded is not None
-    assert (recorded.status, recorded.query_id, recorded.last_error) == (
-        "failed", "fenced-query-id", "Code: 241. MEMORY_LIMIT_EXCEEDED"
+    assert (recorded.status, recorded.query_id, recorded.last_error, recorded.attempt_fenced) == (
+        "failed", "fenced-query-id", "Code: 60. UNKNOWN_TABLE", True
     )
 
 
@@ -1626,6 +1633,7 @@ class _StatusClient(_RecordingClient):
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         self.status_calls.append((query_id, every_replica, running_only))
         if isinstance(self._running, Exception):
@@ -1645,12 +1653,13 @@ def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
         in_progress(
             [
                 op(0, "failed"),
+                # A rejection the server recorded for the id (#767).
                 op(
                     1,
                     "failed",
                     Marker(type="load_table_data", key="table:t"),
                     query_id="retry-query-id",
-                ),
+                ).model_copy(update={"attempt_fenced": True}),
             ],
             checksum="old",
         )
@@ -2404,3 +2413,83 @@ def test_apply_checks_another_releases_fingerprinted_state_by_fingerprint(
         "ALTER TABLE t ADD COLUMN b UInt64;",
         "ALTER TABLE t ADD COLUMN c UInt64;",
     ]
+
+
+class _AlwaysUnknownClient(_RecordingClient):
+    """No replica runs the recorded async attempt, and query_log has nothing of it."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.status_ids: list[str] = []
+
+    def query_status(
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+        include_before_start: bool = False,
+    ) -> QueryStatus:
+        _ = (after_time, every_replica, running_only, include_before_start)
+        self.status_ids.append(query_id)
+        return QueryStatus(status="unknown")
+
+    def submit(self, *_args: Any, **_kwargs: Any) -> str:
+        msg = "never submitted"
+        raise AssertionError(msg)
+
+
+def test_a_marker_key_edit_that_would_drop_an_unverified_failed_record_stops(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 3): an edit of only the marker's key drops the record of an
+    async attempt that an earlier release journaled failed without a server
+    failure (a lost response after the INSERT committed). The record is read
+    against the identity it was recorded with first, and the run stops with
+    the journal as it was: the INSERT would otherwise run again."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    edited = original.replace("key=table:db.a", "key=table:db.renamed")
+    attempt = op(0, "failed", LOAD, query_id="legacy-query-id", last_error="error code: 524")
+    store = FakeStore(
+        in_progress(
+            [attempt.model_copy(update={"fingerprint": statement_fingerprint(statement)})],
+            checksum=checksum_sql(original),
+        )
+    )
+    client = _AlwaysUnknownClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, edited),
+            cast(Any, client),
+            store,
+            retry=_retry_for(edited, previous=checksum_sql(original)),
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "query_id legacy-query-id" in info.value.message
+    assert client.status_ids == ["legacy-query-id"]
+    assert client.calls == []
+    assert store.writes == []
+
+
+def test_a_migration_with_async_work_on_a_journal_that_cannot_fence_stops_before_it_runs(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 3): a journal that cannot store an async attempt's fence
+    stops the migration before any statement runs, so nothing needs
+    reconciling."""
+    sql = (
+        "-- operation: sql_statement key=statement:0 risk=safe\nINSERT INTO db.log VALUES (1);\n"
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        "INSERT INTO db.a SELECT 1;\n"
+    )
+    store = FakeStore(fences=False)
+    client = _RecordingClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), client, store)
+    assert info.value.code == "async_attempt_unfenced"
+    assert "Nothing ran. Add the column" in info.value.message
+    assert client.calls == []
+    assert store.writes == []
+

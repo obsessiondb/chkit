@@ -165,6 +165,9 @@ class _MigrateContext:
     with_lock: WithLock
     query_tracker: Callable[[], QueryTracker | None] = field(default=lambda: None)
     complete_recovery: Callable[[], None] = field(default=lambda: None)
+    # Whether the run applies without the migrate lock because the target
+    # database did not exist (#767).
+    lockless_bootstrap: Callable[[], bool] = field(default=lambda: False)
 
 
 _T = TypeVar("_T")
@@ -496,6 +499,7 @@ def _run(
             ),
             query_tracker=lambda: lock_holder.tracker,
             complete_recovery=lock_holder.complete_recovery,
+            lockless_bootstrap=lambda: lock_holder.lockless_bootstrap,
         )
         if targets.abandon_target is not None:
             run_abandon(
@@ -929,12 +933,15 @@ def _replan_under_lock(ctx: _MigrateContext, plan: _PendingPlan) -> _PendingPlan
 class _LockHolder:
     """The migrate lock this run holds, if any, checked before each request."""
 
-    __slots__ = ("completion", "lock", "tracker")
+    __slots__ = ("completion", "lock", "lockless_bootstrap", "tracker")
 
     def __init__(self) -> None:
         self.lock: MigrateLock | None = None
         self.tracker: QueryTracker | None = None
         self.completion: Callable[[], None] | None = None
+        # Set while the run applies without the lock because the target
+        # database did not exist (#767).
+        self.lockless_bootstrap = False
 
     def complete_recovery(self) -> None:
         if self.completion is not None:
@@ -1029,7 +1036,11 @@ class _MigrateLockRunner(WithLock):
                 "this target until it finishes.",
                 err=True,
             )
-            return fn()
+            self._holder.lockless_bootstrap = True
+            try:
+                return fn()
+            finally:
+                self._holder.lockless_bootstrap = False
         database, table, fanout = found
         # The heartbeat runs while the run's own requests are in flight; a
         # client with an HTTP session takes one query at a time.
@@ -1207,6 +1218,7 @@ def _apply_plan(ctx: _MigrateContext, plan: _PendingPlan) -> None:
                 settings=ctx.settings,
                 flags=ctx.flags,
                 query_tracker=ctx.query_tracker(),
+                lockless_bootstrap=ctx.lockless_bootstrap(),
             )
         )
         applied_now.append(entry)

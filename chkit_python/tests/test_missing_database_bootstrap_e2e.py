@@ -45,6 +45,16 @@ def live() -> Iterator[ClickHouseClient]:
         yield client
 
 
+def _append_async_load(migration: Path, database: str) -> None:
+    """#767: an async load in a run that takes no migrate lock."""
+    with migration.open("a", encoding="utf-8") as handle:
+        handle.write(
+            f"\n-- operation: load_table_data key=table:{database}.events risk=safe "
+            f"mode=async\nINSERT INTO {quote_ident(database)}.events "
+            "SELECT number FROM numbers(3);\n"
+        )
+
+
 def _assert_async_load_journaled(live: ClickHouseClient, database: str, journal_table: str) -> None:
     """The async load completed under a random id of its own (#767)."""
     load = live.query(
@@ -110,14 +120,7 @@ def test_migrate_apply_creates_a_missing_database(
         assert generated.exit_code == 0, format_test_diagnostic("chkit generate", generated)
         migration = next((tmp_path / "chkit" / "migrations").glob("*.sql"))
         assert f"CREATE DATABASE IF NOT EXISTS {database}" in migration.read_text()
-        # #767: this run takes no migrate lock, and an async load in it still
-        # journals its own random query id before its submit.
-        with migration.open("a", encoding="utf-8") as handle:
-            handle.write(
-                f"\n-- operation: load_table_data key=table:{database}.events risk=safe "
-                f"mode=async\nINSERT INTO {quote_ident(database)}.events "
-                "SELECT number FROM numbers(3);\n"
-            )
+        _append_async_load(migration, database)
 
         status = chkit_json("status")
         assert status["databaseMissing"] is True
@@ -135,13 +138,21 @@ def test_migrate_apply_creates_a_missing_database(
         plan = chkit_json("migrate")
         assert plan["pending"] == [migration.name]
 
+        # #767: the run holds no migrate lock, so it stops before the async
+        # load; the statements before it are recorded. The database exists
+        # now: the next run takes the lock and submits the load.
+        assert chkit_json("migrate", "--apply", exit_code=1)["error"]["code"] == (
+            "async_needs_lock"
+        )
         applied = chkit_json("migrate", "--apply")
         assert [entry["name"] for entry in applied["applied"]] == [migration.name]
 
         wait_for_table_on_every_replica(live, database, "events")
+        # The locked run also wrote its migrate lock claim to the journal (#716).
         journal = live.query(
             "SELECT name, migration_completed FROM "
-            f"{quote_ident(database)}.{quote_ident(journal_table)} FINAL"
+            f"{quote_ident(database)}.{quote_ident(journal_table)} FINAL "
+            f"WHERE name = '{migration.name}'"
         ).rows
         assert [(row["name"], bool(row["migration_completed"])) for row in journal] == [
             (migration.name, True)

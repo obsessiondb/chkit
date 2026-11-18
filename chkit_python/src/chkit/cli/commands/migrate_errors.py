@@ -25,6 +25,7 @@ MigrateErrorCode = Literal[
     "migrate_cancellation_failed",
     "async_outcome_unknown",
     "async_attempt_unfenced",
+    "async_needs_lock",
 ]
 
 EMPTY_MIGRATIONS_SUMMARY = (

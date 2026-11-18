@@ -61,14 +61,19 @@ describe('migrate --apply into a database that does not exist yet', () => {
         expect(generate.exitCode).toBe(0)
         const [migration] = await readdir(migrationsDir)
         expect(migration).toEndWith(`_${migrationName}.sql`)
-        // #767: this run takes no migrate lock, and an async load in it still
-        // journals its own random query id before its submit.
+        // #767: an async load in a run that takes no migrate lock.
         await appendFile(
           join(migrationsDir, migration as string),
           `\n-- operation: load_table_data key=table:${database}.events risk=safe mode=async\nINSERT INTO ${quoteIdent(database)}.events SELECT number FROM numbers(3);\n`,
           'utf8',
         )
 
+        // #767: the run holds no migrate lock, so it stops before the async
+        // load; the statements before it are recorded.
+        const lockless = runCli(dir, ['migrate', '--config', configPath, '--apply', '--json'], cliEnv)
+        expect(lockless.exitCode).toBe(1)
+        expect(JSON.parse(lockless.stdout).error).toMatchObject({ code: 'async_needs_lock' })
+        // The database exists now: this run takes the lock and submits the load.
         const apply = runCli(dir, ['migrate', '--config', configPath, '--apply', '--json'], cliEnv)
         if (apply.exitCode !== 0) {
           throw new Error(formatTestDiagnostic('migrate --apply failed', apply))
@@ -85,7 +90,8 @@ describe('migrate --apply into a database that does not exist yet', () => {
         // until the completed row is visible rather than asserting once.
         const journal = await waitForRows<{ name: string; migration_completed: boolean }>(
           executor,
-          `SELECT name, migration_completed FROM ${quoteIdent(database)}.${quoteIdent(journalTable)} FINAL SETTINGS select_sequential_consistency = 1`,
+          // The locked run also wrote its migrate lock claim to the journal (#716).
+          `SELECT name, migration_completed FROM ${quoteIdent(database)}.${quoteIdent(journalTable)} FINAL WHERE name = '${migration}' SETTINGS select_sequential_consistency = 1`,
           (rows) => rows.length === 1 && rows[0]?.migration_completed === true,
           'journal of the bootstrap migration',
         )

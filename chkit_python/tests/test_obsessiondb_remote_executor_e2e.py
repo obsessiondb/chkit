@@ -405,6 +405,8 @@ class _RecordingRemote:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
     ) -> str:
         return self._inner.submit(statement, query_id=query_id, settings=settings)
 
@@ -415,6 +417,7 @@ class _RecordingRemote:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         self.after_times.append(after_time)
         self.status_ids.append(query_id)

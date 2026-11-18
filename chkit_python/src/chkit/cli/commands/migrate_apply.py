@@ -57,6 +57,7 @@ from chkit.cli.journal_store import (
     MigrationRowState,
     OperationState,
     OperationStatus,
+    resolve_journal_table_name,
 )
 from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.plugin_runtime import PluginRuntime
@@ -113,6 +114,9 @@ class ApplyMigrationInput:
     # The command's parsed flags, keyed as in TS, for the apply hooks.
     flags: dict[str, Any] = field(default_factory=dict)
     query_tracker: QueryTracker | None = None
+    # Set when the run holds no migrate lock because the target database did
+    # not exist (#767).
+    lockless_bootstrap: bool = False
 
 
 class StatementError(RuntimeError):
@@ -204,6 +208,14 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             log=input_.log,
         )
 
+    # An async attempt is submitted only once the journal stored its fence
+    # (#767), so a journal that cannot store one stops the migration before any
+    # of its statements runs: nothing needs reconciling.
+    if any(
+        operation is not None and operation.mode == "async" for operation in operation_summaries
+    ) and not journal_store.stores_attempt_fences():
+        raise _unfenced_journal_error(file)
+
     total = len(statements)
     for index, statement in enumerate(statements):
         operation = operation_summaries[index] if index < len(operation_summaries) else None
@@ -224,14 +236,15 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         log=input_.log,
                         settings=input_.settings,
                         query_tracker=input_.query_tracker,
+                        lockless_bootstrap=input_.lockless_bootstrap,
                     )
                 )
             except Exception as error:
                 wrapped = statement_error(
                     file=file, index=index, total=total, statement=statement, error=error
                 )
-                # A stop that nothing ran keeps its code for --json (#767).
-                if isinstance(error, MigrateError) and error.code == "async_outcome_unknown":
+                # A stop of an async statement keeps its code for --json (#767).
+                if isinstance(error, MigrateError) and error.code in _ASYNC_STOP_CODES:
                     raise MigrateError(error.code, str(wrapped)) from error
                 raise wrapped from error
             # Async ops are DML (loads, backfills) — no DDL propagation to wait on.
@@ -616,22 +629,27 @@ def _accept_edited_migration(
         identities=identities,
         applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
-    _assert_dropped_attempts_stopped(client, file, state, rebased)
-    _assert_kept_attempts_resolvable(client, file, rebased, log)
+    _assert_recorded_attempts_resolved(client, file, state, rebased, log)
     journal_store.write_migration_state(rebased)
 
 
-def _assert_kept_attempts_resolvable(
+def _assert_recorded_attempts_resolved(
     client: ClickHouseClient,
     file: str,
+    state: MigrationRowState,
     rebased: MigrationRowState,
     log: Callable[[str], None],
 ) -> None:
-    """Stop an edit before the re-key when a kept async attempt's outcome is unknown (#767).
+    """Resolve every recorded async attempt before an edit is accepted (#767).
 
-    The journal stays as it was and nothing runs.
+    The ones the re-key would drop are included, each read against the
+    identity it was recorded with. An attempt still running, one whose
+    outcome is unknown, and one that finished but whose record the edit drops
+    (its statement would run again) stop the run here, with the journal as it
+    was and nothing run. A dropped record is otherwise the only trace of an
+    attempt under a random id (#701).
     """
-    for op in rebased.operations:
+    for op in state.operations:
         if op.status == "completed" or op.query_id == "":
             continue
         recorded = resolve_recorded_attempt(
@@ -644,10 +662,37 @@ def _assert_kept_attempts_resolvable(
         )
         if recorded.kind == "running":
             raise _attempt_still_running_error(file, op)
+        dropped = not any(kept is op for kept in rebased.operations)
+        reason: str | None = None
         if recorded.kind == "unknown":
-            raise outcome_unknown_error(
-                op.operation_type, op.operation_index, file, op.query_id, recorded.reason
+            reason = recorded.reason
+        elif recorded.kind == "finished" and dropped:
+            reason = (
+                "it finished on the server, but the edit drops its record, so the edited "
+                "statement would run again"
             )
+        if reason is not None:
+            raise outcome_unknown_error(
+                op.operation_type, op.operation_index, file, op.query_id, reason
+            )
+
+
+_ASYNC_STOP_CODES = frozenset(
+    {"async_outcome_unknown", "async_attempt_unfenced", "async_needs_lock"}
+)
+
+
+def _unfenced_journal_error(file: str) -> MigrateError:
+    table = resolve_journal_table_name()
+    return MigrateError(
+        "async_attempt_unfenced",
+        f"Cannot apply {file}: it has async statements, and the journal {table} has no "
+        "operation_fingerprints column, which records each async attempt's fence (#767). "
+        "Nothing ran. Add the column with a user that can alter the journal: run chkit "
+        f"migrate --apply as that user, or ALTER TABLE <database>.{table} ADD COLUMN IF NOT "
+        "EXISTS operation_fingerprints Array(String) DEFAULT [] (ON CLUSTER in cluster "
+        "mode), then apply again.",
+    )
 
 
 def _resolve_async_attempt_before_sync(
@@ -716,50 +761,6 @@ def _attempt_still_running_error(file: str, op: OperationState) -> MigrateError:
         f"finish or run KILL QUERY WHERE query_id = '{op.query_id}', then run chkit "
         "migrate --apply again.",
     )
-
-
-def _assert_dropped_attempts_stopped(
-    client: ClickHouseClient,
-    file: str,
-    state: MigrationRowState,
-    rebased: MigrationRowState,
-) -> None:
-    """Stop an edit that drops the record of an async attempt that still runs.
-
-    An async retry runs under a random query id (#701), so the record a
-    rebase drops is the only trace of an attempt that may still run (a submit
-    that failed while the server ran it, an attempt kept by --abandon): the
-    next run would not find it. Every replica is read.
-    """
-    dropped = [
-        op
-        for op in state.operations
-        if op.status != "completed"
-        and op.query_id != ""
-        and not any(kept is op for kept in rebased.operations)
-    ]
-    for op in dropped:
-        _assert_async_attempt_stopped(client, file, op)
-
-
-def _assert_async_attempt_stopped(
-    client: ClickHouseClient, file: str, op: OperationState
-) -> None:
-    """Keep the only record of an async attempt until it stops on every replica."""
-    if op.status == "completed" or op.query_id == "":
-        return
-    try:
-        status = client.query_status(op.query_id, every_replica=True, running_only=True)
-    except Exception as error:
-        msg = (
-            f"Cannot apply {file}: could not check whether the earlier "
-            f"attempt of statement {op.operation_index + 1} (query_id {op.query_id}) is "
-            f"still running ({clickhouse_error_message(error)}). Nothing ran — re-run "
-            "chkit migrate --apply."
-        )
-        raise RuntimeError(msg) from error
-    if status.status == "running":
-        raise _attempt_still_running_error(file, op)
 
 
 def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool:

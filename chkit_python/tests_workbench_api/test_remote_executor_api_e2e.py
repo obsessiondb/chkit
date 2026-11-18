@@ -25,9 +25,9 @@ from datetime import UTC, datetime
 from typing import Any, TypeVar
 
 from chkit.cli.commands.migrate_async_apply import (
+    ATTEMPT_RECORD_MARKER,
     AsyncApplyInput,
     apply_async_statement,
-    make_deterministic_query_id,
 )
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.clickhouse.client import QueryResult, QueryStatus
@@ -105,9 +105,7 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
     table = f"`{database}`.`{name}`"
     operation_key = f"table:{database}.{name}"
     migration_name = f"20990101000000_{name}.sql"
-    query_id = make_deterministic_query_id(
-        database, "_chkit_migrations", migration_name, 0
-    )
+    query_id = str(uuid.uuid4())
     outcome: list[str] = []
     # The attempt of a run that lost its connection while the statement ran.
     worker = threading.Thread(
@@ -148,7 +146,11 @@ def test_rerun_attaches_to_attempt_a_lost_run_left_running() -> None:
                 "status": "started",
                 "startedAt": "2026-10-02 00:00:00.000",
                 "finishedAt": None,
-                "lastError": "",
+                # A record this release wrote before the submit: fenced, under an
+                # id of its own (#767). A record of an earlier release would stop
+                # the run.
+                "lastError": ATTEMPT_RECORD_MARKER,
+                "attemptFenced": True,
             }
         )
         journal = _MemoryJournal(
@@ -274,10 +276,20 @@ class _RecordingRemote:
         return self._inner.submit(statement, query_id=query_id)
 
     def query_status(
-        self, query_id: str, *, after_time: str | None = None, every_replica: bool = False
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         return self._inner.query_status(
-            query_id, after_time=after_time, every_replica=every_replica
+            query_id,
+            after_time=after_time,
+            every_replica=every_replica,
+            running_only=running_only,
+            include_before_start=include_before_start,
         )
 
 
@@ -288,6 +300,11 @@ class _MemoryJournal:
 
     def read_migration_state(self, _name: str) -> MigrationRowState | None:
         return self.state
+
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)

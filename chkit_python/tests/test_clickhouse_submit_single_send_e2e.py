@@ -9,6 +9,7 @@ client does not.
 
 from __future__ import annotations
 
+import time
 import uuid
 from typing import Any
 
@@ -62,3 +63,22 @@ def test_a_submit_whose_connection_resets_is_sent_once() -> None:
             client.submit("SELECT 1", query_id=str(uuid.uuid4()))
     assert len(pool.requests) == 1
     assert pool.requests[0]["retries"] is False
+
+
+def test_query_status_counts_an_exception_before_start_only_when_asked_to() -> None:
+    """#767: a statement the server rejected before it started is logged as
+    ExceptionBeforeStart. Only a caller whose id names one attempt alone asks
+    for it: backfill reuses chunk ids, and an old rejection must not read as
+    the outcome of a later attempt of the same id."""
+    query_id = str(uuid.uuid4())
+    with ClickHouseClient.connect(_config()) as client:
+        with pytest.raises(Exception, match=r"SYNTAX_ERROR|Syntax error"):
+            client.submit("SELEC 1", query_id=query_id)
+        deadline = time.monotonic() + 60
+        status = client.query_status(query_id, include_before_start=True)
+        while status.status != "failed" and time.monotonic() < deadline:
+            time.sleep(0.5)
+            status = client.query_status(query_id, include_before_start=True)
+        assert (status.status, status.before_start) == ("failed", True)
+        assert "SYNTAX_ERROR" in (status.error or "")
+        assert client.query_status(query_id).status == "unknown"
