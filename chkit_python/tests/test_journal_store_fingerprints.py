@@ -15,6 +15,7 @@ from typing import Any
 
 import pytest
 
+from chkit.cli.commands.migrate_recovery import recorded_statement_mismatches
 from chkit.cli.journal_store import JournalStore, MigrationRowState, OperationState
 from chkit.clickhouse.replicas import ReplicaFanout
 
@@ -556,3 +557,91 @@ def test_a_system_columns_probe_that_fails_for_another_reason_stops_the_read() -
 def test_the_abandon_report_leaves_fingerprints_out() -> None:
     state = _state(["v1:a"])
     assert "fingerprint" not in state.operations[0].model_dump(by_alias=True)
+
+
+# #767: a started async record that names its query_log bound is stored with a
+# fenced fingerprint, so a release from #599 to #767 refuses to resume it
+# instead of compensating it without a record. Same as the TS journal-store tests.
+_BOUND_ERROR = (
+    "submitted; a retry reads its outcome from system.query_log entries started at or "
+    "after 2026-11-09T11:59:58.000Z"
+)
+
+
+def _async_op(status: str, last_error: str, index: int = 0) -> OperationState:
+    return OperationState.model_validate(
+        {
+            "operationIndex": index,
+            "operationKey": "table:t",
+            "operationType": "load_table_data",
+            "queryId": "q-1",
+            "status": status,
+            "startedAt": "2026-11-09T12:00:00.000",
+            "finishedAt": None if status == "started" else "2026-11-09T12:00:05.000",
+            "lastError": last_error,
+            "fingerprint": "v1:load",
+        }
+    )
+
+
+def _with_ops(*ops: OperationState) -> MigrationRowState:
+    return _state([]).model_copy(update={"operations": list(ops)})
+
+
+def test_a_started_record_that_names_its_bound_is_stored_fenced_and_read_back_marked() -> None:
+    client = _Client()
+    _store(client).write_migration_state(_with_ops(_async_op("started", _BOUND_ERROR)))
+    insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
+    assert insert.endswith(", ['fenced-attempt;v1:load'])")
+
+    started = {**_tuple(0), "status": "started", "last_error": _BOUND_ERROR}
+    reader = _store(_Client(rows=[_row([started], ["fenced-attempt;v1:load"])]))
+    read = reader.read_migration_state("m.sql")
+    assert read is not None
+    assert read.operations[0].fingerprint == "v1:load"
+    assert read.operations[0].attempt_fenced is True
+
+
+def test_every_other_record_is_stored_unfenced() -> None:
+    client = _Client()
+    _store(client).write_migration_state(
+        _with_ops(
+            _async_op("completed", ""),
+            _async_op("failed", _BOUND_ERROR, 1),
+            _async_op("started", "not submitted yet; its system.query_log bound is not recorded", 2),
+        )
+    )
+    insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
+    assert insert.endswith(", ['v1:load','v1:load','v1:load'])")
+
+
+def test_a_release_from_599_to_767_that_reads_the_record_stops_before_it_resumes_it() -> None:
+    """An older release reads the stored fingerprint as it is and checks it
+    with recorded_statement_mismatches before it resumes, unchanged since #599."""
+    as_stored = _async_op("started", _BOUND_ERROR).model_copy(
+        update={"fingerprint": "fenced-attempt;v1:load"}
+    )
+    assert recorded_statement_mismatches([as_stored], ["v1:load"]) == [1]
+    no_fingerprint = as_stored.model_copy(update={"fingerprint": "fenced-attempt;"})
+    assert recorded_statement_mismatches([no_fingerprint], ["v1:load"]) == [1]
+
+
+def test_a_journal_without_the_column_stores_no_fence_and_a_read_your_write_keeps_none() -> None:
+    client = _Client(
+        query_error=_no_column,
+        execute_error=lambda sql: (
+            _clickhouse_error(497, "ACCESS_DENIED") if sql.startswith("ALTER TABLE") else None
+        ),
+    )
+    store = _store(client)
+    store.write_migration_state(_with_ops(_async_op("started", _BOUND_ERROR)))
+    read = store.read_migration_state("m.sql")
+    assert read is not None
+    assert read.operations[0].status == "started"
+    assert read.operations[0].fingerprint == "v1:load"
+    assert read.operations[0].attempt_fenced is False
+
+
+def test_the_abandon_report_leaves_the_fence_out() -> None:
+    op = _async_op("started", _BOUND_ERROR).model_copy(update={"attempt_fenced": True})
+    assert "attemptFenced" not in op.model_dump(by_alias=True)

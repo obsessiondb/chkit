@@ -5,13 +5,14 @@ import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit
 
 import { debug } from '../../runtime/debug.js'
 import {
+  ATTEMPT_BOUND_MARKER,
   type JournalStore,
   type MigrationRowState,
   type OperationState,
   resolveJournalTableName,
 } from '../../runtime/journal-store.js'
 import { CLI_VERSION } from '../../runtime/version.js'
-import { inProgressChecksumMismatchError } from './errors.js'
+import { inProgressChecksumMismatchError, MigrateError } from './errors.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
 import type { QueryTracker } from './query-intents.js'
 
@@ -41,15 +42,18 @@ const MAX_TRANSIENT_POLL_ERRORS = 20
 // The lastError of a started attempt that no replica runs and that has no
 // outcome in system.query_log, journaled before it is retried (#672).
 const NO_OUTCOME_ERROR = 'no longer running and no outcome in system.query_log; retried'
-// The lastError of a 'started' record this release writes is this marker
-// followed by the attempt's query_log bound (#767): the time from which its
-// polls count query_log entries of its id. A re-run reads the attempt's
-// outcome with that same bound, so it never takes a QueryFinish its polls
-// ignored. A retry by this release journals the attempt failed before its
-// before-retry SQL runs, so a QueryFinish of the id from the bound on is the
-// statement's outcome. Older releases do not know this marker and check such
-// a record in system.processes only, as they do their own.
-export const ATTEMPT_BOUND_MARKER = 'submitted; a retry reads its outcome from system.query_log entries started at or after '
+// The lastError of a 'started' record this release writes is
+// ATTEMPT_BOUND_MARKER followed by the attempt's query_log bound (#767): the
+// time from which its polls count query_log entries of its id. A re-run reads
+// the attempt's outcome with that same bound, so it never takes a QueryFinish
+// its polls ignored. A retry by this release journals the attempt failed
+// before its before-retry SQL runs, so a QueryFinish of the id from the bound
+// on is the statement's outcome. The journal stores such a record's
+// fingerprint fenced, so releases from #599 to #767 refuse to resume it
+// rather than compensate it without a record (FENCED_FINGERPRINT_PREFIX); a
+// record whose fence was not stored (a journal without the fingerprint
+// column) is not trusted.
+export { ATTEMPT_BOUND_MARKER }
 // The lastError of the 'started' record a statement's first attempt writes
 // before it reads its query_log bound, which is taken after that write and
 // recorded by a second one before the submit (#767). Such a record was never
@@ -197,14 +201,14 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // retry's id, which a #701 record names, is that attempt's alone. Any
     // other id an older release may have reused for earlier attempts, and
     // only the attached attempt's start bounds it.
-    const priorBound = priorOpState?.status === 'started' ? recordedQueryLogBound(priorOpState.lastError) : undefined
+    const priorBound = priorOpState?.status === 'started' ? recordedQueryLogBound(priorOpState) : undefined
     const attachedBound =
       priorBound ??
       (priorOpState?.status === 'started' && priorOpState.lastError === ATTEMPT_RECORD_MARKER && queryId !== baseQueryId
         ? retryQueryLogLowerBound(journalTimeMs(priorOpState.startedAt))
         : attachLowerBound(serverNowMs, inFlight.elapsedMs))
     const attachedStartedAt =
-      priorOpState?.status === 'started' && isStartedRecordMarker(priorOpState.lastError)
+      priorOpState?.status === 'started' && isStartedRecordMarker(priorOpState)
         ? priorOpState.startedAt
         : inFlight.elapsedMs === undefined
           ? (priorOpState?.startedAt ?? isoWithoutZone(new Date(serverNowMs)))
@@ -275,6 +279,18 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // reported with its error.
   // 5. No prior row → FIRST attempt. Skip compensation, submit forward.
   // (priorOpState.status === 'completed' was already returned above.)
+  // A started record of an older release, or one whose bound cannot be
+  // trusted, may have finished without a QueryFinish this release can tell
+  // from an earlier attempt's (#767). Without before-retry SQL to undo it,
+  // running the statement again could load its rows twice: stop instead.
+  const ambiguous = attemptCheck === undefined && isAmbiguousStartedRecord(priorOpState, fingerprint)
+  if (ambiguous && beforeRetry === null) {
+    throw new MigrateError(
+      'async_outcome_unknown',
+      `Async migration step ${operationType} (query_id ${queryId}): the journal records it as started and it is no longer running, but chkit cannot tell from system.query_log whether it finished: an earlier chkit release recorded it, or the journal has no operation_fingerprints column. The statement has no -- before-retry: SQL to undo a partial run, so it was not submitted again and nothing ran. ` +
+        `If an earlier release recorded it, finish ${migrationName} with that release, then upgrade. Or check the query's outcome yourself (SELECT type, event_time FROM system.query_log WHERE query_id = '${queryId}'), reconcile the target table, and discard the partial run with chkit migrate --apply --abandon ${migrationName}; the next apply then runs the migration from statement 1.`,
+    )
+  }
   const attemptQueryId = priorOpState === undefined ? baseQueryId : randomUUID()
   if (priorOpState !== undefined) {
     const prior =
@@ -289,9 +305,10 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // QueryFinish can still reach query_log after this check (query_log is
     // flushed on a timer), and a run that stops between the compensation and
     // the next 'started' write must not take it for this statement's outcome
-    // on its re-run (#672). Without compensation nothing is written until
-    // the next 'started' write, which replaces the record.
-    if (attemptCheck !== undefined && initialMigrationState !== null && beforeRetry !== null) {
+    // on its re-run (#672), nor may an older release that reads the record
+    // as its own (#767). Without compensation nothing is written until the
+    // next 'started' write, which replaces the record.
+    if ((attemptCheck !== undefined || ambiguous) && initialMigrationState !== null && beforeRetry !== null) {
       await journalStore.writeMigrationState(
         upsertOperation(
           initialMigrationState,
@@ -652,7 +669,7 @@ function startedAttemptCheck(
 ): StartedAttemptCheck | undefined {
   if (op?.status !== 'started' || op.queryId === '') return undefined
   if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return undefined
-  const bound = recordedQueryLogBound(op.lastError)
+  const bound = recordedQueryLogBound(op)
   if (bound !== undefined) return { afterTime: bound, awaitsFlush: true }
   if (op.lastError === ATTEMPT_RECORD_MARKER && op.queryId !== baseQueryId) {
     return { afterTime: retryQueryLogLowerBound(journalTimeMs(op.startedAt)), awaitsFlush: true }
@@ -665,18 +682,40 @@ export function attemptRecordError(bound: string): string {
   return `${ATTEMPT_BOUND_MARKER}${bound}`
 }
 
-/** The query_log bound a started record names, or undefined when it names none (#767). */
-function recordedQueryLogBound(lastError: string): string | undefined {
-  if (!lastError.startsWith(ATTEMPT_BOUND_MARKER)) return undefined
-  const bound = lastError.slice(ATTEMPT_BOUND_MARKER.length)
+/**
+ * The query_log bound a started record names, or undefined when it names none
+ * or its fence was not stored, so an older release may have compensated the
+ * attempt without a record (#767).
+ */
+function recordedQueryLogBound(op: OperationState): string | undefined {
+  if (op.attemptFenced !== true || !op.lastError.startsWith(ATTEMPT_BOUND_MARKER)) return undefined
+  const bound = op.lastError.slice(ATTEMPT_BOUND_MARKER.length)
   return RECORDED_BOUND_SHAPE.test(bound) ? bound : undefined
 }
 
-function isStartedRecordMarker(lastError: string): boolean {
+function isStartedRecordMarker(op: OperationState): boolean {
   return (
-    lastError === ATTEMPT_RECORD_MARKER ||
-    lastError === STARTED_RECORD_MARKER ||
-    recordedQueryLogBound(lastError) !== undefined
+    op.lastError === ATTEMPT_RECORD_MARKER ||
+    op.lastError === STARTED_RECORD_MARKER ||
+    recordedQueryLogBound(op) !== undefined
+  )
+}
+
+/**
+ * Whether a started record of this statement's SQL that this release does not
+ * read from query_log may still have finished on the server (#767): a record
+ * of an older release that read it from query_log (#672, #701), or one that
+ * names a bound this release cannot trust. A record without a marker, from a
+ * release before #672, or one not submitted yet, keeps the retry without a
+ * stop.
+ */
+function isAmbiguousStartedRecord(op: OperationState | undefined, fingerprint: string): boolean {
+  if (op?.status !== 'started' || op.queryId === '') return false
+  if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return false
+  return (
+    op.lastError === ATTEMPT_RECORD_MARKER ||
+    op.lastError === STARTED_RECORD_MARKER ||
+    op.lastError.startsWith(ATTEMPT_BOUND_MARKER)
   )
 }
 

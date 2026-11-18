@@ -34,6 +34,49 @@ export interface OperationState {
    * recorded: an older chkit wrote the row, or the journal has no column for it.
    */
   fingerprint: string
+  /**
+   * Set by a journal read when the record's fingerprint was stored fenced
+   * (#767): a started record that names its query_log bound, which releases
+   * before #767 refuse to resume. Never written; the fence follows from the
+   * record itself (see storedFingerprint).
+   */
+  attemptFenced?: boolean
+}
+
+/**
+ * The lastError of a started async attempt that names its query_log bound
+ * (#767): this text, followed by the bound. Defined here because a write
+ * stores such a record's fingerprint fenced.
+ */
+export const ATTEMPT_BOUND_MARKER = 'submitted; a retry reads its outcome from system.query_log entries started at or after '
+
+/**
+ * The prefix of the stored fingerprint of a started record that names its
+ * query_log bound (#767). Releases from #599 on compare a started record's
+ * fingerprint with the statement's before they resume, so they stop with
+ * statement_split_changed instead of compensating the attempt without a
+ * record of it. A read strips it again (attemptFenced).
+ */
+export const FENCED_FINGERPRINT_PREFIX = 'fenced-attempt;'
+
+/** The fingerprint a write stores for `op` (#767). */
+export function storedFingerprint(op: OperationState): string {
+  return op.status === 'started' && op.lastError.startsWith(ATTEMPT_BOUND_MARKER)
+    ? `${FENCED_FINGERPRINT_PREFIX}${op.fingerprint}`
+    : op.fingerprint
+}
+
+/** The fingerprint a read finds stored, without its fence (#767). */
+export function readStoredFingerprint(stored: string): Pick<OperationState, 'fingerprint' | 'attemptFenced'> {
+  return stored.startsWith(FENCED_FINGERPRINT_PREFIX)
+    ? { fingerprint: stored.slice(FENCED_FINGERPRINT_PREFIX.length), attemptFenced: true }
+    : { fingerprint: stored }
+}
+
+/** `op` with the fence a read finds after a write with or without the fingerprint column (#767). */
+export function operationAsStored(op: OperationState, fingerprints: boolean): OperationState {
+  const { attemptFenced: _attemptFenced, ...rest } = op
+  return fingerprints ? { ...rest, ...readStoredFingerprint(storedFingerprint(op)) } : rest
 }
 
 export interface MigrationRowState {
@@ -209,7 +252,7 @@ function operationsArrayLiteral(operations: OperationState[]): string {
 }
 
 function fingerprintsArrayLiteral(operations: OperationState[]): string {
-  return `[${operations.map((op) => `'${escapeSqlString(op.fingerprint)}'`).join(',')}]`
+  return `[${operations.map((op) => `'${escapeSqlString(storedFingerprint(op))}'`).join(',')}]`
 }
 
 function operationFromTuple(row: OperationTupleRow, fingerprint: string): OperationState {
@@ -222,7 +265,7 @@ function operationFromTuple(row: OperationTupleRow, fingerprint: string): Operat
     startedAt: row.started_at,
     finishedAt: row.finished_at,
     lastError: row.last_error,
-    fingerprint,
+    ...readStoredFingerprint(fingerprint),
   }
 }
 
@@ -792,7 +835,11 @@ SETTINGS index_granularity = 1`
       }
       await ensureFingerprintColumn()
       await insertState(state, fingerprintColumn)
-      lastWritten.set(state.name, state)
+      // As a read returns it, so a fence counts only where it was stored.
+      lastWritten.set(state.name, {
+        ...state,
+        operations: state.operations.map((op) => operationAsStored(op, fingerprintColumn)),
+      })
       noteVersion(state.name, state.appliedAt)
       await trySyncReplica()
     },

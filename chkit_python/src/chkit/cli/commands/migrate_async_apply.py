@@ -48,13 +48,14 @@ from datetime import UTC, datetime, timedelta
 from typing import Literal
 
 from chkit import __version__
-from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
+from chkit.cli.commands.migrate_errors import MigrateError, in_progress_checksum_mismatch_error
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     assert_completed_statement,
     has_statement_progress,
 )
 from chkit.cli.journal_store import (
+    ATTEMPT_BOUND_MARKER,
     JournalStore,
     MigrationRowState,
     OperationState,
@@ -86,17 +87,17 @@ MAX_TRANSIENT_POLL_ERRORS = 20
 # The last_error of a started attempt that no replica runs and that has no
 # outcome in system.query_log, journaled before it is retried (#672).
 NO_OUTCOME_ERROR = "no longer running and no outcome in system.query_log; retried"
-# The last_error of a 'started' record this release writes is this marker
-# followed by the attempt's query_log bound (#767): the time from which its
-# polls count query_log entries of its id. A re-run reads the attempt's
-# outcome with that same bound, so it never takes a QueryFinish its polls
-# ignored. A retry by this release journals the attempt failed before its
-# before-retry SQL runs, so a QueryFinish of the id from the bound on is the
-# statement's outcome. Older releases do not know this marker and check such
-# a record in system.processes only, as they do their own.
-ATTEMPT_BOUND_MARKER = (
-    "submitted; a retry reads its outcome from system.query_log entries started at or after "
-)
+# The last_error of a 'started' record this release writes is
+# ATTEMPT_BOUND_MARKER followed by the attempt's query_log bound (#767): the
+# time from which its polls count query_log entries of its id. A re-run reads
+# the attempt's outcome with that same bound, so it never takes a QueryFinish
+# its polls ignored. A retry by this release journals the attempt failed
+# before its before-retry SQL runs, so a QueryFinish of the id from the bound
+# on is the statement's outcome. The journal stores such a record's
+# fingerprint fenced, so releases from #599 to #767 refuse to resume it
+# rather than compensate it without a record (FENCED_FINGERPRINT_PREFIX); a
+# record whose fence was not stored (a journal without the fingerprint
+# column) is not trusted.
 # The last_error of the 'started' record a statement's first attempt writes
 # before it reads its query_log bound, which is taken after that write and
 # recorded by a second one before the submit (#767). Such a record was never
@@ -410,7 +411,9 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     # 4 / 5. Submit (with optional before-retry on resubmit) under a new
     # random id for a retry, which no other attempt or run ever submits
     # (#701). A started attempt that failed on the server is retried the same
-    # way, reported with its error.
+    # way, reported with its error. An ambiguous older record without
+    # before-retry SQL stops here (#767).
+    ambiguous = attempt_check is None and _ambiguous_record_check(input_, prior_op, query_id)
     attempt_query_id = base_query_id if prior_op is None else str(uuid.uuid4())
     if prior_op is not None:
         prior_status: str = prior_op.status
@@ -428,10 +431,11 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         # Its QueryFinish can still reach query_log after this check (query_log
         # is flushed on a timer), and a run that stops between the compensation
         # and the next 'started' write must not take it for this statement's
-        # outcome on its re-run (#672). Without compensation nothing is written
+        # outcome on its re-run (#672), nor may an older release that reads the
+        # record as its own (#767). Without compensation nothing is written
         # until the next 'started' write, which replaces the record.
         if (
-            attempt_check is not None
+            (attempt_check is not None or ambiguous)
             and initial_state is not None
             and input_.before_retry is not None
         ):
@@ -802,12 +806,65 @@ def attempt_record_error(bound: str) -> str:
     return f"{ATTEMPT_BOUND_MARKER}{bound}"
 
 
-def _recorded_query_log_bound(last_error: str) -> str | None:
-    """The query_log bound a started record names, or None when it names none (#767)."""
-    if not last_error.startswith(ATTEMPT_BOUND_MARKER):
+def _recorded_query_log_bound(op: OperationState) -> str | None:
+    """The query_log bound a started record names (#767).
+
+    None when it names none, or when its fence was not stored, so an older
+    release may have compensated the attempt without a record.
+    """
+    if not op.attempt_fenced or not op.last_error.startswith(ATTEMPT_BOUND_MARKER):
         return None
-    bound = last_error[len(ATTEMPT_BOUND_MARKER) :]
+    bound = op.last_error[len(ATTEMPT_BOUND_MARKER) :]
     return bound if _RECORDED_BOUND_SHAPE.fullmatch(bound) else None
+
+
+def _is_ambiguous_started_record(op: OperationState | None, fingerprint: str) -> bool:
+    """Whether a started record of this statement's SQL that this release does
+    not read from query_log may still have finished on the server (#767).
+
+    A record of an older release that read it from query_log (#672, #701), or
+    one that names a bound this release cannot trust. A record without a
+    marker, from a release before #672, or one not submitted yet, keeps the
+    retry without a stop.
+    """
+    if op is None or op.status != "started" or op.query_id == "":
+        return False
+    if op.fingerprint not in ("", fingerprint):
+        return False
+    return op.last_error in (
+        ATTEMPT_RECORD_MARKER,
+        STARTED_RECORD_MARKER,
+    ) or op.last_error.startswith(ATTEMPT_BOUND_MARKER)
+
+
+def _ambiguous_record_check(
+    input_: AsyncApplyInput, prior_op: OperationState | None, query_id: str
+) -> bool:
+    """Whether the started record is ambiguous; stop when nothing undoes a rerun (#767).
+
+    Without before-retry SQL to undo it, running the statement again could
+    load its rows twice.
+    """
+    if not _is_ambiguous_started_record(prior_op, input_.fingerprint):
+        return False
+    if input_.before_retry is None:
+        name = input_.migration_name
+        msg = (
+            f"Async migration step {input_.operation_type} (query_id {query_id}): the "
+            "journal records it as started and it is no longer running, but chkit cannot "
+            "tell from system.query_log whether it finished: an earlier chkit release "
+            "recorded it, or the journal has no operation_fingerprints column. The "
+            "statement has no -- before-retry: SQL to undo a partial run, so it was not "
+            "submitted again and nothing ran. "
+            f"If an earlier release recorded it, finish {name} with that release, then "
+            "upgrade. Or "
+            "check the query's outcome yourself (SELECT type, event_time FROM "
+            f"system.query_log WHERE query_id = '{query_id}'), reconcile the target "
+            f"table, and discard the partial run with chkit migrate --apply --abandon "
+            f"{name}; the next apply then runs the migration from statement 1."
+        )
+        raise MigrateError("async_outcome_unknown", msg)
+    return True
 
 
 def _attached_bound(
@@ -819,7 +876,7 @@ def _attached_bound(
 ) -> str:
     """The query_log bound an attach polls with and records (#767)."""
     if prior_op is not None and prior_op.status == "started":
-        recorded = _recorded_query_log_bound(prior_op.last_error)
+        recorded = _recorded_query_log_bound(prior_op)
         if recorded is not None:
             return recorded
         if prior_op.last_error == ATTEMPT_RECORD_MARKER and query_id != base_query_id:
@@ -887,7 +944,7 @@ def _attached_started_at(
         and prior_op.status == "started"
         and (
             prior_op.last_error in (ATTEMPT_RECORD_MARKER, STARTED_RECORD_MARKER)
-            or _recorded_query_log_bound(prior_op.last_error) is not None
+            or _recorded_query_log_bound(prior_op) is not None
         )
     ):
         return prior_op.started_at
@@ -975,7 +1032,7 @@ def _started_attempt_check(
         return None
     if op.fingerprint not in ("", fingerprint):
         return None
-    bound = _recorded_query_log_bound(op.last_error)
+    bound = _recorded_query_log_bound(op)
     if bound is not None:
         return _StartedAttemptCheck(after_time=bound, awaits_flush=True)
     if op.last_error == ATTEMPT_RECORD_MARKER and op.query_id != base_query_id:

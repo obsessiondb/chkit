@@ -13,6 +13,7 @@ export type MigrateErrorCode =
   | 'migrate_lock_unverifiable'
   | 'migrate_cancellation_failed'
   | 'journal_changed'
+  | 'async_outcome_unknown'
 
 /** A migrate failure with a stable code for `--json` consumers. */
 export class MigrateError extends Error {

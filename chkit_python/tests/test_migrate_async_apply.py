@@ -27,7 +27,7 @@ from chkit.cli.commands.migrate_async_apply import (
 )
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.commands.migrate_query_intents import QueryContext
-from chkit.cli.journal_store import MigrationRowState, OperationState
+from chkit.cli.journal_store import MigrationRowState, OperationState, operation_as_stored
 from chkit.clickhouse.client import QueryResult, QueryStatus
 
 # The server clock differs from the client clock on purpose: the query_log
@@ -203,7 +203,10 @@ class _FakeJournalStore:
     def write_migration_state(self, state: MigrationRowState) -> None:
         assert self.writes is not None
         self.writes.append(state)
-        self.state = state
+        # As the journal returns it: with the fence of a record that names its bound (#767).
+        self.state = state.model_copy(
+            update={"operations": [operation_as_stored(op, fingerprints=True) for op in state.operations]}
+        )
 
 
 class _ScriptedClient:
@@ -1264,6 +1267,7 @@ def _started_record(**overrides: Any) -> MigrationRowState:
             "started_at": "2026-05-26 10:00:00.000",
             "fingerprint": "v1:load",
             "last_error": attempt_record_error(_RECORD_BOUND),
+            "attempt_fenced": True,
             **overrides,
         }
     )
@@ -1342,6 +1346,13 @@ def test_rerun_after_the_poll_budget_finds_the_finished_attempt() -> None:
         f"  alter_table_modify_column: previous attempt of query_id={_RERUN_QUERY_ID} "
         "finished on the server — written=16 rows (128 B) in 8s, recording it as completed"
     ]
+
+    # Run 3 skips the statement the recovery recorded as completed.
+    third = _ScriptedClient(statuses=[], strict=True)
+    skipped = apply_async_statement(_rerun_input(third, journal))
+    assert skipped.kind == "skipped"
+    assert third.status_ids == []
+    assert third.submitted == []
 
 
 def test_rerun_of_a_started_attempt_that_failed_on_the_server_resubmits(
@@ -1612,32 +1623,35 @@ def test_a_rerun_never_takes_a_concurrent_runs_finished_retry_for_its_own_attemp
     assert len(rerun.submitted) == 1
 
 
-@pytest.mark.parametrize(
+_AMBIGUOUS_RECORDS = pytest.mark.parametrize(
     "overrides",
     [
         {"last_error": ATTEMPT_RECORD_MARKER},
         {"last_error": STARTED_RECORD_MARKER},
         {"query_id": _LEGACY_RETRY_ID, "last_error": STARTED_RECORD_MARKER},
-        {"last_error": PENDING_ATTEMPT_MARKER},
         {"last_error": attempt_record_error("soon")},
+        # An older release may have compensated it without a record: the
+        # journal has no fingerprint column, so the fence was not stored.
+        {"attempt_fenced": False},
     ],
     ids=[
         "a #701 record of the first id",
         "a #672 record",
         "a #672 record of a retry id",
-        "a record not submitted yet",
         "a record with a malformed bound",
+        "a record whose bound was stored without its fence",
     ],
 )
-def test_a_record_without_a_bound_never_takes_a_query_finish_of_its_id(
-    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, str]
+
+
+@_AMBIGUOUS_RECORDS
+def test_an_ambiguous_record_never_takes_a_query_finish_of_its_id(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any]
 ) -> None:
-    """#767: a started record that names no query_log bound for an id earlier
-    attempts may share cannot tell its own QueryFinish from theirs: the start
-    older releases recorded lies before the bound their polls used, and a
-    record left between the two writes of a first attempt was never
-    submitted. Its id is checked in system.processes only, and the retry gets
-    an id of its own."""
+    """#767: a started record that names no trusted query_log bound for an id
+    earlier attempts may share cannot tell its own QueryFinish from theirs.
+    Its id is checked in system.processes only; it is journaled failed,
+    compensated, and the retry gets an id of its own."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="finished", written_rows=2, duration_ms=10),
@@ -1655,11 +1669,89 @@ def test_a_record_without_a_bound_never_takes_a_query_finish_of_its_id(
     assert client.executed == ["TRUNCATE TABLE db.t"]
     retry_id = _retry_query_id(client.submitted)
     assert journal.writes is not None
-    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
-    assert journal.writes[0].operations[0].query_id == retry_id
-    assert journal.writes[0].operations[0].last_error == attempt_record_error(RETRY_BOUND)
+    # Journaled failed before the compensation, so no release takes the
+    # attempt's QueryFinish for the outcome once its rows are gone.
+    assert [w.operations[0].status for w in journal.writes] == ["failed", "started", "completed"]
+    assert journal.writes[1].operations[0].query_id == retry_id
+    assert journal.writes[1].operations[0].last_error == attempt_record_error(RETRY_BOUND)
     assert result.operation.status == "completed"
     assert result.operation.query_id == retry_id
+
+
+@_AMBIGUOUS_RECORDS
+def test_an_ambiguous_record_without_before_retry_stops_before_anything_runs(
+    monkeypatch: pytest.MonkeyPatch, overrides: dict[str, Any]
+) -> None:
+    """#767: a finished INSERT without before-retry SQL would load its rows twice."""
+    client = _ScriptedClient(
+        statuses=[QueryStatus(status="finished", written_rows=16, duration_ms=8000)],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    journal = _FakeJournalStore(state=_started_record(**overrides))
+    query_id = _started_record(**overrides).operations[0].query_id
+    with pytest.raises(MigrateError) as raised:
+        apply_async_statement(_rerun_input(client, journal, before_retry=None))
+
+    assert raised.value.code == "async_outcome_unknown"
+    assert str(raised.value) == (
+        f"Async migration step alter_table_modify_column (query_id {query_id}): the journal "
+        "records it as started and it is no longer running, but chkit cannot tell from "
+        "system.query_log whether it finished: an earlier chkit release recorded it, or the "
+        "journal has no operation_fingerprints column. The statement has no -- before-retry: "
+        "SQL to undo a partial run, so it was not submitted again and nothing ran. If an "
+        "earlier release recorded it, finish m.sql with that release, then upgrade. Or check "
+        "the query's outcome yourself (SELECT type, event_time FROM system.query_log WHERE "
+        f"query_id = '{query_id}'), reconcile the target table, and discard the partial run "
+        "with chkit migrate --apply --abandon m.sql; the next apply then runs the migration "
+        "from statement 1."
+    )
+    assert len(client.status_ids) == 1
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_a_record_not_submitted_yet_is_resubmitted_also_without_before_retry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """Never submitted: nothing of it can have run, so it is retried without a stop."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="finished", written_rows=2, duration_ms=10),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    journal = _FakeJournalStore(state=_started_record(last_error=PENDING_ATTEMPT_MARKER))
+    result = apply_async_statement(_rerun_input(client, journal, before_retry=None))
+
+    assert client.running_only[0] is True
+    retry_id = _retry_query_id(client.submitted)
+    assert journal.writes is not None
+    assert [w.operations[0].status for w in journal.writes] == ["started", "completed"]
+    assert result.operation.query_id == retry_id
+
+
+def test_a_701_record_of_the_first_id_whose_attempt_still_runs_is_attached_to(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """An ambiguous record whose attempt still runs is attached to, as before."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="running", written_rows=5, elapsed_ms=RUNNING_ELAPSED_MS),
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    journal = _FakeJournalStore(state=_started_record(last_error=ATTEMPT_RECORD_MARKER))
+    result = apply_async_statement(_rerun_input(client, journal, before_retry=None))
+
+    assert result.kind == "completed"
+    assert client.submitted == []
+    assert client.executed == []
 
 
 def test_a_701_record_of_a_retry_id_still_reads_the_outcome_from_query_log() -> None:

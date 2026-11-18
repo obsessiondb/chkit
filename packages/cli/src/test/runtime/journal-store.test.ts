@@ -2,7 +2,8 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { createJournalStore, type MigrationRowState } from '../../runtime/journal-store.js'
+import { recordedStatementMismatches } from '../../commands/migrate/recovery.js'
+import { createJournalStore, type MigrationRowState, type OperationState } from '../../runtime/journal-store.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 
 interface ScriptedExecutor {
@@ -800,6 +801,73 @@ describe('createJournalStore', () => {
       expect(insert).toContain('migration_completed, operations, operation_fingerprints) VALUES')
       expect(insert).toEndWith(", ['v1:a','v1:\\'b'])")
       expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(false)
+    })
+
+    // #767: a started async record that names its query_log bound is stored
+    // with a fenced fingerprint, so a release from #599 to #767 refuses to
+    // resume it instead of compensating it without a record.
+    describe('the fence of a started record that names its bound (#767)', () => {
+      const BOUND_ERROR =
+        'submitted; a retry reads its outcome from system.query_log entries started at or after 2026-11-09T11:59:58.000Z'
+      function asyncOp(status: OperationState['status'], lastError: string): OperationState {
+        return {
+          operationIndex: 0,
+          operationKey: 'table:t',
+          operationType: 'load_table_data',
+          queryId: 'q-1',
+          status,
+          startedAt: '2026-11-09T12:00:00.000',
+          finishedAt: status === 'started' ? null : '2026-11-09T12:00:05.000',
+          lastError,
+          fingerprint: 'v1:load',
+        }
+      }
+      const withOps = (operations: OperationState[]): MigrationRowState => ({ ...state([]), operations })
+
+      test('stores it fenced, and a read strips the fence and marks the record', async () => {
+        const { store, commands } = storeWith({})
+        await store.writeMigrationState(withOps([asyncOp('started', BOUND_ERROR)]))
+        expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toEndWith(", ['fenced-attempt;v1:load'])")
+
+        const read = storeWith({
+          rows: [row([{ ...tuple(0), status: 'started', last_error: BOUND_ERROR }], ['fenced-attempt;v1:load'])],
+        })
+        const op = (await read.store.readMigrationState('m.sql'))?.operations[0]
+        expect(op).toMatchObject({ fingerprint: 'v1:load', attemptFenced: true })
+      })
+
+      test('stores every other record unfenced', async () => {
+        const { store, commands } = storeWith({})
+        await store.writeMigrationState(
+          withOps([
+            asyncOp('completed', ''),
+            { ...asyncOp('failed', BOUND_ERROR), operationIndex: 1 },
+            { ...asyncOp('started', 'not submitted yet; its system.query_log bound is not recorded'), operationIndex: 2 },
+          ]),
+        )
+        expect(commands.find((sql) => sql.startsWith('INSERT INTO'))).toEndWith(", ['v1:load','v1:load','v1:load'])")
+      })
+
+      // An older release reads the stored fingerprint as it is and checks it
+      // with recordedStatementMismatches before it resumes, unchanged since #599.
+      test('a release from #599 to #767 that reads the record stops before it resumes it', () => {
+        const asStored = { ...asyncOp('started', BOUND_ERROR), fingerprint: 'fenced-attempt;v1:load' }
+        expect(recordedStatementMismatches([asStored], ['v1:load'])).toEqual([1])
+        // A record without a fingerprint is fenced too.
+        expect(recordedStatementMismatches([{ ...asStored, fingerprint: 'fenced-attempt;' }], ['v1:load'])).toEqual([1])
+      })
+
+      test('a journal without the column stores no fence, and a read-your-write keeps none', async () => {
+        const { store } = storeWith({
+          queryError: (sql) => (FINGERPRINT_PROBE.test(sql) ? clickHouseError('47', 'UNKNOWN_IDENTIFIER') : undefined),
+          commandError: (sql) => (sql.startsWith('ALTER TABLE') ? clickHouseError('497', 'ACCESS_DENIED') : undefined),
+        })
+        await store.writeMigrationState(withOps([asyncOp('started', BOUND_ERROR)]))
+
+        const op = (await store.readMigrationState('m.sql'))?.operations[0]
+        expect(op).toMatchObject({ status: 'started', fingerprint: 'v1:load' })
+        expect(op?.attemptFenced).toBeUndefined()
+      })
     })
 
     test('a journal without the column is read without fingerprints and never altered by a read', async () => {

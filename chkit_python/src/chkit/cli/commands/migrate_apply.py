@@ -224,9 +224,13 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                     )
                 )
             except Exception as error:
-                raise statement_error(
+                wrapped = statement_error(
                     file=file, index=index, total=total, statement=statement, error=error
-                ) from error
+                )
+                # A stop that nothing ran keeps its code for --json (#767).
+                if isinstance(error, MigrateError) and error.code == "async_outcome_unknown":
+                    raise MigrateError(error.code, str(wrapped)) from error
+                raise wrapped from error
             # Async ops are DML (loads, backfills) — no DDL propagation to wait on.
             continue
         # Sync DDL path with per-statement journaling + resume. Re-read state

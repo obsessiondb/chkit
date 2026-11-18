@@ -319,7 +319,12 @@ export async function applyMigration(input: {
           log,
         })
       } catch (error) {
-        throw statementError({ file, index: i, total: statements.length, statement, error })
+        const wrapped = statementError({ file, index: i, total: statements.length, statement, error })
+        // A stop that nothing ran keeps its code for --json (#767).
+        if (error instanceof MigrateError && error.code === 'async_outcome_unknown') {
+          throw new MigrateError(error.code, wrapped.message)
+        }
+        throw wrapped
       }
       // Async ops are DML (loads, backfills) — no DDL propagation to wait on.
       continue

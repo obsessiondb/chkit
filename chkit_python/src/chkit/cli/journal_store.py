@@ -88,6 +88,50 @@ class OperationState(BaseModel):
     # recorded: an older chkit wrote the row, or the journal has no column for
     # it. Never part of a report.
     fingerprint: str = Field(..., exclude=True)
+    # Set by a journal read when the record's fingerprint was stored fenced
+    # (#767): a started record that names its query_log bound, which releases
+    # before #767 refuse to resume. Never written; the fence follows from the
+    # record itself (see stored_fingerprint). Never part of a report.
+    attempt_fenced: bool = Field(default=False, alias="attemptFenced", exclude=True)
+
+
+# The last_error of a started async attempt that names its query_log bound
+# (#767): this text, followed by the bound. Defined here because a write
+# stores such a record's fingerprint fenced.
+ATTEMPT_BOUND_MARKER: Final[str] = (
+    "submitted; a retry reads its outcome from system.query_log entries started at or after "
+)
+# The prefix of the stored fingerprint of a started record that names its
+# query_log bound (#767). Releases from #599 on compare a started record's
+# fingerprint with the statement's before they resume, so they stop with
+# statement_split_changed instead of compensating the attempt without a
+# record of it. A read strips it again (attempt_fenced).
+FENCED_FINGERPRINT_PREFIX: Final[str] = "fenced-attempt;"
+
+
+def stored_fingerprint(op: OperationState) -> str:
+    """The fingerprint a write stores for ``op`` (#767)."""
+    if op.status == "started" and op.last_error.startswith(ATTEMPT_BOUND_MARKER):
+        return f"{FENCED_FINGERPRINT_PREFIX}{op.fingerprint}"
+    return op.fingerprint
+
+
+def read_stored_fingerprint(stored: str) -> tuple[str, bool]:
+    """The fingerprint a read finds stored, without its fence, and whether it had one (#767)."""
+    if stored.startswith(FENCED_FINGERPRINT_PREFIX):
+        return stored[len(FENCED_FINGERPRINT_PREFIX) :], True
+    return stored, False
+
+
+def operation_as_stored(op: OperationState, fingerprints: bool) -> OperationState:
+    """``op`` with the fence a read finds after a write (#767).
+
+    Without the fingerprint column a write stores no fence.
+    """
+    if not fingerprints:
+        return op.model_copy(update={"attempt_fenced": False})
+    fingerprint, fenced = read_stored_fingerprint(stored_fingerprint(op))
+    return op.model_copy(update={"fingerprint": fingerprint, "attempt_fenced": fenced})
 
 
 class MigrationRowState(BaseModel):
@@ -228,10 +272,15 @@ def _parse_operations(value: Any, fingerprints_value: Any = None) -> list[Operat
                     else str(raw["finished_at"])
                 ),
                 last_error=str(raw.get("last_error", "")),
-                fingerprint=fingerprints[index] if index < len(fingerprints) else "",
+                **_fingerprint_fields(fingerprints[index] if index < len(fingerprints) else ""),
             )
         )
     return out
+
+
+def _fingerprint_fields(stored: str) -> dict[str, Any]:
+    fingerprint, fenced = read_stored_fingerprint(stored)
+    return {"fingerprint": fingerprint, "attempt_fenced": fenced}
 
 
 def _operation_to_tuple_literal(op: OperationState) -> str:
@@ -255,7 +304,7 @@ def _operations_array_literal(operations: list[OperationState]) -> str:
 
 
 def _fingerprints_array_literal(operations: list[OperationState]) -> str:
-    quoted = ["'" + _escape_sql_string(op.fingerprint) + "'" for op in operations]
+    quoted = ["'" + _escape_sql_string(stored_fingerprint(op)) + "'" for op in operations]
     return f"[{','.join(quoted)}]"
 
 
@@ -897,7 +946,14 @@ class JournalStore:
             return
         self._ensure_fingerprint_column()
         self._insert_state(state, fingerprints=self._fingerprint_column)
-        self._last_written[state.name] = state
+        # As a read returns it, so a fence counts only where it was stored.
+        self._last_written[state.name] = state.model_copy(
+            update={
+                "operations": [
+                    operation_as_stored(op, self._fingerprint_column) for op in state.operations
+                ]
+            }
+        )
         self._note_version(state.name, state.applied_at)
         self._try_sync_replica()
 

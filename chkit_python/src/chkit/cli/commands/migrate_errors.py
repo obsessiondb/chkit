@@ -23,6 +23,7 @@ MigrateErrorCode = Literal[
     "migrate_lock_unverifiable",
     "journal_changed",
     "migrate_cancellation_failed",
+    "async_outcome_unknown",
 ]
 
 EMPTY_MIGRATIONS_SUMMARY = (
