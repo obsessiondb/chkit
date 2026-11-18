@@ -11,7 +11,7 @@ import { nowIso, syncDirectory, writeFileDurably } from './state.js'
  * checkpoint until it ends, so two of them never submit the same chunk under
  * two query ids (#765). chkit-py takes the same lock: same path and format.
  */
-export interface RunLockRecord {
+interface RunLockRecord {
   pid: number
   host: string
   startedAt: string
