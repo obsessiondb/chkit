@@ -193,11 +193,38 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
           expect(help.stdout).toContain(usage)
         }
       }
-      // A user profile without a project config also prints the help with configured plugin flags.
-      for (const command of ['status', 'generate', 'migrate', 'drift', 'check', 'snapshot', 'pull']) {
-        const help = profile.run([command, '--help-plugins'])
-        expect([command, help.exitCode, help.stderr]).toEqual([command, 0, ''])
-        expect(help.stdout).toContain(`chkit ${command} `)
+      // A user profile that lists no plugins prints the help with the ObsessionDB
+      // flags, as in chkit-py and as in an empty directory.
+      const shared = ['--force-shared-engines', '--no-shared-engines']
+      for (const [command, sections, flags] of [
+        ['status', 2, [...shared, '--service']],
+        ['generate', 2, [...shared, '--service']],
+        ['migrate', 2, [...shared, '--service']],
+        ['drift', 2, [...shared, '--service']],
+        ['check', 2, [...shared, '--service']],
+        ['snapshot', 1, shared],
+        ['pull', 1, ['--service']],
+        ['codegen', 0, []],
+      ] as const) {
+        for (const args of [[command, '--help-plugins'], [command, '--help-plugins', '--json']]) {
+          const help = profile.run(args)
+          expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+          expect(help.stdout).toContain(`chkit ${command} `)
+          const shownSections = help.stdout.split('\n').filter((line) => line === 'Plugin: obsessiondb').length
+          const shown = ['--force-shared-engines', '--no-shared-engines', '--service'].filter((flag) =>
+            new RegExp(`^  ${flag}\\b`, 'm').test(help.stdout),
+          )
+          expect([args, shownSections, shown]).toEqual([args, sections, flags])
+          expect([args, help.stdout]).toEqual([args, empty.run(args).stdout])
+        }
+      }
+      // The ObsessionDB flags count as valid there too, as in chkit-py.
+      for (const [args, message] of [
+        [['status', '--service', 'prod', 'foo'], 'Got unexpected extra argument(s) (foo)'],
+        [['status', '--service'], 'Missing value for --service'],
+        [['generate', '--no-shared-engines', '--bogus'], 'Unknown flag: --bogus'],
+      ] as const) {
+        expect([args, ...usageResult(profile.run(args))]).toEqual([args, 1, '', message])
       }
       // Guard: codegen checks its arguments once the config is loaded, as in chkit-py.
       for (const args of [['codegen'], ['codegen', 'foo'], ['codegen', '--bogus'], ['codegen', '--bogus', '--json']]) {

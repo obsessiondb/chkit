@@ -195,13 +195,18 @@ async function codegenFallbackPlugins(): Promise<ChxPluginRegistration[]> {
 
 /**
  * The commands chkit knows when no project config gives the plugins: the
- * built-in commands, `pull`, `codegen`, and the commands and flags of
- * `registrations`.
+ * built-in commands, `pull`, `codegen`, the ObsessionDB flags (as chkit-py
+ * shows them also for a user profile that lists no plugins, #771), and the
+ * commands and flags of `registrations`.
  */
 async function createConfiglessRegistry(
   registrations: readonly ChxPluginRegistration[],
 ): Promise<ReturnType<typeof createCommandRegistry>> {
-  const plugins = registrations.map(normalizePluginRegistration).filter((entry) => entry.enabled)
+  const normalized = registrations.map(normalizePluginRegistration)
+  if (!normalized.some(({ plugin }) => plugin.manifest.name === 'obsessiondb')) {
+    normalized.push(...(await profileFallbackPlugins()).map(normalizePluginRegistration))
+  }
+  const plugins = normalized.filter((entry) => entry.enabled)
   if (!plugins.some(({ plugin }) => plugin.manifest.name === 'pull')) {
     plugins.push(...(await pullFallbackPlugins()).map(normalizePluginRegistration))
   }
