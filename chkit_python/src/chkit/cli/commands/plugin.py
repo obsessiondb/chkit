@@ -23,6 +23,7 @@ from chkit.cli import command_lifecycle
 from chkit.cli.command_target import run_on_config_loaded_or_exit
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.flag_errors import report_flag_error, report_usage_error
+from chkit.cli.help import PULL_SCHEMA_COMMAND, PULL_SCHEMA_DESCRIPTION
 from chkit.cli.json_output import emit_json, print_output
 from chkit.cli.plugin_runtime import (
     PluginRuntime,
@@ -467,7 +468,8 @@ def _run_command(
             cm.close()
 
 
-def run(
+def run(  # noqa: PLR0917 - typer reads the parameters
+    ctx: typer.Context,
     plugin_name: Annotated[
         str | None,
         typer.Argument(help="Plugin name to inspect or dispatch."),
@@ -520,6 +522,9 @@ def run(
             runtime, config, config_path=resolved_config_path, flags=own_flags
         ):
             loaded = list(runtime.plugins)
+            if plugin_name == "pull" and not _has_plugin(loaded, "pull"):
+                _list_pull(json_mode=output_json)
+                return
             if not loaded:
                 _fail_no_plugins(json_mode=output_json)
             if plugin_name is None:
@@ -533,6 +538,15 @@ def run(
             _list_one(entry, json_mode=output_json)
         return
 
+    if plugin_name == "pull":
+        _dispatch_pull(
+            ctx,
+            command_name=command_name,
+            tokens=list(args or []),
+            config_path=config_path,
+            output_json=output_json,
+        )
+        return
     dispatch_plugin_command(
         plugin_name=plugin_name,
         command_name=command_name,
@@ -540,3 +554,58 @@ def run(
         config_path=config_path,
         output_json=output_json,
     )
+
+
+def _has_plugin(loaded: list[LoadedPlugin], name: str) -> bool:
+    return any(entry.plugin.manifest.name == name for entry in loaded)
+
+
+def _list_pull(*, json_mode: bool) -> None:
+    """``chkit plugin pull`` lists the one command of the TS pull plugin, which
+    chkit-py has as the built-in ``chkit pull`` (#771)."""
+    commands = [{"name": PULL_SCHEMA_COMMAND, "description": PULL_SCHEMA_DESCRIPTION}]
+    if json_mode:
+        emit_json("plugin", {"plugin": "pull", "commands": commands})
+        return
+    typer.echo('Plugin commands for "pull":')
+    typer.echo(f"- {PULL_SCHEMA_COMMAND}: {PULL_SCHEMA_DESCRIPTION}")
+
+
+def _dispatch_pull(
+    ctx: typer.Context,
+    *,
+    command_name: str,
+    tokens: list[str],
+    config_path: Path | None,
+    output_json: bool,
+) -> None:
+    """``chkit plugin pull schema`` runs ``chkit pull``, as in TS, where pull is
+    a plugin (#771). As there, the config loads first, and an error is the
+    ``plugin`` command's."""
+    config = load_config(config_path, ChxConfigEnv(command="plugin"))
+    runtime = load_plugin_runtime([p for p in config.plugins if isinstance(p, ChxPlugin)])
+    if _has_plugin(list(runtime.plugins), "pull"):
+        dispatch_plugin_command(
+            plugin_name="pull",
+            command_name=command_name,
+            tokens=tokens,
+            config_path=config_path,
+            output_json=output_json,
+        )
+        return
+    if command_name != PULL_SCHEMA_COMMAND:
+        report_flag_error(
+            "plugin",
+            f'Unknown pull command "{command_name}". Available: {PULL_SCHEMA_COMMAND}.',
+            json_mode=output_json,
+        )
+    group = ctx.parent
+    assert group is not None
+    pull_command = group.command.get_command(group, "pull")  # type: ignore[attr-defined]
+    own_flags = [
+        *(["--config", str(config_path)] if config_path is not None else []),
+        *(["--json"] if output_json else []),
+    ]
+    args = [*own_flags, command_name, *tokens]
+    with pull_command.make_context("plugin", args, parent=group) as sub:
+        pull_command.invoke(sub)

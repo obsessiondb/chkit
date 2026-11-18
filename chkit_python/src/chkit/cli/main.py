@@ -365,8 +365,9 @@ class _ChkitCommand(TyperCommand):
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
-        if ctx.ignore_unknown_options:
-            # `chkit obsessiondb login -h` shows the help of `login`.
+        if ctx.ignore_unknown_options or self.name == "pull":
+            # `chkit obsessiondb login -h` shows the help of `login`, and
+            # `chkit pull schema -h` that of `schema` (#771).
             ctx.meta[HELP_SUBCOMMAND_META] = _first_plugin_positional(args)
         args = _read_help_plugins(ctx, args)
         # TS shows the help of a built-in command before reading --config,

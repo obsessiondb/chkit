@@ -31,6 +31,8 @@ This command delegates to the pull plugin's `schema` command. The pull plugin mu
 If the pull plugin is not configured, the command fails with:
 _"Pull plugin is not configured. Add a plugin with manifest.name "pull" to config.plugins."_
 
+In chkit-py, `pull` is a built-in command, so there is no plugin to register. As in TypeScript, `chkit pull schema` and `chkit plugin pull schema` run the same command.
+
 ## Examples
 
 ```sh

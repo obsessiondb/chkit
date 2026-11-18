@@ -133,7 +133,7 @@ queue so the snapshot follows the change.
 
 ## Pull, drift, and scope
 
-`chkit pull schema` emits a Kafka definition without sorting keys and decodes its
+`chkit pull` emits a Kafka definition without sorting keys and decodes its
 settings into literal values. `drift` and `check` compare the engine, columns, and
 settings declared in the snapshot. Numeric/boolean metadata and SQL string quoting
 are normalized without removing meaningful whitespace from strings.

@@ -46,6 +46,8 @@ from chkit.cli.commands.pull_view_parser import (
     parse_to_clause,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.flag_errors import report_usage_error
+from chkit.cli.help import PULL_SCHEMA_COMMAND
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
@@ -485,6 +487,7 @@ def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None
 
 
 def run(  # noqa: PLR0917
+    ctx: typer.Context,
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -515,7 +518,21 @@ def run(  # noqa: PLR0917
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
     service: ServiceOption = None,
+    args: Annotated[list[str] | None, typer.Argument(hidden=True)] = None,
 ) -> None:
+    # TS's pull is a plugin whose one command is `schema`: `chkit pull` runs it,
+    # and so does `chkit pull schema` (#771). As there, a first argument
+    # `schema` names the command; any other
+    # argument is stray, in click's words, before the config is read.
+    stray = list(args or [])
+    if stray[:1] == [PULL_SCHEMA_COMMAND]:
+        stray = stray[1:]
+    if stray:
+        report_usage_error(
+            ctx.info_name or "pull",
+            f"Got unexpected extra argument(s) ({' '.join(stray)})",
+            json_mode=output_json,
+        )
     # As in TS, the hooks get the flags that were passed, keyed by long name.
     hook_flags = passed_flags(
         {

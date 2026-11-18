@@ -175,19 +175,36 @@ def test_codegen_help_lists_the_python_codegen_flags() -> None:
     )
 
 
-def test_pull_help_is_the_ts_pull_schema_help() -> None:
-    # TS runs pull as `chkit pull schema`, and prints its plugin flags without
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["pull", "--help"],
+        ["pull", "-h"],
+        ["pull", "--help-plugins"],
+        # As in TS, the first token other than a global flag names the
+        # command whose help is shown (#771).
+        ["pull", "foo", "--help"],
+        ["pull", "--dryrun", "schema", "--help"],
+        ["pull", "-h", "schema"],
+    ],
+)
+def test_pull_help_is_the_ts_pull_plugin_help(args: list[str]) -> None:
+    # TS runs pull as a plugin, and prints its plugin flags without
     # --help-plugins because the config is loaded for a plugin command.
-    assert _only_in_each(FIXTURE["pull schema --help"], _help(["pull", "--help-plugins"])) == (
-        [
-            "chkit pull schema [options]",
-            "  Pull live ClickHouse table schema and write chkit schema file",
-        ],
-        [
-            "chkit pull [options]",
-            "  Introspect live ClickHouse and emit a Python schema file",
-        ],
-    )
+    assert _help(args) == FIXTURE["pull --help"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["pull", "schema", "--help"],
+        ["pull", "schema", "-h", "foo"],
+        ["pull", "--help-plugins", "schema"],
+        ["pull", "--json", "schema", "--help"],
+    ],
+)
+def test_pull_schema_help_is_the_ts_pull_schema_help(args: list[str]) -> None:
+    assert _help(args) == FIXTURE["pull schema --help"]
 
 
 def test_an_unknown_obsessiondb_command_shows_the_plugin_help() -> None:
