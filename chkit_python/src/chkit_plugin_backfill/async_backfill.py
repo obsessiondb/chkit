@@ -25,7 +25,11 @@ from threading import Lock
 from typing import Protocol, TypeAlias
 
 from chkit.clickhouse.client import QueryStatus
-from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.clickhouse.replicas import (
+    all_replicas,
+    resolve_replica_fanout_or_raise,
+    string_literal,
+)
 from chkit_plugin_backfill.types import (
     BackfillChunkState,
     BackfillProgress,
@@ -34,6 +38,11 @@ from chkit_plugin_backfill.types import (
 _DEFAULT_CONCURRENCY = 3
 _DEFAULT_POLL_INTERVAL_MS = 5000
 _DEFAULT_MAX_POLL_ERRORS = 10
+# A resume reads an unsettled replay outcome again 5 times, 2 s apart, which
+# covers query_log's default 7.5 s flush interval (as #721 does for migrate).
+_OUTCOME_RECHECK_ATTEMPTS = 5
+_OUTCOME_RECHECK_INTERVAL_MS = 2000
+_REPLAY_BOUND_MARGIN_MS = 60 * 60 * 1000
 
 _BuildQuery: TypeAlias = Callable[[str], str]
 _OnProgress: TypeAlias = "Callable[[BackfillProgress], None]"
@@ -162,114 +171,279 @@ def sync_progress(
     does not find is submitted again (#289). So on a multi-replica target both
     tables are read on every replica of ``cluster`` (the configured
     ``clickhouse.cluster``, or ``default``) through ``clusterAllReplicas``, as
-    the client's ``query_status`` does, and a replica that cannot be read fails
-    the sync instead of being skipped.
+    the client's ``query_status`` does, and a replica (or the replica probe)
+    that cannot be read fails the sync instead of being skipped.
+
+    This is one read. An outcome it cannot settle yet (see
+    ``_classify_attempt``) leaves the chunk as it was; ``execute_backfill``
+    reads those chunks again through the query_log flush window before it
+    submits anything.
     """
-    prefix = f"backfill-{plan_id}-"
-
-    # Collect query IDs for non-terminal chunks that need reconciliation
-    chunk_ids_to_sync: list[str] = []
-    for chunk_id in chunk_ids:
-        state = progress.get(chunk_id)
-        if state is None or state.status == "done":
-            continue
-        chunk_ids_to_sync.append(chunk_id)
-
-    if not chunk_ids_to_sync:
+    to_sync = _chunks_to_sync(chunk_ids, progress)
+    if not to_sync:
         return progress
-
-    # Escape single-quotes in the prefix for safe SQL embedding
-    safe_prefix = _escape_like_prefix(prefix)
-
-    running_result, log_result = _read_chunk_queries(
-        executor, plan_id, safe_prefix, cluster
+    evidence = _read_chunk_queries(
+        executor, plan_id, cluster, prefix=f"backfill-{plan_id}-"
     )
-    running_set = {
-        str(row.get("query_id"))
-        for row in _rows_of(running_result)
-        if row.get("query_id") is not None
-    }
+    return _apply_evidence(plan_id, to_sync, progress, evidence, final=False).progress
 
-    # Deduplicate: take the latest log entry per query_id (results are ordered
-    # by event_time DESC)
-    latest_log_by_query_id: dict[str, dict[str, object]] = {}
-    for row in _rows_of(log_result):
-        query_id = str(row.get("query_id"))
-        if query_id not in latest_log_by_query_id:
-            latest_log_by_query_id[query_id] = row
 
-    updated = dict(progress)
+def _chunks_to_sync(chunk_ids: list[str], progress: BackfillProgress) -> list[str]:
+    return [
+        chunk_id
+        for chunk_id in chunk_ids
+        if (state := progress.get(chunk_id)) is not None and state.status != "done"
+    ]
 
-    for chunk_id in chunk_ids_to_sync:
-        current = updated.get(chunk_id)
-        if current is None:
-            continue
-        # A replayed attempt runs under the id recorded with it (#765). The
-        # deterministic id covers a first attempt whose record was never
-        # written.
-        query_id = (
-            current.query_id
-            if current.query_id is not None
-            else chunk_query_id(plan_id, chunk_id)
+
+def _reconcile_progress(
+    executor: BackfillExecutor,
+    plan_id: str,
+    chunk_ids: list[str],
+    progress: BackfillProgress,
+    *,
+    cluster: str | None,
+    attempts: int,
+    interval_ms: int,
+) -> tuple[BackfillProgress, list[str]]:
+    """The sync before a resume submits anything: one read of every chunk,
+    then reads of the chunks whose outcome is not settled yet, ``attempts``
+    times, ``interval_ms`` apart, which covers the query_log flush interval
+    (#765, as #721 does for async migrate). Returns the chunks whose attempt
+    started and still has no outcome after the last read."""
+    to_sync = _chunks_to_sync(chunk_ids, progress)
+    if not to_sync:
+        return progress, []
+    evidence = _read_chunk_queries(
+        executor, plan_id, cluster, prefix=f"backfill-{plan_id}-"
+    )
+    current = progress
+    round_ = 0
+    while True:
+        passed = _apply_evidence(
+            plan_id, to_sync, current, evidence, final=round_ >= attempts
         )
+        current = passed.progress
+        if not passed.waiting:
+            return current, passed.unknown
+        to_sync = passed.waiting
+        time.sleep(interval_ms / 1000)
+        states = [_get_chunk(current, chunk_id) for chunk_id in to_sync]
+        evidence = _read_chunk_queries(
+            executor,
+            plan_id,
+            cluster,
+            ids=[
+                _attempt_query_id(plan_id, chunk_id, state)
+                for chunk_id, state in zip(to_sync, states, strict=True)
+            ],
+            after=_earliest_bound(states),
+        )
+        round_ += 1
 
-        if query_id in running_set:
+
+def _attempt_query_id(plan_id: str, chunk_id: str, state: BackfillChunkState) -> str:
+    """The query id of a chunk's latest attempt."""
+    if state.query_id is not None:
+        return state.query_id
+    return chunk_query_id(plan_id, chunk_id)
+
+
+def _attempt_kind(plan_id: str, chunk_id: str, state: BackfillChunkState) -> str:
+    """How a chunk's latest attempt was recorded.
+
+    - ``replay``: a replay of this release, under a query id of its own
+      (#765). Its submitted_at is the server time an hour before the replay,
+      a bound that only prunes query_log.
+    - ``legacy``: a replay recorded by an older release, which reused the
+      chunk's id and set submitted_at to the client time a minute before the
+      replay. A failure row after that bound may be the earlier attempt's.
+    - ``first``: the first attempt, under the chunk's id.
+    """
+    if _attempt_query_id(plan_id, chunk_id, state) != chunk_query_id(plan_id, chunk_id):
+        return "replay"
+    return "legacy" if state.submitted_at else "first"
+
+
+@dataclass(frozen=True)
+class _ChunkEvidence:
+    running: set[str]
+    log_rows: list[dict[str, object]]
+
+
+@dataclass(frozen=True)
+class _Outcome:
+    kind: str  # running | done | failed | unchanged | wait | unknown
+    row: dict[str, object] | None = None
+
+
+def _classify_attempt(  # noqa: PLR0911 — mirrors the TS classifier
+    plan_id: str,
+    chunk_id: str,
+    state: BackfillChunkState,
+    evidence: _ChunkEvidence,
+    *,
+    final: bool,
+) -> _Outcome:
+    """Classify the attempt from every row of its id, not the latest one: a
+    short query's QueryStart and QueryFinish can share an event_time second.
+
+    - Running on a replica, or any QueryFinish: running, or done.
+    - A failure: failed, except that a legacy failure is the attempt's own
+      only once the flush window has passed without a QueryFinish.
+    - A pending replay (this release's or a legacy one) is pending because its
+      submit did not return: it may not have run, or it ended and is not in
+      query_log yet. It waits through the flush window. Then a QueryStart
+      without an outcome is unknown, and no row at all means it never ran.
+    - Anything else stays as it is, as before #765: a first attempt is
+      submitted again when nothing is found, and a submitted or running chunk
+      is polled.
+    """
+    query_id = _attempt_query_id(plan_id, chunk_id, state)
+    if query_id in evidence.running:
+        return _Outcome("running")
+    bound = (
+        int(_parse_iso_ms(state.submitted_at) // 1000)
+        if state.submitted_at
+        else None
+    )
+    rows = [
+        row
+        for row in evidence.log_rows
+        if str(row.get("query_id")) == query_id
+        and (
+            bound is None
+            or row.get("start_unix") is None
+            or (_to_int(row.get("start_unix")) or 0) >= bound
+        )
+    ]
+    finish = next((row for row in rows if row.get("type") == "QueryFinish"), None)
+    if finish is not None:
+        return _Outcome("done", finish)
+    kind = _attempt_kind(plan_id, chunk_id, state)
+    failure = next(
+        (row for row in rows if row.get("type") == "ExceptionWhileProcessing"), None
+    )
+    if failure is not None:
+        if kind == "legacy" and not final:
+            return _Outcome("wait")
+        return _Outcome("failed", failure)
+    if state.status != "pending" or kind == "first":
+        return _Outcome("unchanged")
+    if not final:
+        return _Outcome("wait")
+    if any(row.get("type") == "QueryStart" for row in rows):
+        return _Outcome("unknown")
+    return _Outcome("unchanged")
+
+
+@dataclass(frozen=True)
+class _EvidencePass:
+    progress: BackfillProgress
+    waiting: list[str]
+    unknown: list[str]
+
+
+def _apply_evidence(
+    plan_id: str,
+    chunk_ids: list[str],
+    progress: BackfillProgress,
+    evidence: _ChunkEvidence,
+    *,
+    final: bool,
+) -> _EvidencePass:
+    updated = dict(progress)
+    waiting: list[str] = []
+    unknown: list[str] = []
+    for chunk_id in chunk_ids:
+        current = _get_chunk(updated, chunk_id)
+        query_id = _attempt_query_id(plan_id, chunk_id, current)
+        outcome = _classify_attempt(plan_id, chunk_id, current, evidence, final=final)
+        row = outcome.row or {}
+        if outcome.kind == "running":
             updated[chunk_id] = current.model_copy(
                 update={"status": "running", "query_id": query_id}
             )
-        else:
-            log_entry = latest_log_by_query_id.get(query_id)
-            if log_entry is not None:
-                if str(log_entry.get("type")) == "QueryFinish":
-                    updated[chunk_id] = current.model_copy(
-                        update={
-                            "status": "done",
-                            "query_id": query_id,
-                            "finished_at": _now_iso(),
-                            "written_rows": _to_int(log_entry.get("written_rows")),
-                            "written_bytes": _to_int(log_entry.get("written_bytes")),
-                            "duration_ms": _to_int(log_entry.get("query_duration_ms")),
-                        }
-                    )
-                else:
-                    updated[chunk_id] = current.model_copy(
-                        update={
-                            "status": "failed",
-                            "query_id": query_id,
-                            "finished_at": _now_iso(),
-                            "duration_ms": _to_int(log_entry.get("query_duration_ms")),
-                            "error": _to_str(log_entry.get("exception")),
-                        }
-                    )
+        elif outcome.kind == "done":
+            updated[chunk_id] = current.model_copy(
+                update={
+                    "status": "done",
+                    "query_id": query_id,
+                    "finished_at": _now_iso(),
+                    "written_rows": _to_int(row.get("written_rows")),
+                    "written_bytes": _to_int(row.get("written_bytes")),
+                    "duration_ms": _to_int(row.get("query_duration_ms")),
+                }
+            )
+        elif outcome.kind == "failed":
+            updated[chunk_id] = current.model_copy(
+                update={
+                    "status": "failed",
+                    "query_id": query_id,
+                    "finished_at": _now_iso(),
+                    "duration_ms": _to_int(row.get("query_duration_ms")),
+                    "error": _to_str(row.get("exception")),
+                }
+            )
+        elif outcome.kind == "wait":
+            waiting.append(chunk_id)
+        elif outcome.kind == "unknown":
+            unknown.append(chunk_id)
+    return _EvidencePass(updated, waiting, unknown)
 
-    return updated
+
+def _parse_iso_ms(value: str) -> float:
+    return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp() * 1000
+
+
+def _earliest_bound(states: list[BackfillChunkState]) -> str | None:
+    bounds = [state.submitted_at for state in states]
+    present = [bound for bound in bounds if bound is not None]
+    if len(present) != len(bounds):
+        return None
+    return min(present, key=_parse_iso_ms)
 
 
 def _read_chunk_queries(
     executor: BackfillExecutor,
     plan_id: str,
-    safe_prefix: str,
     cluster: str | None,
-) -> tuple[object, object]:
-    fanout = resolve_replica_fanout(executor, cluster)
-
-    def source(table: str) -> str:
-        return all_replicas(fanout, table) if fanout else table
-
+    *,
+    prefix: str | None = None,
+    ids: list[str] | None = None,
+    after: str | None = None,
+) -> _ChunkEvidence:
+    """Read the chunks' rows in system.processes and system.query_log: by the
+    plan's prefix, or by exact ids (the rechecks), then pruned by ``after``."""
+    if prefix is not None:
+        match = f"query_id LIKE '{_escape_like_prefix(prefix)}%'"
+    else:
+        match = f"query_id IN ({', '.join(string_literal(i) for i in ids or [])})"
+    pruning = (
+        "\n  AND event_date >= toDate32(parseDateTimeBestEffort("
+        f"{string_literal(after)})) - 1"
+        if after
+        else ""
+    )
     try:
+        fanout = resolve_replica_fanout_or_raise(executor, cluster)
+
+        def source(table: str) -> str:
+            return all_replicas(fanout, table) if fanout else table
+
         running_result = executor.query(
             f"SELECT query_id FROM {source('system.processes')} "
-            f"WHERE user = currentUser() AND query_id LIKE '{safe_prefix}%' "
+            f"WHERE user = currentUser() AND {match} "
             "SETTINGS skip_unavailable_shards = 0"
         )
         log_result = executor.query(
             "SELECT query_id, type, written_rows, written_bytes, query_duration_ms,"
-            " exception\n"
+            " exception, toUnixTimestamp(query_start_time) AS start_unix\n"
             f"FROM {source('system.query_log')}\n"
             "WHERE user = currentUser()\n"
-            f"  AND query_id LIKE '{safe_prefix}%'\n"
-            "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')\n"
-            "  AND is_initial_query = 1\n"
+            f"  AND {match}\n"
+            "  AND type IN ('QueryStart', 'QueryFinish', 'ExceptionWhileProcessing')\n"
+            f"  AND is_initial_query = 1{pruning}\n"
             "ORDER BY event_time DESC\n"
             "SETTINGS skip_unavailable_shards = 0"
         )
@@ -280,7 +454,35 @@ def _read_chunk_queries(
             "the resume."
         )
         raise RuntimeError(msg) from error
-    return running_result, log_result
+    running = {
+        str(row.get("query_id"))
+        for row in _rows_of(running_result)
+        if row.get("query_id") is not None
+    }
+    return _ChunkEvidence(running=running, log_rows=_rows_of(log_result))
+
+
+def _read_replay_bound(executor: BackfillExecutor, plan_id: str) -> str:
+    """The bound a replay's query_log reads start from: the server's time an
+    hour before the replay. It only prunes query_log by event_date, and the
+    hour covers clock skew between replicas; the replay's own query id is what
+    tells its rows apart (#765)."""
+    try:
+        rows = _rows_of(
+            executor.query("SELECT toString(toUnixTimestamp64Milli(now64(3))) AS now_ms")
+        )
+        now_ms = _to_int(rows[0].get("now_ms")) if rows else None
+        if now_ms is None:
+            msg = "the server returned no time"
+            raise RuntimeError(msg)
+    except Exception as error:
+        msg = (
+            f"Backfill plan {plan_id}: could not read the server time for a replay "
+            f"({error}). Nothing was submitted — re-run the resume."
+        )
+        raise RuntimeError(msg) from error
+    bound = datetime.fromtimestamp((now_ms - _REPLAY_BOUND_MARGIN_MS) / 1000, tz=UTC)
+    return bound.strftime("%Y-%m-%dT%H:%M:%S.") + f"{bound.microsecond // 1000:03d}Z"
 
 
 def _rows_of(result: object) -> list[dict[str, object]]:
@@ -321,6 +523,8 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
     on_progress: _OnProgress | None = None,
     resume_from: BackfillProgress | None = None,
     replay_failed: bool = False,
+    outcome_recheck_attempts: int = _OUTCOME_RECHECK_ATTEMPTS,
+    outcome_recheck_interval_ms: int = _OUTCOME_RECHECK_INTERVAL_MS,
 ) -> BackfillResult:
     progress: BackfillProgress = {}
     for chunk_id in chunk_ids:
@@ -334,32 +538,46 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
     # When resuming, reconcile local state with the server before processing.
     # This catches queries that were submitted but whose status was never
     # persisted (e.g. client crash between submit() and state file write).
+    unknown: list[str] = []
     if resume_from is not None:
-        progress = sync_progress(
-            executor, plan_id, chunk_ids, progress, cluster=cluster
+        progress, unknown = _reconcile_progress(
+            executor,
+            plan_id,
+            chunk_ids,
+            progress,
+            cluster=cluster,
+            attempts=outcome_recheck_attempts,
+            interval_ms=outcome_recheck_interval_ms,
         )
 
     # Reset confirmed-failed chunks to pending AFTER sync so we operate on
-    # ground truth. Each replay gets a new random query id, recorded here and
-    # persisted below before it is submitted, so polling and a later sync only
-    # ever read that attempt's own system.query_log rows (#765). Reusing the
-    # failed attempt's id let its ExceptionWhileProcessing row mark the replay
-    # failed while it ran.
-    #
-    # A chunk still pending under a recorded id is a replay that sync did not
-    # find: never submitted, or submitted and not yet in query_log (a failed
-    # submit stops the run before the chunk's state changes). It gets a new id
-    # too, so a failure row that is flushed later is never read as its result.
-    for chunk_id in chunk_ids:
-        state = progress.get(chunk_id)
-        replay = state is not None and (
-            (replay_failed and state.status == "failed")
-            or (state.status == "pending" and state.query_id is not None)
-        )
-        if replay:
-            progress[chunk_id] = BackfillChunkState(
-                status="pending", query_id=_replay_query_id(plan_id, chunk_id)
+    # ground truth. Each replay gets a new random query id, recorded here with
+    # its query_log bound and persisted below before it is submitted, so
+    # polling and a later sync only ever read that attempt's own rows (#765).
+    # Reusing the failed attempt's id let its ExceptionWhileProcessing row mark
+    # the replay failed while it ran. A replay an older release reset but did
+    # not record as submitted gets one too.
+    if not unknown:
+        replays = [
+            chunk_id
+            for chunk_id in chunk_ids
+            if (state := progress.get(chunk_id)) is not None
+            and (
+                (replay_failed and state.status == "failed")
+                or (
+                    state.status == "pending"
+                    and _attempt_kind(plan_id, chunk_id, state) == "legacy"
+                )
             )
+        ]
+        if replays:
+            submitted_at = _read_replay_bound(executor, plan_id)
+            for chunk_id in replays:
+                progress[chunk_id] = BackfillChunkState(
+                    status="pending",
+                    query_id=_replay_query_id(plan_id, chunk_id),
+                    submitted_at=submitted_at,
+                )
 
     lock = Lock()
     # Serializes snapshot + on_progress so checkpoint writes stay ordered and
@@ -377,6 +595,22 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
     # Persist the reconciled state so the caller's checkpoint is up to date
     if resume_from is not None or replay_failed:
         emit_progress()
+
+    # A replay that started and has no outcome may have written its rows:
+    # submitting the chunk again could write them twice (#765).
+    if unknown:
+        attempts = ", ".join(
+            f"chunk {chunk_id} (query_id "
+            f"{_attempt_query_id(plan_id, chunk_id, _get_chunk(progress, chunk_id))})"
+            for chunk_id in unknown
+        )
+        msg = (
+            f"Backfill plan {plan_id}: the last attempt of {attempts} started, but "
+            "it is not running on any replica and system.query_log has no outcome "
+            "for it. Nothing was submitted, so no chunk runs twice. Re-run the "
+            "resume once system.query_log records the outcome."
+        )
+        raise RuntimeError(msg)
 
     def set_chunk(chunk_id: str, next_state: BackfillChunkState) -> None:
         with lock:
@@ -434,10 +668,9 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
                 return
 
         # Submit and poll. A pending chunk with a query_id is a replay whose id
-        # was recorded and persisted above, before this submit. submitted_at is
-        # never set here: only a replay
-        # recorded by an older release carries one, and poll_chunk then still
-        # passes it as the after_time filter for that shared deterministic id.
+        # and bound were persisted before this submit; a run that stopped
+        # before the replay ran submits it under that same id. A first attempt
+        # has no submitted_at, as before #765.
         with lock:
             recorded_id = _get_chunk(progress, chunk_id).query_id
         query_id = (

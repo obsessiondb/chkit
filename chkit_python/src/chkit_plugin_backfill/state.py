@@ -148,7 +148,7 @@ def write_json(file_path: str | Path, value: object) -> None:
     )
     # Write-then-replace so a crash mid-write never leaves a truncated
     # checkpoint (resume depends on run.json always being parseable).
-    tmp_path = path.with_suffix(path.suffix + ".tmp")
+    tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
     tmp_path.write_text(payload, encoding="utf-8")
     os.replace(tmp_path, path)
 

@@ -2,4 +2,4 @@
 "@chkit/plugin-backfill": patch
 ---
 
-`chkit plugin backfill resume --replay-failed` no longer marks a replayed chunk failed again when the replay starts within a minute of the failure; each replay now runs under a query id of its own.
+`chkit plugin backfill resume --replay-failed` no longer marks a replayed chunk failed again when the replay starts within a minute of the failure, and a resume after a run stopped mid-replay no longer runs that chunk a second time; each replay now runs under a query id of its own.

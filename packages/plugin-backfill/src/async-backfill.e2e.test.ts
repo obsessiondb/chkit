@@ -424,4 +424,47 @@ describe('e2e: executeBackfill against a live cluster', () => {
     expect(replay.failed).toBe(0)
     expect(await settledTargetRows()).toBe(SOURCE_ROWS)
   }, 240_000)
+
+  // #765: a run that dies while a replay's INSERT runs leaves the chunk
+  // pending under the replay's id. A resume right after the INSERT committed
+  // must find its outcome, not run the chunk a second time.
+  test('a resume right after a replay committed records it done without running it again', async () => {
+    await truncateTarget()
+    await waitUntilSourceVisible()
+
+    const chunkIds = plan.chunks.map((chunk) => chunk.id)
+    const replayedId = chunkIds[0]
+    if (!replayedId) throw new Error('plan produced no chunks')
+    const succeededIds = chunkIds.slice(1)
+    for (const id of succeededIds) {
+      await ddl.command(sqlForChunk(id))
+    }
+
+    const planId = `${plan.planId}-committed-replay`
+    const replayId = `backfill-${planId}-${replayedId}-committed`
+    await runExecutor.submit(sqlForChunk(replayedId), replayId)
+
+    const submits: string[] = []
+    const resumed = await executeBackfill({
+      executor: {
+        ...runExecutor,
+        submit: async (sql, id) => {
+          submits.push(id ?? sql)
+          return runExecutor.submit(sql, id)
+        },
+      },
+      planId,
+      chunks: plan.chunks,
+      buildQuery: ({ id }) => sqlForChunk(id),
+      pollIntervalMs: 100,
+      resumeFrom: {
+        [replayedId]: { status: 'pending', queryId: replayId, submittedAt: new Date(Date.now() - 60 * 60_000).toISOString() },
+        ...Object.fromEntries(succeededIds.map((id) => [id, { status: 'done' as const }])),
+      },
+    })
+
+    expect(submits).toEqual([])
+    expect(resumed.progress[replayedId]).toMatchObject({ status: 'done', queryId: replayId })
+    expect(await settledTargetRows()).toBe(SOURCE_ROWS)
+  }, 240_000)
 })

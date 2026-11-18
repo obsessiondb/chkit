@@ -136,6 +136,7 @@ async function runBackfill(input: {
 
     await writeJson(paths.runPath, runState)
 
+    let progressWrites: Promise<void> = Promise.resolve()
     const result = await executeBackfill({
       executor: db,
       cluster: input.clickhouse.cluster,
@@ -162,12 +163,16 @@ async function runBackfill(input: {
       pollIntervalMs: input.pollIntervalMs,
       resumeFrom,
       replayFailed: input.replayFailed,
-      onProgress: async (progress) => {
+      // Chunks report progress concurrently; one write at a time keeps an
+      // older snapshot's rename from landing after a newer one.
+      onProgress: (progress) => {
         runState.progress = progress
         runState.updatedAt = nowIso()
-        await writeJson(paths.runPath, runState)
+        progressWrites = progressWrites.then(() => writeJson(paths.runPath, runState))
+        return progressWrites
       },
     })
+    await progressWrites
 
     runState.status = result.failed > 0 ? 'failed' : 'completed'
     runState.completedAt = nowIso()

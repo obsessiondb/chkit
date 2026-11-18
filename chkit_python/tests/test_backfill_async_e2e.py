@@ -16,10 +16,11 @@ from __future__ import annotations
 import time
 from collections.abc import Iterator
 from dataclasses import dataclass
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
-from chkit.clickhouse.client import ClickHouseClient
+from chkit.clickhouse.client import ClickHouseClient, QueryStatus
 from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit_plugin_backfill.async_backfill import execute_backfill
 from chkit_plugin_backfill.chunking.analyze import analyze_and_chunk
@@ -349,4 +350,61 @@ def test_a_replay_started_right_after_a_chunk_failed_ends_done(
     assert replay.progress[failed_id].status == "done"
     assert replay.progress[failed_id].query_id != first_id
     assert replay.failed == 0
+    assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == SOURCE_ROWS
+
+
+# #765: a run that dies while a replay's INSERT runs leaves the chunk pending
+# under the replay's id. A resume right after the INSERT committed must find
+# its outcome, not run the chunk a second time.
+def test_a_resume_right_after_a_replay_committed_records_it_done(
+    exec_ctx: _ExecContext,
+) -> None:
+    exec_ctx.ddl.execute(f"TRUNCATE TABLE {exec_ctx.target_fqn}")
+
+    chunk_ids = [chunk.id for chunk in exec_ctx.plan.chunks]
+    assert len(chunk_ids) > 0, "plan produced no chunks"
+    replayed_id = chunk_ids[0]
+    succeeded_ids = chunk_ids[1:]
+    for chunk_id in succeeded_ids:
+        exec_ctx.ddl.execute(_sql_for_chunk(exec_ctx, chunk_id))
+
+    plan_id = f"{exec_ctx.plan.plan_id}-committed-replay"
+    replay_id = f"backfill-{plan_id}-{replayed_id}-committed"
+    exec_ctx.run_executor.submit(_sql_for_chunk(exec_ctx, replayed_id), replay_id)
+
+    submits: list[str] = []
+
+    class RecordingExecutor:
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            submits.append(query_id or statement)
+            return exec_ctx.run_executor.submit(statement, query_id)
+
+        def query_status(
+            self, query_id: str, *, after_time: str | None = None
+        ) -> QueryStatus:
+            return exec_ctx.run_executor.query_status(query_id, after_time=after_time)
+
+        def query(self, statement: str) -> object:
+            return exec_ctx.run_executor.query(statement)
+
+    hour_ago = datetime.now(tz=UTC) - timedelta(hours=1)
+    resumed = execute_backfill(
+        executor=RecordingExecutor(),
+        plan_id=plan_id,
+        chunk_ids=chunk_ids,
+        build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
+        poll_interval_ms=100,
+        resume_from={
+            replayed_id: BackfillChunkState(
+                status="pending",
+                query_id=replay_id,
+                submitted_at=hour_ago.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+            ),
+            **{chunk_id: BackfillChunkState(status="done") for chunk_id in succeeded_ids},
+        },
+    )
+
+    assert submits == []
+    assert resumed.progress[replayed_id].status == "done"
+    assert resumed.progress[replayed_id].query_id == replay_id
     assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == SOURCE_ROWS

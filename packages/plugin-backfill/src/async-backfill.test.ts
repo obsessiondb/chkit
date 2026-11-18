@@ -10,7 +10,10 @@ function createMockExecutor(statuses: Map<string, QueryStatus[]>): ClickHouseExe
 
   return {
     async command() {},
-    async query() { return [] },
+    // A replay reads the server time for its query_log bound.
+    async query<T>(sql: string): Promise<T[]> {
+      return (sql.includes('now64') ? [{ now_ms: String(Date.now()) }] : []) as T[]
+    },
     async insert() {},
     async listSchemaObjects() { return [] },
     async listTableDetails() { return [] },
@@ -347,7 +350,7 @@ describe('syncProgress', () => {
     }
 
     const progress: BackfillProgress = {
-      c1: { status: 'submitted', queryId: `backfill-${PLAN_ID}-c1`, submittedAt: '2024-01-01T00:00:00Z' },
+      c1: { status: 'submitted', queryId: `backfill-${PLAN_ID}-c1` },
     }
 
     const synced = await syncProgress(executor, PLAN_ID, [{ id: 'c1' }], progress)
@@ -530,98 +533,116 @@ function statusReads(queries: string[]): string[] {
   return queries.filter((sql) => sql.includes('system.processes') || sql.includes('system.query_log'))
 }
 
-// A ClickHouse stand-in with the timing that matters for a replay (#765): an
-// attempt is in system.processes for `runningPolls` status reads, then neither
-// running nor logged for `unflushedPolls` reads (the query_log flush gap), then
-// logged. Earlier attempts' query_log rows stay visible throughout, and
-// queryStatus applies afterTime to query_start_time as the real one does. An
-// attempt with `loggedAfterReads` ended before the run started and is logged
-// once the server has answered that many status reads.
+// A ClickHouse stand-in with the timing that matters for a replay (#765). An
+// attempt the run submits is in system.processes for `runningReads` status
+// reads of its id, then logged once `unflushedLogReads` more query_log reads
+// (by queryStatus or by a resume's sync) have passed: the flush gap. An
+// attempt that ended before the run starts is logged after `hiddenLogReads`
+// query_log reads. Earlier attempts' rows stay visible throughout. The server
+// clock runs `clockOffsetMs` from the client's, and queryStatus applies
+// afterTime to query_start_time as the real one does.
+type SimOutcome = 'finished' | 'failed' | 'started'
+
 interface SimAttempt {
   queryId: string
   startMs: number
-  outcome: 'finished' | 'failed'
-  runningPolls: number
-  unflushedPolls: number
-  polls: number
-  loggedAfterReads?: number
+  outcome: SimOutcome
+  runningReads: number
+  statusReads: number
+  loggedAtLogRead: number
 }
 
 function createSimulatedServer(options: {
-  nextOutcomes?: Array<'finished' | 'failed'>
-  attempts?: Array<Partial<SimAttempt> & Pick<SimAttempt, 'queryId' | 'outcome'>>
+  nextOutcomes?: SimOutcome[]
+  attempts?: Array<{ queryId: string; outcome: SimOutcome; startMs?: number; running?: number; hiddenLogReads?: number }>
+  clockOffsetMs?: number
 }) {
+  const offset = options.clockOffsetMs ?? 0
+  const serverNow = () => Date.now() + offset
   const nextOutcomes = [...(options.nextOutcomes ?? [])]
   const attempts: SimAttempt[] = (options.attempts ?? []).map((attempt) => ({
-    startMs: Date.now(),
-    runningPolls: 0,
-    unflushedPolls: 0,
-    polls: 0,
-    ...attempt,
+    queryId: attempt.queryId,
+    outcome: attempt.outcome,
+    startMs: attempt.startMs ?? serverNow(),
+    runningReads: attempt.running ?? 0,
+    statusReads: 0,
+    loggedAtLogRead: attempt.hiddenLogReads ?? 0,
   }))
   const submits: string[] = []
-  let statusReads = 0
-  const isRunning = (attempt: SimAttempt) => attempt.polls < attempt.runningPolls
-  const isLogged = (attempt: SimAttempt) =>
-    attempt.loggedAfterReads === undefined
-      ? attempt.polls >= attempt.runningPolls + attempt.unflushedPolls
-      : statusReads >= attempt.loggedAfterReads
+  const persisted: BackfillProgress[] = []
+  const afterTimes = new Map<string, Array<string | undefined>>()
+  let logReads = 0
+  const isRunning = (attempt: SimAttempt) => attempt.statusReads < attempt.runningReads
+  const isLogged = (attempt: SimAttempt) => !isRunning(attempt) && logReads > attempt.loggedAtLogRead
   // Latest first, as both readers order by event_time DESC.
   const logged = () => attempts.filter(isLogged).reverse()
+  const logRows = (attempt: SimAttempt) => {
+    const base = { query_id: attempt.queryId, start_unix: String(Math.floor(attempt.startMs / 1000)) }
+    const start = { ...base, type: 'QueryStart', written_rows: '0', written_bytes: '0', query_duration_ms: '0', exception: '' }
+    if (attempt.outcome === 'started') return [start]
+    const end = attempt.outcome === 'finished'
+      ? { ...base, type: 'QueryFinish', written_rows: '42', written_bytes: '0', query_duration_ms: '1', exception: '' }
+      : { ...base, type: 'ExceptionWhileProcessing', written_rows: '0', written_bytes: '0', query_duration_ms: '1', exception: 'Code: 394. QUERY_WAS_CANCELLED' }
+    return [end, start]
+  }
 
   const executor = createMockExecutor(new Map())
   executor.submit = async (_sql, queryId) => {
     const id = queryId ?? crypto.randomUUID()
     submits.push(id)
+    // The replay's id is durable before its submit.
+    const saved = persisted.at(-1)?.c1
+    if (saved?.status !== 'pending' || saved.queryId !== id) {
+      throw new Error(`submitted ${id} before the checkpoint recorded it (saved: ${JSON.stringify(saved)})`)
+    }
     const outcome = nextOutcomes.shift()
     if (!outcome) throw new Error(`unexpected submit of ${id}`)
-    attempts.push({ queryId: id, startMs: Date.now(), outcome, runningPolls: 1, unflushedPolls: 1, polls: 0 })
+    attempts.push({ queryId: id, startMs: serverNow(), outcome, runningReads: 1, statusReads: 0, loggedAtLogRead: logReads + 1 })
     return id
   }
   executor.queryStatus = async (queryId, statusOptions) => {
-    statusReads += 1
+    afterTimes.set(queryId, [...(afterTimes.get(queryId) ?? []), statusOptions?.afterTime])
     const latest = attempts.filter((attempt) => attempt.queryId === queryId).at(-1)
     if (latest && isRunning(latest)) {
-      latest.polls += 1
+      latest.statusReads += 1
       return { status: 'running', readRows: 0, readBytes: 0, writtenRows: 0, writtenBytes: 0, elapsedMs: 0 }
     }
-    const after = statusOptions?.afterTime ? Date.parse(statusOptions.afterTime) : 0
-    const row = logged().find((attempt) => attempt.queryId === queryId && attempt.startMs >= after)
-    if (latest) latest.polls += 1
+    if (latest) latest.statusReads += 1
+    logReads += 1
+    const after = statusOptions?.afterTime ? Math.floor(Date.parse(statusOptions.afterTime) / 1000) : 0
+    const row = logged().find(
+      (attempt) => attempt.queryId === queryId && attempt.outcome !== 'started' && Math.floor(attempt.startMs / 1000) >= after,
+    )
     if (!row) return { status: 'unknown' }
     return row.outcome === 'finished'
       ? { status: 'finished', writtenRows: 42, writtenBytes: 0, durationMs: 1 }
       : { status: 'failed', durationMs: 1, error: 'Code: 394. QUERY_WAS_CANCELLED' }
   }
   executor.query = async <T>(sql: string): Promise<T[]> => {
+    if (sql.includes('now64')) return [{ now_ms: String(serverNow()) }] as T[]
     if (sql.includes('system.processes')) {
       return attempts.filter(isRunning).map((attempt) => ({ query_id: attempt.queryId })) as T[]
     }
     if (sql.includes('system.query_log')) {
-      return logged().map((attempt) => ({
-        query_id: attempt.queryId,
-        type: attempt.outcome === 'finished' ? 'QueryFinish' : 'ExceptionWhileProcessing',
-        written_rows: attempt.outcome === 'finished' ? '42' : '0',
-        written_bytes: '0',
-        query_duration_ms: '1',
-        exception: attempt.outcome === 'finished' ? '' : 'Code: 394. QUERY_WAS_CANCELLED',
-      })) as T[]
+      logReads += 1
+      return logged().flatMap(logRows) as T[]
     }
     return [] as T[]
   }
-  return { executor, submits }
+  return { executor, submits, persisted, afterTimes }
 }
 
 describe('executeBackfill replays under a query id of their own (#765)', () => {
   const firstId = `backfill-${PLAN_ID}-c1`
   const recordedReplayId = `${firstId}-recorded`
+  const hourAgo = () => new Date(Date.now() - 60 * 60_000).toISOString()
   // The killed first attempt, seconds before the replay: its failure is newer
   // than the 60 s window older releases subtracted from the replay's start.
   const killedFirst = { queryId: firstId, outcome: 'failed' as const, startMs: Date.now() - 5_000 }
   const runOnce = (
     server: ReturnType<typeof createSimulatedServer>,
     resumeFrom: BackfillProgress,
-    extra: { replayFailed?: boolean; onProgress?: (progress: BackfillProgress) => void } = {},
+    extra: { replayFailed?: boolean } = {},
   ) =>
     executeBackfill({
       executor: server.executor,
@@ -629,18 +650,22 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
       chunks: [{ id: 'c1' }],
       buildQuery: () => 'SELECT 1',
       pollIntervalMs: 1,
+      outcomeRecheckAttempts: 3,
+      outcomeRecheckIntervalMs: 1,
       resumeFrom,
+      onProgress: (progress) => {
+        server.persisted.push(progress)
+      },
       ...extra,
     })
 
   test('a replay started seconds after the failure ends done when its attempt finishes', async () => {
     const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'] })
-    const persisted: BackfillProgress[] = []
 
     const result = await runOnce(
       server,
       { c1: { status: 'failed', queryId: firstId, error: 'Code: 394. QUERY_WAS_CANCELLED' } },
-      { replayFailed: true, onProgress: (progress) => { persisted.push(progress) } },
+      { replayFailed: true },
     )
 
     // Releases that reused the first id read its failure while the replay ran.
@@ -649,44 +674,65 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     const replayId = server.submits[0]
     expect(replayId).not.toBe(firstId)
     expect(replayId?.startsWith(`${firstId}-`)).toBe(true)
-    // The replay's id is durable before its submit: the first write names it.
-    expect(persisted[0]?.c1).toEqual({ status: 'pending', queryId: replayId })
     expect(result.failed).toBe(0)
     expect(result.progress.c1).toMatchObject({ status: 'done', queryId: replayId, writtenRows: 42 })
   })
 
-  test('a run stopped after recording the replay id submits the chunk once under a new id', async () => {
-    const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'] })
+  test('a resume in the flush gap of a replay that committed records it done without running it again', async () => {
+    // The run died while the replay's submit waited for the INSERT, which
+    // then committed; its QueryFinish is not in query_log at the first read.
+    const server = createSimulatedServer({
+      attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'finished', hiddenLogReads: 1 }],
+    })
 
-    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId } })
+    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId, submittedAt: hourAgo() } })
 
-    expect(server.submits).toHaveLength(1)
-    expect(new Set([firstId, recordedReplayId, ...server.submits]).size).toBe(3)
-    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: server.submits[0] })
+    expect(server.submits).toEqual([])
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: recordedReplayId, writtenRows: 42 })
   })
 
-  test('a resume in the flush gap of a replay that failed does not read that failure', async () => {
-    // The replay's submit returned its failure, so the run stopped with the
-    // chunk pending, and the resume reads query_log before the failure is in it.
+  test('a resume in the flush gap of a replay that failed records it failed without running it', async () => {
     const server = createSimulatedServer({
-      attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'failed', loggedAfterReads: 1 }],
+      attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'failed', hiddenLogReads: 1 }],
+    })
+
+    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId, submittedAt: hourAgo() } })
+
+    expect(server.submits).toEqual([])
+    expect(result.progress.c1).toMatchObject({ status: 'failed', queryId: recordedReplayId })
+  })
+
+  test('a replay that never ran is submitted once under its recorded id after the flush window', async () => {
+    const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'] })
+
+    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId, submittedAt: hourAgo() } })
+
+    expect(server.submits).toEqual([recordedReplayId])
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: recordedReplayId })
+  })
+
+  test('a replay that started and has no outcome stops the resume before anything is submitted', async () => {
+    const server = createSimulatedServer({
+      attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'started' }],
       nextOutcomes: ['finished'],
     })
 
-    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId } })
-
-    expect(result.progress.c1?.status).toBe('done')
-    expect(server.submits).toHaveLength(1)
-    expect(server.submits[0]).not.toBe(recordedReplayId)
-    expect(result.progress.c1?.queryId).toBe(server.submits[0])
+    for (const replayFailed of [false, true]) {
+      await expect(
+        runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId, submittedAt: hourAgo() } }, { replayFailed }),
+      ).rejects.toThrow(
+        `Backfill plan ${PLAN_ID}: the last attempt of chunk c1 (query_id ${recordedReplayId}) started, but it is not running on any replica and system.query_log has no outcome for it. Nothing was submitted, so no chunk runs twice.`,
+      )
+    }
+    expect(server.submits).toEqual([])
   })
 
   test('a run stopped between the replay submit and its state write attaches to it', async () => {
     const server = createSimulatedServer({
-      attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'finished', runningPolls: 2, unflushedPolls: 1 }],
+      attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'finished', running: 2 }],
     })
 
-    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId } })
+    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId, submittedAt: hourAgo() } })
 
     expect(server.submits).toEqual([])
     expect(result.progress.c1).toMatchObject({ status: 'done', queryId: recordedReplayId })
@@ -695,7 +741,7 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
   test('a resume reads a finished replay by its own id, not the failed first attempt', async () => {
     const server = createSimulatedServer({ attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'finished' }] })
 
-    const result = await runOnce(server, { c1: { status: 'running', queryId: recordedReplayId } })
+    const result = await runOnce(server, { c1: { status: 'running', queryId: recordedReplayId, submittedAt: hourAgo() } })
 
     expect(server.submits).toEqual([])
     expect(result.progress.c1).toMatchObject({ status: 'done', queryId: recordedReplayId, writtenRows: 42 })
@@ -716,6 +762,24 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     expect(second.progress.c1).toMatchObject({ status: 'done', queryId: server.submits[1] })
   })
 
+  test('a replay is polled with a server-time bound, so a server clock behind the client still finds its outcome', async () => {
+    const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'], clockOffsetMs: -10 * 60_000 })
+
+    const result = await runOnce(server, { c1: { status: 'failed', queryId: firstId } }, { replayFailed: true })
+
+    const replayId = server.submits[0] ?? ''
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: replayId })
+    // The bound prunes query_log by event_date: an hour before the server's time.
+    const bounds = server.afterTimes.get(replayId) ?? []
+    expect(bounds.length).toBeGreaterThan(0)
+    for (const bound of bounds) {
+      expect(bound).toBeDefined()
+      const lag = Date.now() - 10 * 60_000 - Date.parse(bound ?? '')
+      expect(lag).toBeGreaterThan(59 * 60_000)
+      expect(lag).toBeLessThan(61 * 60_000)
+    }
+  })
+
   test('a replay an older release reset but never submitted is replayed under a new id', async () => {
     // Older releases reset a failed chunk to pending with submittedAt = now - 60 s.
     const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'] })
@@ -728,12 +792,41 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     expect(result.progress.c1).toMatchObject({ status: 'done', queryId: server.submits[0] })
   })
 
+  test('an older release\'s replay that committed in the flush gap is not taken for the earlier failure', async () => {
+    // An older release reset c1 (submittedAt = now - 60 s) and submitted the
+    // replay under the shared id; the run died and this release resumes
+    // before the replay's QueryFinish is in query_log.
+    const submittedAt = new Date(Date.now() - 60_000).toISOString()
+    const server = createSimulatedServer({
+      attempts: [killedFirst, { queryId: firstId, outcome: 'finished', hiddenLogReads: 1 }],
+    })
+
+    for (const resumeFrom of [
+      { c1: { status: 'pending' as const, submittedAt } },
+      { c1: { status: 'running' as const, queryId: firstId, submittedAt } },
+    ]) {
+      const result = await runOnce(server, resumeFrom)
+      expect(result.progress.c1).toMatchObject({ status: 'done', queryId: firstId })
+    }
+    expect(server.submits).toEqual([])
+  })
+
+  test('an older release\'s shared-id replay that failed is recorded failed after the flush window', async () => {
+    const submittedAt = new Date(Date.now() - 60_000).toISOString()
+    const server = createSimulatedServer({ attempts: [killedFirst] })
+
+    const result = await runOnce(server, { c1: { status: 'pending', submittedAt } })
+
+    expect(server.submits).toEqual([])
+    expect(result.progress.c1).toMatchObject({ status: 'failed', queryId: firstId })
+  })
+
   test('a replay an older release left running under the shared id is still polled from its submittedAt', async () => {
     const submittedAt = new Date(Date.now() - 60_000).toISOString()
     const server = createSimulatedServer({
       attempts: [
         { ...killedFirst, startMs: Date.now() - 120_000 },
-        { queryId: firstId, outcome: 'finished', runningPolls: 2, unflushedPolls: 1 },
+        { queryId: firstId, outcome: 'finished', running: 2 },
       ],
     })
 
@@ -741,5 +834,19 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
 
     expect(server.submits).toEqual([])
     expect(result.progress.c1).toMatchObject({ status: 'done', queryId: firstId })
+  })
+
+  test('a resume whose replica probe fails submits nothing', async () => {
+    const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'] })
+    const query = server.executor.query.bind(server.executor)
+    server.executor.query = async <T>(sql: string, settings?: Record<string, unknown>): Promise<T[]> => {
+      if (sql.includes('system.one')) throw new Error('Code: 210. NETWORK_ERROR')
+      return query<T>(sql, settings)
+    }
+
+    await expect(
+      runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId, submittedAt: hourAgo() } }),
+    ).rejects.toThrow('could not check which chunks are still running on the server (Code: 210. NETWORK_ERROR)')
+    expect(server.submits).toEqual([])
   })
 })

@@ -1,6 +1,6 @@
 import { createHash, randomBytes } from 'node:crypto'
 import { existsSync } from 'node:fs'
-import { mkdir, readFile, readdir, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, readdir, rename, writeFile } from 'node:fs/promises'
 import { dirname, join, resolve } from 'node:path'
 
 import type { ResolvedChxConfig } from '@chkit/core'
@@ -99,9 +99,14 @@ function decodePlan(plan: BackfillPlanState): BackfillPlanState {
   }
 }
 
+/** Write `value` to a temporary file beside `filePath`, then rename it over
+ *  `filePath`, so a crash never leaves a truncated file (the run checkpoint
+ *  holds the only record of a replay's query id, #765). */
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
   await mkdir(dirname(filePath), { recursive: true })
-  await writeFile(filePath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  const tmpPath = `${filePath}.${randomBytes(6).toString('hex')}.tmp`
+  await writeFile(tmpPath, `${JSON.stringify(value, null, 2)}\n`, 'utf8')
+  await rename(tmpPath, filePath)
 }
 
 export async function readPlan(input: {
