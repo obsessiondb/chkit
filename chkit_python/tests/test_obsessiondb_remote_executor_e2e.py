@@ -321,7 +321,7 @@ def test_async_submission_completes_and_rerun_skips(
     )
     try:
         assert apply_async_statement(statement).kind == "completed"
-        assert journal.statuses() == ["started", "completed"]
+        assert journal.statuses() == ["started", "started", "completed"]
         assert apply_async_statement(statement).kind == "skipped"
         rows = _poll_until(
             lambda: int(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"]),
@@ -350,7 +350,7 @@ def test_first_submission_completes_without_query_log(
     )
     try:
         assert apply_async_statement(statement).kind == "completed"
-        assert journal.statuses() == ["started", "completed"]
+        assert journal.statuses() == ["started", "started", "completed"]
         rows = _poll_until(
             lambda: int(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"]),
             lambda n: n >= 3,
@@ -381,7 +381,7 @@ def test_a_statement_the_server_rejects_is_recorded_failed_from_its_query_log_en
     try:
         with pytest.raises(RuntimeError, match="SYNTAX_ERROR"):
             apply_async_statement(statement)
-        assert journal.statuses() == ["started", "failed"]
+        assert journal.statuses() == ["started", "started", "failed"]
     finally:
         live.execute(f"DROP TABLE IF EXISTS {table}")
 
@@ -532,8 +532,10 @@ def test_an_attach_polls_only_the_id_its_fenced_record_names(
             sql="SELECT 1",
             log=lines.append,
         )
-        with pytest.raises(RuntimeError, match="attached attempt failed"):
+        # It failed while it ran (#767): a re-run stops until a reconcile.
+        with pytest.raises(MigrateError, match="attached attempt failed") as info:
             apply_async_statement(statement)
+        assert info.value.code == "async_outcome_unknown"
         assert any("attaching to in-flight query" in line for line in lines)
         # The attach writes nothing until the outcome.
         assert journal.statuses() == ["failed"]

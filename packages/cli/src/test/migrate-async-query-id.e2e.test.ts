@@ -43,7 +43,7 @@ interface Fixture {
 type Target = 'staging' | 'prod'
 
 describe('async migrate statements across databases (#463)', () => {
-  test("a run never takes the other database's failure, and the failed run retries its own load", async () => {
+  test("a run never takes the other database's failure, and the failed run retries its own load after an abandon", async () => {
     const fixture = await createFixture('qid_failure')
     const { executor, databases } = fixture
     try {
@@ -58,11 +58,18 @@ describe('async migrate statements across databases (#463)', () => {
       expect(await countEvents(fixture, 'prod')).toBe(ROWS)
       expect(failed.exitCode, formatTestDiagnostic('staging', failed)).toBe(1)
       expect(failed.stdout).toContain('failure in this database')
+      // It failed while it ran, so some of its rows may have landed (#767):
+      // the run stops until the operator reconciles and abandons.
+      expect(JSON.parse(failed.stdout).error).toMatchObject({ code: 'async_outcome_unknown' })
       await waitForStatuses(fixture, 'staging', 'failed')
+      const again = await migrate(fixture, 'staging').result
+      expect(again.exitCode, formatTestDiagnostic('staging re-run', again)).toBe(1)
+      expect(JSON.parse(again.stdout).error).toMatchObject({ code: 'async_outcome_unknown' })
 
-      // The retry finds its own failed attempt: it runs the before-retry SQL
-      // and loads once.
+      // After the abandon, the retry runs the before-retry SQL and loads once.
       await executor.command(`TRUNCATE TABLE ${quoteIdent(databases.staging)}.fail_marker`)
+      const abandoned = await migrate(fixture, 'staging', ['--abandon', fixture.migration]).result
+      expect(abandoned.exitCode, formatTestDiagnostic('staging abandon', abandoned)).toBe(0)
       const retried = await migrate(fixture, 'staging').result
       expect(retried.exitCode, formatTestDiagnostic('staging retry', retried)).toBe(0)
       expect(retried.stderr).toContain('load_table_data: running before-retry SQL')
