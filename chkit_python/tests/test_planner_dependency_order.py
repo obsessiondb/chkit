@@ -795,6 +795,19 @@ def test_drops_a_column_after_the_modify_that_stops_reading_it_although_its_name
     ]
 
 
+def test_drops_a_dotted_column_after_the_modify_of_the_column_whose_old_expression_reads_it_unquoted() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "n.x", "type": "Array(UInt64)"},
+            {"name": "z", "type": "UInt64", "default_kind": "MATERIALIZED", "default": _expr("arraySum(n.x)")},
+        ])],
+        [_t([{"name": "z", "type": "UInt64", "default_kind": "MATERIALIZED", "default": _expr("id")}])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 MATERIALIZED id;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `n.x`;",
+    ]
+
+
 def test_drops_a_column_after_the_dropped_column_whose_expression_reads_it() -> None:
     assert _sqls(
         [_t([
@@ -815,6 +828,51 @@ def test_a_function_call_named_like_a_column_is_not_a_read() -> None:
     ) == [
         "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length ('abc');",
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `length`;",
+    ]
+
+
+def test_a_dotted_run_followed_by_a_paren_is_a_function_call_not_a_read() -> None:
+    assert _sqls(
+        [_t([])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("n.x(1)")},
+            {"name": "n", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT n.x(1);",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;",
+    ]
+
+
+def test_a_dotted_run_reads_only_its_longest_leading_column_not_a_later_part() -> None:
+    # `n.a` reads the element `a` of the tuple `n`, not the column `a`; reading
+    # `a` too made a cycle with `a DEFAULT z + 1` that kept the key order.
+    assert _sqls(
+        [_t([{"name": "n", "type": "Tuple(a UInt64)"}])],
+        [_t([
+            {"name": "n", "type": "Tuple(a UInt64)"},
+            {"name": "a", "type": "UInt64", "default": _expr("z + 1")},
+            {"name": "z", "type": "UInt64", "default": _expr("n.a")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT n.a;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z + 1;",
+    ]
+
+
+def test_a_dotted_run_ends_at_a_tuple_element_by_position() -> None:
+    # `t.1.a.b` is a path into the tuple `t`; reading its suffix as the column
+    # `a.b` made a cycle with `a.b DEFAULT z + 1` that kept the key order.
+    assert _sqls(
+        [_t([{"name": "t", "type": "Tuple(u Tuple(a Tuple(b UInt64)))"}])],
+        [_t([
+            {"name": "t", "type": "Tuple(u Tuple(a Tuple(b UInt64)))"},
+            {"name": "a.b", "type": "UInt64", "default": _expr("z + 1")},
+            {"name": "z", "type": "UInt64", "default": _expr("t.1.a.b")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT t.1.a.b;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a.b` UInt64 DEFAULT z + 1;",
     ]
 
 
@@ -869,4 +927,45 @@ def test_keeps_the_other_statements_other_tables_and_same_column_statements_in_p
         "ALTER TABLE app.t ADD INDEX IF NOT EXISTS `idx_z` (z) TYPE minmax GRANULARITY 1;",
         "ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;",
         "ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `w` UInt64 DEFAULT x;",
+    ]
+
+
+def test_adds_a_dotted_column_before_the_default_that_reads_it_without_backquotes() -> None:
+    assert _added_columns([
+        {"name": "a", "type": "UInt64", "default": SQLExpression(expression="arraySum(n.x)")},
+        {"name": "n.x", "type": "Array(UInt64)"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT arraySum(n.x);",
+    ]
+
+
+def test_a_dotted_run_reads_its_longest_leading_column_not_a_shorter_prefix() -> None:
+    assert _added_columns([
+        {"name": "a", "type": "UInt64",
+         "default": SQLExpression(expression="length(n.x) + `n`.`x`[1]")},
+        {"name": "b", "type": "UInt64", "default": SQLExpression(expression="a + 1")},
+        {"name": "n", "type": "Tuple(y Array(UInt64))",
+         "default": SQLExpression(expression="tuple([b])")},
+        {"name": "n.x", "type": "Array(UInt64)"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length(n.x) + `n`.`x`[1];",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(y Array(UInt64)) DEFAULT tuple([b]);",
+    ]
+
+
+def test_a_qualifier_that_is_no_column_is_dropped_and_a_column_prefix_is_read() -> None:
+    assert _added_columns([
+        {"name": "a", "type": "UInt64",
+         "default": SQLExpression(expression="app.orders.price + orders.qty + t.first")},
+        {"name": "price", "type": "UInt64"},
+        {"name": "qty", "type": "UInt64"},
+        {"name": "t", "type": "Tuple(first UInt64)"},
+    ]) == [
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `qty` UInt64;",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `t` Tuple(first UInt64);",
+        "ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT app.orders.price + orders.qty + t.first;",
     ]

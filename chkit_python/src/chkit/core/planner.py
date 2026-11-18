@@ -946,6 +946,63 @@ def _column_key(database: str, table: str, column: str) -> str:
     return f"table:{database}.{table}:column:{column}"
 
 
+def _dotted_names(sql: str, columns: set[str]) -> list[str]:
+    """The column names that ``sql`` reads, from runs of bare or quoted names joined by dots.
+
+    A run is ``n.x`` with bare or quoted parts and any comments around the dot. Like
+    ClickHouse, a run reads its longest leading part that is a column: ``n.x``
+    reads the column ``n.x`` when there is one, and otherwise ``n`` (a subcolumn
+    of ``n``). A run whose leading parts are no column is read without them, so
+    ``t.col`` and ``db.t.col`` read ``col`` (#748). A tuple element by position
+    ends the run: ``t.1.a`` reads ``t``. A run followed by ``(`` is a function
+    call, not a column.
+    """
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    found: list[str] = []
+    i = 0
+    while i < len(tokens):
+        run: list[str] = []
+        # A tuple element by position (``t.1``) and the parts after it are one path
+        # into the run before it, so ``t.1.a.b`` reads only ``t``.
+        element = False
+        name = identifier_name(tokens[i])
+        while name is not None:
+            if not element:
+                run.append(name)
+            i += 1
+            if i >= len(tokens) or tokens[i].text != ".":
+                break
+            following = tokens[i + 1] if i + 1 < len(tokens) else None
+            if following is not None and following.kind == "number":
+                element = True
+            if following is None:
+                name = None
+            elif following.kind == "number":
+                name = following.text
+            else:
+                name = identifier_name(following)
+            if name is not None:
+                i += 1
+        if not run:
+            i += 1
+        if i < len(tokens) and tokens[i].text == "(":
+            continue
+        for start in range(len(run)):
+            match = _longest_column_prefix(run[start:], columns)
+            if match is not None:
+                found.append(match)
+                break
+    return found
+
+
+def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
+    for end in range(len(parts), 0, -1):
+        name = ".".join(parts[:end])
+        if name in columns:
+            return name
+    return None
+
+
 def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
@@ -966,12 +1023,8 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             if parsed.kind != "expression":
                 continue
             read: set[str] = set()
-            tokens = [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)]
-            for index, token in enumerate(tokens):
-                name = identifier_name(token)
-                if name is None or (index + 1 < len(tokens) and tokens[index + 1].text == "("):
-                    continue
-                if name != column.name and name in names:
+            for name in _dotted_names(parsed.sql, names):
+                if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
     return graph
