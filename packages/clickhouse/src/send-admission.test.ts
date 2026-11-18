@@ -1,8 +1,10 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import http from 'node:http'
+import https from 'node:https'
 import type { AddressInfo } from 'node:net'
 
 import { createStatelessClickHouseExecutor, isSendNotAdmitted, type ClickHouseExecutor } from './index.js'
+import { createAdmissionAgent } from './send-admission.js'
 
 // A stand-in for ClickHouse's HTTP interface that records each request's
 // query_id and answers it at once, as a finished command.
@@ -77,3 +79,26 @@ describe('submit with an admission (#765)', () => {
     await db.close()
   })
 })
+
+// The admission agent replaces the one @clickhouse/client builds, so it must
+// connect as the configured client would.
+describe('createAdmissionAgent', () => {
+  test('keeps the driver defaults: keep-alive on, 10 sockets', () => {
+    const agent = createAdmissionAgent('http://localhost:8123', new Map())
+
+    expect(agent).toBeInstanceOf(http.Agent)
+    expect(agent.maxSockets).toBe(10)
+    expect((agent as unknown as { keepAlive: boolean }).keepAlive).toBe(true)
+    agent.destroy()
+  })
+
+  test('takes the keep-alive and socket limit clickhouse.url sets, and TLS for https', () => {
+    const agent = createAdmissionAgent('https://ch.example.com:8443/?max_open_connections=3&keep_alive_enabled=false', new Map())
+
+    expect(agent).toBeInstanceOf(https.Agent)
+    expect(agent.maxSockets).toBe(3)
+    expect((agent as unknown as { keepAlive: boolean }).keepAlive).toBe(false)
+    agent.destroy()
+  })
+})
+

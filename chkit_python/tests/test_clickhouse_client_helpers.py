@@ -272,6 +272,35 @@ def test_submit_once_sends_nothing_when_the_send_admission_refuses() -> None:
     assert driver.http is pool
 
 
+# #765: submit_once sends through the submit driver, opened with the same
+# connection settings (TLS included) as the client's other drivers.
+def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    opened: list[dict[str, object]] = []
+
+    def get_client(**kwargs: object) -> MagicMock:
+        opened.append(kwargs)
+        driver = MagicMock()
+        driver.command.return_value = None
+        return driver
+
+    monkeypatch.setattr("chkit.clickhouse.client.clickhouse_connect.get_client", get_client)
+    config = ChxResolvedClickHouseConfig(
+        url="https://ch.example.com:8443", username="u", password="p", database="d", secure=True
+    )
+    client = ClickHouseClient.connect(config)
+
+    client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+
+    assert len(opened) == 2
+    main, submit = opened
+    assert submit["secure"] is True
+    assert {key: submit[key] for key in ("host", "port", "secure", "username", "password")} == {
+        key: main[key] for key in ("host", "port", "secure", "username", "password")
+    }
+
+
 def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
     client, fake = _stub_client()
     httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')
