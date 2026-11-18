@@ -23,7 +23,8 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
-from urllib3 import Timeout
+from urllib3 import HTTPConnectionPool, HTTPSConnectionPool, Timeout
+from urllib3.connection import HTTPConnection, HTTPSConnection
 from urllib3.exceptions import HTTPError
 
 from chkit.clickhouse.control import (
@@ -367,8 +368,10 @@ class ClickHouseClient:
     ) -> str:
         """Send a query that ``query_status`` follows. Returns its query_id.
 
-        ``before_send`` runs right before the request is sent, and raises to
-        stop a request the caller gave up on (#767).
+        ``before_send`` is the caller's guard (#767): called before the
+        request starts and, through ``commit``, once its connection is open and
+        before its first bytes are written. Either raises to stop a request
+        the caller gave up on.
 
         Used by ``chkit migrate --apply`` for long-running ``ALTER`` /
         ``OPTIMIZE`` statements: the server starts processing immediately
@@ -402,7 +405,16 @@ class ClickHouseClient:
             # Opened outside the lock, so close() does not wait for it.
             opened = self._open_driver(self._config, autogenerate_session_id=False)
             # One physical send per submit: the id is journaled for this
-            # attempt alone, so the driver must not send it again (#767).
+            # attempt alone, so the driver must not send it again (#767). A
+            # submit the caller gave up on is not sent once it has connected,
+            # and connecting is bounded, so the caller can tell a late send
+            # is excluded.
+            opened.timeout = Timeout(connect=SUBMIT_CONNECT_TIMEOUT_SECONDS, read=None)
+            opened.http.pool_classes_by_scheme = {
+                "http": _GuardedHTTPConnectionPool,
+                "https": _GuardedHTTPSConnectionPool,
+            }
+            opened.http.clear()
             opened.http = _NoReplayPool(opened.http)
             with self._submit_client_lock:
                 if self._submit_client is None and not self._closed:
@@ -441,7 +453,10 @@ class ClickHouseClient:
         elif cols is None:
             msg = "insert() requires column_names when values is a list of lists."
             raise ValueError(msg)
-        self._client.insert(table, rows, column_names=cols, database=database)
+        # No asynchronous INSERT, as TS's insert sends (#767).
+        self._client.insert(
+            table, rows, column_names=cols, database=database, settings=self._write_settings()
+        )
 
 
     def query_status(
@@ -612,7 +627,7 @@ class _NoReplayPool:
         return getattr(self._pool, name)
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
-        # The submitting thread's check, right before the physical send (#767).
+        # The submitting thread's guard, before the request starts (#767).
         before_send = getattr(_SUBMIT_SEND, "before_send", None)
         if before_send is not None:
             before_send()
@@ -623,6 +638,49 @@ class _NoReplayPool:
                 msg = f"The connection was reset after the request was sent ({error})"
                 raise ConnectionError(msg) from error
             raise
+
+
+# How long a submit may take to connect (#767): a submit the caller gave up
+# on is excluded from sending once it connected or failed to, so this bounds
+# how long the caller waits to know.
+SUBMIT_CONNECT_TIMEOUT_SECONDS = 10.0
+
+
+def _commit_submit(conn: Any) -> None:
+    """Connect, then let the submitting thread's guard stop the first bytes (#767)."""
+    before_send = getattr(_SUBMIT_SEND, "before_send", None)
+    if before_send is None:
+        return
+    if conn.sock is None:
+        conn.connect()
+    commit = getattr(before_send, "commit", None)
+    if commit is None:
+        return
+    try:
+        commit()
+    except BaseException:
+        conn.close()
+        raise
+
+
+class _GuardedHTTPConnection(HTTPConnection):
+    def request(self, *args: Any, **kwargs: Any) -> None:
+        _commit_submit(self)
+        super().request(*args, **kwargs)
+
+
+class _GuardedHTTPSConnection(HTTPSConnection):
+    def request(self, *args: Any, **kwargs: Any) -> None:
+        _commit_submit(self)
+        super().request(*args, **kwargs)
+
+
+class _GuardedHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _GuardedHTTPConnection
+
+
+class _GuardedHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _GuardedHTTPSConnection
 
 
 def _use_ts_timeouts(client: Any) -> None:

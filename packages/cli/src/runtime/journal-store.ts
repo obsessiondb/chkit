@@ -95,6 +95,11 @@ export interface JournalStore {
    * yet gets it with the table.
    */
   storesAttemptFences(): Promise<boolean>
+  /**
+   * Whether a journal read returns the newest record on every copy of the
+   * journal (#767): it reads every replica, or the journal has one copy.
+   */
+  readsEveryCopy(): Promise<boolean>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
   /**
@@ -783,6 +788,25 @@ SETTINGS index_granularity = 1`
           appliedAt: row.applied_at,
           checksum: row.checksum,
         })),
+      }
+    },
+
+    async readsEveryCopy(): Promise<boolean> {
+      // A multi-replica journal is read on every replica, and that read fails
+      // when one of them cannot be read.
+      if (await replicaFanout()) return true
+      const [table] = await db.query<{ engine: string }>(
+        `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
+      )
+      if (table !== undefined && !/^(Replicated|Shared)/.test(table.engine)) return true
+      // A replicated journal without a fanout: only one replica may hold it.
+      try {
+        const [hosts] = await db.query<{ replicas: number | string }>(
+          `SELECT count(DISTINCT hostName()) AS replicas FROM clusterAllReplicas('${escapeSqlString(cluster ?? 'default')}', system.one)`,
+        )
+        return Number(hosts?.replicas) === 1
+      } catch {
+        return false
       }
     },
 

@@ -282,10 +282,9 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             if state_before is not None
             else None
         )
-        if (
-            prior_attempt is not None
-            and state_before is not None
-            and _resolve_async_attempt_before_sync(
+        resolved = "run"
+        if prior_attempt is not None and state_before is not None:
+            resolved = _resolve_async_attempt_before_sync(
                 input_.client,
                 journal_store,
                 file=file,
@@ -295,10 +294,15 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 operation_type=identity.type,
                 log=input_.log,
             )
-            == "completed"
+            if resolved == "completed":
+                continue
+        # An async attempt that was never sent ran nothing: no before-retry SQL.
+        if (
+            prior_attempt is not None
+            and operation is not None
+            and operation.before_retry
+            and resolved != "unsent"
         ):
-            continue
-        if prior_attempt is not None and operation is not None and operation.before_retry:
             try:
                 _run_before_retry(
                     input_.client,
@@ -629,12 +633,16 @@ def _accept_edited_migration(
         identities=identities,
         applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
-    _assert_recorded_attempts_resolved(client, file, state, rebased, log)
+    _assert_recorded_attempts_resolved(
+        client, journal_store, file=file, state=state, rebased=rebased, log=log
+    )
     journal_store.write_migration_state(rebased)
 
 
 def _assert_recorded_attempts_resolved(
     client: ClickHouseClient,
+    journal_store: JournalStore,
+    *,
     file: str,
     state: MigrationRowState,
     rebased: MigrationRowState,
@@ -654,6 +662,8 @@ def _assert_recorded_attempts_resolved(
             continue
         recorded = resolve_recorded_attempt(
             client,
+            journal_store=journal_store,
+            migration_name=file,
             op=op,
             fingerprint=op.fingerprint,
             query_id=op.query_id,
@@ -719,6 +729,8 @@ def _resolve_async_attempt_before_sync(
         return "run"
     recorded = resolve_recorded_attempt(
         client,
+        journal_store=journal_store,
+        migration_name=file,
         op=op,
         fingerprint=fingerprint,
         query_id=op.query_id,
@@ -749,6 +761,8 @@ def _resolve_async_attempt_before_sync(
                 now,
             )
         )
+    if recorded.kind == "unsent":
+        return "unsent"
     return "run"
 
 

@@ -134,7 +134,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     'migrate:async',
     `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
   )
-  const recorded = await resolveRecordedAttempt({ db, op: priorOpState, fingerprint, queryId, operationType, log, sleep })
+  const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName, op: priorOpState, fingerprint, queryId, operationType, log, sleep })
   if (recorded.kind === 'running') {
     if (recorded.afterTime === undefined || priorOpState === undefined) {
       throw runningElsewhereError({ operationType, statementIndex, migrationName, queryId, reason: recorded.reason })
@@ -203,7 +203,11 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // Every attempt's id is random and its own, recorded before its submit
   // (#701, #767).
   const attemptQueryId = randomUUID()
-  if (priorOpState !== undefined) {
+  // An attempt that was never sent ran nothing: it is submitted again without
+  // the before-retry SQL, which runs only after a rejection or an abandon.
+  if (recorded.kind === 'unsent') {
+    log(`  ${operationType}: previous attempt of query_id=${queryId} was never sent — submitting async (query_id=${attemptQueryId})`)
+  } else if (priorOpState !== undefined) {
     const prior =
       recorded.kind === 'failed'
         ? { status: 'failed', lastError: recorded.error }
@@ -356,6 +360,15 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   // Set when the run stops without an outcome: it does not wait for a submit
   // request that may never settle (#767).
   let submitAbandoned = false
+  // Every stop without an outcome: the submit is aborted, so a request not
+  // sent yet never starts, the run does not wait for one that may never
+  // settle, and the fenced started record stays for the next run (#767).
+  const stopWithoutOutcome = (reason: string): MigrateError => {
+    input.abortSubmit?.()
+    submitAbandoned = true
+    const submitTail = submitError ? `, and the submit request failed (${describeError(submitError)})` : ''
+    return outcomeUnknownError({ operationType, statementIndex, migrationName, queryId, reason: `${reason}${submitTail}` })
+  }
   // Capture the submit promise rejection so it doesn't surface as an
   // unhandled rejection. Polling is the source of truth for outcome.
   const submitPromiseGuarded =
@@ -385,16 +398,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         unknownPolls = 0
         const failedElapsed = Math.floor((now() - pollStartedAt) / 1000)
         if (transientPollErrors > MAX_TRANSIENT_POLL_ERRORS) {
-          // A submit error is the only trace of e.g. a rejected statement (#561).
-          // The finally block waits for the submit anyway; wait here so its error
-          // makes it into the message.
-          if (submitPromiseGuarded) await submitPromiseGuarded
-          const submitTail = submitError
-            ? ` The submit request failed too (${describeError(submitError)}).`
-            : ''
-          throw new Error(
-            `Async migration step ${operationType} (query_id ${queryId}): polling failed ${transientPollErrors}× (${describeError(pollError)}).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
-          )
+          throw stopWithoutOutcome(`polling failed ${transientPollErrors}× in a row (${describeError(pollError)})`)
         }
         log(
           `  ${operationType}: poll request failed (${describeError(pollError)}) — load may still be running, retrying (elapsed ${failedElapsed}s)`,
@@ -410,18 +414,15 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       // the attempt still recorded as started.
       unknownPolls = status.status === 'unknown' ? unknownPolls + 1 : 0
       if (unknownPolls >= MAX_UNKNOWN_POLLS) {
-        status = await finalOutcomeCheck({ db, queryId, operationType, pollAfterTime, sleep })
+        try {
+          status = await finalOutcomeCheck({ db, queryId, operationType, pollAfterTime, sleep })
+        } catch (error) {
+          // The request's own error, not the check's wrapped message.
+          const cause = error instanceof Error && error.cause !== undefined ? error.cause : error
+          throw stopWithoutOutcome(`the final check of every replica failed (${describeError(cause)})`)
+        }
         if (status.status === 'unknown') {
-          input.abortSubmit?.()
-          submitAbandoned = true
-          const submitTail = submitError ? `, and the submit request failed (${describeError(submitError)})` : ''
-          throw outcomeUnknownError({
-            operationType,
-            statementIndex,
-            migrationName,
-            queryId,
-            reason: `polling found it neither running nor in system.query_log ${unknownPolls}× in a row${submitTail}`,
-          })
+          throw stopWithoutOutcome(`polling found it neither running nor in system.query_log ${unknownPolls}× in a row`)
         }
         unknownPolls = 0
       }
@@ -452,7 +453,11 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
 
       if (status.status === 'failed') {
         // Only a statement the server rejected before it started (#767) ran
-        // nothing: one that failed while it ran can have applied some writes.
+        // nothing: one that failed while it ran can have applied some writes,
+        // so its fenced started record stays for the operator to reconcile.
+        if (status.beforeStart !== true) {
+          throw failedWhileRunningError({ operationType, statementIndex, migrationName, queryId, error: status.error ?? '<unknown>' })
+        }
         const failedOp: OperationState = {
           operationIndex: statementIndex,
           operationKey,
@@ -464,16 +469,13 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
           lastError: status.error ?? '<unknown>',
           fingerprint,
           // A rejection the server recorded for this id: a re-run may retry it.
-          ...(status.beforeStart === true ? { attemptFenced: true } : {}),
+          attemptFenced: true,
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
         await journalStore.writeMigrationState(
           upsertOperation(baseState, failedOp, now),
         )
-        if (status.beforeStart !== true) {
-          throw failedWhileRunningError({ operationType, statementIndex, migrationName, queryId, error: status.error ?? '<unknown>' })
-        }
         throw new Error(
           `Async migration step ${operationType} failed (query_id ${queryId}): ${status.error ?? '<unknown>'}`,
         )
@@ -566,7 +568,9 @@ export type RecordedAttempt =
   | { kind: 'failed'; error: string }
   /** An attempt of this statement without a server-recorded outcome. */
   | { kind: 'unknown'; reason: string }
-  /** No attempt to resolve: none, a server-recorded failure or an abandon, or another statement's SQL. */
+  /** A prepared attempt a fresh journal read shows was never sent: it ran nothing. */
+  | { kind: 'unsent' }
+  /** No attempt to resolve: none, a rejection the server recorded, or an abandon. */
   | { kind: 'ended' }
 
 const NO_ENTRY_REASON =
@@ -577,6 +581,10 @@ const UNVERIFIED_FAILURE_REASON =
   'the journal records it as failed, but not from a rejection the server recorded before it started (an earlier chkit release recorded it, it failed while it ran, or a run lost its submit response), so some of its writes may have been applied'
 const WHILE_PROCESSING_REASON =
   'the server reports it failed while it ran (ExceptionWhileProcessing), and a statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts)'
+const STALE_PREPARED_REASON =
+  'the journal records it as prepared, not sent, but chkit cannot read every copy of the journal to rule out a newer record of it (one that may have been sent)'
+const OTHER_SQL_REASON =
+  "it ran other SQL than the statement now has (an edit, or a plugin's onBeforeApply rewrite)"
 const NOT_RECORDED_RUNNING =
   'but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends'
 const FAILED_RUNNING =
@@ -597,6 +605,8 @@ const ABANDONED_PREFIX = 'abandoned via chkit migrate --abandon (was '
  */
 export async function resolveRecordedAttempt(input: {
   db: ClickHouseExecutor
+  journalStore: JournalStore
+  migrationName: string
   op: OperationState | undefined
   fingerprint: string
   queryId: string
@@ -605,11 +615,14 @@ export async function resolveRecordedAttempt(input: {
   sleep: (ms: number) => Promise<void>
 }): Promise<RecordedAttempt> {
   const { db, op, fingerprint, queryId, operationType, sleep } = input
-  const ofStatement = op !== undefined && op.queryId !== '' && (op.fingerprint === '' || op.fingerprint === fingerprint)
+  // The record is read as it was recorded, whatever SQL the statement has
+  // now (an edit, a plugin's onBeforeApply rewrite).
+  const recorded = op !== undefined && op.queryId !== ''
+  const otherSql = op !== undefined && op.fingerprint !== '' && op.fingerprint !== fingerprint
   // Only this release writes a prepared record, and only under an id of its
   // own, so its id names that attempt alone too.
-  const prepared = ofStatement && op.status === 'started' && op.lastError === PREPARED_RECORD_MARKER
-  const fenced = ofStatement && op.status === 'started' && op.attemptFenced === true && !prepared
+  const prepared = recorded && op.status === 'started' && op.lastError === PREPARED_RECORD_MARKER
+  const fenced = recorded && op.status === 'started' && op.attemptFenced === true && !prepared
   const afterTime = fenced || prepared ? queryLogLowerBound(journalTimeMs(op.startedAt)) : undefined
   let status = await checkInFlight(db, queryId, operationType, afterTime)
   if (afterTime !== undefined && status.status === 'unknown') {
@@ -619,7 +632,7 @@ export async function resolveRecordedAttempt(input: {
     status = await recheckThroughFlush(db, queryId, operationType, afterTime, sleep)
   }
   if (status.status === 'running') {
-    if (op !== undefined && op.fingerprint !== '' && op.fingerprint !== fingerprint) {
+    if (otherSql) {
       // The running attempt is the SQL its record names (#599): an attempt
       // of other SQL, kept by --abandon and an edit, must not finish as this one.
       throw new Error(
@@ -628,19 +641,39 @@ export async function resolveRecordedAttempt(input: {
     }
     return { kind: 'running', afterTime, reason: op?.status === 'failed' ? FAILED_RUNNING : NOT_RECORDED_RUNNING }
   }
-  if (afterTime !== undefined) {
-    if (status.status === 'finished') return { kind: 'finished', status }
+  if (op !== undefined && afterTime !== undefined) {
+    if (status.status === 'finished') return otherSql ? { kind: 'unknown', reason: OTHER_SQL_REASON } : { kind: 'finished', status }
     if (status.status === 'failed') {
       return status.beforeStart === true
         ? { kind: 'failed', error: status.error ?? '<unknown>' }
         : { kind: 'unknown', reason: WHILE_PROCESSING_REASON }
     }
-    // A prepared attempt with nothing of its id on the server was never sent.
-    return prepared ? { kind: 'ended' } : { kind: 'unknown', reason: NO_ENTRY_REASON }
+    if (!prepared) return { kind: 'unknown', reason: NO_ENTRY_REASON }
+    // A prepared attempt with nothing of its id on the server was never sent,
+    // when no copy of the journal holds a newer record of it.
+    return (await preparedIsCurrent(input.journalStore, input.migrationName, op))
+      ? { kind: 'unsent' }
+      : { kind: 'unknown', reason: STALE_PREPARED_REASON }
   }
-  if (!ofStatement || op.status === 'completed') return { kind: 'ended' }
+  if (!recorded || op.status === 'completed') return { kind: 'ended' }
   if (op.status === 'started') return { kind: 'unknown', reason: UNFENCED_REASON }
   return isRecordedFailure(op) ? { kind: 'ended' } : { kind: 'unknown', reason: UNVERIFIED_FAILURE_REASON }
+}
+
+/**
+ * Whether a journal read that covers every copy of the journal still holds
+ * `op` as prepared (#767): a read of one replica behind a load balancer can
+ * return a prepared row that another replica has superseded with a record of
+ * an attempt that may have been sent. A read that fails counts as no.
+ */
+async function preparedIsCurrent(journalStore: JournalStore, migrationName: string, op: OperationState): Promise<boolean> {
+  try {
+    if (!(await journalStore.readsEveryCopy())) return false
+    const current = await journalStore.readStoredOperation(migrationName, op.operationIndex)
+    return current?.status === 'started' && current.queryId === op.queryId && current.lastError === PREPARED_RECORD_MARKER
+  } catch {
+    return false
+  }
 }
 
 /** Whether a failed record was a rejection the server recorded before the statement started, or an abandon (#767). */

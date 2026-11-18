@@ -15,6 +15,9 @@ function makeJournalStore(): JournalStore {
     async readStoredOperation(_name: string, index: number) {
       return state?.operations.find((op) => op.operationIndex === index)
     },
+    async readsEveryCopy() {
+      return true
+    },
     async writeMigrationState(next: MigrationRowState) {
       state = next
     },
@@ -70,12 +73,12 @@ describe('applyAsyncStatement — transient poll errors', () => {
     expect(result.kind).toBe('completed')
   })
 
-  test('gives up after the budget with a re-run/re-attach hint, not a silent abort', async () => {
+  test('gives up after the budget with async_outcome_unknown, not a silent abort', async () => {
     const db = makeDb([{ status: 'unknown' }, 'throw524']) // unknown once, then 524 forever
 
     await expect(
       applyAsyncStatement({ ...base, db, journalStore: makeJournalStore() }),
-    ).rejects.toThrow('re-attach')
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown' })
   })
 
   test('the give-up message says "polling failed 21×", matching chkit-py', async () => {
@@ -86,7 +89,7 @@ describe('applyAsyncStatement — transient poll errors', () => {
     ).rejects.toMatchObject({
       // The attempt's id is random (#767).
       message: expect.stringMatching(
-        /^Async migration step load_table_data \(query_id [0-9a-f-]{36}\): polling failed 21× \(ClickHouse request failed: error code: 524\)\. The load may still be running server-side — re-run `chkit migrate --apply` to re-attach\.$/,
+        /^Async migration step load_table_data \(statement 2 of 20260101_load, query_id [0-9a-f-]{36}\): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: polling failed 21× in a row \(ClickHouse request failed: error code: 524\)\. Nothing was submitted/,
       ),
     })
   })

@@ -243,6 +243,9 @@ class RemoteClickHouseClient:
         # Never start a request after the caller gave up on it (#767).
         if before_send is not None:
             before_send()
+            commit = getattr(before_send, "commit", None)
+            if commit is not None:
+                commit()
         # The API takes the id as a top-level field and ignores a query_id
         # setting, which would leave the query under a random id.
         result = workbench_query_execute(

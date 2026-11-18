@@ -212,17 +212,21 @@ export function createRemoteExecutor(deps: {
 		},
 
 		async submit(sql, queryId?, settings?, options?) {
-			// Never start a request after the caller gave up on it (#767).
+			// Never start a request after the caller gave up on it (#767): the
+			// signal also aborts the fetch while it connects.
 			options?.signal?.throwIfAborted()
 			const apiSettings = toApiSettings(settings)
-			const res = await client.workbench.query.execute({
-				serviceSlug,
-				query: sql,
-				...(apiSettings ? { settings: apiSettings } : {}),
-				// The API takes the id as a top-level field and ignores a
-				// `query_id` setting, which would leave the query under a random id.
-				...(queryId ? { queryId } : {}),
-			})
+			const res = await client.workbench.query.execute(
+				{
+					serviceSlug,
+					query: sql,
+					...(apiSettings ? { settings: apiSettings } : {}),
+					// The API takes the id as a top-level field and ignores a
+					// `query_id` setting, which would leave the query under a random id.
+					...(queryId ? { queryId } : {}),
+				},
+				options?.signal ? { signal: options.signal } : undefined,
+			)
 			throwIfError(res)
 			return queryId ?? res.query_id ?? 'submitted'
 		},

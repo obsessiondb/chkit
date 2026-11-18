@@ -883,6 +883,32 @@ class JournalStore:
             )
         )
 
+    def reads_every_copy(self) -> bool:
+        """Whether a journal read returns the newest record on every copy (#767).
+
+        It reads every replica, or the journal has one copy.
+        """
+        # A multi-replica journal is read on every replica, and that read
+        # fails when one of them cannot be read.
+        if self._replica_fanout() is not None:
+            return True
+        rows = self._client.query(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() "
+            f"AND name = '{self._table}'"
+        ).rows
+        if rows and not re.match(r"^(Replicated|Shared)", str(rows[0]["engine"])):
+            return True
+        # A replicated journal without a fanout: only one replica may hold it.
+        cluster = self._cluster or "default"
+        try:
+            hosts = self._client.query(
+                "SELECT count(DISTINCT hostName()) AS replicas FROM "
+                f"clusterAllReplicas('{_escape_sql_string(cluster)}', system.one)"
+            ).rows
+        except Exception:
+            return False
+        return bool(hosts) and int(hosts[0]["replicas"]) == 1
+
     def stores_attempt_fences(self) -> bool:
         """Whether the journal stores an async attempt's fence (#767).
 

@@ -30,6 +30,9 @@ describe('@chkit/clickhouse write settings e2e (#767)', () => {
         // Stored when the command returned: a buffered insert would wait out
         // the profile's 30 s flush timeout.
         expect(await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)).toEqual([{ n: '1' }])
+        // The insert API too; chkit-py sends the same (#767, round 4).
+        await executor.insert({ table: `${env.clickhouseDatabase}.${prefix}t`, values: [{ id: 2, marker }] })
+        expect(await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)).toEqual([{ n: '2' }])
       } finally {
         await executor.close()
       }

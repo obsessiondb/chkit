@@ -197,12 +197,12 @@ async function resolveAsyncAttemptBeforeSync(input: {
   fingerprint: string
   operationType: string
   log: (line: string) => void
-}): Promise<'completed' | 'run'> {
+}): Promise<'completed' | 'run' | 'unsent'> {
   const { op, file } = input
   if (op.status === 'completed' || op.queryId === '') return 'run'
   const recorded = await resolveRecordedAttempt({
-    db: input.db, op, fingerprint: input.fingerprint, queryId: op.queryId, operationType: input.operationType,
-    log: input.log, sleep: defaultSleep,
+    db: input.db, journalStore: input.journalStore, migrationName: file, op, fingerprint: input.fingerprint, queryId: op.queryId,
+    operationType: input.operationType, log: input.log, sleep: defaultSleep,
   })
   switch (recorded.kind) {
     case 'running':
@@ -218,6 +218,8 @@ async function resolveAsyncAttemptBeforeSync(input: {
         upsertOperation(input.state, { ...op, status: 'failed', finishedAt: isoWithoutZone(new Date()), lastError: recorded.error }, Date.now),
       )
       return 'run'
+    case 'unsent':
+      return 'unsent'
     case 'ended':
       return 'run'
   }
@@ -421,11 +423,13 @@ export async function applyMigration(input: {
       continue
     }
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
+    let resolved: 'completed' | 'run' | 'unsent' = 'run'
     if (priorAttempt !== undefined && stateBefore !== null) {
-      const resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, operationType: identity.type, log })
+      resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, operationType: identity.type, log })
       if (resolved === 'completed') continue
     }
-    if (priorAttempt !== undefined && operation?.beforeRetry) {
+    // An async attempt that was never sent ran nothing: no before-retry SQL.
+    if (priorAttempt !== undefined && operation?.beforeRetry && resolved !== 'unsent') {
       try {
         await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
           cluster: config.clickhouse?.cluster,
@@ -602,7 +606,7 @@ async function acceptEditedMigration(input: {
     )
   }
   const rebased = rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) })
-  await assertRecordedAttemptsResolved(input.db, file, state, rebased, input.log)
+  await assertRecordedAttemptsResolved(input.db, journalStore, file, state, rebased, input.log)
   await journalStore.writeMigrationState(rebased)
 }
 
@@ -615,6 +619,7 @@ async function acceptEditedMigration(input: {
 // the only trace of an attempt under a random id (#701).
 async function assertRecordedAttemptsResolved(
   db: ClickHouseExecutor,
+  journalStore: JournalStore,
   file: string,
   state: MigrationRowState,
   rebased: MigrationRowState,
@@ -622,7 +627,7 @@ async function assertRecordedAttemptsResolved(
 ): Promise<void> {
   for (const op of state.operations) {
     if (op.status === 'completed' || op.queryId === '') continue
-    const recorded = await resolveRecordedAttempt({ db, op, fingerprint: op.fingerprint, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })
+    const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName: file, op, fingerprint: op.fingerprint, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })
     if (recorded.kind === 'running') throw attemptStillRunningError(file, op)
     const dropped = !rebased.operations.includes(op)
     const reason =

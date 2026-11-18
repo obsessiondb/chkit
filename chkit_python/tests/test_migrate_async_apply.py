@@ -199,6 +199,8 @@ class _FakeJournalStore:
     # False is a journal without the operation_fingerprints column, which
     # stores no fence (#767).
     fingerprints: bool = True
+    # Whether a journal read covers every copy of the journal (#767).
+    every_copy: bool = True
 
     def __post_init__(self) -> None:
         if self.writes is None:
@@ -214,6 +216,9 @@ class _FakeJournalStore:
 
     def stores_attempt_fences(self) -> bool:
         return self.fingerprints
+
+    def reads_every_copy(self) -> bool:
+        return self.every_copy
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         assert self.writes is not None
@@ -273,6 +278,7 @@ class _ScriptedClient:
     ) -> str:
         if before_send is not None:
             before_send()
+            before_send.commit()
         self.events.append("submit")
         self.submitted.append((statement, query_id))
         self.sent_settings.append(("submit", settings))
@@ -455,11 +461,11 @@ def test_apply_async_already_completed_skips_entirely() -> None:
     assert client.submitted == []
 
 
-def test_apply_async_a_failure_while_it_runs_is_recorded_unfenced_and_stops() -> None:
-    """#767 (round 3): a statement that fails while it runs can leave some of
-    its writes applied, so the failure is recorded without the fence and the
-    run stops with async_outcome_unknown: no re-run compensates or runs it
-    again before the operator reconciles and abandons."""
+def test_apply_async_a_failure_while_it_runs_keeps_the_fenced_record_and_stops() -> None:
+    """#767 (rounds 3 and 4): a statement that fails while it runs can leave
+    some of its writes applied, so the run stops with async_outcome_unknown
+    and writes nothing: the fenced started record keeps the attempt's
+    identity for the operator to reconcile."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="unknown"),
@@ -474,10 +480,10 @@ def test_apply_async_a_failure_while_it_runs_is_recorded_unfenced_and_stops() ->
         info.value.message
     )
     assert journal.writes is not None
-    failed = journal.writes[-1].operations[0]
-    assert (failed.status, failed.last_error, failed.attempt_fenced) == (
-        "failed", "ALTER failed", False
-    )
+    assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
+    assert journal.state is not None
+    recorded = journal.state.operations[0]
+    assert (recorded.last_error, recorded.attempt_fenced) == (_ATTEMPT_MARKER, True)
 
 
 def test_apply_async_gives_up_after_poll_error_budget_with_ts_message() -> None:
@@ -486,16 +492,18 @@ def test_apply_async_gives_up_after_poll_error_budget_with_ts_message() -> None:
         statuses=[QueryStatus(status="unknown")]
         + [poll_error] * (migrate_async_apply.MAX_TRANSIENT_POLL_ERRORS + 1)
     )
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(MigrateError) as raised:
         apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
     query_id = _submitted_query_id(client.submitted)
-    # Same text as the TS port, byte for byte: a multiplication sign, not "x".
-    assert str(raised.value) == (
-        f"Async migration step alter_table_modify_column (query_id {query_id}): "
-        "polling failed 21\u00d7 (ClickHouse request failed: error code: 524). "
-        "The load may still be running server-side — re-run "
-        "`chkit migrate --apply` to re-attach."
-    )
+    # #767 (round 4): the poll budget ends without an outcome, as in TS. Same
+    # text as the TS port: a multiplication sign, not "x".
+    assert raised.value.code == "async_outcome_unknown"
+    assert (
+        f"(statement 1 of 20260101_000000_async.sql, query_id {query_id}): the journal "
+        "records an attempt of it and no replica runs it, but chkit cannot tell whether it "
+        "finished: polling failed 21\u00d7 in a row (ClickHouse request failed: error code: "
+        "524). Nothing was submitted"
+    ) in raised.value.message
 
 
 def test_apply_async_resubmit_runs_before_retry(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -758,17 +766,14 @@ def test_apply_async_poll_budget_exhausted_names_submit_error(submit_fails: bool
         submit_raises=RuntimeError("Authentication failed") if submit_fails else None,
     )
     journal = _FakeJournalStore()
-    with pytest.raises(RuntimeError) as excinfo:
+    with pytest.raises(MigrateError) as excinfo:
         apply_async_statement(_input(client=client, journal=journal))
-    submit_tail = (
-        " The submit request failed too (Authentication failed)." if submit_fails else ""
-    )
-    assert str(excinfo.value) == (
-        f"Async migration step alter_table_modify_column (query_id "
-        f"{_submitted_query_id(client.submitted)}): "
-        f"polling failed 21\u00d7 (HTTP 502: bad gateway).{submit_tail} The load may still "
-        "be running server-side — re-run `chkit migrate --apply` to re-attach."
-    )
+    submit_tail = ", and the submit request failed (Authentication failed)" if submit_fails else ""
+    assert excinfo.value.code == "async_outcome_unknown"
+    assert (
+        f"polling failed 21\u00d7 in a row (HTTP 502: bad gateway){submit_tail}. Nothing was "
+        "submitted"
+    ) in excinfo.value.message
     # The outcome is unknown, so the attempt stays started for a re-run to re-attach.
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started", "started"]
@@ -1317,6 +1322,10 @@ _WHILE_PROCESSING_REASON = (
     "that fails while it runs can leave some of its writes applied (parts of an INSERT ... "
     "SELECT, a DDL that ran on some hosts)"
 )
+_STALE_PREPARED_REASON = (
+    "the journal records it as prepared, not sent, but chkit cannot read every copy of the "
+    "journal to rule out a newer record of it (one that may have been sent)"
+)
 _UNFENCED_REASON = (
     "an earlier chkit release recorded it, or the journal could not store the record's "
     "fence (it has no operation_fingerprints column), so its query id may name earlier "
@@ -1783,14 +1792,12 @@ def test_a_started_attempt_that_a_recheck_finds_running_is_attached_to(
     [
         {"status": "failed", "finished_at": "2026-05-26 10:05:00.000", "last_error": "boom"},
         {"query_id": ""},
-        {"fingerprint": "v1:other"},
     ],
-    ids=["failed-attempt", "no-query-id", "other-sql"],
+    ids=["failed-attempt", "no-query-id"],
 )
 def test_rerun_reads_system_processes_only_for(overrides: dict[str, Any]) -> None:
-    """Only a started attempt of this statement's SQL can have finished unseen:
-    a failed one has its outcome, a sync record never ran under this id, and
-    an attempt of other SQL that finished did not run this statement."""
+    """Only a started attempt can have finished unseen: a failed one has its
+    outcome, and a sync record never ran under this id."""
     client = _ScriptedClient(
         statuses=[
             QueryStatus(status="finished", written_rows=16, duration_ms=8000),
@@ -1819,7 +1826,7 @@ def test_an_attach_leaves_the_fenced_record_and_a_rerun_records_its_finish() -> 
             *[RuntimeError("HTTP 502: bad gateway") for _ in range(21)],
         ]
     )
-    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
+    with pytest.raises(MigrateError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal, before_retry=None))
     assert journal.writes == []
     assert set(first.status_ids[1:]) == {_OWN_ID}
@@ -1890,7 +1897,7 @@ def test_a_rerun_before_query_log_has_the_finished_attempt_waits_for_it(
             *[RuntimeError("HTTP 502: bad gateway") for _ in range(21)],
         ]
     )
-    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
+    with pytest.raises(MigrateError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal))
 
     # Run 2: the load ended; its QueryFinish reaches query_log on the third check.
@@ -1958,7 +1965,7 @@ def test_a_rerun_finds_a_retried_attempt_that_ran_on_a_replica_3s_behind(
         strict=True,
     )
     _advance_clock(monkeypatch, first)
-    with pytest.raises(RuntimeError, match="polling failed 21\u00d7"):
+    with pytest.raises(MigrateError, match="polling failed 21\u00d7"):
         apply_async_statement(_rerun_input(first, journal))
     assert journal.writes is not None
     retried = journal.writes[-1].operations[0]
@@ -2141,6 +2148,7 @@ class _NeverSettlingSubmitClient(_ScriptedClient):
     ) -> str:
         if before_send is not None:
             before_send()
+            before_send.commit()
         self.submitted.append((statement, query_id))
         self.release.wait(timeout=30)
         return query_id or "auto-id"
@@ -2262,6 +2270,8 @@ def test_an_attempt_whose_read_back_lags_stays_prepared_and_the_next_run_submits
     assert second.every_replica[:6] == [True] * 6
     assert len(second.submitted) == 1
     assert second.submitted[0][1] != prepared_id
+    # #767 (round 4): it ran nothing, so no before-retry SQL runs.
+    assert second.executed == []
 
 
 class _FlakyReadJournal(_FakeJournalStore):
@@ -2312,4 +2322,71 @@ def test_an_attempt_whose_second_read_back_fails_goes_back_to_prepared(
     assert [w.operations[0].last_error for w in journal.writes] == [
         _PREPARED_MARKER, _ATTEMPT_MARKER, _PREPARED_MARKER
     ]
+
+
+class _StalePreparedJournal(_FakeJournalStore):
+    """A replica read returns the prepared row; the journal's newest record is
+    the move to "may have been sent"."""
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        op = super().read_stored_operation(name, index)
+        if op is None:
+            return None
+        return op.model_copy(update={"last_error": _ATTEMPT_MARKER})
+
+
+@pytest.mark.parametrize("every_copy", [False, True], ids=["one-copy-read", "newer-record"])
+def test_a_prepared_record_that_a_fresh_read_does_not_confirm_stops(
+    every_copy: bool, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 4): a prepared row read from a lagging replica is no proof
+    the attempt was never sent. Unless a read of every copy of the journal
+    still holds it prepared, the run stops and keeps the record."""
+    client = _ScriptedClient(statuses=list(_NO_ENTRY_CHECKS), strict=True)
+    _advance_clock(monkeypatch, client)
+    journal_cls = _StalePreparedJournal if every_copy else _FakeJournalStore
+    journal = journal_cls(
+        state=_started_record(last_error=_PREPARED_MARKER), every_copy=every_copy
+    )
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_rerun_input(client, journal))
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message == _outcome_unknown(_OWN_ID, _STALE_PREPARED_REASON)
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+@pytest.mark.parametrize("failure", ["polls", "final-check"])
+def test_a_poll_budget_exit_with_a_submit_that_never_settles_stops_at_once(
+    failure: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 4): every exit of the poll budget (failed polls, a failed
+    final check) gives up on the submit and stops with async_outcome_unknown,
+    without waiting for a submit that never settles."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    statuses: list[QueryStatus | BaseException] = (
+        [QueryStatus(status="unknown"), *[RuntimeError("HTTP 502") for _ in range(21)]]
+        if failure == "polls"
+        else [
+            QueryStatus(status="unknown"),
+            *[QueryStatus(status="unknown") for _ in range(20)],
+            RuntimeError("ALL_CONNECTION_TRIES_FAILED"),
+        ]
+    )
+    client = _NeverSettlingSubmitClient(statuses)
+    started = time.monotonic()
+    try:
+        with pytest.raises(MigrateError) as info:
+            apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+    assert info.value.code == "async_outcome_unknown"
+    expected = (
+        "polling failed 21\u00d7 in a row (HTTP 502)"
+        if failure == "polls"
+        else "the final check of every replica failed (ALL_CONNECTION_TRIES_FAILED)."
+    )
+    assert expected in info.value.message
 

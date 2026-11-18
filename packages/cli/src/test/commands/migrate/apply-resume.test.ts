@@ -8,7 +8,7 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
 
 import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
-import { ATTEMPT_RECORD_MARKER } from '../../../commands/migrate/async-apply.js'
+import { ATTEMPT_RECORD_MARKER, PREPARED_RECORD_MARKER } from '../../../commands/migrate/async-apply.js'
 import { abandonMigrationState } from '../../../commands/migrate/abandon.js'
 import { MigrateError } from '../../../commands/migrate/errors.js'
 import type {
@@ -34,6 +34,9 @@ function createFakeStore(initial: MigrationRowState | null = null) {
     },
     async readStoredOperation(_name, index) {
       return current?.operations.find((op) => op.operationIndex === index)
+    },
+    async readsEveryCopy() {
+      return true
     },
     async storesAttemptFences() {
       return true
@@ -796,7 +799,7 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
   // runs anything: a QueryFinish records the statement completed, a server
   // failure is journaled failed before the before-retry SQL, and no evidence
   // stops the run with nothing written or run.
-  function modeOnlyEdit(status: 'finished' | 'failed' | 'unknown') {
+  function modeOnlyEdit(status: 'finished' | 'failed' | 'unknown', lastError: string = ATTEMPT_RECORD_MARKER) {
     const sql = 'INSERT INTO db.a SELECT 1;'
     const original = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n-- before-retry: TRUNCATE TABLE db.a\n${sql}\n`
     const edited = original.replace('mode=async', 'mode=sync')
@@ -804,7 +807,7 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     const fake = createFakeStore(inProgressState(checksumSQL(original), [{
       ...operation(0, 'started', { type: 'load_table_data', key: 'table:db.a' }),
       queryId: 'fenced-query-id',
-      lastError: ATTEMPT_RECORD_MARKER,
+      lastError,
       fingerprint: statementFingerprint(sql),
       attemptFenced: true,
     }]))
@@ -860,6 +863,60 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     expect(commands).toEqual([])
     expect(fake.writes).toEqual([])
   }, 20_000)
+
+  // #767 (round 4): a prepared attempt with nothing of its id on the server
+  // was never sent and ran nothing, so the sync run gets no before-retry SQL.
+  test('a mode-only async to sync edit of a prepared attempt runs without before-retry SQL', async () => {
+    const { run, dir, sql, commands } = modeOnlyEdit('unknown', PREPARED_RECORD_MARKER)
+    await run
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commands).toEqual([sql])
+    // The edit's check and the sync path each look the id up, through the
+    // query_log flush rechecks (10 s each).
+  }, 40_000)
+
+  // #767 (round 4): with the file unchanged, a plugin's onBeforeApply rewrite
+  // changes the statement's fingerprint. The recorded attempt is still read as
+  // it was recorded, so a load that may have left rows stops the run instead
+  // of being compensated and run again.
+  for (const recorded of ['fenced-started', 'unverified-failed'] as const) {
+    test(`a plugin rewrite never skips the reconcile of a recorded attempt (${recorded})`, async () => {
+      const statement = 'INSERT INTO db.a SELECT 1;'
+      const sql = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n-- before-retry: TRUNCATE TABLE db.a\n${statement}\n`
+      const dir = writeMigration(sql)
+      const fake = createFakeStore(inProgressState(checksumSQL(sql), [{
+        ...operation(0, recorded === 'fenced-started' ? 'started' : 'failed', { type: 'load_table_data', key: 'table:db.a' }),
+        queryId: 'recorded-query-id',
+        lastError: recorded === 'fenced-started' ? ATTEMPT_RECORD_MARKER : 'error code: 524',
+        fingerprint: statementFingerprint(statement),
+        attemptFenced: recorded === 'fenced-started',
+      }]))
+      const commands: string[] = []
+      const submits: string[] = []
+      const db = {
+        async query() { return [{ now_ms: '1700000000000', database: 'db' }] },
+        async queryStatus() { return { status: 'unknown' } },
+        async submit(query: string) { submits.push(query); return 'x' },
+        async command(command: string) { commands.push(command) },
+      } as unknown as ClickHouseExecutor
+
+      await expect(applyMigration({
+        db, journalStore: fake.store,
+        pluginRuntime: fakePluginRuntime((statements) => statements.map((s) => s.replace('SELECT 1', 'SELECT 2'))),
+        config: CONFIG, tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql', log: () => {},
+      })).rejects.toMatchObject({
+        // A started record of other SQL stops at the recorded-statements
+        // check; a failed one at the record's own outcome.
+        code: recorded === 'fenced-started' ? 'statement_split_changed' : 'async_outcome_unknown',
+      })
+      rmSync(dir, { recursive: true, force: true })
+
+      expect(commands).toEqual([])
+      expect(submits).toEqual([])
+      expect(fake.writes).toEqual([])
+    })
+  }
 
   // #767 (round 3): an edit of only the marker's key drops the record of an
   // async attempt that an earlier release journaled failed without a server

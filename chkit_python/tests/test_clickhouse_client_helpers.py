@@ -28,7 +28,7 @@ from chkit.clickhouse import (
     is_unknown_database_error,
     wrap_connection_error,
 )
-from chkit.clickhouse.client import clickhouse_error_message
+from chkit.clickhouse.client import SUBMIT_CONNECT_TIMEOUT_SECONDS, clickhouse_error_message
 from chkit.clickhouse.control import run_control_request
 from chkit.core.model import ChxResolvedClickHouseConfig
 
@@ -368,8 +368,14 @@ def test_every_driver_waits_without_a_timeout_as_ts(
     assert len(drivers) == 2
     for driver, kwargs in drivers:
         assert kwargs["connect_timeout"] is None
-        assert (driver.timeout.connect_timeout, driver.timeout.read_timeout) == (None, None)
         assert driver._progress_interval == expected_interval
+    session, submit = drivers[0][0], drivers[1][0]
+    assert (session.timeout.connect_timeout, session.timeout.read_timeout) == (None, None)
+    # The submit driver bounds connecting, so a run that gives up on a submit
+    # can tell a late send is excluded (#767); its response is not timed out.
+    assert (submit.timeout.connect_timeout, submit.timeout.read_timeout) == (
+        SUBMIT_CONNECT_TIMEOUT_SECONDS, None
+    )
     client.close()
 
 
