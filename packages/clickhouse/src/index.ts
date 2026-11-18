@@ -21,7 +21,7 @@ import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clic
 import { getLogger } from '@logtape/logtape'
 import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
-import { createAdmissionAgent, isSendNotAdmitted, type SubmitAdmission } from './send-admission.js'
+import { createAdmissionAgent, isSendNotAdmitted, recordingAdmission, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
 import {
 	parseConstraintsFromCreateTableQuery,
 	parseEngineFromCreateTableQuery,
@@ -1113,14 +1113,15 @@ export function createExecutorWithClient(
 			// the server could run the query under an id queryStatus() never sees (#353).
 			const { query_id: _ignored, ...clickhouseSettings } = settings ?? {}
 			let target = fireAndForgetClient
-			if (admission) {
+			const recorded = admission ? recordingAdmission(admission) : undefined
+			if (recorded) {
 				admissionClient ??= createStatelessClickHouseClient(
 					config,
 					{ wait_end_of_query: 0 },
 					{ httpAgent: createAdmissionAgent(config.url, admissions) },
 				)
 				target = admissionClient
-				admissions.set(id, admission)
+				admissions.set(id, recorded.admission)
 			}
 			try {
 				await target.command({
@@ -1129,7 +1130,8 @@ export function createExecutorWithClient(
 					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
 			} catch (error) {
-				if (isSendNotAdmitted(error)) throw error
+				// A refused request was never written, whatever the driver says.
+				if (recorded?.refused() || isSendNotAdmitted(error)) throw sendNotAdmittedError()
 				wrapConnectionError(error, config.url, config.username)
 			} finally {
 				if (admission) admissions.delete(id)

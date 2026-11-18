@@ -1,4 +1,4 @@
-import { createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
+import { type createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
 import { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, untilAborted } from './async-backfill.js'

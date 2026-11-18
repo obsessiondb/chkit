@@ -52,7 +52,9 @@ export interface BackfillOptions {
   /** Aborting it stops the run: no read is waited for and no new chunk is
    *  sent, no progress is reported after the last report finishes, and
    *  executeBackfill rejects with a `BackfillInterruptedError`. Chunks already
-   *  sent keep running on the server; their progress says they may have run. */
+   *  sent keep running on the server; their progress says they may have run.
+   *  Needs an executor with `submitSendsOnce`: another one could send after
+   *  the interrupt returned, so executeBackfill refuses it. */
   signal?: AbortSignal
 }
 
@@ -148,25 +150,30 @@ function updateChunk(
   return { ...progress, [id]: next }
 }
 
+// The first format that saved each query id before its submit.
+const ID_BEFORE_SUBMIT_VERSION = 2
+
 /**
- * Progress an older release saved, in this release's terms. It saved a
- * chunk's query id only after the submit returned, so a chunk it lists as
- * pending, submitted or running without one, or not at all, may have run
- * under the chunk's id: it is recorded under that id, which this release
- * reads as "may have run".
+ * Progress in another format, in this release's terms. A `singleSend` from
+ * another format proves nothing: a release that ignores it (a rollback to an
+ * older one) keeps it and may resend the id. Version 2 already saved each
+ * query id before its submit, so its pending chunk without one was never
+ * sent. Any other format (an older release's, which saved the id only after
+ * the submit returned) may list a chunk as pending, submitted or running
+ * without an id, or not at all, after it ran under the chunk's id: it is
+ * recorded under that id, which this release reads as "may have run".
  */
 function upgradeProgress(
   planId: string,
   chunks: Array<{ id: string }>,
   progress: BackfillProgress,
+  version: number | undefined,
 ): BackfillProgress {
   let upgraded = progress
   for (const chunk of chunks) {
     const saved = progress[chunk.id]
-    // A `singleSend` from another format proves nothing: a release that
-    // ignores it (a rollback to an older one) keeps it and may resend the id.
     const { singleSend: _untrusted, ...state } = saved ?? { status: 'pending' as const }
-    if (state.status === 'done' || state.status === 'failed' || state.queryId !== undefined) {
+    if (version === ID_BEFORE_SUBMIT_VERSION || state.status === 'done' || state.status === 'failed' || state.queryId !== undefined) {
       if (saved) upgraded = updateChunk(upgraded, chunk.id, state)
       continue
     }
@@ -657,8 +664,13 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     signal,
   } = options
 
+  if (signal && executor.submitSendsOnce !== true) {
+    throw new Error(
+      'An interruptible backfill needs an executor with submitSendsOnce, which sends once and asks the run\'s admission as its request is created: another executor could send a chunk after the interrupt returned.',
+    )
+  }
   const saved = resumeFrom && checkpointVersion !== CHECKPOINT_VERSION
-    ? upgradeProgress(planId, chunks, resumeFrom)
+    ? upgradeProgress(planId, chunks, resumeFrom, checkpointVersion)
     : resumeFrom
   let progress: BackfillProgress = Object.fromEntries(
     chunks.map((chunk) => {

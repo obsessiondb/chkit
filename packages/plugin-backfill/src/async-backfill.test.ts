@@ -1440,6 +1440,20 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     await expect(run).rejects.toThrow(`Backfill plan ${PLAN_ID}: interrupted.`)
   })
 
+  // Round 5 item 5: a version-2 writer saved each id before its submit, so
+  // its pending chunk without one was never sent; only singleSend is dropped.
+  test('a version-2 checkpoint keeps its never-sent chunks and drops singleSend', async () => {
+    const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'] })
+    await expect(runOnce(server, { c1: { status: 'failed', queryId: firstId, singleSend: true } }, { replayFailed: true, checkpointVersion: 2 }))
+      .rejects.toThrow(unknownError(firstId, 'an older release may have sent it more than once under this query id, so the failure in system.query_log may not be its last send'))
+    expect(server.submits).toEqual([])
+
+    const fresh = createSimulatedServer({ nextOutcomes: ['finished'] })
+    const result = await runOnce(fresh, { c1: { status: 'pending' } }, { checkpointVersion: 2 })
+    expect(fresh.submits).toEqual([firstId])
+    expect(result.progress.c1?.status).toBe('done')
+  })
+
   // Round 4 item 3: the checkpoint a rollback to an older release rewrites
   // without a version keeps this release's singleSend markers; that release
   // may have resent the ids, so the markers prove nothing (shared fixture).
@@ -1589,6 +1603,20 @@ describe('executeBackfill interrupted around the send (#765, round 4)', () => {
         return 'INSERT INTO t SELECT 1'
       },
     }))
+  })
+
+  // Round 5 item 4: an executor that cannot refuse a send as its request is
+  // created could send after the interrupt returned.
+  test('an interruptible run refuses an executor without submitSendsOnce', async () => {
+    const generic: ClickHouseExecutor = { ...createMockExecutor(new Map()), submitSendsOnce: undefined }
+
+    await expect(executeBackfill({
+      executor: generic,
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }],
+      buildQuery: () => 'SELECT 1',
+      signal: new AbortController().signal,
+    })).rejects.toThrow('An interruptible backfill needs an executor with submitSendsOnce')
   })
 })
 

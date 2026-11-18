@@ -130,6 +130,8 @@ const result = await executeBackfill({
   // older release reported: a chunk it lists as pending, or not at all, may
   // have run, and is not submitted again without acceptUnknown.
   checkpointVersion: CHECKPOINT_VERSION,
+  // signal: an AbortSignal that stops the run; it needs an executor with
+  // submitSendsOnce (the native one), so no chunk is sent after it aborts.
   onProgress: async (progress) => {
     saved = progress
     // persist to disk / state store

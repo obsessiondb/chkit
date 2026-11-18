@@ -240,7 +240,7 @@ describe('run lock durability and ownership (#765, round 3)', () => {
     const script = `
       const { withRunLock } = await import(${JSON.stringify(RUN_LOCK_MODULE)})
       const { executeBackfill } = await import(${JSON.stringify(ASYNC_BACKFILL_MODULE)})
-      const executor = { query: () => { console.log('reading'); return new Promise(() => undefined) }, submit: async () => '' }
+      const executor = { submitSendsOnce: true, query: () => { console.log('reading'); return new Promise(() => undefined) }, submit: async () => '' }
       await withRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)}, (signal) => executeBackfill({
         executor, planId: ${JSON.stringify(PLAN_ID)}, chunks: [{ id: 'c1' }], buildQuery: () => 'SELECT 1',
         resumeFrom: { c1: { status: 'pending' } }, signal,

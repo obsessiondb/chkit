@@ -162,6 +162,10 @@ class _ThreadLocalExecutor:
         # request whose connection was reset, and run the chunk twice.
         return self._client().submit_once(statement, query_id or str(uuid.uuid4()))
 
+    def prepare_submit_once(self) -> object:
+        """Open this thread's client and its ``submit_once`` driver."""
+        return self._client().prepare_submit_once()
+
     def submit_once(self, statement: str, query_id: str) -> str:
         """``ClickHouseClient.submit_once``: one send, and the backfill's
         ``SEND_ADMISSION`` asked at the transport."""

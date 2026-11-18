@@ -7,7 +7,6 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 
 from __future__ import annotations
 
-import contextlib
 import json
 import logging
 import os
@@ -16,11 +15,13 @@ import threading
 import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
+from dataclasses import dataclass
 from typing import Any, Literal, NoReturn, Protocol, Self
 from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import httpx
+from clickhouse_connect.driver import httputil  # type: ignore[import-untyped]
 from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
     DatabaseError,
 )
@@ -120,9 +121,10 @@ class ClickHouseClient:
         "_client",
         "_closed",
         "_config",
+        "_send_once_client",
+        "_send_once_pool",
         "_submit_client",
         "_submit_client_lock",
-        "_submit_once_lock",
     )
 
     def __init__(self, client: Any, config: ChxResolvedClickHouseConfig) -> None:
@@ -131,8 +133,9 @@ class ClickHouseClient:
         # The driver `submit` sends through, opened on first use.
         self._submit_client: Any = None
         self._submit_client_lock = threading.Lock()
-        # submit_once swaps the submit driver's pool for one request at a time.
-        self._submit_once_lock = threading.Lock()
+        # The driver submit_once sends through, with a pool of its own.
+        self._send_once_client: Any = None
+        self._send_once_pool: Any = None
         self._closed = False
 
     @classmethod
@@ -202,8 +205,14 @@ class ClickHouseClient:
         self._client.close()
         with self._submit_client_lock:
             submit_client, self._submit_client = self._submit_client, None
+            send_once_client, self._send_once_client = self._send_once_client, None
+            send_once_pool, self._send_once_pool = self._send_once_pool, None
         if submit_client is not None:
             submit_client.close()
+        if send_once_client is not None:
+            send_once_client.close()
+        if send_once_pool is not None:
+            send_once_pool.clear()
 
     def __enter__(self) -> Self:
         return self
@@ -396,20 +405,44 @@ class ClickHouseClient:
         request whose connection the remote closed, even with
         ``query_retries=0``, and the same id must never name a second send of
         a write (a backfill chunk could run twice). A connection failure
-        raises instead. TS's client sends a request once. When
-        ``SEND_ADMISSION`` is set and refuses, nothing is sent and
-        ``SendNotAdmittedError`` is raised."""
-        driver = self._submit_driver()
-        with self._submit_once_lock:
-            pool = driver.http
-            driver.http = _SingleAttemptPool(
-                pool, "A backfill chunk's request cannot be resent after a connection failure"
-            )
-            try:
-                driver.command(statement, settings={**(settings or {}), "query_id": query_id})
-            finally:
-                driver.http = pool
+        raises instead. TS's client sends a request once.
+
+        It sends through a driver with a urllib3 pool of its own, whose
+        ``urlopen`` asks the ``SEND_ADMISSION`` of this request only (a
+        context variable: an unrelated request, or another thread's, never
+        answers for it). When the admission refuses, nothing is sent and
+        ``SendNotAdmittedError`` is raised. ``prepare_submit_once`` opens
+        that driver ahead of the send."""
+        driver = self.prepare_submit_once()
+        token = _CURRENT_SEND.set(_Send(SEND_ADMISSION.get()))
+        try:
+            driver.command(statement, settings={**(settings or {}), "query_id": query_id})
+        finally:
+            _CURRENT_SEND.reset(token)
         return query_id
+
+    def prepare_submit_once(self) -> Any:
+        """Open the driver ``submit_once`` sends through, if it is not open
+        yet: connection setup, which may stall, done before a caller admits
+        a send."""
+        with self._submit_client_lock:
+            client = self._send_once_client
+        if client is None and not self._closed:
+            pool = _own_pool_manager(self._config.url)
+            # Opened outside the lock, so close() does not wait for it.
+            opened = self._open_driver(self._config, autogenerate_session_id=False, pool_mgr=pool)
+            with self._submit_client_lock:
+                if self._send_once_client is None and not self._closed:
+                    self._send_once_client = opened
+                    self._send_once_pool = pool
+                client = self._send_once_client
+            if client is not opened:
+                opened.close()
+                pool.clear()
+        if self._closed or client is None:
+            msg = "ClickHouse client is closed."
+            raise RuntimeError(msg)
+        return client
 
     def _submit_driver(self) -> Any:
         with self._submit_client_lock:
@@ -576,10 +609,10 @@ class ClickHouseClient:
 class SendAdmission(Protocol):
     """Asked by ``submit_once`` right before its request enters the transport
     (#765). ``admit`` returning False sends nothing. ``handed_off`` is called
-    once the request has entered urllib3's ``urlopen``, or once the send ended
-    without getting there; it may be called more than once. A caller that
-    stops can therefore wait until every admitted send has handed off, and
-    know that no request of it starts afterwards."""
+    once the request has entered urllib3's ``urlopen``; a caller also ends its
+    own wait when ``submit_once`` returns or raises without getting there. A
+    caller that stops can therefore wait until every admitted send has handed
+    off, and know that no request of it starts afterwards."""
 
     def admit(self) -> bool: ...
 
@@ -597,16 +630,66 @@ class SendNotAdmittedError(RuntimeError):
     """``submit_once`` did not send: ``SEND_ADMISSION`` refused it."""
 
 
+@dataclass
+class _Send:
+    """One ``submit_once`` request: its admission, and whether it was sent."""
+
+    admission: SendAdmission | None
+    sent: bool = False
+
+
+_CURRENT_SEND: ContextVar[_Send | None] = ContextVar("chkit_current_send", default=None)
+
+
+def _own_pool_manager(url: str) -> Any:
+    """A urllib3 pool for ``submit_once`` alone, built as clickhouse-connect
+    builds its default one (an environment proxy included), with a stable
+    ``urlopen`` that resolves the current request's own ``_Send``. It is
+    never shared, and the hook is never removed."""
+    parsed = urlparse(url)
+    scheme = parsed.scheme
+    port = parsed.port or (443 if scheme == "https" else 80)
+    proxy = httputil.check_env_proxy(scheme, parsed.hostname or "", port)
+    if proxy and scheme == "https":
+        pool = httputil.get_pool_manager(https_proxy=proxy)
+    elif proxy:
+        pool = httputil.get_pool_manager(
+            http_proxy=proxy if proxy.startswith("http") else f"http://{proxy}"
+        )
+    else:
+        pool = httputil.get_pool_manager()
+    install_send_hook(pool)
+    return pool
+
+
+def install_send_hook(pool: Any) -> None:
+    """Make ``pool.urlopen`` ask the current request's admission (#765)."""
+    original = pool.urlopen
+
+    def urlopen(method: str, url: str, *args: Any, **kwargs: Any) -> Any:
+        send = _CURRENT_SEND.get()
+        if send is None:
+            return original(method, url, *args, **kwargs)
+        if send.sent:
+            msg = "A backfill chunk's request cannot be resent after a connection failure"
+            raise RuntimeError(msg)
+        if send.admission is not None and not send.admission.admit():
+            msg = "The request was not sent: its caller stopped"
+            raise SendNotAdmittedError(msg)
+        send.sent = True
+        if send.admission is not None:
+            # In the transport: the request starts whatever happens next.
+            send.admission.handed_off()
+        return original(method, url, *args, **{**kwargs, "retries": False})
+
+    pool.urlopen = urlopen
+
+
 class _SingleAttemptPool:
     """Allow one driver HTTP send and disable urllib3's separate retry budget."""
 
-    def __init__(
-        self,
-        pool: Any,
-        message: str = "A tracked migration request cannot be replayed after a connection failure",
-    ) -> None:
+    def __init__(self, pool: Any) -> None:
         self._pool = pool
-        self._message = message
         self._sent = False
 
     def __getattr__(self, name: str) -> Any:
@@ -614,29 +697,10 @@ class _SingleAttemptPool:
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
         if self._sent:
-            raise RuntimeError(self._message)
-        admission = SEND_ADMISSION.get()
-        if admission is not None and not admission.admit():
-            msg = "The request was not sent: its caller stopped"
-            raise SendNotAdmittedError(msg)
+            msg = "A tracked migration request cannot be replayed after a connection failure"
+            raise RuntimeError(msg)
         self._sent = True
-        if admission is None:
-            return self._pool.request(*args, **{**kwargs, "retries": False})
-        pool = self._pool
-        original = pool.urlopen
-
-        def urlopen(*urlopen_args: Any, **urlopen_kwargs: Any) -> Any:
-            # In the transport: the request starts whatever happens next.
-            admission.handed_off()
-            return original(*urlopen_args, **urlopen_kwargs)
-
-        pool.urlopen = urlopen
-        try:
-            return pool.request(*args, **{**kwargs, "retries": False})
-        finally:
-            with contextlib.suppress(AttributeError):
-                del pool.urlopen
-            admission.handed_off()
+        return self._pool.request(*args, **{**kwargs, "retries": False})
 
 
 def _use_ts_timeouts(client: Any) -> None:

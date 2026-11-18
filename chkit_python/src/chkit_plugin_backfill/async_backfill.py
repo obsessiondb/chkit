@@ -154,16 +154,24 @@ def _escape_like_prefix(prefix: str) -> str:
     )
 
 
+_ID_BEFORE_SUBMIT_VERSION = 2
+
+
 def _upgrade_progress(
-    plan_id: str, chunk_ids: list[str], progress: BackfillProgress
+    plan_id: str,
+    chunk_ids: list[str],
+    progress: BackfillProgress,
+    version: int | None,
 ) -> BackfillProgress:
-    """Progress in another format, in this release's terms. An older release
-    saved a chunk's query id only after the submit returned, so a chunk it
-    lists as pending, submitted or running without one, or not at all, may
-    have run under the chunk's id: it is recorded under that id, which this
-    release reads as "may have run". A ``single_send`` from another format
-    proves nothing: a release that ignores it (a rollback to an older one)
-    keeps it and may resend the id."""
+    """Progress in another format, in this release's terms. A ``single_send``
+    from another format proves nothing: a release that ignores it (a rollback
+    to an older one) keeps it and may resend the id. Version 2 already saved
+    each query id before its submit, so its pending chunk without one was
+    never sent. Any other format (an older release's, which saved the id only
+    after the submit returned) may list a chunk as pending, submitted or
+    running without an id, or not at all, after it ran under the chunk's id:
+    it is recorded under that id, which this release reads as "may have
+    run"."""
     upgraded = dict(progress)
     for chunk_id in chunk_ids:
         saved = progress.get(chunk_id)
@@ -172,7 +180,8 @@ def _upgrade_progress(
             if saved is not None
             else BackfillChunkState(status="pending")
         )
-        if state.status in {"done", "failed"} or state.query_id is not None:
+        ids_saved_first = version == _ID_BEFORE_SUBMIT_VERSION
+        if ids_saved_first or state.status in {"done", "failed"} or state.query_id is not None:
             if saved is not None:
                 upgraded[chunk_id] = state
             continue
@@ -721,8 +730,15 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     stops the run: no new chunk starts, no progress is reported after the
     last report finishes, and a ``BackfillInterruptedError`` is raised.
     Chunks already submitted keep running on the server."""
+    if stop is not None and not callable(getattr(executor, "submit_once", None)):
+        msg = (
+            "An interruptible backfill needs an executor with submit_once, which sends "
+            "once and asks the run's admission at the transport: another executor could "
+            "send a chunk after the interrupt returned."
+        )
+        raise ValueError(msg)
     saved = (
-        _upgrade_progress(plan_id, chunk_ids, resume_from)
+        _upgrade_progress(plan_id, chunk_ids, resume_from, checkpoint_version)
         if resume_from is not None and checkpoint_version != CHECKPOINT_VERSION
         else resume_from
     )
@@ -995,6 +1011,12 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         submit."""
         query_id = attempt.query_id or ""
         sql = build_query(chunk_id)
+        # Connection setup, which may stall, happens before the admission:
+        # a stop that comes meanwhile refuses the send, and close() never
+        # waits for it.
+        prepare = getattr(executor, "prepare_submit_once", None)
+        if callable(prepare):
+            prepare()
         if not admit():
             return None
         released = [False]

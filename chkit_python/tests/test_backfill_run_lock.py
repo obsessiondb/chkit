@@ -303,6 +303,8 @@ class Empty:
         return Result([])
     def submit(self, statement, query_id=None):
         raise AssertionError("submitted")
+    def submit_once(self, statement, query_id):
+        raise AssertionError("submitted")
 
 with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, lambda stop: execute_backfill(
     executor=Empty(), plan_id={PLAN_ID!r}, chunk_ids=["c1"], build_query=lambda _c: "SELECT 1",
@@ -336,6 +338,8 @@ class Hung:
         print("reading", flush=True)
         threading.Event().wait(60)
     def submit(self, statement, query_id=None):
+        raise AssertionError("submitted")
+    def submit_once(self, statement, query_id):
         raise AssertionError("submitted")
 
 with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, lambda stop: execute_backfill(

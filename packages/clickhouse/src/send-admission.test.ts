@@ -1,4 +1,6 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { spawnSync } from 'node:child_process'
+import net from 'node:net'
 import http from 'node:http'
 import https from 'node:https'
 import type { AddressInfo } from 'node:net'
@@ -7,18 +9,26 @@ import { createStatelessClickHouseExecutor, isSendNotAdmitted, type ClickHouseEx
 import { createAdmissionAgent } from './send-admission.js'
 
 // A stand-in for ClickHouse's HTTP interface that records each request's
-// query_id and answers it at once, as a finished command.
+// query_id and answers it, after `answerAfterMs`, as a finished command.
 let server: http.Server
 const received: string[] = []
 let url = ''
+let inFlight = 0
+let peakInFlight = 0
+let answerAfterMs = 0
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
     received.push(new URL(req.url ?? '/', 'http://localhost').searchParams.get('query_id') ?? '')
+    inFlight++
+    peakInFlight = Math.max(peakInFlight, inFlight)
     req.resume()
     req.on('end', () => {
-      res.writeHead(200, { 'X-ClickHouse-Summary': '{}' })
-      res.end()
+      setTimeout(() => {
+        inFlight--
+        res.writeHead(200, { 'X-ClickHouse-Summary': '{}' })
+        res.end()
+      }, answerAfterMs)
     })
   })
   await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
@@ -29,8 +39,17 @@ afterAll(async () => {
   await new Promise<void>((resolve) => server.close(() => resolve()))
 })
 
-function executor(): ClickHouseExecutor {
-  return createStatelessClickHouseExecutor({ url, username: 'default', password: '', database: 'default' })
+function executor(target = url): ClickHouseExecutor {
+  return createStatelessClickHouseExecutor({ url: target, username: 'default', password: '', database: 'default' })
+}
+
+/** A loopback port nothing listens on. */
+async function closedPort(): Promise<number> {
+  const probe = net.createServer()
+  await new Promise<void>((resolve) => probe.listen(0, '127.0.0.1', resolve))
+  const { port } = probe.address() as AddressInfo
+  await new Promise<void>((resolve) => probe.close(() => resolve()))
+  return port
 }
 
 describe('submit with an admission (#765)', () => {
@@ -99,6 +118,65 @@ describe('createAdmissionAgent', () => {
     expect(agent.maxSockets).toBe(3)
     expect((agent as unknown as { keepAlive: boolean }).keepAlive).toBe(false)
     agent.destroy()
+  })
+})
+
+// Round 5: the refusal is the submit's own record, so a socket error the
+// driver sees for the destroyed request cannot hide it.
+describe('a refused submit stays refused', () => {
+  test('against an endpoint that refuses connections (a cold socket)', async () => {
+    const db = executor(`http://127.0.0.1:${await closedPort()}`)
+
+    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-cold-1', undefined, { admit: () => false }).catch((e: unknown) => e)
+
+    expect(isSendNotAdmitted(error)).toBe(true)
+    await db.close()
+  })
+
+  test('on a reused keep-alive socket', async () => {
+    const db = executor()
+    await db.submit('INSERT INTO t SELECT 1', 'warm-1', undefined, { admit: () => true })
+
+    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-warm-1', undefined, { admit: () => false }).catch((e: unknown) => e)
+
+    expect(isSendNotAdmitted(error)).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(received).not.toContain('refused-warm-1')
+    await db.close()
+  })
+
+  test('keeps the socket limit of clickhouse.url: excess submits queue', async () => {
+    const db = executor(`${url}/?max_open_connections=1`)
+    answerAfterMs = 100
+    peakInFlight = 0
+
+    await Promise.all([1, 2, 3].map((n) => db.submit('INSERT INTO t SELECT 1', `capped-${n}`, undefined, { admit: () => true })))
+
+    answerAfterMs = 0
+    expect(received).toEqual(expect.arrayContaining(['capped-1', 'capped-2', 'capped-3']))
+    expect(peakInFlight).toBe(1)
+    await db.close()
+  })
+
+  // The same checks under Node, which the published CLI runs on.
+  test('under Node: a cold refusal stays refused, and the socket limit holds on HTTP and HTTPS agents', async () => {
+    const dist = new URL('../dist/index.js', import.meta.url).pathname
+    const agentModule = new URL('../dist/send-admission.js', import.meta.url).pathname
+    const script = `
+      const { createStatelessClickHouseExecutor, isSendNotAdmitted } = await import(${JSON.stringify(dist)})
+      const { createAdmissionAgent } = await import(${JSON.stringify(agentModule)})
+      const db = createStatelessClickHouseExecutor({ url: 'http://127.0.0.1:${await closedPort()}', username: 'default', password: '', database: 'default' })
+      const error = await db.submit('INSERT INTO t SELECT 1', 'refused-node-1', undefined, { admit: () => false }).catch((e) => e)
+      await db.close()
+      const http = createAdmissionAgent('http://h/?max_open_connections=3', new Map())
+      const https = createAdmissionAgent('https://h/?max_open_connections=2', new Map())
+      console.log(JSON.stringify({ refused: isSendNotAdmitted(error), http: http.maxSockets, https: https.maxSockets }))
+      http.destroy(); https.destroy()
+    `
+    const node = spawnSync('node', ['--input-type=module', '-e', script], { encoding: 'utf8' })
+
+    expect(node.stderr).toBe('')
+    expect(JSON.parse(node.stdout.trim())).toEqual({ refused: true, http: 3, https: 2 })
   })
 })
 

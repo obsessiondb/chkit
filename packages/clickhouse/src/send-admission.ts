@@ -47,8 +47,9 @@ export function admissionAgentOptions(url: string): { keepAlive: boolean; maxSoc
 
 /**
  * An agent that asks the admission registered under a request's query_id
- * when Node (or Bun) creates that request. The request is handed to the
- * agent first, then destroyed if refused, so the driver sees the error.
+ * when Node (or Bun) creates that request, before any socket is assigned.
+ * The caller reads the refusal from its own record (see `recordingAdmission`):
+ * a socket error (ECONNREFUSED, EPERM) can reach the driver first.
  */
 export function createAdmissionAgent(url: string, admissions: Map<string, SubmitAdmission>): http.Agent {
   const options = admissionAgentOptions(url)
@@ -57,12 +58,34 @@ export function createAdmissionAgent(url: string, admissions: Map<string, Submit
     : new http.Agent(options)) as RequestAgent
   const addRequest = agent.addRequest.bind(agent)
   agent.addRequest = (req, requestOptions) => {
-    addRequest(req, requestOptions)
+    // Admission is decided before the agent touches a socket. A refused
+    // request is still handed to the agent (the driver only sees an error on
+    // a request that has one) and destroyed at once, so nothing is written.
     const queryId = new URL(req.path, 'http://localhost').searchParams.get('query_id')
     const admission = queryId === null ? undefined : admissions.get(queryId)
-    if (!admission || queryId === null) return
-    admissions.delete(queryId)
-    if (!admission.admit()) req.destroy(sendNotAdmittedError())
+    if (admission && queryId !== null) admissions.delete(queryId)
+    const admitted = admission ? admission.admit() : true
+    addRequest(req, requestOptions)
+    if (!admitted) req.destroy(sendNotAdmittedError())
   }
   return agent
 }
+
+/**
+ * `admission`, recording whether it refused, for a submit whose driver may
+ * report another error for the destroyed request (#765).
+ */
+export function recordingAdmission(admission: SubmitAdmission): { admission: SubmitAdmission; refused: () => boolean } {
+  let refused = false
+  return {
+    admission: {
+      admit: () => {
+        const admitted = admission.admit()
+        if (!admitted) refused = true
+        return admitted
+      },
+    },
+    refused: () => refused,
+  }
+}
+

@@ -31,6 +31,7 @@ from chkit.clickhouse.client import (
     SEND_ADMISSION,
     SendNotAdmittedError,
     clickhouse_error_message,
+    install_send_hook,
 )
 from chkit.clickhouse.control import run_control_request
 from chkit.core.model import ChxResolvedClickHouseConfig
@@ -213,9 +214,38 @@ def test_tracked_execute_blocks_the_pinned_drivers_remote_close_retry() -> None:
 
 
 # #765: a backfill chunk resent under its attempt id after a connection reset
-# could run twice before any read sees either run.
-def test_submit_once_blocks_the_pinned_drivers_remote_close_retry() -> None:
+class _FakePoolManager:
+    """A urllib3 PoolManager stand-in: ``request`` enters ``urlopen``, as the
+    real one does; ``urlopen`` records each request, optionally failing or
+    pausing first."""
+
+    def __init__(self, error: Exception | None = None) -> None:
+        self.error = error
+        self.urlopened: list[str] = []
+        self.gates: dict[str, threading.Event] = {}
+
+    def request(self, method: str, url: str, **kwargs: object) -> object:
+        gate = self.gates.get(url)
+        if gate is not None:
+            gate.wait(5)
+        return self.urlopen(method, url, **kwargs)
+
+    def clear(self) -> None:
+        pass
+
+    def urlopen(self, method: str, url: str, **kwargs: object) -> object:
+        self.urlopened.append(url)
+        if self.error is not None:
+            raise self.error
+        return MagicMock(status=200)
+
+
+def _send_once_client(
+    pool: _FakePoolManager, *, hook: bool = True
+) -> tuple[ClickHouseClient, MagicMock]:
     client, _fake = _stub_client()
+    if hook:
+        install_send_hook(pool)
     driver = MagicMock()
     driver.headers = {}
     driver.params = {}
@@ -224,36 +254,32 @@ def test_submit_once_blocks_the_pinned_drivers_remote_close_retry() -> None:
     driver._autogenerate_query_id = False
     driver.url = "http://localhost:8123"
     driver.server_host_name = None
-    pool = driver.http
+    driver.http = pool
+    client._send_once_client = driver
+    return client, driver
+
+
+# #765: a backfill chunk resent under its attempt id after a connection reset
+# could run twice before any read sees either run.
+def test_submit_once_blocks_the_pinned_drivers_remote_close_retry() -> None:
     error = ProtocolError("remote closed")
     error.__context__ = ConnectionResetError("reset")
-    pool.request.side_effect = error
-
-    def command(statement: str, **_kwargs: object) -> None:
-        HttpClient._raw_request(driver, statement, {})
-
-    driver.command.side_effect = command
-    client._submit_client = driver
+    pool = _FakePoolManager(error)
+    client, driver = _send_once_client(pool)
+    driver.command.side_effect = lambda statement, **_kw: HttpClient._raw_request(driver, statement, {})
 
     with pytest.raises(RuntimeError, match="cannot be resent after a connection failure"):
         client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
-    assert pool.request.call_count == 1
-    assert pool.request.call_args.kwargs["retries"] is False
-    assert driver.http is pool
+    assert len(pool.urlopened) == 1
 
 
 # #765 round 3: a backfill that stopped asks again at the transport, after
 # any lazy connection setup, so no request starts once it returned.
 def test_submit_once_sends_nothing_when_the_send_admission_refuses() -> None:
-    client, _fake = _stub_client()
-    driver = MagicMock()
-    pool = driver.http
+    pool = _FakePoolManager()
+    client, driver = _send_once_client(pool)
+    driver.command.side_effect = lambda statement, **_kw: pool.request("POST", "http://ch/")
 
-    def command(statement: str, **_kwargs: object) -> None:
-        driver.http.request("POST", "http://localhost/")
-
-    driver.command.side_effect = command
-    client._submit_client = driver
     class Refuse:
         def admit(self) -> bool:
             return False
@@ -268,11 +294,52 @@ def test_submit_once_sends_nothing_when_the_send_admission_refuses() -> None:
     finally:
         SEND_ADMISSION.reset(token)
 
-    pool.request.assert_not_called()
-    assert driver.http is pool
+    assert pool.urlopened == []
 
 
-# #765: submit_once sends through the submit driver, opened with the same
+class _Counting:
+    def __init__(self) -> None:
+        self.handed_off_count = 0
+
+    def admit(self) -> bool:
+        return True
+
+    def handed_off(self) -> None:
+        self.handed_off_count += 1
+
+
+# #765 round 5: the hook answers for the request that enters it only. Two
+# workers, and an unrelated request, share one pool here (the worst case).
+def test_a_send_hands_off_only_when_its_own_request_enters_the_transport() -> None:
+    pool = _FakePoolManager()
+    pool.gates["http://ch/a"] = threading.Event()
+    client_a, driver_a = _send_once_client(pool)
+    client_b, driver_b = _send_once_client(pool, hook=False)
+    driver_a.command.side_effect = lambda statement, **_kw: pool.request("POST", "http://ch/a")
+    driver_b.command.side_effect = lambda statement, **_kw: pool.request("POST", "http://ch/b")
+    a, b = _Counting(), _Counting()
+
+    def send(client: ClickHouseClient, admission: _Counting, query_id: str) -> None:
+        token = SEND_ADMISSION.set(admission)
+        try:
+            client.submit_once("INSERT INTO t SELECT 1", query_id)
+        finally:
+            SEND_ADMISSION.reset(token)
+
+    worker_a = threading.Thread(target=send, args=(client_a, a, "a"))
+    worker_a.start()
+    time.sleep(0.05)
+    # A waits before urlopen. B's INSERT and an unrelated request enter it.
+    send(client_b, b, "b")
+    pool.request("GET", "http://ch/unrelated")
+    assert (a.handed_off_count, b.handed_off_count) == (0, 1)
+
+    pool.gates["http://ch/a"].set()
+    worker_a.join(5)
+    assert (a.handed_off_count, b.handed_off_count) == (1, 1)
+    assert pool.urlopened == ["http://ch/b", "http://ch/unrelated", "http://ch/a"]
+
+
 # connection settings (TLS included) as the client's other drivers.
 def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
     monkeypatch: pytest.MonkeyPatch,

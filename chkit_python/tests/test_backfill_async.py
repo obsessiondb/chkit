@@ -28,6 +28,7 @@ from chkit.clickhouse.client import (
     ClickHouseClient,
     QueryStatus,
     SendNotAdmittedError,
+    install_send_hook,
 )
 from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit_plugin_backfill.async_backfill import (
@@ -1984,7 +1985,8 @@ def _client_executor(pool: _FakePool) -> tuple[object, ClickHouseClient]:
             url="http://localhost:8123", username="default", password="", database="default", secure=False
         ),
     )
-    client._submit_client = driver
+    install_send_hook(pool)
+    client._send_once_client = driver
     previous = BackfillChunkState(status="failed", query_id=FIRST_ID, single_send=True)
     reads = MockExecutor(
         {FIRST_ID: [QueryStatus(status="failed", error="OOM", duration_ms=0)]}
@@ -2033,7 +2035,7 @@ def _interrupted_replay(
     return reports
 
 
-def test_an_interrupt_waits_for_an_admitted_send_to_enter_the_transport() -> None:
+def test_an_interrupt_waits_for_an_admitted_send_to_reach_the_transport() -> None:
     gate = threading.Event()
     pool = _FakePool(gate)
     executor, _client = _client_executor(pool)
@@ -2045,15 +2047,17 @@ def test_an_interrupt_waits_for_an_admitted_send_to_enter_the_transport() -> Non
         threading.Timer(0.3, gate.set).start()
         return "INSERT INTO t SELECT 1"
 
+    started = time.monotonic()
     reports = _interrupted_replay(executor, stop, build_query)
-    entered = len(pool.entered)
+    waited = time.monotonic() - started
     time.sleep(0.2)
 
-    # The interrupt returned only after the admitted request entered the
-    # transport, and nothing entered it afterwards.
-    assert entered == 1
-    assert len(pool.entered) == 1
-    assert (reports[-1]["c1"].query_id or "").startswith(f"{FIRST_ID}-")
+    # The interrupt returned only once the held send reached urlopen, where
+    # the stop refused it: nothing was sent, and the proved failure is back.
+    assert waited >= 0.25
+    assert pool.entered == []
+    assert reports[-1]["c1"].status == "failed"
+    assert reports[-1]["c1"].query_id == FIRST_ID
 
 
 def test_a_send_refused_after_its_record_saves_the_proved_failure_back_before_the_interrupt_returns() -> None:
@@ -2076,3 +2080,77 @@ def test_a_send_refused_after_its_record_saves_the_proved_failure_back_before_th
     assert any((r["c1"].query_id or "").startswith(f"{FIRST_ID}-") for r in reports)
     assert reports[-1]["c1"].status == "failed"
     assert reports[-1]["c1"].query_id == FIRST_ID
+
+
+# Round 5 item 2: connection setup that stalls happens before the chunk is
+# admitted, so it holds neither the interrupt nor the lock release.
+def test_a_stalled_connection_setup_does_not_hold_the_interrupt() -> None:
+    setup = threading.Event()
+    stop = threading.Event()
+
+    class StalledSetup(SubmitRecordingExecutor):
+        def prepare_submit_once(self) -> None:
+            stop.set()
+            setup.wait(5)
+
+    executor = StalledSetup({})
+    reports: list[BackfillProgress] = []
+    started = time.monotonic()
+
+    with pytest.raises(RuntimeError, match=rf"Backfill plan {PLAN_ID}: interrupted\."):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            poll_interval_ms=1,
+            stop=stop,
+            on_progress=reports.append,
+        )
+    assert time.monotonic() - started < 2
+    setup.set()
+    time.sleep(0.1)
+
+    assert executor.submit_order == []
+    assert reports[-1]["c1"] == BackfillChunkState(status="pending")
+
+
+# Round 5 item 4: an executor that cannot refuse a send at its transport
+# could send after the interrupt returned, so an interruptible run refuses it.
+def test_an_interruptible_run_refuses_an_executor_without_submit_once() -> None:
+    class SubmitOnly:
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            return query_id or ""
+
+        def query(self, statement: str) -> object:
+            return _Result([])
+
+    with pytest.raises(ValueError, match="An interruptible backfill needs an executor with submit_once"):
+        execute_backfill(
+            executor=SubmitOnly(),
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            stop=threading.Event(),
+        )
+
+
+# Round 5 item 5: a version-2 writer saved each id before its submit, so its
+# pending chunk without one was never sent; only its single_send is dropped.
+def test_a_version_2_checkpoint_keeps_its_never_sent_chunks_and_drops_single_send() -> None:
+    server = SimulatedServer(attempts=[_killed_first()], next_outcomes=["finished", "finished"])
+
+    with pytest.raises(RuntimeError) as raised:
+        _run_once(
+            server,
+            {"c1": BackfillChunkState(status="failed", query_id=FIRST_ID, single_send=True)},
+            replay_failed=True,
+            checkpoint_version=2,
+        )
+    assert str(raised.value) == _unknown_error(FIRST_ID, RESENT)
+    assert server.submits == []
+
+    fresh = SimulatedServer(next_outcomes=["finished"])
+    result = _run_once(fresh, {"c1": BackfillChunkState(status="pending")}, checkpoint_version=2)
+    assert fresh.submits == [FIRST_ID]
+    assert result.progress["c1"].status == "done"
