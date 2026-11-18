@@ -10,6 +10,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from chkit.cli.commands.dictionary_password_warnings import (
     detect_dictionary_password_warnings,
 )
@@ -39,6 +41,7 @@ from chkit.clickhouse.create_dictionary_parser import (
     parse_layout_from_create_dictionary_query,
     parse_lifetime_from_create_dictionary_query,
     parse_source_from_create_dictionary_query,
+    replace_source_in_create_dictionary_query,
 )
 from chkit.core.model import dictionary, is_schema_definition, table
 from chkit.core.planner import plan_diff
@@ -320,6 +323,60 @@ def test_parses_source_layout_lifetime() -> None:
     )
     assert parse_layout_from_create_dictionary_query(_PARSER_QUERY) == "HASHED()"
     assert parse_lifetime_from_create_dictionary_query(_PARSER_QUERY) == "MIN 0 MAX 300"
+
+
+def test_parses_a_source_whose_string_ends_in_an_escaped_backslash() -> None:
+    query = (
+        "CREATE DICTIONARY default.files (`id` UInt64) PRIMARY KEY id "
+        "SOURCE(FILE(PATH '/data/C:\\\\' FORMAT 'TSV')) LIFETIME(MIN 0 MAX 300) LAYOUT(FLAT())"
+    )
+    assert parse_source_from_create_dictionary_query(query) == "FILE(PATH '/data/C:\\\\' FORMAT 'TSV')"
+    assert parse_layout_from_create_dictionary_query(query) == "FLAT()"
+
+
+_REAL_SOURCE = "HTTP(URL 'https://user:fake-password@host/data?token=fake-token' FORMAT 'TSV')"
+_SOURCE_TAIL = f"SOURCE({_REAL_SOURCE}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"
+_DECOY_SOURCE_QUERIES = [
+    # A quoted name.
+    f"CREATE DICTIONARY app.d (`SOURCE(x)` UInt64) PRIMARY KEY `SOURCE(x)` {_SOURCE_TAIL}",
+    # A quoted name with a closing paren.
+    f"CREATE DICTIONARY app.d (`a) SOURCE(x` UInt64) PRIMARY KEY `a) SOURCE(x` {_SOURCE_TAIL}",
+    # A block comment.
+    f"CREATE DICTIONARY app.d (`id` UInt64) PRIMARY KEY id /* SOURCE(x) */ {_SOURCE_TAIL}",
+    # A line comment.
+    f"CREATE DICTIONARY app.d (`id` UInt64) PRIMARY KEY id -- SOURCE(x)\n{_SOURCE_TAIL}",
+    # A string literal.
+    "CREATE DICTIONARY app.d (`id` UInt64) PRIMARY KEY id "
+    f"SETTINGS(format_csv_delimiter = 'SOURCE(x)') {_SOURCE_TAIL}",
+    # Another clause.
+    f"CREATE DICTIONARY app.d (`id` UInt64) PRIMARY KEY id LAYOUT(SOURCE(x)) {_SOURCE_TAIL}",
+]
+
+
+@pytest.mark.parametrize("query", _DECOY_SOURCE_QUERIES)
+def test_finds_the_dictionary_level_source_only_outside_names_strings_comments_and_clauses(
+    query: str,
+) -> None:
+    assert parse_source_from_create_dictionary_query(query) == _REAL_SOURCE
+    masked = replace_source_in_create_dictionary_query(query, "NULL()") or ""
+    assert "SOURCE(NULL())" in masked
+    for marker in ("fake-password", "fake-token", "user:"):
+        assert marker not in masked
+
+
+def test_a_quoted_primary_key_name_stays_whole() -> None:
+    assert parse_dictionary_primary_key_from_create_dictionary_query(
+        _DECOY_SOURCE_QUERIES[0]
+    ) == ["SOURCE(x)"]
+
+
+def test_a_statement_with_no_single_top_level_source_is_not_masked() -> None:
+    twice = f"CREATE DICTIONARY app.d (`id` UInt64) PRIMARY KEY id SOURCE(NULL()) {_SOURCE_TAIL}"
+    unterminated = f"CREATE DICTIONARY app.d (`id` UInt64) PRIMARY KEY id {_SOURCE_TAIL} COMMENT 'open"
+    unbalanced = f"CREATE DICTIONARY app.d (`id` UInt64) PRIMARY KEY id SOURCE({_REAL_SOURCE}"
+    for query in (twice, unterminated, unbalanced):
+        assert replace_source_in_create_dictionary_query(query, "NULL()") is None
+        assert parse_source_from_create_dictionary_query(query) is None
 
 
 def test_returns_empty_results_for_none_query() -> None:
