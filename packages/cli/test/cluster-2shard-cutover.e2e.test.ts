@@ -71,6 +71,20 @@ describe('generate --cutover on a 2-shard cluster (#202)', () => {
     }, 300_000)
   }
 
+  // {uuid} in the sorting key is not the replication path.
+  test('stops before it creates anything when {uuid} is only in the sorting key of the table', async () => {
+    await runRefusedAtStartScenario(
+      clusterTarget(),
+      'cutover2s_uuid_key',
+      {
+        columns: 'id UInt64, user_id UInt64, payload String',
+        engine: (table) => `ReplicatedMergeTree('/clickhouse/tables/{shard}/literal_${table}', '{replica}')`,
+        orderBy: "(id, cityHash64(id, '{uuid}'))",
+      },
+      'stores has no {uuid}',
+    )
+  }, 300_000)
+
   test('refuses the backfill copy with clickhouse.cluster', async () => {
     const target = clusterTarget()
     const project = await createCutoverProject(target, 'cutover2s_backfill')

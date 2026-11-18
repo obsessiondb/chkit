@@ -122,6 +122,23 @@ def test_stops_before_it_creates_anything_when_the_stored_path_has_no_uuid(
     )
 
 
+# {uuid} in the sorting key is not the replication path.
+def test_stops_before_it_creates_anything_when_uuid_is_only_in_the_sorting_key(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_uuid_key_2s",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String",
+        engine=lambda table: (
+            f"ReplicatedMergeTree('/clickhouse/tables/{{shard}}/literal_{table}', '{{replica}}')"
+        ),
+        message="stores has no {uuid}",
+        order_by="(id, cityHash64(id, '{uuid}'))",
+    )
+
+
 def test_refuses_the_backfill_copy_with_a_cluster(target: CutoverTarget, tmp_path: Path) -> None:
     project = create_cutover_project(target, "cutover_backfill_2s", tmp_path)
     try:

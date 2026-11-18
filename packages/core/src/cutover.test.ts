@@ -176,11 +176,10 @@ describe('planCutover', () => {
     const nested = [...columns, { name: 'meta', type: 'String' }, { name: 'n', type: 'Nested(x UInt8)' }] as TableDefinition['columns']
     const start = plan({ oldDef: events({ columns: nested }), newDef: events({ columns: nested, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
     const stored = "FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
+    // ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`.
+    expect(start).toContain(`(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x'], name)) ${stored}) AS undeclared_columns`)
     expect(start).toContain(
-      `(SELECT countIf(NOT (has(['id', 'user_id', 'payload', 'meta', 'n'], name) OR arrayExists(column -> startsWith(name, concat(column, '.')), ['n']))) ${stored}) AS undeclared_columns`
-    )
-    expect(start).toContain(
-      `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) ${stored})) AS declared_columns`
+      `((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta', 'n.x']) ${stored})) AS declared_columns`
     )
     expect(start).toContain("throwIf(max(undeclared_columns) > 0, 'app.events stores a column that the schema does not declare")
     expect(start).toContain("throwIf(min(declared_columns) = 0, 'app.events lacks a column that the schema declares")
@@ -190,10 +189,11 @@ describe('planCutover', () => {
   test('checks the table stores the column types of the old definition, before it creates anything', () => {
     // The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs UInt64.
     // chkit-py's test_cutover.py asserts the same.
-    const typed = [...columns, { name: 'price', type: 'Decimal(10, 2)', nullable: true }, { name: 'n', type: 'Nested(x UInt8)' }] as TableDefinition['columns']
+    // ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders the schema's types too.
+    const typed = [...columns, { name: 'price', type: 'Decimal64(2)', nullable: true }, { name: 'n', type: 'Nested(x UInt8, `y z` Decimal64(2))' }] as TableDefinition['columns']
     const start = plan({ oldDef: events({ columns: typed }), newDef: events({ columns: typed, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
     expect(start).toContain(
-      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price'], name) AND NOT has([('id', 'UInt64'), ('user_id', 'UInt64'), ('payload', 'String'), ('price', 'Nullable(Decimal(10,2))')], (name, replaceAll(type, ' ', '')))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) AND NOT has([('id', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('UInt64')), ',\\n *', ', '), '\\n *', '')), ('user_id', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('UInt64')), ',\\n *', ', '), '\\n *', '')), ('payload', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('String')), ',\\n *', ', '), '\\n *', '')), ('price', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('Nullable(Decimal64(2))')), ',\\n *', ', '), '\\n *', '')), ('n.x', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('Array(UInt8)')), ',\\n *', ', '), '\\n *', '')), ('n.y z', replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('Array(Decimal64(2))')), ',\\n *', ', '), '\\n *', ''))], (name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     )
     expect(start).toContain("throwIf(max(mistyped_columns) > 0, 'app.events stores a column with another type than the schema declares")
   })
@@ -203,11 +203,33 @@ describe('planCutover', () => {
     // chkit-py's test_cutover.py asserts the same.
     const engine = "ReplicatedMergeTree('/clickhouse/tables/{uuid}/{shard}', '{replica}')"
     const start = plan({ oldDef: { ...OLD, engine }, newDef: { ...NEW, engine }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    // Only the engine's first argument is the path: {uuid} in a key or a setting does not count.
     expect(start).toContain(
-      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(NOT startsWith(engine, 'Replicated') OR position(engine_full, '{uuid}') > 0) FROM system.tables WHERE database = 'app' AND name = 'events')) AS uuid_path"
+      "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR (SELECT any(NOT startsWith(engine, 'Replicated') OR position(extract(engine_full, '^Replicated\\\\w*MergeTree\\\\(\\\\s*\\'((?:[^\\'\\\\\\\\]|\\\\\\\\.)*)\\''), '{uuid}') > 0) FROM system.tables WHERE database = 'app' AND name = 'events')) AS uuid_path"
     )
     expect(start).toContain("throwIf(min(uuid_path) = 0, 'The replication path that app.events stores has no {uuid}")
     expect(start).toContain("FROM clusterAllReplicas('c2', view(")
+  })
+
+  test('checks the table stores the columns the schema stores, and computes the ALIAS and EPHEMERAL ones', () => {
+    // The mirror, the copy and the verify skip an ALIAS column, so a stored one would lose its values.
+    // chkit-py's test_cutover.py asserts the same.
+    const kinds = [...columns, { name: 'label', type: 'String', defaultKind: 'ALIAS', default: { expression: 'payload' } }] as TableDefinition['columns']
+    const start = plan({ oldDef: events({ columns: kinds }), newDef: events({ columns: kinds, primaryKey: ['user_id', 'id'], orderBy: ['user_id', 'id'] }) }).operations[0]?.sql ?? ''
+    expect(start).toContain(
+      "(SELECT countIf(has(['id', 'user_id', 'payload', 'label'], name) AND NOT has([('id', 1), ('user_id', 1), ('payload', 1), ('label', 0)], (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) FROM system.columns WHERE database = 'app' AND table = 'events') AS column_kinds"
+    )
+    expect(start).toContain("throwIf(max(column_kinds) > 0, 'app.events stores a column that the schema declares ALIAS or EPHEMERAL")
+  })
+
+  test('checks on every replica that the table has no TTL when the snapshot is created AS it', () => {
+    // AS keeps the table's TTLs. chkit-py's test_cutover.py asserts the same.
+    const start = plan().operations[0]?.sql ?? ''
+    expect(start).toContain("(SELECT any(NOT match(replaceRegexpAll(create_table_query, ")
+    expect(start).toContain(", '\\\\bTTL\\\\b')) FROM system.tables WHERE database = 'app' AND name = 'events')) AS no_ttl")
+    expect(start).toContain("throwIf(min(no_ttl) = 0, 'app.events has a TTL")
+    const fromDefinition = plan({ oldDef: { ...OLD, engine: 'ReplicatedMergeTree' }, newDef: { ...NEW, engine: 'ReplicatedMergeTree' }, options: { cluster: 'c2' } }).operations[0]?.sql ?? ''
+    expect(fromDefinition).not.toContain('no_ttl')
   })
 
   test('checks a table whose snapshot comes from the old definition declares PRIMARY KEY, before ClickHouse 26.7', () => {

@@ -85,6 +85,8 @@ export interface CutoverProject {
   previous: string
   /** Rows inserted before the cutover. */
   historic: number
+  /** The table's columns in the schema, when they are not id, user_id and payload. */
+  columns?: Array<Record<string, unknown>>
 }
 
 interface WriterReport {
@@ -93,7 +95,11 @@ interface WriterReport {
   errors: string[]
 }
 
-export async function createCutoverProject(target: CutoverTarget, label: string): Promise<CutoverProject> {
+export async function createCutoverProject(
+  target: CutoverTarget,
+  label: string,
+  columns?: Array<Record<string, unknown>>,
+): Promise<CutoverProject> {
   const prefix = createPrefix(label)
   const dir = await mkdtemp(join(tmpdir(), `chkit-cutover-${label}-`))
   const project: CutoverProject = {
@@ -106,6 +112,7 @@ export async function createCutoverProject(target: CutoverTarget, label: string)
     ingest: `${prefix}ingest`,
     previous: `${prefix}events_previous`,
     historic: HISTORIC_ROWS,
+    columns,
   }
   project.env = { CHKIT_JOURNAL_TABLE: project.journalTable, CI: '1' }
   const config = {
@@ -151,9 +158,10 @@ const columns = [
   { name: 'user_id', type: 'UInt64' },
   { name: 'payload', type: 'String' },
 ]
+${project.columns ? `const tableColumns = ${JSON.stringify(project.columns)}` : 'const tableColumns = columns'}
 
 export default schema(
-  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)}${settings ? `, settings: ${JSON.stringify(settings)}` : ''} }),
+  table({ database: '${db}', name: '${project.table}', engine: ${engine}, columns: tableColumns, primaryKey: ${JSON.stringify(orderBy)}, orderBy: ${JSON.stringify(orderBy)}${settings ? `, settings: ${JSON.stringify(settings)}` : ''} }),
   table({ database: '${db}', name: '${project.byUser}', engine: ${engine}, columns: [{ name: 'user_id', type: 'UInt64' }, { name: 'id', type: 'UInt64' }], primaryKey: ['user_id'], orderBy: ['user_id', 'id'] }),
   materializedView({ database: '${db}', name: '${project.byUser}_mv', to: { database: '${db}', name: '${project.byUser}' }, as: 'SELECT user_id, id FROM ${local(project.table)}' }),
   table({ database: '${db}', name: '${project.ingest}', engine: ${engine}, columns, primaryKey: ['id'], orderBy: ['id'] }),
@@ -580,23 +588,25 @@ export async function runUndeclaredPrimaryKeyScenario(target: CutoverTarget, lab
 
 /**
  * The table is created outside chkit with `columns` and the engine that
- * `engine` returns for its name, which differ from the schema. The snapshot is created AS the table, so it would take the
- * server's state: the cutover must stop at its first statement, before it
- * creates anything.
+ * `engine` returns for its name, which differ from the schema (`schemaColumns`,
+ * or id, user_id and payload). The snapshot is created AS the table, so it
+ * would take the server's state: the cutover must stop at its first statement,
+ * before it creates anything.
  */
 export async function runRefusedAtStartScenario(
   target: CutoverTarget,
   label: string,
-  created: { columns: string; engine: (table: string) => string },
+  created: { columns: string; engine: (table: string) => string; orderBy?: string; clauses?: string },
   message: string,
+  schemaColumns?: Array<Record<string, unknown>>,
 ): Promise<void> {
-  const project = await createCutoverProject(target, label)
+  const project = await createCutoverProject(target, label, schemaColumns)
   try {
     const fqn = `${target.database}.${project.table}`
     const cluster = target.connection.cluster
     const onCluster = cluster ? ` ON CLUSTER '${cluster}'` : ''
     await target.admin.command(`DROP TABLE ${fqn}${onCluster} SYNC`)
-    await target.admin.command(`CREATE TABLE ${fqn}${onCluster} (${created.columns}) ENGINE = ${created.engine(project.table)} ORDER BY id`)
+    await target.admin.command(`CREATE TABLE ${fqn}${onCluster} (${created.columns}) ENGINE = ${created.engine(project.table)} ORDER BY ${created.orderBy ?? 'id'}${created.clauses ? ` ${created.clauses}` : ''}`)
     await pollUntil(
       () => target.admin.query<{ name: string }>(`SELECT name FROM system.tables WHERE database = '${target.database}' AND name = '${project.table}'`),
       (found) => found.length > 0,
@@ -613,6 +623,27 @@ export async function runRefusedAtStartScenario(
       `SELECT name FROM ${tables} WHERE database = '${target.database}' AND startsWith(name, '${project.table}__cutover_')`,
     )
     if (leftovers.length > 0) throw new Error(`the cutover must create nothing, found ${JSON.stringify(leftovers)}`)
+  } finally {
+    await dropCutoverProject(target, project)
+  }
+}
+
+/**
+ * The schema declares `columns`, and chkit creates the table from it.
+ * ClickHouse stores some types in another spelling (`Decimal64(2)` as
+ * `Decimal(18, 2)`), and the cutover must still accept the unchanged table.
+ */
+export async function runStoredSpellingScenario(target: CutoverTarget, label: string, columns: Array<Record<string, unknown>>): Promise<void> {
+  const project = await createCutoverProject(target, label, columns)
+  try {
+    await writeSchema(target, project, ['user_id', 'id'])
+    expectOk(cli(project, ['generate', '--name', 'cutover', '--cutover', `${target.database}.${project.table}=id`, '--json']), 'generate --cutover')
+    expectOk(cli(project, ['migrate', '--apply', '--json']), 'migrate --apply (cutover)')
+    const keys = await sortingKeys(target, project)
+    if (keys[project.table] !== 'user_id, id') throw new Error(`layouts after the cutover: ${JSON.stringify(keys)}`)
+    const [count] = await rows<{ total: number | string }>(target, `SELECT count() AS total FROM ${target.rowsOf(project.table)}`)
+    if (Number(count?.total) !== project.historic) throw new Error(`the new table must hold the ${project.historic} rows, found ${JSON.stringify(count)}`)
+    // No assertChkitClean: chkit drift reports Decimal64(2) against the stored Decimal(18, 2) on its own.
   } finally {
     await dropCutoverProject(target, project)
   }

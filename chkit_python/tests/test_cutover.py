@@ -424,15 +424,15 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
         "FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
     )
+    # ClickHouse stores `n Nested(x UInt8)` as `n.x Array(UInt8)`.
     assert (
-        "(SELECT countIf(NOT (has(['id', 'user_id', 'payload', 'meta', 'n'], name) OR "
-        "arrayExists(column -> startsWith(name, concat(column, '.')), ['n']))) "
+        "(SELECT countIf(NOT has(['id', 'user_id', 'payload', 'meta', 'n.x'], name)) "
         f"{stored}) AS undeclared_columns"
     ) in start
     assert (
         "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
-        f"(SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta']) {stored})) "
-        "AS declared_columns"
+        f"(SELECT hasAll(groupArray(name), ['id', 'user_id', 'payload', 'meta', 'n.x']) "
+        f"{stored})) AS declared_columns"
     ) in start
     assert (
         "throwIf(max(undeclared_columns) > 0, 'app.events stores a column that the schema "
@@ -446,20 +446,30 @@ def test_checks_the_table_stores_the_old_columns_no_more_and_no_fewer() -> None:
 
 def test_checks_the_table_stores_the_old_column_types() -> None:
     # The snapshot takes the types the server stores, and cityHash64 hides UInt32 vs
-    # UInt64. Before it creates anything; TS cutover.test.ts asserts the same.
+    # UInt64. ClickHouse stores Decimal64(2) as Decimal(18, 2), so the server renders
+    # the schema's types too. Before it creates anything; TS cutover.test.ts asserts
+    # the same.
     typed: list[Any] = [
         *COLUMNS,
-        {"name": "price", "type": "Decimal(10, 2)", "nullable": True},
-        {"name": "n", "type": "Nested(x UInt8)"},
+        {"name": "price", "type": "Decimal64(2)", "nullable": True},
+        {"name": "n", "type": "Nested(x UInt8, `y z` Decimal64(2))"},
     ]
     start = plan(
         old_def=events(["id"], columns=typed), new_def=events(["user_id", "id"], columns=typed)
     ).operations[0].sql
+
+    def server(type_: str) -> str:
+        return (
+            f"replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName('{type_}')), "
+            "',\\n *', ', '), '\\n *', '')"
+        )
+
     assert (
-        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price'], name) AND NOT has("
-        "[('id', 'UInt64'), ('user_id', 'UInt64'), ('payload', 'String'), "
-        "('price', 'Nullable(Decimal(10,2))')], (name, replaceAll(type, ' ', '')))) "
-        "FROM system.columns WHERE database = 'app' AND table = 'events' "
+        "(SELECT countIf(has(['id', 'user_id', 'payload', 'price', 'n.x', 'n.y z'], name) AND "
+        f"NOT has([('id', {server('UInt64')}), ('user_id', {server('UInt64')}), "
+        f"('payload', {server('String')}), ('price', {server('Nullable(Decimal64(2))')}), "
+        f"('n.x', {server('Array(UInt8)')}), ('n.y z', {server('Array(Decimal64(2))')})], "
+        "(name, type))) FROM system.columns WHERE database = 'app' AND table = 'events' "
         "AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')) AS mistyped_columns"
     ) in start
     assert (
@@ -479,15 +489,59 @@ def test_checks_every_replica_stores_uuid_in_the_path_when_the_snapshot_is_creat
         new_def=events(["user_id", "id"], engine=engine),
         cluster="c2",
     ).operations[0].sql
+    # Only the engine's first argument is the path: {uuid} in a key or a setting
+    # does not count.
+    path_regex = r"'^Replicated\\w*MergeTree\\(\\s*\'((?:[^\'\\\\]|\\\\.)*)\''"
     assert (
         "((SELECT count() FROM system.tables WHERE database = 'app' AND name = 'events') = 0 OR "
-        "(SELECT any(NOT startsWith(engine, 'Replicated') OR position(engine_full, '{uuid}') > 0) "
+        "(SELECT any(NOT startsWith(engine, 'Replicated') OR position(extract(engine_full, "
+        f"{path_regex}), '{{uuid}}') > 0) "
         "FROM system.tables WHERE database = 'app' AND name = 'events')) AS uuid_path"
     ) in start
     assert (
         "throwIf(min(uuid_path) = 0, 'The replication path that app.events stores has no {uuid}"
     ) in start
     assert "FROM clusterAllReplicas('c2', view(" in start
+
+
+def test_checks_the_table_stores_the_stored_columns_and_computes_the_alias_ones() -> None:
+    # The mirror, the copy and the verify skip an ALIAS column, so a stored one would
+    # lose its values. TS cutover.test.ts asserts the same.
+    kinds: list[Any] = [
+        *COLUMNS,
+        {"name": "label", "type": "String", "default_kind": "ALIAS", "default": "fn:payload"},
+    ]
+    start = plan(
+        old_def=events(["id"], columns=kinds), new_def=events(["user_id", "id"], columns=kinds)
+    ).operations[0].sql
+    assert (
+        "(SELECT countIf(has(['id', 'user_id', 'payload', 'label'], name) AND NOT has("
+        "[('id', 1), ('user_id', 1), ('payload', 1), ('label', 0)], "
+        "(name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
+        "FROM system.columns WHERE database = 'app' AND table = 'events') AS column_kinds"
+    ) in start
+    assert (
+        "throwIf(max(column_kinds) > 0, 'app.events stores a column that the schema declares "
+        "ALIAS or EPHEMERAL"
+    ) in start
+
+
+def test_checks_every_replica_has_no_ttl_when_the_snapshot_is_created_as_it() -> None:
+    # AS keeps the table's TTLs. TS cutover.test.ts asserts the same.
+    start = plan().operations[0].sql
+    assert "(SELECT any(NOT match(replaceRegexpAll(create_table_query, " in start
+    assert (
+        r", '\\bTTL\\b')) FROM system.tables WHERE database = 'app' AND name = 'events')) "
+        "AS no_ttl"
+    ) in start
+    assert "throwIf(min(no_ttl) = 0, 'app.events has a TTL" in start
+    engine = "ReplicatedMergeTree"
+    from_definition = plan(
+        old_def=events(["id"], engine=engine),
+        new_def=events(["user_id", "id"], engine=engine),
+        cluster="c2",
+    ).operations[0].sql
+    assert "no_ttl" not in from_definition
 
 
 def test_checks_primary_key_before_26_7_when_the_snapshot_comes_from_the_definition() -> None:

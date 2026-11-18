@@ -41,6 +41,7 @@ from chkit.core.canonical import canonicalize_definition
 from chkit.core.engine import engine_name
 from chkit.core.identifier import quote_identifier, render_qualified_name
 from chkit.core.kafka import is_kafka_engine
+from chkit.core.key_clause import split_top_level_comma
 from chkit.core.model import (
     ChxValidationError,
     ColumnDefinition,
@@ -662,58 +663,97 @@ def _create_cutover_sql(
     # The snapshot holds every column the table stores, but the mirror and the
     # copy move only the columns of the old definition: a column only the server
     # has would not reach the new table, and a copied column it lacks stops the
-    # mirror. A Nested column `n` is stored as `n.x`.
+    # mirror. ClickHouse stores `n Nested(x T)` as the column `n.x Array(T)`.
     def literals(values: list[str]) -> str:
         return "[" + ", ".join(_string_literal(value) for value in values) + "]"
 
-    nested = [column.name for column in old_columns if column.type.startswith("Nested(")]
-    stored_columns = (
+    leaves = [
+        (leaf_name, leaf_type, column.name, _is_stored(column))
+        for column in old_columns
+        for leaf_name, leaf_type in _column_leaves(column)
+    ]
+    stored = [leaf for leaf in leaves if leaf[3]]
+    live_columns = (
         f"FROM system.columns WHERE database = {_string_literal(database)} "
-        f"AND table = {_string_literal(table)} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
+        f"AND table = {_string_literal(table)}"
     )
-    nested_match = (
-        f" OR arrayExists(column -> startsWith(name, concat(column, '.')), {literals(nested)})"
-        if nested
-        else ""
-    )
+    stored_columns = f"{live_columns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')"
     undeclared_columns = (
-        f"(SELECT countIf(NOT (has({literals([column.name for column in old_columns])}, name)"
-        f"{nested_match})) {stored_columns}) AS undeclared_columns"
+        f"(SELECT countIf(NOT has({literals([leaf[0] for leaf in leaves])}, name)) "
+        f"{stored_columns}) AS undeclared_columns"
     )
     declared_columns = (
         f"({table_count(table)} = 0 OR (SELECT hasAll(groupArray(name), "
-        f"{literals([column for column in columns if column not in nested])}) "
+        f"{literals([leaf[0] for leaf in stored if leaf[2] in columns])}) "
         f"{stored_columns})) AS declared_columns"
+    )
+    # The mirror, the copy and the verify skip a column the schema declares
+    # ALIAS or EPHEMERAL. If the table stores that column, its values would not
+    # reach the new table, so the kinds must match too.
+    kind_pairs = (
+        "["
+        + ", ".join(f"({_string_literal(leaf[0])}, {1 if leaf[3] else 0})" for leaf in leaves)
+        + "]"
+    )
+    column_kinds = (
+        f"(SELECT countIf(has({literals([leaf[0] for leaf in leaves])}, name) AND NOT "
+        f"has({kind_pairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) "
+        f"{live_columns}) AS column_kinds"
     )
     # The snapshot takes the column types the server stores, and the copy then
     # converts each value to the new type. The verify hash does not see every
     # change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
-    # `Decimal(10, 2)` for `Decimal(10,2)`, so the types are compared without spaces.
-    typed = [column for column in old_columns if column.name not in nested]
+    # some types in another spelling (`Decimal64(2)` as `Decimal(18, 2)`), so the
+    # server gives the schema's type in its stored form too.
+    # toTypeName prints a named Tuple over several lines, and system.columns
+    # on one: the line breaks go. A newline in an Enum label is escaped, so no
+    # label changes.
+    def stored_type(type_: str) -> str:
+        return (
+            "replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName("
+            f"{_string_literal(type_)})), ',\\n *', ', '), '\\n *', '')"
+        )
+
     type_pairs = (
         "["
-        + ", ".join(
-            f"({_string_literal(column.name)}, {_string_literal(spaceless)})"
-            for column in typed
-            for spaceless in [re.sub(r"\s+", "", render_column_type(column))]
-        )
+        + ", ".join(f"({_string_literal(leaf[0])}, {stored_type(leaf[1])})" for leaf in stored)
         + "]"
     )
     mistyped_columns = (
-        f"(SELECT countIf(has({literals([column.name for column in typed])}, name) AND NOT "
-        f"has({type_pairs}, (name, replaceAll(type, ' ', '')))) {stored_columns}) "
-        "AS mistyped_columns"
+        f"(SELECT countIf(has({literals([leaf[0] for leaf in stored])}, name) AND NOT "
+        f"has({type_pairs}, (name, type))) {stored_columns}) AS mistyped_columns"
     )
+
+    def stored_table(condition: str, alias: str) -> str:
+        return (
+            f"({table_count(table)} = 0 OR (SELECT any({condition}) FROM system.tables "
+            f"WHERE database = {_string_literal(database)} AND name = {_string_literal(table)})) "
+            f"AS {alias}"
+        )
+
     # AS copies the replication path the server stores, which can differ from
     # the schema's. Without {uuid} the snapshot would register at the table's
-    # own path, and ClickHouse refuses that only after the mirror exists.
+    # own path, and ClickHouse refuses that only after the mirror exists. The
+    # path is the engine's first argument: {uuid} in a key or setting does not count.
     uuid_path = (
         None
         if snapshot_from_definition
-        else (
-            f"({table_count(table)} = 0 OR (SELECT any(NOT startsWith(engine, 'Replicated') OR "
-            "position(engine_full, '{uuid}') > 0) FROM system.tables WHERE database = "
-            f"{_string_literal(database)} AND name = {_string_literal(table)})) AS uuid_path"
+        else stored_table(
+            "NOT startsWith(engine, 'Replicated') OR position(extract(engine_full, "
+            f"{_string_literal(_REPLICATED_PATH_SQL_REGEX)}), '{{uuid}}') > 0",
+            "uuid_path",
+        )
+    )
+    # AS also copies the table's TTLs. A TTL merge on the snapshot could change
+    # rows before the copy, and the verify would compare the changed rows on
+    # both sides. The query is read without its strings, quoted names and comments.
+    stored_ttl = (
+        None
+        if snapshot_from_definition
+        else stored_table(
+            f"NOT match(replaceRegexpAll(create_table_query, {_string_literal(_SQL_QUOTED_REGEX)}, "
+            f"' '), {_string_literal(_TTL_WORD_REGEX)})",
+            "no_ttl",
         )
     )
     # A snapshot rendered from the old definition always declares PRIMARY KEY.
@@ -868,8 +908,10 @@ def _create_cutover_sql(
             f"{table_count(table)} AS present,",
             f"{undeclared_columns},",
             f"{declared_columns},",
+            f"{column_kinds},",
             f"{mistyped_columns},",
             *([f"{uuid_path},"] if uuid_path else []),
+            *([f"{stored_ttl},"] if stored_ttl else []),
             *([f"{declared_key},"] if declared_key else []),
             f"{table_count(names.shadow)} + {table_count(names.mirror)} + "
             f"{table_count(names.snapshot)} + {table_count(names.reconcile)} AS leftovers,",
@@ -903,6 +945,14 @@ def _create_cutover_sql(
                 "the table, and generate the cutover again."
             )
             + "),",
+            "  throwIf(max(column_kinds) > 0, "
+            + _string_literal(
+                f"{target} stores a column that the schema declares ALIAS or EPHEMERAL, or "
+                "computes a column that the schema stores, so the cutover would not copy its "
+                "values. Nothing was created or copied. Run chkit drift, change the schema to "
+                "match the table, and generate the cutover again."
+            )
+            + "),",
             "  throwIf(max(mistyped_columns) > 0, "
             + _string_literal(
                 f"{target} stores a column with another type than the schema declares, so the "
@@ -922,6 +972,20 @@ def _create_cutover_sql(
                     + "),"
                 ]
                 if uuid_path
+                else []
+            ),
+            *(
+                [
+                    "  throwIf(min(no_ttl) = 0, "
+                    + _string_literal(
+                        f"{target} has a TTL, and the cutover's snapshot, created AS the table, "
+                        "would keep it: a TTL merge could change rows before they are copied. "
+                        "Nothing was created or copied. Remove the TTL from the table for the "
+                        "cutover and add it back in a separate migration."
+                    )
+                    + "),"
+                ]
+                if stored_ttl
                 else []
             ),
             *(
@@ -1281,6 +1345,40 @@ def _is_stored(column: ColumnDefinition) -> bool:
 
 def _is_insertable(column: ColumnDefinition) -> bool:
     return column.default_kind in (None, "DEFAULT")
+
+
+# The first argument of a stored Replicated*MergeTree engine: its replication path.
+_REPLICATED_PATH_SQL_REGEX: Final = r"^Replicated\w*MergeTree\(\s*'((?:[^'\\]|\\.)*)'"
+
+# A string, quoted name or comment in a query ClickHouse stores.
+_SQL_QUOTED_REGEX: Final = (
+    r"""'(?:[^'\\]|\\.)*'|\`(?:[^\`\\]|\\.)*\`|"(?:[^"\\]|\\.)*"|--[^\n]*|/\*[\s\S]*?\*/"""
+)
+
+_TTL_WORD_REGEX: Final = r"\bTTL\b"
+
+_NESTED_TYPE: Final = re.compile(r"^Nested\s*\((.*)\)$", re.DOTALL)
+
+
+def _column_leaves(column: ColumnDefinition) -> list[tuple[str, str]]:
+    """The columns ClickHouse stores for a declared column, with their types.
+
+    With the default flatten_nested = 1, ``n Nested(x T)`` is stored as
+    ``n.x Array(T)``.
+    """
+    match = _NESTED_TYPE.match(column.type.strip())
+    if match is None:
+        return [(column.name, render_column_type(column))]
+    leaves: list[tuple[str, str]] = []
+    for field in split_top_level_comma(match.group(1)):
+        token = next((t for t in tokenize_sql(field) if not is_trivia(t)), None)
+        name = identifier_name(token) if token else None
+        if token is None or name is None:
+            # A field chkit cannot read keeps the Nested name, which ClickHouse
+            # does not store: the check refuses it.
+            return [(column.name, render_column_type(column))]
+        leaves.append((f"{column.name}.{name}", f"Array({field[token.end :].strip()})"))
+    return leaves
 
 
 def _replicated_path(engine: str) -> str | None:
