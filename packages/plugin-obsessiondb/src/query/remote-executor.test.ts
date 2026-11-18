@@ -348,6 +348,26 @@ describe('createRemoteExecutor queryStatus', () => {
 		}
 	})
 
+	test('two terminal entries of one id are unknown', async () => {
+		const meta = ['type', 'written_rows', 'written_bytes', 'query_duration_ms', 'exception', 'exception_code']
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			queryLog: {
+				meta,
+				data: [
+					['QueryFinish', '25', '200', '25000', '', '0'],
+					['ExceptionWhileProcessing', '3', '24', '100', 'Code: 241. MEMORY_LIMIT_EXCEEDED', '241'],
+				],
+			},
+		})
+		try {
+			const remote = connect(workbench.url)
+			expect(await remote.queryStatus('qid-1', { includeBeforeStart: true })).toEqual({ status: 'unknown' })
+		} finally {
+			workbench.stop()
+		}
+	})
+
 	test('a duplicate delivery alone is no failure', async () => {
 		const meta = ['type', 'written_rows', 'written_bytes', 'query_duration_ms', 'exception', 'exception_code']
 		const workbench = startScriptedWorkbench({

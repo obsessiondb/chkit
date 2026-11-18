@@ -15,22 +15,22 @@ const duplicate = row('ExceptionBeforeStart', { exception: 'Code: 216. QUERY_WIT
 
 // #767 (Opus review): every entry of the id decides its outcome, newest first.
 describe('queryLogOutcome', () => {
-  test('a QueryFinish outranks a newer ExceptionBeforeStart', () => {
+  test('a QueryFinish outranks a newer duplicate-delivery rejection', () => {
     expect(queryLogOutcome([duplicate, row('QueryFinish')])).toEqual({ status: 'finished', writtenRows: 1, writtenBytes: 8, durationMs: 10 })
-    expect(queryLogOutcome([row('ExceptionBeforeStart', { exception: 'Code: 60' }), row('QueryFinish')]).status).toBe('finished')
-  })
-
-  test('an ExceptionWhileProcessing outranks an ExceptionBeforeStart', () => {
-    expect(queryLogOutcome([row('ExceptionBeforeStart', { exception: 'Code: 60' }), row('ExceptionWhileProcessing', { exception: 'Code: 241' })])).toEqual({
-      status: 'failed',
-      durationMs: 10,
-      error: 'Code: 241',
-    })
   })
 
   test('a duplicate delivery is no failure of the query', () => {
     expect(queryLogOutcome([duplicate])).toEqual({ status: 'unknown' })
     expect(queryLogOutcome([duplicate, row('ExceptionBeforeStart', { exception: 'Code: 60' })])).toMatchObject({ status: 'failed', error: 'Code: 60', beforeStart: true })
+  })
+
+  // #767 (Opus re-review): a redelivered request that ran twice logs two
+  // terminal entries; a partial ExceptionWhileProcessing beside a QueryFinish
+  // says some writes may have been applied twice, so neither decides.
+  test('two terminal entries of one id are unknown', () => {
+    expect(queryLogOutcome([row('QueryFinish'), row('ExceptionWhileProcessing', { exception: 'Code: 241' })])).toEqual({ status: 'unknown' })
+    expect(queryLogOutcome([row('ExceptionBeforeStart', { exception: 'Code: 60' }), row('QueryFinish')])).toEqual({ status: 'unknown' })
+    expect(queryLogOutcome([duplicate, row('QueryFinish'), row('QueryFinish')])).toEqual({ status: 'unknown' })
   })
 
   test('no entry is unknown', () => {

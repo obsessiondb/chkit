@@ -32,7 +32,6 @@ Key invariants:
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import re
 import threading
@@ -485,8 +484,8 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:  # noqa:
                 ),
                 attempt_query_id,
             )
-    except Exception:
-        back_to_prepared()
+    except BaseException as error:
+        back_to_prepared(error)
         raise
     poll_after_time = _query_log_lower_bound(server_now_ms)
     # Polling decides the outcome, as in TS: the submit error is raised only
@@ -530,7 +529,7 @@ def _assert_lock_held(input_: AsyncApplyInput) -> None:
 
 def _record_attempt(
     input_: AsyncApplyInput, base_state: MigrationRowState, attempt_query_id: str, started_at: str
-) -> Callable[[], None]:
+) -> Callable[[BaseException], None]:
     """Journal the attempt before its submit, read back from the server (#767).
 
     Returns what puts the record back to prepared when the run stops before
@@ -566,16 +565,20 @@ def _record_attempt(
     _assert_attempt_stored(input_, attempt_query_id, PREPARED_RECORD_MARKER)
     write_attempt(ATTEMPT_RECORD_MARKER)
 
-    def back_to_prepared() -> None:
+    def back_to_prepared(error: BaseException) -> None:
         # Not sent: put the record back to prepared, so a re-run runs it
-        # again without an abandon (#767).
-        with contextlib.suppress(Exception):
+        # again without an abandon (#767). Ctrl-C included.
+        try:
             write_attempt(PREPARED_RECORD_MARKER)
+        except Exception as revert_error:
+            raise RuntimeError(
+                _not_reverted_message(error, revert_error, input_.migration_name)
+            ) from error
 
     try:
         _assert_attempt_stored(input_, attempt_query_id, ATTEMPT_RECORD_MARKER)
-    except Exception:
-        back_to_prepared()
+    except BaseException as error:
+        back_to_prepared(error)
         raise
     return back_to_prepared
 
@@ -1294,6 +1297,18 @@ def _assert_attempt_stored(input_: AsyncApplyInput, query_id: str, last_error: s
         "submitted. Re-run `chkit migrate --apply`: an attempt that was never sent runs again."
     )
     raise RuntimeError(msg) from read_error
+
+
+def _not_reverted_message(
+    error: BaseException, revert_error: BaseException, migration_name: str
+) -> str:
+    """A stop before the submit whose record could not go back to prepared (#767)."""
+    return (
+        f"{_describe_error(error)}. The attempt was never sent, but chkit could not put its "
+        f"record back to prepared ({_describe_error(revert_error)}), so the next chkit "
+        "migrate --apply stops with async_outcome_unknown: run chkit migrate --apply "
+        f"--abandon {migration_name} to run it again."
+    )
 
 
 def stop_running_advice(query_id: str) -> str:

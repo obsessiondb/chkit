@@ -604,8 +604,12 @@ def query_log_outcome(rows: list[dict[str, Any]]) -> QueryStatus:
 
     A QueryFinish, then an ExceptionWhileProcessing, outranks an
     ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
-    that rejection is never the query's own failure.
+    that rejection is never the query's own failure. Two terminal entries (a
+    redelivered request that ran twice) leave the outcome unknown: one of them
+    may have applied part of its writes.
     """
+    if len([row for row in rows if not _is_same_id_running(row)]) > 1:
+        return QueryStatus(status="unknown")
     finished = next((row for row in rows if str(row.get("type")) == "QueryFinish"), None)
     if finished is not None:
         return QueryStatus(

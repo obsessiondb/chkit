@@ -289,7 +289,11 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   } catch (error) {
     // Nothing was sent: put the record back to prepared, so a re-run runs
     // it again without an abandon (#767).
-    await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now)).catch(() => {})
+    try {
+      await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
+    } catch (revertError) {
+      throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
+    }
     throw error
   }
   const pollAfterTime = queryLogLowerBound(serverNowMs)
@@ -843,6 +847,11 @@ async function assertAttemptStored(input: {
     `${prefix}: the journal did not return the attempt's record${tail}, so it was not submitted. Re-run \`chkit migrate --apply\`: an attempt that was never sent runs again.`,
     readError === undefined ? undefined : { cause: readError },
   )
+}
+
+/** A stop before the submit whose record could not go back to prepared (#767). */
+function notRevertedMessage(error: unknown, revertError: unknown, migrationName: string): string {
+  return `${describeError(error)}. The attempt was never sent, but chkit could not put its record back to prepared (${describeError(revertError)}), so the next chkit migrate --apply stops with async_outcome_unknown: run chkit migrate --apply --abandon ${migrationName} to run it again.`
 }
 
 /**

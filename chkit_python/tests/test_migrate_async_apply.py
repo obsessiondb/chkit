@@ -2572,3 +2572,60 @@ def test_a_failed_query_tracking_write_before_the_submit_puts_the_attempt_back_t
         "submitted under its own query id; a retry reads its outcome from system.query_log",
         _PREPARED_MARKER,
     ]
+
+
+def test_ctrl_c_before_the_submit_puts_the_attempt_back_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus re-review): Ctrl-C between the "may have been sent" record
+    and the submit puts the record back to prepared too, and still stops."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    class _InterruptedTracker:
+        def record_async(self, *_args: Any) -> None:
+            raise KeyboardInterrupt
+
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(
+            _input(client=client, journal=journal, query_tracker=cast(Any, _InterruptedTracker()))
+        )
+    assert client.submitted == []
+    assert [w.operations[0].last_error for w in journal.writes or []][-1] == _PREPARED_MARKER
+
+
+def test_a_revert_to_prepared_that_fails_names_the_abandon(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus re-review): when the record cannot go back to prepared, the
+    error says the next run needs an abandon."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    class _FailingTracker:
+        def record_async(self, *_args: Any) -> None:
+            msg = "tracking write failed"
+            raise RuntimeError(msg)
+
+    class _NoRevertJournal(_FakeJournalStore):
+        def write_migration_state(self, state: MigrationRowState) -> None:
+            writes = self.writes or []
+            if len(writes) == 2:
+                msg = "journal unavailable"
+                raise RuntimeError(msg)
+            super().write_migration_state(state)
+
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")])
+    with pytest.raises(RuntimeError) as info:
+        apply_async_statement(
+            _input(
+                client=client,
+                journal=_NoRevertJournal(),
+                query_tracker=cast(Any, _FailingTracker()),
+            )
+        )
+    message = str(info.value)
+    assert "tracking write failed" in message
+    assert "journal unavailable" in message
+    assert "--abandon 20260101_000000_async.sql" in message
+    assert client.submitted == []

@@ -121,9 +121,12 @@ const SAME_ID_RUNNING = 216
  * The outcome query_log records for a query id, from its entries newest
  * first (#767). A QueryFinish, then an ExceptionWhileProcessing, outranks an
  * ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
- * that rejection is never the query's own failure.
+ * that rejection is never the query's own failure. Two terminal entries (a
+ * redelivered request that ran twice) leave the outcome unknown: one of them
+ * may have applied part of its writes.
  */
 export function queryLogOutcome(rows: readonly QueryLogRow[]): QueryStatus {
+	if (rows.filter((row) => !isSameIdRunning(row)).length > 1) return { status: 'unknown' }
 	const finished = rows.find((row) => row.type === 'QueryFinish')
 	if (finished) {
 		return {

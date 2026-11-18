@@ -30,22 +30,22 @@ _DUPLICATE = _row(
 )
 
 
-def test_a_query_finish_outranks_a_newer_exception_before_start() -> None:
+def test_a_query_finish_outranks_a_newer_duplicate_delivery_rejection() -> None:
     assert query_log_outcome([_DUPLICATE, _row("QueryFinish")]) == QueryStatus(
         status="finished", written_rows=1, written_bytes=8, duration_ms=10
     )
+
+
+def test_two_terminal_entries_of_one_id_are_unknown() -> None:
+    """#767 (Opus re-review): a redelivered request that ran twice logs two
+    terminal entries; a partial ExceptionWhileProcessing beside a QueryFinish
+    says some writes may have been applied twice, so neither decides."""
+    unknown = QueryStatus(status="unknown")
+    partial = _row("ExceptionWhileProcessing", exception="Code: 241")
+    assert query_log_outcome([_row("QueryFinish"), partial]) == unknown
     rejected = _row("ExceptionBeforeStart", exception="Code: 60")
-    assert query_log_outcome([rejected, _row("QueryFinish")]).status == "finished"
-
-
-def test_an_exception_while_processing_outranks_an_exception_before_start() -> None:
-    status = query_log_outcome(
-        [
-            _row("ExceptionBeforeStart", exception="Code: 60"),
-            _row("ExceptionWhileProcessing", exception="Code: 241"),
-        ]
-    )
-    assert status == QueryStatus(status="failed", duration_ms=10, error="Code: 241")
+    assert query_log_outcome([rejected, _row("QueryFinish")]) == unknown
+    assert query_log_outcome([_DUPLICATE, _row("QueryFinish"), _row("QueryFinish")]) == unknown
 
 
 def test_a_duplicate_delivery_is_no_failure_of_the_query() -> None:
@@ -88,3 +88,28 @@ def test_the_remote_executor_reads_every_entry_with_before_start(
     assert status.written_rows == 25
     log_read = next(statement for statement in reads if "system.query_log" in statement)
     assert "LIMIT 1" not in log_read
+
+
+def test_the_remote_executor_finds_two_terminal_entries_unknown(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    remote = RemoteClickHouseClient(
+        credentials=Credentials(access_token="t", base_url="http://127.0.0.1:9"),
+        service_slug="svc",
+    )
+
+    def query(
+        _self: RemoteClickHouseClient, statement: str, settings: dict[str, Any] | None = None
+    ) -> QueryResult:
+        _ = settings
+        if "system.one" in statement:
+            return QueryResult(column_names=["replicas"], rows=[{"replicas": "1"}])
+        if "system.query_log" in statement:
+            rows = [_row("QueryFinish"), _row("ExceptionWhileProcessing", exception="Code: 241")]
+            return QueryResult(column_names=list(rows[0]), rows=rows)
+        return QueryResult(column_names=[], rows=[])
+
+    monkeypatch.setattr(RemoteClickHouseClient, "query", query)
+    assert remote.query_status("qid-1", include_before_start=True) == QueryStatus(
+        status="unknown"
+    )

@@ -940,6 +940,30 @@ describe('applyAsyncStatement', () => {
     expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PREPARED_RECORD_MARKER, ATTEMPT_RECORD_MARKER, PREPARED_RECORD_MARKER])
   })
 
+  // #767 (Opus re-review): when the record cannot go back to prepared, the
+  // error says the next run needs an abandon.
+  test('a revert to prepared that fails names the abandon', async () => {
+    const fake = createFakeExecutor([{ status: 'unknown' }])
+    const { store, writes } = createFakeJournalStore(null)
+    const write = store.writeMigrationState.bind(store)
+    store.writeMigrationState = async (state) => {
+      if (writes.length === 2) throw new Error('journal unavailable')
+      await write(state)
+    }
+    const queryTracker = {
+      async recordAsync() {
+        throw new Error('tracking write failed')
+      },
+    } as unknown as NonNullable<Parameters<typeof applyAsyncStatement>[0]['queryTracker']>
+
+    const error = await applyAsyncStatement({ ...BASE_INPUT, db: fake.db, journalStore: store, queryTracker, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }).catch((e: unknown) => e)
+    expect(error).toBeInstanceOf(Error)
+    expect((error as Error).message).toContain('tracking write failed')
+    expect((error as Error).message).toContain('journal unavailable')
+    expect((error as Error).message).toContain('run chkit migrate --apply --abandon m.sql')
+    expect(fake.submitCalls).toEqual([])
+  })
+
   // #767 (round 3): only unknown polls in a row count; a failed poll request
   // starts the count again.
   test('a failed poll request resets the unknown-poll count', async () => {
