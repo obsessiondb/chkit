@@ -6,7 +6,7 @@ import https from 'node:https'
 import type { AddressInfo } from 'node:net'
 
 import { createStatelessClickHouseExecutor, isSendNotAdmitted, type ClickHouseExecutor } from './index.js'
-import { createAdmissionAgent, createSendQueue, urlConnectionOptions } from './send-admission.js'
+import { acquireSendSlot, createAdmissionAgent, createSendQueue, urlConnectionOptions } from './send-admission.js'
 
 // A stand-in for ClickHouse's HTTP interface that records each request's
 // query_id and answers it, after `answerAfterMs`, as a finished command.
@@ -204,6 +204,59 @@ describe('createSendQueue', () => {
     stop.abort()
 
     await expect(createSendQueue(5).acquire(stop.signal)).rejects.toThrow('The request was not sent')
+  })
+})
+
+// Round 7: the queue grants a slot and drops its abort listener a turn before
+// the waiting submit resumes. A stop in that turn still refuses the submit,
+// before the driver, and the slot goes back.
+describe('acquireSendSlot at the grant-versus-abort boundary', () => {
+  test('under Bun: a stop between the grant and the resumption refuses and frees the slot', async () => {
+    const queue = createSendQueue(1)
+    const first = await queue.acquire()
+    const stop = new AbortController()
+
+    const waiting = acquireSendSlot(queue, stop.signal).then(() => 'slot', (error: unknown) => error)
+    first()
+    stop.abort()
+
+    expect(isSendNotAdmitted(await waiting)).toBe(true)
+    const next = await Promise.race([queue.acquire(), new Promise<'held'>((resolve) => setTimeout(() => resolve('held'), 100))])
+    expect(next).not.toBe('held')
+  })
+
+  test('under Node: the same boundary', () => {
+    const agentModule = new URL('../dist/send-admission.js', import.meta.url).pathname
+    const node = spawnSync(spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' }).stdout.trim(), ['--input-type=module', '-e', `
+      const { acquireSendSlot, createSendQueue, isSendNotAdmitted } = await import(${JSON.stringify(agentModule)})
+      const queue = createSendQueue(1)
+      const first = await queue.acquire()
+      const stop = new AbortController()
+      const waiting = acquireSendSlot(queue, stop.signal).then(() => 'slot', (error) => error)
+      first()
+      stop.abort()
+      const refused = isSendNotAdmitted(await waiting)
+      const freed = await Promise.race([queue.acquire().then(() => true), new Promise((resolve) => setTimeout(() => resolve(false), 100))])
+      console.log(JSON.stringify({ refused, freed }))
+    `], { encoding: 'utf8' })
+
+    expect(node.stderr).toBe('')
+    expect(JSON.parse(node.stdout.trim())).toEqual({ refused: true, freed: true })
+  })
+
+  test('a submit whose signal aborted is refused at request creation, whatever its admit says', async () => {
+    const db = executor()
+    const stop = new AbortController()
+
+    // An SDK admission that always admits: the aborted signal still wins.
+    const sending = db.submit('INSERT INTO t SELECT 1', 'aborted-at-creation-1', undefined, { admit: () => true, signal: stop.signal })
+    stop.abort()
+    const error = await sending.catch((e: unknown) => e)
+
+    expect(isSendNotAdmitted(error)).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(received).not.toContain('aborted-at-creation-1')
+    await db.close()
   })
 })
 

@@ -22,6 +22,8 @@ from pathlib import Path
 from unittest.mock import MagicMock
 
 import pytest
+from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
+from urllib3.exceptions import ProtocolError
 
 from chkit.clickhouse.client import (
     SEND_ADMISSION,
@@ -2186,15 +2188,94 @@ def test_an_interruptible_run_refuses_a_submit_once_without_the_transport_admiss
         )
     assert sent == []
 
-    # Without a stop it runs, through submit, and records no single_send.
+    # Without a stop it still sends through submit_once (a plain submit may
+    # resend), and records no single_send: nothing proves its admission.
     saved: list[BackfillProgress] = []
-    with pytest.raises(AssertionError, match="submit is not used"):
+    with pytest.raises(RuntimeError, match="the outcome of the last attempt is unknown"):
         execute_backfill(
             executor=OneShot(),
             plan_id=PLAN_ID,
             chunk_ids=["c1"],
             build_query=lambda _chunk_id: "SELECT 1",
+            poll_interval_ms=1,
+            max_poll_errors=2,
+            outcome_recheck_attempts=1,
+            outcome_recheck_interval_ms=1,
             on_progress=saved.append,
         )
+    assert sent == [f"backfill-{PLAN_ID}-c1"]
     assert saved[-1]["c1"].single_send is None
 
+
+
+# Round 7 item 1: an executor whose submit_once lacks the transport_admission
+# marker still sends through it, not through a submit that resends a reset
+# request. A connection reset counts the transport attempts.
+def test_an_unmarked_submit_once_is_still_preferred_over_a_resending_submit() -> None:
+    def reset() -> ProtocolError:
+        error = ProtocolError("remote closed")
+        error.__context__ = ConnectionResetError("reset")
+        return error
+
+    class CountingPool:
+        def __init__(self) -> None:
+            self.attempts = 0
+
+        def request(self, method: str, url: str, **kwargs: object) -> object:
+            return self.urlopen(method, url, **kwargs)
+
+        def urlopen(self, method: str, url: str, **kwargs: object) -> object:
+            self.attempts += 1
+            raise reset()
+
+        def clear(self) -> None:
+            pass
+
+    def fake_driver(pool: CountingPool) -> MagicMock:
+        driver = MagicMock()
+        driver.headers = {}
+        driver.params = {}
+        driver._send_progress = False
+        driver._progress_interval = None
+        driver._autogenerate_query_id = False
+        driver.url = "http://localhost:8123"
+        driver.server_host_name = None
+        driver.http = pool
+        driver.command.side_effect = lambda statement, **_kw: HttpClient._raw_request(driver, statement, {})
+        return driver
+
+    once_pool, resending_pool = CountingPool(), CountingPool()
+    install_send_hook(once_pool)
+    client = ClickHouseClient(
+        MagicMock(),
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123", username="default", password="", database="default", secure=False
+        ),
+    )
+    client._send_once_client = fake_driver(once_pool)
+    client._submit_client = fake_driver(resending_pool)
+    reads = MockExecutor()
+
+    class Unmarked:
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            return client.submit(statement, query_id)
+
+        def submit_once(self, statement: str, query_id: str) -> str:
+            return client.submit_once(statement, query_id)
+
+        def query(self, statement: str) -> object:
+            return reads.query(statement)
+
+    saved: list[BackfillProgress] = []
+    with pytest.raises(RuntimeError, match="cannot be resent"):
+        execute_backfill(
+            executor=Unmarked(),
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+            on_progress=saved.append,
+        )
+
+    assert once_pool.attempts == 1
+    assert resending_pool.attempts == 0
+    assert saved[-1]["c1"].single_send is None

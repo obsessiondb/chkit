@@ -107,6 +107,25 @@ export function createSendQueue(limit: number): { acquire(signal?: AbortSignal):
   }
 }
 
+/**
+ * A slot of `queue` for a submit with `signal`. The queue stops listening to
+ * the signal once it grants the slot, and the submit resumes a turn later,
+ * so the signal is read again then: a submit stopped between the grant and
+ * its resumption gives the slot back and is refused before the driver is
+ * called. (The admission is asked once more as the request is created.)
+ */
+export async function acquireSendSlot(
+  queue: ReturnType<typeof createSendQueue>,
+  signal: AbortSignal | undefined,
+): Promise<() => void> {
+  const release = await queue.acquire(signal)
+  if (signal?.aborted) {
+    release()
+    throw sendNotAdmittedError()
+  }
+  return release
+}
+
 function once(fn: () => void): () => void {
   let done = false
   return () => {
@@ -152,7 +171,7 @@ export function recordingAdmission(admission: SubmitAdmission): { admission: Sub
   return {
     admission: {
       admit: () => {
-        const admitted = admission.admit()
+        const admitted = !admission.signal?.aborted && admission.admit()
         if (!admitted) refused = true
         return admitted
       },

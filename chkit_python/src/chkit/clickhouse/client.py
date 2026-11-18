@@ -126,6 +126,7 @@ class ClickHouseClient:
         "_closed",
         "_config",
         "_send_once_client",
+        "_send_once_inflight",
         "_send_once_pool",
         "_submit_client",
         "_submit_client_lock",
@@ -140,6 +141,9 @@ class ClickHouseClient:
         # The driver submit_once sends through, with a pool of its own.
         self._send_once_client: Any = None
         self._send_once_pool: Any = None
+        # submit_once calls in progress, by pool: the last one to end after
+        # close() unregisters that pool again (see submit_once).
+        self._send_once_inflight: dict[int, int] = {}
         self._closed = False
 
     @classmethod
@@ -418,11 +422,24 @@ class ClickHouseClient:
         ``SendNotAdmittedError`` is raised. ``prepare_submit_once`` opens
         that driver ahead of the send."""
         driver = self.prepare_submit_once()
+        pool = driver.http
+        with self._submit_client_lock:
+            self._send_once_inflight[id(pool)] = self._send_once_inflight.get(id(pool), 0) + 1
         token = _CURRENT_SEND.set(_Send(SEND_ADMISSION.get()))
         try:
             driver.command(statement, settings={**(settings or {}), "query_id": query_id})
         finally:
             _CURRENT_SEND.reset(token)
+            with self._submit_client_lock:
+                left = self._send_once_inflight[id(pool)] - 1
+                if left:
+                    self._send_once_inflight[id(pool)] = left
+                else:
+                    del self._send_once_inflight[id(pool)]
+                # The driver's connection-expiry check can register the pool
+                # again after close() dropped it; the last call out drops it.
+                if not left and self._closed:
+                    httputil.all_managers.pop(pool, None)
         return query_id
 
     def prepare_submit_once(self) -> Any:

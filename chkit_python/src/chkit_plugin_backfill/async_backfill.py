@@ -1043,9 +1043,16 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
             if not may_send():
                 record(chunk_id, previous)
                 return None
+            # A submit_once is always preferred: a plain submit may resend
+            # the INSERT under its id. Without the transport_admission
+            # marker it is not trusted to ask the admission (the attempt is
+            # not single-send, and only a run without a stop gets here).
             submit_once = getattr(executor, "submit_once", None)
             if single_send and callable(submit_once):
                 token = SEND_ADMISSION.set(_Handoff(may_send, release_once))
+                submit_once(sql, query_id)
+            elif callable(submit_once):
+                release_once()
                 submit_once(sql, query_id)
             else:
                 release_once()

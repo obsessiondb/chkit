@@ -22,6 +22,7 @@ import { getLogger } from '@logtape/logtape'
 import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
+	acquireSendSlot,
 	createAdmissionAgent,
 	createSendQueue,
 	isSendNotAdmitted,
@@ -1134,7 +1135,7 @@ export function createExecutorWithClient(
 				target = admissionClient
 				// Waits for a connection slot here, not in the agent: a stop
 				// refuses a waiting submit before it reaches the agent.
-				releaseSlot = await sendQueue.acquire(admission.signal)
+				releaseSlot = await acquireSendSlot(sendQueue, admission.signal)
 				admissions.set(id, recorded.admission)
 			}
 			try {

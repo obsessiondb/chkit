@@ -16,8 +16,12 @@ from urllib.parse import urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
+from clickhouse_connect import common
 from clickhouse_connect.driver import client as driver_client  # type: ignore[import-untyped]
-from clickhouse_connect.driver import httputil
+from clickhouse_connect.driver import (
+    httpclient,
+    httputil,
+)
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
 from pytest_httpx import HTTPXMock
@@ -800,3 +804,51 @@ def test_submit_once_routes_through_the_same_proxy_as_the_driver(
         assert route(own) == route(driver.http)
     finally:
         _dispose_pool(own)
+
+
+# #765 round 7: the driver's connection-expiry check can register the private
+# pool again after close() dropped it; the call that ends last drops it again.
+def test_a_submit_in_flight_across_close_leaves_the_pool_out_of_the_registry(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # The request fails once it is sent (a reset): the error path counts too.
+    error = ProtocolError("remote closed")
+    error.__context__ = ConnectionResetError("reset")
+    pool = _FakePoolManager(error)
+    client, driver = _send_once_client(pool)
+    client._send_once_pool = pool
+    driver.command.side_effect = lambda statement, **_kw: HttpClient._raw_request(driver, statement, {})
+    common.set_setting("max_connection_age", 1)
+    outcome: list[BaseException] = []
+
+    def send() -> None:
+        try:
+            client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+        except BaseException as caught:
+            outcome.append(caught)
+
+    in_expiry = threading.Event()
+    resume = threading.Event()
+    real_expiry = httpclient.check_conn_expiration
+
+    def paused_expiry(manager: object) -> None:
+        in_expiry.set()
+        resume.wait(5)
+        real_expiry(manager)  # registers the (expired) pool again
+
+    monkeypatch.setattr(httpclient, "check_conn_expiration", paused_expiry)
+    try:
+        worker = threading.Thread(target=send)
+        worker.start()
+        assert in_expiry.wait(5)
+        client.close()
+        assert pool not in httputil.all_managers
+        resume.set()
+        worker.join(5)
+    finally:
+        common.set_setting("max_connection_age", 0)
+
+    assert len(pool.urlopened) == 1
+    assert len(outcome) == 1
+    assert "cannot be resent" in str(outcome[0])
+    assert pool not in httputil.all_managers
