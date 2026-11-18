@@ -68,7 +68,14 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
-from chkit.core.sql_lexer import identifier_name, is_trivia, js_regex, js_trim, tokenize_sql
+from chkit.core.sql_lexer import (
+    SQLToken,
+    identifier_name,
+    is_trivia,
+    js_regex,
+    js_trim,
+    tokenize_sql,
+)
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
@@ -955,12 +962,15 @@ def _dotted_names(sql: str, columns: set[str]) -> list[str]:
     of ``n``). A run whose leading parts are no column is read without them, so
     ``t.col`` and ``db.t.col`` read ``col`` (#748). A tuple element by position
     ends the run: ``t.1.a`` reads ``t``. A run followed by ``(`` is a function
-    call, not a column.
+    call, not a column, and a run that starts on a name ``_not_column_names``
+    skips reads nothing, so ``a -> a.x`` reads no ``a.x`` (#768).
     """
     tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    skipped = _not_column_names(tokens)
     found: list[str] = []
     i = 0
     while i < len(tokens):
+        first = i
         run: list[str] = []
         # A tuple element by position (``t.1``) and the parts after it are one path
         # into the run before it, so ``t.1.a.b`` reads only ``t``.
@@ -985,7 +995,7 @@ def _dotted_names(sql: str, columns: set[str]) -> list[str]:
                 i += 1
         if not run:
             i += 1
-        if i < len(tokens) and tokens[i].text == "(":
+        if (i < len(tokens) and tokens[i].text == "(") or first in skipped:
             continue
         for start in range(len(run)):
             match = _longest_column_prefix(run[start:], columns)
@@ -1006,9 +1016,8 @@ def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
 def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
-    A name followed by ``(`` is a function call, not a column. A name can also
-    be a lambda parameter; such an extra edge moves a statement later, or
-    makes a cycle that keeps the key order.
+    A name followed by ``(`` is a function call, not a column, and neither are
+    the names ``_not_column_names`` finds.
     """
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -1028,6 +1037,130 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
                     read.add(prefix + name)
             graph[prefix + column.name] = read
     return graph
+
+
+def _not_column_names(tokens: list[SQLToken]) -> set[int]:
+    """Indices of the ``tokens`` (trivia removed) that name no column (#768).
+
+    A lambda parameter (``x -> x``, ``(x, y) -> x + y``) where its lambda
+    declares and uses it, with the ``.name`` parts after a use (``a -> a.x``),
+    and the type of ``CAST(x AS T)`` and ``x::T``, with its arguments
+    (``Array(Tuple(a UInt64))``). A lambda body runs to the first ``,`` or
+    unmatched closing bracket at its own depth, so a name after the lambda
+    still reads a column.
+    """
+    skipped: set[int] = set()
+    count = len(tokens)
+
+    def text_at(i: int) -> str | None:
+        return tokens[i].text if 0 <= i < count else None
+
+    def is_pair(i: int, first: str, second: str) -> bool:
+        return (
+            text_at(i) == first
+            and text_at(i + 1) == second
+            and tokens[i].end == tokens[i + 1].start
+        )
+
+    def is_name(i: int) -> bool:
+        return 0 <= i < count and identifier_name(tokens[i]) is not None
+
+    for i, token in enumerate(tokens):
+        if is_pair(i, "-", ">"):
+            params = _lambda_parameters(tokens, i)
+            if params is None:
+                continue
+            names, start = params
+            skipped.update(range(start, i))
+            end = _group_end(tokens, i + 2)
+            j = i + 2
+            while j < end:
+                name = identifier_name(tokens[j])
+                if name is not None and name in names and text_at(j - 1) != ".":
+                    skipped.add(j)
+                    while text_at(j + 1) == "." and is_name(j + 2):
+                        j += 2
+                        skipped.add(j)
+                j += 1
+        elif is_pair(i, ":", ":"):
+            if not is_name(i + 2):
+                continue
+            stop = _closing_paren(tokens, i + 3) + 1 if text_at(i + 3) == "(" else i + 3
+            skipped.update(range(i + 2, stop))
+        elif token.kind == "identifier" and token.text.lower() == "cast" and text_at(i + 1) == "(":
+            close = _closing_paren(tokens, i + 1)
+            depth = 0
+            for j in range(i + 2, close):
+                inner = tokens[j]
+                if inner.text in ("(", "[", "{"):
+                    depth += 1
+                elif inner.text in (")", "]", "}"):
+                    depth -= 1
+                elif depth == 0 and inner.kind == "identifier" and inner.text.lower() == "as":
+                    skipped.update(range(j, close))
+                    break
+    return skipped
+
+
+def _lambda_parameters(tokens: list[SQLToken], arrow: int) -> tuple[set[str], int] | None:
+    """The parameters of the lambda whose ``->`` starts at ``arrow``.
+
+    The name before it, or the names of a ``(a, b)`` list before it, with the
+    index of the first token that declares them. Any other shape declares
+    nothing.
+    """
+    if arrow < 1:
+        return None
+    before = tokens[arrow - 1]
+    single = identifier_name(before)
+    if single is not None:
+        return {single}, arrow - 1
+    if before.text != ")":
+        return None
+    names: set[str] = set()
+    j = arrow - 2
+    while j >= 0:
+        name = identifier_name(tokens[j])
+        if name is None:
+            return None
+        names.add(name)
+        separator = tokens[j - 1].text if j >= 1 else None
+        if separator == "(":
+            return names, j - 1
+        if separator != ",":
+            return None
+        j -= 2
+    return None
+
+
+def _group_end(tokens: list[SQLToken], start: int) -> int:
+    """Index of the first ``,`` or unmatched closing bracket at ``start``'s depth, or the end."""
+    depth = 0
+    for j in range(start, len(tokens)):
+        text = tokens[j].text
+        if text in ("(", "[", "{"):
+            depth += 1
+        elif text in (")", "]", "}"):
+            if depth == 0:
+                return j
+            depth -= 1
+        elif text == "," and depth == 0:
+            return j
+    return len(tokens)
+
+
+def _closing_paren(tokens: list[SQLToken], open_: int) -> int:
+    """Index of the ``)`` that closes the ``(`` at ``open_``, or the end."""
+    depth = 0
+    for j in range(open_, len(tokens)):
+        text = tokens[j].text
+        if text == "(":
+            depth += 1
+        elif text == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(tokens)
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:
