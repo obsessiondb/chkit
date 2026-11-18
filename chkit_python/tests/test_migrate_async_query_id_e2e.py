@@ -253,7 +253,8 @@ def test_a_run_never_takes_the_other_databases_failure_and_the_failed_run_retrie
     # It failed while it ran, so some of its rows may have landed (#767): the
     # run stops until the operator reconciles and abandons.
     assert json.loads(failed.stdout)["error"]["code"] == "async_outcome_unknown"
-    _wait_for_statuses(fixture, "staging", "failed")
+    # Nothing is written, so the fenced started record keeps the attempt.
+    _wait_for_statuses(fixture, "staging", "started")
     again = _migrate(fixture, "staging")
     assert again.exit_code == 1, _diagnostic("staging re-run", again)
     assert json.loads(again.stdout)["error"]["code"] == "async_outcome_unknown"

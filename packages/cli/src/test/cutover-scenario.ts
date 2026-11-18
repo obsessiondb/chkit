@@ -544,13 +544,17 @@ export async function runRetryScenario(
   }
 }
 
-/** Replaces the SQL of operation `step` (0-based) with a statement that fails, keeping its marker lines. */
+/**
+ * Replaces the SQL of operation `step` (0-based) with a statement that fails, keeping its marker lines.
+ * The server rejects it before it starts (an unknown identifier): an async step that fails while it
+ * runs may have applied writes, so it is never retried without an abandon (#767).
+ */
 function injectFailure(blocks: string[], step: number): string {
   return blocks
     .map((block, index) => {
       if (index !== step + 1) return block
       const comments = block.split('\n').filter((line) => line.startsWith('--'))
-      return [...comments, `SELECT throwIf(1, 'injected failure at statement ${step + 1}');`].join('\n')
+      return [...comments, `SELECT \`injected failure at statement ${step + 1}\`;`].join('\n')
     })
     .join('\n\n')
 }

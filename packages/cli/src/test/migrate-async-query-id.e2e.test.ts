@@ -61,7 +61,8 @@ describe('async migrate statements across databases (#463)', () => {
       // It failed while it ran, so some of its rows may have landed (#767):
       // the run stops until the operator reconciles and abandons.
       expect(JSON.parse(failed.stdout).error).toMatchObject({ code: 'async_outcome_unknown' })
-      await waitForStatuses(fixture, 'staging', 'failed')
+      // Nothing is written, so the fenced started record keeps the attempt.
+      await waitForStatuses(fixture, 'staging', 'started')
       const again = await migrate(fixture, 'staging').result
       expect(again.exitCode, formatTestDiagnostic('staging re-run', again)).toBe(1)
       expect(JSON.parse(again.stdout).error).toMatchObject({ code: 'async_outcome_unknown' })

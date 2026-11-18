@@ -537,8 +537,9 @@ def test_an_attach_polls_only_the_id_its_fenced_record_names(
             apply_async_statement(statement)
         assert info.value.code == "async_outcome_unknown"
         assert any("attaching to in-flight query" in line for line in lines)
-        # The attach writes nothing until the outcome.
-        assert journal.statuses() == ["failed"]
+        # The attach writes nothing, and a failure while it ran (#767) writes
+        # nothing either: the fenced started record keeps the attempt.
+        assert journal.statuses() == []
         worker.join(timeout=60)
         assert "attached attempt failed" in attached_outcome[0]
 
