@@ -31,6 +31,8 @@ Key invariants:
   and an id an older release reused for every attempt, count only from the
   attempt's start on the server clock minus a margin for clock skew between
   replicas.
+- A started record names the query_log bound its polls use, and a re-run
+  reads the attempt's outcome with that same bound (#767).
 """
 
 from __future__ import annotations
@@ -84,23 +86,41 @@ MAX_TRANSIENT_POLL_ERRORS = 20
 # The last_error of a started attempt that no replica runs and that has no
 # outcome in system.query_log, journaled before it is retried (#672).
 NO_OUTCOME_ERROR = "no longer running and no outcome in system.query_log; retried"
-# The last_error of a 'started' record this release writes (#701). Its query id
-# names this attempt alone: a retry submits under a new random one. A retry by
-# this release journals the attempt failed
-# before its before-retry SQL runs, so a QueryFinish of the id is the
+# The last_error of a 'started' record this release writes is this marker
+# followed by the attempt's query_log bound (#767): the time from which its
+# polls count query_log entries of its id. A re-run reads the attempt's
+# outcome with that same bound, so it never takes a QueryFinish its polls
+# ignored. A retry by this release journals the attempt failed before its
+# before-retry SQL runs, so a QueryFinish of the id from the bound on is the
 # statement's outcome. Older releases do not know this marker and check such
 # a record in system.processes only, as they do their own.
+ATTEMPT_BOUND_MARKER = (
+    "submitted; a retry reads its outcome from system.query_log entries started at or after "
+)
+# The last_error of the 'started' record a statement's first attempt writes
+# before it reads its query_log bound, which is taken after that write and
+# recorded by a second one before the submit (#767). Such a record was never
+# submitted, so it is only checked in system.processes.
+PENDING_ATTEMPT_MARKER = "not submitted yet; its system.query_log bound is not recorded"
+# The last_error of a 'started' record the releases from #701 to #767 wrote.
+# Their re-runs bounded the query_log entries of the statement's first id by
+# the recorded start, which lies before the bound the attempt's polls used,
+# so only a record of a retry's id, which names that attempt alone, is read
+# from query_log; one of the first id is checked in system.processes only.
 ATTEMPT_RECORD_MARKER = (
     "submitted under its own query id; a retry reads its outcome from system.query_log"
 )
-# The last_error of a 'started' record that the release before #701 wrote
-# (#672), or that this release writes when it attaches to a query whose id an
-# older release may have reused across attempts. Its start is on the server
-# clock and its query_log entry is bounded by it. A started record without
-# either marker comes from a release before #672: its start is the client's,
-# and a retry by that release may have compensated the attempt without a
-# record, so it is only checked in system.processes.
+# The last_error of a 'started' record that the releases from #672 to #767
+# wrote, for an id an older release may have reused across attempts. Its
+# recorded start is not the bound the attempt's polls used, so it is checked
+# in system.processes only, like a started record without a marker, which a
+# release before #672 wrote.
 STARTED_RECORD_MARKER = "submitted; a retry reads its outcome from system.query_log"
+# A query_log bound as this release records it (an ISO time, or
+# UNBOUNDED_POLL_AFTER_TIME).
+_RECORDED_BOUND_SHAPE = re.compile(
+    r"\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{3})?Z?"
+)
 # query_log is flushed on a timer, every 7.5 s by default. A started attempt
 # of this release that no replica runs and that has no query_log entry is
 # checked again this many times, QUERY_LOG_FLUSH_RECHECK_INTERVAL_SECONDS
@@ -341,15 +361,14 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         # The attached attempt is journaled started, also under a failed
         # record: a run that stops while it polls leaves a record whose
         # QueryFinish a re-run finds (#672). Its start is the server's, from
-        # its elapsed time. The id is known to name this attempt alone when
-        # this release's started record names it, or when no record does and
-        # it is the statement's first id. Under any other record an older
-        # release may have reused it for earlier attempts, and the record
-        # keeps the bounded check (#672).
-        attached_marker = (
-            ATTEMPT_RECORD_MARKER
-            if prior_op is None or _is_attempt_record(prior_op)
-            else STARTED_RECORD_MARKER
+        # its elapsed time. The record names the query_log bound its polls
+        # use, which a re-run then uses too (#767). A record of this release
+        # keeps its attempt's bound. A retry's id, which a #701 record names,
+        # is that attempt's alone. Any other id an older release may have
+        # reused for earlier attempts, and only the attached attempt's start
+        # bounds it.
+        attached_bound = _attached_bound(
+            prior_op, query_id, base_query_id, server_now_ms, in_flight.elapsed_ms
         )
         attached_started_at = _attached_started_at(prior_op, in_flight, server_now_ms)
         journal_store.write_migration_state(
@@ -364,7 +383,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
                     status="started",
                     started_at=attached_started_at,
                     finished_at=None,
-                    last_error=attached_marker,
+                    last_error=attempt_record_error(attached_bound),
                     fingerprint=attempt_fingerprint,
                 ),
                 iso_without_zone(datetime.now(tz=UTC)),
@@ -374,11 +393,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
             input_=input_,
             migration_state=journal_store.read_migration_state(input_.migration_name),
             query_id=query_id,
-            poll_after_time=(
-                _retry_query_log_lower_bound(_journal_time_ms(attached_started_at))
-                if attached_marker == ATTEMPT_RECORD_MARKER and query_id != base_query_id
-                else _attach_lower_bound(server_now_ms, in_flight.elapsed_ms)
-            ),
+            poll_after_time=attached_bound,
             submission=None,
             # What is known about the attempt that runs: a record without a
             # fingerprint stays without one.
@@ -434,44 +449,19 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         )
 
     # The attempt's start on the server clock, which also stamps query_log,
-    # read before the attempt is journaled and submitted: the entries of the
-    # statement's first id count from it (#672).
+    # read before the attempt is journaled and submitted.
     started_at = iso_without_zone(_EPOCH + timedelta(milliseconds=server_now_ms))
 
-    base_state = initial_state or fresh_migration_state(
-        input_.migration_name, input_.migration_checksum
-    )
-    journal_store.write_migration_state(
-        upsert_operation(
-            base_state,
-            OperationState(
-                operation_index=input_.statement_index,
-                operation_key=input_.operation_key,
-                operation_type=input_.operation_type,
-                query_id=attempt_query_id,
-                status="started",
-                started_at=started_at,
-                finished_at=None,
-                last_error=ATTEMPT_RECORD_MARKER,
-                fingerprint=input_.fingerprint,
-            ),
-            iso_without_zone(datetime.now(tz=UTC)),
-        )
+    poll_after_time = _journal_started_attempt(
+        input_,
+        initial_state,
+        attempt_query_id,
+        started_at,
+        server_now_ms,
+        first_attempt=attempt_query_id == base_query_id,
     )
 
     state_after_start = journal_store.read_migration_state(input_.migration_name)
-
-    # A retry's id is this attempt's alone, so every entry of it counts (#701).
-    # The statement's first id counts only queries that started after the
-    # server time read right before the submission, after the journal writes:
-    # the recorded start can lie before an earlier attempt's entry by as long
-    # as they took. That read can land on a replica whose clock is behind the
-    # one that gave the recorded start, so the bound never lies before it.
-    poll_after_time = (
-        _query_log_lower_bound(max(server_now_ms, _read_server_state(client)[0]), 0)
-        if attempt_query_id == base_query_id
-        else _retry_query_log_lower_bound(server_now_ms)
-    )
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
     if input_.query_tracker is not None:
@@ -495,6 +485,61 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         started_at=started_at,
         fingerprint=input_.fingerprint,
     )
+
+
+def _journal_started_attempt(
+    input_: AsyncApplyInput,
+    initial_state: MigrationRowState | None,
+    attempt_query_id: str,
+    started_at: str,
+    server_now_ms: int,
+    *,
+    first_attempt: bool,
+) -> str:
+    """Journal the attempt started before it is submitted; return its query_log bound.
+
+    A retry's id is this attempt's alone, so every entry of it counts (#701).
+    The statement's first id counts only queries that started after the
+    server time read after a first journal write: the recorded start can lie
+    before an earlier attempt's entry by as long as the writes took. That
+    read can land on a replica whose clock is behind the one that gave the
+    recorded start, so the bound never lies before it. The record names the
+    bound before the submit, so a re-run reads the outcome with the bound
+    these polls use (#767); a run that stops between the two writes leaves a
+    record that was never submitted and is checked in system.processes only.
+    """
+    base_state = initial_state or fresh_migration_state(
+        input_.migration_name, input_.migration_checksum
+    )
+
+    def write_started(last_error: str) -> None:
+        input_.journal_store.write_migration_state(
+            upsert_operation(
+                base_state,
+                OperationState(
+                    operation_index=input_.statement_index,
+                    operation_key=input_.operation_key,
+                    operation_type=input_.operation_type,
+                    query_id=attempt_query_id,
+                    status="started",
+                    started_at=started_at,
+                    finished_at=None,
+                    last_error=last_error,
+                    fingerprint=input_.fingerprint,
+                ),
+                iso_without_zone(datetime.now(tz=UTC)),
+            )
+        )
+
+    if first_attempt:
+        write_started(PENDING_ATTEMPT_MARKER)
+        poll_after_time = _query_log_lower_bound(
+            max(server_now_ms, _read_server_state(input_.client)[0]), 0
+        )
+    else:
+        poll_after_time = _retry_query_log_lower_bound(server_now_ms)
+    write_started(attempt_record_error(poll_after_time))
+    return poll_after_time
 
 
 def _execute_before_retry(input_: AsyncApplyInput, before_retry: str) -> None:
@@ -752,9 +797,34 @@ def _check_attempt(
     return in_flight
 
 
-def _is_attempt_record(op: OperationState) -> bool:
-    """Whether ``op`` is a started record of this release (ATTEMPT_RECORD_MARKER)."""
-    return op.status == "started" and op.last_error == ATTEMPT_RECORD_MARKER
+def attempt_record_error(bound: str) -> str:
+    """The last_error of a started record that names its query_log bound (#767)."""
+    return f"{ATTEMPT_BOUND_MARKER}{bound}"
+
+
+def _recorded_query_log_bound(last_error: str) -> str | None:
+    """The query_log bound a started record names, or None when it names none (#767)."""
+    if not last_error.startswith(ATTEMPT_BOUND_MARKER):
+        return None
+    bound = last_error[len(ATTEMPT_BOUND_MARKER) :]
+    return bound if _RECORDED_BOUND_SHAPE.fullmatch(bound) else None
+
+
+def _attached_bound(
+    prior_op: OperationState | None,
+    query_id: str,
+    base_query_id: str,
+    server_now_ms: int,
+    elapsed_ms: int | None,
+) -> str:
+    """The query_log bound an attach polls with and records (#767)."""
+    if prior_op is not None and prior_op.status == "started":
+        recorded = _recorded_query_log_bound(prior_op.last_error)
+        if recorded is not None:
+            return recorded
+        if prior_op.last_error == ATTEMPT_RECORD_MARKER and query_id != base_query_id:
+            return _retry_query_log_lower_bound(_journal_time_ms(prior_op.started_at))
+    return _attach_lower_bound(server_now_ms, elapsed_ms)
 
 
 def _check_in_flight(
@@ -815,7 +885,10 @@ def _attached_started_at(
     if (
         prior_op is not None
         and prior_op.status == "started"
-        and prior_op.last_error in (ATTEMPT_RECORD_MARKER, STARTED_RECORD_MARKER)
+        and (
+            prior_op.last_error in (ATTEMPT_RECORD_MARKER, STARTED_RECORD_MARKER)
+            or _recorded_query_log_bound(prior_op.last_error) is not None
+        )
     ):
         return prior_op.started_at
     if in_flight.elapsed_ms is None:
@@ -891,32 +964,25 @@ def _started_attempt_check(
     Only a started attempt of this statement's SQL can have finished without
     its run journaling the outcome: a failed attempt has its outcome, a record
     without a query id never ran under one, and a finished attempt of other
-    SQL (kept by --abandon and an edit) did not run this statement. Only a
-    record with a marker counts. A record of this release
-    (ATTEMPT_RECORD_MARKER) names an id of this attempt alone: every entry of
-    a retry's id counts (RETRY_QUERY_LOG_MARGIN_MS), and those of the statement's first id from its
-    recorded start (see QUERY_LOG_SKEW_MARGIN_MS). A record of the release
-    before (#672, STARTED_RECORD_MARKER) keeps that release's check: its id
-    can be an earlier attempt's too, so its entries count from the recorded
-    start, on the server clock, and a missing entry is not waited for.
+    SQL (kept by --abandon and an edit) did not run this statement. Its
+    outcome is read with the query_log bound its record names, the one its
+    polls used (#767). A record of the releases from #701 to #767 names no
+    bound; only one of a retry's id is read, as every entry of that id is the
+    attempt's (RETRY_QUERY_LOG_MARGIN_MS). Any other record is checked in
+    system.processes only.
     """
     if op is None or op.status != "started" or op.query_id == "":
         return None
     if op.fingerprint not in ("", fingerprint):
         return None
-    started_ms = _journal_time_ms(op.started_at)
-    bounded = _query_log_lower_bound(started_ms, 0)
-    if op.last_error == ATTEMPT_RECORD_MARKER:
+    bound = _recorded_query_log_bound(op.last_error)
+    if bound is not None:
+        return _StartedAttemptCheck(after_time=bound, awaits_flush=True)
+    if op.last_error == ATTEMPT_RECORD_MARKER and op.query_id != base_query_id:
         return _StartedAttemptCheck(
-            after_time=(
-                bounded
-                if op.query_id == base_query_id
-                else _retry_query_log_lower_bound(started_ms)
-            ),
+            after_time=_retry_query_log_lower_bound(_journal_time_ms(op.started_at)),
             awaits_flush=True,
         )
-    if op.last_error == STARTED_RECORD_MARKER:
-        return _StartedAttemptCheck(after_time=bounded, awaits_flush=False)
     return None
 
 

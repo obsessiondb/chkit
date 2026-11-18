@@ -41,20 +41,35 @@ const MAX_TRANSIENT_POLL_ERRORS = 20
 // The lastError of a started attempt that no replica runs and that has no
 // outcome in system.query_log, journaled before it is retried (#672).
 const NO_OUTCOME_ERROR = 'no longer running and no outcome in system.query_log; retried'
-// The lastError of a 'started' record this release writes (#701). Its query id
-// names this attempt alone: a retry submits under a new random one. A retry by this release journals the attempt failed
-// before its before-retry SQL runs, so a QueryFinish of the id is the
+// The lastError of a 'started' record this release writes is this marker
+// followed by the attempt's query_log bound (#767): the time from which its
+// polls count query_log entries of its id. A re-run reads the attempt's
+// outcome with that same bound, so it never takes a QueryFinish its polls
+// ignored. A retry by this release journals the attempt failed before its
+// before-retry SQL runs, so a QueryFinish of the id from the bound on is the
 // statement's outcome. Older releases do not know this marker and check such
 // a record in system.processes only, as they do their own.
+export const ATTEMPT_BOUND_MARKER = 'submitted; a retry reads its outcome from system.query_log entries started at or after '
+// The lastError of the 'started' record a statement's first attempt writes
+// before it reads its query_log bound, which is taken after that write and
+// recorded by a second one before the submit (#767). Such a record was never
+// submitted, so it is only checked in system.processes.
+export const PENDING_ATTEMPT_MARKER = 'not submitted yet; its system.query_log bound is not recorded'
+// The lastError of a 'started' record the releases from #701 to #767 wrote.
+// Their re-runs bounded the query_log entries of the statement's first id by
+// the recorded start, which lies before the bound the attempt's polls used,
+// so only a record of a retry's id, which names that attempt alone, is read
+// from query_log; one of the first id is checked in system.processes only.
 export const ATTEMPT_RECORD_MARKER = 'submitted under its own query id; a retry reads its outcome from system.query_log'
-// The lastError of a 'started' record that the release before #701 wrote
-// (#672), or that this release writes when it attaches to a query whose id an
-// older release may have reused across attempts. Its start is on the server
-// clock and its query_log entry is bounded by it. A started record without
-// either marker comes from a release before #672: its start is the client's,
-// and a retry by that release may have compensated the attempt without a
-// record, so it is only checked in system.processes.
+// The lastError of a 'started' record that the releases from #672 to #767
+// wrote, for an id an older release may have reused across attempts. Its
+// recorded start is not the bound the attempt's polls used, so it is checked
+// in system.processes only, like a started record without a marker, which a
+// release before #672 wrote.
 export const STARTED_RECORD_MARKER = 'submitted; a retry reads its outcome from system.query_log'
+// A query_log bound as this release records it (an ISO time, or
+// UNBOUNDED_POLL_AFTER_TIME).
+const RECORDED_BOUND_SHAPE = /^\d{4}-\d{2}-\d{2}[T ]\d{2}:\d{2}:\d{2}(\.\d{3})?Z?$/
 // query_log is flushed on a timer, every 7.5 s by default. A started attempt
 // of this release that no replica runs and that has no query_log entry is
 // checked again this many times, QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS apart, before it is
@@ -177,14 +192,17 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // A record this release wrote for the attempt keeps its start: the
     // elapsed time is observed after serverNowMs was read, so the start
     // derived from both can lie earlier than the attempt's by that delay.
-    // The id is known to name this attempt alone when this release's started
-    // record names it, or when no record does and it is the statement's
-    // first id. Under any other record an older release may have reused it
-    // for earlier attempts, and the record keeps the bounded check (#672).
-    const attachedMarker =
-      priorOpState === undefined || (priorOpState.status === 'started' && priorOpState.lastError === ATTEMPT_RECORD_MARKER)
-        ? ATTEMPT_RECORD_MARKER
-        : STARTED_RECORD_MARKER
+    // The record names the query_log bound its polls use, which a re-run then
+    // uses too (#767). A record of this release keeps its attempt's bound. A
+    // retry's id, which a #701 record names, is that attempt's alone. Any
+    // other id an older release may have reused for earlier attempts, and
+    // only the attached attempt's start bounds it.
+    const priorBound = priorOpState?.status === 'started' ? recordedQueryLogBound(priorOpState.lastError) : undefined
+    const attachedBound =
+      priorBound ??
+      (priorOpState?.status === 'started' && priorOpState.lastError === ATTEMPT_RECORD_MARKER && queryId !== baseQueryId
+        ? retryQueryLogLowerBound(journalTimeMs(priorOpState.startedAt))
+        : attachLowerBound(serverNowMs, inFlight.elapsedMs))
     const attachedStartedAt =
       priorOpState?.status === 'started' && isStartedRecordMarker(priorOpState.lastError)
         ? priorOpState.startedAt
@@ -202,7 +220,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
           status: 'started',
           startedAt: attachedStartedAt,
           finishedAt: null,
-          lastError: attachedMarker,
+          lastError: attemptRecordError(attachedBound),
           fingerprint: attemptFingerprint,
         },
         now,
@@ -221,10 +239,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       // fingerprint stays without one.
       fingerprint: attemptFingerprint,
       queryId,
-      pollAfterTime:
-        attachedMarker === ATTEMPT_RECORD_MARKER && queryId !== baseQueryId
-          ? retryQueryLogLowerBound(journalTimeMs(attachedStartedAt))
-          : attachLowerBound(serverNowMs, inFlight.elapsedMs),
+      pollAfterTime: attachedBound,
       log,
       pollIntervalMs,
       sleep,
@@ -301,13 +316,9 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   }
 
   // The attempt's start on the server clock, which also stamps query_log,
-  // read before the attempt is journaled and submitted: the entries of the
-  // statement's first id count from it (#672).
+  // read before the attempt is journaled and submitted.
   const startedAt = isoWithoutZone(new Date(serverNowMs))
-
-  // Persist the "started" intent BEFORE submitting, so a crash between here
-  // and the next event still leaves chkit able to detect "this op was tried."
-  await journalStore.writeMigrationState(
+  const startedState = (lastError: string): MigrationRowState =>
     upsertOperation(
       initialMigrationState ?? freshMigrationState(migrationName, migrationChecksum),
       {
@@ -318,27 +329,35 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
         status: 'started',
         startedAt,
         finishedAt: null,
-        lastError: ATTEMPT_RECORD_MARKER,
+        lastError,
         fingerprint,
       },
       now,
-    ),
-  )
+    )
+
+  // Persist the "started" intent BEFORE submitting, so a crash between here
+  // and the next event still leaves chkit able to detect "this op was tried."
+  // A retry's id is this attempt's alone, so every entry of it counts (#701).
+  // The statement's first id counts only queries that started after the
+  // server time read after a first journal write: the recorded start can lie
+  // before an earlier attempt's entry by as long as the writes took. That
+  // read can land on a replica whose clock is behind the one that gave the
+  // recorded start, so the bound never lies before it. The record names the
+  // bound before the submit, so a re-run reads the outcome with the bound
+  // these polls use (#767); a run that stops between the two writes leaves a
+  // record that was never submitted and is checked in system.processes only.
+  let pollAfterTime: string
+  if (attemptQueryId === baseQueryId) {
+    await journalStore.writeMigrationState(startedState(PENDING_ATTEMPT_MARKER))
+    pollAfterTime = queryLogLowerBound(Math.max(serverNowMs, (await readServerState(db)).nowMs), 0)
+  } else {
+    pollAfterTime = retryQueryLogLowerBound(serverNowMs)
+  }
+  await journalStore.writeMigrationState(startedState(attemptRecordError(pollAfterTime)))
 
   // Re-read so we have the row's actual stored applied_at (matters for
   // subsequent ReplacingMergeTree writes during polling).
   const stateAfterStart = await journalStore.readMigrationState(migrationName)
-
-  // A retry's id is this attempt's alone, so every entry of it counts (#701).
-  // The statement's first id counts only queries that started after the
-  // server time read right before the submission, after the journal writes:
-  // the recorded start can lie before an earlier attempt's entry by as long
-  // as they took. That read can land on a replica whose clock is behind the
-  // one that gave the recorded start, so the bound never lies before it.
-  const pollAfterTime =
-    attemptQueryId === baseQueryId
-      ? queryLogLowerBound(Math.max(serverNowMs, (await readServerState(db)).nowMs), 0)
-      : retryQueryLogLowerBound(serverNowMs)
   await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
   const submitPromise = db.submit(sql, attemptQueryId, settings)
 
@@ -620,15 +639,12 @@ interface StartedAttemptCheck {
 // Only a started attempt of this statement's SQL can have finished without
 // its run journaling the outcome: a failed attempt has its outcome, a record
 // without a query id never ran under one, and a finished attempt of other SQL
-// (kept by --abandon and an edit) did not run this statement. Only a record
-// with a marker counts. A record of this release (ATTEMPT_RECORD_MARKER)
-// names an id of this attempt alone: every entry of a retry's id counts
-// (RETRY_QUERY_LOG_MARGIN_MS), and
-// those of the statement's first id from its recorded start (see
-// QUERY_LOG_SKEW_MARGIN_MS). A record of the release before (#672,
-// STARTED_RECORD_MARKER) keeps that release's check: its id can be an earlier
-// attempt's too, so its entries count from the recorded start, on the server
-// clock, and a missing entry is not waited for.
+// (kept by --abandon and an edit) did not run this statement. Its outcome is
+// read with the query_log bound its record names, the one its polls used
+// (#767). A record of the releases from #701 to #767 names no bound; only
+// one of a retry's id is read, as every entry of that id is the attempt's
+// (RETRY_QUERY_LOG_MARGIN_MS). Any other record is checked in
+// system.processes only.
 function startedAttemptCheck(
   op: OperationState | undefined,
   fingerprint: string,
@@ -636,19 +652,32 @@ function startedAttemptCheck(
 ): StartedAttemptCheck | undefined {
   if (op?.status !== 'started' || op.queryId === '') return undefined
   if (op.fingerprint !== '' && op.fingerprint !== fingerprint) return undefined
-  const startedMs = journalTimeMs(op.startedAt)
-  if (op.lastError === ATTEMPT_RECORD_MARKER) {
-    return {
-      afterTime: op.queryId === baseQueryId ? queryLogLowerBound(startedMs, 0) : retryQueryLogLowerBound(startedMs),
-      awaitsFlush: true,
-    }
+  const bound = recordedQueryLogBound(op.lastError)
+  if (bound !== undefined) return { afterTime: bound, awaitsFlush: true }
+  if (op.lastError === ATTEMPT_RECORD_MARKER && op.queryId !== baseQueryId) {
+    return { afterTime: retryQueryLogLowerBound(journalTimeMs(op.startedAt)), awaitsFlush: true }
   }
-  if (op.lastError === STARTED_RECORD_MARKER) return { afterTime: queryLogLowerBound(startedMs, 0), awaitsFlush: false }
   return undefined
 }
 
+/** The lastError of a started record that names its query_log bound (#767). */
+export function attemptRecordError(bound: string): string {
+  return `${ATTEMPT_BOUND_MARKER}${bound}`
+}
+
+/** The query_log bound a started record names, or undefined when it names none (#767). */
+function recordedQueryLogBound(lastError: string): string | undefined {
+  if (!lastError.startsWith(ATTEMPT_BOUND_MARKER)) return undefined
+  const bound = lastError.slice(ATTEMPT_BOUND_MARKER.length)
+  return RECORDED_BOUND_SHAPE.test(bound) ? bound : undefined
+}
+
 function isStartedRecordMarker(lastError: string): boolean {
-  return lastError === ATTEMPT_RECORD_MARKER || lastError === STARTED_RECORD_MARKER
+  return (
+    lastError === ATTEMPT_RECORD_MARKER ||
+    lastError === STARTED_RECORD_MARKER ||
+    recordedQueryLogBound(lastError) !== undefined
+  )
 }
 
 // The journal returns DateTime64 without a zone, all of it UTC.

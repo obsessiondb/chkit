@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+A re-run of `chkit migrate --apply` no longer records an interrupted async statement as completed from an earlier attempt's `system.query_log` entry that the interrupted run had ignored; it now reads the outcome with the same bound that run used, which the journal stores with the attempt.
