@@ -68,7 +68,7 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
-from chkit.core.sql_lexer import identifier_name, js_regex, js_trim, tokenize_sql
+from chkit.core.sql_lexer import identifier_name, is_trivia, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
@@ -834,47 +834,124 @@ def _order_operations(
     *,
     drop: DependencyGraph,
     create: DependencyGraph,
-    add_column: DependencyGraph,
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
 ) -> list[MigrationOperation]:
     """Reorder the drop and create segments of a (rank, key)-sorted plan by object dependencies.
 
     Drops run dependents first, creates run dependencies first (#231). Alters
-    and create_database keep their place, but an ADD COLUMN moves behind the
-    ADD COLUMNs its default reads (#681).
+    and create_database keep their place, except that the column statements
+    of a table are ordered by the columns they read and remove.
     """
     drops = [op for op in ordered if _rank(op) == 0]
     middle = [op for op in ordered if _rank(op) in (1, 2)]
     creates = [op for op in ordered if _rank(op) >= 3]  # noqa: PLR2004
     return [
         *order_by_dependencies(drops, lambda op: op.key, lambda key: drop.get(key, ())),
-        *_order_column_adds(middle, add_column),
+        *order_column_statements(middle, previous=previous, next_=next_, renames=()),
         *order_by_dependencies(creates, lambda op: op.key, lambda key: create.get(key, ())),
     ]
 
 
-def _order_column_adds(
-    operations: list[MigrationOperation], reads: DependencyGraph
-) -> list[MigrationOperation]:
-    """Move each ADD COLUMN behind the ADD COLUMNs of the columns its expression reads (#681).
+_COLUMN_STATEMENTS = frozenset(
+    {
+        "alter_table_add_column",
+        "alter_table_modify_column",
+        "alter_table_drop_column",
+        "alter_table_rename_column",
+    }
+)
 
-    The expression is the column's DEFAULT, MATERIALIZED or ALIAS one. The ADD
-    COLUMNs fill the positions they had, so every other operation keeps its place.
+
+def is_column_statement(op: MigrationOperation) -> bool:
+    return op.type in _COLUMN_STATEMENTS
+
+
+def column_rename_key(rename: ColumnRenameSuggestion) -> str:
+    """Key of the RENAME COLUMN operation of ``rename``."""
+    return f"table:{rename.database}.{rename.table}:column_rename:{rename.from_}:{rename.to}"
+
+
+def order_column_statements(
+    operations: Sequence[MigrationOperation],
+    *,
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
+    renames: Sequence[ColumnRenameSuggestion],
+) -> list[MigrationOperation]:
+    """Order the column statements of every table in one dependency sort (TS orderColumnStatements).
+
+    The statements are ADD, MODIFY, DROP and RENAME COLUMN, from their key
+    order (#681, #745, #746, #758):
+
+    - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression
+      reads column X runs after the ADD of X or the RENAME to X;
+    - a DROP of X runs after the MODIFY or DROP of every column whose old
+      expression reads X, since ClickHouse refuses to drop a column another
+      column still reads. A RENAME away from X needs no such wait: ClickHouse
+      rewrites the expressions that read X to the new name;
+    - statements of the same column keep their order.
+
+    Members of a cycle keep their key order. The statements fill the positions
+    the column statements had, so every other operation keeps its place, and
+    a table's statements never move past another table's (they share no
+    edge). ``renames`` names the columns of each RENAME COLUMN in ``operations``.
     """
-    adds = iter(
+    reads = _column_default_reads(next_)
+    old_reads = _column_default_reads(previous)
+    renamed_to = {
+        column_rename_key(rename): _column_key(rename.database, rename.table, rename.to)
+        for rename in renames
+    }
+    statements = sorted((op for op in operations if is_column_statement(op)), key=lambda op: op.key)
+
+    providers: dict[str, list[int]] = {}
+    releasers: dict[str, list[int]] = {}
+    for index, op in enumerate(statements):
+        if op.type == "alter_table_add_column":
+            providers.setdefault(op.key, []).append(index)
+        renamed = renamed_to.get(op.key)
+        if op.type == "alter_table_rename_column" and renamed is not None:
+            providers.setdefault(renamed, []).append(index)
+        if op.type in ("alter_table_modify_column", "alter_table_drop_column"):
+            for read in old_reads.get(op.key, ()):
+                releasers.setdefault(read, []).append(index)
+
+    prerequisites: list[list[str]] = []
+    for index, op in enumerate(statements):
+        found: dict[int, None] = {}
+        if op.type in ("alter_table_add_column", "alter_table_modify_column"):
+            for read in reads.get(op.key, ()):
+                for other in providers.get(read, []):
+                    found[other] = None
+        if op.type == "alter_table_drop_column":
+            for other in releasers.get(op.key, []):
+                found[other] = None
+        if index > 0 and statements[index - 1].key == op.key:
+            found[index - 1] = None
+        found.pop(index, None)
+        prerequisites.append([str(other) for other in found])
+
+    ordered = iter(
         order_by_dependencies(
-            [op for op in operations if op.type == "alter_table_add_column"],
-            lambda op: op.key,
-            lambda key: reads.get(key, ()),
+            list(range(len(statements))),
+            str,
+            lambda key: prerequisites[int(key)],
         )
     )
-    return [next(adds) if op.type == "alter_table_add_column" else op for op in operations]
+    return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
+
+
+def _column_key(database: str, table: str, column: str) -> str:
+    return f"table:{database}.{table}:column:{column}"
 
 
 def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
-    A name can also be a function or a lambda parameter; such an extra edge
-    moves an ADD COLUMN later, or makes a cycle that keeps the key order.
+    A name followed by ``(`` is a function call, not a column. A name can also
+    be a lambda parameter; such an extra edge moves a statement later, or
+    makes a cycle that keeps the key order.
     """
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -889,9 +966,12 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             if parsed.kind != "expression":
                 continue
             read: set[str] = set()
-            for token in tokenize_sql(parsed.sql):
+            tokens = [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)]
+            for index, token in enumerate(tokens):
                 name = identifier_name(token)
-                if name is not None and name != column.name and name in names:
+                if name is None or (index + 1 < len(tokens) and tokens[index + 1].text == "("):
+                    continue
+                if name != column.name and name in names:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
     return graph
@@ -1034,7 +1114,8 @@ def plan_diff(
         operations,
         drop=invert_dependency_graph(build_dependency_graph(old_canonical)),
         create=build_dependency_graph(new_canonical),
-        add_column=_column_default_reads(new_canonical),
+        previous=old_canonical,
+        next_=new_canonical,
     )
 
     counts: dict[RiskLevel, int] = {"safe": 0, "caution": 0, "danger": 0}

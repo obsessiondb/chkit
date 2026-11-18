@@ -13,7 +13,7 @@ from chkit.cli.commands.drift_compare import compare_table_shape
 from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.clickhouse.canonicalize import canonicalize_sql_fragments
 from chkit.clickhouse.client import ClickHouseClient
-from chkit.clickhouse.ddl_propagation import wait_for_table
+from chkit.clickhouse.ddl_propagation import wait_for_table, wait_for_view
 from chkit.clickhouse.introspect import list_table_details
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
@@ -21,6 +21,7 @@ from chkit.core.model import (
     SkipIndexMinmax,
     TableDefinition,
     table,
+    view,
 )
 from chkit.core.snapshot import create_snapshot
 from chkit.core.sql import to_create_sql
@@ -140,7 +141,8 @@ def test_column_expressions_read_clean_as_clickhouse_formats_them(tmp_path: Path
     with _connect() as client:
         database = client.database
         name = create_prefix("drift_col_expr") + "users"
-        # ClickHouse stores these as `(id * 2) + 1` and `ts + toIntervalDay(1)`.
+        # ClickHouse stores these as `(id * 2) + 1`, `ts + toIntervalDay(1)`,
+        # `floor(id)` and `lower(s)`.
         definition = table(
             database=database,
             name=name,
@@ -148,6 +150,14 @@ def test_column_expressions_read_clean_as_clickhouse_formats_them(tmp_path: Path
             columns=[
                 {"name": "id", "type": "UInt64"},
                 {"name": "ts", "type": "DateTime"},
+                {"name": "s", "type": "String"},
+                {"name": "bucket", "type": "UInt64", "default": {"expression": "FLOOR(id)"}},
+                {
+                    "name": "lowered",
+                    "type": "String",
+                    "defaultKind": "MATERIALIZED",
+                    "default": {"expression": "LCASE(s)"},
+                },
                 {"name": "score", "type": "UInt64", "default": {"expression": "id * 2 + 1"}},
                 {
                     "name": "due",
@@ -289,3 +299,64 @@ def test_columns_named_from_and_all_read_clean_and_a_changed_default_drifts(
             assert poll_until(observe, lambda seen: seen == expected) == expected
         finally:
             client.execute(f"DROP TABLE IF EXISTS {database}.{name} SYNC")
+
+
+def test_view_query_function_case_and_aliases_report_no_drift(tmp_path: Path) -> None:
+    """FLOOR/CEILING in a schema view must not drift against the stored query (#731).
+
+    ClickHouse stores `FLOOR(amount)` as `floor(amount)` and the alias
+    `CEILING(amount)` as `ceil(amount)`, while case-sensitive names such as
+    `toUnixTimestamp` are stored as written. Drift must converge the registered
+    spellings without touching case-sensitive names.
+    """
+    with _connect() as client:
+        database = client.database
+        prefix = create_prefix("drift_fn_case")
+        events = f"{prefix}events"
+        report = f"{prefix}report"
+        events_def = table(
+            database=database,
+            name=events,
+            engine="MergeTree()",
+            columns=[
+                {"name": "id", "type": "UInt64"},
+                {"name": "amount", "type": "Float64"},
+            ],
+            primary_key=["id"],
+            order_by=["id"],
+        )
+        report_def = view(
+            database=database,
+            name=report,
+            as_=(
+                "SELECT FLOOR(amount) AS floored, CEILING(amount) AS ceiled, "
+                f"toUnixTimestamp(now64()) AS ts FROM {events}"
+            ),
+        )
+        snapshot = create_snapshot(canonicalize_definitions([events_def, report_def]))
+        try:
+            client.execute(to_create_sql(events_def))
+            wait_for_table(client, database, events)
+            client.execute(to_create_sql(report_def))
+            wait_for_view(client, database, report)
+
+            def observe() -> tuple[list[str], list[str], list[str]]:
+                payload = build_drift_payload(
+                    client=client, meta_dir=tmp_path, snapshot=snapshot, database=database
+                )
+                return (
+                    [key for key in payload.missing if events in key or report in key],
+                    [detail.table for detail in payload.table_drift if events in detail.table],
+                    [
+                        f"{detail.code} {detail.object}"
+                        for detail in payload.object_drift
+                        if report in detail.object and detail.code != "extra_object"
+                    ],
+                )
+
+            # Each read may land on a replica that has not applied the CREATE yet.
+            missing, drifted, view_drift = poll_until(observe, lambda seen: seen == ([], [], []))
+            assert (missing, drifted, view_drift) == ([], [], [])
+        finally:
+            client.execute(f"DROP VIEW IF EXISTS {database}.{report} SYNC")
+            client.execute(f"DROP TABLE IF EXISTS {database}.{events} SYNC")

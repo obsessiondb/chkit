@@ -6,8 +6,8 @@ Port of ``packages/clickhouse/src/canonicalize.ts`` (#195).
 from __future__ import annotations
 
 import re
-from collections.abc import Sequence
-from typing import Any
+from collections.abc import Mapping, Sequence
+from typing import Any, TypedDict
 
 from chkit.core.sql_lexer import is_trivia, js_regex, js_trim, tokenize_sql
 
@@ -20,14 +20,97 @@ _SELECT_LIST_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+0,\s*(.+)$"), re.IGNORE
 _SELECT_PREFIX_RE = re.compile(js_regex(r"^SELECT\s+(.+)$"), re.IGNORECASE | re.DOTALL)
 
 
+class FunctionRegistry(TypedDict):
+    """Case-resolution rules for function names, from ``system.functions``.
+
+    ``exact`` maps every registered name to its canonical form (``alias_to``
+    when set, else the name itself); ``insensitive`` does the same keyed by
+    lowercased name, but only for names ClickHouse resolves case-insensitively.
+    """
+
+    exact: dict[str, str]
+    insensitive: dict[str, str]
+
+
+def build_function_registry(rows: Sequence[Mapping[str, Any]]) -> FunctionRegistry:
+    exact: dict[str, str] = {}
+    insensitive: dict[str, str] = {}
+    for row in rows:
+        name = str(row["name"])
+        canonical = str(row["alias_to"]) or name
+        exact[name] = canonical
+        if row["case_insensitive"]:
+            insensitive[name.lower()] = canonical
+    return {"exact": exact, "insensitive": insensitive}
+
+
+def _load_function_registry(client: Any, on_unavailable: Any = None) -> FunctionRegistry:
+    """Load the server's function-name resolution rules once for a run.
+
+    A view written with ``FLOOR`` or ``LCASE`` is stored as ``floor`` /
+    ``lower``, while user-defined (case-sensitive) functions stay as written —
+    only ``system.functions`` tells the two apart (#729 review). If the
+    registry cannot be read, names are left as written: no normalization is
+    safer than lowercasing case-sensitive names.
+    """
+    try:
+        rows = client.query("SELECT name, case_insensitive, alias_to FROM system.functions").rows
+    except Exception as error:
+        if on_unavailable is not None:
+            on_unavailable(error)
+        rows = []
+    return build_function_registry(rows)
+
+
+def normalize_function_names(sql: str, registry: FunctionRegistry) -> str:
+    """Resolve function-call names the way ClickHouse does on write (#729).
+
+    A registered name rewrites to its canonical form (``CEILING`` -> ``ceil``,
+    ``LCASE`` -> ``lower``); an unregistered or case-sensitive name keeps its
+    written form — so ``rv_f`` and ``RV_f`` still compare different, and drift
+    output keeps readable case (``toUnixTimestamp``). Only an identifier
+    followed by ``(`` is a call, and only when it is not qualified by a dot:
+    ``analytics.FLOOR`` names a parameterized view, and ClickHouse normalizes
+    the whole compound name, not its last part — leaving it as written keeps
+    two differently-cased views distinct. Strings, quoted identifiers,
+    comments and plain names keep their case.
+    """
+    tokens = tokenize_sql(sql)
+    out: list[str] = []
+    for i, token in enumerate(tokens):
+        if token.kind == "identifier":
+            prv = i - 1
+            while prv >= 0 and is_trivia(tokens[prv]):
+                prv -= 1
+            nxt = i + 1
+            while nxt < len(tokens) and is_trivia(tokens[nxt]):
+                nxt += 1
+            qualified = prv >= 0 and tokens[prv].text == "."
+            if not qualified and nxt < len(tokens) and tokens[nxt].text == "(":
+                text = token.text
+                out.append(
+                    registry["exact"].get(text) or registry["insensitive"].get(text.lower()) or text
+                )
+                continue
+        out.append(token.text)
+    return "".join(out)
+
+
 def canonicalize_sql_fragments(
-    client: Any, fragments: Sequence[str], *, wrap: bool
+    client: Any,
+    fragments: Sequence[str],
+    *,
+    wrap: bool,
+    on_registry_unavailable: Any = None,
 ) -> dict[str, str]:
     """Map each fragment to the exact form ClickHouse stores it in.
 
     The server rewrites expressions on the way in — spacing, operator
     precedence parens, ``INTERVAL n UNIT`` -> ``toIntervalUnit(n)`` — which no
-    local string normalizer can reproduce.
+    local string normalizer can reproduce. Function-call names are then
+    resolved through the server's ``system.functions`` registry, since the
+    server canonicalizes their case and aliases on write but the formatter
+    does not (#729).
 
     ``wrap`` distinguishes a scalar expression (wrapped as ``SELECT 0, <expr>``,
     prefix stripped back off; after ``0,`` a leading ``all`` or ``distinct``
@@ -42,14 +125,21 @@ def canonicalize_sql_fragments(
     would match.
     """
     unique = list(dict.fromkeys(t for t in (js_trim(f) for f in fragments) if t))
+    if not unique:
+        return {}
+
+    registry = _load_function_registry(client, on_registry_unavailable)
     if not wrap:
-        return _format_fragments(client, unique, "formatQuerySingleLineOrNull(fragment)", None)
+        return _format_fragments(
+            client, unique, "formatQuerySingleLineOrNull(fragment)", None, registry
+        )
 
     result = _format_fragments(
         client,
         unique,
         "formatQuerySingleLineOrNull('SELECT 0, ' || fragment)",
         _SELECT_LIST_PREFIX_RE,
+        registry,
     )
     rest = [
         fragment
@@ -58,7 +148,11 @@ def canonicalize_sql_fragments(
     ]
     result.update(
         _format_fragments(
-            client, rest, "formatQuerySingleLineOrNull('SELECT ' || fragment)", _SELECT_PREFIX_RE
+            client,
+            rest,
+            "formatQuerySingleLineOrNull('SELECT ' || fragment)",
+            _SELECT_PREFIX_RE,
+            registry,
         )
     )
     return result
@@ -77,7 +171,11 @@ def _starts_with_select_modifier(fragment: str) -> bool:
 
 
 def _format_fragments(
-    client: Any, unique: Sequence[str], format_call: str, prefix: re.Pattern[str] | None
+    client: Any,
+    unique: Sequence[str],
+    format_call: str,
+    prefix: re.Pattern[str] | None,
+    registry: FunctionRegistry,
 ) -> dict[str, str]:
     result: dict[str, str] = {}
     for batch in _batch_fragments(unique):
@@ -92,7 +190,7 @@ def _format_fragments(
                 continue
             canonical = js_trim(value) if prefix is None else _strip_prefix(value, prefix)
             if canonical:
-                result[raw] = canonical
+                result[raw] = normalize_function_names(canonical, registry)
     return result
 
 

@@ -9,35 +9,42 @@ time out here.
 from __future__ import annotations
 
 import os
-from types import SimpleNamespace
+from collections.abc import Iterator
 from typing import Any
 
 import pytest
 
 from chkit import TableDefinition, table
+from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
 from chkit.clickhouse.replicas import all_replicas, resolve_replica_fanout
+from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit.core.planner import plan_diff
 from chkit.core.sql import to_create_sql
-from tests.e2e_testkit import create_prefix, quote_ident
+from tests.e2e_testkit import create_prefix, quote_ident, resolve_live_env
 
 _ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 
 
-class _LiveClient:
-    """Adapts clickhouse-connect to the ``query(sql) -> .rows`` shape the waits use."""
+@pytest.fixture
+def live() -> Iterator[ClickHouseClient]:
+    """chkit's client, which ``migrate`` passes to the waits."""
+    env = resolve_live_env()
+    config = ChxResolvedClickHouseConfig(
+        url=env.clickhouse_url,
+        username=env.clickhouse_user,
+        password=env.clickhouse_password,
+        database=env.clickhouse_database,
+        secure=env.clickhouse_url.startswith("https:"),
+    )
+    with ClickHouseClient.connect(config) as client:
+        yield client
 
-    def __init__(self, client: Any) -> None:
-        self._client = client
 
-    def query(self, sql: str) -> SimpleNamespace:
-        return SimpleNamespace(rows=list(self._client.query(sql).named_results()))
-
-
-def test_planned_modify_remove_rename_and_index_statements_pass_the_wait(ch_client: Any) -> None:
-    client = ch_client._client
-    live = _LiveClient(client)
-    db = client.database
+def test_planned_modify_remove_rename_and_index_statements_pass_the_wait(
+    live: ClickHouseClient,
+) -> None:
+    db = live.database
     name = f"{create_prefix('defwait_py')}t"
     columns: list[dict[str, Any]] = [
         {"name": "id", "type": "UInt32"},
@@ -85,7 +92,7 @@ def test_planned_modify_remove_rename_and_index_statements_pass_the_wait(ch_clie
     )
     qualified = f"{quote_ident(db)}.{quote_ident(name)}"
     try:
-        client.command(to_create_sql(before))
+        live.execute(to_create_sql(before))
         wait_for_ddl_propagation(live, "create_table", f"table:{db}.{name}")
         operations = plan_diff([before], [after]).operations
         assert sorted(op.type for op in operations) == [
@@ -94,13 +101,13 @@ def test_planned_modify_remove_rename_and_index_statements_pass_the_wait(ch_clie
             *["alter_table_modify_column"] * 12,
         ]
         for operation in operations:
-            client.command(operation.sql)
+            live.execute(operation.sql)
             wait_for_ddl_propagation(live, operation.type, operation.key, statement=operation.sql)
         rename = (
             f"ALTER TABLE {qualified} RENAME COLUMN IF EXISTS "
             f"{quote_ident('old:name')} TO {quote_ident('new')};"
         )
-        client.command(rename)
+        live.execute(rename)
         wait_for_ddl_propagation(
             live,
             "alter_table_rename_column",
@@ -128,21 +135,19 @@ def test_planned_modify_remove_rename_and_index_statements_pass_the_wait(ch_clie
                 {"name": "x", "default_kind": "", "default_expression": "", "comment": "", "compression_codec": ""},
             ]
     finally:
-        client.command(f"DROP TABLE IF EXISTS {qualified} SYNC")
+        live.execute(f"DROP TABLE IF EXISTS {qualified} SYNC")
 
 
 def test_a_definition_the_server_does_not_show_fails_the_wait_naming_the_field(
-    ch_client: Any, monkeypatch: pytest.MonkeyPatch
+    live: ClickHouseClient, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     monkeypatch.setattr("chkit.clickhouse.ddl_propagation.RETRY_DELAY_SECONDS", 0.05)
     monkeypatch.setattr("chkit.clickhouse.ddl_propagation.DEFINITION_WAIT_DEADLINE_SECONDS", 2.0)
-    client = ch_client._client
-    live = _LiveClient(client)
-    db = client.database
+    db = live.database
     name = f"{create_prefix('defwait_py_miss')}t"
     qualified = f"{quote_ident(db)}.{quote_ident(name)}"
     try:
-        client.command(
+        live.execute(
             f"CREATE TABLE {qualified} (id UInt32, s String DEFAULT 'old') ENGINE = MergeTree ORDER BY id"
         )
         wait_for_ddl_propagation(live, "create_table", f"table:{db}.{name}")
@@ -158,7 +163,7 @@ def test_a_definition_the_server_does_not_show_fails_the_wait_naming_the_field(
                 statement=f"ALTER TABLE {qualified} MODIFY COLUMN `s` String DEFAULT 'new';",
             )
     finally:
-        client.command(f"DROP TABLE IF EXISTS {qualified} SYNC")
+        live.execute(f"DROP TABLE IF EXISTS {qualified} SYNC")
 
 
 # ObsessionDB accepts MODIFY COLUMN ... EPHEMERAL <default> without changing the
@@ -166,16 +171,14 @@ def test_a_definition_the_server_does_not_show_fails_the_wait_naming_the_field(
 # fails as it should. The verify job runs this against ClickHouse.
 @pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB ignores EPHEMERAL default changes (#285)")
 def test_an_ephemeral_default_change_passes_the_wait_once_every_replica_stores_it(
-    ch_client: Any,
+    live: ClickHouseClient,
 ) -> None:
-    client = ch_client._client
-    live = _LiveClient(client)
-    db = client.database
+    db = live.database
     name = f"{create_prefix('defwait_py_eph')}t"
     qualified = f"{quote_ident(db)}.{quote_ident(name)}"
     key = f"table:{db}.{name}:column:raw"
     try:
-        client.command(
+        live.execute(
             f"CREATE TABLE {qualified} (id UInt32, raw String EPHEMERAL) ENGINE = MergeTree ORDER BY id"
         )
         wait_for_ddl_propagation(live, "create_table", f"table:{db}.{name}")
@@ -184,7 +187,7 @@ def test_an_ephemeral_default_change_passes_the_wait_once_every_replica_stores_i
             f"ALTER TABLE {qualified} MODIFY COLUMN `raw` String EPHEMERAL;",
             f"ALTER TABLE {qualified} MODIFY COLUMN `raw` String EPHEMERAL concat('se', 'ed');",
         ):
-            client.command(statement)
+            live.execute(statement)
             wait_for_ddl_propagation(live, "alter_table_modify_column", key, statement=statement)
         for replica in _every_replica(
             live,
@@ -195,10 +198,10 @@ def test_an_ephemeral_default_change_passes_the_wait_once_every_replica_stores_i
                 {"default_kind": "EPHEMERAL", "default_expression": "concat('se', 'ed')"}
             ]
     finally:
-        client.command(f"DROP TABLE IF EXISTS {qualified} SYNC")
+        live.execute(f"DROP TABLE IF EXISTS {qualified} SYNC")
 
 
-def _every_replica(live: _LiveClient, fields: str, where: str) -> list[list[dict[str, Any]]]:
+def _every_replica(live: ClickHouseClient, fields: str, where: str) -> list[list[dict[str, Any]]]:
     """``fields`` of the rows matching ``where``, one sorted list per replica."""
     fanout = resolve_replica_fanout(live)
     source = all_replicas(fanout, "system.columns") if fanout else "system.columns"

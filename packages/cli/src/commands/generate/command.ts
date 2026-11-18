@@ -197,7 +197,10 @@ async function cmdGenerate(ctx: import('../../plugins.js').ChxPluginCommandConte
   plan = applyExplicitTableRenames(plan, activeTableMappings)
   plan = applyExplicitDictionaryRenames(plan, activeDictionaryMappings)
   assertCliColumnMappingsResolvable(cliColumnMappings, plan, definitions)
-  plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings))
+  plan = applySelectedRenameSuggestions(plan, buildExplicitColumnRenameSuggestions(plan, columnMappings), {
+    previous: remappedPreviousDefinitions,
+    next: definitions,
+  })
 
   plan = await pluginRuntime.runOnPlanCreated(
     {
