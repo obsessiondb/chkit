@@ -2607,3 +2607,167 @@ def test_a_plugin_that_drops_a_statement_with_an_unresolved_async_attempt_stops(
     assert client.calls == []
     assert store.writes == []
     assert store.appended == []
+
+
+class _PreparedRerunClient(_AlwaysUnknownClient):
+    """Nothing of the prepared attempt on the server; its re-run finishes."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.submitted: list[str | None] = []
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        super().query_status(query_id, **kwargs)
+        if query_id == "prepared-query-id" or not self.submitted:
+            return QueryStatus(status="unknown")
+        return QueryStatus(status="finished", written_rows=1, duration_ms=10)
+
+    def submit(
+        self,
+        statement: str,
+        query_id: str | None = None,
+        settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
+    ) -> str:
+        _ = (statement, settings)
+        if before_send is not None:
+            before_send()
+            before_send.commit()
+        self.submitted.append(query_id)
+        return query_id or "x"
+
+
+def test_an_async_rerun_after_a_retry_edit_looks_its_prepared_attempt_up_once(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 6): an async statement after a --retry edit reuses the
+    edit check's lookup of its prepared attempt: the check and its 5 query_log
+    flush rechecks run once, then the attempt runs again under a new id."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"-- before-retry: TRUNCATE TABLE db.a\n{statement}\n"
+    )
+    edited = f"-- an edited comment\n{original}"
+    attempt = op(0, "started", LOAD, query_id="prepared-query-id").model_copy(
+        update={
+            "last_error": "prepared under its own query id; not submitted yet",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(original)))
+    client = _PreparedRerunClient()
+    _apply(
+        _write(tmp_path, edited),
+        cast(Any, client),
+        store,
+        retry=_retry_for(edited, previous=checksum_sql(original)),
+    )
+    assert client.status_ids.count("prepared-query-id") == 6
+    assert len(client.submitted) == 1
+    assert client.submitted[0] != "prepared-query-id"
+    assert client.calls == []
+    assert store.appended
+
+
+class _OutcomeClient(_AlwaysUnknownClient):
+    def __init__(self, outcome: str) -> None:
+        super().__init__()
+        self._outcome = outcome
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        super().query_status(query_id, **kwargs)
+        if self._outcome == "finished":
+            return QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        return QueryStatus(status=self._outcome)  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("outcome", "code"),
+    [
+        ("running", "retry_mismatch"),
+        ("unknown", "async_outcome_unknown"),
+        ("finished", "statement_split_changed"),
+    ],
+)
+def test_a_plugin_that_drops_a_statement_with_a_fenced_started_attempt_reads_it_first(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, outcome: str, code: str
+) -> None:
+    """#767 (round 6): a fenced started attempt the plugin dropped is read
+    against its record before the recorded statements are checked."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    first = "ALTER TABLE db.a ADD COLUMN x UInt8;"
+    load = "INSERT INTO db.a SELECT 1;"
+    sql = f"{first}\n-- operation: load_table_data key=table:db.a risk=safe mode=async\n{load}\n"
+    store = FakeStore(
+        in_progress(
+            [
+                op(0, "completed").model_copy(
+                    update={"fingerprint": statement_fingerprint(first)}
+                ),
+                op(1, "started", LOAD, query_id="fenced-query-id").model_copy(
+                    update={
+                        "last_error": "submitted under its own query id; a retry reads its "
+                        "outcome from system.query_log",
+                        "fingerprint": statement_fingerprint(load),
+                        "attempt_fenced": True,
+                    }
+                ),
+            ],
+            checksum=checksum_sql(sql),
+        )
+    )
+    client = _OutcomeClient(outcome)
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, sql),
+            cast(Any, client),
+            store,
+            runtime=_FakeRuntime(lambda statements: statements[:1]),
+        )
+    assert info.value.code == code
+    assert client.status_ids[0] == "fenced-query-id"
+    assert client.calls == []
+    assert store.writes == []
+    assert store.appended == []
+
+
+class _FirstLookupFinishesClient(_AlwaysUnknownClient):
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        super().query_status(query_id, **kwargs)
+        if len(self.status_ids) == 1:
+            return QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        return QueryStatus(status="unknown")
+
+
+def test_an_async_statement_after_a_retry_edit_records_the_query_finish_the_check_read(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 6): a retained async statement takes the edit check's
+    QueryFinish, even when a later lookup would find nothing."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    edited = f"-- an edited comment\n{original}"
+    attempt = op(0, "started", LOAD, query_id="fenced-query-id").model_copy(
+        update={
+            "last_error": "submitted under its own query id; a retry reads its outcome from "
+            "system.query_log",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(original)))
+    client = _FirstLookupFinishesClient()
+    _apply(
+        _write(tmp_path, edited),
+        cast(Any, client),
+        store,
+        retry=_retry_for(edited, previous=checksum_sql(original)),
+    )
+    assert client.status_ids == ["fenced-query-id"]
+    assert store.state is not None
+    assert store.state.operations[0].status == "completed"
+    assert store.appended

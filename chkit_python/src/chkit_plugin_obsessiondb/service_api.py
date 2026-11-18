@@ -29,7 +29,11 @@ from typing import Any, Literal
 import httpcore
 import httpx
 
-from chkit.clickhouse.client import guarded_first_write
+from chkit.clickhouse.client import (
+    SUBMIT_WRITE_TIMEOUT_SECONDS,
+    guard_begin_write,
+    guard_end_write,
+)
 from chkit_plugin_obsessiondb.api_client import (
     USER_AGENT,
     SessionExpiredError,
@@ -150,8 +154,8 @@ def _rpc_post(
 ) -> Any:
     """POST to ``{base_url}/rpc/{procedure}`` with bearer auth, oRPC RPC envelope.
 
-    ``guard``, a submit's guard, runs the request's first write once the
-    connection is open (see ``guarded_first_write``); when it refuses, nothing
+    ``guard``, a submit's guard, holds the request's write once the
+    connection is open (see ``guard_begin_write``); when it refuses, nothing
     is sent (#767). The connection is the client's own, so no earlier request
     shares it.
 
@@ -239,25 +243,55 @@ class _GuardedBackend(httpcore.NetworkBackend):
 
 
 class _GuardedStream(httpcore.NetworkStream):
+    """Writes a request under the submit's guard (#767).
+
+    The first write of the origin request starts the guarded write, and the
+    request is written once the stream is first read (the response) or
+    closed. Its writes run under the submit's write timeout. A proxy's
+    ``CONNECT`` and the TLS handshake through its tunnel are connection setup:
+    the guard stays armed through them, and is carried into the TLS stream.
+    """
+
     def __init__(self, inner: httpcore.NetworkStream, guard: Any) -> None:
         self._inner = inner
         self._guard = guard
+        self._writing: Any = None
+        # A stream that carried a proxy's CONNECT is the tunnel: the origin
+        # request goes through the TLS stream ``start_tls`` opens on it.
+        self._tunnel = False
+
+    def _end_write(self) -> None:
+        writing, self._writing = self._writing, None
+        if writing is not None:
+            guard_end_write(writing)
 
     def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        # A read ends the request's write (its response follows), not the
+        # proxy's CONNECT, whose guard is still armed.
+        self._end_write()
         return self._inner.read(max_bytes, timeout)
 
     def write(self, buffer: bytes, timeout: float | None = None) -> None:
-        if self._guard is None:
-            self._inner.write(buffer, timeout)
-            return
-        guard, self._guard = self._guard, None
+        if buffer.startswith(b"CONNECT "):
+            self._tunnel = True
+        if self._guard is not None and not self._tunnel and buffer:
+            guard, self._guard = self._guard, None
+            try:
+                guard_begin_write(guard)
+            except BaseException:
+                self._inner.close()
+                raise
+            self._writing = guard
+        if self._writing is not None:
+            timeout = min(timeout or SUBMIT_WRITE_TIMEOUT_SECONDS, SUBMIT_WRITE_TIMEOUT_SECONDS)
         try:
-            guarded_first_write(guard, lambda: self._inner.write(buffer, timeout))
+            self._inner.write(buffer, timeout)
         except BaseException:
-            self._inner.close()
+            self._end_write()
             raise
 
     def close(self) -> None:
+        self._end_write()
         self._inner.close()
 
     def start_tls(self, *args: Any, **kwargs: Any) -> httpcore.NetworkStream:

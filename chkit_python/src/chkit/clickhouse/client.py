@@ -646,27 +646,41 @@ class _NoReplayPool:
 # on is excluded from sending once it connected or failed to, so this bounds
 # how long the caller waits to know.
 SUBMIT_CONNECT_TIMEOUT_SECONDS = 10.0
+# How long writing a submit's request may take (#767): the run that gave up
+# on the submit keeps its migrate lock until the write completed or failed.
+SUBMIT_WRITE_TIMEOUT_SECONDS = 30.0
 
 
-def guarded_first_write(guard: Any, write: Callable[[], _T]) -> _T:
-    """Run the request's first write under the submit's guard (#767).
+def guard_begin_write(guard: Any) -> None:
+    """Start writing a request under the submit's guard (#767).
 
-    A guard with ``first_write`` refuses the write once the run gave up on the
-    submit, and holds the run's give-up until the write returned, so a request
-    is either sent before the run stops or never.
+    A guard with ``begin_write`` refuses once the run gave up on the submit,
+    and from here on holds the run's give-up until ``guard_end_write``: a
+    request is either written whole (or its write failed) before the run
+    stops, or never started.
     """
-    first_write = getattr(guard, "first_write", None)
-    return first_write(write) if first_write is not None else write()
+    begin = getattr(guard, "begin_write", None)
+    if begin is not None:
+        begin()
+
+
+def guard_end_write(guard: Any) -> None:
+    end = getattr(guard, "end_write", None)
+    if end is not None:
+        end()
 
 
 class _GuardedSend:
-    """The submitting thread's guard on the first bytes of each request.
+    """The submitting thread's guard on writing each request.
 
-    The connection is opened first (connection setup is not sending), then
-    the first ``send`` of the request goes through the guard.
+    The connection is opened first (connection setup is not sending); the
+    request's first ``send`` starts the guarded write, under the write
+    timeout, and it ends once ``request`` returned or failed.
     """
 
     _guard: Any = None
+    _writing: Any = None
+    _timeout_before: Any = None
 
     def request(self, *args: Any, **kwargs: Any) -> None:
         self._guard = getattr(_SUBMIT_SEND, "before_send", None)
@@ -674,19 +688,26 @@ class _GuardedSend:
             super().request(*args, **kwargs)  # type: ignore[misc]
         finally:
             self._guard = None
+            writing, self._writing = self._writing, None
+            if writing is not None:
+                if self.sock is not None:  # type: ignore[attr-defined]
+                    self.sock.settimeout(self._timeout_before)  # type: ignore[attr-defined]
+                guard_end_write(writing)
 
     def send(self, data: Any) -> None:
         guard, self._guard = self._guard, None
-        if guard is None:
-            super().send(data)  # type: ignore[misc]
-            return
-        if self.sock is None:  # type: ignore[attr-defined]
-            self.connect()  # type: ignore[attr-defined]
-        try:
-            guarded_first_write(guard, lambda: super(_GuardedSend, self).send(data))  # type: ignore[misc]
-        except BaseException:
-            self.close()  # type: ignore[attr-defined]
-            raise
+        if guard is not None:
+            if self.sock is None:  # type: ignore[attr-defined]
+                self.connect()  # type: ignore[attr-defined]
+            try:
+                guard_begin_write(guard)
+            except BaseException:
+                self.close()  # type: ignore[attr-defined]
+                raise
+            self._writing = guard
+            self._timeout_before = self.sock.gettimeout()  # type: ignore[attr-defined]
+            self.sock.settimeout(SUBMIT_WRITE_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+        super().send(data)  # type: ignore[misc]
 
 
 class _GuardedHTTPConnection(_GuardedSend, HTTPConnection):

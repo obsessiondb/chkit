@@ -913,6 +913,132 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     expect(fake.appended).toEqual([])
   })
 
+  // #767 (round 6): an async statement after a --retry edit reuses the edit
+  // check's lookup of its prepared attempt: the check and its 5 query_log
+  // flush rechecks run once, then the attempt runs again under a new id.
+  test('an async re-run after a --retry edit looks its prepared attempt up once', async () => {
+    const sql = 'INSERT INTO db.a SELECT 1;'
+    const original = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n-- before-retry: TRUNCATE TABLE db.a\n${sql}\n`
+    const edited = `-- an edited comment\n${original}`
+    const dir = writeMigration(edited)
+    const fake = createFakeStore(inProgressState(checksumSQL(original), [{
+      ...operation(0, 'started', { type: 'load_table_data', key: 'table:db.a' }),
+      queryId: 'prepared-query-id',
+      lastError: PREPARED_RECORD_MARKER,
+      fingerprint: statementFingerprint(sql),
+      attemptFenced: true,
+    }]))
+    const commands: string[] = []
+    const submits: Array<string | undefined> = []
+    const checks: string[] = []
+    const db = {
+      async query() { return [{ now_ms: String(Date.parse('2026-09-29T00:12:00Z')), database: 'db' }] },
+      async queryStatus(queryId: string) {
+        checks.push(queryId)
+        return queryId === 'prepared-query-id' || submits.length === 0 ? { status: 'unknown' } : { status: 'finished', writtenRows: 1, durationMs: 10 }
+      },
+      async submit(_query: string, queryId?: string) { submits.push(queryId); return queryId ?? 'x' },
+      async command(command: string) { commands.push(command) },
+    } as unknown as ClickHouseExecutor
+
+    await applyMigration({
+      db, journalStore: fake.store, pluginRuntime: fakePluginRuntime(), config: CONFIG,
+      tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql',
+      retry: { previousChecksum: checksumSQL(original), checksum: checksumSQL(edited) }, log: () => {},
+    })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(checks.filter((id) => id === 'prepared-query-id')).toHaveLength(6)
+    expect(submits).toHaveLength(1)
+    expect(submits[0]).not.toBe('prepared-query-id')
+    expect(commands).toEqual([])
+    expect(fake.state()?.migrationCompleted).toBe(true)
+  }, 20_000)
+
+  // #767 (round 6): a retained async statement takes the edit check's
+  // QueryFinish, even when a later lookup would find nothing.
+  test('an async statement after a --retry edit records the QueryFinish the edit check read', async () => {
+    const sql = 'INSERT INTO db.a SELECT 1;'
+    const original = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n${sql}\n`
+    const edited = `-- an edited comment\n${original}`
+    const dir = writeMigration(edited)
+    const fake = createFakeStore(inProgressState(checksumSQL(original), [{
+      ...operation(0, 'started', { type: 'load_table_data', key: 'table:db.a' }),
+      queryId: 'fenced-query-id',
+      lastError: ATTEMPT_RECORD_MARKER,
+      fingerprint: statementFingerprint(sql),
+      attemptFenced: true,
+    }]))
+    const checks: string[] = []
+    const db = {
+      async query() { return [{ now_ms: String(Date.parse('2026-09-29T00:12:00Z')), database: 'db' }] },
+      async queryStatus(queryId: string) {
+        checks.push(queryId)
+        return checks.length === 1 ? { status: 'finished', writtenRows: 1, durationMs: 10 } : { status: 'unknown' }
+      },
+      async submit() { throw new Error('never submitted') },
+      async command() {},
+    } as unknown as ClickHouseExecutor
+
+    await applyMigration({
+      db, journalStore: fake.store, pluginRuntime: fakePluginRuntime(), config: CONFIG,
+      tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql',
+      retry: { previousChecksum: checksumSQL(original), checksum: checksumSQL(edited) }, log: () => {},
+    })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(checks).toEqual(['fenced-query-id'])
+    expect(fake.state()?.operations[0]).toMatchObject({ status: 'completed', queryId: 'fenced-query-id' })
+    expect(fake.state()?.migrationCompleted).toBe(true)
+  })
+
+  // #767 (round 6): a fenced started attempt the plugin dropped is read
+  // against its record before the recorded statements are checked.
+  for (const [outcome, code] of [
+    ['running', 'retry_mismatch'],
+    ['unknown', 'async_outcome_unknown'],
+    ['finished', 'statement_split_changed'],
+  ] as const) {
+    test(`a plugin that drops a statement with a fenced started attempt reads it first (${outcome})`, async () => {
+      const first = 'ALTER TABLE db.a ADD COLUMN x UInt8;'
+      const load = 'INSERT INTO db.a SELECT 1;'
+      const sql = `${first}\n-- operation: load_table_data key=table:db.a risk=safe mode=async\n${load}\n`
+      const dir = writeMigration(sql)
+      const fake = createFakeStore(inProgressState(checksumSQL(sql), [
+        { ...operation(0, 'completed'), fingerprint: statementFingerprint(first) },
+        {
+          ...operation(1, 'started', { type: 'load_table_data', key: 'table:db.a' }),
+          queryId: 'fenced-query-id',
+          lastError: ATTEMPT_RECORD_MARKER,
+          fingerprint: statementFingerprint(load),
+          attemptFenced: true,
+        },
+      ]))
+      const commands: string[] = []
+      const checks: string[] = []
+      const db = {
+        async query() { return [{ now_ms: '1700000000000', database: 'db' }] },
+        async queryStatus(queryId: string) {
+          checks.push(queryId)
+          return outcome === 'finished' ? { status: 'finished', writtenRows: 1, durationMs: 10 } : { status: outcome }
+        },
+        async command(command: string) { commands.push(command) },
+      } as unknown as ClickHouseExecutor
+
+      await expect(applyMigration({
+        db, journalStore: fake.store,
+        pluginRuntime: fakePluginRuntime((statements) => statements.slice(0, 1)),
+        config: CONFIG, tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql', log: () => {},
+      })).rejects.toMatchObject({ code })
+      rmSync(dir, { recursive: true, force: true })
+
+      expect(checks[0]).toBe('fenced-query-id')
+      expect(commands).toEqual([])
+      expect(fake.writes).toEqual([])
+      expect(fake.appended).toEqual([])
+    }, 20_000)
+  }
+
   // #767 (round 4): with the file unchanged, a plugin's onBeforeApply rewrite
   // changes the statement's fingerprint. The recorded attempt is still read as
   // it was recorded, so a load that may have left rows stops the run instead

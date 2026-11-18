@@ -845,6 +845,32 @@ describe('applyAsyncStatement', () => {
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
   })
 
+  // #767 (round 6): a settled outcome is journaled, then the run ends without
+  // waiting for a submit a proxy holds open.
+  for (const [label, status] of [
+    ['QueryFinish', { status: 'finished' as const, writtenRows: 1, durationMs: 10 }],
+    ['ExceptionBeforeStart', { status: 'failed' as const, error: 'Code: 60. UNKNOWN_TABLE', beforeStart: true }],
+  ] as const) {
+    test(`a ${label} journals the outcome and aborts a submit that never settles`, async () => {
+      const fake = createFakeExecutor([{ status: 'unknown' }, status])
+      let signal: AbortSignal | undefined
+      const db = {
+        ...fake.db,
+        submit: (_sql: string, _queryId?: string, _settings?: unknown, options?: { signal?: AbortSignal }) => {
+          signal = options?.signal
+          return new Promise(() => {})
+        },
+      } as unknown as ClickHouseExecutor
+      const { store, writes } = createFakeJournalStore(null)
+
+      const run = applyAsyncStatement({ ...BASE_INPUT, db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW })
+      if (label === 'QueryFinish') expect((await run).kind).toBe('completed')
+      else await expect(run).rejects.toThrow('UNKNOWN_TABLE')
+      expect(signal?.aborted).toBe(true)
+      expect(writes.at(-1)?.operations[0]?.status).toBe(label === 'QueryFinish' ? 'completed' : 'failed')
+    })
+  }
+
   // #767 (round 3): only unknown polls in a row count; a failed poll request
   // starts the count again.
   test('a failed poll request resets the unknown-poll count', async () => {

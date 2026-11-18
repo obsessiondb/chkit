@@ -142,6 +142,8 @@ class AsyncApplyInput:
     query_tracker: QueryTracker | None = None
     # The run holds no migrate lock because the target database did not exist (#767).
     lockless_bootstrap: bool = False
+    # The outcome a --retry edit's check read for this statement's record (#767).
+    known: KnownOutcome | None = None
 
 
 def iso_without_zone(dt: datetime) -> str:
@@ -243,11 +245,11 @@ class _Submission:
     ``error`` is set once the request has failed.
 
     It is also the request's guard (#767): called before the request starts,
-    and around the request's first write through ``first_write``, once its
-    connection is open. A run that gives up on it (``abandon``) refuses both,
-    and waits until a send that started connecting or writing either wrote
-    its first bytes or was stopped: the request is sent before the run stops,
-    or never.
+    and around writing the request (``begin_write`` at its first bytes,
+    ``end_write`` once written), once its connection is open. A run that gives
+    up on it (``abandon``) refuses both, and waits until a send that started
+    connecting was stopped, or one writing was written or failed: the request
+    is written before the run stops, or never started.
     """
 
     def __init__(self, submit: Callable[[_Submission], object]) -> None:
@@ -280,38 +282,49 @@ class _Submission:
                 raise RuntimeError(msg)
             self._state = "connecting"
 
-    def first_write(self, write: Callable[[], _T]) -> _T:
-        """Write the request's first bytes, unless the run gave up on it."""
+    def begin_write(self) -> None:
+        """Start writing the request, unless the run gave up on it."""
         with self._cond:
             if self._cancelled:
                 msg = "The run stopped without an outcome; the submit was not sent"
                 raise RuntimeError(msg)
             self._state = "writing"
-        try:
-            return write()
-        finally:
-            with self._cond:
+
+    def end_write(self) -> None:
+        """The request is written, or its write failed."""
+        with self._cond:
+            if self._state == "writing":
                 self._state = "sent"
                 self._cond.notify_all()
 
+    def first_write(self, write: Callable[[], _T]) -> _T:
+        """Write a whole request in one call, unless the run gave up on it."""
+        self.begin_write()
+        try:
+            return write()
+        finally:
+            self.end_write()
+
     def commit(self) -> None:
-        """A first write that writes nothing (a transport without a hook)."""
+        """A write that writes nothing (a transport without a hook)."""
         self.first_write(lambda: None)
 
     def abandon(self) -> bool:
         """Give up on the request; return whether a late send is excluded.
 
-        A send not started never starts. One connecting or writing its first
-        bytes is waited for, up to the connect timeout and a margin, until
-        those bytes were written (it was sent before the run gave up) or it
-        was stopped.
+        A send not started never starts, and one still connecting never
+        writes: it is waited for up to the connect timeout and a margin. A
+        request whose bytes are being written keeps the run, and its migrate
+        lock, until its write completed or failed, however long that takes;
+        the transport's write timeout bounds it.
         """
         with self._cond:
             self._cancelled = True
-            return self._cond.wait_for(
-                lambda: self._state not in ("connecting", "writing"),
-                SUBMIT_CONNECT_TIMEOUT_SECONDS + 5,
+            excluded = self._cond.wait_for(
+                lambda: self._state != "connecting", SUBMIT_CONNECT_TIMEOUT_SECONDS + 5
             )
+            self._cond.wait_for(lambda: self._state != "writing")
+            return excluded
 
     @property
     def abandoned(self) -> bool:
@@ -370,7 +383,8 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         input_.migration_name,
         input_.statement_index,
     )
-    recorded = resolve_recorded_attempt(
+    known = reusable_outcome(input_.known, prior_op, input_.fingerprint)
+    recorded = known or resolve_recorded_attempt(
         client,
         journal_store=journal_store,
         migration_name=input_.migration_name,
@@ -631,12 +645,12 @@ def _poll_until_terminal(
         if submission is not None and not submission.abandoned:
             submission.wait()
         raise
-    if submission is not None:
+    if submission is not None and not submission.abandoned:
         submission.wait()
     return result
 
 
-def _poll(
+def _poll(  # noqa: PLR0912 - one branch per poll outcome
     *,
     input_: AsyncApplyInput,
     migration_state: MigrationRowState | None,
@@ -732,6 +746,10 @@ def _poll(
                     iso_without_zone(datetime.now(tz=UTC)),
                 )
             )
+            # The outcome is journaled: a proxy holding the submit's response
+            # does not keep the run, or its migrate lock (#767).
+            if submission is not None:
+                submission.abandon()
             # TS reads the duration as a double and prints the result as String(n).
             finished_sec = js_number_to_string(
                 js_math_round(float(status.duration_ms or 0) / 1000)
@@ -773,6 +791,8 @@ def _poll(
                     iso_without_zone(datetime.now(tz=UTC)),
                 )
             )
+            if submission is not None:
+                submission.abandon()
             msg = (
                 f"Async migration step {input_.operation_type} failed "
                 f"(query_id {query_id}): {status.error or '<unknown>'}"
@@ -983,6 +1003,33 @@ class RecordedAttempt:
     reason: str = ""
     status: QueryStatus | None = None
     error: str = ""
+
+
+# An outcome ``resolve_recorded_attempt`` read earlier in this run, with the
+# record it read it for (#767).
+KnownOutcome = tuple[OperationState, RecordedAttempt]
+
+
+def reusable_outcome(
+    known: KnownOutcome | None, op: OperationState | None, fingerprint: str
+) -> RecordedAttempt | None:
+    """The outcome read earlier for ``op``, when it stands for a new lookup (#767).
+
+    Only one query_log settled (an unsent, failed or finished attempt, which
+    stays so under the lock), for this very record and the SQL the statement
+    still has. An attempt that ended without one is checked in
+    system.processes again right before the statement runs.
+    """
+    if known is None or op is None or known[1].kind == "ended":
+        return None
+    recorded_op, recorded = known
+    same = (
+        recorded_op.query_id == op.query_id
+        and recorded_op.status == op.status
+        and recorded_op.last_error == op.last_error
+        and recorded_op.fingerprint == fingerprint
+    )
+    return recorded if same else None
 
 
 _NO_ENTRY_REASON = (

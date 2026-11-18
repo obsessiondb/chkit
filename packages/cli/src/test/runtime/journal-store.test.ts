@@ -1357,3 +1357,59 @@ describe('everyCopyRead', () => {
     expect(everyCopyRead([{ ...row('r1', ''), present: '0' }, { ...row('r2', ''), present: '0' }], findOp)).toEqual({ covered: true, op: undefined })
   })
 })
+
+// #767 (round 6): the topology of an every-copy read is read fresh, in the
+// same query, and only positive evidence of a single server counts a journal
+// that is not replicated as one copy.
+describe('readOperationOnEveryCopy topology', () => {
+  const prepared = JSON.stringify([[0, 'k', 'load_table_data', 'qid', 'started', '2026-11-18 10:00:00.000', null, 'prepared under its own query id; not submitted yet']])
+  const copy = (replica: string) => ({ replica, members: [replica], present: 1, applied_at: '2026-11-18 10:00:00.000', operations: prepared, operation_fingerprints: '[]' })
+  function storeAnswering(engine: string, everyCopy: () => unknown[]) {
+    const reads: string[] = []
+    const db = {
+      async command() {},
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('SELECT engine FROM system.tables')) return [{ engine }] as T[]
+        if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
+        if (sql.includes('view(')) {
+          reads.push(sql)
+          return everyCopy() as T[]
+        }
+        return []
+      },
+    } as unknown as ClickHouseExecutor
+    return { store: createJournalStore(db), reads }
+  }
+
+  test('one server answers: covered, with its record', async () => {
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => [copy('uuid-a')])
+    const read = await store.readOperationOnEveryCopy('m.sql', 0)
+    expect(read.covered).toBe(true)
+    expect(reads[0]).toContain("clusterAllReplicas('default', view(SELECT toString(serverUUID())")
+  })
+
+  test('a cluster the user may not read, or that does not exist, fails the read', async () => {
+    const denied = storeAnswering('ReplacingMergeTree', () => {
+      throw Object.assign(new Error('Not enough privileges. (ACCESS_DENIED)'), { code: '497' })
+    })
+    await expect(denied.store.readOperationOnEveryCopy('m.sql', 0)).rejects.toThrow('ACCESS_DENIED')
+    const missing = storeAnswering('ReplacingMergeTree', () => {
+      throw Object.assign(new Error("Requested cluster 'default' not found"), { code: '701' })
+    })
+    await expect(missing.store.readOperationOnEveryCopy('m.sql', 0)).rejects.toThrow('not found')
+  })
+
+  test('two servers behind one hostname: not covered', async () => {
+    const { store } = storeAnswering('ReplacingMergeTree', () => [copy('uuid-a'), copy('uuid-b')])
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+  })
+
+  test('a server added after the first read: the next read is not covered', async () => {
+    let servers = [copy('uuid-a')]
+    const { store, reads } = storeAnswering('ReplacingMergeTree', () => servers)
+    expect((await store.readOperationOnEveryCopy('m.sql', 0)).covered).toBe(true)
+    servers = [copy('uuid-a'), copy('uuid-b')]
+    expect(await store.readOperationOnEveryCopy('m.sql', 0)).toEqual({ covered: false })
+    expect(reads).toHaveLength(2)
+  })
+})

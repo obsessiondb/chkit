@@ -928,59 +928,60 @@ class JournalStore:
         if self._database_missing or self._table_missing:
             return EveryCopyRead(covered=True, op=None)
         database = self._database_name()
-        fanout = self._replica_fanout()
         rows = self._client.query(
             "SELECT engine FROM system.tables WHERE database = currentDatabase() "
             f"AND name = '{self._table}'"
         ).rows
+        replicated = not rows or bool(re.match(r"^(Replicated|Shared)", str(rows[0]["engine"])))
+        fingerprints = (
+            f"toJSONString({_FINGERPRINTS_COLUMN})" if self._fingerprint_column else "'[]'"
+        )
+        name = _escape_sql_string(migration_name)
+        # Each server answers for itself, in the same query that reads its
+        # copy's newest version of the record. (A scalar subquery would run on
+        # the server that receives the query only.) The topology is read fresh
+        # for this read, never from an earlier probe: a cluster that does not
+        # exist, or that the user may not read, fails it.
+        latest = (
+            "(SELECT count() AS present, argMax(tuple(toString(applied_at), "
+            f"{_OPERATIONS_SELECT}, {fingerprints}), applied_at) AS latest FROM "
+            f"{self._qualified_table()} WHERE name = '{name}') AS j"
+        )
+        columns = (
+            "j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, "
+            "j.latest.3 AS operation_fingerprints"
+        )
+        # A replicated journal: every replica in the table's replica set, named
+        # by the set itself, must answer. One that is not replicated is one
+        # copy only on a single server: every server of the cluster answers by
+        # its server UUID, and there must be one.
+        per_copy = (
+            "SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, "
+            f"{columns} FROM system.replicas AS r CROSS JOIN {latest} WHERE r.database = "
+            f"'{_escape_sql_string(database)}' AND r.table = '{self._table}'"
+            if replicated
+            else "SELECT toString(serverUUID()) AS replica, [toString(serverUUID())] AS "
+            f"members, {columns} FROM {latest}"
+        )
+        override = self._fanout_override
+        cluster = override.cluster if override is not None else (self._cluster or "default")
+        copies = self._client.query(
+            "SELECT replica, members, present, applied_at, operations, operation_fingerprints "
+            f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))"
+        ).rows
+        if not replicated and len({str(row["replica"]) for row in copies}) != 1:
+            return EveryCopyRead(covered=False, op=None)
 
-        def find_op(operations: Any, fingerprints: Any) -> OperationState | None:
+        def find_op(operations: Any, fingerprints_value: Any) -> OperationState | None:
             return next(
                 (
                     op
-                    for op in _parse_operations(operations, fingerprints)
+                    for op in _parse_operations(operations, fingerprints_value)
                     if op.operation_index == statement_index
                 ),
                 None,
             )
 
-        if rows and not re.match(r"^(Replicated|Shared)", str(rows[0]["engine"])):
-            # One copy only on a single server: on several replicas, a journal
-            # that is not replicated is a different journal on each.
-            if fanout is not None:
-                return EveryCopyRead(covered=False, op=None)
-            found = self._journal_rows(
-                f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1"
-            )
-            return EveryCopyRead(
-                covered=True,
-                op=find_op(found[0].get("operations"), found[0].get(_FINGERPRINTS_COLUMN))
-                if found
-                else None,
-            )
-        # A replicated journal: every replica in the table's replica set, named
-        # by the set itself, must answer the same read, and the newest version
-        # of the record across them is the record. Each server answers for
-        # itself, joined with its own copy (a scalar subquery would run on the
-        # server that receives the query only).
-        fingerprints = (
-            f"toJSONString({_FINGERPRINTS_COLUMN})" if self._fingerprint_column else "'[]'"
-        )
-        name = _escape_sql_string(migration_name)
-        per_copy = (
-            "SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, "
-            "j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, "
-            "j.latest.3 AS operation_fingerprints FROM system.replicas AS r CROSS JOIN "
-            "(SELECT count() AS present, argMax(tuple(toString(applied_at), "
-            f"{_OPERATIONS_SELECT}, {fingerprints}), applied_at) AS latest FROM "
-            f"{self._qualified_table()} WHERE name = '{name}') AS j WHERE r.database = "
-            f"'{_escape_sql_string(database)}' AND r.table = '{self._table}'"
-        )
-        cluster = fanout.cluster if fanout is not None else (self._cluster or "default")
-        copies = self._client.query(
-            "SELECT replica, members, present, applied_at, operations, operation_fingerprints "
-            f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))"
-        ).rows
         return every_copy_read(copies, find_op)
 
     def stores_attempt_fences(self) -> bool:

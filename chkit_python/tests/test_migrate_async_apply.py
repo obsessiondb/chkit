@@ -961,7 +961,8 @@ def test_apply_async_polls_while_the_submit_request_is_open(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The submit does not block: progress lines come while the load runs, as
-    in TS, and the step returns once the request has closed."""
+    in TS, and the step returns once the outcome is journaled, without waiting
+    for the request to close (#767, round 6)."""
     monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
     client = _OpenSubmitClient(
         statuses=[
@@ -982,13 +983,12 @@ def test_apply_async_polls_while_the_submit_request_is_open(
         "  alter_table_modify_column: written=9 rows (72 B), elapsed 0s",
         "  alter_table_modify_column: finished — written=25 rows (200 B) in 25s",
     ]
-    assert client.events == [
+    assert [event for event in client.events if event != "submit returned"] == [
         SERVER_TIME_QUERY,
         "status",
         "status",
         "status",
         "status",
-        "submit returned",
     ]
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started", "started", "completed"]
@@ -998,7 +998,7 @@ def test_apply_async_query_failing_while_the_submit_is_open_raises_the_polled_er
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """The failure comes from query_log, as in TS; the submit error that
-    follows it is waited for, not raised."""
+    follows it is not waited for (#767, round 6), nor raised."""
     monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _: None)
     client = _OpenSubmitClient(
         statuses=[
@@ -1015,7 +1015,6 @@ def test_apply_async_query_failing_while_the_submit_is_open_raises_the_polled_er
         "Async migration step alter_table_modify_column failed "
         f"(query_id {_submitted_query_id(client.submitted)}): Memory limit exceeded"
     )
-    assert client.events[-1] == "submit returned"
     assert journal.writes is not None
     assert [w.operations[0].status for w in journal.writes] == ["started", "started", "failed"]
 
@@ -2424,3 +2423,33 @@ def test_a_failure_while_it_runs_does_not_wait_for_a_submit_that_never_settles(
     assert info.value.code == "async_outcome_unknown"
     assert "failed while it ran" in info.value.message
     assert [state.operations[0].status for state in journal.writes or []] == ["started", "started"]
+
+
+@pytest.mark.parametrize("outcome", ["QueryFinish", "ExceptionBeforeStart"])
+def test_a_settled_outcome_does_not_wait_for_a_submit_that_never_settles(
+    outcome: str, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#767 (round 6): a settled outcome is journaled, then the run ends
+    without waiting for a submit a proxy holds open."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    settled = (
+        QueryStatus(status="finished", written_rows=1, duration_ms=10)
+        if outcome == "QueryFinish"
+        else QueryStatus(status="failed", error="Code: 60. UNKNOWN_TABLE", before_start=True)
+    )
+    client = _NeverSettlingSubmitClient([QueryStatus(status="unknown"), settled])
+    journal = _FakeJournalStore()
+    started = time.monotonic()
+    try:
+        if outcome == "QueryFinish":
+            assert apply_async_statement(_input(client=client, journal=journal)).kind == "completed"
+        else:
+            with pytest.raises(RuntimeError, match="UNKNOWN_TABLE"):
+                apply_async_statement(_input(client=client, journal=journal))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+    writes = journal.writes or []
+    assert writes[-1].operations[0].status == (
+        "completed" if outcome == "QueryFinish" else "failed"
+    )

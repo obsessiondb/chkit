@@ -828,33 +828,33 @@ SETTINGS index_granularity = 1`
       await ensureTable(false)
       if (_databaseMissing || tableMissing) return { covered: true, op: undefined }
       const database = await databaseName()
-      const fanout = await replicaFanout()
       const [table] = await db.query<{ engine: string }>(
         `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
       )
-      const findOp = (operations: unknown, fingerprints: unknown) =>
-        parseOperations(operations, fingerprints).find((op) => op.operationIndex === statementIndex)
-      if (table !== undefined && !/^(Replicated|Shared)/.test(table.engine)) {
-        // One copy only on a single server: on several replicas, a journal
-        // that is not replicated is a different journal on each.
-        if (fanout) return { covered: false }
-        const [row] = await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
-        return { covered: true, op: row ? findOp(row.operations, row.operation_fingerprints) : undefined }
-      }
-      // A replicated journal: every replica in the table's replica set, named
-      // by the set itself, must answer the same read, and the newest version
-      // of the record across them is the record.
+      const replicated = table === undefined || /^(Replicated|Shared)/.test(table.engine)
       const fingerprints = fingerprintColumn ? `toJSONString(${FINGERPRINTS_COLUMN})` : `'[]'`
       const name = escapeSqlString(migrationName)
-      // Each server answers for itself: its replica name and the replica set
-      // from its own system.replicas, joined with its own copy's newest
-      // version of the record. (A scalar subquery would run on the server
-      // that receives the query only.)
-      const perCopy = `SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, j.latest.3 AS operation_fingerprints FROM system.replicas AS r CROSS JOIN (SELECT count() AS present, argMax(tuple(toString(applied_at), ${OPERATIONS_SELECT}, ${fingerprints}), applied_at) AS latest FROM ${await qualifiedJournal()} WHERE name = '${name}') AS j WHERE r.database = '${escapeSqlString(database)}' AND r.table = '${journalTable}'`
+      // Each server answers for itself, in the same query that reads its
+      // copy's newest version of the record. (A scalar subquery would run on
+      // the server that receives the query only.) The topology is read fresh
+      // for this read, never from an earlier probe: a cluster that does not
+      // exist, or that the user may not read, fails it.
+      const latest = `(SELECT count() AS present, argMax(tuple(toString(applied_at), ${OPERATIONS_SELECT}, ${fingerprints}), applied_at) AS latest FROM ${await qualifiedJournal()} WHERE name = '${name}') AS j`
+      const columns = 'j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, j.latest.3 AS operation_fingerprints'
+      // A replicated journal: every replica in the table's replica set, named
+      // by the set itself, must answer. One that is not replicated is one
+      // copy only on a single server: every server of the cluster answers by
+      // its server UUID, and there must be one.
+      const perCopy = replicated
+        ? `SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, ${columns} FROM system.replicas AS r CROSS JOIN ${latest} WHERE r.database = '${escapeSqlString(database)}' AND r.table = '${journalTable}'`
+        : `SELECT toString(serverUUID()) AS replica, [toString(serverUUID())] AS members, ${columns} FROM ${latest}`
       const rows = await db.query<CopyRow>(
-        `SELECT replica, members, present, applied_at, operations, operation_fingerprints FROM clusterAllReplicas('${escapeSqlString(fanout?.cluster ?? cluster ?? 'default')}', view(${perCopy}))`,
+        `SELECT replica, members, present, applied_at, operations, operation_fingerprints FROM clusterAllReplicas('${escapeSqlString(fanoutOverride?.cluster ?? cluster ?? 'default')}', view(${perCopy}))`,
       )
-      return everyCopyRead(rows, findOp)
+      if (!replicated && new Set(rows.map((row) => row.replica)).size !== 1) return { covered: false }
+      return everyCopyRead(rows, (operations, fingerprintsValue) =>
+        parseOperations(operations, fingerprintsValue).find((op) => op.operationIndex === statementIndex),
+      )
     },
 
     async storesAttemptFences(): Promise<boolean> {

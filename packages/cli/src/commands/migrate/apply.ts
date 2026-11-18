@@ -37,9 +37,10 @@ import {
   finishedRecordOf,
   freshMigrationState,
   isoWithoutZone,
+  type KnownOutcome,
   outcomeUnknownError,
-  type RecordedAttempt,
   resolveRecordedAttempt,
+  reusableOutcome,
   upsertOperation,
 } from './async-apply.js'
 import {
@@ -199,27 +200,16 @@ async function resolveAsyncAttemptBeforeSync(input: {
   operationType: string
   log: (line: string) => void
   /** The outcome the edit's check read for this attempt, if it did (#767). */
-  known?: ResolvedOp
+  known?: KnownOutcome
 }): Promise<'completed' | 'run' | 'unsent'> {
   const { op, file, known } = input
   if (op.status === 'completed' || op.queryId === '') return 'run'
-  // Only an outcome query_log settled for this very record, and the SQL the
-  // statement still has, stands for a new lookup: an unsent, failed or
-  // finished attempt stays so under the lock. An attempt that ended without
-  // one is checked in system.processes again right before the statement runs.
-  const reusable =
-    known !== undefined &&
-    known.recorded.kind !== 'ended' &&
-    known.op.queryId === op.queryId &&
-    known.op.status === op.status &&
-    known.op.lastError === op.lastError &&
-    known.op.fingerprint === input.fingerprint
-  const recorded = reusable
-    ? known.recorded
-    : await resolveRecordedAttempt({
+  const recorded =
+    reusableOutcome(known, op, input.fingerprint) ??
+    (await resolveRecordedAttempt({
         db: input.db, journalStore: input.journalStore, migrationName: file, op, fingerprint: input.fingerprint, queryId: op.queryId,
         operationType: input.operationType, log: input.log, sleep: defaultSleep,
-      })
+      }))
   switch (recorded.kind) {
     case 'running':
       throw attemptStillRunningError(file, op)
@@ -337,6 +327,19 @@ export async function applyMigration(input: {
       })
     }
   }
+  // A statement a plugin's onBeforeApply dropped is never visited below, so
+  // its recorded async attempt is read, against the identity it was recorded
+  // with, before anything runs and before the recorded statements are
+  // checked: one still running or without an outcome stops the run with the
+  // journal as it was, instead of the migration being recorded as applied, or
+  // the record being refused unread (#767).
+  if (initialState !== null && !initialState.migrationCompleted && initialState.checksum === migrationChecksum) {
+    const omitted = initialState.operations.filter((op) => op.operationIndex >= statements.length)
+    if (omitted.length > 0) {
+      await assertRecordedAttemptsResolved(db, journalStore, file, { ...initialState, operations: omitted }, initialState, log)
+    }
+  }
+
   // The file is unchanged, so the statements this run gets should be those the
   // journal recorded. They are not when the split or a plugin's onBeforeApply
   // changed since: then positions do not hold (#599). An edited file is
@@ -358,7 +361,7 @@ export async function applyMigration(input: {
   }
   // The outcomes the edit's check read for the attempts it keeps, so the sync
   // path does not look them up, through the query_log rechecks, again.
-  let editResolved = new Map<number, ResolvedOp>()
+  let editResolved = new Map<number, KnownOutcome>()
   if (
     initialState !== null &&
     !initialState.migrationCompleted &&
@@ -383,18 +386,6 @@ export async function applyMigration(input: {
     throw unfencedJournalError(file)
   }
 
-  // A statement a plugin's onBeforeApply dropped is never visited below, so
-  // its recorded async attempt is read, against the identity it was recorded
-  // with, before anything runs: one still running or without an outcome stops
-  // the run with the journal as it was, instead of the migration being
-  // recorded as applied (#767).
-  if (initialState !== null && !initialState.migrationCompleted && initialState.checksum === migrationChecksum) {
-    const omitted = initialState.operations.filter((op) => op.operationIndex >= statements.length)
-    if (omitted.length > 0) {
-      await assertRecordedAttemptsResolved(db, journalStore, file, { ...initialState, operations: omitted }, initialState, log)
-    }
-  }
-
   for (let i = 0; i < statements.length; i++) {
     const statement = statements[i] as string
     const operation = operationSummaries[i]
@@ -410,6 +401,7 @@ export async function applyMigration(input: {
           operationType: operation.type,
           operationKey: operation.key,
           fingerprint: fingerprints[i] ?? '',
+          known: editResolved.get(i),
           beforeRetry: operation.beforeRetry,
           settings,
           queryTracker: input.queryTracker,
@@ -614,7 +606,7 @@ async function acceptEditedMigration(input: {
   retry: { previousChecksum: string; checksum: string } | undefined
   journalStore: JournalStore
   log: (line: string) => void
-}): Promise<Map<number, ResolvedOp>> {
+}): Promise<Map<number, KnownOutcome>> {
   const { file, state, checksum, identities, retry, journalStore } = input
   const retryVerified =
     retry !== undefined && retry.previousChecksum === state.checksum && retry.checksum === checksum
@@ -642,10 +634,6 @@ async function acceptEditedMigration(input: {
   return resolved
 }
 
-interface ResolvedOp {
-  op: OperationState
-  recorded: RecordedAttempt
-}
 
 // Every async attempt the journal records, the ones the re-key would drop
 // included, must have an outcome the edit can act on before it is accepted,
@@ -661,8 +649,8 @@ async function assertRecordedAttemptsResolved(
   state: MigrationRowState,
   rebased: MigrationRowState,
   log: (line: string) => void,
-): Promise<Map<number, ResolvedOp>> {
-  const resolved = new Map<number, ResolvedOp>()
+): Promise<Map<number, KnownOutcome>> {
+  const resolved = new Map<number, KnownOutcome>()
   for (const op of state.operations) {
     if (op.status === 'completed' || op.queryId === '') continue
     const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName: file, op, fingerprint: op.fingerprint, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })

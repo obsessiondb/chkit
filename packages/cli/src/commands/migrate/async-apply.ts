@@ -76,6 +76,8 @@ export interface AsyncApplyInput {
   pollIntervalMs?: number
   sleep?: (ms: number) => Promise<void>
   now?: () => number
+  /** The outcome a --retry edit's check read for this statement's record (#767). */
+  known?: KnownOutcome
 }
 
 export type AsyncApplyResult =
@@ -134,7 +136,9 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     'migrate:async',
     `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
   )
-  const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName, op: priorOpState, fingerprint, queryId, operationType, log, sleep })
+  const recorded =
+    reusableOutcome(input.known, priorOpState, fingerprint) ??
+    (await resolveRecordedAttempt({ db, journalStore, migrationName, op: priorOpState, fingerprint, queryId, operationType, log, sleep }))
   if (recorded.kind === 'running') {
     if (recorded.afterTime === undefined || priorOpState === undefined) {
       throw runningElsewhereError({ operationType, statementIndex, migrationName, queryId, reason: recorded.reason })
@@ -448,6 +452,9 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         await journalStore.writeMigrationState(
           upsertOperation(baseState, finishedOp, now),
         )
+        // The outcome is journaled: a proxy holding the submit's response
+        // does not keep the run, or its migrate lock (#767).
+        abandonSubmit()
         log(
           `  ${operationType}: finished — written=${formatRows(status.writtenRows)} (${formatBytes(status.writtenBytes)}) in ${finishedSec}s`,
         )
@@ -482,6 +489,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         await journalStore.writeMigrationState(
           upsertOperation(baseState, failedOp, now),
         )
+        abandonSubmit()
         throw new Error(
           `Async migration step ${operationType} failed (query_id ${queryId}): ${status.error ?? '<unknown>'}`,
         )
@@ -598,6 +606,29 @@ const FAILED_RUNNING =
 // The lastError prefix of a record --abandon reset: the operator's decision
 // to run the statement again (abandon.ts).
 const ABANDONED_PREFIX = 'abandoned via chkit migrate --abandon (was '
+
+/** An outcome resolveRecordedAttempt read earlier in this run (#767). */
+export interface KnownOutcome {
+  op: OperationState
+  recorded: RecordedAttempt
+}
+
+/**
+ * The outcome read earlier for `op`, when it stands for a new lookup (#767):
+ * only one query_log settled (an unsent, failed or finished attempt, which
+ * stays so under the lock), for this very record and the SQL the statement
+ * still has. An attempt that ended without one is checked in system.processes
+ * again right before the statement runs.
+ */
+export function reusableOutcome(known: KnownOutcome | undefined, op: OperationState | undefined, fingerprint: string): RecordedAttempt | undefined {
+  if (known === undefined || op === undefined || known.recorded.kind === 'ended') return undefined
+  const same =
+    known.op.queryId === op.queryId &&
+    known.op.status === op.status &&
+    known.op.lastError === op.lastError &&
+    known.op.fingerprint === fingerprint
+  return same ? known.recorded : undefined
+}
 
 /**
  * Reads the outcome of the attempt `op` records, on every replica (#246).
