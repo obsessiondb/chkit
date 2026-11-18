@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 import json
 import re
-from collections.abc import Iterable, Mapping, Sequence
+from collections.abc import Iterable, Sequence
 from typing import Any, NamedTuple
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -1013,38 +1013,53 @@ def _repaired_order(
         str,
         lambda key: [str(other) for other in prerequisites[int(key)]],
     )
-    ids, ambiguous = _statement_columns(statements, previous, next_)
+    columns, ambiguous = _statement_columns(statements, previous, next_)
     excluded = old_facts.uncertain | facts.uncertain | ambiguous
     for rename in renames:
         excluded.add(_table_id(rename.database, rename.table))
-    candidates = _cycle_candidates([old_facts.plain, facts.plain])
-    # The statements each table replays, and the size of its replay.
+    # Only a table with a column statement can close a cycle while the plan runs.
+    active = dict.fromkeys(
+        column.table for column in columns if column is not None and column.table not in excluded
+    )
+    if not active:
+        return sorted_order
+    # Per table: the columns that may close a cycle, the size of its replay
+    # and its old expressions.
+    candidates: dict[str, set[str]] = {}
+    size: dict[str, int] = {}
+    initial: dict[str, list[tuple[str, set[str]]]] = {}
+    for table in active:
+        graphs = [
+            graph
+            for graph in (old_facts.plain.get(table), facts.plain.get(table))
+            if graph is not None
+        ]
+        found = _cycle_candidates(graphs)
+        if not found:
+            continue
+        candidates[table] = found
+        total = len(found)
+        for graph in graphs:
+            for column_id, reads in graph.items():
+                if column_id in found:
+                    total += sum(1 for read in reads if read in found)
+        size[table] = total
+        initial[table] = [
+            (column_id, reads)
+            for column_id, reads in old_facts.plain.get(table, {}).items()
+            if column_id in found
+        ]
+    # The statements each table replays.
     replayed: dict[str, list[int]] = {}
+    ids = [column.id if column is not None else None for column in columns]
     for index in sorted_order:
-        column = ids[index]
-        if column is None or column not in candidates:
+        column = columns[index]
+        if column is None or column.id not in candidates.get(column.table, ()):
             continue
-        table = _table_of_column(column)
-        if table in excluded:
-            continue
-        replayed.setdefault(table, []).append(index)
+        replayed.setdefault(column.table, []).append(index)
     if not replayed:
         return sorted_order
-    table_of = {column: _table_of_column(column) for column in candidates}
-    size: dict[str, int] = {}
-    for table in table_of.values():
-        size[table] = size.get(table, 0) + 1
-    for graph in (old_facts.plain, facts.plain):
-        for column, reads in graph.items():
-            owner = table_of.get(column)
-            if owner is not None:
-                size[owner] += sum(1 for read in reads if read in candidates)
-    initial: dict[str, list[tuple[str, set[str]]]] = {}
-    for column, reads in old_facts.plain.items():
-        owner = table_of.get(column)
-        if owner is not None:
-            initial.setdefault(owner, []).append((column, reads))
-    changes = _replay_changes(statements, ids, facts.plain, previous, next_)
+    changes = _replay_changes(statements, columns, facts.plain)
     groups = [sorted(members) for members in strongly_connected_components(prerequisites)]
     group_of = [0] * len(prerequisites)
     for group, members in enumerate(groups):
@@ -1262,11 +1277,23 @@ def _connected_statements(prerequisites: list[list[int]]) -> list[int]:
     return [find(index) for index in range(len(prerequisites))]
 
 
+class _StatementColumn:
+    """The column a statement changes, as it was and as it will be."""
+
+    __slots__ = ("after", "before", "id", "table")
+
+    def __init__(self, column_id: str, table: str) -> None:
+        self.id = column_id
+        self.table = table
+        self.before: ColumnDefinition | None = None
+        self.after: ColumnDefinition | None = None
+
+
 def _statement_columns(
     statements: Sequence[MigrationOperation],
     previous: Sequence[SchemaDefinition],
     next_: Sequence[SchemaDefinition],
-) -> tuple[list[str | None], set[str]]:
+) -> tuple[list[_StatementColumn | None], set[str]]:
     """The column (``_column_id``) of each ADD, MODIFY and DROP COLUMN statement.
 
     A key can name the columns of two tables (table ``t:column:x`` and column
@@ -1275,40 +1302,51 @@ def _statement_columns(
     still more than one, the tables are ambiguous and the repair leaves them
     out.
     """
-    by_key: dict[str, dict[str, None]] = {}
+    # Only the keys of the statements matter.
+    keys = {op.key for op in statements}
+    by_key: dict[str, list[_StatementColumn]] = {}
 
-    def columns_of(definitions: Sequence[SchemaDefinition]) -> dict[str, ColumnDefinition]:
-        found: dict[str, ColumnDefinition] = {}
+    def record(definitions: Sequence[SchemaDefinition], *, before: bool) -> None:
         for definition in definitions:
             if not isinstance(definition, TableDefinition):
                 continue
+            table = _table_id(definition.database, definition.name)
+            prefix = _column_key(definition.database, definition.name, "")
             for column in definition.columns:
-                column_id = _column_id(definition.database, definition.name, column.name)
-                found[column_id] = column
-                key = _column_key(definition.database, definition.name, column.name)
-                by_key.setdefault(key, {})[column_id] = None
-        return found
+                key = prefix + column.name
+                if key not in keys:
+                    continue
+                column_id = f"{table}\x00{column.name}"
+                entries = by_key.setdefault(key, [])
+                entry = next((found for found in entries if found.id == column_id), None)
+                if entry is None:
+                    entry = _StatementColumn(column_id, table)
+                    entries.append(entry)
+                if before:
+                    entry.before = column
+                else:
+                    entry.after = column
 
-    before = columns_of(previous)
-    after = columns_of(next_)
+    record(previous, before=True)
+    record(next_, before=False)
     ambiguous: set[str] = set()
-    ids: list[str | None] = []
+    found_columns: list[_StatementColumn | None] = []
     for op in statements:
         if op.type not in (
             "alter_table_add_column",
             "alter_table_modify_column",
             "alter_table_drop_column",
         ):
-            ids.append(None)
+            found_columns.append(None)
             continue
-        found = list(by_key.get(op.key, ()))
+        entries = by_key.get(op.key, [])
         # A key that names one column is that column's.
-        if len(found) == 1:
-            ids.append(found[0])
+        if len(entries) <= 1:
+            found_columns.append(entries[0] if entries else None)
             continue
         matching = []
-        for column_id in found:
-            old, new = before.get(column_id), after.get(column_id)
+        for entry in entries:
+            old, new = entry.before, entry.after
             if op.type == "alter_table_add_column":
                 matches = old is None and new is not None
             elif op.type == "alter_table_drop_column":
@@ -1316,21 +1354,19 @@ def _statement_columns(
             else:
                 matches = old is not None and new is not None and not _columns_equal(old, new)
             if matches:
-                matching.append(column_id)
+                matching.append(entry)
         if len(matching) == 1:
-            ids.append(matching[0])
+            found_columns.append(matching[0])
             continue
-        ambiguous.update(_table_of_column(column_id) for column_id in found)
-        ids.append(None)
-    return ids, ambiguous
+        ambiguous.update(entry.table for entry in entries)
+        found_columns.append(None)
+    return found_columns, ambiguous
 
 
 def _replay_changes(
     statements: Sequence[MigrationOperation],
-    columns: list[str | None],
-    plain: dict[str, set[str]],
-    previous: Sequence[SchemaDefinition],
-    next_: Sequence[SchemaDefinition],
+    columns: list[_StatementColumn | None],
+    plain: dict[str, dict[str, set[str]]],
 ) -> dict[int, set[str]]:
     """Statement index to the plain reads (as ``_column_id``) of its column's expression after it.
 
@@ -1340,36 +1376,27 @@ def _replay_changes(
     expression (``render_alter_remove_column_expression``). The other
     statements (REMOVE COMMENT, REMOVE CODEC) keep it.
     """
-    old_columns: dict[str, ColumnDefinition] = {}
-    for definition in previous:
-        if isinstance(definition, TableDefinition):
-            for column in definition.columns:
-                old_columns[_column_id(definition.database, definition.name, column.name)] = column
-    removed: set[str] = set()
-    for definition in next_:
-        if not isinstance(definition, TableDefinition):
-            continue
-        for column in definition.columns:
-            column_id = _column_id(definition.database, definition.name, column.name)
-            old = old_columns.get(column_id)
-            if (
-                old is not None
-                and old.default is not None
-                and column.default is None
-                and column.default_kind != "EPHEMERAL"
-            ):
-                removed.add(column_id)
     changes: dict[int, set[str]] = {}
     for index, op in enumerate(statements):
-        statement_column = columns[index]
-        if statement_column is None:
+        column = columns[index]
+        if column is None:
             continue
-        first = index == 0 or columns[index - 1] != statement_column
-        last = index + 1 == len(statements) or columns[index + 1] != statement_column
+        previous_column = columns[index - 1] if index > 0 else None
+        next_column = columns[index + 1] if index + 1 < len(columns) else None
+        first = previous_column is None or previous_column.id != column.id
+        last = next_column is None or next_column.id != column.id
         is_modify = op.type == "alter_table_modify_column"
+        before, after = column.before, column.after
+        removed = (
+            before is not None
+            and before.default is not None
+            and after is not None
+            and after.default is None
+            and after.default_kind != "EPHEMERAL"
+        )
         if op.type == "alter_table_add_column" or (is_modify and last):
-            changes[index] = plain.get(statement_column, set())
-        elif is_modify and first and statement_column in removed:
+            changes[index] = plain.get(column.table, {}).get(column.id, set())
+        elif is_modify and first and removed:
             changes[index] = set()
     return changes
 
@@ -1380,33 +1407,62 @@ class _DefaultReplay:
     Its state never holds a cycle, so a new read Y of column X closes one
     exactly when Y reaches X. That search runs from both ends at once,
     widening the smaller frontier (in turns on a tie), so it stops early when
-    either side runs out. Every search follows reads in code point order and
-    readers in the order they were added, so the work it does is the same in
-    both ports; each column it looks at uses one unit of the ``budget``.
+    either side runs out. Columns are numbered in the order the replay first
+    meets them (each set in code point order); reads are kept in that order
+    and readers in the order they were added, so every search does the same
+    work in both ports. Each column a search looks at uses one unit of the
+    ``budget``.
     """
 
     def __init__(self, initial: list[tuple[str, set[str]]], budget: int) -> None:
-        self._state: dict[str, list[str]] = {}
-        self._readers: dict[str, dict[str, None]] = {}
+        self._number: dict[str, int] = {}
+        self._names: list[str] = []
+        self._reads: list[list[int] | None] = []
+        self._readers: list[dict[int, None]] = []
+        # Marks with an epoch per search, instead of a set per search.
+        self._down: list[int] = []
+        self._up: list[int] = []
+        self._inside: list[int] = []
+        self._epoch = 0
         self._left = budget
         for column, reads in initial:
             self.assign(column, reads)
 
+    def _of(self, column: str) -> int:
+        known = self._number.get(column)
+        if known is not None:
+            return known
+        number = len(self._names)
+        self._number[column] = number
+        self._names.append(column)
+        self._reads.append(None)
+        self._readers.append({})
+        self._down.append(0)
+        self._up.append(0)
+        self._inside.append(0)
+        return number
+
+    def _numbered(self, columns: Iterable[str]) -> list[int]:
+        # Columns are numbered in code point order within each set, so both ports number them alike.
+        return sorted(self._of(column) for column in sorted(columns))
+
     def reads(self, column: str) -> list[str] | None:
-        """The columns ``column`` reads, in code point order."""
-        return self._state.get(column)
+        """The columns ``column`` reads."""
+        number = self._number.get(column)
+        if number is None:
+            return None
+        reads = self._reads[number]
+        return None if reads is None else [self._names[read] for read in reads]
 
     def assign(self, column: str, reads: Iterable[str] | None) -> None:
         """Give ``column`` the ``reads`` (none removes it); they must close no cycle."""
-        for read in self._state.get(column, ()):
-            self._readers[read].pop(column, None)
-        if reads is None:
-            self._state.pop(column, None)
-            return
-        ordered = sorted(reads)
-        self._state[column] = ordered
-        for read in ordered:
-            self._readers.setdefault(read, {})[column] = None
+        number = self._of(column)
+        for read in self._reads[number] or ():
+            self._readers[read].pop(number, None)
+        numbered = None if reads is None else self._numbered(reads)
+        self._reads[number] = numbered
+        for read in numbered or ():
+            self._readers[read][number] = None
 
     def closed_cycle(self, column: str, reads: set[str]) -> set[str] | None:
         """The columns on a cycle through ``column`` that giving it ``reads`` would close.
@@ -1414,30 +1470,55 @@ class _DefaultReplay:
         It changes nothing, and returns None when the replay has used up its
         work.
         """
-        current = set(self._state.get(column, ()))
+        target = self._of(column)
+        current = set(self._reads[target] or ())
         cycle: set[str] = set()
-        for read in sorted(reads):
+        down, inside = self._down, self._inside
+        for read in self._numbered(reads):
             if read in current:
                 continue
-            hit = self._reaches(read, column)
+            hit = self._reaches(read, target)
             if hit is None:
                 return None
             if not hit:
                 continue
-            # This read's cycle: the columns it reaches that reach ``column``.
-            below = self._walk(read, self._state, None, column)
-            if below is None:
-                return None
-            below.add(column)
-            on_cycle = self._walk(column, self._readers, below, None)
-            if on_cycle is None:
-                return None
-            cycle |= on_cycle
+            # This read's cycle: the columns it reaches (``down``) that reach ``column``.
+            self._epoch += 1
+            epoch = self._epoch
+            below = [read]
+            down[read] = epoch
+            while below:
+                for other in self._reads[below.pop()] or ():
+                    self._left -= 1
+                    if self._left < 0:
+                        return None
+                    if other == target or down[other] == epoch:
+                        continue
+                    down[other] = epoch
+                    below.append(other)
+            down[target] = epoch
+            back = [target]
+            inside[target] = epoch
+            cycle.add(column)
+            while back:
+                for reader in self._readers[back.pop()]:
+                    self._left -= 1
+                    if self._left < 0:
+                        return None
+                    if down[reader] != epoch or inside[reader] == epoch:
+                        continue
+                    inside[reader] = epoch
+                    cycle.add(self._names[reader])
+                    back.append(reader)
         return cycle
 
-    def _reaches(self, start: str, goal: str) -> bool | None:
+    def _reaches(self, start: int, goal: int) -> bool | None:
         """Whether ``start`` reaches ``goal`` through reads, or None when the work runs out."""
-        down, up = {start}, {goal}
+        self._epoch += 1
+        epoch = self._epoch
+        down, up = self._down, self._up
+        down[start] = epoch
+        up[goal] = epoch
         down_front, up_front = [start], [goal]
         widen_down = False
         while down_front and up_front:
@@ -1446,53 +1527,32 @@ class _DefaultReplay:
                 widen_down = not widen_down
             else:
                 widen_down = len(down_front) < len(up_front)
-            front: list[str] = []
+            front: list[int] = []
             if widen_down:
                 for column in down_front:
-                    for reached in self._state.get(column, ()):
+                    for reached in self._reads[column] or ():
                         self._left -= 1
                         if self._left < 0:
                             return None
-                        if reached in up:
+                        if up[reached] == epoch:
                             return True
-                        if reached not in down:
-                            down.add(reached)
+                        if down[reached] != epoch:
+                            down[reached] = epoch
                             front.append(reached)
                 down_front = front
             else:
                 for column in up_front:
-                    for reached in self._readers.get(column, ()):
+                    for reached in self._readers[column]:
                         self._left -= 1
                         if self._left < 0:
                             return None
-                        if reached in down:
+                        if down[reached] == epoch:
                             return True
-                        if reached not in up:
-                            up.add(reached)
+                        if up[reached] != epoch:
+                            up[reached] = epoch
                             front.append(reached)
                 up_front = front
         return False
-
-    def _walk(
-        self,
-        start: str,
-        graph: Mapping[str, Iterable[str]],
-        within: set[str] | None,
-        stop: str | None,
-    ) -> set[str] | None:
-        """The columns ``start`` reaches through ``graph`` inside ``within``, short of ``stop``."""
-        seen = {start}
-        pending = [start]
-        while pending:
-            for other in graph.get(pending.pop(), ()):
-                self._left -= 1
-                if self._left < 0:
-                    return None
-                if other == stop or other in seen or (within is not None and other not in within):
-                    continue
-                seen.add(other)
-                pending.append(other)
-        return seen
 
 
 def _table_id(database: str, table: str) -> str:
@@ -1500,34 +1560,33 @@ def _table_id(database: str, table: str) -> str:
     return f"{database}\x00{table}"
 
 
-def _column_id(database: str, table: str, column: str) -> str:
-    """The identity of a column: its table's ``_table_id`` and its name."""
-    return f"{_table_id(database, table)}\x00{column}"
-
-
-def _table_of_column(column_id: str) -> str:
-    return column_id[: column_id.rindex("\x00")]
-
-
 def _cycle_candidates(graphs: list[dict[str, set[str]]]) -> set[str]:
-    """The columns that may lie on a cycle of the union of ``graphs``.
+    """The columns that may lie on a cycle of the union of one table's ``graphs``.
 
     What is left after removing, again and again, the columns that read
     nothing or that nothing reads among the columns left. With no cycle
     nothing is left, so a table whose old and new reads form no cycle is not
-    replayed at all.
+    replayed at all. A read in both graphs counts twice, on both ends.
     """
-    out: dict[str, set[str]] = {}
-    into: dict[str, set[str]] = {}
+    out: dict[str, list[str]] = {}
+    into: dict[str, list[str]] = {}
     for graph in graphs:
         for column, reads in graph.items():
+            if not reads:
+                continue
+            out.setdefault(column, []).extend(reads)
             for read in reads:
-                out.setdefault(column, set()).add(read)
-                into.setdefault(read, set()).add(column)
-    columns = set(out) | set(into)
-    out_degree = {column: len(out.get(column, ())) for column in columns}
-    in_degree = {column: len(into.get(column, ())) for column in columns}
-    pending = [column for column in columns if out_degree[column] == 0 or in_degree[column] == 0]
+                into.setdefault(read, []).append(column)
+    out_degree: dict[str, int] = {}
+    in_degree: dict[str, int] = {}
+    pending: list[str] = []
+    for column in {**dict.fromkeys(out), **dict.fromkeys(into)}:
+        reads_count = len(out.get(column, ()))
+        readers_count = len(into.get(column, ()))
+        out_degree[column] = reads_count
+        in_degree[column] = readers_count
+        if reads_count == 0 or readers_count == 0:
+            pending.append(column)
     removed = set(pending)
 
     def lower(degree: dict[str, int], column: str) -> None:
@@ -1545,7 +1604,7 @@ def _cycle_candidates(graphs: list[dict[str, set[str]]]) -> set[str]:
             lower(in_degree, read)
         for reader in into.get(column, ()):
             lower(out_degree, reader)
-    return columns - removed
+    return set(out_degree) - removed
 
 
 _BINARY_OPERATORS = frozenset(["+", "-", "*", "/", "%", "=", "<", ">"])
@@ -1838,20 +1897,22 @@ class _ExpressionFacts(NamedTuple):
 
     #: ``_column_default_reads``.
     reads: dict[str, set[str]]
-    #: ``_column_id`` to the ``_column_id``\s its expression reads, for the
-    #: expressions ``_plain_reads`` accepts.
-    plain: dict[str, set[str]]
+    #: ``_table_id`` to ``_column_id`` to the ``_column_id`` values its
+    #: expression reads, for the expressions ``_plain_reads`` accepts.
+    plain: dict[str, dict[str, set[str]]]
     #: The ``_table_id`` of every table with an expression ``_plain_reads`` does not accept.
     uncertain: set[str]
 
 
 def _expression_facts(definitions: Sequence[SchemaDefinition]) -> _ExpressionFacts:
     graph: dict[str, set[str]] = {}
-    plain: dict[str, set[str]] = {}
+    plain: dict[str, dict[str, set[str]]] = {}
     uncertain: set[str] = set()
     for definition in definitions:
         if not isinstance(definition, TableDefinition):
             continue
+        table = _table_id(definition.database, definition.name)
+        table_plain = plain.setdefault(table, {})
         prefix = f"table:{definition.database}.{definition.name}:column:"
         names = {column.name for column in definition.columns}
         for column in definition.columns:
@@ -1863,12 +1924,10 @@ def _expression_facts(definitions: Sequence[SchemaDefinition]) -> _ExpressionFac
             tokens = [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)]
             certain = _plain_reads(tokens, names)
             if certain is None:
-                uncertain.add(_table_id(definition.database, definition.name))
+                uncertain.add(table)
             else:
-                plain[_column_id(definition.database, definition.name, column.name)] = {
-                    _column_id(definition.database, definition.name, name)
-                    for name in certain
-                    if name != column.name
+                table_plain[f"{table}\x00{column.name}"] = {
+                    f"{table}\x00{name}" for name in certain if name != column.name
                 }
             read: set[str] = set()
             for name in _names_read(tokens, names):

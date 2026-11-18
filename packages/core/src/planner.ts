@@ -980,39 +980,47 @@ function repairedOrder(
   const columns = statementColumns(statements, definitions)
   const excluded = new Set([...oldFacts.uncertain, ...facts.uncertain, ...columns.ambiguous])
   for (const rename of renames) excluded.add(tableId(rename.database, rename.table))
-  const candidates = cycleCandidates([oldFacts.plain, facts.plain])
-  // The statements each table replays, and the size of its replay.
+  // Only a table with a column statement can close a cycle while the plan runs.
+  const active = new Set<string>()
+  for (const column of columns.of) {
+    if (column !== undefined && !excluded.has(column.table)) active.add(column.table)
+  }
+  if (active.size === 0) return sorted
+  // Per table: the columns that may close a cycle, the size of its replay
+  // and its old expressions.
+  const candidates = new Map<string, Set<string>>()
+  const size = new Map<string, number>()
+  const initial = new Map<string, Array<[string, ReadonlySet<string>]>>()
+  for (const table of active) {
+    const graphs = [oldFacts.plain.get(table), facts.plain.get(table)].filter((graph) => graph !== undefined)
+    const found = cycleCandidates(graphs)
+    if (found.size === 0) continue
+    candidates.set(table, found)
+    let total = found.size
+    for (const graph of graphs) {
+      for (const [column, reads] of graph) {
+        if (!found.has(column)) continue
+        for (const read of reads) if (found.has(read)) total += 1
+      }
+    }
+    size.set(table, total)
+    initial.set(
+      table,
+      [...(oldFacts.plain.get(table) ?? [])].filter(([column]) => found.has(column))
+    )
+  }
+  // The statements each table replays.
   const replayed = new Map<string, number[]>()
+  const ids = columns.of.map((column) => column?.id)
   sorted.forEach((index) => {
-    const column = columns.ids[index]
-    if (column === undefined || !candidates.has(column) || excluded.has(tableOfColumn(column))) return
-    const table = tableOfColumn(column)
-    const list = replayed.get(table)
-    if (list === undefined) replayed.set(table, [index])
+    const column = columns.of[index]
+    if (column === undefined || !candidates.get(column.table)?.has(column.id)) return
+    const list = replayed.get(column.table)
+    if (list === undefined) replayed.set(column.table, [index])
     else list.push(index)
   })
   if (replayed.size === 0) return sorted
-  const size = new Map<string, number>()
-  const initial = new Map<string, Array<[string, ReadonlySet<string>]>>()
-  const tableOf = new Map([...candidates].map((column) => [column, tableOfColumn(column)]))
-  for (const table of tableOf.values()) size.set(table, (size.get(table) ?? 0) + 1)
-  for (const graph of [oldFacts.plain, facts.plain]) {
-    for (const [column, reads] of graph) {
-      const table = tableOf.get(column)
-      if (table === undefined) continue
-      let edges = 0
-      for (const read of reads) if (candidates.has(read)) edges += 1
-      size.set(table, (size.get(table) ?? 0) + edges)
-    }
-  }
-  for (const [column, reads] of oldFacts.plain) {
-    const table = tableOf.get(column)
-    if (table === undefined) continue
-    const list = initial.get(table)
-    if (list === undefined) initial.set(table, [[column, reads]])
-    else list.push([column, reads])
-  }
-  const changes = replayChanges(statements, columns.ids, facts.plain, definitions)
+  const changes = replayChanges(statements, columns.of, facts.plain)
   const groups = stronglyConnectedComponents(prerequisites).map((members) => [...members].sort((a, b) => a - b))
   const groupOf = new Array<number>(prerequisites.length).fill(0)
   groups.forEach((members, group) => {
@@ -1032,7 +1040,7 @@ function repairedOrder(
     const replay = defaultReplay(initial.get(table) ?? [], 8 * (size.get(table) ?? 0) + 1024)
     const roots = [...new Set(list.map((index) => component[index] ?? index))]
     const scheduled = roots.flatMap((root) => connected.get(root) ?? []).sort((a, b) => a - b)
-    const edges = breakClosedCycles(scheduled, new Set(list), statements, prerequisites, groups, groupOf, columns.ids, changes, replay)
+    const edges = breakClosedCycles(scheduled, new Set(list), statements, prerequisites, groups, groupOf, ids, changes, replay)
     if (edges !== undefined) added.push(...edges)
   }
   if (added.length === 0) return sorted
@@ -1275,6 +1283,14 @@ function connectedStatements(prerequisites: number[][]): number[] {
   return parent.map((_, index) => find(index))
 }
 
+/** The column a statement changes, as it was and as it will be. */
+interface StatementColumn {
+  id: string
+  table: string
+  before?: ColumnDefinition
+  after?: ColumnDefinition
+}
+
 /**
  * The column (`columnId`) of each ADD, MODIFY and DROP COLUMN statement. A
  * key can name the columns of two tables (table `t:column:x` and column
@@ -1286,44 +1302,53 @@ function connectedStatements(prerequisites: number[][]): number[] {
 function statementColumns(
   statements: MigrationOperation[],
   definitions: ColumnStatementDefinitions
-): { ids: Array<string | undefined>; ambiguous: Set<string> } {
-  const byKey = new Map<string, Set<string>>()
-  const columnsOf = (defs: SchemaDefinition[]) => {
-    const found = new Map<string, ColumnDefinition>()
+): { of: Array<StatementColumn | undefined>; ambiguous: Set<string> } {
+  // Only the keys of the statements matter.
+  const keys = new Set(statements.map((op) => op.key))
+  const byKey = new Map<string, StatementColumn | StatementColumn[]>()
+  const record = (defs: SchemaDefinition[], side: 'before' | 'after') => {
     for (const def of defs) {
       if (def.kind !== 'table') continue
+      const table = tableId(def.database, def.name)
+      const prefix = columnKey({ database: def.database, table: def.name }, '')
       for (const column of def.columns) {
-        const id = columnId(def.database, def.name, column.name)
-        found.set(id, column)
-        const key = columnKey({ database: def.database, table: def.name }, column.name)
-        byKey.set(key, (byKey.get(key) ?? new Set<string>()).add(id))
+        const key = prefix + column.name
+        if (!keys.has(key)) continue
+        const id = `${table}\u0000${column.name}`
+        const found = byKey.get(key)
+        if (found === undefined) byKey.set(key, { id, table, [side]: column })
+        else if (!Array.isArray(found) && found.id === id) found[side] = column
+        else {
+          const list = Array.isArray(found) ? found : [found]
+          const same = list.find((entry) => entry.id === id)
+          if (same !== undefined) same[side] = column
+          else list.push({ id, table, [side]: column })
+          byKey.set(key, list)
+        }
       }
     }
-    return found
   }
-  const before = columnsOf(definitions.previous)
-  const after = columnsOf(definitions.next)
+  record(definitions.previous, 'before')
+  record(definitions.next, 'after')
   const ambiguous = new Set<string>()
-  const ids = statements.map((op) => {
+  const of = statements.map((op) => {
     const type = op.type
     if (type !== 'alter_table_add_column' && type !== 'alter_table_modify_column' && type !== 'alter_table_drop_column') {
       return undefined
     }
-    const found = [...(byKey.get(op.key) ?? [])]
+    const found = byKey.get(op.key)
     // A key that names one column is that column's.
-    if (found.length === 1) return found[0]
-    const matching = found.filter((id) => {
-      const old = before.get(id)
-      const column = after.get(id)
-      if (type === 'alter_table_add_column') return old === undefined && column !== undefined
-      if (type === 'alter_table_drop_column') return old !== undefined && column === undefined
-      return old !== undefined && column !== undefined && shapeKey(normalizeColumn(old)) !== shapeKey(normalizeColumn(column))
+    if (found === undefined || !Array.isArray(found)) return found
+    const matching = found.filter(({ before, after }) => {
+      if (type === 'alter_table_add_column') return before === undefined && after !== undefined
+      if (type === 'alter_table_drop_column') return before !== undefined && after === undefined
+      return before !== undefined && after !== undefined && shapeKey(normalizeColumn(before)) !== shapeKey(normalizeColumn(after))
     })
     if (matching.length === 1) return matching[0]
-    for (const id of found) ambiguous.add(tableOfColumn(id))
+    for (const entry of found) ambiguous.add(entry.table)
     return undefined
   })
-  return { ids, ambiguous }
+  return { of, ambiguous }
 }
 
 /**
@@ -1336,33 +1361,20 @@ function statementColumns(
  */
 function replayChanges(
   statements: MigrationOperation[],
-  columns: ReadonlyArray<string | undefined>,
-  plain: ReadonlyMap<string, ReadonlySet<string>>,
-  definitions: ColumnStatementDefinitions
+  columns: ReadonlyArray<StatementColumn | undefined>,
+  plain: ReadonlyMap<string, ReadonlyMap<string, ReadonlySet<string>>>
 ): Map<number, ReadonlySet<string>> {
-  const previous = new Map<string, ColumnDefinition>()
-  for (const def of definitions.previous) {
-    if (def.kind !== 'table') continue
-    for (const column of def.columns) previous.set(columnId(def.database, def.name, column.name), column)
-  }
-  const removed = new Set<string>()
-  for (const def of definitions.next) {
-    if (def.kind !== 'table') continue
-    for (const column of def.columns) {
-      const id = columnId(def.database, def.name, column.name)
-      const old = previous.get(id)
-      if (old?.default !== undefined && column.default === undefined && column.defaultKind !== 'EPHEMERAL') removed.add(id)
-    }
-  }
   const changes = new Map<number, ReadonlySet<string>>()
   statements.forEach((op, index) => {
     const column = columns[index]
     if (column === undefined) return
-    const first = columns[index - 1] !== column
-    const last = columns[index + 1] !== column
+    const first = columns[index - 1]?.id !== column.id
+    const last = columns[index + 1]?.id !== column.id
     const isModify = op.type === 'alter_table_modify_column'
-    if (op.type === 'alter_table_add_column' || (isModify && last)) changes.set(index, plain.get(column) ?? new Set())
-    else if (isModify && first && removed.has(column)) changes.set(index, new Set())
+    const { before, after } = column
+    const removed = before?.default !== undefined && after !== undefined && after.default === undefined && after.defaultKind !== 'EPHEMERAL'
+    if (op.type === 'alter_table_add_column' || (isModify && last)) changes.set(index, plain.get(column.table)?.get(column.id) ?? new Set())
+    else if (isModify && first && removed) changes.set(index, new Set())
   })
   return changes
 }
@@ -1386,46 +1398,67 @@ interface DefaultReplay {
  * never holds a cycle, so a new read Y of column X closes one exactly when
  * Y reaches X. That search runs from both ends at once, widening the smaller
  * frontier (in turns on a tie), so it stops early when either side runs
- * out. Every search follows reads in code point order and readers in the
- * order they were added, so the work it does is the same in both ports;
- * each column it looks at uses one unit of the `budget`.
+ * out. Columns are numbered in the order the replay first meets them (each
+ * set in code point order); reads are kept in that order and readers in the
+ * order they were added, so every search does the same work in both ports. Each column a search looks at
+ * uses one unit of the `budget`.
  */
 function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, budget: number): DefaultReplay {
-  const state = new Map<string, string[]>()
-  const readers = new Map<string, Set<string>>()
+  const number = new Map<string, number>()
+  const names: string[] = []
+  const reads: Array<number[] | undefined> = []
+  const readers: Array<Set<number>> = []
+  // Marks with an epoch per search, instead of a set per search.
+  const down: number[] = []
+  const up: number[] = []
+  const inside: number[] = []
+  let epoch = 0
   let left = budget
-  const assign = (column: string, reads: Iterable<string> | undefined) => {
-    for (const read of state.get(column) ?? []) readers.get(read)?.delete(column)
-    if (reads === undefined) {
-      state.delete(column)
-      return
-    }
-    const sorted = [...reads].sort(compareCodePoints)
-    state.set(column, sorted)
-    for (const read of sorted) readers.set(read, (readers.get(read) ?? new Set<string>()).add(column))
+  const of = (column: string): number => {
+    const known = number.get(column)
+    if (known !== undefined) return known
+    const id = names.length
+    number.set(column, id)
+    names.push(column)
+    reads.push(undefined)
+    readers.push(new Set())
+    down.push(0)
+    up.push(0)
+    inside.push(0)
+    return id
   }
-  for (const [column, reads] of initial) assign(column, reads)
-  const readsOf = (column: string): Iterable<string> => state.get(column) ?? []
-  const readersOf = (column: string): Iterable<string> => readers.get(column) ?? []
+  const assignNumbers = (column: number, next: number[] | undefined) => {
+    for (const read of reads[column] ?? []) readers[read]?.delete(column)
+    reads[column] = next
+    for (const read of next ?? []) readers[read]?.add(column)
+  }
+  // Columns are numbered in code point order within each set, so both ports number them alike.
+  const numbered = (columns: Iterable<string>) => [...columns].sort(compareCodePoints).map(of).sort((a, b) => a - b)
+  const assign = (column: string, next: Iterable<string> | undefined) => {
+    const id = of(column)
+    assignNumbers(id, next === undefined ? undefined : numbered(next))
+  }
+  for (const [column, columnReads] of initial) assign(column, columnReads)
   // Whether `from` reaches `to` through reads, or undefined when the work runs out.
-  const reaches = (from: string, to: string): boolean | undefined => {
-    const down = new Set([from])
-    const up = new Set([to])
+  const reaches = (from: number, to: number): boolean | undefined => {
+    epoch += 1
+    down[from] = epoch
+    up[to] = epoch
     let downFront = [from]
     let upFront = [to]
     let widenDown = false
     while (downFront.length > 0 && upFront.length > 0) {
       // The smaller frontier widens; on a tie, the sides take turns.
       widenDown = downFront.length === upFront.length ? !widenDown : downFront.length < upFront.length
-      const front: string[] = []
+      const front: number[] = []
       if (widenDown) {
         for (const column of downFront) {
-          for (const reached of state.get(column) ?? []) {
+          for (const reached of reads[column] ?? []) {
             left -= 1
             if (left < 0) return undefined
-            if (up.has(reached)) return true
-            if (!down.has(reached)) {
-              down.add(reached)
+            if (up[reached] === epoch) return true
+            if (down[reached] !== epoch) {
+              down[reached] = epoch
               front.push(reached)
             }
           }
@@ -1433,12 +1466,12 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
         downFront = front
       } else {
         for (const column of upFront) {
-          for (const reached of readers.get(column) ?? []) {
+          for (const reached of readers[column] ?? []) {
             left -= 1
             if (left < 0) return undefined
-            if (down.has(reached)) return true
-            if (!up.has(reached)) {
-              up.add(reached)
+            if (down[reached] === epoch) return true
+            if (up[reached] !== epoch) {
+              up[reached] = epoch
               front.push(reached)
             }
           }
@@ -1448,38 +1481,47 @@ function defaultReplay(initial: ReadonlyArray<[string, ReadonlySet<string>]>, bu
     }
     return false
   }
-  // The columns `from` reaches through `next` without passing `stop`, inside `within`.
-  const walk = (from: string, next: (column: string) => Iterable<string>, within?: ReadonlySet<string>, stop?: string) => {
-    const seen = new Set([from])
-    const pending = [from]
-    for (let at = pending.pop(); at !== undefined; at = pending.pop()) {
-      for (const other of next(at)) {
-        left -= 1
-        if (left < 0) return undefined
-        if (other === stop || seen.has(other) || (within !== undefined && !within.has(other))) continue
-        seen.add(other)
-        pending.push(other)
-      }
-    }
-    return seen
-  }
   return {
-    reads: (column) => state.get(column),
-    closedCycle: (column, reads) => {
-      const current = new Set(state.get(column) ?? [])
+    reads: (column) => {
+      const id = number.get(column)
+      return id === undefined ? undefined : reads[id]?.map((read) => names[read] ?? '')
+    },
+    closedCycle: (column, next) => {
+      const target = of(column)
+      const current = new Set(reads[target] ?? [])
       const cycle = new Set<string>()
-      for (const read of [...reads].sort(compareCodePoints)) {
+      for (const read of numbered(next)) {
         if (current.has(read)) continue
-        const hit = reaches(read, column)
+        const hit = reaches(read, target)
         if (hit === undefined) return undefined
         if (!hit) continue
-        // This read's cycle: the columns it reaches that reach `column`.
-        const below = walk(read, readsOf, undefined, column)
-        if (below === undefined) return undefined
-        below.add(column)
-        const onCycle = walk(column, readersOf, below)
-        if (onCycle === undefined) return undefined
-        for (const other of onCycle) cycle.add(other)
+        // This read's cycle: the columns it reaches (`down`) that reach `column`.
+        epoch += 1
+        const below = [read]
+        down[read] = epoch
+        for (let at = below.pop(); at !== undefined; at = below.pop()) {
+          for (const other of reads[at] ?? []) {
+            left -= 1
+            if (left < 0) return undefined
+            if (other === target || down[other] === epoch) continue
+            down[other] = epoch
+            below.push(other)
+          }
+        }
+        down[target] = epoch
+        const back = [target]
+        inside[target] = epoch
+        cycle.add(column)
+        for (let at = back.pop(); at !== undefined; at = back.pop()) {
+          for (const reader of readers[at] ?? []) {
+            left -= 1
+            if (left < 0) return undefined
+            if (down[reader] !== epoch || inside[reader] === epoch) continue
+            inside[reader] = epoch
+            cycle.add(names[reader] ?? '')
+            back.push(reader)
+          }
+        }
       }
       return cycle
     },
@@ -1492,36 +1534,39 @@ function tableId(database: string, table: string): string {
   return `${database}\u0000${table}`
 }
 
-/** The identity of a column: its table's `tableId` and its name. */
-function columnId(database: string, table: string, column: string): string {
-  return `${tableId(database, table)}\u0000${column}`
-}
-
-function tableOfColumn(id: string): string {
-  return id.slice(0, id.lastIndexOf('\u0000'))
-}
-
 /**
- * The columns that may lie on a cycle of the union of `graphs`: what is left
- * after removing, again and again, the columns that read nothing or that
- * nothing reads among the columns left. With no cycle nothing is left, so a
- * table whose old and new reads form no cycle is not replayed at all.
+ * The columns that may lie on a cycle of the union of one table's `graphs`:
+ * what is left after removing, again and again, the columns that read
+ * nothing or that nothing reads among the columns left. With no cycle
+ * nothing is left, so a table whose old and new reads form no cycle is not
+ * replayed at all. A read in both graphs counts twice, on both ends.
  */
 function cycleCandidates(graphs: ReadonlyArray<ReadonlyMap<string, ReadonlySet<string>>>): Set<string> {
-  const out = new Map<string, Set<string>>()
-  const into = new Map<string, Set<string>>()
+  const out = new Map<string, string[]>()
+  const into = new Map<string, string[]>()
   for (const graph of graphs) {
     for (const [column, reads] of graph) {
+      if (reads.size === 0) continue
+      const list = out.get(column)
+      if (list === undefined) out.set(column, [...reads])
+      else list.push(...reads)
       for (const read of reads) {
-        out.set(column, (out.get(column) ?? new Set<string>()).add(read))
-        into.set(read, (into.get(read) ?? new Set<string>()).add(column))
+        const readers = into.get(read)
+        if (readers === undefined) into.set(read, [column])
+        else readers.push(column)
       }
     }
   }
-  const columns = new Set([...out.keys(), ...into.keys()])
-  const outDegree = new Map([...columns].map((column) => [column, out.get(column)?.size ?? 0]))
-  const inDegree = new Map([...columns].map((column) => [column, into.get(column)?.size ?? 0]))
-  const pending = [...columns].filter((column) => outDegree.get(column) === 0 || inDegree.get(column) === 0)
+  const outDegree = new Map<string, number>()
+  const inDegree = new Map<string, number>()
+  const pending: string[] = []
+  for (const column of new Set([...out.keys(), ...into.keys()])) {
+    const reads = out.get(column)?.length ?? 0
+    const readers = into.get(column)?.length ?? 0
+    outDegree.set(column, reads)
+    inDegree.set(column, readers)
+    if (reads === 0 || readers === 0) pending.push(column)
+  }
   const removed = new Set(pending)
   const lower = (degree: Map<string, number>, column: string) => {
     if (removed.has(column)) return
@@ -1535,7 +1580,7 @@ function cycleCandidates(graphs: ReadonlyArray<ReadonlyMap<string, ReadonlySet<s
     for (const read of out.get(column) ?? []) lower(inDegree, read)
     for (const reader of into.get(column) ?? []) lower(outDegree, reader)
   }
-  return new Set([...columns].filter((column) => !removed.has(column)))
+  return new Set([...outDegree.keys()].filter((column) => !removed.has(column)))
 }
 
 const BINARY_OPERATORS: ReadonlySet<string> = new Set(['+', '-', '*', '/', '%', '=', '<', '>'])
@@ -1774,18 +1819,24 @@ export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyG
 interface ExpressionFacts {
   /** `columnDefaultReads`. */
   reads: DependencyGraph
-  /** `columnId` → the `columnId`s its expression reads, for the expressions `plainReads` accepts. */
-  plain: Map<string, Set<string>>
+  /**
+   * `tableId` → `columnId` → the `columnId`s its expression reads, for the
+   * expressions `plainReads` accepts.
+   */
+  plain: Map<string, Map<string, Set<string>>>
   /** The `tableId` of every table with an expression `plainReads` does not accept. */
   uncertain: Set<string>
 }
 
 function expressionFacts(definitions: SchemaDefinition[]): ExpressionFacts {
   const graph = new Map<string, Set<string>>()
-  const plain = new Map<string, Set<string>>()
+  const plain = new Map<string, Map<string, Set<string>>>()
   const uncertain = new Set<string>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
+    const table = tableId(def.database, def.name)
+    const tablePlain = new Map<string, Set<string>>()
+    plain.set(table, tablePlain)
     const keyOf = (name: string) => columnKey({ database: def.database, table: def.name }, name)
     const names = new Set(def.columns.map((column) => column.name))
     for (const column of def.columns) {
@@ -1794,11 +1845,11 @@ function expressionFacts(definitions: SchemaDefinition[]): ExpressionFacts {
       if (parsed.kind !== 'expression') continue
       const tokens = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
       const certain = plainReads(tokens, names)
-      if (certain === undefined) uncertain.add(tableId(def.database, def.name))
+      if (certain === undefined) uncertain.add(table)
       else {
-        plain.set(
-          columnId(def.database, def.name, column.name),
-          new Set(certain.filter((name) => name !== column.name).map((name) => columnId(def.database, def.name, name)))
+        tablePlain.set(
+          `${table}\u0000${column.name}`,
+          new Set(certain.filter((name) => name !== column.name).map((name) => `${table}\u0000${name}`))
         )
       }
       const read = new Set<string>()
