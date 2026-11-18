@@ -112,6 +112,36 @@ export async function assertBackfillTargetSafe(input: {
   return rows.filter((column) => ['', 'DEFAULT'].includes(column.default_kind)).map((column) => column.name)
 }
 
+/**
+ * Why no failure of the backfill target can be proven, when none can (#765):
+ * an INSERT SELECT into a Distributed table can run on its shards
+ * (parallel_distributed_insert_select, 2 by default in ClickHouse 26.3), and
+ * the initial query's written_rows then does not count the rows they wrote.
+ * A target whose engine cannot be read counts as one.
+ */
+export async function unprovableTargetFailures(input: {
+  database: string
+  table: string
+  query: ClickHouseQuery
+}): Promise<string | undefined> {
+  const quote = (value: string) => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`
+  const target = `${input.database}.${input.table}`
+  let engine: string | undefined
+  try {
+    const rows = await input.query<{ engine: string }>(
+      `SELECT engine FROM system.tables WHERE database = ${quote(input.database)} AND name = ${quote(input.table)}`,
+    )
+    engine = rows[0]?.engine || undefined
+  } catch {
+    engine = undefined
+  }
+  if (engine !== undefined && engine !== 'Distributed') return undefined
+  const shards = 'whose shards can write the rows of an INSERT SELECT without system.query_log counting them in its written_rows'
+  return engine === 'Distributed'
+    ? `its target ${target} is a Distributed table, ${shards}`
+    : `the engine of its target ${target} could not be read, and a Distributed table, ${shards}, cannot be ruled out`
+}
+
 export async function buildBackfillPlan(input: {
   opts: PlanOptions
   configPath: string

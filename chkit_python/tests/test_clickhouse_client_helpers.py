@@ -41,10 +41,12 @@ from chkit.clickhouse import (
 from chkit.clickhouse.client import (
     _CURRENT_SEND,
     SEND_ADMISSION,
+    SendAbandonedError,
     SendNotAdmittedError,
     _dispose_pool,
     _own_pool_manager,
     _Send,
+    _SendHTTPSConnectionPool,
     clickhouse_error_message,
     install_send_hook,
 )
@@ -867,18 +869,26 @@ def test_a_submit_in_flight_across_close_leaves_the_pool_out_of_the_registry(
     assert pool not in httputil.all_managers
 
 
-# #765 whole-branch review: the handoff comes only once the request has
-# started (its request line and headers are on the socket), through the real
-# urllib3 pool and connection against a local socket.
-def test_the_handoff_follows_the_written_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+# #765 whole-branch review and Opus critic item 3: the handoff comes only once
+# the whole request (request line, headers and body) is on the socket, as TS
+# reports it on the request's finish, through the real urllib3 pool and
+# connection against a local socket.
+def test_the_handoff_follows_the_written_body(monkeypatch: pytest.MonkeyPatch) -> None:
     events: list[str] = []
     real_endheaders = HTTPConnection.endheaders
+    real_send = HTTPConnection.send
 
     def endheaders(self: HTTPConnection, *args: Any, **kwargs: Any) -> None:
         real_endheaders(self, *args, **kwargs)
         events.append("headers written")
 
+    def send(self: HTTPConnection, data: Any) -> None:
+        real_send(self, data)
+        if data == b"SELECT 1":
+            events.append("body written")
+
     monkeypatch.setattr(HTTPConnection, "endheaders", endheaders)
+    monkeypatch.setattr(HTTPConnection, "send", send)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     listener.listen(1)
@@ -917,9 +927,111 @@ def test_the_handoff_follows_the_written_headers(monkeypatch: pytest.MonkeyPatch
         pool.clear()
 
     assert response.status == 200
-    assert events == ["admitted", "headers written", "handed off"]
+    assert events == ["admitted", "headers written", "body written", "handed off"]
     # Sent with its length, not chunked: some proxies reject chunked POSTs.
     head = received[0].split(b"\r\n\r\n", 1)[0].lower()
     assert b"content-length: 8" in head
     assert b"transfer-encoding" not in head
     assert received[0].endswith(b"\r\n\r\nSELECT 1")
+
+
+class _Admitting:
+    def __init__(self) -> None:
+        self.handed_off_count = 0
+
+    def admit(self) -> bool:
+        return True
+
+    def handed_off(self) -> None:
+        self.handed_off_count += 1
+
+
+def _silent_listener() -> tuple[socket.socket, list[bytes]]:
+    """Accepts one TCP connection and never answers: no TLS ServerHello."""
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    received: list[bytes] = []
+
+    def serve() -> None:
+        try:
+            conn, _ = listener.accept()
+        except OSError:
+            return
+        conn.settimeout(5)
+        data = b""
+        try:
+            while chunk := conn.recv(4096):
+                data += chunk
+        except OSError:
+            pass
+        received.append(data)
+        conn.close()
+
+    threading.Thread(target=serve, daemon=True).start()
+    return listener, received
+
+
+# Opus critic, item 1: over HTTPS, the send's connections connect (TCP and
+# TLS) under the connect timeout, so a TLS handshake that never completes
+# ends at it, and nothing of the request is written.
+def test_an_https_send_whose_handshake_never_completes_ends_at_the_connect_timeout() -> None:
+    listener, received = _silent_listener()
+    port = listener.getsockname()[1]
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    admission = _Admitting()
+    token = _CURRENT_SEND.set(_Send(admission))
+    started = time.monotonic()
+    try:
+        with pytest.raises(urllib3.exceptions.TimeoutError) as raised:
+            pool.request(
+                "POST",
+                f"https://127.0.0.1:{port}/",
+                body=b"SELECT 1",
+                timeout=Timeout(connect=0.3, read=None),
+            )
+    finally:
+        _CURRENT_SEND.reset(token)
+        elapsed = time.monotonic() - started
+        pool.clear()
+        listener.close()
+
+    assert elapsed < 3
+    assert "timed out" in str(raised.value).lower()
+    assert admission.handed_off_count == 0
+    # The HTTPS pool and connection are the send's own.
+    assert pool.pool_classes_by_scheme["https"] is _SendHTTPSConnectionPool
+    deadline = time.monotonic() + 5
+    while not received and time.monotonic() < deadline:
+        time.sleep(0.01)
+    # A TLS ClientHello (record type 0x16), and nothing of the request.
+    assert received
+    assert received[0][:1] == b"\x16"
+    assert b"SELECT 1" not in received[0]
+
+
+# Opus critic, item 1: once abandoned, a send writes nothing, even when its
+# connection completes afterwards.
+def test_an_abandoned_send_writes_nothing_after_it_connects() -> None:
+    listener, received = _silent_listener()
+    port = listener.getsockname()[1]
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    admission = _Admitting()
+    send = _Send(admission)
+    send.abandon()
+    token = _CURRENT_SEND.set(send)
+    try:
+        with pytest.raises(SendAbandonedError):
+            pool.request("POST", f"http://127.0.0.1:{port}/", body=b"SELECT 1")
+    finally:
+        _CURRENT_SEND.reset(token)
+        pool.clear()
+    deadline = time.monotonic() + 5
+    while not received and time.monotonic() < deadline:
+        time.sleep(0.01)
+    listener.close()
+
+    assert received == [b""]
+    assert admission.handed_off_count == 0

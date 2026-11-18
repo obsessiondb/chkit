@@ -30,7 +30,7 @@ import {
   type StatusOptions,
 } from './options.js'
 import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
-import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan } from './planner.js'
+import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
 import {
@@ -156,6 +156,11 @@ async function runBackfillLocked(
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )
+    const unprovableFailures = await untilAborted(
+      unprovableTargetFailures({ database, table, query: (sql, settings) => db.query(sql, settings) }),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
     assertReplayColumnsStillInsertable({
       planId: plan.planId,
       target: plan.target,
@@ -207,6 +212,7 @@ async function runBackfillLocked(
       signal,
       replayFailed: input.resume?.replayFailed,
       acceptUnknown: input.resume?.acceptUnknown,
+      unprovableFailures,
       // Chunks report progress concurrently; one write at a time keeps an
       // older snapshot's rename from landing after a newer one.
       onProgress: (progress) => {

@@ -64,6 +64,7 @@ from chkit_plugin_backfill.planner import (
     assert_backfill_target_safe,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
+    unprovable_target_failures,
 )
 from chkit_plugin_backfill.queries import (
     cancel_backfill_run,
@@ -341,6 +342,13 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             stop,
             plan.plan_id,
         )
+        unprovable_failures = run_interruptible(
+            lambda: unprovable_target_failures(
+                database=database, table=table, query=db.query_rows
+            ),
+            stop,
+            plan.plan_id,
+        )
         assert_replay_columns_still_insertable(
             plan_id=plan.plan_id,
             target=plan.target,
@@ -413,6 +421,7 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             replay_failed=resume.replay_failed if resume is not None else False,
             accept_unknown=resume.accept_unknown if resume is not None else False,
             on_progress=on_progress,
+            unprovable_failures=unprovable_failures,
         )
 
         # A run is completed only when every chunk is done (#765).

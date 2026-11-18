@@ -16,8 +16,9 @@ from pathlib import Path
 import pytest
 
 from chkit_plugin_backfill import run_lock as run_lock_module
+from chkit_plugin_backfill.async_backfill import BackfillInterruptedError
 from chkit_plugin_backfill.errors import BackfillConfigError
-from chkit_plugin_backfill.run_lock import acquire_run_lock, run_lock_path
+from chkit_plugin_backfill.run_lock import acquire_run_lock, run_lock_path, with_run_lock
 from chkit_plugin_backfill.state import sync_directory
 
 SRC = Path(__file__).resolve().parents[1] / "src"
@@ -184,14 +185,10 @@ else:
     assert list(runs_dir.iterdir()) == []
 
 
-def test_with_run_lock_releases_after_the_body_ignores_a_second_sigint_and_exits_130(
-    tmp_path: Path,
-) -> None:
-    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
-    log = tmp_path / "writes.log"
+def _lingering_body(lock_path: Path, log: Path) -> str:
     # The body stands in for a run: once stopped, it writes its last
     # checkpoint 300 ms later, recording whether it still holds the lock.
-    script = f"""
+    return f"""
 import os, sys, time
 from chkit_plugin_backfill.run_lock import with_run_lock
 def body(stop):
@@ -203,12 +200,15 @@ def body(stop):
     raise RuntimeError("interrupted")
 with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, body)
 """
-    child = _python(script)
+
+
+def test_with_run_lock_releases_after_the_body_and_exits_130(tmp_path: Path) -> None:
+    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
+    log = tmp_path / "writes.log"
+    child = _python(_lingering_body(lock_path, log))
     assert child.stdout is not None
     assert child.stdout.readline().strip() == "ready"
 
-    child.send_signal(signal.SIGINT)
-    time.sleep(0.05)
     child.send_signal(signal.SIGINT)
     _stdout, stderr = child.communicate(timeout=30)
 
@@ -219,6 +219,43 @@ with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, body)
         f"Backfill plan {PLAN_ID}: interrupted (SIGINT). No new chunk was submitted, and "
         "the lock is released"
     ) in stderr
+
+
+# Opus critic, item 1: a second signal does not wait for the body, and leaves
+# the lock in place, saying so.
+def test_a_second_sigint_exits_at_once_and_leaves_the_lock_in_place(tmp_path: Path) -> None:
+    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
+    log = tmp_path / "writes.log"
+    child = _python(_lingering_body(lock_path, log))
+    assert child.stdout is not None
+    assert child.stdout.readline().strip() == "ready"
+
+    child.send_signal(signal.SIGINT)
+    time.sleep(0.05)
+    child.send_signal(signal.SIGINT)
+    _stdout, stderr = child.communicate(timeout=30)
+
+    assert child.returncode == 130
+    assert not log.exists()
+    assert lock_path.exists()
+    assert (
+        f"Backfill plan {PLAN_ID}: SIGINT again, exiting at once. The lock {lock_path} stays "
+        "in place: a chunk being sent may still reach the server, and its attempt stays "
+        "recorded as one that may have run. Once this process has exited, delete the lock "
+        "and re-run."
+    ) in stderr
+
+
+def test_a_body_that_says_a_request_may_still_be_sent_keeps_the_lock(tmp_path: Path) -> None:
+    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
+
+    def body(_stop: object) -> None:
+        raise BackfillInterruptedError("interrupted.", note="still sending.", keep_lock=True)
+
+    with pytest.raises(BackfillInterruptedError, match=r"interrupted\. still sending\."):
+        with_run_lock(lock_path, PLAN_ID, body)
+
+    assert lock_path.exists()
 
 
 # Round 3 item 5: runs/ made by another process that never synced its parent.

@@ -7,15 +7,17 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
 import re
+import socket
 import threading
 import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from typing import Any, Literal, NoReturn, Protocol, Self
 from urllib.parse import unquote, urlparse
 
@@ -26,7 +28,8 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
-from urllib3 import Timeout
+from urllib3 import HTTPConnectionPool, HTTPSConnectionPool, Timeout
+from urllib3.connection import HTTPConnection, HTTPSConnection
 
 from chkit.clickhouse.control import (
     STRICT_CONTROL_SETTINGS,
@@ -425,9 +428,16 @@ class ClickHouseClient:
         pool = driver.http
         with self._submit_client_lock:
             self._send_once_inflight[id(pool)] = self._send_once_inflight.get(id(pool), 0) + 1
-        token = _CURRENT_SEND.set(_Send(SEND_ADMISSION.get()))
+        send = _Send(SEND_ADMISSION.get())
+        token = _CURRENT_SEND.set(send)
         try:
             driver.command(statement, settings={**(settings or {}), "query_id": query_id})
+        except SendNotAdmittedError:
+            raise
+        except Exception as error:
+            if send.sent and not send.handed_off and _timed_out(error):
+                raise SendConnectTimeoutError(_connect_timeout_message()) from error
+            raise
         finally:
             _CURRENT_SEND.reset(token)
             with self._submit_client_lock:
@@ -458,6 +468,9 @@ class ClickHouseClient:
             except BaseException:
                 _dispose_pool(pool)
                 raise
+            # Bounded until the request is written (connect, TLS handshake and
+            # the write itself); the wait for the INSERT's response is not.
+            opened.timeout = Timeout(connect=SEND_CONNECT_TIMEOUT_MS / 1000, read=None)
             with self._submit_client_lock:
                 if self._send_once_client is None and not self._closed:
                     self._send_once_client = opened
@@ -636,15 +649,56 @@ class ClickHouseClient:
 class SendAdmission(Protocol):
     """Asked by ``submit_once`` right before its request enters the transport
     (#765). ``admit`` returning False sends nothing. ``handed_off`` is called
-    once urllib3 has written the request line and headers to the socket (as it
-    reads the body); a caller also ends its own wait when ``submit_once``
+    once urllib3 has written the whole request (request line, headers and
+    body) to the socket; a caller also ends its own wait when ``submit_once``
     returns or raises without getting there. A caller that stops can
     therefore wait until every admitted send has handed off, and know that no
-    request of it starts afterwards."""
+    request of it starts afterwards. An admission may also have
+    ``attach(abandon)``, called once ``admit`` returned True, with the
+    request's ``abandon``: calling it destroys the request's socket and
+    refuses any later write, so no more of the request is sent (TS's
+    ``abandon``)."""
 
     def admit(self) -> bool: ...
 
     def handed_off(self) -> None: ...
+
+
+#: How long an admitted request may take to connect (TCP and TLS) and write
+#: itself to its socket (TS ``SEND_CONNECT_TIMEOUT_MS``). Past it, the send
+#: fails: a connection that never completes (a stalled load balancer or TLS
+#: terminator) must not hold a backfill's interrupt (#765). The wait for the
+#: INSERT's response has no limit.
+SEND_CONNECT_TIMEOUT_MS = 10_000
+
+
+class SendConnectTimeoutError(RuntimeError):
+    """``submit_once``'s request did not connect and get written in time."""
+
+
+class SendAbandonedError(RuntimeError):
+    """``submit_once``'s request was abandoned before it was written."""
+
+
+def _connect_timeout_message() -> str:
+    return (
+        f"The request could not connect and be written within {SEND_CONNECT_TIMEOUT_MS} ms "
+        "(TCP connect, TLS handshake and the request itself), so it was destroyed. "
+        "It may have reached the server."
+    )
+
+
+def _timed_out(error: BaseException) -> bool:
+    seen: set[int] = set()
+    current: BaseException | None = error
+    while current is not None and id(current) not in seen:
+        seen.add(id(current))
+        if isinstance(current, TimeoutError) or type(current).__name__.endswith("TimeoutError"):
+            return True
+        if any(isinstance(arg, BaseException) and _timed_out(arg) for arg in current.args):
+            return True
+        current = current.__cause__ or current.__context__
+    return False
 
 
 #: Set by a caller that must not send once it stops (#765), asked after any
@@ -660,10 +714,42 @@ class SendNotAdmittedError(RuntimeError):
 
 @dataclass
 class _Send:
-    """One ``submit_once`` request: its admission, and whether it was sent."""
+    """One ``submit_once`` request: its admission, whether it was sent and
+    handed off, and what ``abandon`` needs: the connection it writes to."""
 
     admission: SendAdmission | None
     sent: bool = False
+    handed_off: bool = False
+    abandoned: bool = False
+    conn: Any = None
+    lock: threading.Lock = field(default_factory=threading.Lock)
+
+    def writing(self, conn: Any) -> None:
+        """Called by the connection right before it writes the request: from
+        then on, ``abandon`` shuts its socket down."""
+        with self.lock:
+            if self.abandoned:
+                raise SendAbandonedError(_ABANDONED_MESSAGE)
+            self.conn = conn
+
+    def abandon(self) -> None:
+        """No more of the request is written: a later write is refused, and a
+        write in progress fails on its shut-down socket."""
+        with self.lock:
+            self.abandoned = True
+            conn = self.conn
+        sock = getattr(conn, "sock", None)
+        if sock is not None:
+            # socket.socket's own shutdown: SSLSocket's would also drop its
+            # TLS state under the writing thread.
+            with contextlib.suppress(OSError):
+                socket.socket.shutdown(sock, socket.SHUT_RDWR)
+
+
+_ABANDONED_MESSAGE = (
+    "The request was abandoned before it was written: its caller stopped waiting for it. "
+    "It may have reached the server."
+)
 
 
 _CURRENT_SEND: ContextVar[_Send | None] = ContextVar("chkit_current_send", default=None)
@@ -699,18 +785,22 @@ def _dispose_pool(pool: Any) -> None:
     httputil.all_managers.pop(pool, None)
 
 
-def _body_after_handoff(kwargs: dict[str, Any], admission: SendAdmission) -> dict[str, Any]:
+def _body_after_handoff(kwargs: dict[str, Any], send: _Send) -> dict[str, Any]:
     """``urlopen``'s arguments with the body as an iterable that reports the
-    handoff when urllib3 first reads it, after the request line and headers
-    are on the socket. The body's Content-Length is set explicitly, so
-    urllib3 sends it as is, not chunked: some proxies reject chunked POSTs."""
+    handoff once urllib3 has written it (it asks for the next part only after
+    writing the last), as TS reports it on the request's ``finish``. The
+    body's Content-Length is set explicitly, so urllib3 sends it as is, not
+    chunked: some proxies reject chunked POSTs."""
     body = kwargs.get("body")
     data = body.encode() if isinstance(body, str) else (body or b"")
+    admission = send.admission
 
     def chunks() -> Any:
-        admission.handed_off()
         if data:
             yield data
+        send.handed_off = True
+        if admission is not None:
+            admission.handed_off()
 
     headers = {
         **{key: value for key, value in (kwargs.get("headers") or {}).items()
@@ -734,17 +824,56 @@ def install_send_hook(pool: Any) -> None:
         if send.admission is not None and not send.admission.admit():
             msg = "The request was not sent: its caller stopped"
             raise SendNotAdmittedError(msg)
+        attach = getattr(send.admission, "attach", None)
+        if callable(attach):
+            # An admitted request can be abandoned from here on.
+            attach(send.abandon)
         send.sent = True
         admission = send.admission
         if admission is not None:
-            # Handed off once urllib3 asks for the body: by then it has
-            # written the request line and headers to the socket, so the
-            # request has started. A request that fails before that never
-            # started; its caller ends the wait when submit_once returns.
-            kwargs = _body_after_handoff(kwargs, admission)
+            # Handed off once urllib3 has written the body: the whole request
+            # is on the socket. A request that fails before that ends its
+            # caller's wait when submit_once returns.
+            kwargs = _body_after_handoff(kwargs, send)
         return original(method, url, *args, **{**kwargs, "retries": False})
 
     pool.urlopen = urlopen
+    # The connections tell the request when they write it, so that an
+    # abandon can stop them.
+    pool.pool_classes_by_scheme = {
+        "http": _SendHTTPConnectionPool,
+        "https": _SendHTTPSConnectionPool,
+    }
+
+
+class _SendConnectionMixin:
+    """A connection that registers with the current ``submit_once`` request
+    before it writes it, connected first (a plain HTTP connection otherwise
+    connects inside its first write), so an abandon finds its socket."""
+
+    def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> None:
+        send = _CURRENT_SEND.get()
+        if send is not None and send.admission is not None:
+            if getattr(self, "sock", None) is None:
+                self.connect()  # type: ignore[attr-defined]
+            send.writing(self)
+        super().request(method, url, *args, **kwargs)  # type: ignore[misc]
+
+
+class _SendHTTPConnection(_SendConnectionMixin, HTTPConnection):
+    pass
+
+
+class _SendHTTPSConnection(_SendConnectionMixin, HTTPSConnection):
+    pass
+
+
+class _SendHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _SendHTTPConnection
+
+
+class _SendHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _SendHTTPSConnection
 
 
 class _SingleAttemptPool:

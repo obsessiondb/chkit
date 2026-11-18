@@ -1,9 +1,9 @@
 import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
-import type { AddressInfo } from 'node:net'
+import { createServer, type AddressInfo, type Socket } from 'node:net'
 import { createStatelessClickHouseExecutor, sendNotAdmittedError, type ClickHouseExecutor, type QueryStatus, type SubmitAdmission } from '@chkit/clickhouse'
-import { CHECKPOINT_VERSION, executeBackfill, syncProgress, type BackfillProgress } from './async-backfill.js'
+import { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, syncProgress, type BackfillProgress } from './async-backfill.js'
 
 const PLAN_ID = 'test-plan'
 
@@ -972,7 +972,8 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
       attempts: [{ queryId: recordedReplayId, outcome: 'partial' }],
       nextOutcomes: ['finished'],
     })
-    const recorded = { c1: { status: 'failed' as const, queryId: recordedReplayId, submittedAt: hourAgo(), singleSend: true } }
+    // In flight when the run stopped: this release never records such a failure.
+    const recorded = { c1: { status: 'submitted' as const, queryId: recordedReplayId, submittedAt: hourAgo(), singleSend: true } }
 
     await expect(runOnce(server, recorded, { replayFailed: true })).rejects.toThrow(
       unknownError(recordedReplayId, 'it failed after writing 42 rows, which a replay would write again'),
@@ -1190,9 +1191,16 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
 
     const failedLocally = createSimulatedServer({ attempts: [{ queryId: recordedReplayId, outcome: 'failed' }], nextOutcomes: ['finished'] })
     deny(failedLocally)
-    await expect(runOnce(failedLocally, { c1: { ...recorded.c1, status: 'failed' } }, { replayFailed: true }))
+    await expect(runOnce(failedLocally, { c1: { ...recorded.c1, status: 'submitted' } }, { replayFailed: true }))
       .rejects.toThrow(unknownError(recordedReplayId, deniedReason))
     expect(failedLocally.submits).toEqual([])
+
+    // A failure this release proved before the denial stays proven.
+    const proven = createSimulatedServer({ attempts: [{ queryId: recordedReplayId, outcome: 'failed' }], nextOutcomes: ['finished'] })
+    deny(proven)
+    const replayed = await runOnce(proven, { c1: { ...recorded.c1, status: 'failed' } }, { replayFailed: true })
+    expect(proven.submits).toHaveLength(1)
+    expect(replayed.progress.c1).toMatchObject({ status: 'done', queryId: proven.submits[0] })
 
     const found = createSimulatedServer({ attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'finished' }] })
     deny(found)
@@ -1649,7 +1657,8 @@ describe('executeBackfill interrupted around the send (#765, round 4)', () => {
         planId: PLAN_ID,
         chunks: [{ id: 'c1' }],
         buildQuery: () => 'SELECT 1',
-        resumeFrom: { c1: { status: 'failed', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true, ...(seen === undefined ? {} : { writtenRows: seen }) } },
+        // In flight when the run stopped: its failure is proven here or never.
+        resumeFrom: { c1: { status: 'submitted', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true, ...(seen === undefined ? {} : { writtenRows: seen }) } },
         checkpointVersion: CHECKPOINT_VERSION,
         replayFailed: true,
         outcomeRecheckAttempts: 1,
@@ -1660,3 +1669,167 @@ describe('executeBackfill interrupted around the send (#765, round 4)', () => {
   }
 })
 
+
+// Opus critic, item 2: a failure this release proved is not proven again. Its
+// query_log rows may have aged out, or sit on a replica the resume cannot read.
+describe('a resume after a proven failure whose query_log rows are gone', () => {
+  const failure = { status: 'failed' as const, queryId: `backfill-${PLAN_ID}-c1`, error: 'Code: 241 MEMORY_LIMIT_EXCEEDED' }
+
+  async function resume(c1: BackfillProgress[string], flags: { replayFailed?: boolean } = {}) {
+    // query_log has nothing for c1; every attempt sent finishes.
+    const statuses = new Map<string, QueryStatus[]>()
+    const executor = createMockExecutor(statuses)
+    const submits: string[] = []
+    const submit = executor.submit.bind(executor)
+    executor.submit = (sql, queryId, settings, admission) => {
+      submits.push(queryId ?? '')
+      statuses.set(queryId ?? '', [{ status: 'finished', writtenRows: 1 }])
+      return submit(sql, queryId, settings, admission)
+    }
+    const result = await executeBackfill({
+      executor,
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }, { id: 'c2' }],
+      buildQuery: () => 'SELECT 1',
+      pollIntervalMs: 1,
+      outcomeRecheckAttempts: 1,
+      outcomeRecheckIntervalMs: 1,
+      resumeFrom: { c1, c2: { status: 'pending' } },
+      checkpointVersion: CHECKPOINT_VERSION,
+      ...flags,
+    })
+    return { result, submits }
+  }
+
+  test('a plain resume skips it and runs the pending chunks', async () => {
+    const { result, submits } = await resume({ ...failure, singleSend: true })
+
+    expect(submits).toEqual([`backfill-${PLAN_ID}-c2`])
+    expect(result.progress.c1).toEqual({ ...failure, singleSend: true })
+    expect(result.progress.c2).toMatchObject({ status: 'done' })
+    expect(result).toMatchObject({ total: 2, completed: 1, failed: 1 })
+  })
+
+  test('--replay-failed replays it under a new id', async () => {
+    const { result, submits } = await resume({ ...failure, singleSend: true }, { replayFailed: true })
+
+    expect(submits.sort()).toEqual([`backfill-${PLAN_ID}-c2`, expect.stringMatching(new RegExp(`^backfill-${PLAN_ID}-c1-`))].sort())
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: submits.find((id) => id.startsWith(`backfill-${PLAN_ID}-c1-`)) })
+  })
+
+  test('a failure an older release recorded still needs proof, and stops the resume', async () => {
+    for (const flags of [{}, { replayFailed: true }]) {
+      const run = resume(failure, flags)
+
+      await expect(run).rejects.toThrow(`chunk c1 (query_id backfill-${PLAN_ID}-c1): it is not running on any replica and system.query_log has no outcome for it.`)
+    }
+  })
+})
+
+// Opus critic, item 1: an interrupt never waits without end for a request
+// that was admitted and never started.
+describe('an interrupt while an admitted send never hands off', () => {
+  async function stalledRun(executor: ClickHouseExecutor, handoffTimeoutMs: number) {
+    const controller = new AbortController()
+    const reports: BackfillProgress[] = []
+    const run = executeBackfill({
+      executor,
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }],
+      buildQuery: () => 'INSERT INTO t SELECT 1',
+      pollIntervalMs: 1,
+      signal: controller.signal,
+      handoffTimeoutMs,
+      onProgress: (progress) => { reports.push(progress) },
+    })
+    return { controller, reports, run }
+  }
+
+  test('a server that never answers the TLS handshake: the send is abandoned and its attempt may have run', async () => {
+    const connections: Socket[] = []
+    const closed: Socket[] = []
+    const server = createServer((socket) => {
+      connections.push(socket)
+      socket.on('data', () => undefined)
+      socket.on('close', () => closed.push(socket))
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const executor = createStatelessClickHouseExecutor(
+      { url: `https://127.0.0.1:${(server.address() as AddressInfo).port}`, username: 'default', password: '', database: 'default' },
+      { sendConnectTimeoutMs: 600_000 },
+    )
+    const { controller, reports, run } = await stalledRun(executor, 300)
+    while (connections.length === 0) await new Promise((resolve) => setTimeout(resolve, 10))
+    const started = Date.now()
+
+    controller.abort()
+    const error = await run.then(() => undefined, (rejection: unknown) => rejection)
+    const elapsed = Date.now() - started
+    // The socket chkit opened is gone: nothing of the request is written later.
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    const closedByClient = closed.length
+    for (const socket of connections) socket.destroy()
+    server.close()
+    void executor.close().catch(() => undefined)
+
+    expect(error).toBeInstanceOf(BackfillInterruptedError)
+    expect(error).toMatchObject({ keepLock: false, note: 'The send of chunk c1 did not reach the server in time and was abandoned: it may still have reached it, so its attempt stays recorded as one that may have run.' })
+    expect(elapsed).toBeLessThan(2_000)
+    expect(closedByClient).toBe(connections.length)
+    expect(reports.at(-1)?.c1).toEqual({ status: 'pending', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true })
+  })
+
+  test('a send stuck before it reaches the transport keeps the lock', async () => {
+    const executor = createMockExecutor(new Map())
+    let sending = false
+    // Admitted by the run, then stuck before its request reaches the
+    // transport (nothing there to abandon).
+    executor.submit = () => {
+      sending = true
+      return new Promise<string>(() => undefined)
+    }
+    const { controller, run } = await stalledRun(executor, 100)
+    while (!sending) await new Promise((resolve) => setTimeout(resolve, 5))
+
+    controller.abort()
+    const error = await run.then(() => undefined, (rejection: unknown) => rejection)
+
+    expect(error).toBeInstanceOf(BackfillInterruptedError)
+    expect(error).toMatchObject({ keepLock: true })
+    expect((error as Error).message).toContain('The send of chunk c1 did not reach the server in time and could not be stopped (chunk c1): it may still be sent while this process runs, so its attempt stays recorded as one that may have run and the plan\'s lock stays in place.')
+  })
+})
+
+// Opus critic, parallel_distributed_insert_select: with no failure provable
+// for the target, a zero-row failure is unknown and nothing is replayed.
+test('a zero-row failure of a target whose failures cannot be proven is unknown', async () => {
+  const reason = 'its target app.events is a Distributed table, whose shards can write the rows of an INSERT SELECT without system.query_log counting them in its written_rows'
+  const submits: string[] = []
+  const executor = createMockExecutor(new Map([[`backfill-${PLAN_ID}-c1`, [{ status: 'failed', error: 'shard failed' }]]]))
+  const submit = executor.submit.bind(executor)
+  executor.submit = (sql, queryId, settings, admission) => {
+    submits.push(queryId ?? '')
+    return submit(sql, queryId, settings, admission)
+  }
+  const run = (resumeFrom: BackfillProgress | undefined, replayFailed?: boolean) => executeBackfill({
+    executor,
+    planId: PLAN_ID,
+    chunks: [{ id: 'c1' }],
+    buildQuery: () => 'INSERT INTO app.events SELECT 1',
+    pollIntervalMs: 1,
+    outcomeRecheckAttempts: 1,
+    outcomeRecheckIntervalMs: 1,
+    resumeFrom,
+    checkpointVersion: CHECKPOINT_VERSION,
+    replayFailed,
+    unprovableFailures: reason,
+  })
+
+  // A run that sees the failure stops instead of recording it failed.
+  await expect(run(undefined)).rejects.toThrow(`chunk c1 (query_id backfill-${PLAN_ID}-c1): ${reason}.`)
+  expect(submits).toEqual([`backfill-${PLAN_ID}-c1`])
+  // A resume with --replay-failed replays nothing.
+  await expect(run({ c1: { status: 'submitted', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true } }, true))
+    .rejects.toThrow(`chunk c1 (query_id backfill-${PLAN_ID}-c1): ${reason}.`)
+  expect(submits).toHaveLength(1)
+})

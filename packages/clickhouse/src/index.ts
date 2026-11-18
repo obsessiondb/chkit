@@ -678,7 +678,7 @@ export {
 	waitForTableAbsent,
 	waitForView,
 } from './ddl-propagation.js'
-export { isSendNotAdmitted, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
+export { isSendNotAdmitted, SEND_CONNECT_TIMEOUT_MS, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
 export { STRICT_READ_SETTINGS } from './replicas.js'
 export { allReplicas, probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaAccess, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
@@ -841,7 +841,7 @@ export function createSessionClickHouseClient(
 export function createExecutorWithClient(
 	config: ClickHouseConfig,
 	client: ClickHouseClient,
-	options: { createCompressedClient?: () => ClickHouseClient } = {},
+	options: { createCompressedClient?: () => ClickHouseClient; sendConnectTimeoutMs?: number } = {},
 ): ClickHouseExecutor {
 	const profiler = getLogger(['chkit', 'profiling'])
 
@@ -1137,7 +1137,7 @@ export function createExecutorWithClient(
 				admissionClient ??= createStatelessClickHouseClient(
 					config,
 					{ wait_end_of_query: 0 },
-					{ httpAgent: createAdmissionAgent(config.url, admissions) },
+					{ httpAgent: createAdmissionAgent(config.url, admissions, options.sendConnectTimeoutMs) },
 				)
 				sendQueue ??= createSendQueue(urlConnectionOptions(config.url).maxOpenConnections)
 				target = admissionClient
@@ -1361,11 +1361,13 @@ export function createClickHouseExecutor(
 
 export function createStatelessClickHouseExecutor(
 	config: ClickHouseConfig,
+	options: { sendConnectTimeoutMs?: number } = {},
 ): ClickHouseExecutor {
 	return createExecutorWithClient(
 		config,
 		createStatelessClickHouseClient(config),
 		{
+			...options,
 			createCompressedClient: () =>
 				createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, {
 					compression: { request: true },

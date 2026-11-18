@@ -21,7 +21,21 @@ export interface SubmitAdmission {
    *  slot (see `createSendQueue`) is then refused without ever reaching the
    *  HTTP agent. */
   signal?: AbortSignal
+  /** Aborted when the caller stops waiting for the handoff: an admitted
+   *  request that has not handed off is destroyed with its socket, so no
+   *  more of it is written. Its submit rejects with a send-abandoned error,
+   *  and the request may have reached the server. */
+  abandon?: AbortSignal
 }
+
+/**
+ * How long an admitted request may take to connect (TCP and TLS) and write
+ * itself to its socket. Past it, the request is destroyed and its submit
+ * fails: a connection that never completes (a stalled load balancer or TLS
+ * terminator) must not hold a backfill's interrupt (#765). It ends at the
+ * handoff, so a long INSERT's wait for its response has no limit.
+ */
+export const SEND_CONNECT_TIMEOUT_MS = 10_000
 
 const NOT_ADMITTED = 'CHKIT_SEND_NOT_ADMITTED'
 
@@ -32,6 +46,22 @@ export function sendNotAdmittedError(): Error {
 /** Whether `error` says a submit's request was refused before it was sent. */
 export function isSendNotAdmitted(error: unknown): boolean {
   return error instanceof Error && 'code' in error && error.code === NOT_ADMITTED
+}
+
+const ABANDONED = 'CHKIT_SEND_ABANDONED'
+
+function sendAbandonedError(): Error {
+  return Object.assign(
+    new Error('The request was abandoned before it was written: its caller stopped waiting for it. It may have reached the server.'),
+    { code: ABANDONED },
+  )
+}
+
+function connectTimeoutError(timeoutMs: number): Error {
+  return Object.assign(
+    new Error(`The request could not connect and be written within ${timeoutMs} ms (TCP connect, TLS handshake and the request itself), so it was destroyed. It may have reached the server.`),
+    { code: 'CHKIT_SEND_CONNECT_TIMEOUT' },
+  )
 }
 
 type RequestAgent = http.Agent & { addRequest(req: http.ClientRequest, options: unknown): void }
@@ -146,7 +176,11 @@ function once(fn: () => void): () => void {
  * The caller reads the refusal from its own record (see `recordingAdmission`):
  * a socket error (ECONNREFUSED, EPERM) can reach the driver first.
  */
-export function createAdmissionAgent(url: string, admissions: Map<string, SubmitAdmission>): http.Agent {
+export function createAdmissionAgent(
+  url: string,
+  admissions: Map<string, SubmitAdmission>,
+  connectTimeoutMs: number = SEND_CONNECT_TIMEOUT_MS,
+): http.Agent {
   // The socket limit is the send queue's: the agent never queues a request.
   const options = { keepAlive: urlConnectionOptions(url).keepAlive, maxSockets: Number.POSITIVE_INFINITY }
   const agent = (new URL(url).protocol === 'https:'
@@ -163,8 +197,17 @@ export function createAdmissionAgent(url: string, admissions: Map<string, Submit
     const admission = queryId === null ? undefined : admissions.get(queryId)
     if (admission && queryId !== null) admissions.delete(queryId)
     const admitted = admission ? admission.admit() : false
-    if (admitted && admission?.handedOff) {
-      const handedOff = once(admission.handedOff.bind(admission))
+    if (admitted && admission) {
+      // Until the handoff, the request is bounded (connect, TLS handshake and
+      // its write) and can be abandoned; destroying it destroys its socket.
+      const timer = setTimeout(() => req.destroy(connectTimeoutError(connectTimeoutMs)), connectTimeoutMs)
+      const onAbandon = () => req.destroy(sendAbandonedError())
+      admission.abandon?.addEventListener('abort', onAbandon, { once: true })
+      const handedOff = once(() => {
+        clearTimeout(timer)
+        admission.abandon?.removeEventListener('abort', onAbandon)
+        admission.handedOff?.()
+      })
       // 'finish': the request's bytes are flushed to the socket.
       req.once('finish', handedOff)
       req.once('error', handedOff)
@@ -172,6 +215,7 @@ export function createAdmissionAgent(url: string, admissions: Map<string, Submit
     }
     addRequest(req, requestOptions)
     if (!admitted) req.destroy(sendNotAdmittedError())
+    else if (admission?.abandon?.aborted) req.destroy(sendAbandonedError())
   }
   return agent
 }
@@ -191,6 +235,7 @@ export function recordingAdmission(admission: SubmitAdmission): { admission: Sub
         return admitted
       },
       ...(admission.handedOff ? { handedOff: () => admission.handedOff?.() } : {}),
+      ...(admission.abandon ? { abandon: admission.abandon } : {}),
     },
     refused: () => refused,
   }

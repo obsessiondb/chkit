@@ -3,6 +3,7 @@ import { link, readFile, unlink } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 
+import { BackfillInterruptedError } from './async-backfill.js'
 import { BackfillConfigError } from './errors.js'
 import { mkdirDurably, nowIso, syncDirectory, writeFileDurably } from './state.js'
 
@@ -81,7 +82,9 @@ export async function acquireRunLock(lockPath: string, planId: string): Promise<
  * Run `body` holding the plan's lock. A SIGINT or SIGTERM aborts the signal
  * `body` gets; once `body` returns or throws, the lock is released and the
  * process exits with 128 + the signal's number, saying whether the lock was
- * removed. Later signals do nothing, so the lock is never released while
+ * removed. The lock stays when `body` throws a `BackfillInterruptedError`
+ * that keeps it: a request of the run could still be sent. A second signal
+ * exits at once and leaves the lock in place, so it is never released while
  * `body` can still write the checkpoint or send a chunk.
  */
 export async function withRunLock<T>(
@@ -92,16 +95,22 @@ export async function withRunLock<T>(
 ): Promise<T> {
   const controller = new AbortController()
   let received: NodeJS.Signals | undefined
+  let held = false
   const onSignal = (name: NodeJS.Signals) => {
-    if (received) return
+    if (received) {
+      process.stderr.write(`${secondSignalMessage(planId, name, options.command ?? 'run', held && released !== 'released' ? lockPath : undefined)}\n`)
+      process.exit(name === 'SIGINT' ? 130 : 143)
+    }
     received = name
     controller.abort()
   }
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
   let released: string | undefined
+  let note: string | undefined
   try {
     const lock = await acquireRunLock(lockPath, planId)
+    held = true
     const release = async () => {
       released = await lock.release().then(
         () => 'released',
@@ -112,7 +121,12 @@ export async function withRunLock<T>(
     try {
       result = await body(controller.signal)
     } catch (error) {
-      await release()
+      if (error instanceof BackfillInterruptedError) note = error.note
+      if (error instanceof BackfillInterruptedError && error.keepLock) {
+        released = `stays in place at ${lockPath}: once this process has exited, delete it and re-run`
+      } else {
+        await release()
+      }
       throw error
     }
     await release()
@@ -122,10 +136,19 @@ export async function withRunLock<T>(
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (received) {
-      process.stderr.write(`${interruptMessage(planId, received, options.command ?? 'run', released)}\n`)
+      const message = interruptMessage(planId, received, options.command ?? 'run', released)
+      process.stderr.write(`${note ? `${message} ${note}` : message}\n`)
       process.exit(received === 'SIGINT' ? 130 : 143)
     }
   }
+}
+
+function secondSignalMessage(planId: string, signal: string, command: 'run' | 'cancel', lockPath: string | undefined): string {
+  const sending = command === 'cancel' ? '' : ' a chunk being sent may still reach the server, and its attempt stays recorded as one that may have run.'
+  const lock = lockPath
+    ? `The lock ${lockPath} stays in place:${sending} Once this process has exited, delete the lock and re-run.`
+    : 'The lock is not held.'
+  return `Backfill plan ${planId}: ${signal} again, exiting at once. ${lock}`
 }
 
 function interruptMessage(planId: string, signal: string, command: 'run' | 'cancel', released: string | undefined): string {

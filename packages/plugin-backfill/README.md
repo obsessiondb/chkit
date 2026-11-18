@@ -132,6 +132,8 @@ const result = await executeBackfill({
   checkpointVersion: CHECKPOINT_VERSION,
   // signal: an AbortSignal that stops the run; it needs an executor with
   // submitSendsOnce (the native one), so no chunk is sent after it aborts.
+  // unprovableFailures: the reason no failure of the target can be proven,
+  // for a Distributed target (its shards' rows are not in written_rows).
   onProgress: async (progress) => {
     saved = progress
     // persist to disk / state store

@@ -29,6 +29,7 @@ from pathlib import Path
 from types import FrameType
 from typing import Any, TypeVar
 
+from chkit_plugin_backfill.async_backfill import BackfillInterruptedError
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.state import (
     mkdir_durably,
@@ -154,7 +155,7 @@ class StopFlag:
         return True
 
 
-def with_run_lock(
+def with_run_lock(  # noqa: PLR0915 — mirrors the TS withRunLock
     lock_path: str | Path,
     plan_id: str,
     body: Callable[[StopFlag], T],
@@ -164,13 +165,25 @@ def with_run_lock(
     """Run ``body`` holding the plan's lock. A SIGINT or SIGTERM sets the flag
     ``body`` gets (instead of raising KeyboardInterrupt); once ``body``
     returns or raises, the lock is released and the process exits with
-    128 + the signal's number, saying whether the lock was removed. Later
-    signals do nothing, so the lock is never released while a worker can
+    128 + the signal's number, saying whether the lock was removed. The lock
+    stays when ``body`` raises a ``BackfillInterruptedError`` that keeps it:
+    a request of the run could still be sent. A second signal exits at once
+    and leaves the lock in place, so it is never released while a worker can
     still write the checkpoint or send a chunk. Signals are only caught on
     the main thread, where Python delivers them."""
     stop = StopFlag()
+    state: dict[str, Any] = {"held": False, "released": None}
 
     def on_signal(signum: int, _frame: FrameType | None) -> None:
+        if stop.is_set():
+            held = state["held"] and state["released"] != "released"
+            message = _second_signal_message(
+                plan_id, signal.Signals(signum).name, command, str(lock_path) if held else None
+            )
+            # os.write, not sys.stderr: the main thread may be inside a
+            # write to it, which this handler interrupted.
+            os.write(2, (message + "\n").encode())
+            os._exit(_EXIT_CODES[signal.Signals(signum)])
         stop.record(signum)
 
     previous: dict[signal.Signals, Any] = {}
@@ -178,19 +191,33 @@ def with_run_lock(
         for caught in _EXIT_CODES:
             previous[caught] = signal.signal(caught, on_signal)
     released: str | None = None
+    note: str | None = None
     try:
         lock = acquire_run_lock(lock_path, plan_id)
+        state["held"] = True
+        kept = False
         try:
             result = body(stop)
+        except BackfillInterruptedError as error:
+            note = error.note
+            kept = error.keep_lock
+            raise
         finally:
-            try:
-                lock.release()
-                released = "released"
-            except Exception as error:
+            if kept:
                 released = (
-                    f"could not be removed ({error}): delete {lock.path} once no run, "
-                    "resume or cancel of this plan runs"
+                    f"stays in place at {lock.path}: once this process has exited, "
+                    "delete it and re-run"
                 )
+            else:
+                try:
+                    lock.release()
+                    released = "released"
+                except Exception as error:
+                    released = (
+                        f"could not be removed ({error}): delete {lock.path} once no run, "
+                        "resume or cancel of this plan runs"
+                    )
+            state["released"] = released
         if released != "released" and not stop.is_set():
             msg = f"Backfill plan {plan_id}: the lock {released}."
             raise RuntimeError(msg)
@@ -204,12 +231,31 @@ def with_run_lock(
                 signal.signal(caught, handler)
         if signum is not None:
             name = signal.Signals(signum).name
-            sys.stderr.write(_interrupt_message(plan_id, name, command, released) + "\n")
+            message = _interrupt_message(plan_id, name, command, released)
+            sys.stderr.write((f"{message} {note}" if note else message) + "\n")
             sys.stdout.flush()
             sys.stderr.flush()
             # Chunks in flight still block in their submit; they report
             # nothing now, and the process must not wait for their INSERT.
             os._exit(_EXIT_CODES[signal.Signals(signum)])
+
+
+def _second_signal_message(
+    plan_id: str, name: str, command: str, lock_path: str | None
+) -> str:
+    sending = (
+        ""
+        if command == "cancel"
+        else " a chunk being sent may still reach the server, and its attempt stays "
+        "recorded as one that may have run."
+    )
+    lock = (
+        f"The lock {lock_path} stays in place:{sending} Once this process has exited, "
+        "delete the lock and re-run."
+        if lock_path is not None
+        else "The lock is not held."
+    )
+    return f"Backfill plan {plan_id}: {name} again, exiting at once. {lock}"
 
 
 def _interrupt_message(plan_id: str, name: str, command: str, released: str | None) -> str:

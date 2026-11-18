@@ -8,7 +8,7 @@ import { resolveConfig } from '@chkit/core'
 import { buildChunkExecutionSql, rewriteSelectColumns } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { PlanSchema } from './options.js'
-import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan } from './planner.js'
+import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
 import { backfillPaths, computeBackfillStateDir, readPlan } from './state.js'
 
 function createMockQuery(opts: {
@@ -738,4 +738,31 @@ describe('mv_replay column list', () => {
     expect(() => check(['id'])).toThrow('Target app.t changed since plan p1 was created: column(s) a are gone or no longer insertable')
     expect(() => assertReplayColumnsStillInsertable({ planId: 'p1', target: 'app.t', insertableColumns: [] })).not.toThrow()
   })
+})
+
+// Opus critic, parallel_distributed_insert_select: a failure of an INSERT into
+// a Distributed table is never proven, nor one whose target engine is unknown.
+describe('unprovableTargetFailures', () => {
+  const SHARDS = 'whose shards can write the rows of an INSERT SELECT without system.query_log counting them in its written_rows'
+  const engineIs = (rows: Array<{ engine: string }> | Error) => async <T>(sql: string): Promise<T[]> => {
+    expect(sql).toBe("SELECT engine FROM system.tables WHERE database = 'app' AND name = 'events'")
+    if (rows instanceof Error) throw rows
+    return rows as T[]
+  }
+
+  test('a MergeTree target can prove its failures', async () => {
+    expect(await unprovableTargetFailures({ database: 'app', table: 'events', query: engineIs([{ engine: 'SharedMergeTree' }]) })).toBeUndefined()
+  })
+
+  test('a Distributed target cannot', async () => {
+    expect(await unprovableTargetFailures({ database: 'app', table: 'events', query: engineIs([{ engine: 'Distributed' }]) }))
+      .toBe(`its target app.events is a Distributed table, ${SHARDS}`)
+  })
+
+  for (const [label, rows] of [['an empty', []], ['a failed', new Error('ACCESS_DENIED')]] as const) {
+    test(`${label} engine read cannot either`, async () => {
+      expect(await unprovableTargetFailures({ database: 'app', table: 'events', query: engineIs(rows) }))
+        .toBe(`the engine of its target app.events could not be read, and a Distributed table, ${SHARDS}, cannot be ruled out`)
+    })
+  }
 })

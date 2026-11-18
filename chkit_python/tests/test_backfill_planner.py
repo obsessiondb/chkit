@@ -30,6 +30,7 @@ from chkit_plugin_backfill.planner import (
     assert_backfill_target_safe,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
+    unprovable_target_failures,
 )
 from chkit_plugin_backfill.state import (
     backfill_paths,
@@ -807,4 +808,45 @@ def test_run_refuses_a_plan_whose_columns_the_target_no_longer_takes() -> None:
         check(["id"])
     assert_replay_columns_still_insertable(
         plan_id="p1", target="app.t", target_columns=None, insertable_columns=[]
+    )
+
+
+# Opus critic, parallel_distributed_insert_select: a failure of an INSERT into
+# a Distributed table is never proven, nor one whose target engine is unknown.
+_SHARDS = (
+    "whose shards can write the rows of an INSERT SELECT without system.query_log "
+    "counting them in its written_rows"
+)
+
+
+def _engine_is(rows: list[dict[str, object]] | Exception) -> PlannerQuery:
+    def query(sql: str, _settings: QuerySettings | None = None) -> list[dict[str, object]]:
+        assert sql == "SELECT engine FROM system.tables WHERE database = 'app' AND name = 'events'"
+        if isinstance(rows, Exception):
+            raise rows
+        return rows
+
+    return query
+
+
+def test_a_merge_tree_target_can_prove_its_failures() -> None:
+    query = _engine_is([{"engine": "SharedMergeTree"}])
+    assert unprovable_target_failures(database="app", table="events", query=query) is None
+
+
+def test_a_distributed_target_cannot_prove_its_failures() -> None:
+    query = _engine_is([{"engine": "Distributed"}])
+    assert unprovable_target_failures(database="app", table="events", query=query) == (
+        f"its target app.events is a Distributed table, {_SHARDS}"
+    )
+
+
+@pytest.mark.parametrize("rows", [[], RuntimeError("ACCESS_DENIED")])
+def test_a_target_whose_engine_cannot_be_read_cannot_either(
+    rows: list[dict[str, object]] | Exception,
+) -> None:
+    query = _engine_is(rows)
+    assert unprovable_target_failures(database="app", table="events", query=query) == (
+        f"the engine of its target app.events could not be read, and a Distributed table, "
+        f"{_SHARDS}, cannot be ruled out"
     )

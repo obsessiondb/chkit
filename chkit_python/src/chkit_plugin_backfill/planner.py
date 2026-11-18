@@ -108,6 +108,43 @@ def _detect_backfill_strategy(
         return _BackfillStrategy(mvs=[])
 
 
+def unprovable_target_failures(
+    *, database: str, table: str, query: PlannerQuery
+) -> str | None:
+    """Why no failure of the backfill target can be proven, when none can
+    (#765): an INSERT SELECT into a Distributed table can run on its shards
+    (parallel_distributed_insert_select, 2 by default in ClickHouse 26.3), and
+    the initial query's written_rows then does not count the rows they wrote.
+    A target whose engine cannot be read counts as one."""
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    target = f"{database}.{table}"
+    engine: str | None
+    try:
+        rows = query(
+            "SELECT engine FROM system.tables "
+            f"WHERE database = {quote(database)} AND name = {quote(table)}",
+            None,
+        )
+        engine = (str(rows[0].get("engine") or "") if rows else "") or None
+    except Exception:
+        engine = None
+    if engine is not None and engine != "Distributed":
+        return None
+    shards = (
+        "whose shards can write the rows of an INSERT SELECT without system.query_log "
+        "counting them in its written_rows"
+    )
+    if engine == "Distributed":
+        return f"its target {target} is a Distributed table, {shards}"
+    return (
+        f"the engine of its target {target} could not be read, and a Distributed table, "
+        f"{shards}, cannot be ruled out"
+    )
+
+
 def assert_backfill_target_safe(
     *, database: str, table: str, mode: Literal["copy", "mv_replay", "cutover_copy"],
     query: PlannerQuery,

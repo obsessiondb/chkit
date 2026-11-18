@@ -1,13 +1,14 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
 import http from 'node:http'
-import type { AddressInfo } from 'node:net'
+import net, { type AddressInfo } from 'node:net'
 import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync, fstatSync, statSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { acquireRunLock, runLockPath } from './run-lock.js'
+import { BackfillInterruptedError } from './async-backfill.js'
+import { acquireRunLock, runLockPath, withRunLock } from './run-lock.js'
 
 const PLAN_ID = '0123456789abcdef'
 // The lock chkit-py writes and reads too: same path, same format.
@@ -149,13 +150,10 @@ describe('acquireRunLock (#765)', () => {
 })
 
 describe('withRunLock on SIGINT (#765)', () => {
-  test('releases the lock after the body ends, ignores a second SIGINT meanwhile, and exits 130', async () => {
-    const runsDir = await tempRunsDir()
-    const lockPath = runLockPath(runsDir, PLAN_ID)
-    const log = join(runsDir, '..', 'writes.log')
-    // The body stands in for a run: once aborted, it writes its last
-    // checkpoint 300 ms later, recording whether it still holds the lock.
-    const script = `
+  // The body stands in for a run: once aborted, it writes its last
+  // checkpoint 300 ms later, recording whether it still holds the lock.
+  function lingeringBody(lockPath: string, log: string): string {
+    return `
       const { appendFileSync, existsSync } = await import('node:fs')
       const { withRunLock } = await import(${JSON.stringify(RUN_LOCK_MODULE)})
       await withRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)}, async (signal) => {
@@ -166,13 +164,21 @@ describe('withRunLock on SIGINT (#765)', () => {
         throw new Error('interrupted')
       })
     `
-    const run = runScript(script)
+  }
+
+  async function started(run: ReturnType<typeof runScript>): Promise<void> {
     await new Promise<void>((resolve) => {
       run.child.stdout?.on('data', (chunk) => { if (String(chunk).includes('ready')) resolve() })
     })
+  }
 
-    run.child.kill('SIGINT')
-    await new Promise((resolve) => setTimeout(resolve, 50))
+  test('releases the lock after the body ends, and exits 130', async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+    const log = join(runsDir, '..', 'writes.log')
+    const run = runScript(lingeringBody(lockPath, log))
+    await started(run)
+
     run.child.kill('SIGINT')
     const result = await run
 
@@ -182,6 +188,39 @@ describe('withRunLock on SIGINT (#765)', () => {
     expect(result.stderr).toContain(`Backfill plan ${PLAN_ID}: interrupted (SIGINT). No new chunk was submitted, and the lock is released`)
     await rm(join(runsDir, '..'), { recursive: true, force: true })
   }, 30_000)
+
+  // Opus critic, item 1: a second signal does not wait for the body, and
+  // leaves the lock in place, saying so.
+  test('a second SIGINT exits at once and leaves the lock in place', async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+    const log = join(runsDir, '..', 'writes.log')
+    const run = runScript(lingeringBody(lockPath, log))
+    await started(run)
+
+    run.child.kill('SIGINT')
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    run.child.kill('SIGINT')
+    const result = await run
+
+    expect(result.code).toBe(130)
+    expect(existsSync(log)).toBe(false)
+    expect(existsSync(lockPath)).toBe(true)
+    expect(result.stderr).toContain(`Backfill plan ${PLAN_ID}: SIGINT again, exiting at once. The lock ${lockPath} stays in place: a chunk being sent may still reach the server, and its attempt stays recorded as one that may have run. Once this process has exited, delete the lock and re-run.`)
+    await rm(join(runsDir, '..'), { recursive: true, force: true })
+  }, 30_000)
+
+  test('a body that says a request may still be sent keeps the lock', async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+
+    await expect(withRunLock(lockPath, PLAN_ID, async () => {
+      throw new BackfillInterruptedError('interrupted.', { note: 'still sending.', keepLock: true })
+    })).rejects.toThrow('interrupted. still sending.')
+
+    expect(existsSync(lockPath)).toBe(true)
+    await rm(join(runsDir, '..'), { recursive: true, force: true })
+  })
 })
 
 describe('run lock durability and ownership (#765, round 3)', () => {
@@ -287,6 +326,32 @@ describe('run lock durability and ownership (#765, round 3)', () => {
   }, 30_000)
 })
 
+// The sources on Bun, and the built packages on Node.
+const runtimes = [
+  {
+    name: 'Bun',
+    command: process.execPath,
+    args: (code: string) => ['-e', code],
+    modules: {
+      runLock: RUN_LOCK_MODULE,
+      asyncBackfill: ASYNC_BACKFILL_MODULE,
+      clickhouse: new URL('../../clickhouse/src/index.ts', import.meta.url).pathname,
+    },
+  },
+  {
+    name: 'Node',
+    // The node binary itself: a version manager's shim on PATH would take
+    // the signal in its place.
+    command: spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' }).stdout.trim(),
+    args: (code: string) => ['--input-type=module', '-e', code],
+    modules: {
+      runLock: new URL('../dist/run-lock.js', import.meta.url).pathname,
+      asyncBackfill: new URL('../dist/async-backfill.js', import.meta.url).pathname,
+      clickhouse: new URL('../../clickhouse/dist/index.js', import.meta.url).pathname,
+    },
+  },
+]
+
 // Round 6: at a one-connection cap, with the first INSERT held open, the
 // second waits in chkit's send queue. An interrupt, either while it waits or
 // just as its submit starts, releases the lock without the second INSERT ever
@@ -328,30 +393,6 @@ describe('an interrupt with a held INSERT at a one-connection cap', () => {
     `
   }
 
-  const runtimes = [
-    {
-      name: 'Bun',
-      command: process.execPath,
-      args: (code: string) => ['-e', code],
-      modules: {
-        runLock: RUN_LOCK_MODULE,
-        asyncBackfill: ASYNC_BACKFILL_MODULE,
-        clickhouse: new URL('../../clickhouse/src/index.ts', import.meta.url).pathname,
-      },
-    },
-    {
-      name: 'Node',
-      // The node binary itself: a version manager's shim on PATH would take
-      // the signal in its place.
-      command: spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' }).stdout.trim(),
-      args: (code: string) => ['--input-type=module', '-e', code],
-      modules: {
-        runLock: new URL('../dist/run-lock.js', import.meta.url).pathname,
-        asyncBackfill: new URL('../dist/async-backfill.js', import.meta.url).pathname,
-        clickhouse: new URL('../../clickhouse/dist/index.js', import.meta.url).pathname,
-      },
-    },
-  ]
 
   for (const runtime of runtimes) {
     for (const timing of ['while the second waits for its slot', 'as the second submit starts'] as const) {
@@ -396,3 +437,105 @@ describe('an interrupt with a held INSERT at a one-connection cap', () => {
   }
 })
 
+
+// Opus critic, item 1: a load balancer or TLS terminator that accepts the TCP
+// connection and never answers the TLS ClientHello. The interrupt abandons
+// the stalled send after its handoff wait, releases the lock and says the
+// chunk may have run; without an interrupt, the connect timeout fails the run.
+describe('a send whose TLS handshake never completes', () => {
+  async function silentServer() {
+    const connections: net.Socket[] = []
+    const server = net.createServer((socket) => {
+      connections.push(socket)
+      socket.on('data', () => undefined)
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    const close = () => {
+      for (const socket of connections) socket.destroy()
+      server.close()
+    }
+    return { connections, close, url: `https://127.0.0.1:${(server.address() as AddressInfo).port}` }
+  }
+
+  function script(modules: { runLock: string; asyncBackfill: string; clickhouse: string }, lockPath: string, url: string, timeouts: string): string {
+    return `
+      const { withRunLock } = await import(${JSON.stringify(modules.runLock)})
+      const { executeBackfill } = await import(${JSON.stringify(modules.asyncBackfill)})
+      const { createStatelessClickHouseExecutor } = await import(${JSON.stringify(modules.clickhouse)})
+      const { sendConnectTimeoutMs, handoffTimeoutMs } = ${timeouts}
+      await withRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)}, async (signal) => {
+        const db = createStatelessClickHouseExecutor({ url: ${JSON.stringify(url)}, username: 'default', password: '', database: 'default' }, { sendConnectTimeoutMs })
+        const submit = db.submit.bind(db)
+        db.submit = (sql, id, settings, admission) => {
+          console.log('submit ' + id)
+          return submit(sql, id, settings, admission)
+        }
+        try {
+          return await executeBackfill({
+            executor: db, planId: ${JSON.stringify(PLAN_ID)}, chunks: [{ id: 'c1' }],
+            buildQuery: () => 'INSERT INTO t SELECT 1', pollIntervalMs: 10, signal, handoffTimeoutMs,
+            onProgress: (progress) => console.log('checkpoint ' + JSON.stringify(progress.c1)),
+          })
+        } finally {
+          if (signal.aborted) void db.close().catch(() => undefined)
+          else await db.close()
+        }
+      })
+    `
+  }
+
+  function spawnRun(runtime: (typeof runtimes)[number], code: string) {
+    const child = spawn(runtime.command, runtime.args(code), { stdio: ['ignore', 'pipe', 'pipe'] })
+    let stderr = ''
+    let stdout = ''
+    child.stderr?.on('data', (chunk) => { stderr += String(chunk) })
+    child.stdout?.on('data', (chunk) => { stdout += String(chunk) })
+    const exited = new Promise<number | null>((resolve) => child.on('exit', resolve))
+    return { child, exited, output: () => ({ stdout, stderr }) }
+  }
+
+  const lastCheckpoint = (stdout: string) =>
+    JSON.parse(stdout.trim().split('\n').filter((line) => line.startsWith('checkpoint ')).at(-1)?.slice('checkpoint '.length) ?? 'null')
+
+  for (const runtime of runtimes) {
+    test(`${runtime.name}: an interrupt abandons the stalled send, releases the lock and says the chunk may have run`, async () => {
+      const runsDir = await tempRunsDir()
+      const lockPath = runLockPath(runsDir, PLAN_ID)
+      const { connections, close, url } = await silentServer()
+      // A connect timeout longer than the test: only the handoff wait ends it.
+      const run = spawnRun(runtime, script(runtime.modules, lockPath, url, '{ sendConnectTimeoutMs: 600000, handoffTimeoutMs: 500 }'))
+      while (connections.length === 0) await new Promise((r) => setTimeout(r, 10))
+      const started = Date.now()
+
+      run.child.kill('SIGINT')
+      const code = await run.exited
+      const elapsed = Date.now() - started
+      const { stdout, stderr } = run.output()
+      close()
+
+      expect(code, `${stdout}\n${stderr}`).toBe(130)
+      expect(elapsed).toBeLessThan(5_000)
+      expect(existsSync(lockPath)).toBe(false)
+      expect(stderr).toContain(`Backfill plan ${PLAN_ID}: interrupted (SIGINT). No new chunk was submitted, and the lock is released; a chunk already submitted keeps running on the server, and a resume attaches to it. The send of chunk c1 did not reach the server in time and was abandoned: it may still have reached it, so its attempt stays recorded as one that may have run.`)
+      expect(lastCheckpoint(stdout)).toEqual({ status: 'pending', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true })
+      await rm(join(runsDir, '..'), { recursive: true, force: true })
+    }, 30_000)
+
+    test(`${runtime.name}: without an interrupt, the connect timeout fails the run and keeps the attempt`, async () => {
+      const runsDir = await tempRunsDir()
+      const lockPath = runLockPath(runsDir, PLAN_ID)
+      const { close, url } = await silentServer()
+      const run = spawnRun(runtime, script(runtime.modules, lockPath, url, '{ sendConnectTimeoutMs: 300, handoffTimeoutMs: undefined }'))
+
+      const code = await run.exited
+      const { stdout, stderr } = run.output()
+      close()
+
+      expect(code, `${stdout}\n${stderr}`).not.toBe(0)
+      expect(stderr).toContain('could not connect and be written within 300 ms')
+      expect(existsSync(lockPath)).toBe(false)
+      expect(lastCheckpoint(stdout)).toEqual({ status: 'pending', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true })
+      await rm(join(runsDir, '..'), { recursive: true, force: true })
+    }, 30_000)
+  }
+})
