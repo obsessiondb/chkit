@@ -193,6 +193,12 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
           expect(help.stdout).toContain(usage)
         }
       }
+      // A user profile without a project config also prints the help with configured plugin flags.
+      for (const command of ['status', 'generate', 'migrate', 'drift', 'check', 'snapshot', 'pull']) {
+        const help = profile.run([command, '--help-plugins'])
+        expect([command, help.exitCode, help.stderr]).toEqual([command, 0, ''])
+        expect(help.stdout).toContain(`chkit ${command} `)
+      }
       // Guard: codegen checks its arguments once the config is loaded, as in chkit-py.
       for (const args of [['codegen'], ['codegen', 'foo'], ['codegen', '--bogus'], ['codegen', '--bogus', '--json']]) {
         const result = empty.run(args)
