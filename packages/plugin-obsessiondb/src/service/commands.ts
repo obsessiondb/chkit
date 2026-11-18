@@ -162,8 +162,8 @@ export const SERVICE_COMMAND: PluginCommand = {
 			return runServiceAlias(context)
 		}
 
-		print(`Unknown service action: ${action}`)
-		printServiceUsage(print)
+		// One line, so `--json` prints one message, as in chkit-py (#776).
+		print(`Unknown service subcommand "${action}".`)
 		return 1
 	},
 }

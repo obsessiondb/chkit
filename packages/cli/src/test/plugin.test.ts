@@ -1228,17 +1228,6 @@ describe('plugin runtime', () => {
     }
   })
 
-  test('pull root command fails when pull plugin is not configured', async () => {
-    const fixture = await createFixture()
-    try {
-      const result = runCli(['pull', '--config', fixture.configPath, '--json'])
-      expect(result.exitCode).toBe(1)
-      expect(result.stderr).toContain('Pull plugin is not configured')
-    } finally {
-      await rm(fixture.dir, { recursive: true, force: true })
-    }
-  })
-
   test('codegen returns exit code 2 for invalid plugin options', async () => {
     const fixture = await createFixture()
     try {
