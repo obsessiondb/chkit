@@ -11,6 +11,7 @@ import {
 } from './index'
 import type { ColumnDefinition, SchemaDefinition } from './index'
 import { buildDependencyGraph, orderByDependencies } from './object-dependencies.js'
+import { columnDefaultReads } from './planner.js'
 
 const appTable = (name: string, columns: ColumnDefinition[] = [{ name: 'id', type: 'UInt64' }]) =>
   table({ database: 'app', name, columns, engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] })
@@ -727,6 +728,46 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 
+  // Reading the lambda parameter `c` as the column `c` ran MODIFY `a` last, so
+  // MODIFY `b` DEFAULT a met the old `a DEFAULT b`: Cyclic alias detected (#768).
+  test('a lambda parameter named like a column is not a read', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'id' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(c -> c, [1]))' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'a' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'id' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  test('a CAST type named like a column is not a read', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'A', type: 'UInt64', default: { expression: 'CAST(id AS UInt64)' } },
+            { name: 'UInt64', type: 'UInt64', default: { expression: 'A' } },
+          ]),
+        ],
+        [t([])]
+      )
+    ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `UInt64`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `A`;'])
+  })
+
   test('keeps key order for a cycle', () => {
     expect(
       sqls(
@@ -788,5 +829,65 @@ describe('planDiff orders the column statements of a table by the columns they r
       'ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;',
       'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `w` UInt64 DEFAULT x;',
     ])
+  })
+})
+
+describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () => {
+  const columns = ['a', 'arr', 'c', 'id', 'threshold', 'UInt64', 'x', 'y']
+  const readsOf = (expression: string) => {
+    const definition = table({
+      database: 'app',
+      name: 't',
+      columns: [
+        ...columns.map((name) => ({ name, type: 'UInt64' })),
+        { name: 'v', type: 'UInt64', default: { expression } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const reads = columnDefaultReads([definition]).get('table:app.t:column:v') ?? new Set<string>()
+    return [...reads].map((key) => key.slice('table:app.t:column:'.length)).sort()
+  }
+
+  test.each<[string, string[]]>([
+    ['arrayMap(c -> c, [1])', []],
+    ['arrayMap((x, y) -> x + y, arr, arr)', ['arr']],
+    ['arrayMap((`x`, y) -> `x` * y, arr, arr)', ['arr']],
+    ['arrayMap(a -> a.x, arr)', ['arr']],
+    ['arrayMap(a -> a.x.y + c, arr)', ['arr', 'c']],
+    ['arrayFilter(x -> x > threshold, arr)', ['arr', 'threshold']],
+    ['arrayMap(x -> arrayMap(y -> x + y + c, arr), [arr])', ['arr', 'c']],
+    ['arrayMap(x -> arrayMap(x -> x, [x]), [1])', []],
+    ['arrayMap(x -> x, [1]) + x', ['x']],
+    ['arrayMap(x -> x, x)', ['x']],
+    ['arrayMap(x -> (x, y), arr)', ['arr', 'y']],
+    ['arrayMap(x -> c.x, arr)', ['arr', 'c', 'x']],
+  ])('lambda: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test.each<[string, string[]]>([
+    ['CAST(id AS UInt64)', ['id']],
+    ['cast(id AS Nullable(UInt64))', ['id']],
+    ['CAST(id AS Array(Tuple(a UInt64, x String)))', ['id']],
+    ["CAST(id AS DateTime64(3, 'UTC'))", ['id']],
+    ['CAST(CAST(a AS UInt8) AS UInt64)', ['a']],
+    ['CAST(a AS UInt64) + UInt64', ['UInt64', 'a']],
+    ['id::UInt64', ['id']],
+    ['id::Nullable(UInt64) + x', ['id', 'x']],
+    ['id::Array(Tuple(a UInt64)) + c', ['c', 'id']],
+  ])('type: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test.each<[string, string[]]>([
+    ['-> x', ['x']],
+    ['(x, y -> x', ['x']],
+    ['() -> x', ['x']],
+    ['CAST(a AS', ['a']],
+    ['a::', ['a']],
+  ])('incomplete: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
   })
 })

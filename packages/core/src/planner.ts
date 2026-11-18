@@ -58,7 +58,7 @@ import {
   orderByDependencies,
   type DependencyGraph,
 } from './object-dependencies.js'
-import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
+import { type SQLToken, identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -933,10 +933,9 @@ function columnKey(table: { database: string; table: string }, column: string): 
 /**
  * Column operation key → keys of the other columns of the same table that the
  * column's default expression names. A name followed by `(` is a function
- * call, not a column. A name can also be a lambda parameter; such an extra
- * edge moves a statement later, or makes a cycle that keeps the key order.
+ * call, not a column, and neither are the names `notColumnNames` finds.
  */
-function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
@@ -948,13 +947,122 @@ function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
       if (parsed.kind !== 'expression') continue
       const read = new Set<string>()
       const tokens = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
+      const skipped = notColumnNames(tokens)
       tokens.forEach((token, index) => {
         const name = identifierName(token)
-        if (name === undefined || tokens[index + 1]?.text === '(') return
+        if (name === undefined || skipped.has(index) || tokens[index + 1]?.text === '(') return
         if (name !== column.name && names.has(name)) read.add(keyOf(name))
       })
       graph.set(keyOf(column.name), read)
     }
   }
   return graph
+}
+
+/**
+ * Indices of the `tokens` (trivia removed) that name no column (#768): a lambda
+ * parameter (`x -> x`, `(x, y) -> x + y`) where its lambda declares and uses it,
+ * with the `.name` parts after a use (`a -> a.x`), and the type of `CAST(x AS T)`
+ * and `x::T`, with its arguments (`Array(Tuple(a UInt64))`). A lambda body runs
+ * to the first `,` or unmatched closing bracket at its own depth, so a name
+ * after the lambda still reads a column.
+ */
+function notColumnNames(tokens: SQLToken[]): Set<number> {
+  const skipped = new Set<number>()
+  const isPair = (i: number, first: string, second: string) => {
+    const a = tokens[i]
+    const b = tokens[i + 1]
+    return a?.text === first && b?.text === second && a.end === b.start
+  }
+  const isName = (i: number) => {
+    const token = tokens[i]
+    return token !== undefined && identifierName(token) !== undefined
+  }
+  const skip = (from: number, to: number) => {
+    for (let i = from; i < to; i += 1) skipped.add(i)
+  }
+  tokens.forEach((token, i) => {
+    if (isPair(i, '-', '>')) {
+      const params = lambdaParameters(tokens, i)
+      if (params === undefined) return
+      skip(params.from, i)
+      const end = groupEnd(tokens, i + 2)
+      for (let j = i + 2; j < end; j += 1) {
+        const name = identifierName(tokens[j]!)
+        if (name === undefined || !params.names.has(name) || tokens[j - 1]?.text === '.') continue
+        skipped.add(j)
+        while (tokens[j + 1]?.text === '.' && isName(j + 2)) {
+          j += 2
+          skipped.add(j)
+        }
+      }
+    } else if (isPair(i, ':', ':')) {
+      if (!isName(i + 2)) return
+      skip(i + 2, tokens[i + 3]?.text === '(' ? closingParen(tokens, i + 3) + 1 : i + 3)
+    } else if (token.kind === 'identifier' && token.text.toLowerCase() === 'cast' && tokens[i + 1]?.text === '(') {
+      const close = closingParen(tokens, i + 1)
+      let depth = 0
+      for (let j = i + 2; j < close; j += 1) {
+        const inner = tokens[j]!
+        if (inner.text === '(') depth += 1
+        else if (inner.text === ')') depth -= 1
+        else if (depth === 0 && inner.kind === 'identifier' && inner.text.toLowerCase() === 'as') {
+          skip(j, close)
+          break
+        }
+      }
+    }
+  })
+  return skipped
+}
+
+/**
+ * The parameters of the lambda whose `->` starts at `arrow`: the name before
+ * it, or the names of a `(a, b)` list before it, with the index of the first
+ * token that declares them. Any other shape declares nothing.
+ */
+function lambdaParameters(tokens: SQLToken[], arrow: number): { names: Set<string>; from: number } | undefined {
+  const before = tokens[arrow - 1]
+  if (before === undefined) return undefined
+  const single = identifierName(before)
+  if (single !== undefined) return { names: new Set([single]), from: arrow - 1 }
+  if (before.text !== ')') return undefined
+  const names = new Set<string>()
+  for (let j = arrow - 2; j >= 0; j -= 2) {
+    const name = identifierName(tokens[j]!)
+    if (name === undefined) return undefined
+    names.add(name)
+    const separator = tokens[j - 1]?.text
+    if (separator === '(') return { names, from: j - 1 }
+    if (separator !== ',') return undefined
+  }
+  return undefined
+}
+
+/** Index of the first `,` or unmatched closing bracket at the depth of `from`, or the end. */
+function groupEnd(tokens: SQLToken[], from: number): number {
+  let depth = 0
+  for (let j = from; j < tokens.length; j += 1) {
+    const text = tokens[j]!.text
+    if (text === '(' || text === '[' || text === '{') depth += 1
+    else if (text === ')' || text === ']' || text === '}') {
+      if (depth === 0) return j
+      depth -= 1
+    } else if (text === ',' && depth === 0) return j
+  }
+  return tokens.length
+}
+
+/** Index of the `)` that closes the `(` at `open`, or the end. */
+function closingParen(tokens: SQLToken[], open: number): number {
+  let depth = 0
+  for (let j = open; j < tokens.length; j += 1) {
+    const text = tokens[j]!.text
+    if (text === '(') depth += 1
+    else if (text === ')') {
+      depth -= 1
+      if (depth === 0) return j
+    }
+  }
+  return tokens.length
 }

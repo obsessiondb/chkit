@@ -52,7 +52,7 @@ Operations run in groups. Without a rename, the order is drops, then `ALTER` sta
 - an `ADD COLUMN` or `MODIFY COLUMN` whose new `DEFAULT`, `MATERIALIZED` or `ALIAS` expression reads a column runs after the `ADD COLUMN` of that column, or the `RENAME COLUMN` to its name;
 - a `DROP COLUMN` runs after the `MODIFY COLUMN` or `DROP COLUMN` of every column whose old expression reads it, since ClickHouse refuses to drop a column another column still reads. A `RENAME COLUMN` needs no such wait: ClickHouse rewrites the expressions that read the old name.
 
-A name followed by `(` is a function call, not a column. Columns that read each other in a cycle keep the name order. Statements for the same column keep their planned order: removing a column's expression (`REMOVE DEFAULT` or `REMOVE MATERIALIZED`) or codec (`REMOVE CODEC`) runs right before the column's `MODIFY COLUMN`.
+A name followed by `(` is a function call, not a column. Neither is a lambda parameter inside its lambda (`c` in `arrayMap(c -> c + 1, arr)`), nor a type in `CAST(x AS T)` or `x::T`. Columns that read each other in a cycle keep the name order. Statements for the same column keep their planned order: removing a column's expression (`REMOVE DEFAULT` or `REMOVE MATERIALIZED`) or codec (`REMOVE CODEC`) runs right before the column's `MODIFY COLUMN`.
 
 `generate` then reorders creates and drops by the dependencies between the objects in the migration: an object is created after every object it reads and dropped before them. A view that reads another view, a materialized view, or a dictionary is created after it, even when its name sorts first. Dependencies come from:
 

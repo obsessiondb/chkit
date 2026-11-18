@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     DictionaryDefinition,
@@ -17,7 +19,7 @@ from chkit.core.model import (
     view,
 )
 from chkit.core.object_dependencies import build_dependency_graph, order_by_dependencies
-from chkit.core.planner import plan_diff
+from chkit.core.planner import _column_default_reads, plan_diff
 
 
 def app_table(name: str, columns: list[dict[str, Any]] | None = None) -> TableDefinition:
@@ -818,6 +820,39 @@ def test_a_function_call_named_like_a_column_is_not_a_read() -> None:
     ]
 
 
+# Reading the lambda parameter `c` as the column `c` ran MODIFY `a` last, so
+# MODIFY `b` DEFAULT a met the old `a DEFAULT b`: Cyclic alias detected (#768).
+def test_a_lambda_parameter_named_like_a_column_is_not_a_read() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("b")},
+            {"name": "b", "type": "UInt64", "default": _expr("id")},
+        ])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("arraySum(arrayMap(c -> c, [1]))")},
+            {"name": "b", "type": "UInt64", "default": _expr("a")},
+            {"name": "c", "type": "UInt64", "default": _expr("id")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `c` UInt64 DEFAULT id;",
+    ]
+
+
+def test_a_cast_type_named_like_a_column_is_not_a_read() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "A", "type": "UInt64", "default": _expr("CAST(id AS UInt64)")},
+            {"name": "UInt64", "type": "UInt64", "default": _expr("A")},
+        ])],
+        [_t([])],
+    ) == [
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `UInt64`;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `A`;",
+    ]
+
+
 def test_keeps_key_order_for_a_cycle_of_dropped_columns() -> None:
     assert _sqls(
         [_t([
@@ -870,3 +905,77 @@ def test_keeps_the_other_statements_other_tables_and_same_column_statements_in_p
         "ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;",
         "ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `w` UInt64 DEFAULT x;",
     ]
+
+
+# ---------- the column reads skip lambda parameters and CAST types (#768) ----------
+
+
+_READ_COLUMNS = ["a", "arr", "c", "id", "threshold", "UInt64", "x", "y"]
+
+
+def _reads_of(expression: str) -> list[str]:
+    columns: list[dict[str, object]] = [{"name": name, "type": "UInt64"} for name in _READ_COLUMNS]
+    columns.append({"name": "v", "type": "UInt64", "default": _expr(expression)})
+    definition = table(
+        database="app",
+        name="t",
+        columns=list(columns),
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+    )
+    reads = _column_default_reads([definition]).get("table:app.t:column:v", set())
+    return sorted(key[len("table:app.t:column:"):] for key in reads)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("arrayMap(c -> c, [1])", []),
+        ("arrayMap((x, y) -> x + y, arr, arr)", ["arr"]),
+        ("arrayMap((`x`, y) -> `x` * y, arr, arr)", ["arr"]),
+        ("arrayMap(a -> a.x, arr)", ["arr"]),
+        ("arrayMap(a -> a.x.y + c, arr)", ["arr", "c"]),
+        ("arrayFilter(x -> x > threshold, arr)", ["arr", "threshold"]),
+        ("arrayMap(x -> arrayMap(y -> x + y + c, arr), [arr])", ["arr", "c"]),
+        ("arrayMap(x -> arrayMap(x -> x, [x]), [1])", []),
+        ("arrayMap(x -> x, [1]) + x", ["x"]),
+        ("arrayMap(x -> x, x)", ["x"]),
+        ("arrayMap(x -> (x, y), arr)", ["arr", "y"]),
+        ("arrayMap(x -> c.x, arr)", ["arr", "c", "x"]),
+    ],
+)
+def test_reads_skip_lambda_parameters(expression: str, expected: list[str]) -> None:
+    assert _reads_of(expression) == expected
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("CAST(id AS UInt64)", ["id"]),
+        ("cast(id AS Nullable(UInt64))", ["id"]),
+        ("CAST(id AS Array(Tuple(a UInt64, x String)))", ["id"]),
+        ("CAST(id AS DateTime64(3, 'UTC'))", ["id"]),
+        ("CAST(CAST(a AS UInt8) AS UInt64)", ["a"]),
+        ("CAST(a AS UInt64) + UInt64", ["UInt64", "a"]),
+        ("id::UInt64", ["id"]),
+        ("id::Nullable(UInt64) + x", ["id", "x"]),
+        ("id::Array(Tuple(a UInt64)) + c", ["c", "id"]),
+    ],
+)
+def test_reads_skip_cast_types(expression: str, expected: list[str]) -> None:
+    assert _reads_of(expression) == expected
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("-> x", ["x"]),
+        ("(x, y -> x", ["x"]),
+        ("() -> x", ["x"]),
+        ("CAST(a AS", ["a"]),
+        ("a::", ["a"]),
+    ],
+)
+def test_reads_of_incomplete_expressions(expression: str, expected: list[str]) -> None:
+    assert _reads_of(expression) == expected

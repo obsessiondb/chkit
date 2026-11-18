@@ -550,4 +550,19 @@ describe('@chkit/cli migrate orders the column statements of a table (#745, #746
       columns: ['b', 'id', 'length'],
     })
   }, 120_000)
+
+  // Reading the lambda parameter `c` as the new column `c` ran MODIFY `a`
+  // last, so MODIFY `b` DEFAULT a met the old `a DEFAULT b`: Cyclic alias
+  // detected in column DEFAULT expressions (#768).
+  test('a lambda parameter named like a new column does not hold back the MODIFY that declares it (#768)', async () => {
+    await migrateColumnChange({
+      label: 'lambdaparam',
+      before:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64', default: { expression: 'id' } }",
+      after:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(c -> c, [1]))' } }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }, { name: 'c', type: 'UInt64', default: { expression: 'id' } }",
+      order: ['MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));', 'MODIFY COLUMN `b` UInt64 DEFAULT a;'],
+      columns: ['a', 'b', 'c', 'id'],
+    })
+  }, 120_000)
 })

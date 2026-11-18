@@ -382,6 +382,18 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "order": ["column_rename:a:b", "column:length"],
         "columns": ["b", "id", "length"],
     },
+    {
+        # #768: reading the lambda parameter `c` as the new column `c` ran
+        # MODIFY `a` last, so MODIFY `b` DEFAULT a met the old `a DEFAULT b`:
+        # Cyclic alias detected in column DEFAULT expressions.
+        "label": "lambdaparam",
+        "before": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('arraySum(arrayMap(c -> c, [1]))')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('a')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:a", "column:b"],
+        "columns": ["a", "b", "c", "id"],
+    },
 ]
 
 
