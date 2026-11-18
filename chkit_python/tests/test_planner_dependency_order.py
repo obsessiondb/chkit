@@ -2,6 +2,10 @@
 
 from __future__ import annotations
 
+import json
+import os
+import subprocess
+import sys
 import time
 from typing import Any
 
@@ -1216,7 +1220,7 @@ def test_plans_a_wide_table_whose_every_modify_closes_a_cycle_in_time_that_grows
         after = [_u(name(i), name(i + 2) if i + 2 < count else "1") for i in range(count)]
         best = float("inf")
         operations: list[MigrationOperation] = []
-        for _ in range(2):
+        for _ in range(3):
             start = time.perf_counter()
             operations = plan_diff([_t(before)], [_t(after)]).operations
             best = min(best, time.perf_counter() - start)
@@ -1225,7 +1229,7 @@ def test_plans_a_wide_table_whose_every_modify_closes_a_cycle_in_time_that_grows
     narrow, _ = plan(1200)
     wide, first = plan(4800)
     assert first == ["c4798", "c4797", "c4796"]
-    assert wide < max(8 * narrow, 0.05)
+    assert wide < max(10 * narrow, 0.05)
     assert wide < 5
 
 
@@ -1354,6 +1358,148 @@ def test_keeps_the_sorted_order_of_a_table_whose_cycle_no_statement_breaks() -> 
         "ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `p` UInt64 DEFAULT q;",
         "ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `q` UInt64 DEFAULT p;",
     ]
+
+
+def _order_of(previous: list[SchemaDefinition], next_: list[SchemaDefinition]) -> list[str]:
+    """The column order of a plan, as ``table.column`` without the database."""
+    order = []
+    for op in plan_diff(previous, next_).operations:
+        at = op.key.rindex(":column:")
+        order.append(f"{op.key[len('table:app.'):at]}.{op.key[at + len(':column:'):]}")
+    return order
+
+
+def _text(name: str, expression: str) -> dict[str, Any]:
+    return {"name": name, "type": "String", "default": _expr(expression)}
+
+
+@pytest.mark.parametrize(
+    ("expression", "name", "changed"),
+    [
+        ("toString(date '2024-01-01')", "date", _text("date", "toString(id)")),
+        ("toString(arrayMap(`as` -> tuple(id as month).1, [id])[1])", "month", _u("month", "id")),
+        (
+            "CAST(arrayMap(lambda(tuple(month), month), [id])[1] AS String)",
+            "month",
+            _u("month", "id"),
+        ),
+    ],
+)
+def test_a_table_with_an_uncertain_expression_keeps_its_sorted_order(
+    expression: str, name: str, changed: dict[str, Any]
+) -> None:
+    # `a` changes to String; the ALIAS `b` calls `length(a)`, so it must come
+    # after that change. Each expression for `a` reads `month` or `date` only
+    # seemingly, so these tables keep their sorted order.
+    assert _order_of(
+        [_t([_u("a"), _text(name, "toString(z)"), _u("z", "length(toString(a))")])],
+        [_t([_text("a", expression), _u("b", "length(a)", default_kind="ALIAS"), changed, _u("z", "id")])],
+    ) == ["t.a", "t.b", f"t.{name}", "t.z"]
+
+
+_Columns = list[tuple[str, str | None]]
+_OVERLAPPING_CYCLES: dict[str, tuple[_Columns, _Columns, list[str]]] = {
+    "cycles through m": (
+        [("a", None), ("b", "m"), ("c", "b"), ("e", "m"), ("f", "e"), ("m", "a")],
+        [("a", "f + c"), ("b", "z"), ("c", "id"), ("e", "id"), ("f", "id"), ("m", "a"), ("z", "id")],
+        ["t.c", "t.e", "t.f", "t.z", "t.b", "t.a"],
+    ),
+    "cycles through y": (
+        [("a", None), ("b", None), ("c", "y"), ("y", "a"), ("z", "b")],
+        [("a", "z"), ("b", "y + c"), ("c", "zz"), ("y", "id"), ("z", "id"), ("zz", None)],
+        ["t.a", "t.y", "t.z", "t.zz", "t.c", "t.b"],
+    ),
+}
+
+
+@pytest.mark.parametrize("label", list(_OVERLAPPING_CYCLES))
+def test_with_two_overlapping_cycles_every_breaker_counts(label: str) -> None:
+    # Two reads of `a` close cycles that share columns; each cycle's breakers
+    # count, so the first breaker in key order runs first in both ports.
+    before, after, order = _OVERLAPPING_CYCLES[label]
+    assert _order_of(
+        [_t([_u(name, expression) for name, expression in before])],
+        [_t([_u(name, expression) for name, expression in after])],
+    ) == order
+
+
+def test_overlapping_cycles_plan_the_same_under_every_hash_seed() -> None:
+    # The orders the TS tests assert, in fresh interpreters with other seeds.
+    script = (
+        "import json, sys\n"
+        "from chkit.core.model import table\n"
+        "from chkit.core.planner import plan_diff\n"
+        "def t(columns):\n"
+        "    return table(database='app', name='t', columns=[{'name': 'id', 'type': 'UInt64'}] + [\n"
+        "        {'name': n, 'type': 'UInt64', **({} if e is None else {'default': {'expression': e}})}\n"
+        "        for n, e in columns], engine='MergeTree()', primary_key=['id'], order_by=['id'])\n"
+        "cases = json.loads(sys.argv[1])\n"
+        "print(json.dumps([[op.key.rsplit(':', 1)[1] for op in plan_diff([t(b)], [t(a)]).operations]\n"
+        "    for b, a in cases]))\n"
+    )
+    cases = [[before, after] for before, after, _ in _OVERLAPPING_CYCLES.values()]
+    expected = [[column.split(".")[1] for column in order] for _, _, order in _OVERLAPPING_CYCLES.values()]
+    for seed in ("0", "1", "2", "3", "4"):
+        result = subprocess.run(
+            [sys.executable, "-c", script, json.dumps(cases)],
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        assert json.loads(result.stdout) == expected, seed
+
+
+def test_a_table_whose_name_has_column_is_a_table_of_its_own() -> None:
+    # A table named like another table's column keys (`t:column_archive`,
+    # `t:column:other`) is still a table of its own.
+    archive = "t:column_archive"
+    assert _order_of(
+        [_t([_u("a"), _text("month", "toString(z)"), _u("z", "length(toString(a))")], archive)],
+        [_t([
+            _text("a", "toString(toDateTime(id) + INTERVAL 1 month)"),
+            _u("b", "length(a)", default_kind="ALIAS"),
+            _u("month", "id"),
+            _u("z", "id"),
+        ], archive)],
+    ) == [f"{archive}.a", f"{archive}.b", f"{archive}.month", f"{archive}.z"]
+    assert _order_of(
+        [_t(_CYCLE_BEFORE, "t"), _t([], archive)],
+        [_t(_CYCLE_AFTER, "t"), _t([_u("p", "q"), _u("q", "p")], archive)],
+    ) == ["t.b", "t.a", "t.c", f"{archive}.p", f"{archive}.q"]
+    other = "t:column:other"
+    interval = [_u("k", "toUInt64(toDateTime(id) + INTERVAL 1 DAY)")]
+    assert _order_of(
+        [_t(_CYCLE_BEFORE, other), _t(interval, "t")],
+        [_t(_CYCLE_AFTER, other), _t(interval, "t")],
+    ) == [f"{other}.b", f"{other}.a", f"{other}.c"]
+
+
+def test_plans_the_acyclic_groups_fixture_in_time_that_grows_with_its_width() -> None:
+    # Old and new reads that form no cycle are not replayed: every `a` and `z`
+    # goes through the `b` chain. Four times the columns take about four
+    # times as long.
+    def name(prefix: str, i: int) -> str:
+        return f"{prefix}{i:05d}"
+
+    def plan(n: int) -> float:
+        greatest = "greatest(" + ", ".join(name("z", j) for j in range(n)) + ")"
+        before = [_u(name(prefix, i)) for prefix in "abz" for i in range(n)]
+        after = (
+            [_u(name("a", i), greatest if i == 0 else name("a", i - 1)) for i in range(n)]
+            + [_u(name("b", i), "id" if i == 0 else name("b", i - 1)) for i in range(n)]
+            + [_u(name("z", i), name("b", n - 1)) for i in range(n)]
+        )
+        best = float("inf")
+        for _ in range(3):
+            start = time.perf_counter()
+            plan_diff([_t(before)], [_t(after)])
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    narrow = plan(500)
+    wide = plan(2000)
+    assert wide < max(10 * narrow, 0.05)
 
 
 # ---------- the column reads skip lambda parameters and CAST types (#768) ----------

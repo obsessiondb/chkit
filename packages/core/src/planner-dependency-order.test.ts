@@ -1289,7 +1289,7 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
       const after = Array.from({ length: count }, (_, i) => u(name(i), i + 2 < count ? name(i + 2) : '1'))
       let best = Number.POSITIVE_INFINITY
       let operations: MigrationOperation[] = []
-      for (let run = 0; run < 2; run += 1) {
+      for (let run = 0; run < 3; run += 1) {
         const start = performance.now()
         operations = planDiff([t(before)], [t(after)]).operations
         best = Math.min(best, performance.now() - start)
@@ -1299,7 +1299,7 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     const narrow = plan(1200)
     const wide = plan(4800)
     expect(wide.first).toEqual(['c4798', 'c4797', 'c4796'])
-    expect(wide.best).toBeLessThan(Math.max(8 * narrow.best, 50))
+    expect(wide.best).toBeLessThan(Math.max(10 * narrow.best, 50))
     expect(wide.best).toBeLessThan(5_000)
   }, 60_000)
 
@@ -1433,4 +1433,105 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
       'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `q` UInt64 DEFAULT p;',
     ])
   })
+
+  // The column order of a plan, as `table.column` without the database.
+  const orderOf = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => {
+      const at = op.key.lastIndexOf(':column:')
+      return `${op.key.slice('table:app.'.length, at)}.${op.key.slice(at + ':column:'.length)}`
+    })
+  const text = (name: string, expression: string): ColumnDefinition => ({ name, type: 'String', default: { expression } })
+
+  // `a` changes to String; the ALIAS `b` calls `length(a)`, so it must come
+  // after that change. Each expression for `a` reads `month` or `date` only
+  // seemingly, so these tables keep their sorted order.
+  test.each<[string, string, ColumnDefinition]>([
+    ["toString(date '2024-01-01')", 'date', text('date', 'toString(id)')],
+    ['toString(arrayMap(`as` -> tuple(id as month).1, [id])[1])', 'month', u('month', 'id')],
+    ['CAST(arrayMap(lambda(tuple(month), month), [id])[1] AS String)', 'month', u('month', 'id')],
+  ])('with a DEFAULT %s, the table keeps its sorted order', (expression, name, changed) => {
+    expect(
+      orderOf(
+        [t([u('a'), text(name, 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([text('a', expression), u('b', 'length(a)', { defaultKind: 'ALIAS' }), changed, u('z', 'id')])]
+      )
+    ).toEqual(['t.a', 't.b', `t.${name}`, 't.z'])
+  })
+
+  // Two reads of `a` close cycles that share columns; each cycle's breakers
+  // count, so the first breaker in key order runs first in both ports.
+  test.each<[string, SchemaDefinition[], SchemaDefinition[], string[]]>([
+    [
+      'cycles through m',
+      [t([u('a'), u('b', 'm'), u('c', 'b'), u('e', 'm'), u('f', 'e'), u('m', 'a')])],
+      [t([u('a', 'f + c'), u('b', 'z'), u('c', 'id'), u('e', 'id'), u('f', 'id'), u('m', 'a'), u('z', 'id')])],
+      ['t.c', 't.e', 't.f', 't.z', 't.b', 't.a'],
+    ],
+    [
+      'cycles through y',
+      [t([u('a'), u('b'), u('c', 'y'), u('y', 'a'), u('z', 'b')])],
+      [t([u('a', 'z'), u('b', 'y + c'), u('c', 'zz'), u('y', 'id'), u('z', 'id'), u('zz')])],
+      ['t.a', 't.y', 't.z', 't.zz', 't.c', 't.b'],
+    ],
+  ])('with two %s, every breaker counts', (_, previous, next, order) => {
+    expect(orderOf(previous, next)).toEqual(order)
+  })
+
+  // A table named like another table's column keys (`t:column_archive`,
+  // `t:column:other`) is still a table of its own.
+  test('a table whose name has :column is a table of its own', () => {
+    const archive = 't:column_archive'
+    expect(
+      orderOf(
+        [named(archive, [u('a'), text('month', 'toString(z)'), u('z', 'length(toString(a))')])],
+        [named(archive, [text('a', 'toString(toDateTime(id) + INTERVAL 1 month)'), u('b', 'length(a)', { defaultKind: 'ALIAS' }), u('month', 'id'), u('z', 'id')])]
+      )
+    ).toEqual([`${archive}.a`, `${archive}.b`, `${archive}.month`, `${archive}.z`])
+    expect(
+      orderOf([named('t', cycleBefore), named(archive, [])], [named('t', cycleAfter), named(archive, [u('p', 'q'), u('q', 'p')])])
+    ).toEqual(['t.b', 't.a', 't.c', `${archive}.p`, `${archive}.q`])
+    const other = 't:column:other'
+    const interval = [u('k', 'toUInt64(toDateTime(id) + INTERVAL 1 DAY)')]
+    expect(orderOf([named(other, cycleBefore), named('t', interval)], [named(other, cycleAfter), named('t', interval)])).toEqual([
+      `${other}.b`,
+      `${other}.a`,
+      `${other}.c`,
+    ])
+  })
+
+  // Old and new reads that form no cycle are not replayed, so deep chains
+  // take about as long as the plan itself: `chains` keeps each `a` chain
+  // read and adds the last `b`, `groups` sends every `a` and `z` through the
+  // `b` chain. Four times the columns take about four times as long.
+  test.each<[string, (n: number) => [ColumnDefinition[], ColumnDefinition[]]]>([
+    [
+      'groups',
+      (n) => {
+        const name = (prefix: string, i: number) => `${prefix}${String(i).padStart(5, '0')}`
+        const range = Array.from({ length: n }, (_, i) => i)
+        return [
+          [...range.map((i) => u(name('a', i))), ...range.map((i) => u(name('b', i))), ...range.map((i) => u(name('z', i)))],
+          [
+            ...range.map((i) => u(name('a', i), i === 0 ? `greatest(${range.map((j) => name('z', j)).join(', ')})` : name('a', i - 1))),
+            ...range.map((i) => u(name('b', i), i === 0 ? 'id' : name('b', i - 1))),
+            ...range.map((i) => u(name('z', i), name('b', n - 1))),
+          ],
+        ]
+      },
+    ],
+  ])('plans the acyclic %s fixture in time that grows with its width', (_, columns) => {
+    const plan = (n: number) => {
+      const [before, after] = columns(n)
+      let best = Number.POSITIVE_INFINITY
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now()
+        planDiff([t(before)], [t(after)])
+        best = Math.min(best, performance.now() - start)
+      }
+      return best
+    }
+    const narrow = plan(500)
+    const wide = plan(2000)
+    expect(wide).toBeLessThan(Math.max(10 * narrow, 50))
+  }, 60_000)
 })

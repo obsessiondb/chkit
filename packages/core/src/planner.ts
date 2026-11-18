@@ -882,7 +882,7 @@ export function columnRenameKey(rename: ColumnRename): string {
  * - a MODIFY whose new expression would close a cycle with an old expression
  *   runs after the MODIFY that removes that old read (`cycleReleases`);
  * - when the order still closes a cycle in a table whose reads are certain
- *   (`uncheckedTables`), the first breaker in key order runs before the
+ *   (`repairScope`), the first breaker in key order runs before the
  *   MODIFY that closes it (`breakClosedCycles`, #775);
  * - statements of the same column keep their order.
  * Members of a cycle keep their key order. The statements fill the positions
@@ -895,8 +895,10 @@ export function orderColumnStatements(
   definitions: ColumnStatementDefinitions,
   renames: readonly ColumnRename[]
 ): MigrationOperation[] {
-  const reads = columnDefaultReads(definitions.next)
-  const oldReads = columnDefaultReads(definitions.previous)
+  const facts = expressionFacts(definitions.next)
+  const oldFacts = expressionFacts(definitions.previous)
+  const reads = facts.reads
+  const oldReads = oldFacts.reads
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
@@ -946,23 +948,25 @@ export function orderColumnStatements(
   })
 
   const changes = defaultChanges(statements, reads, definitions)
-  const ordered = repairedOrder(prerequisites, statements, changes, oldReads, uncheckedTables(definitions, renames))
+  const scope = repairScope(definitions, renames, [...oldFacts.uncertain, ...facts.uncertain], [oldReads, reads])
+  const ordered = repairedOrder(prerequisites, statements, changes, oldReads, scope)
   let next = 0
   return operations.map((op) => (isColumnStatement(op) ? (statements[ordered[next++] ?? -1] ?? op) : op))
 }
 
 /**
  * The sorted statement order, with closed cycles broken where the reads are
- * certain (#775). The replay covers only the tables whose `tablePrefix` is
- * not in `unchecked`. A table whose cycle no statement can break keeps its
- * sorted order too, and the other tables are repaired again without it.
+ * certain (#775). The replay covers only the columns `scope` keeps. A table
+ * whose cycle no statement can break, or whose replay runs out of work,
+ * keeps its sorted order too, and the other tables are repaired again
+ * without it.
  */
 function repairedOrder(
   prerequisites: number[][],
   statements: MigrationOperation[],
   changes: ReadonlyMap<number, ReadonlySet<string>>,
   oldReads: DependencyGraph,
-  unchecked: Set<string>
+  scope: RepairScope
 ): number[] {
   const sorted = orderByDependencies(
     prerequisites.map((_, index) => index),
@@ -970,69 +974,78 @@ function repairedOrder(
     (key) => (prerequisites[Number(key)] ?? []).map(String)
   )
   for (;;) {
-    const replayed = (key: string) => !unchecked.has(tablePrefix(key))
-    if (!closesCycle(sorted, statements, changes, oldReads, replayed)) return sorted
+    const closed = closesCycle(sorted, statements, changes, oldReads, scope)
+    if (closed === 'none') return sorted
+    if (closed !== 'closes') {
+      scope.exclude(closed.unbreakable)
+      continue
+    }
     const repaired = breakClosedCycles(
       prerequisites.map((before) => [...before]),
       statements,
       changes,
       oldReads,
-      replayed
+      scope
     )
     if ('order' in repaired) return repaired.order
-    unchecked.add(repaired.unbreakable)
+    scope.exclude(repaired.unbreakable)
   }
 }
 
 /**
  * Whether replaying `order` over the old expressions reaches an ADD or
  * MODIFY whose new expression closes a cycle, which ClickHouse rejects
- * (`Cyclic alias detected`). Only the `replayed` columns count. When it
- * reaches none, the sorted order stays (#775).
+ * (`Cyclic alias detected`). Only the columns `scope` keeps count. When it
+ * reaches none, the sorted order stays (#775). When the replay runs out of
+ * work, the table it was replaying is returned.
  */
 function closesCycle(
   order: number[],
   statements: MigrationOperation[],
   changes: ReadonlyMap<number, ReadonlySet<string>>,
   oldReads: DependencyGraph,
-  replayed: (key: string) => boolean
-): boolean {
-  const replay = defaultReplay(oldReads, replayed)
-  return order.some((index) => {
+  scope: RepairScope
+): 'none' | 'closes' | { unbreakable: string } {
+  const replay = defaultReplay(oldReads, scope)
+  for (const index of order) {
     const op = statements[index]
-    if (op === undefined || !replayed(op.key)) return false
+    if (op === undefined || !scope.replayed(op.key)) continue
     const change = changes.get(index)
-    if (change !== undefined && replay.closedCycle(op.key, change).size > 0) return true
+    if (change !== undefined) {
+      const cycle = replay.closedCycle(op.key, change)
+      if (cycle === undefined) return { unbreakable: scope.tableOf(op.key) }
+      if (cycle.size > 0) return 'closes'
+    }
     replayStatement(replay, op, change)
-    return false
-  })
+  }
+  return 'none'
 }
 
 /**
  * The statement order with the MODIFYs that break a cycle moved before the
- * MODIFY that would close it (#775), or none when that fails. `cycleReleases`
- * adds an edge only when one MODIFY must break the cycle in every order. When
- * several could, or the cycle closes through two new expressions, this sorts
- * like `orderByDependencies` while replaying each statement: the ready group
- * with the lowest key order runs next, a group being one statement or the
- * members of a cycle among the prerequisites, in key order. A statement that
- * would close a cycle makes its group wait for the breaker with the lowest
- * key order: a later statement of a column on the cycle whose change removes
- * a read on it, and the group's statements are replayed back. A breaker that
+ * MODIFY that would close it (#775). `cycleReleases` adds an edge only when
+ * one MODIFY must break the cycle in every order. When several could, or the
+ * cycle closes through two new expressions, this sorts like
+ * `orderByDependencies` while replaying each statement: the ready group with
+ * the lowest key order runs next, a group being one statement or the members
+ * of a cycle among the prerequisites, in key order. A statement that would
+ * close a cycle makes its group wait for the breaker with the lowest key
+ * order: a later statement of a column on the cycle whose change removes a
+ * read on it, and the group's statements are replayed back. A breaker that
  * already waits for the statement is skipped, so the edges never form a new
  * cycle. The groups before it keep their places, so this is the order that
- * adding the edge and sorting again would give. With no breaker it returns
- * the `tablePrefix` of the cycle's table instead. Only the `replayed` columns
- * are replayed.
+ * adding the edge and sorting again would give. With no breaker, or when the
+ * replay runs out of work, it returns the cycle's table instead. Only the
+ * columns `scope` keeps are replayed.
  */
 function breakClosedCycles(
   prerequisites: number[][],
   statements: MigrationOperation[],
   changes: ReadonlyMap<number, ReadonlySet<string>>,
   oldReads: DependencyGraph,
-  replayed: (key: string) => boolean
+  scope: RepairScope
 ): { order: number[] } | { unbreakable: string } {
-  const replay = defaultReplay(oldReads, replayed)
+  const replay = defaultReplay(oldReads, scope)
   const groups = stronglyConnectedComponents(prerequisites).map((members) => [...members].sort((a, b) => a - b))
   const groupOf = new Array<number>(prerequisites.length).fill(0)
   groups.forEach((members, group) => {
@@ -1064,26 +1077,28 @@ function breakClosedCycles(
   for (let first = ready.shift(); first !== undefined; first = ready.shift()) {
     const group = groupAt.get(first) ?? 0
     const members = groups[group] ?? []
-    const undo: Array<[MigrationOperation, ReadonlySet<string> | undefined]> = []
+    const undo: Array<[string, readonly string[] | undefined]> = []
     let blocked = false
     for (const target of members) {
       const op = statements[target]
-      if (op === undefined || !replayed(op.key)) continue
+      if (op === undefined || !scope.replayed(op.key)) continue
       const change = changes.get(target)
       const cycle = change === undefined ? new Set<string>() : replay.closedCycle(op.key, change)
+      if (cycle === undefined) return { unbreakable: scope.tableOf(op.key) }
       if (cycle.size > 0) {
         const candidates = [...cycle]
+          .sort(compareCodePoints)
           .filter((column) => column !== op.key)
           .flatMap((column) => (changing.get(column) ?? []).filter((j) => !placed[j] && groupOf[j] !== group))
         const breaker = firstBreaker(cycle, op.key, target, candidates, statements, changes, replay, prerequisites)
-        if (breaker === undefined) return { unbreakable: tablePrefix(op.key) }
-        for (const [undone, reads] of undo.reverse()) replay.assign(undone.key, reads)
+        if (breaker === undefined) return { unbreakable: scope.tableOf(op.key) }
+        for (const [undone, reads] of undo.reverse()) replay.assign(undone, reads)
         prerequisites[target]?.push(breaker)
         wait(target, breaker)
         blocked = true
         break
       }
-      undo.push([op, replay.reads(op.key)])
+      undo.push([op.key, replay.reads(op.key)])
       replayStatement(replay, op, change)
     }
     if (blocked) continue
@@ -1123,7 +1138,7 @@ function firstBreaker(
     .find((j) => {
       const other = statements[j]?.key ?? ''
       const after = changes.get(j) ?? new Set<string>()
-      const removes = [...(replay.reads(other) ?? [])].some((read) => cycle.has(read) && !after.has(read))
+      const removes = (replay.reads(other) ?? []).some((read) => cycle.has(read) && !after.has(read))
       return other !== column && removes && !waitsFor(prerequisites, j, target)
     })
 }
@@ -1201,41 +1216,46 @@ function expressionRemovals(definitions: ColumnStatementDefinitions): Set<string
 
 /** The reads of every column's expression while a plan runs, starting from the old expressions. */
 interface DefaultReplay {
-  reads: (column: string) => ReadonlySet<string> | undefined
+  /** The columns `column` reads, in code point order. */
+  reads: (column: string) => readonly string[] | undefined
   /**
    * The columns on a cycle through `column` that giving it `reads` would
-   * close, or none. It changes nothing.
+   * close, or none. It changes nothing. It returns undefined when the replay
+   * has used up its work.
    */
-  closedCycle: (column: string, reads: ReadonlySet<string>) => Set<string>
+  closedCycle: (column: string, reads: ReadonlySet<string>) => Set<string> | undefined
   /** Gives `column` the `reads` (none removes it); they must close no cycle. */
-  assign: (column: string, reads: ReadonlySet<string> | undefined) => void
+  assign: (column: string, reads: Iterable<string> | undefined) => void
 }
 
 /**
  * The replay's state never holds a cycle, so a new read Y of column X closes
  * one exactly when Y reaches X. That search runs from both ends at once,
  * widening the smaller frontier (in turns on a tie), so it stops early when
- * either side runs out; a wide table does not cost a walk over every column
- * per statement.
- * Only the `replayed` columns take part.
+ * either side runs out. Every search follows reads in code point order and
+ * readers in the order they were added, so the work it does is the same in
+ * both ports; each column it looks at uses one unit of `scope.budget`. Only
+ * the columns `scope` keeps take part.
  */
-function defaultReplay(oldReads: DependencyGraph, replayed: (key: string) => boolean): DefaultReplay {
-  const state = new Map<string, ReadonlySet<string>>()
+function defaultReplay(oldReads: DependencyGraph, scope: RepairScope): DefaultReplay {
+  const state = new Map<string, string[]>()
   const readers = new Map<string, Set<string>>()
-  const assign = (column: string, reads: ReadonlySet<string> | undefined) => {
+  let left = scope.budget
+  const assign = (column: string, reads: Iterable<string> | undefined) => {
     for (const read of state.get(column) ?? []) readers.get(read)?.delete(column)
     if (reads === undefined) {
       state.delete(column)
       return
     }
-    state.set(column, reads)
-    for (const read of reads) readers.set(read, (readers.get(read) ?? new Set<string>()).add(column))
+    const sorted = [...reads].sort(compareCodePoints)
+    state.set(column, sorted)
+    for (const read of sorted) readers.set(read, (readers.get(read) ?? new Set<string>()).add(column))
   }
-  for (const [column, reads] of oldReads) if (replayed(column)) assign(column, reads)
-  const readsOf = (column: string) => state.get(column) ?? []
-  const readersOf = (column: string) => readers.get(column) ?? []
-  // Whether `from` reaches `to` through reads.
-  const reaches = (from: string, to: string): boolean => {
+  for (const [column, reads] of oldReads) if (scope.replayed(column)) assign(column, reads)
+  const readsOf = (column: string): Iterable<string> => state.get(column) ?? []
+  const readersOf = (column: string): Iterable<string> => readers.get(column) ?? []
+  // Whether `from` reaches `to` through reads, or undefined when the work runs out.
+  const reaches = (from: string, to: string): boolean | undefined => {
     const down = new Set([from])
     const up = new Set([to])
     let downFront = [from]
@@ -1248,6 +1268,8 @@ function defaultReplay(oldReads: DependencyGraph, replayed: (key: string) => boo
       const front: string[] = []
       for (const column of widenDown ? downFront : upFront) {
         for (const reached of next(column)) {
+          left -= 1
+          if (left < 0) return undefined
           if (other.has(reached)) return true
           if (!seen.has(reached)) {
             seen.add(reached)
@@ -1260,34 +1282,38 @@ function defaultReplay(oldReads: DependencyGraph, replayed: (key: string) => boo
     }
     return false
   }
+  // The columns `from` reaches through `next` without passing `stop`, inside `within`.
+  const walk = (from: string, next: (column: string) => Iterable<string>, within?: ReadonlySet<string>, stop?: string) => {
+    const seen = new Set([from])
+    const pending = [from]
+    for (let at = pending.pop(); at !== undefined; at = pending.pop()) {
+      for (const other of next(at)) {
+        left -= 1
+        if (left < 0) return undefined
+        if (other === stop || seen.has(other) || (within !== undefined && !within.has(other))) continue
+        seen.add(other)
+        pending.push(other)
+      }
+    }
+    return seen
+  }
   return {
     reads: (column) => state.get(column),
     closedCycle: (column, reads) => {
-      const current = state.get(column)
+      const current = new Set(state.get(column) ?? [])
       const cycle = new Set<string>()
-      for (const read of reads) {
-        if (current?.has(read) || !reaches(read, column)) continue
-        // The cycle's columns: those `read` reaches that reach `column`.
-        const below = new Set([read])
-        const pending = [read]
-        for (let at = pending.pop(); at !== undefined; at = pending.pop()) {
-          for (const other of readsOf(at)) {
-            if (other !== column && !below.has(other)) {
-              below.add(other)
-              pending.push(other)
-            }
-          }
-        }
-        cycle.add(column)
-        const back = [column]
-        for (let at = back.pop(); at !== undefined; at = back.pop()) {
-          for (const reader of readersOf(at)) {
-            if (below.has(reader) && !cycle.has(reader)) {
-              cycle.add(reader)
-              back.push(reader)
-            }
-          }
-        }
+      for (const read of [...reads].sort(compareCodePoints)) {
+        if (current.has(read)) continue
+        const hit = reaches(read, column)
+        if (hit === undefined) return undefined
+        if (!hit) continue
+        // This read's cycle: the columns it reaches that reach `column`.
+        const below = walk(read, readsOf, undefined, column)
+        if (below === undefined) return undefined
+        below.add(column)
+        const onCycle = walk(column, readersOf, below)
+        if (onCycle === undefined) return undefined
+        for (const other of onCycle) cycle.add(other)
       }
       return cycle
     },
@@ -1301,58 +1327,201 @@ function replayStatement(replay: DefaultReplay, op: MigrationOperation, change: 
   if (change !== undefined) replay.assign(op.key, change)
 }
 
-/** The `table:db.t:column:` prefix of a column statement's key. */
-function tablePrefix(key: string): string {
-  const at = key.indexOf(':column')
-  return at === -1 ? key : `${key.slice(0, at)}:column:`
+/** Which columns the cycle repair replays (#775). */
+interface RepairScope {
+  /** Whether the replay covers column `key`. */
+  replayed: (key: string) => boolean
+  /** The table of column `key`. */
+  tableOf: (key: string) => string
+  /** Leaves `table` out of the replay, so it keeps its sorted order. */
+  exclude: (table: string) => void
+  /** The work one replay may do. */
+  budget: number
 }
 
-// Words that ClickHouse reads as keywords, not columns, in an expression.
-const RESERVED_WORDS: ReadonlySet<string> = new Set([
-  'all', 'and', 'any', 'as', 'asc', 'between', 'both', 'by', 'case', 'desc', 'distinct', 'div', 'else', 'end',
-  'exists', 'extract', 'false', 'filter', 'for', 'from', 'global', 'ilike', 'in', 'inf', 'interval', 'is',
-  'leading', 'like', 'mod', 'nan', 'not', 'null', 'nulls', 'or', 'over', 'regexp', 'then', 'trailing', 'true',
-  'when',
-])
+/** The identity of a table, which a column key does not carry unambiguously. */
+function tableId(database: string, table: string): string {
+  return `${database}\u0000${table}`
+}
 
 /**
- * The `tablePrefix` of every table the cycle repair leaves in its sorted
- * order (#775): a table with a RENAME COLUMN in `renames` (the replay does
- * not rename), and a table where an old or new column expression has a part
- * the reads may get wrong (`hasUncertainReads`).
+ * The columns the cycle repair replays (#775). A table is left out when it
+ * has a RENAME COLUMN in `renames` (the replay does not rename), when it is
+ * in `uncertain` (an expression `isPlainExpression` does not accept), or
+ * when one of its column keys is also another table's. Of the other tables
+ * only the columns that `cycleCandidates` finds in the old and new reads
+ * `graphs` take part, since a cycle while the plan runs only uses those
+ * reads. The budget grows with those columns and their reads.
  */
-function uncheckedTables(definitions: ColumnStatementDefinitions, renames: readonly ColumnRename[]): Set<string> {
-  const unchecked = new Set(renames.map((rename) => columnKey(rename, '')))
+function repairScope(
+  definitions: ColumnStatementDefinitions,
+  renames: readonly ColumnRename[],
+  uncertain: Iterable<string>,
+  graphs: DependencyGraph[]
+): RepairScope {
+  const excluded = new Set(uncertain)
+  for (const rename of renames) excluded.add(tableId(rename.database, rename.table))
+  const tables = new Map<string, string>()
   for (const def of [...definitions.previous, ...definitions.next]) {
     if (def.kind !== 'table') continue
-    const names = new Set(def.columns.map((column) => column.name))
-    const reserved = new Set([...names].filter((name) => RESERVED_WORDS.has(name.toLowerCase())))
-    const uncertain = def.columns.some((column) => {
-      if (column.default === undefined) return false
-      const parsed = parseColumnDefault(column.default)
-      return parsed.kind === 'expression' && hasUncertainReads(parsed.sql, reserved)
-    })
-    if (uncertain) unchecked.add(columnKey({ database: def.database, table: def.name }, ''))
+    const table = tableId(def.database, def.name)
+    for (const column of def.columns) {
+      const key = columnKey({ database: def.database, table: def.name }, column.name)
+      const known = tables.get(key)
+      if (known === undefined) tables.set(key, table)
+      else if (known !== table) {
+        excluded.add(known)
+        excluded.add(table)
+      }
+    }
   }
-  return unchecked
+  const candidates = cycleCandidates(graphs)
+  let reads = 0
+  for (const graph of graphs) {
+    for (const [column, read] of graph) {
+      if (candidates.has(column)) for (const other of read) if (candidates.has(other)) reads += 1
+    }
+  }
+  return {
+    replayed: (key) => {
+      const table = tables.get(key)
+      return table !== undefined && !excluded.has(table) && candidates.has(key)
+    },
+    tableOf: (key) => tables.get(key) ?? key,
+    exclude: (table) => {
+      excluded.add(table)
+    },
+    budget: 64 * (candidates.size + reads) + 65_536,
+  }
 }
 
 /**
- * Whether the reads of `sql` may be wrong: it has INTERVAL, EXTRACT or CASE,
- * an alias (`x AS y`, but not the AS of a CAST), or a bare reserved word that
- * is also the name of a column in `reservedColumns`.
+ * The columns that may lie on a cycle of the union of `graphs`: what is left
+ * after removing, again and again, the columns that read nothing or that
+ * nothing reads among the columns left. With no cycle nothing is left, so a
+ * table whose old and new reads form no cycle is not replayed at all.
  */
-function hasUncertainReads(sql: string, reservedColumns: ReadonlySet<string>): boolean {
-  if (reservedColumns.size === 0 && !/interval|extract|case|as/i.test(sql)) return false
-  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
-  const skipped = notColumnNames(tokens)
-  return tokens.some((token, i) => {
-    if (token.kind !== 'identifier') return false
-    const word = token.text.toLowerCase()
-    if (word === 'interval' || word === 'extract' || word === 'case') return true
-    if (word === 'as') return !skipped.has(i)
-    return reservedColumns.has(token.text)
-  })
+function cycleCandidates(graphs: DependencyGraph[]): Set<string> {
+  const out = new Map<string, Set<string>>()
+  const into = new Map<string, Set<string>>()
+  for (const graph of graphs) {
+    for (const [column, reads] of graph) {
+      for (const read of reads) {
+        out.set(column, (out.get(column) ?? new Set<string>()).add(read))
+        into.set(read, (into.get(read) ?? new Set<string>()).add(column))
+      }
+    }
+  }
+  const columns = new Set([...out.keys(), ...into.keys()])
+  const outDegree = new Map([...columns].map((column) => [column, out.get(column)?.size ?? 0]))
+  const inDegree = new Map([...columns].map((column) => [column, into.get(column)?.size ?? 0]))
+  const pending = [...columns].filter((column) => outDegree.get(column) === 0 || inDegree.get(column) === 0)
+  const removed = new Set(pending)
+  const lower = (degree: Map<string, number>, column: string) => {
+    if (removed.has(column)) return
+    const left = (degree.get(column) ?? 0) - 1
+    degree.set(column, left)
+    if (left > 0) return
+    removed.add(column)
+    pending.push(column)
+  }
+  for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
+    for (const read of out.get(column) ?? []) lower(inDegree, read)
+    for (const reader of into.get(column) ?? []) lower(outDegree, reader)
+  }
+  return new Set([...columns].filter((column) => !removed.has(column)))
+}
+
+const BINARY_OPERATORS: ReadonlySet<string> = new Set(['+', '-', '*', '/', '%', '=', '<', '>'])
+const PAIRED_OPERATORS: ReadonlySet<string> = new Set(['<=', '>=', '!=', '<>', '==', '||'])
+
+/**
+ * Whether the reads of an expression are certain (#775): it is built only
+ * from `columns`, function calls (a bare name followed by `(`), number and
+ * string literals, unary `-`, `+` and NOT, binary operators (AND and OR as
+ * well, unless a column has that name), parentheses, commas between call
+ * arguments, and the casts `CAST(x AS T)` and `x::T`. Anything else, such as
+ * another keyword or name, two operands in a row (`date '2024-01-01'`,
+ * `INTERVAL 1 day`, `x alias`), `.`, brackets, a lambda or any other AS, is
+ * not, and its table keeps its sorted order. `tokens` have no trivia.
+ */
+function isPlainExpression(tokens: SQLToken[], columns: ReadonlySet<string>): boolean {
+  const frames: Array<'group' | 'call' | 'cast'> = []
+  const adjacent = (i: number, text: string) => tokens[i + 1]?.text === text && tokens[i + 1]?.start === tokens[i]?.end
+  const close = (open: number) => {
+    let depth = 0
+    for (let j = open; j < tokens.length; j += 1) {
+      const text = tokens[j]?.text
+      if (text === '(') depth += 1
+      else if (text === ')') {
+        depth -= 1
+        if (depth === 0) return j
+      }
+    }
+    return -1
+  }
+  let operand = true
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!
+    const text = token.text
+    const word = token.kind === 'identifier' ? text.toLowerCase() : undefined
+    if (operand) {
+      if (token.kind === 'number' || token.kind === 'string') operand = false
+      else if (word !== undefined && tokens[i + 1]?.text === '(') {
+        if (word === 'lambda') return false
+        i += 1
+        if (tokens[i + 1]?.text === ')') {
+          i += 1
+          operand = false
+        } else frames.push(word === 'cast' ? 'cast' : 'call')
+      } else if (token.kind === 'identifier' || token.kind === 'quoted_identifier') {
+        const name = identifierName(token)
+        if (name !== undefined && columns.has(name)) operand = false
+        else if (word !== 'not') return false
+      } else if (text === '(') frames.push('group')
+      else if (text !== '-' && text !== '+') return false
+      continue
+    }
+    if (text === ')') {
+      if (frames.pop() === undefined) return false
+    } else if (text === ',') {
+      const top = frames.length - 1
+      if (frames[top] === 'group' || top < 0) return false
+      frames[top] = 'call'
+      operand = true
+    } else if (word === 'as' && frames[frames.length - 1] === 'cast') {
+      // The type runs to the cast's closing parenthesis.
+      let depth = 0
+      let j = i + 1
+      for (; j < tokens.length; j += 1) {
+        const inner = tokens[j]?.text
+        if (inner === '(') depth += 1
+        else if (inner === ')') {
+          if (depth === 0) break
+          depth -= 1
+        }
+      }
+      if (j === i + 1 || j >= tokens.length) return false
+      i = j
+      frames.pop()
+    } else if ((word === 'and' || word === 'or') && !columns.has(text)) operand = true
+    else if (text === ':' && adjacent(i, ':')) {
+      // `x::T`, with the type's arguments.
+      if (tokens[i + 2]?.kind !== 'identifier') return false
+      i += 2
+      if (tokens[i + 1]?.text === '(') {
+        const end = close(i + 1)
+        if (end === -1) return false
+        i = end
+      }
+    } else if (token.kind === 'punctuation' && PAIRED_OPERATORS.has(text + (tokens[i + 1]?.text ?? '')) && adjacent(i, tokens[i + 1]?.text ?? '')) {
+      i += 1
+      operand = true
+    } else if (text === '-' && adjacent(i, '>')) return false
+    else if (token.kind === 'punctuation' && BINARY_OPERATORS.has(text)) operand = true
+    else return false
+  }
+  return !operand && frames.length === 0
 }
 
 /**
@@ -1416,7 +1585,14 @@ function columnKey(table: { database: string; table: string }, column: string): 
  * `a -> a.x` reads no `a.x` (#768).
  */
 function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
-  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  return namesRead(
+    tokenizeSQL(sql).filter((token) => !isTrivia(token)),
+    columns
+  )
+}
+
+/** `dottedNames` over the `tokens` of an expression, without trivia. */
+function namesRead(tokens: SQLToken[], columns: ReadonlySet<string>): string[] {
   const skipped = notColumnNames(tokens)
   const found: string[] = []
   let i = 0
@@ -1461,7 +1637,16 @@ function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): str
  * call, not a column, and neither are the names `notColumnNames` finds.
  */
 export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+  return expressionFacts(definitions).reads
+}
+
+/**
+ * `columnDefaultReads`, with the `tableId` of every table where a column
+ * expression is not `isPlainExpression` (#775).
+ */
+function expressionFacts(definitions: SchemaDefinition[]): { reads: DependencyGraph; uncertain: Set<string> } {
   const graph = new Map<string, Set<string>>()
+  const uncertain = new Set<string>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
     const keyOf = (name: string) => columnKey({ database: def.database, table: def.name }, name)
@@ -1470,14 +1655,16 @@ export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyG
       if (column.default === undefined) continue
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
+      const tokens = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
+      if (!isPlainExpression(tokens, names)) uncertain.add(tableId(def.database, def.name))
       const read = new Set<string>()
-      for (const name of dottedNames(parsed.sql, names)) {
+      for (const name of namesRead(tokens, names)) {
         if (name !== column.name) read.add(keyOf(name))
       }
       graph.set(keyOf(column.name), read)
     }
   }
-  return graph
+  return { reads: graph, uncertain }
 }
 
 /**
