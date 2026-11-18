@@ -931,6 +931,57 @@ function columnKey(table: { database: string; table: string }, column: string): 
 }
 
 /**
+ * The column names that `sql` reads, from runs of bare or quoted names joined
+ * by dots (`n.x`, `` `n`.`x` ``, comments around the dot). Like ClickHouse, a
+ * run reads its longest leading part that is a column: `n.x` reads the column
+ * `n.x` when there is one, and otherwise `n` (a subcolumn of `n`). A run whose
+ * leading parts are no column is read without them, so `t.col` and
+ * `db.t.col` read `col` (#748). A tuple element by position ends the run:
+ * `t.1.a` reads `t`. A run followed by `(` is a function call, not a column,
+ * and a run that starts on a name `notColumnNames` skips reads nothing, so
+ * `a -> a.x` reads no `a.x` (#768).
+ */
+function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
+  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  const skipped = notColumnNames(tokens)
+  const found: string[] = []
+  let i = 0
+  while (i < tokens.length) {
+    const first = i
+    const run: string[] = []
+    // A tuple element by position (`t.1`) and the parts after it are one path
+    // into the run before it, so `t.1.a.b` reads only `t`.
+    let element = false
+    for (let name = identifierName(tokens[i]!); name !== undefined; ) {
+      if (!element) run.push(name)
+      i += 1
+      if (tokens[i]?.text !== '.') break
+      const next = tokens[i + 1]
+      if (next?.kind === 'number') element = true
+      name = next === undefined ? undefined : next.kind === 'number' ? next.text : identifierName(next)
+      if (name !== undefined) i += 1
+    }
+    if (run.length === 0) i += 1
+    if (tokens[i]?.text === '(' || skipped.has(first)) continue
+    for (let start = 0; start < run.length; start += 1) {
+      const name = longestColumnPrefix(run.slice(start), columns)
+      if (name === undefined) continue
+      found.push(name)
+      break
+    }
+  }
+  return found
+}
+
+function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): string | undefined {
+  for (let end = parts.length; end > 0; end -= 1) {
+    const name = parts.slice(0, end).join('.')
+    if (columns.has(name)) return name
+  }
+  return undefined
+}
+
+/**
  * Column operation key → keys of the other columns of the same table that the
  * column's default expression names. A name followed by `(` is a function
  * call, not a column, and neither are the names `notColumnNames` finds.
@@ -946,13 +997,9 @@ export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyG
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
       const read = new Set<string>()
-      const tokens = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
-      const skipped = notColumnNames(tokens)
-      tokens.forEach((token, index) => {
-        const name = identifierName(token)
-        if (name === undefined || skipped.has(index) || tokens[index + 1]?.text === '(') return
-        if (name !== column.name && names.has(name)) read.add(keyOf(name))
-      })
+      for (const name of dottedNames(parsed.sql, names)) {
+        if (name !== column.name) read.add(keyOf(name))
+      }
       graph.set(keyOf(column.name), read)
     }
   }

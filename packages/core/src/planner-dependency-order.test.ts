@@ -636,6 +636,50 @@ describe('planDiff orders ADD COLUMNs by the columns their expressions read (#68
       'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `d` String;',
     ])
   })
+
+  test('adds a dotted column before the DEFAULT that reads it without backquotes (#748)', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'arraySum(n.x)' } },
+        { name: 'n.x', type: 'Array(UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT arraySum(n.x);',
+    ])
+  })
+
+  test('a dotted run reads its longest leading column, not a shorter column prefix', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'length(n.x) + `n`.`x`[1]' } },
+        { name: 'b', type: 'UInt64', default: { expression: 'a + 1' } },
+        { name: 'n', type: 'Tuple(y Array(UInt64))', default: { expression: 'tuple([b])' } },
+        { name: 'n.x', type: 'Array(UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT length(n.x) + `n`.`x`[1];',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT a + 1;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `n` Tuple(y Array(UInt64)) DEFAULT tuple([b]);',
+    ])
+  })
+
+  test('a qualifier that is no column is dropped from a dotted run, and a column prefix is read', () => {
+    expect(
+      addedColumns([
+        { name: 'a', type: 'UInt64', default: { expression: 'app.orders.price + orders.qty + t.first' } },
+        { name: 'price', type: 'UInt64' },
+        { name: 'qty', type: 'UInt64' },
+        { name: 't', type: 'Tuple(first UInt64)' },
+      ])
+    ).toEqual([
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `price` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `qty` UInt64;',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `t` Tuple(first UInt64);',
+      'ALTER TABLE app.orders ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT app.orders.price + orders.qty + t.first;',
+    ])
+  })
 })
 
 describe('planDiff orders the column statements of a table by the columns they read and remove (#745)', () => {
@@ -716,6 +760,23 @@ describe('planDiff orders the column statements of a table by the columns they r
     ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;'])
   })
 
+  test('drops a dotted column after the MODIFY of the column whose old expression reads it unquoted', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'n.x', type: 'Array(UInt64)' },
+            { name: 'z', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'arraySum(n.x)' } },
+          ]),
+        ],
+        [t([{ name: 'z', type: 'UInt64', defaultKind: 'MATERIALIZED', default: { expression: 'id' } }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 MATERIALIZED id;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `n.x`;',
+    ])
+  })
+
   test('a function call named like a column is not a read', () => {
     expect(
       sqls(
@@ -785,6 +846,63 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 
+  test('a dotted run followed by ( is a function call, not a read', () => {
+    expect(
+      sqls(
+        [t([])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'n.x(1)' } },
+            { name: 'n', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT n.x(1);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;',
+    ])
+  })
+
+  // `n.a` reads the element `a` of the tuple `n`, not the column `a`; reading
+  // `a` too made a cycle with `a DEFAULT z + 1` that kept the key order.
+  test('a dotted run reads only its longest leading column, not a later part', () => {
+    expect(
+      sqls(
+        [t([{ name: 'n', type: 'Tuple(a UInt64)' }])],
+        [
+          t([
+            { name: 'n', type: 'Tuple(a UInt64)' },
+            { name: 'a', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'z', type: 'UInt64', default: { expression: 'n.a' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT n.a;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z + 1;',
+    ])
+  })
+
+  // `t.1.a.b` is a path into the tuple `t`; reading its suffix as the column
+  // `a.b` made a cycle with `a.b DEFAULT z + 1` that kept the key order.
+  test('a dotted run ends at a tuple element by position', () => {
+    expect(
+      sqls(
+        [t([{ name: 't', type: 'Tuple(u Tuple(a Tuple(b UInt64)))' }])],
+        [
+          t([
+            { name: 't', type: 'Tuple(u Tuple(a Tuple(b UInt64)))' },
+            { name: 'a.b', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'z', type: 'UInt64', default: { expression: 't.1.a.b' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT t.1.a.b;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a.b` UInt64 DEFAULT z + 1;',
+    ])
+  })
+
   test('keeps key order for a cycle', () => {
     expect(
       sqls(
@@ -850,7 +968,7 @@ describe('planDiff orders the column statements of a table by the columns they r
 })
 
 describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () => {
-  const columns = ['a', 'arr', 'c', 'id', 'threshold', 'UInt64', 'x', 'y']
+  const columns = ['a', 'arr', 'c', 'id', 'n.x', 'threshold', 'UInt64', 'x', 'y']
   const readsOf = (expression: string) => {
     const definition = table({
       database: 'app',
@@ -879,7 +997,11 @@ describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () 
     ['arrayMap(x -> x, [1]) + x', ['x']],
     ['arrayMap(x -> x, x)', ['x']],
     ['arrayMap(x -> (x, y), arr)', ['arr', 'y']],
-    ['arrayMap(x -> c.x, arr)', ['arr', 'c', 'x']],
+    ['arrayMap(x -> c.x, arr)', ['arr', 'c']],
+    ['arrayMap(n -> n.x, arr)', ['arr']],
+    ['arrayMap(`n` -> `n`.`x`, arr)', ['arr']],
+    ['arrayMap(y -> y + n.x, arr)', ['arr', 'n.x']],
+    ['arrayMap(n -> n.x, arr) + n.x', ['arr', 'n.x']],
   ])('lambda: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
   })
