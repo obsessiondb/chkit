@@ -382,6 +382,72 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "order": ["column_rename:a:b", "column:length"],
         "columns": ["b", "id", "length"],
     },
+    # #769: these fail on ClickHouse 26.3 in the #759 order, with `Cyclic alias
+    # detected` (a MODIFY reads back a column whose old DEFAULT still reads
+    # it) or `Missing columns` (a DROP COLUMN while the table TTL reads it).
+    {
+        "label": "modrelease",
+        "before": f"{{'name': 'a', 'type': 'UInt64'}}, {{'name': 'z', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('z')}}}, {{'name': 'z', 'type': 'UInt64'}}",
+        "order": ["column:z", "column:a"],
+        "columns": ["a", "id", "z"],
+    },
+    {
+        "label": "modrelease3",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:c", "column:a"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "modreleaseadd",
+        "before": f"{{'name': 'b', 'type': 'UInt64'}}, {{'name': 'c', 'type': 'UInt64', {_e('b')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('c')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('a')}}}, {{'name': 'c', 'type': 'UInt64'}}",
+        "order": ["column:a", "column:c", "column:b"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "ttlswap",
+        "before": "{'name': 'x', 'type': 'DateTime'}",
+        "before_ttl": "x + INTERVAL 1 DAY",
+        "after": "{'name': 'y', 'type': 'DateTime'}",
+        "after_ttl": "y + INTERVAL 1 DAY",
+        "order": ["column:y", "ttl", "column:x"],
+        "columns": ["id", "y"],
+    },
+    {
+        "label": "ttlremove",
+        "before": "{'name': 'x', 'type': 'DateTime'}",
+        "before_ttl": "x + INTERVAL 1 DAY",
+        "after": "{'name': 'w', 'type': 'UInt64'}",
+        "order": ["ttl", "column:x"],
+        "columns": ["id", "w"],
+    },
+    {
+        "label": "ttlrename",
+        "before": "{'name': 'a', 'type': 'UInt64'}, {'name': 'x', 'type': 'DateTime'}",
+        "before_ttl": "x + INTERVAL 1 DAY",
+        "after": "{'name': 'b', 'type': 'UInt64'}, {'name': 'y', 'type': 'DateTime'}",
+        "after_ttl": "y + INTERVAL 1 DAY",
+        "rename": "a=b",
+        "order": ["column:y", "ttl", "column:x"],
+        "columns": ["b", "id", "y"],
+    },
+    {
+        # #768: reading the lambda parameter `c` as the new column `c` ran
+        # MODIFY `a` last, so MODIFY `b` DEFAULT a met the old `a DEFAULT b`:
+        # Cyclic alias detected in column DEFAULT expressions.
+        "label": "lambdaparam",
+        "before": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('arraySum(arrayMap(c -> c, [1]))')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('a')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:a", "column:b"],
+        "columns": ["a", "b", "c", "id"],
+    },
 ]
 
 
@@ -415,12 +481,15 @@ def test_orders_the_column_statements_of_a_table(
         + ")\n"
     )
 
-    def generate_and_migrate(columns: str, step: str, migration_id: str, extra: list[str]) -> str:
+    def generate_and_migrate(
+        columns: str, ttl: str | None, step: str, migration_id: str, extra: list[str]
+    ) -> str:
+        ttl_arg = "" if ttl is None else f", ttl={ttl!r}"
         (tmp_path / "schema.py").write_text(
             "from chkit import SQLExpression, schema, table\n\n"
             f"definitions = schema(table(database={db!r}, name={name!r}, "
             f"columns=[{{'name': 'id', 'type': 'UInt64'}}, {columns}], engine='MergeTree()', "
-            "primary_key=['id'], order_by=['id']))\n"
+            f"primary_key=['id'], order_by=['id']{ttl_arg}))\n"
         )
         gen = runner.invoke(
             app, ["generate", "--name", step, "--migration-id", migration_id, *extra, "--json"])
@@ -438,10 +507,11 @@ def test_orders_the_column_statements_of_a_table(
         return [str(row[0]) for row in rows]
 
     try:
-        generate_and_migrate(change["before"], "init", "20990101000000", [])
+        generate_and_migrate(change["before"], change.get("before_ttl"), "init", "20990101000000", [])
         rename = change.get("rename")
         sql = generate_and_migrate(
             change["after"],
+            change.get("after_ttl"),
             "change",
             "20990101000001",
             [] if rename is None else ["--rename-column", f"{db}.{name}.{rename}"],
@@ -547,4 +617,90 @@ def test_drops_a_skip_index_before_the_column_it_reads_when_a_column_rename_is_a
         assert columns == ["b", "id"]
     finally:
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(events)}")
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")
+
+
+def test_adds_a_dotted_column_before_the_add_column_whose_default_reads_it_unquoted(
+    ch_client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # `a` sorts before `n.x`, and its DEFAULT reads `n.x` without backquotes
+    # (#748). ClickHouse rejects the ADD COLUMN of `a` while `n.x` is missing.
+    # Then `k.b` sorts before `z`, whose `t.1.k.b` is a path into the tuple `t`,
+    # not a read of `k.b`; ClickHouse rejects `k.b DEFAULT z + 1` before `z`.
+    client = ch_client._client
+    env = resolve_live_env()
+    db = client.database
+    journal_table = create_journal_table_name("dotorder_py")
+    orders = f"{create_prefix('dotorder')}orders"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
+    monkeypatch.setenv("CI", "1")
+    runner = CliRunner()
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": db,
+            },
+        })
+        + ")\n"
+    )
+
+    def generate_and_migrate(columns: str, name: str, migration_id: str) -> str:
+        (tmp_path / "schema.py").write_text(
+            "from chkit import SQLExpression, schema, table\n\n"
+            f"definitions = schema(table(database={db!r}, name={orders!r}, "
+            f"columns=[{{'name': 'id', 'type': 'UInt64'}}, "
+            f"{{'name': 't', 'type': 'Tuple(u Tuple(k Tuple(b UInt64)))'}}{columns}], "
+            "engine='MergeTree()', "
+            "primary_key=['id'], order_by=['id']))\n"
+        )
+        gen = runner.invoke(
+            app, ["generate", "--name", name, "--migration-id", migration_id, "--json"])
+        assert gen.exit_code == 0, format_test_diagnostic(f"generate ({name}) failed", gen)
+        migrate = _run_migrate(runner, ["migrate", "--execute", "--json"])
+        assert migrate.exit_code == 0, format_test_diagnostic(f"migrate ({name}) failed", migrate)
+        return (tmp_path / "chkit" / "migrations" / f"{migration_id}_{name}.sql").read_text()
+
+    try:
+        generate_and_migrate("", "init", "20990101000000")
+        add_sql = generate_and_migrate(
+            ", {'name': 'a', 'type': 'UInt64', 'default': SQLExpression(expression='arraySum(n.x)')}, "
+            "{'name': 'n.x', 'type': 'Array(UInt64)'}",
+            "add",
+            "20990101000001",
+        )
+        _assert_in_order(add_sql, [f"table:{db}.{orders}:column:n.x",
+                                   f"table:{db}.{orders}:column:a"])
+
+        client.command(
+            f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, `n.x`) VALUES (1, [40, 2])")
+        rows = client.query(f"SELECT a FROM {quote_ident(db)}.{quote_ident(orders)}").result_rows
+        assert [int(row[0]) for row in rows] == [42]
+
+        element_sql = generate_and_migrate(
+            ", {'name': 'a', 'type': 'UInt64', 'default': SQLExpression(expression='arraySum(n.x)')}, "
+            "{'name': 'n.x', 'type': 'Array(UInt64)'}, "
+            "{'name': 'k.b', 'type': 'UInt64', 'default': SQLExpression(expression='z + 1')}, "
+            "{'name': 'z', 'type': 'UInt64', 'default': SQLExpression(expression='t.1.k.b')}",
+            "element",
+            "20990101000002",
+        )
+        _assert_in_order(element_sql, [f"table:{db}.{orders}:column:z",
+                                       f"table:{db}.{orders}:column:k.b"])
+
+        client.command(
+            f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, t) VALUES (2, (((41))))")
+        rows = client.query(
+            f"SELECT z, `k.b` FROM {quote_ident(db)}.{quote_ident(orders)} WHERE id = 2").result_rows
+        assert [(int(row[0]), int(row[1])) for row in rows] == [(41, 42)]
+    finally:
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")

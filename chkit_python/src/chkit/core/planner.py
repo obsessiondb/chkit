@@ -68,7 +68,14 @@ from chkit.core.sql import (
     render_dictionary_sql,
     to_create_sql,
 )
-from chkit.core.sql_lexer import identifier_name, is_trivia, js_regex, js_trim, tokenize_sql
+from chkit.core.sql_lexer import (
+    SQLToken,
+    identifier_name,
+    is_trivia,
+    js_regex,
+    js_trim,
+    tokenize_sql,
+)
 from chkit.core.sql_normalizer import sql_expression_fingerprint
 from chkit.core.table_settings import readonly_settings_fingerprint
 from chkit.core.text_index import text_index_fingerprint
@@ -853,12 +860,15 @@ def _order_operations(
     ]
 
 
+# The table TTL statement (MODIFY or REMOVE TTL) sorts with the column
+# statements: it reads columns that are added and dropped (#769).
 _COLUMN_STATEMENTS = frozenset(
     {
         "alter_table_add_column",
         "alter_table_modify_column",
         "alter_table_drop_column",
         "alter_table_rename_column",
+        "alter_table_modify_ttl",
     }
 )
 
@@ -879,17 +889,21 @@ def order_column_statements(
     next_: Sequence[SchemaDefinition],
     renames: Sequence[ColumnRenameSuggestion],
 ) -> list[MigrationOperation]:
-    """Order the column statements of every table in one dependency sort (TS orderColumnStatements).
+    """Order the column and TTL statements of every table in one sort (TS orderColumnStatements).
 
-    The statements are ADD, MODIFY, DROP and RENAME COLUMN, from their key
-    order (#681, #745, #746, #758):
+    The statements are ADD, MODIFY, DROP and RENAME COLUMN and the table TTL
+    statement, from their key order (#681, #745, #746, #758, #769):
 
-    - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression
-      reads column X runs after the ADD of X or the RENAME to X;
+    - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
+      a table TTL that reads column X runs after the ADD of X or the RENAME to X;
     - a DROP of X runs after the MODIFY or DROP of every column whose old
-      expression reads X, since ClickHouse refuses to drop a column another
-      column still reads. A RENAME away from X needs no such wait: ClickHouse
-      rewrites the expressions that read X to the new name;
+      expression reads X, and after the TTL change when the old TTL reads X,
+      since ClickHouse refuses to drop a column something still reads. A
+      RENAME away from X needs no such wait: ClickHouse rewrites the
+      expressions and the TTL that read X to the new name;
+    - a MODIFY whose new expression would close a cycle with an old
+      expression runs after the MODIFY that removes that old read
+      (``_cycle_releases``);
     - statements of the same column keep their order.
 
     Members of a cycle keep their key order. The statements fill the positions
@@ -899,6 +913,8 @@ def order_column_statements(
     """
     reads = _column_default_reads(next_)
     old_reads = _column_default_reads(previous)
+    ttl_reads = _table_ttl_reads(next_)
+    old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
         column_rename_key(rename): _column_key(rename.database, rename.table, rename.to)
         for rename in renames
@@ -907,16 +923,23 @@ def order_column_statements(
 
     providers: dict[str, list[int]] = {}
     releasers: dict[str, list[int]] = {}
+    modifies: dict[str, list[int]] = {}
     for index, op in enumerate(statements):
         if op.type == "alter_table_add_column":
             providers.setdefault(op.key, []).append(index)
         renamed = renamed_to.get(op.key)
         if op.type == "alter_table_rename_column" and renamed is not None:
             providers.setdefault(renamed, []).append(index)
+        if op.type == "alter_table_modify_column":
+            modifies.setdefault(op.key, []).append(index)
         if op.type in ("alter_table_modify_column", "alter_table_drop_column"):
             for read in old_reads.get(op.key, ()):
                 releasers.setdefault(read, []).append(index)
+        if op.type == "alter_table_modify_ttl":
+            for read in old_ttl_reads.get(op.key, ()):
+                releasers.setdefault(read, []).append(index)
 
+    added = {op.key for op in statements if op.type == "alter_table_add_column"}
     prerequisites: list[list[str]] = []
     for index, op in enumerate(statements):
         found: dict[int, None] = {}
@@ -924,9 +947,19 @@ def order_column_statements(
             for read in reads.get(op.key, ()):
                 for other in providers.get(read, []):
                     found[other] = None
+        if op.type == "alter_table_modify_ttl":
+            for read in ttl_reads.get(op.key, ()):
+                for other in providers.get(read, []):
+                    found[other] = None
         if op.type == "alter_table_drop_column":
             for other in releasers.get(op.key, []):
                 found[other] = None
+        # A column's last statement is the MODIFY COLUMN that sets its new expression.
+        is_last = index + 1 == len(statements) or statements[index + 1].key != op.key
+        if op.type == "alter_table_modify_column" and is_last:
+            for column in _cycle_releases(op.key, reads, old_reads, added):
+                for other in modifies.get(column, []):
+                    found[other] = None
         if index > 0 and statements[index - 1].key == op.key:
             found[index - 1] = None
         found.pop(index, None)
@@ -942,16 +975,120 @@ def order_column_statements(
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
 
 
+def _cycle_releases(
+    key: str,
+    reads: dict[str, set[str]],
+    old_reads: dict[str, set[str]],
+    added: set[str],
+) -> list[str]:
+    """Columns whose MODIFY must run before the MODIFY that sets ``key``'s expression (#769).
+
+    ClickHouse rejects an expression that closes a cycle. The new expression
+    closes one through column P when it reads a column that leads to P, and
+    P's old expression reads a column that leads back to ``key``, which P's
+    new expression no longer reads. "Leads to" follows reads that both the
+    old and the new expression of their column have, so the path exists in
+    every intermediate state and only P's MODIFY breaks it. On the way to P
+    it also follows the reads of ``added`` columns: the MODIFY runs after the
+    ADD of every added column its expression reads through them. Every such
+    P is read by the new expression through the new schema, so these edges
+    can't form a cycle unless the new schema has one.
+    """
+
+    def reachable(start: str, through_added: bool) -> set[str]:
+        seen = {start}
+        pending = [start]
+        while pending:
+            column = pending.pop()
+            follow = through_added and column in added
+            for read in reads.get(column, ()):
+                if (follow or read in old_reads.get(column, ())) and read not in seen:
+                    seen.add(read)
+                    pending.append(read)
+        return seen
+
+    released: dict[str, None] = {}
+    for read in reads.get(key, ()):
+        for column in reachable(read, through_added=True):
+            if column == key:
+                continue
+            for dropped in old_reads.get(column, ()):
+                if dropped not in reads.get(column, ()) and key in reachable(
+                    dropped, through_added=False
+                ):
+                    released[column] = None
+    return list(released)
+
+
 def _column_key(database: str, table: str, column: str) -> str:
     return f"table:{database}.{table}:column:{column}"
+
+
+def _dotted_names(sql: str, columns: set[str]) -> list[str]:
+    """The column names that ``sql`` reads, from runs of bare or quoted names joined by dots.
+
+    A run is ``n.x`` with bare or quoted parts and any comments around the dot. Like
+    ClickHouse, a run reads its longest leading part that is a column: ``n.x``
+    reads the column ``n.x`` when there is one, and otherwise ``n`` (a subcolumn
+    of ``n``). A run whose leading parts are no column is read without them, so
+    ``t.col`` and ``db.t.col`` read ``col`` (#748). A tuple element by position
+    ends the run: ``t.1.a`` reads ``t``. A run followed by ``(`` is a function
+    call, not a column, and a run that starts on a name ``_not_column_names``
+    skips reads nothing, so ``a -> a.x`` reads no ``a.x`` (#768).
+    """
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    skipped = _not_column_names(tokens)
+    found: list[str] = []
+    i = 0
+    while i < len(tokens):
+        first = i
+        run: list[str] = []
+        # A tuple element by position (``t.1``) and the parts after it are one path
+        # into the run before it, so ``t.1.a.b`` reads only ``t``.
+        element = False
+        name = identifier_name(tokens[i])
+        while name is not None:
+            if not element:
+                run.append(name)
+            i += 1
+            if i >= len(tokens) or tokens[i].text != ".":
+                break
+            following = tokens[i + 1] if i + 1 < len(tokens) else None
+            if following is not None and following.kind == "number":
+                element = True
+            if following is None:
+                name = None
+            elif following.kind == "number":
+                name = following.text
+            else:
+                name = identifier_name(following)
+            if name is not None:
+                i += 1
+        if not run:
+            i += 1
+        if (i < len(tokens) and tokens[i].text == "(") or first in skipped:
+            continue
+        for start in range(len(run)):
+            match = _longest_column_prefix(run[start:], columns)
+            if match is not None:
+                found.append(match)
+                break
+    return found
+
+
+def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
+    for end in range(len(parts), 0, -1):
+        name = ".".join(parts[:end])
+        if name in columns:
+            return name
+    return None
 
 
 def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
-    A name followed by ``(`` is a function call, not a column. A name can also
-    be a lambda parameter; such an extra edge moves a statement later, or
-    makes a cycle that keeps the key order.
+    A name followed by ``(`` is a function call, not a column, and neither are
+    the names ``_not_column_names`` finds.
     """
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -966,15 +1103,153 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             if parsed.kind != "expression":
                 continue
             read: set[str] = set()
-            tokens = [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)]
-            for index, token in enumerate(tokens):
-                name = identifier_name(token)
-                if name is None or (index + 1 < len(tokens) and tokens[index + 1].text == "("):
-                    continue
-                if name != column.name and name in names:
+            for name in _dotted_names(parsed.sql, names):
+                if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
     return graph
+
+
+def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+    """Table TTL operation key to the keys of the table's columns the TTL names.
+
+    The TTL is read with the same rules as a column's default expression
+    (``_dotted_names``).
+    """
+    graph: dict[str, set[str]] = {}
+    for definition in definitions:
+        if not isinstance(definition, TableDefinition) or definition.ttl is None:
+            continue
+        names = {column.name for column in definition.columns}
+        graph[f"table:{definition.database}.{definition.name}:ttl"] = {
+            _column_key(definition.database, definition.name, name)
+            for name in _dotted_names(definition.ttl, names)
+        }
+    return graph
+
+
+def _not_column_names(tokens: list[SQLToken]) -> set[int]:
+    """Indices of the ``tokens`` (trivia removed) that name no column (#768).
+
+    A lambda parameter (``x -> x``, ``(x, y) -> x + y``) where its lambda
+    declares and uses it, with the ``.name`` parts after a use (``a -> a.x``),
+    and the type of ``CAST(x AS T)`` and ``x::T``, with its arguments
+    (``Array(Tuple(a UInt64))``). A lambda body runs to the first ``,`` or
+    unmatched closing bracket at its own depth, so a name after the lambda
+    still reads a column.
+    """
+    skipped: set[int] = set()
+    count = len(tokens)
+
+    def text_at(i: int) -> str | None:
+        return tokens[i].text if 0 <= i < count else None
+
+    def is_pair(i: int, first: str, second: str) -> bool:
+        return (
+            text_at(i) == first
+            and text_at(i + 1) == second
+            and tokens[i].end == tokens[i + 1].start
+        )
+
+    def is_name(i: int) -> bool:
+        return 0 <= i < count and identifier_name(tokens[i]) is not None
+
+    for i, token in enumerate(tokens):
+        if is_pair(i, "-", ">"):
+            params = _lambda_parameters(tokens, i)
+            if params is None:
+                continue
+            names, start = params
+            skipped.update(range(start, i))
+            end = _group_end(tokens, i + 2)
+            j = i + 2
+            while j < end:
+                name = identifier_name(tokens[j])
+                if name is not None and name in names and text_at(j - 1) != ".":
+                    skipped.add(j)
+                    while text_at(j + 1) == "." and is_name(j + 2):
+                        j += 2
+                        skipped.add(j)
+                j += 1
+        elif is_pair(i, ":", ":"):
+            if not is_name(i + 2):
+                continue
+            stop = _closing_paren(tokens, i + 3) + 1 if text_at(i + 3) == "(" else i + 3
+            skipped.update(range(i + 2, stop))
+        elif token.kind == "identifier" and token.text.lower() == "cast" and text_at(i + 1) == "(":
+            close = _closing_paren(tokens, i + 1)
+            depth = 0
+            for j in range(i + 2, close):
+                inner = tokens[j]
+                if inner.text in ("(", "[", "{"):
+                    depth += 1
+                elif inner.text in (")", "]", "}"):
+                    depth -= 1
+                elif depth == 0 and inner.kind == "identifier" and inner.text.lower() == "as":
+                    skipped.update(range(j, close))
+                    break
+    return skipped
+
+
+def _lambda_parameters(tokens: list[SQLToken], arrow: int) -> tuple[set[str], int] | None:
+    """The parameters of the lambda whose ``->`` starts at ``arrow``.
+
+    The name before it, or the names of a ``(a, b)`` list before it, with the
+    index of the first token that declares them. Any other shape declares
+    nothing.
+    """
+    if arrow < 1:
+        return None
+    before = tokens[arrow - 1]
+    single = identifier_name(before)
+    if single is not None:
+        return {single}, arrow - 1
+    if before.text != ")":
+        return None
+    names: set[str] = set()
+    j = arrow - 2
+    while j >= 0:
+        name = identifier_name(tokens[j])
+        if name is None:
+            return None
+        names.add(name)
+        separator = tokens[j - 1].text if j >= 1 else None
+        if separator == "(":
+            return names, j - 1
+        if separator != ",":
+            return None
+        j -= 2
+    return None
+
+
+def _group_end(tokens: list[SQLToken], start: int) -> int:
+    """Index of the first ``,`` or unmatched closing bracket at ``start``'s depth, or the end."""
+    depth = 0
+    for j in range(start, len(tokens)):
+        text = tokens[j].text
+        if text in ("(", "[", "{"):
+            depth += 1
+        elif text in (")", "]", "}"):
+            if depth == 0:
+                return j
+            depth -= 1
+        elif text == "," and depth == 0:
+            return j
+    return len(tokens)
+
+
+def _closing_paren(tokens: list[SQLToken], open_: int) -> int:
+    """Index of the ``)`` that closes the ``(`` at ``open_``, or the end."""
+    depth = 0
+    for j in range(open_, len(tokens)):
+        text = tokens[j].text
+        if text == "(":
+            depth += 1
+        elif text == ")":
+            depth -= 1
+            if depth == 0:
+                return j
+    return len(tokens)
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:

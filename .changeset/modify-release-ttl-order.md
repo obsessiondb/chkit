@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`generate` orders a column's `MODIFY` that reads another column back after the `MODIFY` that removes the old reverse read, and orders table TTL changes after the `ADD COLUMN` they read and before the `DROP COLUMN` of a column the old TTL reads, so `migrate` no longer fails with `Cyclic alias detected` or `Missing columns`.

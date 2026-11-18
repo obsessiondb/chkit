@@ -293,6 +293,100 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
     }
   }, 120_000)
 
+  // `a` sorts before `n.x`, and its DEFAULT reads `n.x` without backquotes
+  // (#748). ClickHouse rejects the ADD COLUMN of `a` while `n.x` is missing.
+  // Then `k.b` sorts before `z`, whose `t.1.k.b` is a path into the tuple `t`,
+  // not a read of `k.b`; ClickHouse rejects `k.b DEFAULT z + 1` before `z`.
+  test('adds a dotted column before the ADD COLUMN whose DEFAULT reads it unquoted', async () => {
+    const liveEnv = getLiveEnv()
+    const executor = createLiveExecutor(liveEnv)
+    const db = liveEnv.clickhouseDatabase
+    const journalTable = createJournalTableName('dotorder')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable, CI: '1' }
+    const orders = `${createPrefix('dotorder')}orders`
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-dotorder-e2e-'))
+    const configPath = join(dir, 'clickhouse.config.ts')
+    const schemaPath = join(dir, 'schema.ts')
+    const migrationsDir = join(dir, 'chkit/migrations')
+    const writeSchema = (columns: string) =>
+      writeFile(
+        schemaPath,
+        `import { schema, table } from '${CORE_ENTRY}'\n\n` +
+          `export default schema(table({ database: '${db}', name: '${orders}', columns: [{ name: 'id', type: 'UInt64' }, { name: 't', type: 'Tuple(u Tuple(k Tuple(b UInt64)))' }${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
+        'utf8'
+      )
+    const generateAndMigrate = async (name: string, migrationId: string) => {
+      const generated = runCli(
+        dir,
+        ['generate', '--config', configPath, '--name', name, '--migration-id', migrationId, '--json'],
+        cliEnv
+      )
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic(`generate (${name}) failed`, generated))
+      const migrated = await runCliWithRetry(dir, ['migrate', '--config', configPath, '--execute', '--json'], {
+        extraEnv: cliEnv,
+      })
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic(`migrate --execute (${name}) failed`, migrated))
+      return readFile(join(migrationsDir, `${migrationId}_${name}.sql`), 'utf8')
+    }
+
+    try {
+      await writeFile(
+        configPath,
+        `export default {\n` +
+          `  schema: '${schemaPath}',\n` +
+          `  outDir: '${join(dir, 'chkit')}',\n` +
+          `  migrationsDir: '${migrationsDir}',\n` +
+          `  metaDir: '${join(dir, 'chkit/meta')}',\n` +
+          `  clickhouse: {\n` +
+          `    url: '${liveEnv.clickhouseUrl}',\n` +
+          `    username: '${liveEnv.clickhouseUser}',\n` +
+          `    password: '${liveEnv.clickhousePassword}',\n` +
+          `    database: '${db}',\n` +
+          `  },\n}\n`,
+        'utf8'
+      )
+      await writeSchema('')
+      await generateAndMigrate('init', '20990101000000')
+      await waitForTable(executor, db, orders)
+
+      await writeSchema(
+        ", { name: 'a', type: 'UInt64', default: { expression: 'arraySum(n.x)' } }, { name: 'n.x', type: 'Array(UInt64)' }"
+      )
+      const addSql = await generateAndMigrate('add', '20990101000001')
+      expectInOrder(addSql, [
+        'ADD COLUMN IF NOT EXISTS `n.x` Array(UInt64);',
+        'ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT arraySum(n.x);',
+      ])
+      await waitForColumn(executor, db, orders, 'a')
+
+      await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, \`n.x\`) VALUES (1, [40, 2])`)
+      const rows = await executor.query<{ a: string }>(`SELECT a FROM ${quoteIdent(db)}.${quoteIdent(orders)}`)
+      expect(rows.map((row) => Number(row.a))).toEqual([42])
+
+      await writeSchema(
+        ", { name: 'a', type: 'UInt64', default: { expression: 'arraySum(n.x)' } }, { name: 'n.x', type: 'Array(UInt64)' }" +
+          ", { name: 'k.b', type: 'UInt64', default: { expression: 'z + 1' } }, { name: 'z', type: 'UInt64', default: { expression: 't.1.k.b' } }"
+      )
+      const elementSql = await generateAndMigrate('element', '20990101000002')
+      expectInOrder(elementSql, [
+        'ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT t.1.k.b;',
+        'ADD COLUMN IF NOT EXISTS `k.b` UInt64 DEFAULT z + 1;',
+      ])
+      await waitForColumn(executor, db, orders, 'k.b')
+
+      await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, t) VALUES (2, (((41))))`)
+      const elementRows = await executor.query<{ z: string; kb: string }>(
+        `SELECT z, \`k.b\` AS kb FROM ${quoteIdent(db)}.${quoteIdent(orders)} WHERE id = 2`
+      )
+      expect(elementRows.map((row) => [Number(row.z), Number(row.kb)])).toEqual([[41, 42]])
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(orders)}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 120_000)
+
   // The column DROP INDEX sorts after the DROP COLUMN by key (`column` <
   // `index`); the planner runs it first, and a rename in the same plan must
   // keep that (#747). ClickHouse rejects dropping `x` while `idx_x` reads it.
@@ -380,12 +474,15 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
 /**
  * Generates and migrates a change of one table's columns, then checks the
  * migration order and the columns ClickHouse ends with. `before` and `after`
- * are the column entries after `id`; `rename` is a `from=to` column rename.
+ * are the column entries after `id`, `beforeTtl` and `afterTtl` the table
+ * TTL; `rename` is a `from=to` column rename.
  */
 async function migrateColumnChange(input: {
   label: string
   before: string
   after: string
+  beforeTtl?: string
+  afterTtl?: string
   rename?: string
   order: string[]
   columns: string[]
@@ -400,11 +497,11 @@ async function migrateColumnChange(input: {
   const configPath = join(dir, 'clickhouse.config.ts')
   const schemaPath = join(dir, 'schema.ts')
   const migrationsDir = join(dir, 'chkit/migrations')
-  const writeSchema = (columns: string) =>
+  const writeSchema = (columns: string, ttl: string | undefined) =>
     writeFile(
       schemaPath,
       `import { schema, table } from '${CORE_ENTRY}'\n\n` +
-        `export default schema(table({ database: '${db}', name: '${name}', columns: [{ name: 'id', type: 'UInt64' }, ${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
+        `export default schema(table({ database: '${db}', name: '${name}', columns: [{ name: 'id', type: 'UInt64' }, ${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id']${ttl === undefined ? '' : `, ttl: ${JSON.stringify(ttl)}`} }))\n`,
       'utf8'
     )
   const generateAndMigrate = async (step: string, migrationId: string, extraArgs: string[]) => {
@@ -445,11 +542,11 @@ async function migrateColumnChange(input: {
         `  },\n}\n`,
       'utf8'
     )
-    await writeSchema(input.before)
+    await writeSchema(input.before, input.beforeTtl)
     await generateAndMigrate('init', '20990101000000', [])
     await waitForTable(executor, db, name)
 
-    await writeSchema(input.after)
+    await writeSchema(input.after, input.afterTtl)
     const sql = await generateAndMigrate(
       'change',
       '20990101000001',
@@ -548,6 +645,96 @@ describe('@chkit/cli migrate orders the column statements of a table (#745, #746
       rename: 'a=b',
       order: ['RENAME COLUMN IF EXISTS `a` TO `b`;', 'ADD COLUMN IF NOT EXISTS `length` UInt64 DEFAULT b + 1;'],
       columns: ['b', 'id', 'length'],
+    })
+  }, 120_000)
+
+  // Reading the lambda parameter `c` as the new column `c` ran MODIFY `a`
+  // last, so MODIFY `b` DEFAULT a met the old `a DEFAULT b`: Cyclic alias
+  // detected in column DEFAULT expressions (#768).
+  test('a lambda parameter named like a new column does not hold back the MODIFY that declares it (#768)', async () => {
+    await migrateColumnChange({
+      label: 'lambdaparam',
+      before:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64', default: { expression: 'id' } }",
+      after:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(c -> c, [1]))' } }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }, { name: 'c', type: 'UInt64', default: { expression: 'id' } }",
+      order: ['MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(c -> c, [1]));', 'MODIFY COLUMN `b` UInt64 DEFAULT a;'],
+      columns: ['a', 'b', 'c', 'id'],
+    })
+  }, 120_000)
+})
+
+// Each change below fails on ClickHouse 26.3 in the order of the #759 plan:
+// `Cyclic alias detected` when a MODIFY reads back a column whose old DEFAULT
+// still reads it, `Missing columns` when a DROP COLUMN runs while the table
+// TTL still reads the column.
+describe('@chkit/cli migrate orders MODIFY read releases and table TTL changes (#769)', () => {
+  test('a MODIFY COLUMN that reads a column back runs after that column stops reading it', async () => {
+    await migrateColumnChange({
+      label: 'modrelease',
+      before: "{ name: 'a', type: 'UInt64' }, { name: 'z', type: 'UInt64', default: { expression: 'a' } }",
+      after: "{ name: 'a', type: 'UInt64', default: { expression: 'z' } }, { name: 'z', type: 'UInt64' }",
+      order: ['MODIFY COLUMN `z` REMOVE DEFAULT;', 'MODIFY COLUMN `a` UInt64 DEFAULT z;'],
+      columns: ['a', 'id', 'z'],
+    })
+  }, 120_000)
+
+  test('a MODIFY COLUMN that closes a longer cycle runs after the release', async () => {
+    await migrateColumnChange({
+      label: 'modrelease3',
+      before:
+        "{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'c' } }, { name: 'c', type: 'UInt64', default: { expression: 'a' } }",
+      after:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64', default: { expression: 'c' } }, { name: 'c', type: 'UInt64', default: { expression: 'id' } }",
+      order: ['MODIFY COLUMN `c` UInt64 DEFAULT id;', 'MODIFY COLUMN `a` UInt64 DEFAULT b;'],
+      columns: ['a', 'b', 'c', 'id'],
+    })
+  }, 120_000)
+
+  test('a MODIFY COLUMN that closes a cycle through an added column runs after the release', async () => {
+    await migrateColumnChange({
+      label: 'modreleaseadd',
+      before: "{ name: 'b', type: 'UInt64' }, { name: 'c', type: 'UInt64', default: { expression: 'b' } }",
+      after:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'c' } }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }, { name: 'c', type: 'UInt64' }",
+      order: ['ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT c;', 'MODIFY COLUMN `c` REMOVE DEFAULT;', 'MODIFY COLUMN `b` UInt64 DEFAULT a;'],
+      columns: ['a', 'b', 'c', 'id'],
+    })
+  }, 120_000)
+
+  test('a TTL change runs after the ADD of the column it reads and before the DROP of the column it stops reading', async () => {
+    await migrateColumnChange({
+      label: 'ttlswap',
+      before: "{ name: 'x', type: 'DateTime' }",
+      beforeTtl: 'x + INTERVAL 1 DAY',
+      after: "{ name: 'y', type: 'DateTime' }",
+      afterTtl: 'y + INTERVAL 1 DAY',
+      order: ['ADD COLUMN IF NOT EXISTS `y` DateTime;', 'MODIFY TTL y + INTERVAL 1 DAY;', 'DROP COLUMN IF EXISTS `x`;'],
+      columns: ['id', 'y'],
+    })
+  }, 120_000)
+
+  test('a REMOVE TTL runs before the DROP of the column the TTL reads', async () => {
+    await migrateColumnChange({
+      label: 'ttlremove',
+      before: "{ name: 'x', type: 'DateTime' }",
+      beforeTtl: 'x + INTERVAL 1 DAY',
+      after: "{ name: 'w', type: 'UInt64' }",
+      order: ['REMOVE TTL;', 'DROP COLUMN IF EXISTS `x`;'],
+      columns: ['id', 'w'],
+    })
+  }, 120_000)
+
+  test('a TTL change keeps its order when a column rename runs too', async () => {
+    await migrateColumnChange({
+      label: 'ttlrename',
+      before: "{ name: 'a', type: 'UInt64' }, { name: 'x', type: 'DateTime' }",
+      beforeTtl: 'x + INTERVAL 1 DAY',
+      after: "{ name: 'b', type: 'UInt64' }, { name: 'y', type: 'DateTime' }",
+      afterTtl: 'y + INTERVAL 1 DAY',
+      rename: 'a=b',
+      order: ['ADD COLUMN IF NOT EXISTS `y` DateTime;', 'MODIFY TTL y + INTERVAL 1 DAY;', 'DROP COLUMN IF EXISTS `x`;'],
+      columns: ['b', 'id', 'y'],
     })
   }, 120_000)
 })

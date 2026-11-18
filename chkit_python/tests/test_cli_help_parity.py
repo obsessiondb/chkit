@@ -17,6 +17,7 @@ import pytest
 from typer.testing import CliRunner
 
 from chkit import __version__
+from chkit.cli.json_output import _reset_for_testing
 from chkit.cli.main import app
 
 FIXTURE: dict[str, str] = json.loads(
@@ -175,20 +176,117 @@ def test_codegen_help_lists_the_python_codegen_flags() -> None:
     )
 
 
-def test_pull_help_is_the_ts_pull_schema_help() -> None:
-    # TS runs pull as `chkit pull schema`, and prints its plugin flags without
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["pull", "--help"],
+        ["pull", "-h"],
+        ["pull", "--help-plugins"],
+        # As in TS, the first token other than a global flag names the
+        # command whose help is shown (#771).
+        ["pull", "foo", "--help"],
+        ["pull", "--dryrun", "schema", "--help"],
+        ["pull", "-h", "schema"],
+    ],
+)
+def test_pull_help_is_the_ts_pull_plugin_help(args: list[str]) -> None:
+    # TS runs pull as a plugin, and prints its plugin flags without
     # --help-plugins because the config is loaded for a plugin command.
-    assert _only_in_each(FIXTURE["pull schema --help"], _help(["pull", "--help-plugins"])) == (
-        [
-            "chkit pull schema [options]",
-            "  Pull live ClickHouse table schema and write chkit schema file",
-        ],
-        [
-            "chkit pull [options]",
-            "  Introspect live ClickHouse and emit a Python schema file",
-        ],
-    )
+    assert _help(args) == FIXTURE["pull --help"]
+
+
+@pytest.mark.parametrize(
+    "args",
+    [
+        ["pull", "schema", "--help"],
+        ["pull", "schema", "-h", "foo"],
+        ["pull", "--help-plugins", "schema"],
+        ["pull", "--json", "schema", "--help"],
+    ],
+)
+def test_pull_schema_help_is_the_ts_pull_schema_help(args: list[str]) -> None:
+    assert _help(args) == FIXTURE["pull schema --help"]
 
 
 def test_an_unknown_obsessiondb_command_shows_the_plugin_help() -> None:
     assert _help(["obsessiondb", "nope", "-h"]) == FIXTURE["obsessiondb --help"]
+
+
+def _write_project(root: Path, plugins: str) -> None:
+    (root / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n"
+        "from chkit_plugin_obsessiondb import obsessiondb\n\n"
+        f'config = define_config({{"schema": "./schema.py", "plugins": [{plugins}]}})\n'
+    )
+    (root / "schema.py").write_text("")
+
+
+def _without_service_section(help_text: str) -> str:
+    section = (
+        "Plugin: obsessiondb\n"
+        "  --service              Override the selected ObsessionDB service by name "
+        "for this command\n\n"
+    )
+    assert section in help_text
+    return help_text.replace(section, "")
+
+
+@pytest.fixture
+def empty_home(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("HOME", str(tmp_path))
+    monkeypatch.setenv("XDG_CONFIG_HOME", str(tmp_path))
+    return tmp_path
+
+
+@pytest.mark.parametrize("command", [["pull"], ["pull", "schema"]])
+@pytest.mark.parametrize("flag", ["--help", "--help-plugins"])
+def test_pull_help_lists_the_flags_of_the_configured_plugins(
+    empty_home: Path, command: list[str], flag: str
+) -> None:
+    # TS loads the config for the help of pull, a plugin command there (#771).
+    expected = FIXTURE[f"{' '.join(command)} --help"]
+    _write_project(empty_home, "")
+    assert _help([*command, flag]) == _without_service_section(expected)
+    _write_project(empty_home, "obsessiondb()")
+    assert _help([*command, flag]) == expected
+
+
+def test_pull_help_reports_a_config_that_fails_to_load(empty_home: Path) -> None:
+    message = "Unable to load config module from /dev/null"
+    text = CliRunner().invoke(app, ["pull", "schema", "-c", "/dev/null", "--help"])
+    assert (text.exit_code, text.stdout, text.stderr) == (1, "", f"{message}\n")
+    _reset_for_testing()
+    as_json = CliRunner().invoke(app, ["pull", "schema", "--json", "-c", "/dev/null", "--help"])
+    _reset_for_testing()
+    assert (as_json.exit_code, as_json.stderr) == (1, f"{message}\n")
+    assert json.loads(as_json.stdout) == {
+        "command": "pull",
+        "schemaVersion": 1,
+        "ok": False,
+        "error": {"code": "error", "message": message},
+    }
+    # A --config that names no file is no config, as in TS: the help.
+    assert _help(["pull", "--help", "-c", "missing.py"]) == FIXTURE["pull --help"]
+
+
+def test_pull_help_reads_an_empty_config_value_as_no_path(empty_home: Path) -> None:
+    assert _help(["pull", "--config=", "--help"]) == FIXTURE["pull --help"]
+    _write_project(empty_home, "")
+    # The project config, without obsessiondb(), as in TS.
+    expected = _without_service_section(FIXTURE["pull --help"])
+    assert _help(["pull", "--config=", "--help"]) == expected
+
+
+def test_pull_help_loads_a_user_profile_used_alone(empty_home: Path) -> None:
+    profile = empty_home / "chkit" / "config.py"
+    profile.parent.mkdir()
+    profile.write_text('config = {"clickhouse": {"url": "http://localhost:8123"}}\n')
+    assert _help(["pull", "--help"]) == FIXTURE["pull --help"]
+    # As in TS, a profile that fails to resolve is the error.
+    profile.write_text(
+        'config = {"clickhouse": {"url": "http://localhost:8123", "indexGranularity": 0}}\n'
+    )
+    result = CliRunner().invoke(app, ["pull", "--help"])
+    assert (result.exit_code, result.stdout) == (1, "")
+    assert "indexGranularity" in result.stderr

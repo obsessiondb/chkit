@@ -12,17 +12,7 @@ export const queryCommand: ChxPluginCommand = {
 		const { flags, args, pluginContext } = context
 		const jsonMode = flags['--json'] === true
 
-		const sql = args[0]
-		if (!sql || sql.trim().length === 0) {
-			throw new Error(
-				'query requires a SQL string as the first positional argument (e.g. `chkit query "SELECT 1"`)',
-			)
-		}
-		if (args.length > 1) {
-			throw new Error(
-				'query accepts a single SQL string. Wrap it in quotes if it contains spaces.',
-			)
-		}
+		const sql = querySql(args)
 
 		if (!pluginContext.hasExecutor) {
 			throw new Error(
@@ -43,6 +33,22 @@ export const queryCommand: ChxPluginCommand = {
 			throw cleanQueryError(error)
 		}
 	},
+}
+
+/** Returns the SQL string of `chkit query`, or throws when it is missing or split. */
+export function querySql(args: readonly string[]): string {
+	const sql = args[0]
+	if (!sql || sql.trim().length === 0) {
+		throw new Error(
+			'query requires a SQL string as the first positional argument (e.g. `chkit query "SELECT 1"`)',
+		)
+	}
+	if (args.length > 1) {
+		throw new Error(
+			'query accepts a single SQL string. Wrap it in quotes if it contains spaces.',
+		)
+	}
+	return sql
 }
 
 const INJECTED_FORMAT_RE = /\s+FORMAT\s+JSON(?:EachRow)?\b/gi
