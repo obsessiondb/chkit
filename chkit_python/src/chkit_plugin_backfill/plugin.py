@@ -415,6 +415,14 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             on_progress=on_progress,
         )
 
+        # A run is completed only when every chunk is done (#765).
+        if result.failed == 0 and result.completed != result.total:
+            msg = (
+                f"Backfill plan {plan.plan_id}: {result.total - result.completed} of "
+                f"{result.total} chunks did not run, so the run is not marked completed. "
+                "Resume it."
+            )
+            raise RuntimeError(msg)
         run_state.status = "failed" if result.failed > 0 else "completed"
         run_state.completed_at = now_iso()
         run_state.updated_at = now_iso()

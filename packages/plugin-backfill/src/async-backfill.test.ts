@@ -77,6 +77,7 @@ function createMockExecutor(statuses: Map<string, QueryStatus[]>): ClickHouseExe
     submitSendsOnce: true,
     async submit(_sql: string, queryId?: string, _settings?: unknown, admission?: SubmitAdmission): Promise<string> {
       if (admission && !admission.admit()) throw sendNotAdmittedError()
+      admission?.handedOff?.()
       return queryId ?? crypto.randomUUID()
     },
     // Backfill reads status through query(), on every replica.
@@ -708,6 +709,7 @@ function createSimulatedServer(options: {
   const executor = createMockExecutor(new Map())
   executor.submit = async (_sql, queryId, _settings, admission) => {
     if (admission && !admission.admit()) throw sendNotAdmittedError()
+      admission?.handedOff?.()
     const id = queryId ?? crypto.randomUUID()
     submits.push(id)
     // The attempt's id is durable before its submit.
@@ -1258,6 +1260,7 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     executor.submit = (_sql, queryId, _settings, admission) => {
       // The request is created, then the run is interrupted.
       if (admission && !admission.admit()) return Promise.reject(sendNotAdmittedError())
+      admission?.handedOff?.()
       submits.push(queryId ?? '')
       controller.abort()
       return new Promise((resolve) => { release = () => resolve(queryId ?? '') })
@@ -1618,5 +1621,42 @@ describe('executeBackfill interrupted around the send (#765, round 4)', () => {
       signal: new AbortController().signal,
     })).rejects.toThrow('An interruptible backfill needs an executor with submitSendsOnce')
   })
+
+  // Whole-branch review: a failure proves a safe replay only with an explicit
+  // zero for its written rows, and none seen written before.
+  for (const [writtenRows, seen, reason] of [
+    [null, undefined, 'system.query_log does not say how many rows it wrote'],
+    ['', undefined, 'system.query_log does not say how many rows it wrote'],
+    ['0', 37, 'it failed after writing 37 rows, which a replay would write again'],
+  ] as const) {
+    test(`a failure with written_rows ${JSON.stringify(writtenRows)} after ${seen ?? 'no'} rows seen is unknown`, async () => {
+      const submits: string[] = []
+      const executor = createMockExecutor(new Map())
+      executor.query = async <T>(sql: string): Promise<T[]> => {
+        if (sql.includes('system.one')) return [{ replicas: '1' }] as T[]
+        if (sql.includes('system.query_log')) {
+          return [{ query_id: `backfill-${PLAN_ID}-c1`, type: 'ExceptionWhileProcessing', written_rows: writtenRows, written_bytes: '0', query_duration_ms: '1', exception: 'late block' }] as T[]
+        }
+        return [] as T[]
+      }
+      executor.submit = async (_sql, queryId) => {
+        submits.push(queryId ?? '')
+        return queryId ?? ''
+      }
+
+      await expect(executeBackfill({
+        executor,
+        planId: PLAN_ID,
+        chunks: [{ id: 'c1' }],
+        buildQuery: () => 'SELECT 1',
+        resumeFrom: { c1: { status: 'failed', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true, ...(seen === undefined ? {} : { writtenRows: seen }) } },
+        checkpointVersion: CHECKPOINT_VERSION,
+        replayFailed: true,
+        outcomeRecheckAttempts: 1,
+        outcomeRecheckIntervalMs: 1,
+      })).rejects.toThrow(`chunk c1 (query_id backfill-${PLAN_ID}-c1): ${reason}.`)
+      expect(submits).toEqual([])
+    })
+  }
 })
 

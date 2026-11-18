@@ -54,6 +54,15 @@ export function resolveReplicaFanoutOrThrow(
   return probe
 }
 
+/**
+ * The SETTINGS of a read that proves what ran (#765): no replica left out
+ * (`skip_unavailable_shards = 0`), and `STRICT_CONTROL_SETTINGS`, so an
+ * inherited cache or overflow mode (`read_overflow_mode = 'break'`) never
+ * returns a partial result as a whole one. A user who may not change them
+ * gets an error: the read fails closed.
+ */
+export const STRICT_READ_SETTINGS = "skip_unavailable_shards = 0, use_query_cache = 0, enable_reads_from_query_cache = 0, enable_writes_to_query_cache = 0, read_overflow_mode = 'throw', read_overflow_mode_leaf = 'throw', group_by_overflow_mode = 'throw', sort_overflow_mode = 'throw', result_overflow_mode = 'throw', timeout_overflow_mode = 'throw', timeout_overflow_mode_leaf = 'throw', set_overflow_mode = 'throw', transfer_overflow_mode = 'throw', distinct_overflow_mode = 'throw'"
+
 /** `source` read on every replica, e.g. `allReplicas(fanout, 'system.tables')`. */
 export function allReplicas(fanout: ReplicaFanout, source: string): string {
   return `clusterAllReplicas(${stringLiteral(fanout.cluster)}, ${source})`
@@ -98,7 +107,7 @@ export async function probeReplicaAccess(
   let rows: Array<{ replicas?: number | string }>
   try {
     rows = await executor.query<{ replicas?: number | string }>(
-      `SELECT count(DISTINCT hostName()) AS replicas FROM clusterAllReplicas(${stringLiteral(cluster)}, system.one) SETTINGS skip_unavailable_shards = 0`,
+      `SELECT count(DISTINCT hostName()) AS replicas FROM clusterAllReplicas(${stringLiteral(cluster)}, system.one) SETTINGS ${STRICT_READ_SETTINGS}`,
     )
   } catch (error) {
     if (isMissingCluster(error)) {

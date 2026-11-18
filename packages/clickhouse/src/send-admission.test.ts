@@ -319,3 +319,55 @@ describe('a stop at the last moment before the request', () => {
   })
 })
 
+// Whole-branch review: the admission is bound to its own request, and the
+// handoff waits until the request's bytes are on its socket.
+describe('admission per request and the written handoff', () => {
+  test('a second submit of a query id in flight on the executor is rejected', async () => {
+    const db = executor()
+    answerAfterMs = 100
+    const first = db.submit('INSERT INTO t SELECT 1', 'same-id-1', undefined, { admit: () => true })
+
+    const second = await db.submit('INSERT INTO t SELECT 1', 'same-id-1', undefined, { admit: () => true }).catch((e: unknown) => e)
+    await first
+    answerAfterMs = 0
+
+    expect(String(second)).toContain('A submit with query id same-id-1 is already in flight on this executor.')
+    expect(received.filter((id) => id === 'same-id-1')).toHaveLength(1)
+    await db.close()
+  })
+
+  test('a request of the admission agent without an admission is refused', async () => {
+    const agent = createAdmissionAgent(url, new Map())
+    const error = await new Promise<unknown>((resolve) => {
+      const req = http.request(`${url}/?query_id=unregistered-1`, { agent, method: 'POST' }, () => resolve('sent'))
+      req.on('error', resolve)
+      req.end('INSERT INTO t SELECT 1')
+    })
+    agent.destroy()
+
+    expect(isSendNotAdmitted(error)).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(received).not.toContain('unregistered-1')
+  })
+
+  test('hands off after the admitted request is written, and after a failed connection', async () => {
+    const events: string[] = []
+    const db = executor()
+    await db.submit('INSERT INTO t SELECT 1', 'handoff-1', undefined, {
+      admit: () => {
+        events.push('admit')
+        return true
+      },
+      handedOff: () => events.push('handed off'),
+    })
+    expect(events).toEqual(['admit', 'handed off'])
+    await db.close()
+
+    const cold = executor(`http://127.0.0.1:${await closedPort()}`)
+    let handedOff = 0
+    await cold.submit('INSERT INTO t SELECT 1', 'handoff-cold-1', undefined, { admit: () => true, handedOff: () => { handedOff++ } }).catch(() => undefined)
+    expect(handedOff).toBe(1)
+    await cold.close()
+  })
+})
+

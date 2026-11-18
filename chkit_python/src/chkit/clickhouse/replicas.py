@@ -57,6 +57,31 @@ def resolve_replica_fanout_or_raise(
     return fanout
 
 
+#: The SETTINGS of a read that proves what ran (#765): no replica left out,
+#: and the strict control settings, so an inherited cache or overflow mode
+#: (``read_overflow_mode = 'break'``) never returns a partial result as a
+#: whole one. A user who may not change them gets an error: the read fails
+#: closed. TS ``STRICT_READ_SETTINGS``.
+STRICT_READ_SETTINGS = ", ".join(
+    (
+        "skip_unavailable_shards = 0",
+        "use_query_cache = 0",
+        "enable_reads_from_query_cache = 0",
+        "enable_writes_to_query_cache = 0",
+        "read_overflow_mode = 'throw'",
+        "read_overflow_mode_leaf = 'throw'",
+        "group_by_overflow_mode = 'throw'",
+        "sort_overflow_mode = 'throw'",
+        "result_overflow_mode = 'throw'",
+        "timeout_overflow_mode = 'throw'",
+        "timeout_overflow_mode_leaf = 'throw'",
+        "set_overflow_mode = 'throw'",
+        "transfer_overflow_mode = 'throw'",
+        "distinct_overflow_mode = 'throw'",
+    )
+)
+
+
 def all_replicas(fanout: ReplicaFanout, source: str) -> str:
     """``source`` read on every replica, e.g. ``all_replicas(fanout, "system.tables")``."""
     return f"clusterAllReplicas({string_literal(fanout.cluster)}, {source})"
@@ -105,7 +130,7 @@ def probe_replica_access(client: Any, cluster: str | None = None) -> ReplicaAcce
         rows = client.query(
             "SELECT count(DISTINCT hostName()) AS replicas "
             f"FROM clusterAllReplicas({string_literal(name)}, system.one) "
-            "SETTINGS skip_unavailable_shards = 0"
+            f"SETTINGS {STRICT_READ_SETTINGS}"
         ).rows
     except Exception as error:
         if _is_missing_cluster(error):

@@ -636,10 +636,11 @@ class ClickHouseClient:
 class SendAdmission(Protocol):
     """Asked by ``submit_once`` right before its request enters the transport
     (#765). ``admit`` returning False sends nothing. ``handed_off`` is called
-    once the request has entered urllib3's ``urlopen``; a caller also ends its
-    own wait when ``submit_once`` returns or raises without getting there. A
-    caller that stops can therefore wait until every admitted send has handed
-    off, and know that no request of it starts afterwards."""
+    once urllib3 has written the request line and headers to the socket (as it
+    reads the body); a caller also ends its own wait when ``submit_once``
+    returns or raises without getting there. A caller that stops can
+    therefore wait until every admitted send has handed off, and know that no
+    request of it starts afterwards."""
 
     def admit(self) -> bool: ...
 
@@ -698,6 +699,19 @@ def _dispose_pool(pool: Any) -> None:
     httputil.all_managers.pop(pool, None)
 
 
+def _body_after_handoff(body: object, admission: SendAdmission) -> Any:
+    """``body`` as an iterable that reports the handoff when urllib3 first
+    reads it, after the request line and headers are on the socket."""
+    data = body.encode() if isinstance(body, str) else body
+
+    def chunks() -> Any:
+        admission.handed_off()
+        if data:
+            yield data
+
+    return chunks()
+
+
 def install_send_hook(pool: Any) -> None:
     """Make ``pool.urlopen`` ask the current request's admission (#765)."""
     original = pool.urlopen
@@ -713,9 +727,13 @@ def install_send_hook(pool: Any) -> None:
             msg = "The request was not sent: its caller stopped"
             raise SendNotAdmittedError(msg)
         send.sent = True
-        if send.admission is not None:
-            # In the transport: the request starts whatever happens next.
-            send.admission.handed_off()
+        admission = send.admission
+        if admission is not None:
+            # Handed off once urllib3 asks for the body: by then it has
+            # written the request line and headers to the socket, so the
+            # request has started. A request that fails before that never
+            # started; its caller ends the wait when submit_once returns.
+            kwargs = {**kwargs, "body": _body_after_handoff(kwargs.get("body"), admission)}
         return original(method, url, *args, **{**kwargs, "retries": False})
 
     pool.urlopen = urlopen

@@ -219,6 +219,12 @@ async function runBackfillLocked(
     })
     await progressWrites
 
+    // A run is completed only when every chunk is done (#765).
+    if (result.failed === 0 && result.completed !== result.total) {
+      throw new Error(
+        `Backfill plan ${plan.planId}: ${result.total - result.completed} of ${result.total} chunks did not run, so the run is not marked completed. Resume it.`,
+      )
+    }
     runState.status = result.failed > 0 ? 'failed' : 'completed'
     runState.completedAt = nowIso()
     runState.updatedAt = nowIso()

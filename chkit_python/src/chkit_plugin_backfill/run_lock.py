@@ -196,9 +196,12 @@ def with_run_lock(
             raise RuntimeError(msg)
         return result
     finally:
-        for caught, handler in previous.items():
-            signal.signal(caught, handler)
         signum = stop.signum
+        # On the way to the forced exit the handlers stay installed: a second
+        # signal must not raise KeyboardInterrupt and wait for an INSERT.
+        if signum is None:
+            for caught, handler in previous.items():
+                signal.signal(caught, handler)
         if signum is not None:
             name = signal.Signals(signum).name
             sys.stderr.write(_interrupt_message(plan_id, name, command, released) + "\n")

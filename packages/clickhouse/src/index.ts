@@ -679,6 +679,7 @@ export {
 	waitForView,
 } from './ddl-propagation.js'
 export { isSendNotAdmitted, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
+export { STRICT_READ_SETTINGS } from './replicas.js'
 export { allReplicas, probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaAccess, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
 export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
@@ -852,6 +853,7 @@ export function createExecutorWithClient(
 	const admissions = new Map<string, SubmitAdmission>()
 	let admissionClient: ClickHouseClient | undefined
 	let sendQueue: ReturnType<typeof createSendQueue> | undefined
+	const admittedIds = new Set<string>()
 	let compressedClient: ClickHouseClient | undefined
 	let controlClient: ClickHouseClient | undefined
 
@@ -1125,6 +1127,12 @@ export function createExecutorWithClient(
 			let target = fireAndForgetClient
 			const recorded = admission ? recordingAdmission(admission) : undefined
 			let releaseSlot: (() => void) | undefined
+			// One admission per in-flight query id, from the queue on: a second
+			// submit of the same id would share the first one's record.
+			if (recorded && admittedIds.has(id)) {
+				throw new Error(`A submit with query id ${id} is already in flight on this executor.`)
+			}
+			if (recorded) admittedIds.add(id)
 			if (recorded && admission) {
 				admissionClient ??= createStatelessClickHouseClient(
 					config,
@@ -1135,7 +1143,12 @@ export function createExecutorWithClient(
 				target = admissionClient
 				// Waits for a connection slot here, not in the agent: a stop
 				// refuses a waiting submit before it reaches the agent.
-				releaseSlot = await acquireSendSlot(sendQueue, admission.signal)
+				try {
+					releaseSlot = await acquireSendSlot(sendQueue, admission.signal)
+				} catch (error) {
+					admittedIds.delete(id)
+					throw error
+				}
 				admissions.set(id, recorded.admission)
 			}
 			try {
@@ -1152,7 +1165,10 @@ export function createExecutorWithClient(
 				if (recorded?.refused() || isSendNotAdmitted(error)) throw sendNotAdmittedError()
 				wrapConnectionError(error, config.url, config.username)
 			} finally {
-				if (admission) admissions.delete(id)
+				if (admission) {
+					admissions.delete(id)
+					admittedIds.delete(id)
+				}
 				releaseSlot?.()
 			}
 			return id

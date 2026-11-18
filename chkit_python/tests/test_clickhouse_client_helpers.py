@@ -8,6 +8,7 @@ branching, ``wrap_connection_error``).
 
 from __future__ import annotations
 
+import socket
 import threading
 import time
 from typing import Any
@@ -16,6 +17,7 @@ from urllib.parse import urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
+import urllib3
 from clickhouse_connect import common
 from clickhouse_connect.driver import client as driver_client  # type: ignore[import-untyped]
 from clickhouse_connect.driver import (
@@ -26,6 +28,7 @@ from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[i
 from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
 from pytest_httpx import HTTPXMock
 from urllib3 import Timeout
+from urllib3.connection import HTTPConnection
 from urllib3.exceptions import ProtocolError
 
 from chkit.clickhouse import (
@@ -36,10 +39,12 @@ from chkit.clickhouse import (
     wrap_connection_error,
 )
 from chkit.clickhouse.client import (
+    _CURRENT_SEND,
     SEND_ADMISSION,
     SendNotAdmittedError,
     _dispose_pool,
     _own_pool_manager,
+    _Send,
     clickhouse_error_message,
     install_send_hook,
 )
@@ -224,6 +229,13 @@ def test_tracked_execute_blocks_the_pinned_drivers_remote_close_retry() -> None:
 
 
 # #765: a backfill chunk resent under its attempt id after a connection reset
+
+def _write_body(body: object) -> None:
+    """Read the body as urllib3 does once the headers are written."""
+    if body is not None and not isinstance(body, (bytes, str)):
+        for _chunk in body:  # type: ignore[attr-defined]
+            pass
+
 class _FakePoolManager:
     """A urllib3 PoolManager stand-in: ``request`` enters ``urlopen``, as the
     real one does; ``urlopen`` records each request, optionally failing or
@@ -244,6 +256,7 @@ class _FakePoolManager:
         pass
 
     def urlopen(self, method: str, url: str, **kwargs: object) -> object:
+        _write_body(kwargs.get("body"))
         self.urlopened.append(url)
         if self.error is not None:
             raise self.error
@@ -852,3 +865,53 @@ def test_a_submit_in_flight_across_close_leaves_the_pool_out_of_the_registry(
     assert len(outcome) == 1
     assert "cannot be resent" in str(outcome[0])
     assert pool not in httputil.all_managers
+
+
+# #765 whole-branch review: the handoff comes only once the request has
+# started (its request line and headers are on the socket), through the real
+# urllib3 pool and connection against a local socket.
+def test_the_handoff_follows_the_written_headers(monkeypatch: pytest.MonkeyPatch) -> None:
+    events: list[str] = []
+    real_endheaders = HTTPConnection.endheaders
+
+    def endheaders(self: HTTPConnection, *args: Any, **kwargs: Any) -> None:
+        real_endheaders(self, *args, **kwargs)
+        events.append("headers written")
+
+    monkeypatch.setattr(HTTPConnection, "endheaders", endheaders)
+    listener = socket.socket()
+    listener.bind(("127.0.0.1", 0))
+    listener.listen(1)
+    port = listener.getsockname()[1]
+
+    def serve() -> None:
+        conn, _ = listener.accept()
+        data = b""
+        while b"\r\n0\r\n\r\n" not in data and b"SELECT 1" not in data:
+            data += conn.recv(4096)
+        conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
+        conn.close()
+
+    server = threading.Thread(target=serve, daemon=True)
+    server.start()
+
+    class Recording:
+        def admit(self) -> bool:
+            events.append("admitted")
+            return True
+
+        def handed_off(self) -> None:
+            events.append("handed off")
+
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    token = _CURRENT_SEND.set(_Send(Recording()))
+    try:
+        response = pool.request("POST", f"http://127.0.0.1:{port}/", body=b"SELECT 1")
+    finally:
+        _CURRENT_SEND.reset(token)
+        listener.close()
+        pool.clear()
+
+    assert response.status == 200
+    assert events == ["admitted", "headers written", "handed off"]

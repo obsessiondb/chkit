@@ -12,6 +12,11 @@ import https from 'node:https'
  */
 export interface SubmitAdmission {
   admit(): boolean
+  /** Called once an admitted request has written its bytes to its socket,
+   *  or has ended without getting there (#765): until then the request could
+   *  still start, so a caller that stops waits for this, never for the
+   *  response. */
+  handedOff?(): void
   /** Aborted when the caller stops. A submit still waiting for a connection
    *  slot (see `createSendQueue`) is then refused without ever reaching the
    *  HTTP agent. */
@@ -152,10 +157,19 @@ export function createAdmissionAgent(url: string, admissions: Map<string, Submit
     // Admission is decided before the agent touches a socket. A refused
     // request is still handed to the agent (the driver only sees an error on
     // a request that has one) and destroyed at once, so nothing is written.
+    // Every request of this agent's client has an admission: one without
+    // a matching record is refused (fails closed).
     const queryId = new URL(req.path, 'http://localhost').searchParams.get('query_id')
     const admission = queryId === null ? undefined : admissions.get(queryId)
     if (admission && queryId !== null) admissions.delete(queryId)
-    const admitted = admission ? admission.admit() : true
+    const admitted = admission ? admission.admit() : false
+    if (admitted && admission?.handedOff) {
+      const handedOff = once(admission.handedOff.bind(admission))
+      // 'finish': the request's bytes are flushed to the socket.
+      req.once('finish', handedOff)
+      req.once('error', handedOff)
+      req.once('close', handedOff)
+    }
     addRequest(req, requestOptions)
     if (!admitted) req.destroy(sendNotAdmittedError())
   }
@@ -176,6 +190,7 @@ export function recordingAdmission(admission: SubmitAdmission): { admission: Sub
         if (!admitted) refused = true
         return admitted
       },
+      ...(admission.handedOff ? { handedOff: () => admission.handedOff?.() } : {}),
     },
     refused: () => refused,
   }

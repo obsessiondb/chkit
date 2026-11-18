@@ -380,3 +380,47 @@ with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, body, command="cancel")
     assert not lock_path.exists()
     assert f"Backfill plan {PLAN_ID}: cancel interrupted (SIGINT); the lock is released." in stderr
 
+
+
+# #765 whole-branch review: a second SIGINT on the way to the forced exit is
+# caught too; it never raises KeyboardInterrupt into a wait for an INSERT.
+def test_a_second_sigint_during_the_forced_exit_changes_nothing(tmp_path: Path) -> None:
+    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
+    script = f"""
+import sys, threading, time
+from chkit_plugin_backfill.run_lock import with_run_lock
+
+class SlowStderr:
+    def __init__(self, inner):
+        self.inner = inner
+    def write(self, text):
+        if "interrupted" in text:
+            print("exiting", flush=True)
+            time.sleep(0.5)  # the second SIGINT lands here
+        return self.inner.write(text)
+    def flush(self):
+        self.inner.flush()
+
+sys.stderr = SlowStderr(sys.stderr)
+insert_done = threading.Event()
+
+def body(stop):
+    print("ready", flush=True)
+    stop.wait(30)
+
+with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, body)
+insert_done.wait(30)  # stands in for an INSERT the exit must not wait for
+"""
+    child = _python(script)
+    _wait_for(child, "ready")
+
+    child.send_signal(signal.SIGINT)
+    _wait_for(child, "exiting")
+    child.send_signal(signal.SIGINT)
+    started = time.monotonic()
+    _stdout, stderr = child.communicate(timeout=20)
+
+    assert child.returncode == 130
+    assert time.monotonic() - started < 5
+    assert "KeyboardInterrupt" not in stderr
+    assert not lock_path.exists()

@@ -5,6 +5,7 @@ import {
   allReplicas,
   isSendNotAdmitted,
   probeReplicaAccess,
+  STRICT_READ_SETTINGS,
   stringLiteral,
   type ClickHouseExecutor,
 } from '@chkit/clickhouse'
@@ -352,7 +353,13 @@ function classifyAttempt(
   const kind = attemptKind(planId, chunkId, state)
   const failure = own.find((row) => FAILURE_TYPES.has(row.type))
   if (failure && state.singleSend === true && evidence.partial === undefined) {
-    const written = Math.max(...own.map((row) => Number(row.written_rows) || 0))
+    // Proof needs every row of the id to state, as a number, that it wrote
+    // nothing, and no earlier poll of this attempt to have seen it write.
+    const counts = own.map((row) => rowCount(row.written_rows))
+    if (counts.some((count) => count === undefined)) {
+      return { kind: 'unknown', reason: 'system.query_log does not say how many rows it wrote' }
+    }
+    const written = Math.max(...(counts as number[]), state.writtenRows ?? 0)
     if (written === 0) return { kind: 'failed', row: failure }
     return { kind: 'unknown', reason: `it failed after writing ${written} rows, which a replay would write again` }
   }
@@ -368,6 +375,13 @@ function classifyAttempt(
     return { kind: 'unknown', reason: 'an older release may have sent it more than once under this query id, so the failure in system.query_log may not be its last send' }
   }
   return { kind: 'unknown', reason: 'it is not running on any replica and system.query_log has no outcome for it' }
+}
+
+/** A row count as query_log reports it: a whole number, or its digits. */
+function rowCount(value: number | string | null | undefined): number | undefined {
+  if (typeof value === 'number') return Number.isSafeInteger(value) && value >= 0 ? value : undefined
+  if (typeof value === 'string' && /^\d+$/.test(value)) return Number(value)
+  return undefined
 }
 
 function applyEvidence(
@@ -435,7 +449,7 @@ interface RunningRow {
 interface ChunkLogRow {
   query_id: string
   type: string
-  written_rows: number | string
+  written_rows: number | string | null
   written_bytes: number | string
   query_duration_ms: number | string
   exception: string
@@ -511,7 +525,7 @@ async function readEvidence(
   const from = (table: 'processes' | 'query_log') =>
     access.kind === 'fanout' ? allReplicas(access.fanout, `system.${table}`) : `system.${table}`
   const runningRows = await executor.query<RunningRow>(
-    `SELECT query_id, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE user = currentUser() AND ${match} SETTINGS skip_unavailable_shards = 0`
+    `SELECT query_id, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE user = currentUser() AND ${match} SETTINGS ${STRICT_READ_SETTINGS}`
   )
   const logRows = await executor.query<ChunkLogRow>(
     `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
@@ -521,7 +535,7 @@ WHERE user = currentUser()
   AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart', 'ExceptionWhileProcessing')
   AND is_initial_query = 1${pruning}
 ORDER BY event_time DESC
-SETTINGS skip_unavailable_shards = 0`
+SETTINGS ${STRICT_READ_SETTINGS}`
   )
   return {
     running: new Map(runningRows.map((row) => [row.query_id, row])),
@@ -807,6 +821,8 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
       resolve()
     }, reject)
   })
+  // A stop after the last chunk settled may have refused a chunk's send.
+  if (signal?.aborted) throw interruptedError(planId)
   if (stopError) throw stopError.error
   if (pollUnknown.length > 0) throw unknownOutcomeError(planId, pollUnknown)
 
@@ -881,12 +897,12 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
         return undefined
       }
       if (sendsOnce) {
+        // The handoff settles once the request's bytes are on its socket (or
+        // it ended without getting there): only then can no part of it start
+        // after an interrupt returned.
         await executor.submit(sql, queryId, undefined, {
-          admit: () => {
-            const admitted = mayStart()
-            if (admitted) settle()
-            return admitted
-          },
+          admit: () => mayStart(),
+          handedOff: settle,
           signal: dispatchStopped.signal,
         })
       } else {

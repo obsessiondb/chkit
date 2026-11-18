@@ -1964,6 +1964,13 @@ def test_an_attempt_of_an_executor_that_may_resend_is_never_proved_failed() -> N
 
 # Round 4 items 1 and 4, through ClickHouseClient.submit_once and its
 # single-attempt pool: a fake urllib3 pool whose request() enters urlopen().
+
+def _write_body(body: object) -> None:
+    """Read the body as urllib3 does once the headers are written."""
+    if body is not None and not isinstance(body, (bytes, str)):
+        for _chunk in body:  # type: ignore[attr-defined]
+            pass
+
 class _FakePool:
     def __init__(self, gate: threading.Event | None = None) -> None:
         self.gate = gate
@@ -1975,6 +1982,7 @@ class _FakePool:
         return self.urlopen(method, url, **kwargs)
 
     def urlopen(self, method: str, url: str, **kwargs: object) -> object:
+        _write_body(kwargs.get("body"))
         self.entered.append(url)
         return MagicMock(status=200)
 
@@ -2279,3 +2287,76 @@ def test_an_unmarked_submit_once_is_still_preferred_over_a_resending_submit() ->
     assert once_pool.attempts == 1
     assert resending_pool.attempts == 0
     assert saved[-1]["c1"].single_send is None
+
+
+# #765 whole-branch review: a stop during the dispatcher's last wait, whose
+# only worker is then refused, must not end the run as if it had run.
+def test_a_stop_during_the_last_wait_raises_instead_of_returning_an_unrun_chunk() -> None:
+    stop = threading.Event()
+    executor = SubmitRecordingExecutor({})
+
+    def build_query(_chunk_id: str) -> str:
+        stop.set()  # the worker is then refused at its admission
+        return "SELECT 1"
+
+    with pytest.raises(RuntimeError, match=rf"Backfill plan {PLAN_ID}: interrupted\."):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=build_query,
+            poll_interval_ms=1,
+            stop=stop,
+        )
+    assert executor.submit_order == []
+
+
+# #765 whole-branch review: a failure proves a safe replay only with an
+# explicit zero for its written rows, and none seen written before.
+@pytest.mark.parametrize(
+    ("written_rows", "seen", "reason"),
+    [
+        (None, None, "system.query_log does not say how many rows it wrote"),
+        ("", None, "system.query_log does not say how many rows it wrote"),
+        ("0", 37, "it failed after writing 37 rows, which a replay would write again"),
+    ],
+)
+def test_a_failure_without_an_explicit_zero_write_is_unknown(
+    written_rows: object, seen: int | None, reason: str
+) -> None:
+    class Rows(SubmitRecordingExecutor):
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "system.one" in statement:
+                return [{"replicas": 1}]
+            if "system.query_log" in statement:
+                return [
+                    {
+                        "query_id": FIRST_ID,
+                        "type": "ExceptionWhileProcessing",
+                        "written_rows": written_rows,
+                        "written_bytes": "0",
+                        "query_duration_ms": "1",
+                        "exception": "late block",
+                    }
+                ]
+            return []
+
+    executor = Rows({})
+    with pytest.raises(RuntimeError) as raised:
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            resume_from={
+                "c1": BackfillChunkState(
+                    status="failed", query_id=FIRST_ID, single_send=True, written_rows=seen
+                )
+            },
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=True,
+            outcome_recheck_attempts=1,
+            outcome_recheck_interval_ms=1,
+        )
+    assert str(raised.value) == _unknown_error(FIRST_ID, reason)
+    assert executor.submit_order == []

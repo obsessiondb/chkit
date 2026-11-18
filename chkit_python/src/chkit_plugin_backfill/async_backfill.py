@@ -27,6 +27,7 @@ from typing import Protocol, TypeAlias, TypeVar
 
 from chkit.clickhouse.client import SEND_ADMISSION, SendNotAdmittedError
 from chkit.clickhouse.replicas import (
+    STRICT_READ_SETTINGS,
     all_replicas,
     probe_replica_access,
     string_literal,
@@ -408,7 +409,15 @@ def _classify_attempt(  # noqa: PLR0911 — mirrors the TS classifier
     kind = _attempt_kind(plan_id, chunk_id, state)
     failure = next((row for row in own if row.get("type") in _FAILURE_TYPES), None)
     if failure is not None and state.single_send is True and evidence.partial is None:
-        written = max((_to_int(row.get("written_rows")) or 0) for row in own)
+        # Proof needs every row of the id to state, as a number, that it
+        # wrote nothing, and no earlier poll of this attempt to have seen it
+        # write.
+        counts = [_row_count(row.get("written_rows")) for row in own]
+        if any(count is None for count in counts):
+            return _Outcome(
+                "unknown", reason="system.query_log does not say how many rows it wrote"
+            )
+        written = max([*(count or 0 for count in counts), state.written_rows or 0])
         if written == 0:
             return _Outcome("failed", failure)
         return _Outcome(
@@ -564,7 +573,7 @@ def _read_evidence(
         "SELECT query_id, read_rows, read_bytes, written_rows, written_bytes, elapsed "
         f"FROM {source('system.processes')} "
         f"WHERE user = currentUser() AND {match} "
-        "SETTINGS skip_unavailable_shards = 0"
+        f"SETTINGS {STRICT_READ_SETTINGS}"
     )
     log_result = executor.query(
         "SELECT query_id, type, written_rows, written_bytes, query_duration_ms,"
@@ -576,7 +585,7 @@ def _read_evidence(
         " 'ExceptionWhileProcessing')\n"
         f"  AND is_initial_query = 1{pruning}\n"
         "ORDER BY event_time DESC\n"
-        "SETTINGS skip_unavailable_shards = 0"
+        f"SETTINGS {STRICT_READ_SETTINGS}"
     )
     running = {
         str(row.get("query_id")): row
@@ -691,6 +700,17 @@ def _rows_of(result: object) -> list[dict[str, object]]:
     if isinstance(rows, list):
         return [row for row in rows if isinstance(row, dict)]
     return []
+
+
+def _row_count(value: object) -> int | None:
+    """A row count as query_log reports it: a whole number, or its digits."""
+    if isinstance(value, bool):
+        return None
+    if isinstance(value, int):
+        return value if value >= 0 else None
+    if isinstance(value, str) and value.isdigit():
+        return int(value)
+    return None
 
 
 def _to_int(value: object) -> int | None:
@@ -1103,6 +1123,12 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                 _done, pending_futures = wait(
                     pending_futures, timeout=_STOP_CHECK_S, return_when=FIRST_COMPLETED
                 )
+            # A stop during the last wait: a worker it refused left its chunk
+            # unrun, and the run must not end as if it had run.
+            if stop is not None and stop.is_set():
+                interrupted = True
+                close()
+                raise _interrupted_error(plan_id)
             for future in futures:
                 error = future.exception()
                 if error is not None:
