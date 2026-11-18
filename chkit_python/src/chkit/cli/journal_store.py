@@ -183,6 +183,37 @@ _FINGERPRINTS_COLUMN: Final[str] = "operation_fingerprints"
 _FINGERPRINTS_COLUMN_DEFINITION: Final[str] = f"{_FINGERPRINTS_COLUMN} Array(String) DEFAULT []"
 
 
+class EveryCopyRead(BaseModel):
+    """A statement's record read from every copy of the journal (#767)."""
+
+    covered: bool
+    op: OperationState | None
+
+
+def every_copy_read(
+    rows: list[dict[str, Any]],
+    find_op: Callable[[Any, Any], OperationState | None],
+) -> EveryCopyRead:
+    """Whether one read's per-replica rows cover the journal's replica set (#767).
+
+    A row without a replica name, or a member no row names, leaves the read
+    uncovered; otherwise the newest record among them is the record.
+    """
+    if not rows or any(str(row["replica"]) == "" for row in rows):
+        return EveryCopyRead(covered=False, op=None)
+    read = {str(row["replica"]) for row in rows}
+    members = {str(member) for row in rows for member in row["members"]}
+    if not members or not members <= read:
+        return EveryCopyRead(covered=False, op=None)
+    present = [row for row in rows if int(row["present"]) > 0]
+    if not present:
+        return EveryCopyRead(covered=True, op=None)
+    newest = max(present, key=lambda row: str(row["applied_at"]))
+    return EveryCopyRead(
+        covered=True, op=find_op(newest["operations"], newest["operation_fingerprints"])
+    )
+
+
 class _UnknownDatabaseError(Exception):
     pass
 
@@ -883,31 +914,74 @@ class JournalStore:
             )
         )
 
-    def reads_every_copy(self) -> bool:
-        """Whether a journal read returns the newest record on every copy (#767).
+    def read_operation_on_every_copy(
+        self, migration_name: str, statement_index: int
+    ) -> EveryCopyRead:
+        """The statement's record, read in one query from every copy of the journal (#767).
 
-        It reads every replica, or the journal has one copy.
+        ``covered`` is false when that read cannot be shown to cover every
+        copy: a replicated journal with a replica the read did not reach, or
+        with replicas it cannot name, or a journal that is not replicated on a
+        target with several replicas.
         """
-        # A multi-replica journal is read on every replica, and that read
-        # fails when one of them cannot be read.
-        if self._replica_fanout() is not None:
-            return True
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return EveryCopyRead(covered=True, op=None)
+        database = self._database_name()
+        fanout = self._replica_fanout()
         rows = self._client.query(
             "SELECT engine FROM system.tables WHERE database = currentDatabase() "
             f"AND name = '{self._table}'"
         ).rows
+
+        def find_op(operations: Any, fingerprints: Any) -> OperationState | None:
+            return next(
+                (
+                    op
+                    for op in _parse_operations(operations, fingerprints)
+                    if op.operation_index == statement_index
+                ),
+                None,
+            )
+
         if rows and not re.match(r"^(Replicated|Shared)", str(rows[0]["engine"])):
-            return True
-        # A replicated journal without a fanout: only one replica may hold it.
-        cluster = self._cluster or "default"
-        try:
-            hosts = self._client.query(
-                "SELECT count(DISTINCT hostName()) AS replicas FROM "
-                f"clusterAllReplicas('{_escape_sql_string(cluster)}', system.one)"
-            ).rows
-        except Exception:
-            return False
-        return bool(hosts) and int(hosts[0]["replicas"]) == 1
+            # One copy only on a single server: on several replicas, a journal
+            # that is not replicated is a different journal on each.
+            if fanout is not None:
+                return EveryCopyRead(covered=False, op=None)
+            found = self._journal_rows(
+                f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1"
+            )
+            return EveryCopyRead(
+                covered=True,
+                op=find_op(found[0].get("operations"), found[0].get(_FINGERPRINTS_COLUMN))
+                if found
+                else None,
+            )
+        # A replicated journal: every replica in the table's replica set, named
+        # by the set itself, must answer the same read, and the newest version
+        # of the record across them is the record. Each server answers for
+        # itself, joined with its own copy (a scalar subquery would run on the
+        # server that receives the query only).
+        fingerprints = (
+            f"toJSONString({_FINGERPRINTS_COLUMN})" if self._fingerprint_column else "'[]'"
+        )
+        name = _escape_sql_string(migration_name)
+        per_copy = (
+            "SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, "
+            "j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, "
+            "j.latest.3 AS operation_fingerprints FROM system.replicas AS r CROSS JOIN "
+            "(SELECT count() AS present, argMax(tuple(toString(applied_at), "
+            f"{_OPERATIONS_SELECT}, {fingerprints}), applied_at) AS latest FROM "
+            f"{self._qualified_table()} WHERE name = '{name}') AS j WHERE r.database = "
+            f"'{_escape_sql_string(database)}' AND r.table = '{self._table}'"
+        )
+        cluster = fanout.cluster if fanout is not None else (self._cluster or "default")
+        copies = self._client.query(
+            "SELECT replica, members, present, applied_at, operations, operation_fingerprints "
+            f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))"
+        ).rows
+        return every_copy_read(copies, find_op)
 
     def stores_attempt_fences(self) -> bool:
         """Whether the journal stores an async attempt's fence (#767).

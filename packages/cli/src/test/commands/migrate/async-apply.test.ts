@@ -120,8 +120,8 @@ function createFakeJournalStore(initial: MigrationRowState | null = null, option
     async readStoredOperation(_name, index) {
       return current?.operations.find((op) => op.operationIndex === index)
     },
-    async readsEveryCopy() {
-      return everyCopy
+    async readOperationOnEveryCopy(name, index) {
+      return everyCopy ? { covered: true as const, op: await this.readStoredOperation(name, index) } : { covered: false as const }
     },
     async writeMigrationState(state) {
       writes.push(state)
@@ -820,6 +820,30 @@ describe('applyAsyncStatement', () => {
       expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
     })
   }
+
+  // #767 (round 5): a statement that fails while it runs stops the run at
+  // once too, without waiting for a submit a proxy holds open.
+  test('a failure while it runs aborts a submit that never settles and stops with async_outcome_unknown', async () => {
+    const fake = createFakeExecutor([
+      { status: 'unknown' },
+      { status: 'failed', error: 'Code: 395. throwIf', beforeStart: false },
+    ])
+    let signal: AbortSignal | undefined
+    const db = {
+      ...fake.db,
+      submit: (_sql: string, _queryId?: string, _settings?: unknown, options?: { signal?: AbortSignal }) => {
+        signal = options?.signal
+        return new Promise(() => {})
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({ ...BASE_INPUT, db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('failed while it ran') })
+    expect(signal?.aborted).toBe(true)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
+  })
 
   // #767 (round 3): only unknown polls in a row count; a failed poll request
   // starts the count again.

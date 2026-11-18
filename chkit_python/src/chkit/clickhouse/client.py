@@ -14,7 +14,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable
-from typing import Any, Literal, NoReturn, Self
+from typing import Any, Literal, NoReturn, Self, TypeVar
 from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -609,6 +609,8 @@ class _SingleAttemptPool:
 # submit driver is shared by concurrent submits (#767).
 _SUBMIT_SEND = threading.local()
 
+_T = TypeVar("_T")
+
 
 class _NoReplayPool:
     """Never replay a sent request, for clients whose requests run concurrently.
@@ -646,33 +648,53 @@ class _NoReplayPool:
 SUBMIT_CONNECT_TIMEOUT_SECONDS = 10.0
 
 
-def _commit_submit(conn: Any) -> None:
-    """Connect, then let the submitting thread's guard stop the first bytes (#767)."""
-    before_send = getattr(_SUBMIT_SEND, "before_send", None)
-    if before_send is None:
-        return
-    if conn.sock is None:
-        conn.connect()
-    commit = getattr(before_send, "commit", None)
-    if commit is None:
-        return
-    try:
-        commit()
-    except BaseException:
-        conn.close()
-        raise
+def guarded_first_write(guard: Any, write: Callable[[], _T]) -> _T:
+    """Run the request's first write under the submit's guard (#767).
+
+    A guard with ``first_write`` refuses the write once the run gave up on the
+    submit, and holds the run's give-up until the write returned, so a request
+    is either sent before the run stops or never.
+    """
+    first_write = getattr(guard, "first_write", None)
+    return first_write(write) if first_write is not None else write()
 
 
-class _GuardedHTTPConnection(HTTPConnection):
+class _GuardedSend:
+    """The submitting thread's guard on the first bytes of each request.
+
+    The connection is opened first (connection setup is not sending), then
+    the first ``send`` of the request goes through the guard.
+    """
+
+    _guard: Any = None
+
     def request(self, *args: Any, **kwargs: Any) -> None:
-        _commit_submit(self)
-        super().request(*args, **kwargs)
+        self._guard = getattr(_SUBMIT_SEND, "before_send", None)
+        try:
+            super().request(*args, **kwargs)  # type: ignore[misc]
+        finally:
+            self._guard = None
+
+    def send(self, data: Any) -> None:
+        guard, self._guard = self._guard, None
+        if guard is None:
+            super().send(data)  # type: ignore[misc]
+            return
+        if self.sock is None:  # type: ignore[attr-defined]
+            self.connect()  # type: ignore[attr-defined]
+        try:
+            guarded_first_write(guard, lambda: super(_GuardedSend, self).send(data))  # type: ignore[misc]
+        except BaseException:
+            self.close()  # type: ignore[attr-defined]
+            raise
 
 
-class _GuardedHTTPSConnection(HTTPSConnection):
-    def request(self, *args: Any, **kwargs: Any) -> None:
-        _commit_submit(self)
-        super().request(*args, **kwargs)
+class _GuardedHTTPConnection(_GuardedSend, HTTPConnection):
+    pass
+
+
+class _GuardedHTTPSConnection(_GuardedSend, HTTPSConnection):
+    pass
 
 
 class _GuardedHTTPConnectionPool(HTTPConnectionPool):

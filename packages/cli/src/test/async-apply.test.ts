@@ -15,8 +15,8 @@ function makeJournalStore(): JournalStore {
     async readStoredOperation(_name: string, index: number) {
       return state?.operations.find((op) => op.operationIndex === index)
     },
-    async readsEveryCopy() {
-      return true
+    async readOperationOnEveryCopy(name: string, index: number) {
+      return { covered: true as const, op: await this.readStoredOperation(name, index) }
     },
     async writeMigrationState(next: MigrationRowState) {
       state = next

@@ -21,6 +21,7 @@ from typing import Any
 from chkit import __version__
 from chkit.cli.commands.migrate_async_apply import (
     AsyncApplyInput,
+    RecordedAttempt,
     apply_async_statement,
     finished_record_of,
     fresh_migration_state,
@@ -192,12 +193,15 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 recorded_by=initial_state.chkit_version,
                 cli_version=__version__,
             )
+    # The outcomes the edit's check read for the attempts it keeps, so the
+    # sync path does not look them up, through the query_log rechecks, again.
+    edit_resolved: dict[int, tuple[OperationState, RecordedAttempt]] = {}
     if (
         initial_state is not None
         and not initial_state.migration_completed
         and initial_state.checksum != migration_checksum
     ):
-        _accept_edited_migration(
+        edit_resolved = _accept_edited_migration(
             client=input_.client,
             file=file,
             state=initial_state,
@@ -215,6 +219,29 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         operation is not None and operation.mode == "async" for operation in operation_summaries
     ) and not journal_store.stores_attempt_fences():
         raise _unfenced_journal_error(file)
+
+    # A statement a plugin's onBeforeApply dropped is never visited below, so
+    # its recorded async attempt is read, against the identity it was recorded
+    # with, before anything runs: one still running or without an outcome
+    # stops the run with the journal as it was, instead of the migration being
+    # recorded as applied (#767).
+    if (
+        initial_state is not None
+        and not initial_state.migration_completed
+        and initial_state.checksum == migration_checksum
+    ):
+        omitted = [
+            op for op in initial_state.operations if op.operation_index >= len(statements)
+        ]
+        if omitted:
+            _assert_recorded_attempts_resolved(
+                input_.client,
+                journal_store,
+                file=file,
+                state=initial_state.model_copy(update={"operations": omitted}),
+                rebased=initial_state,
+                log=input_.log,
+            )
 
     total = len(statements)
     for index, statement in enumerate(statements):
@@ -293,6 +320,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 fingerprint=fingerprint,
                 operation_type=identity.type,
                 log=input_.log,
+                known=edit_resolved.get(index),
             )
             if resolved == "completed":
                 continue
@@ -595,7 +623,7 @@ def _accept_edited_migration(
     retry: RetryResume | None,
     journal_store: JournalStore,
     log: Callable[[str], None],
-) -> None:
+) -> dict[int, tuple[OperationState, RecordedAttempt]]:
     """Resume an in-progress migration whose file changed, or refuse.
 
     It resumes when this run's --retry verified the edit, or when no
@@ -633,10 +661,11 @@ def _accept_edited_migration(
         identities=identities,
         applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
-    _assert_recorded_attempts_resolved(
+    resolved = _assert_recorded_attempts_resolved(
         client, journal_store, file=file, state=state, rebased=rebased, log=log
     )
     journal_store.write_migration_state(rebased)
+    return resolved
 
 
 def _assert_recorded_attempts_resolved(
@@ -647,7 +676,7 @@ def _assert_recorded_attempts_resolved(
     state: MigrationRowState,
     rebased: MigrationRowState,
     log: Callable[[str], None],
-) -> None:
+) -> dict[int, tuple[OperationState, RecordedAttempt]]:
     """Resolve every recorded async attempt before an edit is accepted (#767).
 
     The ones the re-key would drop are included, each read against the
@@ -655,8 +684,10 @@ def _assert_recorded_attempts_resolved(
     outcome is unknown, and one that finished but whose record the edit drops
     (its statement would run again) stop the run here, with the journal as it
     was and nothing run. A dropped record is otherwise the only trace of an
-    attempt under a random id (#701).
+    attempt under a random id (#701). Returns the outcomes of the records the
+    edit keeps, by statement index.
     """
+    resolved: dict[int, tuple[OperationState, RecordedAttempt]] = {}
     for op in state.operations:
         if op.status == "completed" or op.query_id == "":
             continue
@@ -685,6 +716,9 @@ def _assert_recorded_attempts_resolved(
             raise outcome_unknown_error(
                 op.operation_type, op.operation_index, file, op.query_id, reason
             )
+        if not dropped:
+            resolved[op.operation_index] = (op, recorded)
+    return resolved
 
 
 _ASYNC_STOP_CODES = frozenset(
@@ -715,6 +749,7 @@ def _resolve_async_attempt_before_sync(
     fingerprint: str,
     operation_type: str,
     log: Callable[[str], None],
+    known: tuple[OperationState, RecordedAttempt] | None = None,
 ) -> str:
     """Resolve a recorded async attempt before a sync or barrier run of its statement.
 
@@ -724,18 +759,36 @@ def _resolve_async_attempt_before_sync(
     attempt that may have finished stops the run before anything is written
     or run. A running attempt keeps its record: its query id is the only way
     to find it later.
+
+    ``known`` is the outcome the edit's check read for this attempt (#767).
+    Only an outcome query_log settled for this very record, and the SQL the
+    statement still has, stands for a new lookup: an unsent, failed or
+    finished attempt stays so under the lock. An attempt that ended without
+    one is checked in system.processes again right before the statement runs.
     """
     if op.status == "completed" or op.query_id == "":
         return "run"
-    recorded = resolve_recorded_attempt(
-        client,
-        journal_store=journal_store,
-        migration_name=file,
-        op=op,
-        fingerprint=fingerprint,
-        query_id=op.query_id,
-        operation_type=operation_type,
-        log=log,
+    reusable = (
+        known is not None
+        and known[1].kind != "ended"
+        and known[0].query_id == op.query_id
+        and known[0].status == op.status
+        and known[0].last_error == op.last_error
+        and known[0].fingerprint == fingerprint
+    )
+    recorded = (
+        known[1]
+        if known is not None and reusable
+        else resolve_recorded_attempt(
+            client,
+            journal_store=journal_store,
+            migration_name=file,
+            op=op,
+            fingerprint=fingerprint,
+            query_id=op.query_id,
+            operation_type=operation_type,
+            log=log,
+        )
     )
     if recorded.kind == "running":
         raise _attempt_still_running_error(file, op)

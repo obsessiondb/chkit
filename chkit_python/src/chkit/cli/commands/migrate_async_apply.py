@@ -41,7 +41,7 @@ import uuid
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
-from typing import Literal
+from typing import Literal, TypeVar
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError, in_progress_checksum_mismatch_error
@@ -232,6 +232,9 @@ def _describe_error(error: BaseException) -> str:
     return clickhouse_error_message(error)
 
 
+_T = TypeVar("_T")
+
+
 class _Submission:
     """The submit request, open on its own thread while the poller runs.
 
@@ -240,17 +243,18 @@ class _Submission:
     ``error`` is set once the request has failed.
 
     It is also the request's guard (#767): called before the request starts,
-    and through ``commit`` once its connection is open and before its first
-    bytes are written. A run that gives up on it (``abandon``) stops both,
-    and waits, bounded by the submit's connect timeout, until a send that
-    started connecting either committed or was stopped.
+    and around the request's first write through ``first_write``, once its
+    connection is open. A run that gives up on it (``abandon``) refuses both,
+    and waits until a send that started connecting or writing either wrote
+    its first bytes or was stopped: the request is sent before the run stops,
+    or never.
     """
 
     def __init__(self, submit: Callable[[_Submission], object]) -> None:
         self.error: Exception | None = None
         self._cond = threading.Condition()
         self._cancelled = False
-        # idle, connecting, committed, done
+        # idle, connecting, writing, sent, done
         self._state = "idle"
         # A daemon, so an interrupted run exits while the request is open;
         # the query keeps running and a re-run attaches to it.
@@ -276,25 +280,37 @@ class _Submission:
                 raise RuntimeError(msg)
             self._state = "connecting"
 
-    def commit(self) -> None:
+    def first_write(self, write: Callable[[], _T]) -> _T:
+        """Write the request's first bytes, unless the run gave up on it."""
         with self._cond:
             if self._cancelled:
                 msg = "The run stopped without an outcome; the submit was not sent"
                 raise RuntimeError(msg)
-            self._state = "committed"
-            self._cond.notify_all()
+            self._state = "writing"
+        try:
+            return write()
+        finally:
+            with self._cond:
+                self._state = "sent"
+                self._cond.notify_all()
+
+    def commit(self) -> None:
+        """A first write that writes nothing (a transport without a hook)."""
+        self.first_write(lambda: None)
 
     def abandon(self) -> bool:
         """Give up on the request; return whether a late send is excluded.
 
-        A send not started never starts. One connecting is waited for, up to
-        the connect timeout, until it committed (it was sent before the run
-        gave up) or was stopped.
+        A send not started never starts. One connecting or writing its first
+        bytes is waited for, up to the connect timeout and a margin, until
+        those bytes were written (it was sent before the run gave up) or it
+        was stopped.
         """
         with self._cond:
             self._cancelled = True
             return self._cond.wait_for(
-                lambda: self._state != "connecting", SUBMIT_CONNECT_TIMEOUT_SECONDS + 5
+                lambda: self._state not in ("connecting", "writing"),
+                SUBMIT_CONNECT_TIMEOUT_SECONDS + 5,
             )
 
     @property
@@ -732,6 +748,10 @@ def _poll(
             # ran nothing: one that failed while it ran can have applied
             # writes, so its fenced started record stays for the operator.
             if not status.before_start:
+                # A proxy may hold the submit's response: the run stops as
+                # every other stop without an outcome does, without waiting.
+                if submission is not None:
+                    submission.abandon()
                 raise _failed_while_running_error(input_, query_id, status.error or "<unknown>")
             failed_op = OperationState(
                 operation_index=input_.statement_index,
@@ -1105,11 +1125,12 @@ def _prepared_is_current(
     have been sent. A read that fails counts as no.
     """
     try:
-        if not journal_store.reads_every_copy():
-            return False
-        current = journal_store.read_stored_operation(migration_name, op.operation_index)
+        read = journal_store.read_operation_on_every_copy(migration_name, op.operation_index)
     except Exception:
         return False
+    if not read.covered:
+        return False
+    current = read.op
     return (
         current is not None
         and current.status == "started"

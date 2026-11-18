@@ -96,10 +96,13 @@ export interface JournalStore {
    */
   storesAttemptFences(): Promise<boolean>
   /**
-   * Whether a journal read returns the newest record on every copy of the
-   * journal (#767): it reads every replica, or the journal has one copy.
+   * The statement's record, read in one query from every copy of the journal
+   * (#767). `covered` is false when that read cannot be shown to cover every
+   * copy: a replicated journal with a replica the read did not reach, or with
+   * replicas it cannot name, or a journal that is not replicated on a target
+   * with several replicas.
    */
-  readsEveryCopy(): Promise<boolean>
+  readOperationOnEveryCopy(migrationName: string, statementIndex: number): Promise<EveryCopyRead>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
   /**
@@ -122,6 +125,17 @@ export function resolveJournalTableName(): string {
     )
   }
   return candidate
+}
+
+export type EveryCopyRead = { covered: false } | { covered: true; op: OperationState | undefined }
+
+export interface CopyRow extends Record<string, unknown> {
+  replica: string
+  members: string[]
+  present: number | string
+  applied_at: string
+  operations: string
+  operation_fingerprints: string
 }
 
 interface MigrationRow extends Record<string, unknown> {
@@ -288,6 +302,25 @@ function parseBool(value: unknown): boolean {
 // `operations` is selected via `toJSONString(...)`, so it arrives as a JSON
 // string from every executor. Tolerate an already-decoded array too (mocks /
 // any future typed executor) and degrade to [] on anything unparseable.
+/**
+ * Whether the per-replica rows of one read cover every replica of the
+ * journal's replica set, and the newest record among them (#767). A row
+ * without a replica name, or a member no row names, leaves the read uncovered.
+ */
+export function everyCopyRead(
+  rows: CopyRow[],
+  findOp: (operations: unknown, fingerprints: unknown) => OperationState | undefined,
+): EveryCopyRead {
+  if (rows.length === 0 || rows.some((row) => row.replica === '')) return { covered: false }
+  const read = new Set(rows.map((row) => row.replica))
+  const members = new Set(rows.flatMap((row) => row.members))
+  if (members.size === 0 || [...members].some((member) => !read.has(member))) return { covered: false }
+  const newest = rows
+    .filter((row) => Number(row.present) > 0)
+    .reduce<CopyRow | undefined>((best, row) => (best === undefined || row.applied_at > best.applied_at ? row : best), undefined)
+  return { covered: true, op: newest ? findOp(newest.operations, newest.operation_fingerprints) : undefined }
+}
+
 function parseOperations(value: unknown, fingerprintsValue: unknown): OperationState[] {
   const decoded = parseJsonArray(value)
   const fingerprints = parseFingerprints(fingerprintsValue, decoded.length)
@@ -791,23 +824,37 @@ SETTINGS index_granularity = 1`
       }
     },
 
-    async readsEveryCopy(): Promise<boolean> {
-      // A multi-replica journal is read on every replica, and that read fails
-      // when one of them cannot be read.
-      if (await replicaFanout()) return true
+    async readOperationOnEveryCopy(migrationName: string, statementIndex: number): Promise<EveryCopyRead> {
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return { covered: true, op: undefined }
+      const database = await databaseName()
+      const fanout = await replicaFanout()
       const [table] = await db.query<{ engine: string }>(
         `SELECT engine FROM system.tables WHERE database = currentDatabase() AND name = '${journalTable}'`,
       )
-      if (table !== undefined && !/^(Replicated|Shared)/.test(table.engine)) return true
-      // A replicated journal without a fanout: only one replica may hold it.
-      try {
-        const [hosts] = await db.query<{ replicas: number | string }>(
-          `SELECT count(DISTINCT hostName()) AS replicas FROM clusterAllReplicas('${escapeSqlString(cluster ?? 'default')}', system.one)`,
-        )
-        return Number(hosts?.replicas) === 1
-      } catch {
-        return false
+      const findOp = (operations: unknown, fingerprints: unknown) =>
+        parseOperations(operations, fingerprints).find((op) => op.operationIndex === statementIndex)
+      if (table !== undefined && !/^(Replicated|Shared)/.test(table.engine)) {
+        // One copy only on a single server: on several replicas, a journal
+        // that is not replicated is a different journal on each.
+        if (fanout) return { covered: false }
+        const [row] = await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
+        return { covered: true, op: row ? findOp(row.operations, row.operation_fingerprints) : undefined }
       }
+      // A replicated journal: every replica in the table's replica set, named
+      // by the set itself, must answer the same read, and the newest version
+      // of the record across them is the record.
+      const fingerprints = fingerprintColumn ? `toJSONString(${FINGERPRINTS_COLUMN})` : `'[]'`
+      const name = escapeSqlString(migrationName)
+      // Each server answers for itself: its replica name and the replica set
+      // from its own system.replicas, joined with its own copy's newest
+      // version of the record. (A scalar subquery would run on the server
+      // that receives the query only.)
+      const perCopy = `SELECT r.replica_name AS replica, mapKeys(r.replica_is_active) AS members, j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, j.latest.3 AS operation_fingerprints FROM system.replicas AS r CROSS JOIN (SELECT count() AS present, argMax(tuple(toString(applied_at), ${OPERATIONS_SELECT}, ${fingerprints}), applied_at) AS latest FROM ${await qualifiedJournal()} WHERE name = '${name}') AS j WHERE r.database = '${escapeSqlString(database)}' AND r.table = '${journalTable}'`
+      const rows = await db.query<CopyRow>(
+        `SELECT replica, members, present, applied_at, operations, operation_fingerprints FROM clusterAllReplicas('${escapeSqlString(fanout?.cluster ?? cluster ?? 'default')}', view(${perCopy}))`,
+      )
+      return everyCopyRead(rows, findOp)
     },
 
     async storesAttemptFences(): Promise<boolean> {

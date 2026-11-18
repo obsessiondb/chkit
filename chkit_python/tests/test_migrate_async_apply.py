@@ -25,7 +25,12 @@ from chkit.cli.commands.migrate_async_apply import (
 )
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.commands.migrate_query_intents import QueryContext
-from chkit.cli.journal_store import MigrationRowState, OperationState, operation_as_stored
+from chkit.cli.journal_store import (
+    EveryCopyRead,
+    MigrationRowState,
+    OperationState,
+    operation_as_stored,
+)
 from chkit.clickhouse.client import QueryResult, QueryStatus
 
 # The server clock differs from the client clock on purpose: the query_log
@@ -217,8 +222,10 @@ class _FakeJournalStore:
     def stores_attempt_fences(self) -> bool:
         return self.fingerprints
 
-    def reads_every_copy(self) -> bool:
-        return self.every_copy
+    def read_operation_on_every_copy(self, name: str, index: int) -> EveryCopyRead:
+        if not self.every_copy:
+            return EveryCopyRead(covered=False, op=None)
+        return EveryCopyRead(covered=True, op=self.read_stored_operation(name, index))
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         assert self.writes is not None
@@ -2390,3 +2397,30 @@ def test_a_poll_budget_exit_with_a_submit_that_never_settles_stops_at_once(
     )
     assert expected in info.value.message
 
+
+
+def test_a_failure_while_it_runs_does_not_wait_for_a_submit_that_never_settles(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (round 5): a statement that fails while it runs stops the run with
+    async_outcome_unknown at once, as every stop without an outcome does,
+    without waiting for a submit a proxy holds open; the fenced started
+    record stays."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _NeverSettlingSubmitClient(
+        [
+            QueryStatus(status="unknown"),
+            QueryStatus(status="failed", error="Code: 395. throwIf", before_start=False),
+        ]
+    )
+    journal = _FakeJournalStore()
+    started = time.monotonic()
+    try:
+        with pytest.raises(MigrateError) as info:
+            apply_async_statement(_input(client=client, journal=journal))
+    finally:
+        client.release.set()
+    assert time.monotonic() - started < 10
+    assert info.value.code == "async_outcome_unknown"
+    assert "failed while it ran" in info.value.message
+    assert [state.operations[0].status for state in journal.writes or []] == ["started", "started"]

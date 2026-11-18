@@ -363,9 +363,12 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   // Every stop without an outcome: the submit is aborted, so a request not
   // sent yet never starts, the run does not wait for one that may never
   // settle, and the fenced started record stays for the next run (#767).
-  const stopWithoutOutcome = (reason: string): MigrateError => {
+  const abandonSubmit = () => {
     input.abortSubmit?.()
     submitAbandoned = true
+  }
+  const stopWithoutOutcome = (reason: string): MigrateError => {
+    abandonSubmit()
     const submitTail = submitError ? `, and the submit request failed (${describeError(submitError)})` : ''
     return outcomeUnknownError({ operationType, statementIndex, migrationName, queryId, reason: `${reason}${submitTail}` })
   }
@@ -456,6 +459,9 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         // nothing: one that failed while it ran can have applied some writes,
         // so its fenced started record stays for the operator to reconcile.
         if (status.beforeStart !== true) {
+          // A proxy may hold the submit's response: the run stops as every
+          // other stop without an outcome does, without waiting for it.
+          abandonSubmit()
           throw failedWhileRunningError({ operationType, statementIndex, migrationName, queryId, error: status.error ?? '<unknown>' })
         }
         const failedOp: OperationState = {
@@ -668,8 +674,9 @@ export async function resolveRecordedAttempt(input: {
  */
 async function preparedIsCurrent(journalStore: JournalStore, migrationName: string, op: OperationState): Promise<boolean> {
   try {
-    if (!(await journalStore.readsEveryCopy())) return false
-    const current = await journalStore.readStoredOperation(migrationName, op.operationIndex)
+    const read = await journalStore.readOperationOnEveryCopy(migrationName, op.operationIndex)
+    if (!read.covered) return false
+    const current = read.op
     return current?.status === 'started' && current.queryId === op.queryId && current.lastError === PREPARED_RECORD_MARKER
   } catch {
     return false

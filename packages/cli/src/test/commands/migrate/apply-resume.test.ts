@@ -35,8 +35,8 @@ function createFakeStore(initial: MigrationRowState | null = null) {
     async readStoredOperation(_name, index) {
       return current?.operations.find((op) => op.operationIndex === index)
     },
-    async readsEveryCopy() {
-      return true
+    async readOperationOnEveryCopy(name: string, index: number) {
+      return { covered: true as const, op: await this.readStoredOperation(name, index) }
     },
     async storesAttemptFences() {
       return true
@@ -867,14 +867,51 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
   // #767 (round 4): a prepared attempt with nothing of its id on the server
   // was never sent and ran nothing, so the sync run gets no before-retry SQL.
   test('a mode-only async to sync edit of a prepared attempt runs without before-retry SQL', async () => {
-    const { run, dir, sql, commands } = modeOnlyEdit('unknown', PREPARED_RECORD_MARKER)
+    const { run, dir, sql, commands, checks } = modeOnlyEdit('unknown', PREPARED_RECORD_MARKER)
     await run
     rmSync(dir, { recursive: true, force: true })
 
     expect(commands).toEqual([sql])
-    // The edit's check and the sync path each look the id up, through the
-    // query_log flush rechecks (10 s each).
-  }, 40_000)
+    // The sync path reuses the edit check's lookup: the check and its 5
+    // query_log flush rechecks run once.
+    expect(checks).toHaveLength(6)
+  }, 20_000)
+
+  // #767 (round 5): a plugin's onBeforeApply that drops a statement with a
+  // recorded async attempt never marks the migration applied while that
+  // attempt has no outcome.
+  test('a plugin that drops a statement with an unresolved async attempt stops with async_outcome_unknown', async () => {
+    const first = 'ALTER TABLE db.a ADD COLUMN x UInt8;'
+    const load = 'INSERT INTO db.a SELECT 1;'
+    const sql = `${first}\n-- operation: load_table_data key=table:db.a risk=safe mode=async\n${load}\n`
+    const dir = writeMigration(sql)
+    const fake = createFakeStore(inProgressState(checksumSQL(sql), [
+      { ...operation(0, 'completed'), fingerprint: statementFingerprint(first) },
+      {
+        ...operation(1, 'failed', { type: 'load_table_data', key: 'table:db.a' }),
+        queryId: 'recorded-query-id',
+        lastError: 'error code: 524',
+        fingerprint: statementFingerprint(load),
+      },
+    ]))
+    const commands: string[] = []
+    const db = {
+      async query() { return [{ now_ms: '1700000000000', database: 'db' }] },
+      async queryStatus() { return { status: 'unknown' } },
+      async command(command: string) { commands.push(command) },
+    } as unknown as ClickHouseExecutor
+
+    await expect(applyMigration({
+      db, journalStore: fake.store,
+      pluginRuntime: fakePluginRuntime((statements) => statements.slice(0, 1)),
+      config: CONFIG, tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql', log: () => {},
+    })).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('query_id recorded-query-id') })
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(commands).toEqual([])
+    expect(fake.writes).toEqual([])
+    expect(fake.appended).toEqual([])
+  })
 
   // #767 (round 4): with the file unchanged, a plugin's onBeforeApply rewrite
   // changes the statement's fingerprint. The recorded attempt is still read as

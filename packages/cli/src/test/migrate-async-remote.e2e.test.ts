@@ -321,8 +321,8 @@ function createMemoryJournal(initial: MigrationRowState | null) {
     async readStoredOperation(_name, index) {
       return state?.operations.find((op) => op.operationIndex === index)
     },
-    async readsEveryCopy() {
-      return true
+    async readOperationOnEveryCopy(name: string, index: number) {
+      return { covered: true as const, op: await this.readStoredOperation(name, index) }
     },
     async writeMigrationState(next) {
       writes.push(next)

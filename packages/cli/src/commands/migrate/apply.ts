@@ -38,6 +38,7 @@ import {
   freshMigrationState,
   isoWithoutZone,
   outcomeUnknownError,
+  type RecordedAttempt,
   resolveRecordedAttempt,
   upsertOperation,
 } from './async-apply.js'
@@ -197,13 +198,28 @@ async function resolveAsyncAttemptBeforeSync(input: {
   fingerprint: string
   operationType: string
   log: (line: string) => void
+  /** The outcome the edit's check read for this attempt, if it did (#767). */
+  known?: ResolvedOp
 }): Promise<'completed' | 'run' | 'unsent'> {
-  const { op, file } = input
+  const { op, file, known } = input
   if (op.status === 'completed' || op.queryId === '') return 'run'
-  const recorded = await resolveRecordedAttempt({
-    db: input.db, journalStore: input.journalStore, migrationName: file, op, fingerprint: input.fingerprint, queryId: op.queryId,
-    operationType: input.operationType, log: input.log, sleep: defaultSleep,
-  })
+  // Only an outcome query_log settled for this very record, and the SQL the
+  // statement still has, stands for a new lookup: an unsent, failed or
+  // finished attempt stays so under the lock. An attempt that ended without
+  // one is checked in system.processes again right before the statement runs.
+  const reusable =
+    known !== undefined &&
+    known.recorded.kind !== 'ended' &&
+    known.op.queryId === op.queryId &&
+    known.op.status === op.status &&
+    known.op.lastError === op.lastError &&
+    known.op.fingerprint === input.fingerprint
+  const recorded = reusable
+    ? known.recorded
+    : await resolveRecordedAttempt({
+        db: input.db, journalStore: input.journalStore, migrationName: file, op, fingerprint: input.fingerprint, queryId: op.queryId,
+        operationType: input.operationType, log: input.log, sleep: defaultSleep,
+      })
   switch (recorded.kind) {
     case 'running':
       throw attemptStillRunningError(file, op)
@@ -340,12 +356,15 @@ export async function applyMigration(input: {
       })
     }
   }
+  // The outcomes the edit's check read for the attempts it keeps, so the sync
+  // path does not look them up, through the query_log rechecks, again.
+  let editResolved = new Map<number, ResolvedOp>()
   if (
     initialState !== null &&
     !initialState.migrationCompleted &&
     initialState.checksum !== migrationChecksum
   ) {
-    await acceptEditedMigration({
+    editResolved = await acceptEditedMigration({
       db,
       file,
       state: initialState,
@@ -362,6 +381,18 @@ export async function applyMigration(input: {
   // of its statements runs: nothing needs reconciling.
   if (operationSummaries.some((operation) => operation?.mode === 'async') && !(await journalStore.storesAttemptFences())) {
     throw unfencedJournalError(file)
+  }
+
+  // A statement a plugin's onBeforeApply dropped is never visited below, so
+  // its recorded async attempt is read, against the identity it was recorded
+  // with, before anything runs: one still running or without an outcome stops
+  // the run with the journal as it was, instead of the migration being
+  // recorded as applied (#767).
+  if (initialState !== null && !initialState.migrationCompleted && initialState.checksum === migrationChecksum) {
+    const omitted = initialState.operations.filter((op) => op.operationIndex >= statements.length)
+    if (omitted.length > 0) {
+      await assertRecordedAttemptsResolved(db, journalStore, file, { ...initialState, operations: omitted }, initialState, log)
+    }
   }
 
   for (let i = 0; i < statements.length; i++) {
@@ -425,7 +456,7 @@ export async function applyMigration(input: {
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
     let resolved: 'completed' | 'run' | 'unsent' = 'run'
     if (priorAttempt !== undefined && stateBefore !== null) {
-      resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, operationType: identity.type, log })
+      resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, operationType: identity.type, log, known: editResolved.get(i) })
       if (resolved === 'completed') continue
     }
     // An async attempt that was never sent ran nothing: no before-retry SQL.
@@ -583,7 +614,7 @@ async function acceptEditedMigration(input: {
   retry: { previousChecksum: string; checksum: string } | undefined
   journalStore: JournalStore
   log: (line: string) => void
-}): Promise<void> {
+}): Promise<Map<number, ResolvedOp>> {
   const { file, state, checksum, identities, retry, journalStore } = input
   const retryVerified =
     retry !== undefined && retry.previousChecksum === state.checksum && retry.checksum === checksum
@@ -606,8 +637,14 @@ async function acceptEditedMigration(input: {
     )
   }
   const rebased = rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) })
-  await assertRecordedAttemptsResolved(input.db, journalStore, file, state, rebased, input.log)
+  const resolved = await assertRecordedAttemptsResolved(input.db, journalStore, file, state, rebased, input.log)
   await journalStore.writeMigrationState(rebased)
+  return resolved
+}
+
+interface ResolvedOp {
+  op: OperationState
+  recorded: RecordedAttempt
 }
 
 // Every async attempt the journal records, the ones the re-key would drop
@@ -624,7 +661,8 @@ async function assertRecordedAttemptsResolved(
   state: MigrationRowState,
   rebased: MigrationRowState,
   log: (line: string) => void,
-): Promise<void> {
+): Promise<Map<number, ResolvedOp>> {
+  const resolved = new Map<number, ResolvedOp>()
   for (const op of state.operations) {
     if (op.status === 'completed' || op.queryId === '') continue
     const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName: file, op, fingerprint: op.fingerprint, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })
@@ -639,7 +677,9 @@ async function assertRecordedAttemptsResolved(
     if (reason !== undefined) {
       throw outcomeUnknownError({ operationType: op.operationType, statementIndex: op.operationIndex, migrationName: file, queryId: op.queryId, reason })
     }
+    if (!dropped) resolved.set(op.operationIndex, { op, recorded })
   }
+  return resolved
 }
 
 function attemptStillRunningError(file: string, op: OperationState): MigrateError {

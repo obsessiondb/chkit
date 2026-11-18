@@ -240,12 +240,11 @@ class RemoteClickHouseClient:
         *,
         before_send: Callable[[], None] | None = None,
     ) -> str:
-        # Never start a request after the caller gave up on it (#767).
+        # Never start a request after the caller gave up on it, and stop one
+        # still connecting before its first bytes (#767), as the native driver
+        # does. QUERY_TIMEOUT bounds the connect (10 s).
         if before_send is not None:
             before_send()
-            commit = getattr(before_send, "commit", None)
-            if commit is not None:
-                commit()
         # The API takes the id as a top-level field and ignores a query_id
         # setting, which would leave the query under a random id.
         result = workbench_query_execute(
@@ -254,6 +253,7 @@ class RemoteClickHouseClient:
             query=statement,
             settings=_coerce_wire_settings(settings),
             query_id=query_id,
+            guard=before_send,
         )
         _raise_if_error(result)
         return query_id or result.query_id or "submitted"

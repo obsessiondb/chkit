@@ -26,8 +26,10 @@ from __future__ import annotations
 import json
 from typing import Any, Literal
 
+import httpcore
 import httpx
 
+from chkit.clickhouse.client import guarded_first_write
 from chkit_plugin_obsessiondb.api_client import (
     USER_AGENT,
     SessionExpiredError,
@@ -144,8 +146,14 @@ def _rpc_post(
     payload: Any,
     *,
     timeout: httpx.Timeout | float = HTTP_TIMEOUT_SECONDS,
+    guard: Any = None,
 ) -> Any:
     """POST to ``{base_url}/rpc/{procedure}`` with bearer auth, oRPC RPC envelope.
+
+    ``guard``, a submit's guard, runs the request's first write once the
+    connection is open (see ``guarded_first_write``); when it refuses, nothing
+    is sent (#767). The connection is the client's own, so no earlier request
+    shares it.
 
     The oRPC RPC protocol (what TS's ``RPCLink`` speaks) wraps the input as
     ``{"json": ...}`` and the output the same way; the API rejects any other
@@ -162,6 +170,8 @@ def _rpc_post(
         "User-Agent": USER_AGENT,
     }
     with httpx.Client(timeout=timeout) as http:
+        if guard is not None:
+            _guard_first_write(http, guard)
         request = http.build_request("POST", url, json=body, headers=headers)
         # Like ``fetch``, the request ends with the response headers; the body
         # is read after, and a failure to read it reads as a parse failure.
@@ -198,6 +208,64 @@ def _rpc_post(
         except ValueError:
             raise RuntimeError(_UNPARSABLE_BODY_ERROR) from None
     return envelope["json"] if isinstance(envelope, dict) and "json" in envelope else envelope
+
+
+def _guard_first_write(http: httpx.Client, guard: Any) -> None:
+    """Run the first write on any connection ``http`` opens under ``guard``.
+
+    Every transport of the client, an environment proxy's included, connects
+    through the guarded backend.
+    """
+    transports = [http._transport, *http._mounts.values()]
+    for transport in transports:
+        pool = getattr(transport, "_pool", None)
+        if pool is not None:
+            pool._network_backend = _GuardedBackend(pool._network_backend, guard)
+
+
+class _GuardedBackend(httpcore.NetworkBackend):
+    def __init__(self, inner: httpcore.NetworkBackend, guard: Any) -> None:
+        self._inner = inner
+        self._guard = guard
+
+    def connect_tcp(self, *args: Any, **kwargs: Any) -> httpcore.NetworkStream:
+        return _GuardedStream(self._inner.connect_tcp(*args, **kwargs), self._guard)
+
+    def connect_unix_socket(self, *args: Any, **kwargs: Any) -> httpcore.NetworkStream:
+        return _GuardedStream(self._inner.connect_unix_socket(*args, **kwargs), self._guard)
+
+    def sleep(self, seconds: float) -> None:
+        self._inner.sleep(seconds)
+
+
+class _GuardedStream(httpcore.NetworkStream):
+    def __init__(self, inner: httpcore.NetworkStream, guard: Any) -> None:
+        self._inner = inner
+        self._guard = guard
+
+    def read(self, max_bytes: int, timeout: float | None = None) -> bytes:
+        return self._inner.read(max_bytes, timeout)
+
+    def write(self, buffer: bytes, timeout: float | None = None) -> None:
+        if self._guard is None:
+            self._inner.write(buffer, timeout)
+            return
+        guard, self._guard = self._guard, None
+        try:
+            guarded_first_write(guard, lambda: self._inner.write(buffer, timeout))
+        except BaseException:
+            self._inner.close()
+            raise
+
+    def close(self) -> None:
+        self._inner.close()
+
+    def start_tls(self, *args: Any, **kwargs: Any) -> httpcore.NetworkStream:
+        # The handshake is connection setup; the request's bytes follow it.
+        return _GuardedStream(self._inner.start_tls(*args, **kwargs), self._guard)
+
+    def get_extra_info(self, info: str) -> Any:
+        return self._inner.get_extra_info(info)
 
 
 class ConsoleApiError(RuntimeError):

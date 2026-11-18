@@ -3,7 +3,7 @@ import { afterEach, beforeEach, describe, expect, spyOn, test } from 'bun:test'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { ATTEMPT_RECORD_MARKER } from '../../commands/migrate/async-apply.js'
-import { createJournalStore, type MigrationRowState, type OperationState } from '../../runtime/journal-store.js'
+import { type CopyRow, createJournalStore, everyCopyRead, type MigrationRowState, type OperationState } from '../../runtime/journal-store.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 
 interface ScriptedExecutor {
@@ -1318,5 +1318,42 @@ describe('createJournalStore', () => {
       expect(writes.length).toBeGreaterThan(1)
       for (const sql of writes) expect(sql).toMatch(/^(INSERT INTO|ALTER TABLE) `app`\._chkit_migrations /)
     })
+  })
+})
+
+// #767 (round 5): a read of a replicated journal counts as a read of every
+// copy only when every member of the table's replica set answered it, by the
+// replica name the set records; the newest version across them is the record.
+describe('everyCopyRead', () => {
+  const row = (replica: string, appliedAt: string, members = ['r1', 'r2']): CopyRow => ({
+    replica,
+    members,
+    present: 1,
+    applied_at: appliedAt,
+    operations: appliedAt,
+    operation_fingerprints: '[]',
+  })
+  const findOp = (operations: unknown) => ({ lastError: String(operations) }) as OperationState
+
+  test('every member answered: the newest version is the record', () => {
+    expect(everyCopyRead([row('r1', '2026-11-18 10:00:00.000'), row('r2', '2026-11-18 10:00:01.000')], findOp)).toEqual({
+      covered: true,
+      op: { lastError: '2026-11-18 10:00:01.000' } as OperationState,
+    })
+  })
+
+  test('two servers with one name, and a member the read did not reach: not covered', () => {
+    // The cluster lists r1 twice (a shared hostname) and never r2.
+    expect(everyCopyRead([row('r1', '2026-11-18 10:00:00.000'), row('r1', '2026-11-18 10:00:00.000')], findOp)).toEqual({ covered: false })
+  })
+
+  test('a server that cannot name its replica, or no answer at all: not covered', () => {
+    expect(everyCopyRead([row('r1', 'a'), row('', 'b')], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([], findOp)).toEqual({ covered: false })
+    expect(everyCopyRead([row('r1', 'a', [])], findOp)).toEqual({ covered: false })
+  })
+
+  test('no copy holds the record: covered, without one', () => {
+    expect(everyCopyRead([{ ...row('r1', ''), present: '0' }, { ...row('r2', ''), present: '0' }], findOp)).toEqual({ covered: true, op: undefined })
   })
 })

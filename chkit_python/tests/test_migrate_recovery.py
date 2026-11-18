@@ -62,7 +62,7 @@ from chkit.cli.commands.migrate_recovery import (
     verify_retry_edit,
 )
 from chkit.cli.commands.migrate_retry import RetryNoop, RetryResume, resolve_retry
-from chkit.cli.journal_store import MigrationRowState, OperationState
+from chkit.cli.journal_store import EveryCopyRead, MigrationRowState, OperationState
 from chkit.cli.main import app
 from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.safety_markers import (
@@ -158,8 +158,8 @@ class FakeStore:
     def stores_attempt_fences(self) -> bool:
         return self.fences
 
-    def reads_every_copy(self) -> bool:
-        return True
+    def read_operation_on_every_copy(self, name: str, index: int) -> EveryCopyRead:
+        return EveryCopyRead(covered=True, op=self.read_stored_operation(name, index))
 
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)
@@ -2517,6 +2517,9 @@ def test_a_mode_only_edit_of_a_prepared_attempt_runs_without_before_retry_sql(
     )
     run()
     assert client.calls == [statement]
+    # The sync path reuses the edit check's lookup: the check and its 5
+    # query_log flush rechecks run once.
+    assert len(client.checks) == 6
 
 
 class _RewritingRuntime(_FakeRuntime):
@@ -2564,3 +2567,43 @@ def test_a_plugin_rewrite_never_skips_the_reconcile_of_a_recorded_attempt(
     assert client.calls == []
     assert store.writes == []
 
+
+
+def test_a_plugin_that_drops_a_statement_with_an_unresolved_async_attempt_stops(
+    tmp_path: Path,
+) -> None:
+    """#767 (round 5): a plugin's onBeforeApply that drops a statement with a
+    recorded async attempt never marks the migration applied while that
+    attempt has no outcome."""
+    first = "ALTER TABLE db.a ADD COLUMN x UInt8;"
+    load = "INSERT INTO db.a SELECT 1;"
+    sql = f"{first}\n-- operation: load_table_data key=table:db.a risk=safe mode=async\n{load}\n"
+    store = FakeStore(
+        in_progress(
+            [
+                op(0, "completed").model_copy(
+                    update={"fingerprint": statement_fingerprint(first)}
+                ),
+                op(1, "failed", LOAD, query_id="recorded-query-id").model_copy(
+                    update={
+                        "last_error": "error code: 524",
+                        "fingerprint": statement_fingerprint(load),
+                    }
+                ),
+            ],
+            checksum=checksum_sql(sql),
+        )
+    )
+    client = _AlwaysUnknownClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(
+            _write(tmp_path, sql),
+            cast(Any, client),
+            store,
+            runtime=_FakeRuntime(lambda statements: statements[:1]),
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "query_id recorded-query-id" in info.value.message
+    assert client.calls == []
+    assert store.writes == []
+    assert store.appended == []
