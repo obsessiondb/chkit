@@ -51,8 +51,9 @@ _STOP_CHECK_S = 0.05
 
 #: The checkpoint format of this release (#765): every attempt's query id is
 #: saved before its submit, so a pending chunk without one was never
-#: submitted. Older releases saved no version.
-CHECKPOINT_VERSION = 2
+#: submitted, and ``single_send`` marks an attempt sent once. Older releases
+#: saved no version; progress in any other format keeps no ``single_send``.
+CHECKPOINT_VERSION = 3
 
 _BuildQuery: TypeAlias = Callable[[str], str]
 _OnProgress: TypeAlias = "Callable[[BackfillProgress], None]"
@@ -156,20 +157,26 @@ def _escape_like_prefix(prefix: str) -> str:
 def _upgrade_progress(
     plan_id: str, chunk_ids: list[str], progress: BackfillProgress
 ) -> BackfillProgress:
-    """Progress an older release saved, in this release's terms. It saved a
-    chunk's query id only after the submit returned, so a chunk it lists as
-    pending, submitted or running without one, or not at all, may have run
-    under the chunk's id: it is recorded under that id, which this release
-    reads as "may have run"."""
+    """Progress in another format, in this release's terms. An older release
+    saved a chunk's query id only after the submit returned, so a chunk it
+    lists as pending, submitted or running without one, or not at all, may
+    have run under the chunk's id: it is recorded under that id, which this
+    release reads as "may have run". A ``single_send`` from another format
+    proves nothing: a release that ignores it (a rollback to an older one)
+    keeps it and may resend the id."""
     upgraded = dict(progress)
     for chunk_id in chunk_ids:
-        state = progress.get(chunk_id)
-        if state is not None and (
-            state.status in {"done", "failed"} or state.query_id is not None
-        ):
+        saved = progress.get(chunk_id)
+        state = (
+            saved.model_copy(update={"single_send": None})
+            if saved is not None
+            else BackfillChunkState(status="pending")
+        )
+        if state.status in {"done", "failed"} or state.query_id is not None:
+            if saved is not None:
+                upgraded[chunk_id] = state
             continue
-        base = state if state is not None else BackfillChunkState(status="pending")
-        upgraded[chunk_id] = base.model_copy(
+        upgraded[chunk_id] = state.model_copy(
             update={"query_id": chunk_query_id(plan_id, chunk_id)}
         )
     return upgraded
@@ -617,6 +624,21 @@ def _interrupted_error(plan_id: str) -> BackfillInterruptedError:
     )
 
 
+@dataclass(frozen=True)
+class _Handoff:
+    """A chunk's ``SendAdmission``: asks the run again at the transport and
+    releases the chunk's admission once its request entered it."""
+
+    may_send: Callable[[], bool]
+    release: Callable[[], None]
+
+    def admit(self) -> bool:
+        return self.may_send()
+
+    def handed_off(self) -> None:
+        self.release()
+
+
 def run_interruptible(fn: Callable[[], _T], stop: StopSignal | None, plan_id: str) -> _T:
     """``fn()``, or a ``BackfillInterruptedError`` as soon as ``stop`` is set.
     A synchronous read cannot be aborted, so ``fn`` runs on its own daemon
@@ -780,18 +802,44 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                     snapshot = dict(progress)
                 on_progress(snapshot)
 
-    # Taken to admit a send and to stop: once close() returns, no send is
-    # admitted, and every send admitted before it is in the transport.
-    admission_lock = Lock()
+    # Chunks between their admission and their request's handoff to the
+    # transport (or their refusal and saved-back state). close() waits for
+    # them, so no chunk of a stopped run is sent or saved after it returns,
+    # and it never waits for an INSERT's response.
+    admission = threading.Condition(Lock())
+    admitted = [0]
+    single_send = callable(getattr(executor, "submit_once", None))
+
+    def stopping() -> bool:
+        # The stop itself counts at once, before the dispatching thread sees it.
+        return (
+            closed.is_set()
+            or dispatch_stopped.is_set()
+            or (stop is not None and stop.is_set())
+        )
 
     def may_send() -> bool:
-        with admission_lock:
-            return not closed.is_set() and not dispatch_stopped.is_set()
+        with admission:
+            return not stopping()
+
+    def admit() -> bool:
+        with admission:
+            if stopping():
+                return False
+            admitted[0] += 1
+            return True
+
+    def release() -> None:
+        with admission:
+            admitted[0] -= 1
+            admission.notify_all()
 
     def close() -> None:
-        with persist_lock, admission_lock:
+        with persist_lock, admission:
             closed.set()
             dispatch_stopped.set()
+        with admission:
+            admission.wait_for(lambda: admitted[0] == 0)
 
     # Save the reconciled state, every chunk included, before anything is
     # submitted: a chunk this checkpoint lists as pending without a query id
@@ -879,16 +927,16 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         if chunk_id in replays and replay_bound is not None:
             with lock:
                 previous = _get_chunk(progress, chunk_id)
-            set_chunk(
+            return send(
                 chunk_id,
+                previous,
                 BackfillChunkState(
                     status="pending",
                     query_id=_replay_query_id(plan_id, chunk_id),
                     submitted_at=replay_bound,
-                    single_send=True,
+                    single_send=True if single_send else None,
                 ),
             )
-            return send(chunk_id, previous)
 
         with lock:
             state = _get_chunk(progress, chunk_id)
@@ -913,35 +961,69 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
             pending = _get_chunk(progress, chunk_id)
         if pending.query_id is not None:
             return None
-        set_chunk(
+        return send(
             chunk_id,
+            pending,
             pending.model_copy(
-                update={"query_id": chunk_query_id(plan_id, chunk_id), "single_send": True}
+                update={
+                    "query_id": chunk_query_id(plan_id, chunk_id),
+                    "single_send": True if single_send else None,
+                }
             ),
         )
-        return send(chunk_id, pending)
 
-    def send(chunk_id: str, previous: BackfillChunkState) -> _UnknownAttempt | None:
-        """Send the chunk under the id just recorded, unless the run stopped
-        while that record was written: then the chunk gets its ``previous``
-        state back, as it was never sent (once the run is interrupted nothing
-        more is saved, and the record stays: may have run). The transport
-        asks ``may_send`` again right before the request leaves, after any
-        lazy connection setup."""
+    def record(chunk_id: str, next_state: BackfillChunkState) -> None:
+        """An admitted chunk's own record, saved even after close() began:
+        close() waits for it."""
         with lock:
-            query_id = _get_chunk(progress, chunk_id).query_id or ""
+            progress[chunk_id] = next_state
+        if on_progress is not None:
+            with persist_lock:
+                with lock:
+                    snapshot = dict(progress)
+                on_progress(snapshot)
+
+    def send(
+        chunk_id: str, previous: BackfillChunkState, attempt: BackfillChunkState
+    ) -> _UnknownAttempt | None:
+        """Record ``attempt`` and send the chunk under its query id. The SQL is
+        built first. The chunk is admitted before its record: from then until
+        its request enters the transport (``submit_once`` reports the handoff
+        through ``SEND_ADMISSION``), or is refused and ``previous`` is saved
+        back, close() waits for it. Another executor's request has no
+        handoff, so its attempt is not single-send and is released before its
+        submit."""
+        query_id = attempt.query_id or ""
         sql = build_query(chunk_id)
-        token = SEND_ADMISSION.set(may_send)
+        if not admit():
+            return None
+        released = [False]
+
+        def release_once() -> None:
+            if not released[0]:
+                released[0] = True
+                release()
+
+        token = None
         try:
+            record(chunk_id, attempt)
             if not may_send():
-                set_chunk(chunk_id, previous)
+                record(chunk_id, previous)
                 return None
-            executor.submit(sql, query_id)
+            submit_once = getattr(executor, "submit_once", None)
+            if callable(submit_once):
+                token = SEND_ADMISSION.set(_Handoff(may_send, release_once))
+                submit_once(sql, query_id)
+            else:
+                release_once()
+                executor.submit(sql, query_id)
         except SendNotAdmittedError:
-            set_chunk(chunk_id, previous)
+            record(chunk_id, previous)
             return None
         finally:
-            SEND_ADMISSION.reset(token)
+            if token is not None:
+                SEND_ADMISSION.reset(token)
+            release_once()
         with lock:
             submitted = _get_chunk(progress, chunk_id).model_copy(
                 update={"status": "submitted", "query_id": query_id}

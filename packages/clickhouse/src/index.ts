@@ -21,6 +21,7 @@ import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clic
 import { getLogger } from '@logtape/logtape'
 import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
+import { createAdmissionAgent, isSendNotAdmitted, type SubmitAdmission } from './send-admission.js'
 import {
 	parseConstraintsFromCreateTableQuery,
 	parseEngineFromCreateTableQuery,
@@ -143,8 +144,15 @@ export interface ClickHouseExecutor {
 	 *  @param sql - The SQL to execute
 	 *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
 	 *  @param settings - Optional ClickHouse settings sent with the query.
+	 *  @param admission - Asked as the request is created (see `SubmitAdmission`); only honoured
+	 *    by an executor with `submitSendsOnce`.
 	 *  @returns The query_id assigned to this query. */
-	submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string>
+	submit(sql: string, queryId?: string, settings?: ClickHouseSettings, admission?: SubmitAdmission): Promise<string>
+
+	/** Set when `submit` sends its request once, never resending it under the same query id,
+	 *  and asks `admission` as the request is created (#765). Backfill proves a failure only
+	 *  for an attempt sent this way. */
+	readonly submitSendsOnce?: boolean
 
 	/** Check the status of a previously submitted query.
 	 *  Checks system.processes first (running?), then system.query_log (finished/failed?).
@@ -248,6 +256,7 @@ type ClickHouseClient = ReturnType<typeof createClient>
 type ClickHouseConfig = NonNullable<ChxConfig['clickhouse']>
 type ClickHouseClientOptions = {
 	keepAlive?: boolean
+	httpAgent?: import('node:http').Agent
 	compression?: {
 		request?: boolean
 		response?: boolean
@@ -660,6 +669,7 @@ export {
 	waitForTableAbsent,
 	waitForView,
 } from './ddl-propagation.js'
+export { isSendNotAdmitted, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
 export { allReplicas, probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaAccess, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
 export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
@@ -788,6 +798,7 @@ export function createStatelessClickHouseClient(
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
 		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
+		...(options.httpAgent ? { http_agent: options.httpAgent, set_basic_auth_header: true } : {}),
 	})
 }
 
@@ -827,6 +838,10 @@ export function createExecutorWithClient(
 	const fireAndForgetClient = createStatelessClickHouseClient(config, {
 		wait_end_of_query: 0,
 	})
+	// Submits with an admission go through their own client, whose agent asks
+	// the admission as each request is created.
+	const admissions = new Map<string, SubmitAdmission>()
+	let admissionClient: ClickHouseClient | undefined
 	let compressedClient: ClickHouseClient | undefined
 	let controlClient: ClickHouseClient | undefined
 
@@ -1091,19 +1106,33 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			}
 		},
-		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
+		submitSendsOnce: true,
+		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings, admission?: SubmitAdmission): Promise<string> {
 			const id = queryId ?? crypto.randomUUID()
 			// A query_id in the settings would put a second query_id on the URL, and
 			// the server could run the query under an id queryStatus() never sees (#353).
 			const { query_id: _ignored, ...clickhouseSettings } = settings ?? {}
+			let target = fireAndForgetClient
+			if (admission) {
+				admissionClient ??= createStatelessClickHouseClient(
+					config,
+					{ wait_end_of_query: 0 },
+					{ httpAgent: createAdmissionAgent(config.url, admissions) },
+				)
+				target = admissionClient
+				admissions.set(id, admission)
+			}
 			try {
-				await fireAndForgetClient.command({
+				await target.command({
 					query: sql,
 					query_id: id,
 					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
 				})
 			} catch (error) {
+				if (isSendNotAdmitted(error)) throw error
 				wrapConnectionError(error, config.url, config.username)
+			} finally {
+				if (admission) admissions.delete(id)
 			}
 			return id
 		},
@@ -1213,6 +1242,7 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 			await Promise.all([
 				client.close(),
 				fireAndForgetClient.close(),
+				admissionClient?.close(),
 				compressedClient?.close(),
 				controlClient?.close(),
 			])

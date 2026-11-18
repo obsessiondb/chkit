@@ -254,7 +254,14 @@ def test_submit_once_sends_nothing_when_the_send_admission_refuses() -> None:
 
     driver.command.side_effect = command
     client._submit_client = driver
-    token = SEND_ADMISSION.set(lambda: False)
+    class Refuse:
+        def admit(self) -> bool:
+            return False
+
+        def handed_off(self) -> None:
+            raise AssertionError("nothing was sent")
+
+    token = SEND_ADMISSION.set(Refuse())
     try:
         with pytest.raises(SendNotAdmittedError):
             client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")

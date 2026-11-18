@@ -3,6 +3,7 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import {
   allReplicas,
+  isSendNotAdmitted,
   probeReplicaAccess,
   stringLiteral,
   type ClickHouseExecutor,
@@ -79,9 +80,10 @@ export type BackfillProgress = Record<string, BackfillChunkState>
 /**
  * The checkpoint format of this release (#765): every attempt's query id is
  * saved before its submit, so a pending chunk without one was never
- * submitted. Older releases saved no version.
+ * submitted, and `singleSend` marks an attempt sent once. Older releases
+ * saved no version; progress in any other format keeps no `singleSend`.
  */
-export const CHECKPOINT_VERSION = 2
+export const CHECKPOINT_VERSION = 3
 
 // A resume reads an unsettled outcome again 5 times, 2 s apart, which covers
 // query_log's default 7.5 s flush interval (as #721 does for migrate). An
@@ -160,9 +162,15 @@ function upgradeProgress(
 ): BackfillProgress {
   let upgraded = progress
   for (const chunk of chunks) {
-    const state = progress[chunk.id]
-    if (state?.status === 'done' || state?.status === 'failed' || state?.queryId !== undefined) continue
-    upgraded = updateChunk(upgraded, chunk.id, { ...(state ?? { status: 'pending' }), queryId: chunkQueryId(planId, chunk.id) })
+    const saved = progress[chunk.id]
+    // A `singleSend` from another format proves nothing: a release that
+    // ignores it (a rollback to an older one) keeps it and may resend the id.
+    const { singleSend: _untrusted, ...state } = saved ?? { status: 'pending' as const }
+    if (state.status === 'done' || state.status === 'failed' || state.queryId !== undefined) {
+      if (saved) upgraded = updateChunk(upgraded, chunk.id, state)
+      continue
+    }
+    upgraded = updateChunk(upgraded, chunk.id, { ...state, queryId: chunkQueryId(planId, chunk.id) })
   }
   return upgraded
 }
@@ -719,6 +727,17 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     progress = updateChunk(progress, id, next)
     return report()
   }
+  // An admitted chunk's own records, saved even after an interrupt: the
+  // interrupt waits for them (see `send`).
+  const record = (id: string, next: BackfillChunkState) => {
+    progress = updateChunk(progress, id, next)
+    lastReport = Promise.resolve(onProgress?.(progress))
+    return lastReport
+  }
+  // Only an executor that sends a request once, and asks the admission as
+  // the request is created, records attempts as single-send (#765).
+  const sendsOnce = executor.submitSendsOnce === true
+  const handoffs = new Set<Promise<void>>()
 
   // How long polls wait for a finished attempt's outcome to reach query_log:
   // never shorter than the resume's recheck window, whatever the poll interval.
@@ -757,7 +776,11 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     const onAbort = () => {
       closed = true
       stopDispatch = true
-      lastReport.then(() => reject(interruptedError(planId)), () => reject(interruptedError(planId)))
+      // Admitted chunks hand their request off, or are refused and saved
+      // back, before the interrupt returns.
+      void Promise.all([...handoffs])
+        .then(() => lastReport)
+        .then(() => reject(interruptedError(planId)), () => reject(interruptedError(planId)))
     }
     if (signal?.aborted) return onAbort()
     signal?.addEventListener('abort', onAbort, { once: true })
@@ -774,9 +797,12 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
 
     // A replay: its own query id, recorded with the bound right before the send.
     if (replays.has(chunk.id) && replayBound !== undefined) {
-      const previous = getChunk(progress, chunk.id)
-      await setChunk(chunk.id, { status: 'pending', queryId: replayQueryId(planId, chunk.id), submittedAt: replayBound, singleSend: true })
-      return send(chunk, target, previous)
+      return send(chunk, target, getChunk(progress, chunk.id), {
+        status: 'pending',
+        queryId: replayQueryId(planId, chunk.id),
+        submittedAt: replayBound,
+        ...(sendsOnce ? { singleSend: true } : {}),
+      })
     }
 
     const state = getChunk(progress, chunk.id)
@@ -800,30 +826,63 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     // resume's sync settled it, so it is never resent under that id.)
     const pending = getChunk(progress, chunk.id)
     if (pending.queryId !== undefined) return undefined
-    await setChunk(chunk.id, { ...pending, queryId: chunkQueryId(planId, chunk.id), singleSend: true })
-    return send(chunk, target, pending)
+    return send(chunk, target, pending, {
+      ...pending,
+      queryId: chunkQueryId(planId, chunk.id),
+      ...(sendsOnce ? { singleSend: true } : {}),
+    })
   }
 
   /**
-   * Send the chunk under the id just recorded, unless the run stopped while
-   * that record was written: then the chunk gets its `previous` state back,
-   * as it was never sent (once the run is interrupted nothing more is saved,
-   * and the record stays: may have run).
+   * Record `attempt` and send the chunk under its query id. The chunk is
+   * admitted first: from then until its request is created, or refused and
+   * its `previous` state saved back, an interrupt waits for it, so no chunk
+   * of a stopped run is sent or saved after the interrupt returns. The SQL is
+   * built before anything is recorded.
    */
   async function send(
     chunk: { id: string; from?: string; to?: string },
     target: { planId: string; chunkId: string; cluster?: string },
     previous: BackfillChunkState,
+    attempt: BackfillChunkState,
   ): Promise<UnknownAttempt | undefined> {
-    const queryId = getChunk(progress, chunk.id).queryId as string
+    const queryId = attempt.queryId as string
     const sql = buildQuery(chunk)
-    // Nothing yields between this check and the submit's start, so no chunk
-    // is sent after the run stopped, or after an interrupt released the lock.
-    if (!mayStart()) {
-      await setChunk(chunk.id, previous)
-      return undefined
+    if (!mayStart()) return undefined
+    let handOff: () => void = () => undefined
+    const handoff = new Promise<void>((resolve) => { handOff = resolve })
+    handoffs.add(handoff)
+    const settle = () => {
+      handoffs.delete(handoff)
+      handOff()
     }
-    await executor.submit(sql, queryId)
+    try {
+      await record(chunk.id, attempt)
+      if (!mayStart()) {
+        await record(chunk.id, previous)
+        return undefined
+      }
+      if (sendsOnce) {
+        await executor.submit(sql, queryId, undefined, {
+          admit: () => {
+            const admitted = mayStart()
+            if (admitted) settle()
+            return admitted
+          },
+        })
+      } else {
+        // Nothing proves when another executor's request starts, so its
+        // attempt is not single-send and an interrupt does not wait for it.
+        settle()
+        await executor.submit(sql, queryId)
+      }
+    } catch (error) {
+      if (!isSendNotAdmitted(error)) throw error
+      await record(chunk.id, previous)
+      return undefined
+    } finally {
+      settle()
+    }
     const submitted: BackfillChunkState = {
       ...getChunk(progress, chunk.id),
       status: 'submitted',

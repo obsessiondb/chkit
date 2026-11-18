@@ -683,6 +683,48 @@ describe('plugin runtime', () => {
     }
   }, 120_000)
 
+  // #765 round 4: chunk workers poll at once; through a session-bound
+  // executor their reads were refused (SESSION_IS_LOCKED) until the poll
+  // error budget ran out.
+  test('chkit plugin backfill run completes chunks polled at once', async () => {
+    const chEnv = getClickHouseEnv()
+    const chConfig = clickhouseConfigBlock(chEnv)
+    const tableName = `chkit_e2e_bf_overlap_${Date.now()}_${Math.floor(Math.random() * 100000)}`
+    const db = createClickHouseExecutor(chEnv)
+    try {
+      await db.command(`CREATE TABLE ${chEnv.database}.${tableName} (id UInt64, event_time DateTime) ENGINE = MergeTree() PARTITION BY toYYYYMMDD(event_time) ORDER BY (event_time, id)`)
+      await db.command(`INSERT INTO ${chEnv.database}.${tableName} VALUES (1, '2026-01-01 12:00:00'), (2, '2026-01-02 12:00:00'), (3, '2026-01-03 12:00:00'), (4, '2026-01-04 12:00:00'), (5, '2026-01-05 12:00:00'), (6, '2026-01-06 12:00:00')`)
+      await waitForParts(db, chEnv.database, tableName, 6)
+
+      const fixture = await createFixture()
+      const pluginPath = join(fixture.dir, 'backfill-plugin.ts')
+      try {
+        await writeFile(pluginPath, `import { createBackfillPlugin } from '${BACKFILL_PLUGIN_ENTRY}'\n\nexport const plugin = createBackfillPlugin()\n`, 'utf8')
+        await writeFile(
+          fixture.configPath,
+          `import { plugin } from '${pluginPath}'\n\nexport default {\n  schema: '${fixture.schemaPath}',\n  outDir: '${join(fixture.dir, 'chkit')}',\n  migrationsDir: '${fixture.migrationsDir}',\n  metaDir: '${fixture.metaDir}',\n  ${chConfig}\n  plugins: [{ plugin }],\n}\n`,
+          'utf8'
+        )
+        const planned = runCli(['plugin', 'backfill', 'plan', '--target', `${chEnv.database}.${tableName}`, '--from', '2026-01-01T00:00:00.000Z', '--to', '2026-01-07T00:00:00.000Z', '--config', fixture.configPath, '--json'])
+        expect(planned.exitCode).toBe(0)
+        const planPayload = JSON.parse(planned.stdout) as { planId: string }
+
+        const ran = runCli(['plugin', 'backfill', 'run', '--plan-id', planPayload.planId, '--concurrency', '6', '--poll-interval', '1', '--config', fixture.configPath, '--json'])
+
+        expect(ran.exitCode, ran.stdout + ran.stderr).toBe(0)
+        const runPayload = JSON.parse(ran.stdout) as { status: string; chunkCounts: { done: number; total: number } }
+        expect(runPayload.status).toBe('completed')
+        expect(runPayload.chunkCounts.total).toBeGreaterThan(1)
+        expect(runPayload.chunkCounts.done).toBe(runPayload.chunkCounts.total)
+      } finally {
+        await rm(fixture.dir, { recursive: true, force: true })
+      }
+    } finally {
+      await db.command(`DROP TABLE IF EXISTS ${chEnv.database}.${tableName}`)
+      await db.close()
+    }
+  }, 120_000)
+
   test('chkit plugin backfill resume on completed run is a no-op', async () => {
     const chEnv = getClickHouseEnv()
     const chConfig = clickhouseConfigBlock(chEnv)

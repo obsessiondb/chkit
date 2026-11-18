@@ -10,16 +10,26 @@ replay of failed chunks, unknown outcomes) and ``sync_progress``
 
 from __future__ import annotations
 
+import json
 import re
 import threading
 import time
 import uuid
+from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
+from pathlib import Path
+from unittest.mock import MagicMock
 
 import pytest
 
-from chkit.clickhouse.client import QueryStatus
+from chkit.clickhouse.client import (
+    SEND_ADMISSION,
+    ClickHouseClient,
+    QueryStatus,
+    SendNotAdmittedError,
+)
+from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit_plugin_backfill.async_backfill import (
     CHECKPOINT_VERSION,
     BackfillResult,
@@ -76,6 +86,17 @@ class MockExecutor:
 
     def submit(self, statement: str, query_id: str | None = None) -> str:
         return query_id if query_id is not None else str(uuid.uuid4())
+
+    def submit_once(self, statement: str, query_id: str) -> str:
+        """Sends once, asking the admission as the request enters the
+        transport, as ``ClickHouseClient.submit_once`` does."""
+        admission = SEND_ADMISSION.get()
+        if admission is not None:
+            if not admission.admit():
+                msg = "The request was not sent: its caller stopped"
+                raise SendNotAdmittedError(msg)
+            admission.handed_off()
+        return self.submit(statement, query_id)
 
     def query(self, statement: str) -> _Result:
         # Rows in a result, as the client returns them (the replica probe
@@ -455,6 +476,7 @@ def test_replay_failed_replays_a_chunk_the_server_shows_failed_under_a_new_id() 
         build_query=lambda _chunk_id: "SELECT 1",
         poll_interval_ms=1,
         resume_from=resume_from,
+        checkpoint_version=CHECKPOINT_VERSION,
         replay_failed=True,
     )
 
@@ -925,7 +947,7 @@ def _run_once(
     accept_unknown: bool = False,
     max_poll_errors: int = 10,
     outcome_recheck_interval_ms: int = 1,
-    checkpoint_version: int | None = None,
+    checkpoint_version: int | None = CHECKPOINT_VERSION,
 ) -> BackfillResult:
     return execute_backfill(
         executor=server,
@@ -1205,7 +1227,7 @@ def test_replay_failed_and_accept_unknown_each_replay_their_own_chunks(
         assert executor.submit_order == []
         return
     result = run()
-    assert ["-".join(qid.split("-")[:4]) for qid in executor.submit_order] == [
+    assert sorted("-".join(qid.split("-")[:4]) for qid in executor.submit_order) == [
         f"backfill-{PLAN_ID}-{chunk_id}" for chunk_id in replayed
     ]
     assert result.progress["c1"].status == "done"
@@ -1275,13 +1297,13 @@ def test_an_unversioned_checkpoints_pending_or_missing_chunk_with_no_outcome_is_
         next_outcomes=["finished"],
     )
     with pytest.raises(RuntimeError) as raised:
-        _run_once(legacy, resume_from())
+        _run_once(legacy, resume_from(), checkpoint_version=None)
     assert str(raised.value) == _unknown_error(FIRST_ID, NO_OUTCOME)
     assert legacy.submits == []
     # Saved in this release's format: recorded as may have run.
     assert legacy.persisted[-1]["c1"] == BackfillChunkState(status="pending", query_id=FIRST_ID)
 
-    accepted = _run_once(legacy, resume_from(), accept_unknown=True)
+    accepted = _run_once(legacy, resume_from(), accept_unknown=True, checkpoint_version=None)
     assert len(legacy.submits) == 1
     assert legacy.submits[0] != FIRST_ID
     assert accepted.progress["c1"].status == "done"
@@ -1297,7 +1319,9 @@ def test_an_unversioned_checkpoints_chunk_that_committed_is_done_without_a_flag(
         attempts=[_SimAttempt(query_id=FIRST_ID, outcome="finished", logged_at_log_read=1)]
     )
 
-    result = _run_once(server, {"c1": BackfillChunkState(status="pending")})
+    result = _run_once(
+        server, {"c1": BackfillChunkState(status="pending")}, checkpoint_version=None
+    )
 
     assert server.submits == []
     assert (result.progress["c1"].status, result.progress["c1"].query_id) == ("done", FIRST_ID)
@@ -1394,8 +1418,11 @@ def test_older_release_shared_id_replay_seen_running_is_not_taken_for_the_failur
         ]
     )
 
+    # A wide flush window: the QueryFinish shows a few log reads late.
     result = _run_once(
-        server, {"c1": BackfillChunkState(status="pending", submitted_at=submitted_at)}
+        server,
+        {"c1": BackfillChunkState(status="pending", submitted_at=submitted_at)},
+        outcome_recheck_interval_ms=100,
     )
 
     assert server.submits == []
@@ -1663,7 +1690,7 @@ def test_a_failure_row_of_an_attempt_an_older_release_recorded_is_unknown(saved:
     server = SimulatedServer(attempts=[_killed_first()], next_outcomes=["finished"])
 
     with pytest.raises(RuntimeError) as raised:
-        _run_once(server, resume_from, replay_failed=True)
+        _run_once(server, resume_from, replay_failed=True, checkpoint_version=None)
 
     assert str(raised.value) == _unknown_error(FIRST_ID, RESENT)
     assert server.submits == []
@@ -1677,7 +1704,12 @@ def test_an_older_releases_second_send_that_committed_is_done_once_its_finish_sh
         ]
     )
 
-    result = _run_once(server, {"c1": BackfillChunkState(status="pending")}, replay_failed=True)
+    result = _run_once(
+        server,
+        {"c1": BackfillChunkState(status="pending")},
+        replay_failed=True,
+        checkpoint_version=None,
+    )
 
     assert server.submits == []
     assert (result.progress["c1"].status, result.progress["c1"].query_id) == ("done", FIRST_ID)
@@ -1839,3 +1871,208 @@ def test_a_stop_during_a_hung_resume_read_raises_at_once() -> None:
             stop=stop,
         )
     assert time.monotonic() - started < 5
+
+
+# Round 4 item 3: the checkpoint a rollback to an older release rewrites
+# without a version keeps this release's single_send markers; that release may
+# have resent the ids, so the markers prove nothing (fixture shared with TS).
+ROLLBACK_FIXTURE = (
+    Path(__file__).resolve().parents[2] / "test" / "fixtures" / "backfill-rollback-checkpoint.json"
+)
+
+
+def test_a_rolled_back_checkpoints_single_send_markers_prove_nothing() -> None:
+    raw = json.loads(ROLLBACK_FIXTURE.read_text(encoding="utf-8"))
+    progress = {
+        chunk_id: BackfillChunkState.model_validate(state)
+        for chunk_id, state in raw["progress"].items()
+    }
+    failed = [QueryStatus(status="failed", error="Code: 394. QUERY_WAS_CANCELLED", duration_ms=1)]
+    finished = [QueryStatus(status="finished", written_rows=1, written_bytes=1, duration_ms=1)]
+    executor = SubmitRecordingExecutor(
+        {
+            f"backfill-{PLAN_ID}-c1": failed,
+            f"backfill-{PLAN_ID}-c2": failed,
+            f"backfill-{PLAN_ID}-c1-*": finished,
+            f"backfill-{PLAN_ID}-c2-*": finished,
+        }
+    )
+
+    def resume(*, replay_failed: bool = False, accept_unknown: bool = False) -> BackfillResult:
+        return execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            poll_interval_ms=1,
+            outcome_recheck_attempts=2,
+            outcome_recheck_interval_ms=1,
+            resume_from=progress,
+            replay_failed=replay_failed,
+            accept_unknown=accept_unknown,
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        resume(replay_failed=True)
+    assert (
+        f"chunk c1 (query_id backfill-{PLAN_ID}-c1): {RESENT}; chunk c2 (query_id "
+        f"backfill-{PLAN_ID}-c2): {RESENT}."
+    ) in str(raised.value)
+    assert executor.submit_order == []
+
+    accepted = resume(accept_unknown=True)
+    assert len(executor.submit_order) == 2
+    assert accepted.completed == 2
+
+
+# Round 4 item 2: an executor without a single-attempt send records no
+# single_send, so a failure of its attempt is never proof.
+def test_an_attempt_of_an_executor_that_may_resend_is_never_proved_failed() -> None:
+    class Retrying:
+        def __init__(self) -> None:
+            self._inner = MockExecutor(
+                {f"backfill-{PLAN_ID}-c1": [QueryStatus(status="failed", error="OOM", duration_ms=1)]}
+            )
+
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            return self._inner.submit(statement, query_id)
+
+        def query(self, statement: str) -> object:
+            return self._inner.query(statement)
+
+    saved: list[BackfillProgress] = []
+
+    with pytest.raises(RuntimeError, match=r"an older release may have sent it more than once"):
+        execute_backfill(
+            executor=Retrying(),
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            poll_interval_ms=1,
+            max_poll_errors=2,
+            outcome_recheck_attempts=1,
+            outcome_recheck_interval_ms=1,
+            on_progress=saved.append,
+        )
+    assert all(progress["c1"].single_send is None for progress in saved)
+
+
+# Round 4 items 1 and 4, through ClickHouseClient.submit_once and its
+# single-attempt pool: a fake urllib3 pool whose request() enters urlopen().
+class _FakePool:
+    def __init__(self, gate: threading.Event | None = None) -> None:
+        self.gate = gate
+        self.entered: list[str] = []
+
+    def request(self, method: str, url: str, **kwargs: object) -> object:
+        if self.gate is not None:
+            self.gate.wait(5)
+        return self.urlopen(method, url, **kwargs)
+
+    def urlopen(self, method: str, url: str, **kwargs: object) -> object:
+        self.entered.append(url)
+        return MagicMock(status=200)
+
+
+def _client_executor(pool: _FakePool) -> tuple[object, ClickHouseClient]:
+    driver = MagicMock()
+    driver.http = pool
+    driver.command.side_effect = lambda statement, **_kw: driver.http.request("POST", "http://ch/")
+    client = ClickHouseClient(
+        MagicMock(),
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123", username="default", password="", database="default", secure=False
+        ),
+    )
+    client._submit_client = driver
+    previous = BackfillChunkState(status="failed", query_id=FIRST_ID, single_send=True)
+    reads = MockExecutor(
+        {FIRST_ID: [QueryStatus(status="failed", error="OOM", duration_ms=0)]}
+    )
+
+    class Executor:
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            raise AssertionError("submit_once is used")
+
+        def submit_once(self, statement: str, query_id: str) -> str:
+            return client.submit_once(statement, query_id)
+
+        def query(self, statement: str) -> object:
+            return reads.query(statement)
+
+    assert previous.single_send
+    return Executor(), client
+
+
+def _interrupted_replay(
+    executor: object,
+    stop: threading.Event,
+    build_query: Callable[[str], str],
+    on_report: Callable[[BackfillProgress], None] | None = None,
+) -> list[BackfillProgress]:
+    reports: list[BackfillProgress] = []
+
+    def on_progress(progress: BackfillProgress) -> None:
+        reports.append(progress)
+        if on_report is not None:
+            on_report(progress)
+
+    with pytest.raises(RuntimeError, match=rf"Backfill plan {PLAN_ID}: interrupted\."):
+        execute_backfill(
+            executor=executor,  # type: ignore[arg-type]
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=build_query,
+            poll_interval_ms=1,
+            resume_from={"c1": BackfillChunkState(status="failed", query_id=FIRST_ID, single_send=True)},
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=True,
+            stop=stop,
+            on_progress=on_progress,
+        )
+    return reports
+
+
+def test_an_interrupt_waits_for_an_admitted_send_to_enter_the_transport() -> None:
+    gate = threading.Event()
+    pool = _FakePool(gate)
+    executor, _client = _client_executor(pool)
+    stop = threading.Event()
+
+    def build_query(_chunk_id: str) -> str:
+        # Admitted, then held before urlopen; the interrupt comes meanwhile.
+        threading.Timer(0.05, stop.set).start()
+        threading.Timer(0.3, gate.set).start()
+        return "INSERT INTO t SELECT 1"
+
+    reports = _interrupted_replay(executor, stop, build_query)
+    entered = len(pool.entered)
+    time.sleep(0.2)
+
+    # The interrupt returned only after the admitted request entered the
+    # transport, and nothing entered it afterwards.
+    assert entered == 1
+    assert len(pool.entered) == 1
+    assert (reports[-1]["c1"].query_id or "").startswith(f"{FIRST_ID}-")
+
+
+def test_a_send_refused_after_its_record_saves_the_proved_failure_back_before_the_interrupt_returns() -> None:
+    pool = _FakePool()
+    executor, _client = _client_executor(pool)
+    stop = threading.Event()
+
+    def on_report(progress: BackfillProgress) -> None:
+        # The interrupt lands while the replay's new id is being saved.
+        if (progress["c1"].query_id or "").startswith(f"{FIRST_ID}-") and not stop.is_set():
+            stop.set()
+            time.sleep(0.2)
+
+    reports = _interrupted_replay(executor, stop, lambda _chunk_id: "INSERT INTO t SELECT 1", on_report)
+    reported = len(reports)
+    time.sleep(0.2)
+
+    assert pool.entered == []
+    assert len(reports) == reported
+    assert any((r["c1"].query_id or "").startswith(f"{FIRST_ID}-") for r in reports)
+    assert reports[-1]["c1"].status == "failed"
+    assert reports[-1]["c1"].query_id == FIRST_ID

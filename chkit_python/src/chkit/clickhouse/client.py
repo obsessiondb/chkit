@@ -7,6 +7,7 @@ client returns ``Any`` extensively; this wrapper narrows it down.
 
 from __future__ import annotations
 
+import contextlib
 import json
 import logging
 import os
@@ -15,7 +16,7 @@ import threading
 import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
-from typing import Any, Literal, NoReturn, Self
+from typing import Any, Literal, NoReturn, Protocol, Self
 from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -572,11 +573,22 @@ class ClickHouseClient:
         return list_table_details(self, databases)
 
 
-#: Set by a caller that must not send once it stops (#765). ``submit_once``
-#: asks it right before the request reaches the transport, after any lazy
-#: connection setup, so a caller that refuses admission and then returns knows
-#: no request can start afterwards.
-SEND_ADMISSION: ContextVar[Callable[[], bool] | None] = ContextVar(
+class SendAdmission(Protocol):
+    """Asked by ``submit_once`` right before its request enters the transport
+    (#765). ``admit`` returning False sends nothing. ``handed_off`` is called
+    once the request has entered urllib3's ``urlopen``, or once the send ended
+    without getting there; it may be called more than once. A caller that
+    stops can therefore wait until every admitted send has handed off, and
+    know that no request of it starts afterwards."""
+
+    def admit(self) -> bool: ...
+
+    def handed_off(self) -> None: ...
+
+
+#: Set by a caller that must not send once it stops (#765), asked after any
+#: lazy connection setup.
+SEND_ADMISSION: ContextVar[SendAdmission | None] = ContextVar(
     "chkit_send_admission", default=None
 )
 
@@ -603,12 +615,28 @@ class _SingleAttemptPool:
     def request(self, *args: Any, **kwargs: Any) -> Any:
         if self._sent:
             raise RuntimeError(self._message)
-        admit = SEND_ADMISSION.get()
-        if admit is not None and not admit():
+        admission = SEND_ADMISSION.get()
+        if admission is not None and not admission.admit():
             msg = "The request was not sent: its caller stopped"
             raise SendNotAdmittedError(msg)
         self._sent = True
-        return self._pool.request(*args, **{**kwargs, "retries": False})
+        if admission is None:
+            return self._pool.request(*args, **{**kwargs, "retries": False})
+        pool = self._pool
+        original = pool.urlopen
+
+        def urlopen(*urlopen_args: Any, **urlopen_kwargs: Any) -> Any:
+            # In the transport: the request starts whatever happens next.
+            admission.handed_off()
+            return original(*urlopen_args, **urlopen_kwargs)
+
+        pool.urlopen = urlopen
+        try:
+            return pool.request(*args, **{**kwargs, "retries": False})
+        finally:
+            with contextlib.suppress(AttributeError):
+                del pool.urlopen
+            admission.handed_off()
 
 
 def _use_ts_timeouts(client: Any) -> None:

@@ -143,7 +143,9 @@ async function runBackfillLocked(
     )
   }
 
-  const db = createClickHouseExecutor(input.clickhouse)
+  // Chunk workers read and poll concurrently, which a session-bound executor
+  // rejects ("Session is locked by a concurrent client"): a stateless one.
+  const db = createStatelessClickHouseExecutor(input.clickhouse)
 
   try {
     const [database, table] = plan.target.split('.')
