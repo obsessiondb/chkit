@@ -183,16 +183,35 @@ async function pullFallbackPlugins(): Promise<ChxPluginRegistration[]> {
   }
 }
 
+/** The `codegen` plugin when it is installed: chkit-py prints its help without a config (#771). */
+async function codegenFallbackPlugins(): Promise<ChxPluginRegistration[]> {
+  try {
+    const mod = (await import('@chkit/plugin-codegen')) as { codegen?: () => ChxPluginRegistration }
+    return typeof mod.codegen === 'function' ? [mod.codegen()] : []
+  } catch {
+    return []
+  }
+}
+
 /**
  * The commands chkit knows when no project config gives the plugins: the
- * built-in commands, `pull`, and the commands and flags of `registrations`.
+ * built-in commands, `pull`, `codegen`, the ObsessionDB flags (as chkit-py
+ * shows them also for a user profile that lists no plugins, #771), and the
+ * commands and flags of `registrations`.
  */
 async function createConfiglessRegistry(
   registrations: readonly ChxPluginRegistration[],
 ): Promise<ReturnType<typeof createCommandRegistry>> {
-  const plugins = registrations.map(normalizePluginRegistration).filter((entry) => entry.enabled)
+  const normalized = registrations.map(normalizePluginRegistration)
+  if (!normalized.some(({ plugin }) => plugin.manifest.name === 'obsessiondb')) {
+    normalized.push(...(await profileFallbackPlugins()).map(normalizePluginRegistration))
+  }
+  const plugins = normalized.filter((entry) => entry.enabled)
   if (!plugins.some(({ plugin }) => plugin.manifest.name === 'pull')) {
     plugins.push(...(await pullFallbackPlugins()).map(normalizePluginRegistration))
+  }
+  if (!plugins.some(({ plugin }) => plugin.manifest.name === 'codegen')) {
+    plugins.push(...(await codegenFallbackPlugins()).map(normalizePluginRegistration))
   }
   return createCommandRegistry({
     globalFlags: GLOBAL_FLAGS,
@@ -239,6 +258,8 @@ async function reportsWithoutProjectConfig(input: {
     console.log(formatCommandHelp(resolved, registry.globalFlags, firstPluginPositional(argv)))
     return true
   }
+  // As in chkit-py, codegen checks its arguments once the config is loaded.
+  if (commandName === 'codegen') return false
   if (commandName === 'query') {
     const parsed = parseCommandArgs(commandName, argv.slice(1), registry.resolveFlags(commandName))
     if (!parsed) return true
@@ -340,14 +361,13 @@ async function run(): Promise<void> {
 
   if (configSource !== 'project' && PROJECT_ONLY_COMMANDS.has(commandName)) {
     if (
-      !wantsHelp &&
-      (await reportsWithoutProjectConfig({
+      await reportsWithoutProjectConfig({
         argv,
         commandName,
         registrations: config.plugins,
-        wantsHelp: false,
+        wantsHelp,
         jsonMode: options.includes('--json'),
-      }))
+      })
     ) {
       return
     }
@@ -376,6 +396,9 @@ async function run(): Promise<void> {
   })
 
   const resolved = registry.get(commandName)
+  // Outside a project, `chkit obsessiondb` reads its command name as
+  // `chkit plugin obsessiondb` does, as in chkit-py (#771).
+  const forwardsCommandName = commandName === 'obsessiondb' && configSource !== 'project'
   let initFlags: ParsedFlags = {}
   if (resolved && !wantsHelp) {
     const parsed = parseInitFlags({
@@ -384,6 +407,7 @@ async function run(): Promise<void> {
       resolved,
       registry,
       plugins: pluginRuntime.plugins,
+      forwardsCommandName,
     })
     if (!parsed) return
     initFlags = parsed
@@ -459,6 +483,7 @@ async function run(): Promise<void> {
       config,
       configPath,
       pluginRuntime,
+      forwardsCommandName,
       onAmbiguousPluginSubcommand(token) {
         if (token === undefined) {
           console.log(formatCommandHelp(resolved, registry.globalFlags))
