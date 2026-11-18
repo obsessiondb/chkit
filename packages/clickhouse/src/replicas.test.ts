@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { waitForDDLPropagation } from './ddl-propagation.js'
 import type { ClickHouseExecutor } from './index.js'
-import { resolveReplicaFanout } from './replicas.js'
+import { probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow } from './replicas.js'
 
 const FAST = { pollIntervalMs: 1 }
 
@@ -47,6 +47,37 @@ describe('resolveReplicaFanout', () => {
 
     expect(await resolveReplicaFanout(db, 'prod')).toEqual({ cluster: 'prod', replicas: 2 })
     expect(queries[0]).toContain("clusterAllReplicas('prod', system.one)")
+  })
+})
+
+function failingExecutor(error: Error): ClickHouseExecutor {
+  return {
+    async query(): Promise<never> {
+      throw error
+    },
+  } as unknown as ClickHouseExecutor
+}
+
+describe('probeReplicaAccess (#765)', () => {
+  test('reports a denied cluster as denied, not as one replica', async () => {
+    const denied = Object.assign(new Error('Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)'), { code: '497' })
+
+    expect(await probeReplicaAccess(failingExecutor(denied))).toEqual({ kind: 'denied', error: denied.message })
+    // The lenient and strict fan-out helpers keep their single-replica fallback.
+    expect(await resolveReplicaFanoutOrThrow(failingExecutor(denied))).toBeUndefined()
+  })
+
+  test('reports a missing cluster as one replica and rejects any other failure', async () => {
+    const missing = new Error("Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)")
+
+    expect(await probeReplicaAccess(failingExecutor(missing))).toEqual({ kind: 'single' })
+    await expect(probeReplicaAccess(failingExecutor(new Error('Code: 210. NETWORK_ERROR')))).rejects.toThrow('NETWORK_ERROR')
+  })
+
+  test('reports several replicas as a fan-out', async () => {
+    const { db } = twoReplicaExecutor([2])
+
+    expect(await probeReplicaAccess(db, 'prod')).toEqual({ kind: 'fanout', fanout: { cluster: 'prod', replicas: 2 } })
   })
 })
 

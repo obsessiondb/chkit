@@ -116,9 +116,20 @@ chkit plugin backfill resume --plan-id <samePlanId> --replay-failed --json
 chkit plugin backfill doctor --plan-id <samePlanId> --json
 ```
 
-Resume uses saved progress and skips completed chunks. A completed run returns a successful no-op; it does not create a new plan. `run` refuses an existing run and directs you to resume. `--replay-failed` resets failed chunks for retry; the default resume does not request failed-chunk replay. A chunk's first attempt runs under the query id `backfill-<planId>-<chunkId>`; each replay runs under a new id, that prefix followed by a random suffix, saved with the chunk before it is submitted, so its status is read from that attempt alone, however soon after the failure the replay starts. When a run stopped during a replay, resume reads that replay's outcome again for up to 10 seconds, while `system.query_log` catches up, before it submits anything: a finished replay is recorded done, a failed one failed, and one that never started runs under its saved id. If the replay started but has no outcome and runs on no replica, resume stops with an error and submits nothing, so the chunk never runs twice.
+Resume uses saved progress and skips completed chunks. A completed run returns a successful no-op; it does not create a new plan. `run` refuses an existing run and directs you to resume. A chunk's first attempt runs under the query id `backfill-<planId>-<chunkId>`; each replay runs under a new id, that prefix followed by a random suffix. The id of every attempt is saved with the chunk before it is submitted, so its status is read from that attempt alone, however soon after a failure the replay starts.
 
 Before submitting anything, resume reads `system.processes` and `system.query_log` to find chunks that are still running or already finished, so it polls them instead of submitting them again. A chunk runs on the replica that received it, so on a multi-replica target these reads cover every replica of `clickhouse.cluster`, or of `default` (a multi-replica ObsessionDB service) when no cluster is set. If a replica cannot be read, resume stops with an error and submits nothing; re-run it.
+
+A chunk is submitted again only on the server's evidence that its last attempt failed: an exception row for that attempt's query id in `system.query_log`, with no `QueryFinish` and nothing running. `--replay-failed` replays those chunks; the default resume does not. When a saved attempt has no such evidence, resume reads its outcome again for up to 10 seconds while `system.query_log` catches up. If the outcome is still unknown, resume stops with an error that names each chunk and its query id, and submits nothing, so a chunk that may have written its rows never runs twice. An outcome is unknown when:
+
+- the attempt runs on no replica and `system.query_log` has no outcome for it: the log flushes later than usual, query logging is off, or the submit never reached the server;
+- the user may not read every replica through `clusterAllReplicas`, and the replica it can read shows nothing;
+- polling lost contact with the server (also during `run`: the run then ends with the same error, and the chunk keeps its state);
+- an older chkit release replayed the chunk under its shared query id, so a failure row may be the earlier attempt's.
+
+Re-run the resume once the outcome is in `system.query_log`. If it never will be, `--accept-unknown` replays those chunks under a new query id. Use it only after you checked the target: if the attempt did write its rows, the replay writes them again, unless the table's deduplication drops them.
+
+A `run` or `resume` holds a lock on its plan, `runs/<planId>.lock` in the backfill state directory, until it ends. A second `run` or `resume` of the same plan fails at once with the lock holder's pid, host and start time. A lock left by a process that died on the same host is taken over; any other lock stays until you delete the file, so check that its process is gone first. Each checkpoint write is synced to disk before the run goes on.
 
 Each chunk has a stable token within its saved plan. ClickHouse's actual deduplication depends on the table engine, settings and deduplication window; a token is **not** a universal exactly-once guarantee. A crash after an INSERT but before checkpoint persistence needs engine-specific recovery testing. Verify totals before and after resuming.
 
@@ -146,7 +157,8 @@ All commands support the usual `--json` and `--config` flags. Replace `chkit` wi
 | `--concurrency <n>` | No | Concurrent async queries, default `3` |
 | `--poll-interval <ms>` | No | Poll interval, default `5000` |
 | `--force-environment` | No | Explicitly bypass the saved environment check |
-| `--replay-failed` | Resume only | Reset failed chunks for retry |
+| `--replay-failed` | Resume only | Replay the chunks the server shows failed |
+| `--accept-unknown` | Resume only | Replay the chunks whose last attempt has an unknown outcome; this can write their rows twice |
 
 `status`, `cancel`, and `doctor` accept `--plan-id`. `cancel` marks the saved run as cancelled; it does not kill ClickHouse queries or reliably interrupt a runner that is already executing. Stop that runner separately and inspect resulting data before planning further work.
 

@@ -146,11 +146,33 @@ def write_json(file_path: str | Path, value: object) -> None:
     payload = (
         json.dumps(_jsonable(value), indent=2, default=_json_default) + "\n"
     )
-    # Write-then-replace so a crash mid-write never leaves a truncated
-    # checkpoint (resume depends on run.json always being parseable).
+    # Write, sync, replace, then sync the directory, so neither a crash nor a
+    # power loss leaves a truncated checkpoint or brings back the previous one
+    # (the run checkpoint holds the only record of a replay's query id, #765).
     tmp_path = path.with_name(f"{path.name}.{secrets.token_hex(6)}.tmp")
-    tmp_path.write_text(payload, encoding="utf-8")
+    write_file_durably(tmp_path, payload)
     os.replace(tmp_path, path)
+    sync_directory(path.parent)
+
+
+def write_file_durably(path: Path, content: str) -> None:
+    """Write ``content`` to a new file at ``path`` and sync it to disk."""
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write(content)
+        handle.flush()
+        os.fsync(handle.fileno())
+
+
+def sync_directory(directory: Path) -> None:
+    """Sync a directory, so a rename or link in it survives a power loss.
+    Windows cannot open a directory for that, and needs no such sync."""
+    if os.name == "nt":
+        return
+    fd = os.open(directory, os.O_RDONLY)
+    try:
+        os.fsync(fd)
+    finally:
+        os.close(fd)
 
 
 _JS_INTEGER_PRINT_BOUND = 1e21

@@ -274,10 +274,18 @@ class _RecordingRemote:
         return self._inner.submit(statement, query_id=query_id)
 
     def query_status(
-        self, query_id: str, *, after_time: str | None = None, every_replica: bool = False
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
         return self._inner.query_status(
-            query_id, after_time=after_time, every_replica=every_replica
+            query_id,
+            after_time=after_time,
+            every_replica=every_replica,
+            running_only=running_only,
         )
 
 

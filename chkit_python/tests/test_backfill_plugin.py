@@ -10,6 +10,8 @@ Covers:
 from __future__ import annotations
 
 import json
+import os
+import socket
 from pathlib import Path
 from typing import Any
 from unittest.mock import MagicMock
@@ -19,6 +21,7 @@ import pytest
 from chkit.cli.table_scope import TableScope
 from chkit.core.model import (
     ChxResolvedCheckConfig,
+    ChxResolvedClickHouseConfig,
     ChxResolvedConfig,
     ChxResolvedSafetyConfig,
 )
@@ -695,3 +698,66 @@ def test_doctor_reports_plan_missing_run(tmp_path: Path) -> None:
     payload = msgs[0]
     assert payload["issueCodes"] == ["backfill_plan_missing"]
     assert any("backfill run --plan-id" in r for r in payload["recommendations"])
+
+
+# #765: a resume takes the plan's lock before it reads the checkpoint, so a
+# second resume fails at once instead of submitting chunks the first runs.
+def test_resume_fails_at_once_while_another_run_holds_the_plans_lock(tmp_path: Path) -> None:
+    cfg = _cfg(tmp_path).model_copy(
+        update={
+            "clickhouse": ChxResolvedClickHouseConfig(
+                url="http://localhost:1",
+                username="default",
+                password="",
+                database="default",
+                secure=False,
+            )
+        }
+    )
+    plan = _make_plan()
+    paths = backfill_paths(
+        compute_backfill_state_dir(cfg, tmp_path / "clickhouse.config.py"), plan.plan_id
+    )
+    write_json(paths.plan_path, plan)
+    lock_path = Path(paths.runs_dir) / f"{plan.plan_id}.lock"
+    # The parent of this test process: alive, on this host.
+    holder = {
+        "pid": os.getppid(),
+        "host": socket.gethostname(),
+        "startedAt": "2026-11-18T10:00:00.000Z",
+        "token": "0123456789abcdef",
+    }
+    lock_path.parent.mkdir(parents=True, exist_ok=True)
+    lock_path.write_text(json.dumps(holder) + "\n", encoding="utf-8")
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "resume")
+
+    def resume() -> tuple[int, list[Any]]:
+        msgs: list[Any] = []
+        code = cmd.run(
+            _make_command_context(
+                config=cfg,
+                tmp_path=tmp_path,
+                flags={"--plan-id": plan.plan_id},
+                json_mode=True,
+                msgs=msgs,
+            )
+        )
+        assert code is not None
+        return code, msgs
+
+    code, msgs = resume()
+    assert code == 2
+    assert any(
+        f"Backfill plan {plan.plan_id} is locked by another run or resume (pid "
+        f"{os.getppid()} on {socket.gethostname()}, since 2026-11-18T10:00:00.000Z)."
+        in str(m)
+        for m in msgs
+    )
+
+    lock_path.unlink()
+    code, msgs = resume()
+    assert code == 2
+    assert any("Run state not found" in str(m) for m in msgs)
+    assert not lock_path.exists()

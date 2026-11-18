@@ -22,7 +22,7 @@ import pytest
 
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus
 from chkit.core.model import ChxResolvedClickHouseConfig
-from chkit_plugin_backfill.async_backfill import execute_backfill
+from chkit_plugin_backfill.async_backfill import BackfillResult, execute_backfill
 from chkit_plugin_backfill.chunking.analyze import analyze_and_chunk
 from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
 from chkit_plugin_backfill.chunking.types import (
@@ -268,7 +268,8 @@ def test_replay_failed_re_runs_a_failed_chunk_and_restores_the_full_row_count(
 
     for chunk_id in succeeded_ids:
         exec_ctx.ddl.execute(_sql_for_chunk(exec_ctx, chunk_id))
-    assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) < SOURCE_ROWS
+    partial = _count_rows(exec_ctx.ddl, exec_ctx.target_fqn)
+    assert partial < SOURCE_ROWS
 
     resume_from: BackfillProgress = {
         failed_id: BackfillChunkState(status="failed", error="simulated failure"),
@@ -277,17 +278,34 @@ def test_replay_failed_re_runs_a_failed_chunk_and_restores_the_full_row_count(
             for chunk_id in succeeded_ids
         },
     }
+    plan_id = f"{exec_ctx.plan.plan_id}-replay"
 
-    result = execute_backfill(
-        executor=exec_ctx.run_executor,
-        plan_id=f"{exec_ctx.plan.plan_id}-replay",
-        chunk_ids=chunk_ids,
-        build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
-        concurrency=3,
-        poll_interval_ms=250,
-        resume_from=resume_from,
-        replay_failed=True,
-    )
+    def replay(*, accept_unknown: bool) -> BackfillResult:
+        return execute_backfill(
+            executor=exec_ctx.run_executor,
+            plan_id=plan_id,
+            chunk_ids=chunk_ids,
+            build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
+            concurrency=3,
+            poll_interval_ms=250,
+            outcome_recheck_interval_ms=200,
+            resume_from=resume_from,
+            replay_failed=True,
+            accept_unknown=accept_unknown,
+        )
+
+    # #765: the checkpoint says failed, but the server has no row of the
+    # chunk, so nothing proves it did not write its rows: no replay.
+    with pytest.raises(RuntimeError) as raised:
+        replay(accept_unknown=False)
+    assert (
+        f"the outcome of the last attempt is unknown for chunk {failed_id} (query_id "
+        f"backfill-{plan_id}-{failed_id}): it is not running on any replica and "
+        "system.query_log has no outcome for it."
+    ) in str(raised.value)
+    assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == partial
+
+    result = replay(accept_unknown=True)
 
     assert result.failed == 0
     assert result.completed == len(exec_ctx.plan.chunks)
@@ -379,10 +397,8 @@ def test_a_resume_right_after_a_replay_committed_records_it_done(
             submits.append(query_id or statement)
             return exec_ctx.run_executor.submit(statement, query_id)
 
-        def query_status(
-            self, query_id: str, *, after_time: str | None = None
-        ) -> QueryStatus:
-            return exec_ctx.run_executor.query_status(query_id, after_time=after_time)
+        def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
+            return exec_ctx.run_executor.query_status(query_id, running_only=running_only)
 
         def query(self, statement: str) -> object:
             return exec_ctx.run_executor.query(statement)
@@ -407,4 +423,75 @@ def test_a_resume_right_after_a_replay_committed_records_it_done(
     assert submits == []
     assert resumed.progress[replayed_id].status == "done"
     assert resumed.progress[replayed_id].query_id == replay_id
+    assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == SOURCE_ROWS
+
+
+# #765: a recorded attempt that left no row in query_log (log_queries = 0
+# here; a slow or disabled log does the same) may have written its rows. The
+# resume stops; accept_unknown replays it under a new id.
+def test_a_resume_stops_on_a_recorded_attempt_query_log_has_no_row_of(
+    exec_ctx: _ExecContext,
+) -> None:
+    exec_ctx.ddl.execute(f"TRUNCATE TABLE {exec_ctx.target_fqn}")
+
+    chunk_ids = [chunk.id for chunk in exec_ctx.plan.chunks]
+    assert len(chunk_ids) > 0, "plan produced no chunks"
+    recorded_id = chunk_ids[0]
+    succeeded_ids = chunk_ids[1:]
+    for chunk_id in succeeded_ids:
+        exec_ctx.ddl.execute(_sql_for_chunk(exec_ctx, chunk_id))
+
+    plan_id = f"{exec_ctx.plan.plan_id}-unlogged"
+    attempt_id = f"backfill-{plan_id}-{recorded_id}-unlogged"
+    exec_ctx.run_executor.submit("SELECT 1 SETTINGS log_queries = 0", attempt_id)
+
+    submits: list[str] = []
+
+    class RecordingExecutor:
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            submits.append(query_id or statement)
+            return exec_ctx.run_executor.submit(statement, query_id)
+
+        def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
+            return exec_ctx.run_executor.query_status(query_id, running_only=running_only)
+
+        def query(self, statement: str) -> object:
+            return exec_ctx.run_executor.query(statement)
+
+    hour_ago = datetime.now(tz=UTC) - timedelta(hours=1)
+
+    def resume(*, accept_unknown: bool) -> BackfillResult:
+        return execute_backfill(
+            executor=RecordingExecutor(),
+            plan_id=plan_id,
+            chunk_ids=chunk_ids,
+            build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
+            poll_interval_ms=100,
+            outcome_recheck_interval_ms=200,
+            accept_unknown=accept_unknown,
+            resume_from={
+                recorded_id: BackfillChunkState(
+                    status="pending",
+                    query_id=attempt_id,
+                    submitted_at=hour_ago.strftime("%Y-%m-%dT%H:%M:%S.000Z"),
+                ),
+                **{chunk_id: BackfillChunkState(status="done") for chunk_id in succeeded_ids},
+            },
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        resume(accept_unknown=False)
+    assert (
+        f"the outcome of the last attempt is unknown for chunk {recorded_id} (query_id "
+        f"{attempt_id}): it is not running on any replica and system.query_log has no "
+        "outcome for it."
+    ) in str(raised.value)
+    assert submits == []
+
+    accepted = resume(accept_unknown=True)
+
+    assert len(submits) == 1
+    assert submits[0] != attempt_id
+    assert accepted.progress[recorded_id].status == "done"
+    assert accepted.progress[recorded_id].query_id == submits[0]
     assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == SOURCE_ROWS

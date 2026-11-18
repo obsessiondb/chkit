@@ -351,16 +351,27 @@ describe('e2e: executeBackfill against a live cluster', () => {
       ),
     }
 
-    const result = await executeBackfill({
+    const replay = (acceptUnknown: boolean) => executeBackfill({
       executor: runExecutor,
       planId: `${plan.planId}-replay`,
       chunks: plan.chunks,
       buildQuery: ({ id }) => sqlForChunk(id),
       concurrency: 3,
       pollIntervalMs: 1500,
+      outcomeRecheckIntervalMs: 200,
       resumeFrom,
       replayFailed: true,
+      acceptUnknown,
     })
+
+    // #765: the checkpoint says failed, but the server has no row of the
+    // chunk, so nothing proves it did not write its rows: no replay.
+    await expect(replay(false)).rejects.toThrow(
+      `the outcome of the last attempt is unknown for chunk ${failedId} (query_id backfill-${plan.planId}-replay-${failedId}): it is not running on any replica and system.query_log has no outcome for it.`,
+    )
+    expect(await readTargetRows()).toBe(partial)
+
+    const result = await replay(true)
 
     expect(result.failed).toBe(0)
     expect(result.completed).toBe(plan.chunks.length)
@@ -465,6 +476,59 @@ describe('e2e: executeBackfill against a live cluster', () => {
 
     expect(submits).toEqual([])
     expect(resumed.progress[replayedId]).toMatchObject({ status: 'done', queryId: replayId })
+    expect(await settledTargetRows()).toBe(SOURCE_ROWS)
+  }, 240_000)
+
+  // #765: a recorded attempt that left no row in query_log (log_queries = 0
+  // here; a slow or disabled log does the same) may have written its rows.
+  // The resume stops; --accept-unknown replays it under a new id.
+  test('a resume stops on a recorded attempt query_log has no row of, and --accept-unknown replays it', async () => {
+    await truncateTarget()
+    await waitUntilSourceVisible()
+
+    const chunkIds = plan.chunks.map((chunk) => chunk.id)
+    const recordedId = chunkIds[0]
+    if (!recordedId) throw new Error('plan produced no chunks')
+    const succeededIds = chunkIds.slice(1)
+    for (const id of succeededIds) {
+      await ddl.command(sqlForChunk(id))
+    }
+
+    const planId = `${plan.planId}-unlogged`
+    const attemptId = `backfill-${planId}-${recordedId}-unlogged`
+    await runExecutor.submit('SELECT 1 SETTINGS log_queries = 0', attemptId)
+
+    const submits: string[] = []
+    const resume = (acceptUnknown: boolean) => executeBackfill({
+      executor: {
+        ...runExecutor,
+        submit: async (sql, id) => {
+          submits.push(id ?? sql)
+          return runExecutor.submit(sql, id)
+        },
+      },
+      planId,
+      chunks: plan.chunks,
+      buildQuery: ({ id }) => sqlForChunk(id),
+      pollIntervalMs: 100,
+      outcomeRecheckIntervalMs: 200,
+      acceptUnknown,
+      resumeFrom: {
+        [recordedId]: { status: 'pending', queryId: attemptId, submittedAt: new Date(Date.now() - 60 * 60_000).toISOString() },
+        ...Object.fromEntries(succeededIds.map((id) => [id, { status: 'done' as const }])),
+      },
+    })
+
+    await expect(resume(false)).rejects.toThrow(
+      `the outcome of the last attempt is unknown for chunk ${recordedId} (query_id ${attemptId}): it is not running on any replica and system.query_log has no outcome for it.`,
+    )
+    expect(submits).toEqual([])
+
+    const accepted = await resume(true)
+
+    expect(submits).toHaveLength(1)
+    expect(submits[0]).not.toBe(attemptId)
+    expect(accepted.progress[recordedId]).toMatchObject({ status: 'done', queryId: submits[0] })
     expect(await settledTargetRows()).toBe(SOURCE_ROWS)
   }, 240_000)
 })

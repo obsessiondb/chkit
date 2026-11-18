@@ -1,7 +1,7 @@
 import { createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
-import { executeBackfill, type BackfillProgress } from './async-backfill.js'
+import { executeBackfill } from './async-backfill.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
@@ -42,6 +42,7 @@ import {
   summarizeRunStatus,
   writeJson,
 } from './state.js'
+import { acquireRunLock, runLockPath } from './run-lock.js'
 import type {
   BackfillPlugin,
   BackfillPluginCommandContext,
@@ -67,8 +68,7 @@ async function runBackfill(input: {
   concurrency: number
   pollIntervalMs: number
   stateDir?: string
-  resumeFrom?: BackfillProgress
-  replayFailed?: boolean
+  resume?: { replayFailed: boolean; acceptUnknown: boolean }
   configPath: string
   config: Parameters<typeof readPlan>[0]['config']
   clickhouse: NonNullable<Parameters<typeof createClickHouseExecutor>[0]>
@@ -82,19 +82,50 @@ async function runBackfill(input: {
     stateDir: input.stateDir,
   })
 
+  const paths = backfillPaths(stateDir, plan.planId)
+
+  // The lock is held from before the checkpoint is read until the run ends,
+  // so two runs or resumes never submit one chunk under two query ids (#765).
+  const lock = await acquireRunLock(runLockPath(paths.runsDir, plan.planId), plan.planId)
+  try {
+    return await runBackfillLocked(input, plan, paths)
+  } finally {
+    await lock.release()
+  }
+}
+
+async function runBackfillLocked(
+  input: Parameters<typeof runBackfill>[0],
+  plan: Awaited<ReturnType<typeof readPlan>>['plan'],
+  paths: ReturnType<typeof backfillPaths>,
+): Promise<number> {
+  // Check for existing run state
+  const existingRun = await readRun(paths.runPath)
+
+  if (input.resume) {
+    if (!existingRun) {
+      throw new BackfillConfigError(
+        `Run state not found for plan ${plan.planId}. Start with backfill run before resume.`
+      )
+    }
+    if (existingRun.status === 'completed') {
+      if (input.jsonMode) {
+        input.print({ ok: true, noop: true, planId: plan.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
+      } else {
+        input.print(`Backfill ${plan.planId}: already completed. Nothing to resume.`)
+      }
+      return 0
+    }
+  }
+  const resumeFrom = input.resume ? existingRun?.progress : undefined
+
   ensureEnvironmentMatch({
     plan,
     clickhouse: input.clickhouse,
     forceEnvironment: input.forceEnvironment,
   })
 
-  const paths = backfillPaths(stateDir, plan.planId)
-
-  // Check for existing run state
-  const existingRun = await readRun(paths.runPath)
-  const resumeFrom = input.resumeFrom
-
-  if (existingRun && !resumeFrom) {
+  if (existingRun && !input.resume) {
     // `run` command (no resumeFrom) must not silently continue an existing run.
     // Users should use `backfill resume` instead.
     const status = existingRun.status
@@ -162,7 +193,8 @@ async function runBackfill(input: {
       concurrency: input.concurrency,
       pollIntervalMs: input.pollIntervalMs,
       resumeFrom,
-      replayFailed: input.replayFailed,
+      replayFailed: input.resume?.replayFailed,
+      acceptUnknown: input.resume?.acceptUnknown,
       // Chunks report progress concurrently; one write at a time keeps an
       // older snapshot's rename from landing after a newer one.
       onProgress: (progress) => {
@@ -366,36 +398,13 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
               )
             }
 
-            const { stateDir } = await readPlan({
-              planId: opts.planId,
-              configPath: context.configPath,
-              config: context.config,
-              stateDir: opts.stateDir,
-            })
-            const paths = backfillPaths(stateDir, opts.planId)
-            const existingRun = await readRun(paths.runPath)
-            if (!existingRun) {
-              throw new BackfillConfigError(
-                `Run state not found for plan ${opts.planId}. Start with backfill run before resume.`
-              )
-            }
-            if (existingRun.status === 'completed') {
-              if (context.jsonMode) {
-                context.print({ ok: true, noop: true, planId: opts.planId, status: 'completed', message: 'Run already completed. Nothing to resume.' })
-              } else {
-                context.print(`Backfill ${opts.planId}: already completed. Nothing to resume.`)
-              }
-              return 0
-            }
-
             return runBackfill({
               planId: opts.planId,
               forceEnvironment: opts.forceEnvironment,
               concurrency: opts.concurrency,
               pollIntervalMs: opts.pollIntervalMs,
               stateDir: opts.stateDir,
-              resumeFrom: existingRun.progress,
-              replayFailed: opts.replayFailed,
+              resume: { replayFailed: opts.replayFailed, acceptUnknown: opts.acceptUnknown },
               configPath: context.configPath,
               config: context.config,
               clickhouse: context.config.clickhouse,

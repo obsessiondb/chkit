@@ -1,6 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 import { existsSync } from 'node:fs'
-import { readFile, rm, writeFile } from 'node:fs/promises'
+import { mkdir, readFile, rm, writeFile } from 'node:fs/promises'
+import { hostname } from 'node:os'
 import { join } from 'node:path'
 import { pathToFileURL } from 'node:url'
 
@@ -852,6 +853,28 @@ describe('plugin runtime', () => {
         ])
         expect(planned.exitCode).toBe(0)
         const planPayload = JSON.parse(planned.stdout) as { planId: string }
+
+        // #765: a resume takes the plan's lock before it reads the checkpoint;
+        // this test process, alive on this host, holds it.
+        const runsDir = join(fixture.metaDir, 'backfill', 'runs')
+        const lockPath = join(runsDir, `${planPayload.planId}.lock`)
+        await mkdir(runsDir, { recursive: true })
+        await writeFile(lockPath, `${JSON.stringify({ pid: process.pid, host: hostname(), startedAt: '2026-11-18T10:00:00.000Z', token: '0123456789abcdef' })}\n`, 'utf8')
+        const lockedResume = runCli([
+          'plugin',
+          'backfill',
+          'resume',
+          '--plan-id',
+          planPayload.planId,
+          '--config',
+          fixture.configPath,
+          '--json',
+        ])
+        expect(lockedResume.exitCode).toBe(2)
+        expect(lockedResume.stdout).toContain(
+          `Backfill plan ${planPayload.planId} is locked by another run or resume (pid ${process.pid} on ${hostname()}, since 2026-11-18T10:00:00.000Z).`,
+        )
+        await rm(lockPath)
 
         const blockedResume = runCli([
           'plugin',

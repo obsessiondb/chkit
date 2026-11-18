@@ -660,7 +660,7 @@ export {
 	waitForTableAbsent,
 	waitForView,
 } from './ddl-propagation.js'
-export { allReplicas, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaFanout } from './replicas.js'
+export { allReplicas, probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaAccess, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
 export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
 export { assertServerIndexGranularity } from './index-granularity.js'

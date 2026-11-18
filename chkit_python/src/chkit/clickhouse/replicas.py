@@ -63,38 +63,73 @@ def all_replicas(fanout: ReplicaFanout, source: str) -> str:
 
 
 def _probe_replicas(client: Any, cluster: str) -> ReplicaFanout | None:
+    access = probe_replica_access(client, cluster)
+    return access.fanout if access.kind == "fanout" else None
+
+
+@dataclass(frozen=True)
+class ReplicaAccess:
+    """What a read of every replica of a cluster can see (TS ``ReplicaAccess``).
+
+    - ``fanout``: several replicas, read through ``clusterAllReplicas``;
+    - ``single``: one replica, or no such cluster, so local reads see everything;
+    - ``denied``: the user may not query the cluster, so a local read sees one
+      replica of an unknown number, and a row it does not find may be on another.
+    """
+
+    kind: str  # fanout | single | denied
+    fanout: ReplicaFanout | None = None
+    error: str | None = None
+
+
+def probe_replica_access(client: Any, cluster: str | None = None) -> ReplicaAccess:
+    """Probe ``cluster`` (default ``default``) for a caller that must prove a
+    query runs, or ran, on no replica (#765). Any failure other than a missing
+    cluster or a denied user raises. Not cached."""
+    name = cluster or DEFAULT_CLUSTER
     try:
         rows = client.query(
             "SELECT count(DISTINCT hostName()) AS replicas "
-            f"FROM clusterAllReplicas({string_literal(cluster)}, system.one)"
+            f"FROM clusterAllReplicas({string_literal(name)}, system.one)"
         ).rows
     except Exception as error:
-        if _has_no_fanout(error):
-            return None
+        if _is_missing_cluster(error):
+            return ReplicaAccess(kind="single")
+        if _is_access_denied(error):
+            return ReplicaAccess(kind="denied", error=str(error))
         raise
     replicas = int(rows[0].get("replicas", 0)) if rows else 0
-    return ReplicaFanout(cluster=cluster, replicas=replicas) if replicas > 1 else None
+    if replicas > 1:
+        return ReplicaAccess(kind="fanout", fanout=ReplicaFanout(cluster=name, replicas=replicas))
+    return ReplicaAccess(kind="single")
 
 
-_NO_FANOUT_CODES = frozenset({"701", "170", "497"})
-_NO_FANOUT_MESSAGE = re.compile(
-    r"CLUSTER_DOESNT_EXIST|Requested cluster '.*' not found|ACCESS_DENIED|Not enough privileges"
+_MISSING_CLUSTER_CODES = frozenset({"701", "170"})
+_MISSING_CLUSTER_MESSAGE = re.compile(
+    r"CLUSTER_DOESNT_EXIST|Requested cluster '.*' not found"
 )
+_ACCESS_DENIED_MESSAGE = re.compile(r"ACCESS_DENIED|Not enough privileges")
 _CODE = re.compile(r"\bcode: (\d+)", re.IGNORECASE)
 
 
-def _has_no_fanout(error: BaseException) -> bool:
-    """Whether ``error`` says the target has no fan-out chkit can use.
+def _error_code(error: BaseException) -> str | None:
+    code = _CODE.search(str(error))
+    return code.group(1) if code is not None else None
 
-    The cluster does not exist (CLUSTER_DOESNT_EXIST, or BAD_GET on older
-    servers) or the user may not query it (ACCESS_DENIED). The ObsessionDB
-    console API sends only the message.
-    """
-    text = str(error)
-    code = _CODE.search(text)
-    if code is not None and code.group(1) in _NO_FANOUT_CODES:
+
+def _is_missing_cluster(error: BaseException) -> bool:
+    """The cluster does not exist (CLUSTER_DOESNT_EXIST, or BAD_GET on older
+    servers). The ObsessionDB console API sends only the message."""
+    if _error_code(error) in _MISSING_CLUSTER_CODES:
         return True
-    return _NO_FANOUT_MESSAGE.search(text) is not None
+    return _MISSING_CLUSTER_MESSAGE.search(str(error)) is not None
+
+
+def _is_access_denied(error: BaseException) -> bool:
+    """The user may not query the cluster (ACCESS_DENIED)."""
+    if _error_code(error) == "497":
+        return True
+    return _ACCESS_DENIED_MESSAGE.search(str(error)) is not None
 
 
 def string_literal(value: str) -> str:

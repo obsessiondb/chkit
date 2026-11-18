@@ -13,7 +13,13 @@ import pytest
 
 from chkit.cli.journal_store import JournalStore
 from chkit.clickhouse.ddl_propagation import wait_for_ddl_propagation
-from chkit.clickhouse.replicas import ReplicaFanout, resolve_replica_fanout
+from chkit.clickhouse.replicas import (
+    ReplicaAccess,
+    ReplicaFanout,
+    probe_replica_access,
+    resolve_replica_fanout,
+    resolve_replica_fanout_or_raise,
+)
 
 
 @pytest.fixture(autouse=True)
@@ -70,6 +76,36 @@ def test_uses_the_configured_cluster_name() -> None:
 
     assert resolve_replica_fanout(client, "prod") == ReplicaFanout(cluster="prod", replicas=2)
     assert "clusterAllReplicas('prod', system.one)" in client.queries[0]
+
+
+class _Failing:
+    def __init__(self, message: str) -> None:
+        self.message = message
+
+    def query(self, sql: str) -> _Result:
+        raise RuntimeError(self.message)
+
+
+def test_probe_replica_access_reports_a_denied_cluster_as_denied_not_as_one_replica() -> None:
+    message = "Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)"
+
+    assert probe_replica_access(_Failing(message)) == ReplicaAccess(kind="denied", error=message)
+    # The lenient and strict fan-out helpers keep their single-replica fallback.
+    assert resolve_replica_fanout_or_raise(_Failing(message)) is None
+
+
+def test_probe_replica_access_reports_a_missing_cluster_as_one_replica_and_raises_otherwise() -> None:
+    missing = "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)"
+
+    assert probe_replica_access(_Failing(missing)) == ReplicaAccess(kind="single")
+    with pytest.raises(RuntimeError, match="NETWORK_ERROR"):
+        probe_replica_access(_Failing("Code: 210. NETWORK_ERROR"))
+
+
+def test_probe_replica_access_reports_several_replicas_as_a_fanout() -> None:
+    assert probe_replica_access(_ReplicaClient([2]), "prod") == ReplicaAccess(
+        kind="fanout", fanout=ReplicaFanout(cluster="prod", replicas=2)
+    )
 
 
 @dataclass
