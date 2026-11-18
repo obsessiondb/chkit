@@ -1,15 +1,21 @@
 import { randomBytes } from 'node:crypto'
-import { link, mkdir, readFile, rename, unlink } from 'node:fs/promises'
+import { link, readFile, unlink } from 'node:fs/promises'
 import { hostname } from 'node:os'
 import { dirname, join } from 'node:path'
 
 import { BackfillConfigError } from './errors.js'
-import { nowIso, syncDirectory, writeFileDurably } from './state.js'
+import { mkdirDurably, nowIso, syncDirectory, writeFileDurably } from './state.js'
 
 /**
- * The lock a `run` or `resume` holds on its plan from before it reads the
- * checkpoint until it ends, so two of them never submit the same chunk under
- * two query ids (#765). chkit-py takes the same lock: same path and format.
+ * The lock a `run`, `resume` or `cancel` holds on its plan from before it
+ * reads the checkpoint until it ends, so two of them never write the
+ * checkpoint or submit the same chunk under two query ids (#765). chkit-py
+ * takes the same lock: same path and format.
+ *
+ * A lock that exists always blocks: no process takes another's lock over,
+ * since no pid or host check proves a holder dead across PID namespaces,
+ * containers or a reused pid. A holder releases it when it ends, also on
+ * SIGINT or SIGTERM (see `withRunLock`); after a crash the operator deletes it.
  */
 interface RunLockRecord {
   pid: number
@@ -27,56 +33,76 @@ export function runLockPath(runsDir: string, planId: string): string {
   return join(runsDir, `${planId}.lock`)
 }
 
-/**
- * Take the plan's lock, or fail at once when another run or resume holds it.
- * A lock is taken over only when its process is provably dead: it was taken
- * on this host, by another pid, and no process has that pid. Any other lock,
- * including one that cannot be read, stays, and the error says how to clear it.
- */
+/** Take the plan's lock, or fail at once when it exists. */
 export async function acquireRunLock(lockPath: string, planId: string): Promise<RunLock> {
-  await mkdir(dirname(lockPath), { recursive: true })
+  await mkdirDurably(dirname(lockPath))
   const record: RunLockRecord = {
     pid: process.pid,
     host: hostname(),
     startedAt: nowIso(),
     token: randomBytes(8).toString('hex'),
   }
-  // Two tries: the second follows the removal of a dead process's lock.
-  for (let attempt = 0; attempt < 2; attempt++) {
-    if (await createLockFile(lockPath, record)) return { release: () => releaseRunLock(lockPath, record.token) }
-    const holder = await readLockRecord(lockPath)
-    if (holder === 'missing') continue
-    if (holder === 'unreadable') throw lockBusyError(planId, lockPath, undefined)
-    if (!isProvablyDead(holder)) throw lockBusyError(planId, lockPath, holder)
-    await removeStaleLock(lockPath, holder, record.token, planId)
-  }
-  throw lockBusyError(planId, lockPath, undefined)
-}
-
-/** Create the lock file with its whole content, or return false when it exists. */
-async function createLockFile(lockPath: string, record: RunLockRecord): Promise<boolean> {
   // Written in full beside the lock, then linked: a link fails when the lock
-  // exists, and no reader ever sees a half-written lock.
+  // exists, so one contender wins, and no reader sees a half-written lock.
   const tmpPath = `${lockPath}.${record.token}.tmp`
   await writeFileDurably(tmpPath, `${JSON.stringify(record)}\n`)
   try {
     await link(tmpPath, lockPath)
-    await syncDirectory(dirname(lockPath))
-    return true
   } catch (error) {
-    if (errorCode(error) === 'EEXIST') return false
-    throw error
+    if (errorCode(error) !== 'EEXIST') throw error
+    throw lockBusyError(planId, lockPath, await readLockRecord(lockPath))
   } finally {
     await unlink(tmpPath)
   }
+  await syncDirectory(dirname(lockPath))
+  return { release: () => releaseRunLock(lockPath, record.token) }
 }
 
-async function readLockRecord(lockPath: string): Promise<RunLockRecord | 'missing' | 'unreadable'> {
+/**
+ * Run `body` holding the plan's lock. A SIGINT or SIGTERM aborts the signal
+ * `body` gets; once `body` returns or throws, the lock is released and the
+ * process exits with 128 + the signal's number. Later signals do nothing, so
+ * the lock is never released while `body` can still write the checkpoint.
+ */
+export async function withRunLock<T>(
+  lockPath: string,
+  planId: string,
+  body: (signal: AbortSignal) => Promise<T>,
+): Promise<T> {
+  const controller = new AbortController()
+  let received: NodeJS.Signals | undefined
+  const onSignal = (name: NodeJS.Signals) => {
+    if (received) return
+    received = name
+    controller.abort()
+  }
+  process.on('SIGINT', onSignal)
+  process.on('SIGTERM', onSignal)
+  try {
+    const lock = await acquireRunLock(lockPath, planId)
+    try {
+      return await body(controller.signal)
+    } finally {
+      await lock.release()
+    }
+  } finally {
+    process.off('SIGINT', onSignal)
+    process.off('SIGTERM', onSignal)
+    if (received) {
+      process.stderr.write(
+        `Backfill plan ${planId}: interrupted (${received}). No new chunk was submitted, and the lock is released; a chunk already submitted keeps running on the server, and a resume attaches to it.\n`,
+      )
+      process.exit(received === 'SIGINT' ? 130 : 143)
+    }
+  }
+}
+
+async function readLockRecord(lockPath: string): Promise<RunLockRecord | undefined> {
   let text: string
   try {
     text = await readFile(lockPath, 'utf8')
   } catch (error) {
-    if (errorCode(error) === 'ENOENT') return 'missing'
+    if (errorCode(error) === 'ENOENT') return undefined
     throw error
   }
   try {
@@ -92,64 +118,20 @@ async function readLockRecord(lockPath: string): Promise<RunLockRecord | 'missin
   } catch {
     // Not JSON: unreadable, below.
   }
-  return 'unreadable'
-}
-
-/**
- * Whether the lock's process is dead for sure. Another host's process, this
- * process's own pid (another run in this process may hold it), and Windows
- * (where chkit-py cannot check a pid) are never provably dead.
- */
-function isProvablyDead(holder: RunLockRecord): boolean {
-  if (holder.host !== hostname() || holder.pid === process.pid || process.platform === 'win32') return false
-  try {
-    process.kill(holder.pid, 0)
-    return false
-  } catch (error) {
-    return errorCode(error) === 'ESRCH'
-  }
-}
-
-/**
- * Move the dead process's lock aside and check that it is the lock judged
- * dead: another resume may have replaced it meanwhile. That one is put back.
- */
-async function removeStaleLock(lockPath: string, holder: RunLockRecord, token: string, planId: string): Promise<void> {
-  const movedPath = `${lockPath}.${token}.stale`
-  try {
-    await rename(lockPath, movedPath)
-  } catch (error) {
-    if (errorCode(error) === 'ENOENT') return
-    throw error
-  }
-  const moved = await readLockRecord(movedPath)
-  if (moved !== 'missing' && moved !== 'unreadable' && moved.token === holder.token) {
-    await unlink(movedPath)
-    return
-  }
-  try {
-    await link(movedPath, lockPath)
-  } catch (error) {
-    if (errorCode(error) !== 'EEXIST') throw error
-  }
-  await unlink(movedPath)
-  throw lockBusyError(planId, lockPath, moved === 'missing' || moved === 'unreadable' ? undefined : moved)
+  return undefined
 }
 
 async function releaseRunLock(lockPath: string, token: string): Promise<void> {
   const holder = await readLockRecord(lockPath)
-  if (holder === 'missing' || holder === 'unreadable' || holder.token !== token) return
+  if (holder?.token !== token) return
   await unlink(lockPath)
+  await syncDirectory(dirname(lockPath))
 }
 
 function lockBusyError(planId: string, lockPath: string, holder: RunLockRecord | undefined): BackfillConfigError {
-  if (!holder) {
-    return new BackfillConfigError(
-      `Backfill plan ${planId} is locked by another run or resume (lock file ${lockPath} cannot be read). If no run or resume of this plan is running, delete that file and re-run.`,
-    )
-  }
+  const by = holder ? `pid ${holder.pid} on ${holder.host}, since ${holder.startedAt}` : 'its lock file cannot be read'
   return new BackfillConfigError(
-    `Backfill plan ${planId} is locked by another run or resume (pid ${holder.pid} on ${holder.host}, since ${holder.startedAt}). Wait for it to end. If that process is no longer running, delete ${lockPath} and re-run.`,
+    `Backfill plan ${planId} is locked by another run, resume or cancel (${by}). Wait for it to end. If it has ended without releasing the lock, confirm that its process no longer runs, then delete ${lockPath} and re-run.`,
   )
 }
 

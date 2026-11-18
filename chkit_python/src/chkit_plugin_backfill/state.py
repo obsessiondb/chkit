@@ -142,7 +142,7 @@ def backfill_paths(state_dir: Path | str, plan_id: str) -> BackfillPathSet:
 
 def write_json(file_path: str | Path, value: object) -> None:
     path = Path(file_path)
-    path.parent.mkdir(parents=True, exist_ok=True)
+    mkdir_durably(path.parent)
     payload = (
         json.dumps(_jsonable(value), indent=2, default=_json_default) + "\n"
     )
@@ -153,6 +153,21 @@ def write_json(file_path: str | Path, value: object) -> None:
     write_file_durably(tmp_path, payload)
     os.replace(tmp_path, path)
     sync_directory(path.parent)
+
+
+def mkdir_durably(directory: Path) -> None:
+    """``mkdir -p``, then sync the parent of each directory it created, so a
+    power loss cannot drop a new ``runs/`` with the checkpoint in it (#765)."""
+    missing: list[Path] = []
+    current = directory.resolve()
+    while not current.exists():
+        missing.append(current)
+        if current.parent == current:
+            break
+        current = current.parent
+    directory.mkdir(parents=True, exist_ok=True)
+    for created in reversed(missing):
+        sync_directory(created.parent)
 
 
 def write_file_durably(path: Path, content: str) -> None:

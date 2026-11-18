@@ -1,5 +1,5 @@
 import { describe, expect, spyOn, test } from 'bun:test'
-import { readFileSync } from 'node:fs'
+import { fstatSync, readFileSync, statSync } from 'node:fs'
 import { mkdtemp, open, readFile, readdir, rm, stat } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
@@ -45,5 +45,26 @@ describe('writeJson', () => {
 
     expect(seenAtSync).toEqual(['failed', 'pending'])
     await rm(dir, { recursive: true, force: true })
+  })
+
+  // Round 2: a new runs/ is an entry in the state directory; until that
+  // directory is synced, a power loss can drop runs/ with the checkpoint.
+  test('syncs the parent of each directory it creates', async () => {
+    const stateDir = await mkdtemp(join(tmpdir(), 'chkit-backfill-state-'))
+    await writeJson(join(stateDir, 'probe.json'), {})
+    const probe = await open(join(stateDir, 'probe.json'), 'r')
+    const fileHandle = Object.getPrototypeOf(probe) as { sync: () => Promise<void> }
+    await probe.close()
+    const synced: number[] = []
+    const sync = spyOn(fileHandle, 'sync').mockImplementation(async function (this: { fd: number }) {
+      synced.push(fstatSync(this.fd).ino)
+    })
+
+    await writeJson(join(stateDir, 'runs', 'nested', 'plan.json'), { progress: {} })
+    sync.mockRestore()
+
+    expect(synced).toContain(statSync(stateDir).ino)
+    expect(synced).toContain(statSync(join(stateDir, 'runs')).ino)
+    await rm(stateDir, { recursive: true, force: true })
   })
 })

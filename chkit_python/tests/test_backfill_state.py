@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import json
+import os
 from pathlib import Path
 
 import pytest
@@ -48,3 +49,23 @@ def test_write_json_syncs_the_temporary_file_before_the_rename_and_the_directory
     write_json(run_path, {"progress": {"c1": {"status": "pending", "queryId": "q-2"}}})
 
     assert seen_at_sync == ["failed", "pending"]
+
+
+# Round 2: a new runs/ is an entry in the state directory; until that
+# directory is synced, a power loss can drop runs/ with the checkpoint.
+def test_write_json_syncs_the_parent_of_each_directory_it_creates(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def record_sync(fd: int) -> None:
+        synced.append(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr("chkit_plugin_backfill.state.os.fsync", record_sync)
+
+    write_json(tmp_path / "runs" / "nested" / "plan.json", {"progress": {}})
+
+    assert tmp_path.stat().st_ino in synced
+    assert (tmp_path / "runs").stat().st_ino in synced

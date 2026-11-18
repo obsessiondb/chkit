@@ -1,7 +1,7 @@
 import { createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
-import { executeBackfill } from './async-backfill.js'
+import { CHECKPOINT_VERSION, executeBackfill } from './async-backfill.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
@@ -42,7 +42,7 @@ import {
   summarizeRunStatus,
   writeJson,
 } from './state.js'
-import { acquireRunLock, runLockPath } from './run-lock.js'
+import { runLockPath, withRunLock } from './run-lock.js'
 import type {
   BackfillPlugin,
   BackfillPluginCommandContext,
@@ -85,19 +85,18 @@ async function runBackfill(input: {
   const paths = backfillPaths(stateDir, plan.planId)
 
   // The lock is held from before the checkpoint is read until the run ends,
-  // so two runs or resumes never submit one chunk under two query ids (#765).
-  const lock = await acquireRunLock(runLockPath(paths.runsDir, plan.planId), plan.planId)
-  try {
-    return await runBackfillLocked(input, plan, paths)
-  } finally {
-    await lock.release()
-  }
+  // so two runs or resumes never submit one chunk under two query ids, and
+  // released on SIGINT or SIGTERM once no chunk can write the checkpoint (#765).
+  return withRunLock(runLockPath(paths.runsDir, plan.planId), plan.planId, (signal) =>
+    runBackfillLocked(input, plan, paths, signal),
+  )
 }
 
 async function runBackfillLocked(
   input: Parameters<typeof runBackfill>[0],
   plan: Awaited<ReturnType<typeof readPlan>>['plan'],
   paths: ReturnType<typeof backfillPaths>,
+  signal: AbortSignal,
 ): Promise<number> {
   // Check for existing run state
   const existingRun = await readRun(paths.runPath)
@@ -156,6 +155,9 @@ async function runBackfillLocked(
       targetColumns: plan.execution.targetColumns,
       insertableColumns,
     })
+    // A resume keeps the format it read until executeBackfill reports
+    // progress, which is always in this release's format.
+    const checkpointVersion = input.resume ? existingRun?.checkpointVersion : CHECKPOINT_VERSION
     const runState: BackfillRunState = {
       planId: plan.planId,
       target: plan.target,
@@ -163,6 +165,7 @@ async function runBackfillLocked(
       startedAt: existingRun?.startedAt ?? nowIso(),
       updatedAt: nowIso(),
       progress: resumeFrom ?? {},
+      ...(checkpointVersion === undefined ? {} : { checkpointVersion }),
     }
 
     await writeJson(paths.runPath, runState)
@@ -193,12 +196,15 @@ async function runBackfillLocked(
       concurrency: input.concurrency,
       pollIntervalMs: input.pollIntervalMs,
       resumeFrom,
+      checkpointVersion: existingRun?.checkpointVersion,
+      signal,
       replayFailed: input.resume?.replayFailed,
       acceptUnknown: input.resume?.acceptUnknown,
       // Chunks report progress concurrently; one write at a time keeps an
       // older snapshot's rename from landing after a newer one.
       onProgress: (progress) => {
         runState.progress = progress
+        runState.checkpointVersion = CHECKPOINT_VERSION
         runState.updatedAt = nowIso()
         progressWrites = progressWrites.then(() => writeJson(paths.runPath, runState))
         return progressWrites
@@ -241,7 +247,10 @@ async function runBackfillLocked(
 
     return result.failed > 0 ? 1 : 0
   } finally {
-    await db.close()
+    // After an interrupt the process exits once the lock is released: a
+    // close that waits for a running INSERT would hold it until the INSERT ends.
+    if (signal.aborted) void db.close().catch(() => undefined)
+    else await db.close()
   }
 }
 

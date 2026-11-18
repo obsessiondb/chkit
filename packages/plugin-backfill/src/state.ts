@@ -104,11 +104,25 @@ function decodePlan(plan: BackfillPlanState): BackfillPlanState {
  *  loss leaves a truncated file or brings back the previous one (the run
  *  checkpoint holds the only record of a replay's query id, #765). */
 export async function writeJson(filePath: string, value: unknown): Promise<void> {
-  await mkdir(dirname(filePath), { recursive: true })
+  await mkdirDurably(dirname(filePath))
   const tmpPath = `${filePath}.${randomBytes(6).toString('hex')}.tmp`
   await writeFileDurably(tmpPath, `${JSON.stringify(value, null, 2)}\n`)
   await rename(tmpPath, filePath)
   await syncDirectory(dirname(filePath))
+}
+
+/**
+ * `mkdir -p dir`, then sync the parent of each directory it created, so a
+ * power loss cannot drop a new `runs/` with the checkpoint in it (#765).
+ */
+export async function mkdirDurably(dir: string): Promise<void> {
+  const missing: string[] = []
+  for (let current = resolve(dir); !existsSync(current); current = dirname(current)) {
+    missing.push(current)
+    if (dirname(current) === current) break
+  }
+  await mkdir(dir, { recursive: true })
+  for (const created of missing.reverse()) await syncDirectory(dirname(created))
 }
 
 /** Write `content` to a new file at `filePath` and sync it to disk. */

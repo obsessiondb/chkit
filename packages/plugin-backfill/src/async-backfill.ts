@@ -8,7 +8,6 @@ import {
   stringLiteral,
   type ClickHouseExecutor,
   type ObservableSystemTable,
-  type QueryStatus,
 } from '@chkit/clickhouse'
 import pMap from 'p-map'
 
@@ -35,16 +34,27 @@ export interface BackfillOptions {
   onProgress?: (progress: BackfillProgress) => void | Promise<void>
   /** Previously saved progress to resume from. */
   resumeFrom?: BackfillProgress
-  /** When true, replay chunks whose last attempt the server shows failed. */
+  /** The format `resumeFrom` was saved in: `CHECKPOINT_VERSION` for progress
+   *  this release reported. Omit it for progress an older release reported,
+   *  which saved a chunk's query id only after its submit: a chunk it lists
+   *  as pending without one, or not at all, may have run. */
+  checkpointVersion?: number
+  /** When true, replay chunks whose last attempt the server shows failed
+   *  before it wrote any row. */
   replayFailed?: boolean
   /** When true, replay chunks whose last attempt has an unknown outcome under
    *  a new query id instead of stopping the resume. It can write their rows twice. */
   acceptUnknown?: boolean
-  /** How many times a resume reads a replay's outcome again when the first
-   *  read cannot settle it (the query_log flush window). Default: 5 */
+  /** How many times a resume reads an outcome again when the first read
+   *  cannot settle it (the query_log flush window). Default: 5 */
   outcomeRecheckAttempts?: number
   /** Interval between those reads in ms. Default: 2000 */
   outcomeRecheckIntervalMs?: number
+  /** Aborting it stops the run: no new chunk starts, no progress is reported
+   *  after the last report finishes, and executeBackfill rejects with a
+   *  `BackfillInterruptedError`. Chunks already submitted keep running on the
+   *  server; their progress says they may have run. */
+  signal?: AbortSignal
 }
 
 export interface BackfillChunkState {
@@ -63,6 +73,13 @@ export interface BackfillChunkState {
 
 export type BackfillProgress = Record<string, BackfillChunkState>
 
+/**
+ * The checkpoint format of this release (#765): every attempt's query id is
+ * saved before its submit, so a pending chunk without one was never
+ * submitted. Older releases saved no version.
+ */
+export const CHECKPOINT_VERSION = 2
+
 // A resume reads an unsettled outcome again 5 times, 2 s apart, which covers
 // query_log's default 7.5 s flush interval (as #721 does for migrate). An
 // outcome still missing after that is unknown, never taken for "never ran".
@@ -76,6 +93,9 @@ export interface BackfillResult {
   failed: number
   progress: BackfillProgress
 }
+
+/** executeBackfill stopped because its `signal` was aborted. */
+export class BackfillInterruptedError extends Error {}
 
 /** Build the deterministic query ID of a chunk's first attempt. */
 function chunkQueryId(planId: string, chunkId: string): string {
@@ -91,54 +111,22 @@ function replayQueryId(planId: string, chunkId: string): string {
   return `${chunkQueryId(planId, chunkId)}-${randomUUID()}`
 }
 
-function applyQueryStatus(
-  state: BackfillChunkState,
-  qs: QueryStatus,
-): { state: BackfillChunkState; changed: boolean } {
-  if (qs.status === 'running') {
-    const next: BackfillChunkState = {
-      ...state,
-      status: 'running',
-      readRows: qs.readRows,
-      readBytes: qs.readBytes,
-      writtenRows: qs.writtenRows,
-      writtenBytes: qs.writtenBytes,
-      elapsedMs: qs.elapsedMs,
-    }
-    const metricsChanged =
-      state.status !== 'running' ||
-      state.readRows !== qs.readRows ||
-      state.writtenRows !== qs.writtenRows ||
-      state.elapsedMs !== qs.elapsedMs
-    return { state: next, changed: metricsChanged }
+function runningState(state: BackfillChunkState, row: RunningRow): { state: BackfillChunkState; changed: boolean } {
+  const next: BackfillChunkState = {
+    ...state,
+    status: 'running',
+    readRows: Number(row.read_rows),
+    readBytes: Number(row.read_bytes),
+    writtenRows: Number(row.written_rows),
+    writtenBytes: Number(row.written_bytes),
+    elapsedMs: Math.round(Number(row.elapsed) * 1000),
   }
-  if (qs.status === 'finished') {
-    return {
-      state: {
-        ...state,
-        status: 'done',
-        finishedAt: new Date().toISOString(),
-        durationMs: qs.durationMs,
-        writtenRows: qs.writtenRows,
-        writtenBytes: qs.writtenBytes,
-      },
-      changed: true,
-    }
-  }
-  if (qs.status === 'failed') {
-    return {
-      state: {
-        ...state,
-        status: 'failed',
-        finishedAt: new Date().toISOString(),
-        durationMs: qs.durationMs,
-        error: qs.error,
-      },
-      changed: true,
-    }
-  }
-  // 'unknown' — leave status as-is (query_log may not have flushed yet)
-  return { state, changed: false }
+  const changed =
+    state.status !== 'running' ||
+    state.readRows !== next.readRows ||
+    state.writtenRows !== next.writtenRows ||
+    state.elapsedMs !== next.elapsedMs
+  return { state: next, changed }
 }
 
 function getChunk(progress: BackfillProgress, id: string): BackfillChunkState {
@@ -153,6 +141,27 @@ function updateChunk(
   next: BackfillChunkState,
 ): BackfillProgress {
   return { ...progress, [id]: next }
+}
+
+/**
+ * Progress an older release saved, in this release's terms. It saved a
+ * chunk's query id only after the submit returned, so a chunk it lists as
+ * pending, submitted or running without one, or not at all, may have run
+ * under the chunk's id: it is recorded under that id, which this release
+ * reads as "may have run".
+ */
+function upgradeProgress(
+  planId: string,
+  chunks: Array<{ id: string }>,
+  progress: BackfillProgress,
+): BackfillProgress {
+  let upgraded = progress
+  for (const chunk of chunks) {
+    const state = progress[chunk.id]
+    if (state?.status === 'done' || state?.status === 'failed' || state?.queryId !== undefined) continue
+    upgraded = updateChunk(upgraded, chunk.id, { ...(state ?? { status: 'pending' }), queryId: chunkQueryId(planId, chunk.id) })
+  }
+  return upgraded
 }
 
 /**
@@ -181,7 +190,7 @@ export async function syncProgress(
   const chunkIds = chunksToSync(chunks, progress)
   if (chunkIds.length === 0) return progress
   const evidence = await readChunkQueries(executor, planId, { prefix: `backfill-${planId}-` }, options?.cluster)
-  return applyEvidence(planId, chunkIds, progress, evidence, { final: false, verifyFailed: false }).progress
+  return applyEvidence(planId, chunkIds, progress, evidence, false).progress
 }
 
 function chunksToSync(chunks: Array<{ id: string }>, progress: BackfillProgress): string[] {
@@ -204,26 +213,29 @@ interface UnknownAttempt {
  * `intervalMs` apart, which covers the query_log flush interval (#765, as
  * #721 does for async migrate). The last read has no time bound, so a replica
  * clock that differs from the one the bound came from cannot hide a row.
- * Returns the chunks whose attempt may have run and still has no outcome.
+ * Returns the chunks whose attempt may have run and has no settled outcome.
  */
 async function reconcileProgress(
   executor: ClickHouseExecutor,
   planId: string,
   chunks: Array<{ id: string }>,
   progress: BackfillProgress,
-  options: { cluster?: string; attempts: number; intervalMs: number; verifyFailed: boolean },
+  options: { cluster?: string; attempts: number; intervalMs: number; signal?: AbortSignal },
 ): Promise<{ progress: BackfillProgress; unknown: UnknownAttempt[] }> {
   let chunkIds = chunksToSync(chunks, progress)
   if (chunkIds.length === 0) return { progress, unknown: [] }
   let evidence = await readChunkQueries(executor, planId, { prefix: `backfill-${planId}-` }, options.cluster)
   let current = progress
+  let unknown: UnknownAttempt[] = []
   for (let round = 0; ; round++) {
     const final = round >= options.attempts
-    const pass = applyEvidence(planId, chunkIds, current, evidence, { final, verifyFailed: options.verifyFailed })
+    const pass = applyEvidence(planId, chunkIds, current, evidence, final)
     current = pass.progress
-    if (pass.waiting.length === 0) return { progress: current, unknown: pass.unknown }
+    unknown = [...unknown, ...pass.unknown]
+    if (pass.waiting.length === 0) return { progress: current, unknown }
     chunkIds = pass.waiting
     await sleep(options.intervalMs)
+    if (options.signal?.aborted) throw interruptedError(planId)
     const states = chunkIds.map((id) => getChunk(current, id))
     const last = round + 1 >= options.attempts
     evidence = await readChunkQueries(
@@ -261,23 +273,22 @@ function attemptKind(planId: string, chunkId: string, state: BackfillChunkState)
 
 /**
  * Whether the chunk's last attempt may have reached the server, so that
- * finding no row of it is no proof that it never ran:
+ * finding no proof of its outcome leaves it unknown:
  * - submitted or running;
  * - pending with a recorded query id, which is saved before every submit;
  * - pending with an older release's replay bound;
- * - failed, when the resume is about to replay it (`verifyFailed`): a
- *   checkpoint can record a failure the server never showed, such as a lost
- *   contact while polling.
- * A pending chunk without either was never submitted by this release.
+ * - failed: a checkpoint can record a failure the server never showed (an
+ *   older release recorded a lost contact while polling as failed), or one
+ *   that wrote rows. Whether it is replayed is up to the flags, not this.
+ * A pending chunk without either was never submitted.
  */
-function attemptMayHaveRun(state: BackfillChunkState, verifyFailed: boolean): boolean {
-  if (state.status === 'submitted' || state.status === 'running') return true
-  if (state.status === 'pending') return state.queryId !== undefined || state.submittedAt !== undefined
-  return state.status === 'failed' && verifyFailed
+function attemptMayHaveRun(state: BackfillChunkState): boolean {
+  if (state.status === 'submitted' || state.status === 'running' || state.status === 'failed') return true
+  return state.status === 'pending' && (state.queryId !== undefined || state.submittedAt !== undefined)
 }
 
 type AttemptOutcome =
-  | { kind: 'running' }
+  | { kind: 'running'; row: RunningRow }
   | { kind: 'done'; row: ChunkLogRow }
   | { kind: 'failed'; row: ChunkLogRow }
   | { kind: 'unchanged' }
@@ -288,18 +299,22 @@ const FAILURE_TYPES = new Set(['ExceptionBeforeStart', 'ExceptionWhileProcessing
 
 /**
  * Classify the attempt from every row of its id, not the latest one: a short
- * query's QueryStart and QueryFinish can share an event_time second.
+ * query's QueryStart and QueryFinish can share an event_time second. The
+ * flags never change the classification; they decide what is replayed.
  *
  * - Running on a replica, or any QueryFinish of the id: running, or done.
  *   A QueryFinish means a whole attempt of the chunk committed.
- * - A failure row of the attempt's own id: failed. Only that is proof that
- *   the attempt failed, and so that replaying the chunk cannot write its
- *   rows twice. An older release's replay shares the id with the earlier
- *   attempt, so its failure rows prove nothing.
+ * - A failure row of the attempt's own id, read on every replica, with no
+ *   row of the id that wrote a row: failed. Only that proves a replay
+ *   cannot write the chunk's rows twice. A failure after a written row is
+ *   unknown at once: those rows stay, and a replay writes them again. An
+ *   older release's replay shares the id with the earlier attempt, so its
+ *   failure rows prove nothing, and a read of one replica (the probe was
+ *   denied) cannot rule out a run or a QueryFinish on another.
  * - Otherwise an attempt that may have run (see `attemptMayHaveRun`) waits
  *   through the flush window, then its outcome is unknown. An empty
  *   query_log is no proof that it never ran: logs can flush late, or not at
- *   all, and a denied replica probe reads one replica only.
+ *   all.
  * - Anything else stays as it is.
  */
 function classifyAttempt(
@@ -307,23 +322,28 @@ function classifyAttempt(
   chunkId: string,
   state: BackfillChunkState,
   evidence: ChunkEvidence,
-  options: { final: boolean; verifyFailed: boolean },
+  final: boolean,
 ): AttemptOutcome {
   const queryId = attemptQueryId(planId, chunkId, state)
-  if (evidence.running.has(queryId)) return { kind: 'running' }
+  const running = evidence.running.get(queryId)
+  if (running) return { kind: 'running', row: running }
   const own = evidence.logRows.filter((row) => row.query_id === queryId)
   const finish = own.find((row) => row.type === 'QueryFinish')
   if (finish) return { kind: 'done', row: finish }
   const kind = attemptKind(planId, chunkId, state)
   const failure = own.find((row) => FAILURE_TYPES.has(row.type))
-  if (failure && kind !== 'legacy') return { kind: 'failed', row: failure }
-  if (!attemptMayHaveRun(state, options.verifyFailed)) return { kind: 'unchanged' }
-  if (!options.final) return { kind: 'wait' }
-  if (failure) {
+  if (failure && kind !== 'legacy' && evidence.denied === undefined) {
+    const written = Math.max(...own.map((row) => Number(row.written_rows) || 0))
+    if (written === 0) return { kind: 'failed', row: failure }
+    return { kind: 'unknown', reason: `it failed after writing ${written} rows, which a replay would write again` }
+  }
+  if (!attemptMayHaveRun(state)) return { kind: 'unchanged' }
+  if (!final) return { kind: 'wait' }
+  if (failure && kind === 'legacy') {
     return { kind: 'unknown', reason: 'an older release ran it under the chunk\'s shared query id, so the failure in system.query_log may be an earlier attempt\'s' }
   }
   if (evidence.denied !== undefined) {
-    return { kind: 'unknown', reason: `the user may not read every replica (${evidence.denied}), and the replica it can read neither runs it nor has an outcome for it` }
+    return { kind: 'unknown', reason: `the user may not read every replica (${evidence.denied}), and the replica it can read shows neither a run of it nor a QueryFinish` }
   }
   return { kind: 'unknown', reason: 'it is not running on any replica and system.query_log has no outcome for it' }
 }
@@ -333,7 +353,7 @@ function applyEvidence(
   chunkIds: string[],
   progress: BackfillProgress,
   evidence: ChunkEvidence,
-  options: { final: boolean; verifyFailed: boolean },
+  final: boolean,
 ): { progress: BackfillProgress; waiting: string[]; unknown: UnknownAttempt[] } {
   let updated = progress
   const waiting: string[] = []
@@ -341,7 +361,7 @@ function applyEvidence(
   for (const chunkId of chunkIds) {
     const current = getChunk(updated, chunkId)
     const queryId = attemptQueryId(planId, chunkId, current)
-    const outcome = classifyAttempt(planId, chunkId, current, evidence, options)
+    const outcome = classifyAttempt(planId, chunkId, current, evidence, final)
     if (outcome.kind === 'running') {
       updated = updateChunk(updated, chunkId, { ...current, status: 'running', queryId })
     } else if (outcome.kind === 'done' || outcome.kind === 'failed') {
@@ -381,6 +401,15 @@ function settledState(
   }
 }
 
+interface RunningRow {
+  query_id: string
+  read_rows: number | string
+  read_bytes: number | string
+  written_rows: number | string
+  written_bytes: number | string
+  elapsed: number | string
+}
+
 interface ChunkLogRow {
   query_id: string
   type: string
@@ -391,7 +420,7 @@ interface ChunkLogRow {
 }
 
 interface ChunkEvidence {
-  running: Set<string>
+  running: Map<string, RunningRow>
   logRows: ChunkLogRow[]
   /** Set when the replica probe was denied: the reads saw one replica only. */
   denied?: string
@@ -415,7 +444,11 @@ function errorMessage(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
 }
 
-/** readEvidence for the resume's sync: a failed read stops the resume. */
+/**
+ * readEvidence for the resume's sync: a failed read, including a replica
+ * probe that fails for any reason other than a missing cluster or a denied
+ * user, stops the resume, whatever the flags: nothing was read.
+ */
 async function readChunkQueries(
   executor: ClickHouseExecutor,
   planId: string,
@@ -436,7 +469,8 @@ async function readChunkQueries(
  * Read the chunks' rows in system.processes and system.query_log: by the
  * plan's prefix, or by exact ids, pruned by event_date from `after`. The
  * pruning keeps a day of slack, and no row is filtered by its start time,
- * since replicas' clocks can differ (#765).
+ * since replicas' clocks can differ (#765). A user denied the cluster reads
+ * the local tables, also with `clickhouse.cluster` set, as chkit-py does.
  */
 async function readEvidence(
   executor: ClickHouseExecutor,
@@ -450,10 +484,12 @@ async function readEvidence(
     ? `\n  AND event_date >= toDate32(parseDateTimeBestEffort(${stringLiteral(scope.after)})) - 1`
     : ''
   const access = await probeReplicaAccess(executor, cluster)
-  const from = (table: ObservableSystemTable) =>
-    access.kind === 'fanout' ? allReplicas(access.fanout, `system.${table}`) : observableSystemTable(executor, table)
-  const runningRows = await executor.query<{ query_id: string }>(
-    `SELECT query_id FROM ${from('processes')} WHERE user = currentUser() AND ${match} SETTINGS skip_unavailable_shards = 0`
+  const from = (table: ObservableSystemTable) => {
+    if (access.kind === 'fanout') return allReplicas(access.fanout, `system.${table}`)
+    return access.kind === 'denied' ? `system.${table}` : observableSystemTable(executor, table)
+  }
+  const runningRows = await executor.query<RunningRow>(
+    `SELECT query_id, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE user = currentUser() AND ${match} SETTINGS skip_unavailable_shards = 0`
   )
   const logRows = await executor.query<ChunkLogRow>(
     `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
@@ -466,7 +502,7 @@ ORDER BY event_time DESC
 SETTINGS skip_unavailable_shards = 0`
   )
   return {
-    running: new Set(runningRows.map((row) => row.query_id)),
+    running: new Map(runningRows.map((row) => [row.query_id, row])),
     logRows,
     ...(access.kind === 'denied' ? { denied: access.error } : {}),
   }
@@ -500,45 +536,42 @@ function unknownOutcomeError(planId: string, unknown: UnknownAttempt[]): Error {
   )
 }
 
+function interruptedError(planId: string): BackfillInterruptedError {
+  return new BackfillInterruptedError(
+    `Backfill plan ${planId}: interrupted. No new chunk was submitted; a chunk already submitted keeps running on the server, and a resume attaches to it.`,
+  )
+}
+
 /**
- * Follow a submitted attempt to its outcome. Running is read from
- * system.processes (as queryStatus does, with its metrics); once the attempt
- * is not running, the outcome is classified as the resume's sync does it, on
- * every replica, so a shared-id failure is never taken for the attempt's
- * own. After `maxPollErrors` consecutive poll errors, or once polls have
- * found the attempt neither running nor with an outcome for `emptyWindowMs`
- * (the query_log flush gap every finished attempt goes through), the
- * outcome is unknown: the last read has no time bound, the chunk keeps its
- * state, and the run stops once the other chunks end.
+ * Follow a submitted attempt to its outcome, on every replica, classified as
+ * the resume's sync does it, so a shared-id failure or a partial write is
+ * never taken for a failure a replay can follow. After `maxPollErrors`
+ * consecutive poll errors, or once polls have found the attempt neither
+ * running nor with an outcome for `emptyWindowMs` (the query_log flush gap
+ * every finished attempt goes through), the outcome is unknown: the last
+ * read has no time bound, the chunk keeps its state, and the run stops once
+ * the chunks in flight end.
  */
 async function pollChunk(
   executor: ClickHouseExecutor,
   target: { planId: string; chunkId: string; cluster?: string },
   initial: BackfillChunkState,
-  limits: { pollIntervalMs: number; maxPollErrors: number; emptyWindowMs: number },
+  limits: { pollIntervalMs: number; maxPollErrors: number; emptyWindowMs: number; stopped: () => boolean },
   onChanged: (state: BackfillChunkState) => void | Promise<void>,
 ): Promise<UnknownAttempt | undefined> {
   const { planId, chunkId, cluster } = target
   let state = initial
   let errors = 0
   let emptySince: number | undefined
-  while (state.status === 'submitted' || state.status === 'running') {
+  while ((state.status === 'submitted' || state.status === 'running') && !limits.stopped()) {
     await sleep(limits.pollIntervalMs)
     const queryId = state.queryId
     if (!queryId) break
     const final = emptySince !== undefined && Date.now() - emptySince >= limits.emptyWindowMs
-    let outcome: AttemptOutcome | { kind: 'metrics'; status: QueryStatus }
+    let outcome: AttemptOutcome
     try {
-      const qs = await executor.queryStatus(queryId, { runningOnly: true })
-      outcome = qs.status === 'running'
-        ? { kind: 'metrics', status: qs }
-        : classifyAttempt(
-          planId,
-          chunkId,
-          state,
-          await readEvidence(executor, { ids: [queryId], after: final ? undefined : state.submittedAt }, cluster),
-          { final, verifyFailed: false },
-        )
+      const evidence = await readEvidence(executor, { ids: [queryId], after: final ? undefined : state.submittedAt }, cluster)
+      outcome = classifyAttempt(planId, chunkId, state, evidence, final)
     } catch (error) {
       errors++
       if (errors >= limits.maxPollErrors) {
@@ -547,11 +580,9 @@ async function pollChunk(
       continue
     }
     errors = 0
-    if (outcome.kind === 'metrics' || outcome.kind === 'running') {
+    if (outcome.kind === 'running') {
       emptySince = undefined
-      const result = outcome.kind === 'metrics'
-        ? applyQueryStatus(state, outcome.status)
-        : { state: { ...state, status: 'running' as const }, changed: state.status !== 'running' }
+      const result = runningState(state, outcome.row)
       if (result.changed) {
         state = result.state
         await onChanged(state)
@@ -580,15 +611,20 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     maxPollErrors = 10,
     onProgress,
     resumeFrom,
+    checkpointVersion,
     replayFailed,
     acceptUnknown,
     outcomeRecheckAttempts = OUTCOME_RECHECK_ATTEMPTS,
     outcomeRecheckIntervalMs = OUTCOME_RECHECK_INTERVAL_MS,
+    signal,
   } = options
 
+  const saved = resumeFrom && checkpointVersion !== CHECKPOINT_VERSION
+    ? upgradeProgress(planId, chunks, resumeFrom)
+    : resumeFrom
   let progress: BackfillProgress = Object.fromEntries(
     chunks.map((chunk) => {
-      const resumed = resumeFrom?.[chunk.id]
+      const resumed = saved?.[chunk.id]
       return [chunk.id, resumed ? { ...resumed } : { status: 'pending' as const }]
     }),
   )
@@ -596,24 +632,25 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // When resuming, reconcile local state with the server before processing.
   // This catches queries that were submitted but whose status was never
   // persisted (e.g. client crash between submit() and state file write), and
-  // confirms the failure of each chunk --replay-failed is about to replay.
+  // checks the failure of every chunk the checkpoint records failed.
   let unknown: UnknownAttempt[] = []
   if (resumeFrom) {
     const reconciled = await reconcileProgress(executor, planId, chunks, progress, {
       cluster,
       attempts: outcomeRecheckAttempts,
       intervalMs: outcomeRecheckIntervalMs,
-      verifyFailed: replayFailed === true,
+      signal,
     })
     progress = reconciled.progress
     unknown = reconciled.unknown
   }
+  if (signal?.aborted) throw interruptedError(planId)
 
-  // Replay the chunks the server shows failed (with --replay-failed) and,
-  // with --accept-unknown, those whose outcome is unknown. Each replay gets a
-  // new random query id, recorded here with its query_log bound and persisted
-  // below before it is submitted, so polling and a later sync only ever read
-  // that attempt's own rows (#765).
+  // Replay the chunks the server shows failed before they wrote a row (with
+  // --replay-failed) and, with --accept-unknown, those whose outcome is
+  // unknown. Each replay gets a new random query id, recorded here with its
+  // query_log bound and persisted below before it is submitted, so polling
+  // and a later sync only ever read that attempt's own rows (#765).
   const accepted = new Set(acceptUnknown ? unknown.map((attempt) => attempt.chunkId) : [])
   if (acceptUnknown) unknown = []
   if (unknown.length === 0) {
@@ -630,45 +667,74 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     }
   }
 
-  // Persist the reconciled state so the caller's checkpoint is up to date
-  if (resumeFrom || replayFailed) {
-    await onProgress?.(progress)
+  // After an abort, nothing is reported once the report in progress ends,
+  // so a caller that stops right after never sees a later checkpoint.
+  let closed = false
+  let lastReport: Promise<void> = Promise.resolve()
+  const report = (): Promise<void> => {
+    if (closed) return lastReport
+    lastReport = Promise.resolve(onProgress?.(progress))
+    return lastReport
   }
+
+  // Save the reconciled state, every chunk included, before anything is
+  // submitted: a chunk this checkpoint lists as pending without a query id
+  // was never submitted.
+  await report()
 
   // An attempt that may have run and has no outcome may have written its
   // rows: submitting the chunk again could write them twice (#765).
   if (unknown.length > 0) throw unknownOutcomeError(planId, unknown)
 
+  const setChunk = (id: string, next: BackfillChunkState) => {
+    if (closed) return lastReport
+    progress = updateChunk(progress, id, next)
+    return report()
+  }
+
   // How long polls wait for a finished attempt's outcome to reach query_log:
   // never shorter than the resume's recheck window, whatever the poll interval.
+  // On the first chunk that fails, or whose outcome is unknown, no new chunk
+  // starts; the chunks in flight end first.
+  let stopError: { error: unknown } | undefined
+  let stopDispatch = false
   const pollLimits = {
     pollIntervalMs,
     maxPollErrors,
     emptyWindowMs: Math.max(outcomeRecheckAttempts * outcomeRecheckIntervalMs, maxPollErrors * pollIntervalMs),
+    stopped: () => closed,
   }
-
-  const setChunk = (id: string, next: BackfillChunkState) => {
-    progress = updateChunk(progress, id, next)
-    return onProgress?.(progress)
-  }
-
-  // A chunk that fails stops new chunks from starting, but the run waits for
-  // the chunks in flight, so nothing writes the checkpoint after it returns.
-  let stopError: { error: unknown } | undefined
   const pollUnknown: UnknownAttempt[] = []
-  await pMap(
+  const work = pMap(
     chunks,
     async (chunk) => {
-      if (stopError) return
+      if (stopDispatch || closed) return
       try {
         const lost = await runChunk(chunk)
-        if (lost) pollUnknown.push(lost)
+        if (lost) {
+          pollUnknown.push(lost)
+          stopDispatch = true
+        }
       } catch (error) {
         stopError ??= { error }
+        stopDispatch = true
       }
     },
     { concurrency },
   )
+  await new Promise<void>((resolve, reject) => {
+    const onAbort = () => {
+      closed = true
+      stopDispatch = true
+      lastReport.then(() => reject(interruptedError(planId)), () => reject(interruptedError(planId)))
+    }
+    if (signal?.aborted) return onAbort()
+    signal?.addEventListener('abort', onAbort, { once: true })
+    work.then(() => {
+      signal?.removeEventListener('abort', onAbort)
+      resolve()
+    }, reject)
+  })
   if (stopError) throw stopError.error
   if (pollUnknown.length > 0) throw unknownOutcomeError(planId, pollUnknown)
 
@@ -695,6 +761,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     const pending = getChunk(progress, chunk.id)
     const queryId = pending.queryId ?? chunkQueryId(planId, chunk.id)
     if (pending.queryId === undefined) await setChunk(chunk.id, { ...pending, queryId })
+    if (closed) return undefined
     const sql = buildQuery(chunk)
     await executor.submit(sql, queryId)
     const submitted: BackfillChunkState = {

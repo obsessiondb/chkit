@@ -22,7 +22,11 @@ import pytest
 
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus
 from chkit.core.model import ChxResolvedClickHouseConfig
-from chkit_plugin_backfill.async_backfill import BackfillResult, execute_backfill
+from chkit_plugin_backfill.async_backfill import (
+    CHECKPOINT_VERSION,
+    BackfillResult,
+    execute_backfill,
+)
 from chkit_plugin_backfill.chunking.analyze import analyze_and_chunk
 from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
 from chkit_plugin_backfill.chunking.types import (
@@ -245,6 +249,8 @@ def test_resume_skips_already_completed_chunks_without_re_inserting_them(
         concurrency=3,
         poll_interval_ms=250,
         resume_from=resume_from,
+        # Progress this release saved: a chunk it does not list never ran.
+        checkpoint_version=CHECKPOINT_VERSION,
     )
 
     assert result.failed == 0
@@ -493,3 +499,63 @@ def test_a_resume_stops_on_a_recorded_attempt_query_log_has_no_row_of(
     assert accepted.progress[recorded_id].status == "done"
     assert accepted.progress[recorded_id].query_id == submits[0]
     assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == SOURCE_ROWS
+
+
+# #765 round 2: a chunk that fails after a block committed leaves those rows in
+# the target; --replay-failed must not write them again.
+def test_a_chunk_that_failed_after_writing_rows_is_not_replayed_by_replay_failed(
+    exec_ctx: _ExecContext,
+) -> None:
+    exec_ctx.ddl.execute(f"TRUNCATE TABLE {exec_ctx.target_fqn}")
+
+    chunk_id = exec_ctx.plan.chunks[0].id
+    plan_id = f"{exec_ctx.plan.plan_id}-late-failure"
+    late_failure = (
+        f"INSERT INTO {exec_ctx.target_fqn} (id, bucket, payload) SELECT number, 0, 'x' "
+        "FROM numbers(100000) WHERE throwIf(number = 50000, 'late block') = 0 "
+        "SETTINGS max_block_size = 1000, max_insert_block_size = 1000, "
+        "min_insert_block_size_rows = 1000, min_insert_block_size_bytes = 0, "
+        "max_threads = 1, insert_deduplicate = 0"
+    )
+    saved: list[BackfillProgress] = []
+    with pytest.raises(Exception, match="late block"):
+        execute_backfill(
+            executor=exec_ctx.run_executor,
+            plan_id=plan_id,
+            chunk_ids=[chunk_id],
+            build_query=lambda _chunk_id: late_failure,
+            poll_interval_ms=100,
+            on_progress=saved.append,
+        )
+    written = poll_until(
+        lambda: _count_rows(exec_ctx.ddl, exec_ctx.target_fqn), lambda rows: rows > 0
+    )
+    assert 0 < written < 100000
+
+    submits: list[str] = []
+
+    class RecordingExecutor:
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            submits.append(query_id or statement)
+            return exec_ctx.run_executor.submit(statement, query_id)
+
+        def query(self, statement: str) -> object:
+            return exec_ctx.run_executor.query(statement)
+
+    with pytest.raises(RuntimeError) as raised:
+        execute_backfill(
+            executor=RecordingExecutor(),
+            plan_id=plan_id,
+            chunk_ids=[chunk_id],
+            build_query=lambda _chunk_id: late_failure,
+            poll_interval_ms=100,
+            resume_from=saved[-1],
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=True,
+        )
+    assert (
+        f"the outcome of the last attempt is unknown for chunk {chunk_id} (query_id "
+        f"backfill-{plan_id}-{chunk_id}): it failed after writing"
+    ) in str(raised.value)
+    assert submits == []
+    assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == written

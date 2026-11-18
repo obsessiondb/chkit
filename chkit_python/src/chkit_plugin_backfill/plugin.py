@@ -10,6 +10,7 @@ plugin).
 from __future__ import annotations
 
 import threading
+import uuid
 from dataclasses import dataclass
 from typing import Any
 
@@ -24,7 +25,7 @@ from chkit.plugins import (
     ChxPluginCommandContext,
     ChxPluginManifest,
 )
-from chkit_plugin_backfill.async_backfill import execute_backfill
+from chkit_plugin_backfill.async_backfill import CHECKPOINT_VERSION, execute_backfill
 from chkit_plugin_backfill.check import evaluate_backfill_check
 from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
 from chkit_plugin_backfill.chunking.types import QuerySettings
@@ -65,7 +66,7 @@ from chkit_plugin_backfill.queries import (
     get_backfill_doctor_report,
     get_backfill_status,
 )
-from chkit_plugin_backfill.run_lock import acquire_run_lock, run_lock_path
+from chkit_plugin_backfill.run_lock import run_lock_path, with_run_lock
 from chkit_plugin_backfill.state import (
     backfill_paths,
     ensure_environment_match,
@@ -153,7 +154,9 @@ class _ThreadLocalExecutor:
         return client
 
     def submit(self, statement: str, query_id: str | None = None) -> str:
-        return self._client().submit(statement, query_id)
+        # One physical send per attempt id (#765): the driver would resend a
+        # request whose connection was reset, and run the chunk twice.
+        return self._client().submit_once(statement, query_id or str(uuid.uuid4()))
 
     def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
         return self._client().query_status(query_id, running_only=running_only)
@@ -214,10 +217,12 @@ def _run_backfill(
     paths = backfill_paths(resolved_state_dir, plan.plan_id)
 
     # The lock is held from before the checkpoint is read until the run ends,
-    # so two runs or resumes never submit one chunk under two query ids (#765).
-    lock = acquire_run_lock(run_lock_path(paths.runs_dir, plan.plan_id), plan.plan_id)
-    try:
-        return _run_backfill_locked(
+    # so two runs or resumes never submit one chunk under two query ids, and
+    # released on SIGINT or SIGTERM once no chunk can write the checkpoint (#765).
+    return with_run_lock(
+        run_lock_path(paths.runs_dir, plan.plan_id),
+        plan.plan_id,
+        lambda stop: _run_backfill_locked(
             plan=plan,
             paths=paths,
             force_environment=force_environment,
@@ -228,9 +233,9 @@ def _run_backfill(
             json_mode=json_mode,
             resume=resume,
             insert_settings=insert_settings,
-        )
-    finally:
-        lock.release()
+            stop=stop,
+        ),
+    )
 
 
 @dataclass(frozen=True)
@@ -251,6 +256,7 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
     json_mode: bool,
     resume: _ResumeRequest | None,
     insert_settings: dict[str, str | int | float | bool] | None,
+    stop: threading.Event,
 ) -> int:
     # Check for existing run state
     existing_run = read_run(paths.run_path)
@@ -329,6 +335,13 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             ),
             updated_at=now_iso(),
             progress=resume_from if resume_from is not None else {},
+            # A resume keeps the format it read until execute_backfill reports
+            # progress, which is always in this release's format.
+            checkpoint_version=(
+                existing_run.checkpoint_version
+                if resume is not None and existing_run is not None
+                else CHECKPOINT_VERSION
+            ),
         )
 
         write_json(paths.run_path, run_state)
@@ -359,6 +372,7 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
 
         def on_progress(progress: BackfillProgress) -> None:
             run_state.progress = progress
+            run_state.checkpoint_version = CHECKPOINT_VERSION
             run_state.updated_at = now_iso()
             write_json(paths.run_path, run_state)
 
@@ -371,6 +385,10 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             concurrency=concurrency,
             poll_interval_ms=poll_interval_ms,
             resume_from=resume_from,
+            checkpoint_version=(
+                existing_run.checkpoint_version if existing_run is not None else None
+            ),
+            stop=stop,
             replay_failed=resume.replay_failed if resume is not None else False,
             accept_unknown=resume.accept_unknown if resume is not None else False,
             on_progress=on_progress,
@@ -424,7 +442,10 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
 
         return 1 if result.failed > 0 else 0
     finally:
-        db.close()
+        # After an interrupt the process exits once the lock is released: a
+        # close that waits for a running INSERT would hold it until it ends.
+        if not stop.is_set():
+            db.close()
 
 
 def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS factory

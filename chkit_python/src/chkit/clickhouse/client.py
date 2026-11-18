@@ -114,7 +114,14 @@ class QueryStatus(BaseModel):
 class ClickHouseClient:
     """Imperative client wrapper. Use as a context manager."""
 
-    __slots__ = ("_client", "_closed", "_config", "_submit_client", "_submit_client_lock")
+    __slots__ = (
+        "_client",
+        "_closed",
+        "_config",
+        "_submit_client",
+        "_submit_client_lock",
+        "_submit_once_lock",
+    )
 
     def __init__(self, client: Any, config: ChxResolvedClickHouseConfig) -> None:
         self._client: Any = client
@@ -122,6 +129,8 @@ class ClickHouseClient:
         # The driver `submit` sends through, opened on first use.
         self._submit_client: Any = None
         self._submit_client_lock = threading.Lock()
+        # submit_once swaps the submit driver's pool for one request at a time.
+        self._submit_once_lock = threading.Lock()
         self._closed = False
 
     @classmethod
@@ -375,6 +384,29 @@ class ClickHouseClient:
         )
         return qid
 
+    def submit_once(
+        self,
+        statement: str,
+        query_id: str,
+        settings: dict[str, Any] | None = None,
+    ) -> str:
+        """``submit`` with one physical send: clickhouse-connect 0.15.1 resends a
+        request whose connection the remote closed, even with
+        ``query_retries=0``, and the same id must never name a second send of
+        a write (a backfill chunk could run twice). A connection failure
+        raises instead. TS's client sends a request once."""
+        driver = self._submit_driver()
+        with self._submit_once_lock:
+            pool = driver.http
+            driver.http = _SingleAttemptPool(
+                pool, "A backfill chunk's request cannot be resent after a connection failure"
+            )
+            try:
+                driver.command(statement, settings={**(settings or {}), "query_id": query_id})
+            finally:
+                driver.http = pool
+        return query_id
+
     def _submit_driver(self) -> Any:
         with self._submit_client_lock:
             submit_client = self._submit_client
@@ -540,8 +572,13 @@ class ClickHouseClient:
 class _SingleAttemptPool:
     """Allow one driver HTTP send and disable urllib3's separate retry budget."""
 
-    def __init__(self, pool: Any) -> None:
+    def __init__(
+        self,
+        pool: Any,
+        message: str = "A tracked migration request cannot be replayed after a connection failure",
+    ) -> None:
         self._pool = pool
+        self._message = message
         self._sent = False
 
     def __getattr__(self, name: str) -> Any:
@@ -549,8 +586,7 @@ class _SingleAttemptPool:
 
     def request(self, *args: Any, **kwargs: Any) -> Any:
         if self._sent:
-            msg = "A tracked migration request cannot be replayed after a connection failure"
-            raise RuntimeError(msg)
+            raise RuntimeError(self._message)
         self._sent = True
         return self._pool.request(*args, **{**kwargs, "retries": False})
 

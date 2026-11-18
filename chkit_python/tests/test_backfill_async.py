@@ -21,6 +21,7 @@ import pytest
 
 from chkit.clickhouse.client import QueryStatus
 from chkit_plugin_backfill.async_backfill import (
+    CHECKPOINT_VERSION,
     BackfillResult,
     execute_backfill,
     sync_progress,
@@ -51,8 +52,8 @@ def _ids_in(statement: str) -> list[str] | None:
 
 class MockExecutor:
     """A scripted server: each query id walks through its list of statuses. A
-    ``running`` status is in system.processes and read by query_status, which
-    moves the id to its next status; a ``finished`` or ``failed`` one is a
+    ``running`` status is in system.processes, and a read of it there moves the
+    id to its next status; a ``finished`` or ``failed`` one is a
     QueryFinish or ExceptionWhileProcessing row in system.query_log. A key
     ending in ``-*`` scripts every id with that prefix (a replay's random id)."""
 
@@ -76,14 +77,6 @@ class MockExecutor:
     def submit(self, statement: str, query_id: str | None = None) -> str:
         return query_id if query_id is not None else str(uuid.uuid4())
 
-    def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
-        with self._lock:
-            status = self._current(query_id)
-            if status.status != "running":
-                return QueryStatus(status="unknown")
-            self._cursors[query_id] = self._cursors.get(query_id, 0) + 1
-            return status
-
     def query(self, statement: str) -> _Result:
         # Rows in a result, as the client returns them (the replica probe
         # reads ``.rows``).
@@ -98,7 +91,23 @@ class MockExecutor:
             ids = [key for key in self._statuses if not key.endswith("-*")]
         with self._lock:
             if "system.processes" in statement:
-                return [{"query_id": i} for i in ids if self._current(i).status == "running"]
+                rows: list[dict[str, object]] = []
+                for i in ids:
+                    status = self._current(i)
+                    if status.status != "running":
+                        continue
+                    self._cursors[i] = self._cursors.get(i, 0) + 1
+                    rows.append(
+                        {
+                            "query_id": i,
+                            "read_rows": str(status.read_rows or 0),
+                            "read_bytes": str(status.read_bytes or 0),
+                            "written_rows": str(status.written_rows or 0),
+                            "written_bytes": str(status.written_bytes or 0),
+                            "elapsed": (status.elapsed_ms or 0) / 1000,
+                        }
+                    )
+                return rows
             if "system.query_log" in statement:
                 return [
                     _scripted_log_row(i, status)
@@ -377,21 +386,25 @@ def _unknown_error(query_id: str, reason: str) -> str:
 
 
 # #765: losing contact is no evidence that the chunk failed, and a failed
-# chunk is what --replay-failed runs again.
-def test_a_polling_outage_leaves_the_chunk_unsettled_and_stops_the_run() -> None:
-    class AlwaysErrorExecutor(MockExecutor):
-        def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
-            msg = "ETIMEDOUT"
-            raise ConnectionError(msg)
+# chunk is what --replay-failed runs again. No chunk starts after it.
+def test_a_polling_outage_stops_the_run_after_the_chunk_in_flight() -> None:
+    class AlwaysErrorExecutor(SubmitRecordingExecutor):
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "system.processes" in statement:
+                msg = "ETIMEDOUT"
+                raise ConnectionError(msg)
+            return []
 
+    executor = AlwaysErrorExecutor({})
     saved: list[BackfillProgress] = []
 
     with pytest.raises(RuntimeError) as raised:
         execute_backfill(
-            executor=AlwaysErrorExecutor(),
+            executor=executor,
             plan_id=PLAN_ID,
-            chunk_ids=["c1"],
+            chunk_ids=["c1", "c2", "c3"],
             build_query=lambda _chunk_id: "SELECT 1",
+            concurrency=1,
             poll_interval_ms=1,
             max_poll_errors=3,
             on_progress=saved.append,
@@ -401,9 +414,12 @@ def test_a_polling_outage_leaves_the_chunk_unsettled_and_stops_the_run() -> None
         f"backfill-{PLAN_ID}-c1",
         "lost contact with the server after 3 consecutive poll errors (ETIMEDOUT)",
     )
-    assert saved[-1]["c1"] == BackfillChunkState(
-        status="submitted", query_id=f"backfill-{PLAN_ID}-c1"
-    )
+    assert executor.submit_order == [f"backfill-{PLAN_ID}-c1"]
+    assert saved[-1] == {
+        "c1": BackfillChunkState(status="submitted", query_id=f"backfill-{PLAN_ID}-c1"),
+        "c2": BackfillChunkState(status="pending"),
+        "c3": BackfillChunkState(status="pending"),
+    }
 
 
 def test_replay_failed_replays_a_chunk_the_server_shows_failed_under_a_new_id() -> None:
@@ -696,8 +712,8 @@ def test_resume_submits_nothing_when_a_replica_cannot_be_read() -> None:
 
 
 # A ClickHouse stand-in with the timing that matters for a replay (#765). An
-# attempt the run submits is in system.processes for ``running_reads`` running
-# reads of its id, then logged once ``unflushed_log_reads`` more query_log
+# attempt the run submits is in system.processes for ``running_reads`` reads of
+# system.processes, then logged once ``unflushed_log_reads`` more query_log
 # reads have passed: the flush gap. An attempt that ended before the run
 # starts is logged after ``hidden_log_reads`` query_log reads (infinity:
 # never, as with log_queries = 0 or a log that has not flushed). Earlier
@@ -713,7 +729,7 @@ _PRUNING = re.compile(r"event_date >= toDate32\(parseDateTimeBestEffort\('([^']*
 @dataclass
 class _SimAttempt:
     query_id: str
-    outcome: str  # finished | failed | started
+    outcome: str  # finished | failed | partial (failed after writing rows) | started
     start_ms: float | None = None
     running_reads: int = 0
     status_reads: int = 0
@@ -785,22 +801,6 @@ class SimulatedServer(MockExecutor):
             )
         return submitted
 
-    def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
-        with self._lock:
-            own = [attempt for attempt in self.attempts if attempt.query_id == query_id]
-            latest = own[-1] if own else None
-            if latest is not None and self._running(latest):
-                latest.status_reads += 1
-                return QueryStatus(
-                    status="running",
-                    read_rows=0,
-                    read_bytes=0,
-                    written_rows=0,
-                    written_bytes=0,
-                    elapsed_ms=0,
-                )
-        return QueryStatus(status="unknown")
-
     def _rows(self, statement: str) -> list[dict[str, object]]:
         if "system.one" in statement and self.deny_probe is not None:
             raise RuntimeError(self.deny_probe)
@@ -813,10 +813,23 @@ class SimulatedServer(MockExecutor):
             if "now64" in statement:
                 return [{"now_ms": str(int(self.server_now()))}]
             if "system.processes" in statement:
-                return [
-                    {"query_id": attempt.query_id}
+                running = [
+                    attempt
                     for attempt in self.attempts
                     if self._running(attempt) and matches(attempt.query_id)
+                ]
+                for attempt in running:
+                    attempt.status_reads += 1
+                return [
+                    {
+                        "query_id": attempt.query_id,
+                        "read_rows": "0",
+                        "read_bytes": "0",
+                        "written_rows": "0",
+                        "written_bytes": "0",
+                        "elapsed": 0,
+                    }
+                    for attempt in running
                 ]
             if "system.query_log" in statement:
                 self.log_reads += 1
@@ -857,7 +870,7 @@ def _log_rows(attempt: _SimAttempt) -> list[dict[str, object]]:
     end = {
         **base,
         "type": "QueryFinish" if finished else "ExceptionWhileProcessing",
-        "written_rows": "42" if finished else "0",
+        "written_rows": "42" if finished or attempt.outcome == "partial" else "0",
         "written_bytes": "0",
         "query_duration_ms": "1",
         "exception": "" if finished else "Code: 394. QUERY_WAS_CANCELLED",
@@ -900,6 +913,7 @@ def _run_once(
     accept_unknown: bool = False,
     max_poll_errors: int = 10,
     outcome_recheck_interval_ms: int = 1,
+    checkpoint_version: int | None = None,
 ) -> BackfillResult:
     return execute_backfill(
         executor=server,
@@ -911,6 +925,7 @@ def _run_once(
         outcome_recheck_attempts=3,
         outcome_recheck_interval_ms=outcome_recheck_interval_ms,
         resume_from=resume_from,
+        checkpoint_version=checkpoint_version,
         replay_failed=replay_failed,
         accept_unknown=accept_unknown,
         on_progress=server.persisted.append,
@@ -1109,31 +1124,155 @@ def test_failed_replay_keeps_its_id_and_is_replayed_under_a_third_id() -> None:
     )
 
 
-# Finding 3: a checkpoint can say failed without the server ever showing it,
-# as older releases recorded a polling outage.
-def test_replay_failed_replays_a_chunk_only_on_the_servers_evidence_that_it_failed() -> None:
+# Round-2 item 7: whether an attempt is unknown never depends on the flags.
+# --replay-failed replays a proved failure, --accept-unknown an unresolved
+# attempt, such as a failure an older release recorded for a polling outage,
+# which the server never showed.
+@pytest.mark.parametrize(
+    ("replay_failed", "accept_unknown", "replayed"),
+    [
+        (False, False, None),
+        (True, False, None),
+        (False, True, ["c1"]),
+        (True, True, ["c1", "c2"]),
+    ],
+)
+def test_replay_failed_and_accept_unknown_each_replay_their_own_chunks(
+    replay_failed: bool, accept_unknown: bool, replayed: list[str] | None
+) -> None:
+    finished = [QueryStatus(status="finished", written_rows=1, written_bytes=1, duration_ms=1)]
+    executor = SubmitRecordingExecutor(
+        {
+            f"backfill-{PLAN_ID}-c2": [QueryStatus(status="failed", error="OOM", duration_ms=1)],
+            f"backfill-{PLAN_ID}-c1-*": finished,
+            f"backfill-{PLAN_ID}-c2-*": finished,
+        }
+    )
+
+    def run() -> BackfillResult:
+        return execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            poll_interval_ms=1,
+            outcome_recheck_attempts=2,
+            outcome_recheck_interval_ms=1,
+            resume_from={
+                "c1": BackfillChunkState(
+                    status="failed",
+                    error="Lost contact with query after 10 consecutive poll errors",
+                ),
+                "c2": BackfillChunkState(status="failed", query_id=f"backfill-{PLAN_ID}-c2"),
+            },
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=replay_failed,
+            accept_unknown=accept_unknown,
+        )
+
+    if replayed is None:
+        with pytest.raises(RuntimeError) as raised:
+            run()
+        assert (
+            f"chunk c1 (query_id backfill-{PLAN_ID}-c1): it is not running on any replica "
+            "and system.query_log has no outcome for it."
+        ) in str(raised.value)
+        assert executor.submit_order == []
+        return
+    result = run()
+    assert ["-".join(qid.split("-")[:4]) for qid in executor.submit_order] == [
+        f"backfill-{PLAN_ID}-{chunk_id}" for chunk_id in replayed
+    ]
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c2"].status == ("done" if replay_failed else "failed")
+
+
+PARTIAL = "it failed after writing 42 rows, which a replay would write again"
+
+
+# Round-2 item 5: an attempt that failed after writing rows leaves them in the
+# table; a replay writes them again.
+def test_a_failure_after_written_rows_is_unknown_and_only_accept_unknown_replays_it() -> None:
     server = SimulatedServer(
-        attempts=[_SimAttempt(query_id=FIRST_ID, outcome="finished", logged_at_log_read=NEVER)],
+        attempts=[_SimAttempt(query_id=RECORDED_REPLAY_ID, outcome="partial")],
         next_outcomes=["finished"],
     )
 
-    def lost_contact() -> BackfillProgress:
+    def recorded() -> BackfillProgress:
         return {
             "c1": BackfillChunkState(
-                status="failed",
-                query_id=FIRST_ID,
-                error="Lost contact with query after 10 consecutive poll errors",
+                status="failed", query_id=RECORDED_REPLAY_ID, submitted_at=_hour_ago()
             )
         }
 
     with pytest.raises(RuntimeError) as raised:
-        _run_once(server, lost_contact(), replay_failed=True)
+        _run_once(server, recorded(), replay_failed=True)
+    assert str(raised.value) == _unknown_error(RECORDED_REPLAY_ID, PARTIAL)
+    assert server.submits == []
+
+    accepted = _run_once(server, recorded(), accept_unknown=True)
+    assert len(server.submits) == 1
+    assert (accepted.progress["c1"].status, accepted.progress["c1"].query_id) == (
+        "done",
+        server.submits[0],
+    )
+
+
+def test_a_run_whose_chunk_fails_after_written_rows_stops_instead_of_recording_it_failed() -> None:
+    server = SimulatedServer(next_outcomes=["partial"])
+
+    with pytest.raises(RuntimeError) as raised:
+        _run_once(server, None)
+
+    assert str(raised.value) == _unknown_error(FIRST_ID, PARTIAL)
+    # Seen running, then failed: it keeps that state, not failed.
+    assert (server.persisted[-1]["c1"].status, server.persisted[-1]["c1"].query_id) == (
+        "running",
+        FIRST_ID,
+    )
+
+
+# Round-2 item 6: an older release saved a chunk's query id only after its
+# submit returned, so a chunk its checkpoint lists as pending, or not at all,
+# may have run.
+@pytest.mark.parametrize("listed", [False, True])
+def test_an_unversioned_checkpoints_pending_or_missing_chunk_with_no_outcome_is_unknown(
+    listed: bool,
+) -> None:
+    def resume_from() -> BackfillProgress:
+        return {"c1": BackfillChunkState(status="pending")} if listed else {}
+
+    legacy = SimulatedServer(
+        attempts=[_SimAttempt(query_id=FIRST_ID, outcome="finished", logged_at_log_read=NEVER)],
+        next_outcomes=["finished"],
+    )
+    with pytest.raises(RuntimeError) as raised:
+        _run_once(legacy, resume_from())
     assert str(raised.value) == _unknown_error(FIRST_ID, NO_OUTCOME)
+    assert legacy.submits == []
+    # Saved in this release's format: recorded as may have run.
+    assert legacy.persisted[-1]["c1"] == BackfillChunkState(status="pending", query_id=FIRST_ID)
+
+    accepted = _run_once(legacy, resume_from(), accept_unknown=True)
+    assert len(legacy.submits) == 1
+    assert legacy.submits[0] != FIRST_ID
+    assert accepted.progress["c1"].status == "done"
+
+    current = SimulatedServer(next_outcomes=["finished"])
+    result = _run_once(current, resume_from(), checkpoint_version=CHECKPOINT_VERSION)
+    assert current.submits == [FIRST_ID]
+    assert result.progress["c1"].status == "done"
+
+
+def test_an_unversioned_checkpoints_chunk_that_committed_is_done_without_a_flag() -> None:
+    server = SimulatedServer(
+        attempts=[_SimAttempt(query_id=FIRST_ID, outcome="finished", logged_at_log_read=1)]
+    )
+
+    result = _run_once(server, {"c1": BackfillChunkState(status="pending")})
+
     assert server.submits == []
-    # Without --replay-failed nothing is submitted, so nothing needs proof.
-    plain = _run_once(server, lost_contact())
-    assert plain.progress["c1"].status == "failed"
-    assert server.submits == []
+    assert (result.progress["c1"].status, result.progress["c1"].query_id) == ("done", FIRST_ID)
 
 
 # Finding 6: the replica that runs the replay can stamp it days before the
@@ -1341,26 +1480,39 @@ def test_resume_whose_replica_probe_fails_submits_nothing() -> None:
     assert server.submits == []
 
 
-# Finding 4: a user denied clusterAllReplicas reads one replica. What it finds
-# there holds; what it does not find may be on another replica.
-def test_resume_whose_replica_probe_is_denied_trusts_only_what_it_finds() -> None:
-    denied = "Code: 497. DB::Exception: default: Not enough privileges. (ACCESS_DENIED)"
+# Finding 4 / round-2 item 4: a user denied clusterAllReplicas reads one
+# replica. A run or a QueryFinish it finds there holds; anything else, a
+# failure row included, may differ on another replica.
+DENIED = "Code: 497. DB::Exception: default: Not enough privileges. (ACCESS_DENIED)"
+DENIED_REASON = (
+    f"the user may not read every replica ({DENIED}), and the replica it can read "
+    "shows neither a run of it nor a QueryFinish"
+)
 
+
+def test_resume_whose_replica_probe_is_denied_trusts_only_a_run_or_a_finish() -> None:
     absent = SimulatedServer(
-        attempts=[_killed_first()], next_outcomes=["finished"], deny_probe=denied
+        attempts=[_killed_first()], next_outcomes=["finished"], deny_probe=DENIED
     )
     with pytest.raises(RuntimeError) as raised:
         _run_once(absent, _pending_replay())
-    assert str(raised.value) == _unknown_error(
-        RECORDED_REPLAY_ID,
-        f"the user may not read every replica ({denied}), and the replica it can read "
-        "neither runs it nor has an outcome for it",
-    )
+    assert str(raised.value) == _unknown_error(RECORDED_REPLAY_ID, DENIED_REASON)
     assert absent.submits == []
+
+    failed_locally = SimulatedServer(
+        attempts=[_SimAttempt(query_id=RECORDED_REPLAY_ID, outcome="failed")],
+        next_outcomes=["finished"],
+        deny_probe=DENIED,
+    )
+    failed_state = _pending_replay()["c1"].model_copy(update={"status": "failed"})
+    with pytest.raises(RuntimeError) as raised:
+        _run_once(failed_locally, {"c1": failed_state}, replay_failed=True)
+    assert str(raised.value) == _unknown_error(RECORDED_REPLAY_ID, DENIED_REASON)
+    assert failed_locally.submits == []
 
     found = SimulatedServer(
         attempts=[_killed_first(), _SimAttempt(query_id=RECORDED_REPLAY_ID, outcome="finished")],
-        deny_probe=denied,
+        deny_probe=DENIED,
     )
     result = _run_once(found, _pending_replay())
     assert (result.progress["c1"].status, result.progress["c1"].query_id) == (
@@ -1368,3 +1520,97 @@ def test_resume_whose_replica_probe_is_denied_trusts_only_what_it_finds() -> Non
         RECORDED_REPLAY_ID,
     )
     assert found.submits == []
+
+
+# Round-2 item 8: with clickhouse.cluster set and the cluster denied, the
+# reads use the local tables, as TS does.
+def test_a_denied_explicit_cluster_reads_the_local_tables_the_polls_too() -> None:
+    class DeniedCluster(SimulatedServer):
+        def __init__(self) -> None:
+            super().__init__(
+                attempts=[_SimAttempt(query_id=RECORDED_REPLAY_ID, outcome="started")],
+                next_outcomes=["finished"],
+            )
+            self.reads: list[str] = []
+
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "clusterAllReplicas" in statement:
+                raise RuntimeError(DENIED)
+            if "system.processes" in statement or "system.query_log" in statement:
+                self.reads.append(statement)
+            return super()._rows(statement)
+
+    server = DeniedCluster()
+
+    def run(*, accept_unknown: bool) -> BackfillResult:
+        return execute_backfill(
+            executor=server,
+            cluster="default",
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            poll_interval_ms=1,
+            outcome_recheck_attempts=2,
+            outcome_recheck_interval_ms=1,
+            resume_from=_pending_replay(),
+            checkpoint_version=CHECKPOINT_VERSION,
+            accept_unknown=accept_unknown,
+            on_progress=server.persisted.append,
+        )
+
+    with pytest.raises(RuntimeError) as raised:
+        run(accept_unknown=False)
+    assert (
+        f"chunk c1 (query_id {RECORDED_REPLAY_ID}): the user may not read every replica ({DENIED})"
+    ) in str(raised.value)
+    assert server.submits == []
+
+    accepted = run(accept_unknown=True)
+    assert len(server.submits) == 1
+    assert accepted.progress["c1"].status == "done"
+    assert len(server.reads) > 4
+    for sql in server.reads:
+        assert re.search(r"FROM system\.(processes|query_log)", sql)
+
+
+# Round-2 item 1: SIGINT and SIGTERM set the run's stop event.
+def test_a_stopped_run_submits_no_new_chunk_and_reports_nothing_after_it_raises() -> None:
+    stop = threading.Event()
+    release = threading.Event()
+
+    class BlockingSubmit(SubmitRecordingExecutor):
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            submitted = super().submit(statement, query_id)
+            stop.set()
+            release.wait(5)
+            return submitted
+
+    executor = BlockingSubmit(
+        {
+            f"backfill-{PLAN_ID}-c1": [
+                QueryStatus(status="finished", written_rows=1, written_bytes=1, duration_ms=1)
+            ]
+        }
+    )
+    reports: list[BackfillProgress] = []
+
+    with pytest.raises(RuntimeError, match=rf"Backfill plan {PLAN_ID}: interrupted\. No new chunk"):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            concurrency=1,
+            poll_interval_ms=1,
+            stop=stop,
+            on_progress=reports.append,
+        )
+    reported = len(reports)
+    release.set()
+    time.sleep(0.1)
+
+    assert executor.submit_order == [f"backfill-{PLAN_ID}-c1"]
+    assert len(reports) == reported
+    assert reports[-1]["c1"] == BackfillChunkState(
+        status="pending", query_id=f"backfill-{PLAN_ID}-c1"
+    )

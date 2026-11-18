@@ -97,6 +97,7 @@ console.log(`${plan.chunks.length} chunks, ${plan.totalRows.toLocaleString()} ro
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import {
   buildChunkExecutionSql,
+  CHECKPOINT_VERSION,
   executeBackfill,
   type BackfillProgress,
 } from '@chkit/plugin-backfill/sdk'
@@ -125,6 +126,10 @@ const result = await executeBackfill({
   concurrency: 4,
   pollIntervalMs: 5_000,
   resumeFrom: saved,
+  // The format of progress this release reported. Omit it for progress an
+  // older release reported: a chunk it lists as pending, or not at all, may
+  // have run, and is not submitted again without acceptUnknown.
+  checkpointVersion: CHECKPOINT_VERSION,
   onProgress: async (progress) => {
     saved = progress
     // persist to disk / state store

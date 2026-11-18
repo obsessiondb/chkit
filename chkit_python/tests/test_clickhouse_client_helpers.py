@@ -208,6 +208,36 @@ def test_tracked_execute_blocks_the_pinned_drivers_remote_close_retry() -> None:
     assert pool.request.call_args.kwargs["retries"] is False
 
 
+# #765: a backfill chunk resent under its attempt id after a connection reset
+# could run twice before any read sees either run.
+def test_submit_once_blocks_the_pinned_drivers_remote_close_retry() -> None:
+    client, _fake = _stub_client()
+    driver = MagicMock()
+    driver.headers = {}
+    driver.params = {}
+    driver._send_progress = False
+    driver._progress_interval = None
+    driver._autogenerate_query_id = False
+    driver.url = "http://localhost:8123"
+    driver.server_host_name = None
+    pool = driver.http
+    error = ProtocolError("remote closed")
+    error.__context__ = ConnectionResetError("reset")
+    pool.request.side_effect = error
+
+    def command(statement: str, **_kwargs: object) -> None:
+        HttpClient._raw_request(driver, statement, {})
+
+    driver.command.side_effect = command
+    client._submit_client = driver
+
+    with pytest.raises(RuntimeError, match="cannot be resent after a connection failure"):
+        client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+    assert pool.request.call_count == 1
+    assert pool.request.call_args.kwargs["retries"] is False
+    assert driver.http is pool
+
+
 def test_native_control_uses_a_separate_bounded_session_free_request(httpx_mock: HTTPXMock) -> None:
     client, fake = _stub_client()
     httpx_mock.add_response(text='{"query_id":"old-query","kill_status":"finished"}\n')

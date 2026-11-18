@@ -750,10 +750,28 @@ def test_resume_fails_at_once_while_another_run_holds_the_plans_lock(tmp_path: P
     code, msgs = resume()
     assert code == 2
     assert any(
-        f"Backfill plan {plan.plan_id} is locked by another run or resume (pid "
+        f"Backfill plan {plan.plan_id} is locked by another run, resume or cancel (pid "
         f"{os.getppid()} on {socket.gethostname()}, since 2026-11-18T10:00:00.000Z)."
         in str(m)
         for m in msgs
+    )
+
+    # Cancel takes the same lock, so it never replaces a checkpoint a run writes.
+    cancel = next(c for c in plugin.commands if c.name == "cancel")
+    cancel_msgs: list[Any] = []
+    cancel_code = cancel.run(
+        _make_command_context(
+            config=cfg,
+            tmp_path=tmp_path,
+            flags={"--plan-id": plan.plan_id},
+            json_mode=True,
+            msgs=cancel_msgs,
+        )
+    )
+    assert cancel_code == 2
+    assert any(
+        f"Backfill plan {plan.plan_id} is locked by another run, resume or cancel" in str(m)
+        for m in cancel_msgs
     )
 
     lock_path.unlink()

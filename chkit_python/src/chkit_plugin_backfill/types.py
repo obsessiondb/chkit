@@ -124,6 +124,9 @@ class BackfillRunState(BaseModel):
     completed_at: str | None = Field(default=None, alias="completedAt")
     last_error: str | None = Field(default=None, alias="lastError")
     progress: dict[str, BackfillChunkProgress] = Field(default_factory=dict)
+    # CHECKPOINT_VERSION of the format ``progress`` is in; unset when an older
+    # release wrote it (#765).
+    checkpoint_version: int | None = Field(default=None, alias="checkpointVersion")
 
     model_config = ConfigDict(frozen=False, extra="ignore", populate_by_name=True)
 
