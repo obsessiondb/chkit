@@ -373,25 +373,22 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       // record for the id decides it. After the budget, every replica is
       // read once more, through a query_log flush, before the run stops with
       // the attempt still recorded as started.
-      if (status.status === 'unknown') {
-        unknownPolls += 1
-        if (unknownPolls > MAX_TRANSIENT_POLL_ERRORS) {
-          status = await checkInFlight(db, queryId, operationType, pollAfterTime)
-          if (status.status === 'unknown') status = await recheckThroughFlush(db, queryId, operationType, pollAfterTime, sleep)
-          if (status.status === 'unknown') {
-            if (submitPromiseGuarded) await submitPromiseGuarded
-            const submitTail = submitError ? `, and the submit request failed (${describeError(submitError)})` : ''
-            throw outcomeUnknownError({
-              operationType,
-              statementIndex,
-              migrationName,
-              queryId,
-              reason: `polling found it neither running nor in system.query_log ${unknownPolls}× in a row${submitTail}`,
-            })
-          }
+      unknownPolls = status.status === 'unknown' ? unknownPolls + 1 : 0
+      if (unknownPolls > MAX_TRANSIENT_POLL_ERRORS) {
+        status = await finalOutcomeCheck({ db, queryId, operationType, pollAfterTime, sleep })
+        if (status.status === 'unknown') {
+          if (submitPromiseGuarded) await submitPromiseGuarded
+          const submitTail = submitError ? `, and the submit request failed (${describeError(submitError)})` : ''
+          throw outcomeUnknownError({
+            operationType,
+            statementIndex,
+            migrationName,
+            queryId,
+            reason: `polling found it neither running nor in system.query_log ${unknownPolls}× in a row${submitTail}`,
+          })
         }
+        unknownPolls = 0
       }
-      if (status.status !== 'unknown') unknownPolls = 0
 
       if (status.status === 'finished') {
         const finishedSec = Math.round((status.durationMs ?? 0) / 1000)
@@ -603,6 +600,19 @@ function isRecordedFailure(op: OperationState): boolean {
 /** The record of an attempt that finished on the server. */
 export function finishedRecordOf(op: OperationState, now: () => number): OperationState {
   return { ...op, status: 'completed', finishedAt: isoWithoutZone(new Date(now())), lastError: '' }
+}
+
+// After the unknown-poll budget: every replica, then the query_log flush rechecks.
+async function finalOutcomeCheck(input: {
+  db: ClickHouseExecutor
+  queryId: string
+  operationType: string
+  pollAfterTime: string
+  sleep: (ms: number) => Promise<void>
+}): Promise<QueryStatus> {
+  const status = await checkInFlight(input.db, input.queryId, input.operationType, input.pollAfterTime)
+  if (status.status !== 'unknown') return status
+  return await recheckThroughFlush(input.db, input.queryId, input.operationType, input.pollAfterTime, input.sleep)
 }
 
 async function recheckThroughFlush(
