@@ -53,10 +53,18 @@ async function buildSqlCanonicalizer(
   if (expressions.length === 0 && queries.length === 0) return undefined
 
   try {
+    // Report an unreadable system.functions registry once for both calls:
+    // without it the #729 FLOOR drift would silently come back.
+    let registryWarningLogged = false
+    const onRegistryUnavailable = (error: unknown) => {
+      if (registryWarningLogged) return
+      registryWarningLogged = true
+      debug('drift', `function registry unavailable, keeping function names as written: ${String(error)}`)
+    }
     // One after the other: the CLI's executor is bound to one HTTP session, and
     // ClickHouse rejects a second query while the session is busy.
-    const expressionMap = await canonicalizeSqlFragments(db, expressions, { wrap: true })
-    const queryMap = await canonicalizeSqlFragments(db, queries, { wrap: false })
+    const expressionMap = await canonicalizeSqlFragments(db, expressions, { wrap: true, onRegistryUnavailable })
+    const queryMap = await canonicalizeSqlFragments(db, queries, { wrap: false, onRegistryUnavailable })
     return {
       expression: (fragment) => expressionMap.get(fragment) ?? null,
       query: (fragment) => queryMap.get(fragment) ?? null,
