@@ -11,12 +11,20 @@ via ``system.processes`` / ``system.query_log``).
 from __future__ import annotations
 
 import threading
+import time
 import uuid
+from collections.abc import Callable
+from dataclasses import dataclass, field
+from datetime import UTC, datetime, timedelta
 
 import pytest
 
 from chkit.clickhouse.client import QueryStatus
-from chkit_plugin_backfill.async_backfill import execute_backfill, sync_progress
+from chkit_plugin_backfill.async_backfill import (
+    BackfillResult,
+    execute_backfill,
+    sync_progress,
+)
 from chkit_plugin_backfill.types import BackfillChunkState, BackfillProgress
 
 PLAN_ID = "test-plan"
@@ -332,8 +340,19 @@ def test_replay_failed_resets_failed_chunks_after_sync() -> None:
         ),
     }
 
+    class ReplayExecutor(MockExecutor):
+        # The replay runs under its own id (#765), which starts with the chunk's.
+        def query_status(
+            self, query_id: str, *, after_time: str | None = None
+        ) -> QueryStatus:
+            replayed = query_id.startswith(f"{first_id}-")
+            return super().query_status(
+                first_id if replayed else query_id, after_time=after_time
+            )
+
+    first_id = query_id
     result = execute_backfill(
-        executor=MockExecutor(statuses),
+        executor=ReplayExecutor(statuses),
         plan_id=PLAN_ID,
         chunk_ids=CHUNK_IDS,
         build_query=lambda _chunk_id: "SELECT 1",
@@ -552,3 +571,303 @@ def test_resume_submits_nothing_when_a_replica_cannot_be_read() -> None:
             replay_failed=True,
         )
     assert executor.submit_order == []
+
+
+# A ClickHouse stand-in with the timing that matters for a replay (#765): an
+# attempt is in system.processes for ``running_polls`` status reads, then
+# neither running nor logged for ``unflushed_polls`` reads (the query_log flush
+# gap), then logged. Earlier attempts' query_log rows stay visible throughout,
+# and query_status applies after_time to query_start_time as the real one does.
+@dataclass
+class _SimAttempt:
+    query_id: str
+    outcome: str
+    start_ms: float = field(default_factory=lambda: time.time() * 1000)
+    running_polls: int = 0
+    unflushed_polls: int = 0
+    polls: int = 0
+
+    def running(self) -> bool:
+        return self.polls < self.running_polls
+
+    def logged(self) -> bool:
+        return self.polls >= self.running_polls + self.unflushed_polls
+
+
+class SimulatedServer(MockExecutor):
+    def __init__(
+        self,
+        *,
+        attempts: list[_SimAttempt] | None = None,
+        next_outcomes: list[str] | None = None,
+    ) -> None:
+        super().__init__()
+        self.attempts = list(attempts or [])
+        self.next_outcomes = list(next_outcomes or [])
+        self.submits: list[str] = []
+
+    def _logged(self) -> list[_SimAttempt]:
+        # Latest first, as both readers order by event_time DESC.
+        return [attempt for attempt in reversed(self.attempts) if attempt.logged()]
+
+    def submit(self, statement: str, query_id: str | None = None) -> str:
+        submitted = query_id if query_id is not None else str(uuid.uuid4())
+        with self._lock:
+            self.submits.append(submitted)
+            if not self.next_outcomes:
+                msg = f"unexpected submit of {submitted}"
+                raise AssertionError(msg)
+            self.attempts.append(
+                _SimAttempt(
+                    query_id=submitted,
+                    outcome=self.next_outcomes.pop(0),
+                    running_polls=1,
+                    unflushed_polls=1,
+                )
+            )
+        return submitted
+
+    def query_status(self, query_id: str, *, after_time: str | None = None) -> QueryStatus:
+        with self._lock:
+            own = [attempt for attempt in self.attempts if attempt.query_id == query_id]
+            latest = own[-1] if own else None
+            if latest is not None and latest.running():
+                latest.polls += 1
+                return QueryStatus(
+                    status="running",
+                    read_rows=0,
+                    read_bytes=0,
+                    written_rows=0,
+                    written_bytes=0,
+                    elapsed_ms=0,
+                )
+            after = (
+                datetime.fromisoformat(after_time.replace("Z", "+00:00")).timestamp() * 1000
+                if after_time
+                else 0
+            )
+            row = next(
+                (
+                    attempt
+                    for attempt in self._logged()
+                    if attempt.query_id == query_id and attempt.start_ms >= after
+                ),
+                None,
+            )
+            if latest is not None:
+                latest.polls += 1
+        if row is None:
+            return QueryStatus(status="unknown")
+        if row.outcome == "finished":
+            return QueryStatus(
+                status="finished", written_rows=42, written_bytes=0, duration_ms=1
+            )
+        return QueryStatus(
+            status="failed", duration_ms=1, error="Code: 394. QUERY_WAS_CANCELLED"
+        )
+
+    def query(self, statement: str) -> list[dict[str, object]]:
+        with self._lock:
+            if "system.processes" in statement:
+                return [
+                    {"query_id": attempt.query_id}
+                    for attempt in self.attempts
+                    if attempt.running()
+                ]
+            if "system.query_log" in statement:
+                return [_log_row(attempt) for attempt in self._logged()]
+        return []
+
+
+def _log_row(attempt: _SimAttempt) -> dict[str, object]:
+    finished = attempt.outcome == "finished"
+    return {
+        "query_id": attempt.query_id,
+        "type": "QueryFinish" if finished else "ExceptionWhileProcessing",
+        "written_rows": "42" if finished else "0",
+        "written_bytes": "0",
+        "query_duration_ms": "1",
+        "exception": "" if finished else "Code: 394. QUERY_WAS_CANCELLED",
+    }
+
+
+FIRST_ID = f"backfill-{PLAN_ID}-c1"
+RECORDED_REPLAY_ID = f"{FIRST_ID}-recorded"
+
+
+def _killed_first() -> _SimAttempt:
+    # The killed first attempt, seconds before the replay: its failure is newer
+    # than the 60 s window older releases subtracted from the replay's start.
+    return _SimAttempt(
+        query_id=FIRST_ID, outcome="failed", start_ms=time.time() * 1000 - 5_000
+    )
+
+
+def _run_once(
+    server: SimulatedServer,
+    resume_from: BackfillProgress,
+    *,
+    replay_failed: bool = False,
+    on_progress: Callable[[BackfillProgress], None] | None = None,
+) -> BackfillResult:
+    return execute_backfill(
+        executor=server,
+        plan_id=PLAN_ID,
+        chunk_ids=["c1"],
+        build_query=lambda _chunk_id: "SELECT 1",
+        poll_interval_ms=1,
+        resume_from=resume_from,
+        replay_failed=replay_failed,
+        on_progress=on_progress,
+    )
+
+
+def test_replay_started_seconds_after_the_failure_ends_done() -> None:
+    server = SimulatedServer(attempts=[_killed_first()], next_outcomes=["finished"])
+    persisted: list[BackfillProgress] = []
+
+    result = _run_once(
+        server,
+        {
+            "c1": BackfillChunkState(
+                status="failed", query_id=FIRST_ID, error="Code: 394. QUERY_WAS_CANCELLED"
+            )
+        },
+        replay_failed=True,
+        on_progress=persisted.append,
+    )
+
+    # Releases that reused the first id read its failure while the replay ran.
+    assert result.progress["c1"].status == "done"
+    assert len(server.submits) == 1
+    replay_id = server.submits[0]
+    assert replay_id != FIRST_ID
+    assert replay_id.startswith(f"{FIRST_ID}-")
+    # The replay's id is durable before its submit: the first write names it.
+    assert persisted[0]["c1"] == BackfillChunkState(status="pending", query_id=replay_id)
+    assert result.failed == 0
+    assert result.progress["c1"].query_id == replay_id
+    assert result.progress["c1"].written_rows == 42
+
+
+def test_run_stopped_after_recording_the_replay_id_submits_it_once() -> None:
+    server = SimulatedServer(attempts=[_killed_first()], next_outcomes=["finished"])
+
+    result = _run_once(
+        server, {"c1": BackfillChunkState(status="pending", query_id=RECORDED_REPLAY_ID)}
+    )
+
+    assert server.submits == [RECORDED_REPLAY_ID]
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c1"].query_id == RECORDED_REPLAY_ID
+
+
+def test_run_stopped_between_replay_submit_and_state_write_attaches() -> None:
+    server = SimulatedServer(
+        attempts=[
+            _killed_first(),
+            _SimAttempt(
+                query_id=RECORDED_REPLAY_ID,
+                outcome="finished",
+                running_polls=2,
+                unflushed_polls=1,
+            ),
+        ]
+    )
+
+    result = _run_once(
+        server, {"c1": BackfillChunkState(status="pending", query_id=RECORDED_REPLAY_ID)}
+    )
+
+    assert server.submits == []
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c1"].query_id == RECORDED_REPLAY_ID
+
+
+def test_resume_reads_a_finished_replay_by_its_own_id() -> None:
+    server = SimulatedServer(
+        attempts=[
+            _killed_first(),
+            _SimAttempt(query_id=RECORDED_REPLAY_ID, outcome="finished"),
+        ]
+    )
+
+    result = _run_once(
+        server, {"c1": BackfillChunkState(status="running", query_id=RECORDED_REPLAY_ID)}
+    )
+
+    assert server.submits == []
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c1"].query_id == RECORDED_REPLAY_ID
+    assert result.progress["c1"].written_rows == 42
+
+
+def test_failed_replay_keeps_its_id_and_is_replayed_under_a_third_id() -> None:
+    server = SimulatedServer(
+        attempts=[_killed_first()], next_outcomes=["failed", "finished"]
+    )
+
+    first = _run_once(
+        server,
+        {"c1": BackfillChunkState(status="failed", query_id=FIRST_ID)},
+        replay_failed=True,
+    )
+    assert first.progress["c1"].status == "failed"
+    assert first.progress["c1"].query_id == server.submits[0]
+    plain = _run_once(server, first.progress)
+    assert plain.progress["c1"].status == "failed"
+    assert plain.progress["c1"].query_id == server.submits[0]
+
+    second = _run_once(server, plain.progress, replay_failed=True)
+
+    assert len(server.submits) == 2
+    assert len({FIRST_ID, *server.submits}) == 3
+    assert second.progress["c1"].status == "done"
+    assert second.progress["c1"].query_id == server.submits[1]
+
+
+def _iso_ms_ago(ms: int) -> str:
+    moment = datetime.now(tz=UTC) - timedelta(milliseconds=ms)
+    return moment.strftime("%Y-%m-%dT%H:%M:%S.") + f"{moment.microsecond // 1000:03d}Z"
+
+
+def test_replay_an_older_release_reset_but_never_submitted_gets_a_new_id() -> None:
+    # Older releases reset a failed chunk to pending with submitted_at = now - 60 s.
+    server = SimulatedServer(attempts=[_killed_first()], next_outcomes=["finished"])
+
+    result = _run_once(
+        server,
+        {"c1": BackfillChunkState(status="pending", submitted_at=_iso_ms_ago(60_000))},
+        replay_failed=True,
+    )
+
+    assert len(server.submits) == 1
+    assert server.submits[0] != FIRST_ID
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c1"].query_id == server.submits[0]
+
+
+def test_replay_an_older_release_left_running_is_polled_from_its_submitted_at() -> None:
+    killed = _killed_first()
+    killed.start_ms = time.time() * 1000 - 120_000
+    server = SimulatedServer(
+        attempts=[
+            killed,
+            _SimAttempt(
+                query_id=FIRST_ID, outcome="finished", running_polls=2, unflushed_polls=1
+            ),
+        ]
+    )
+
+    result = _run_once(
+        server,
+        {
+            "c1": BackfillChunkState(
+                status="running", query_id=FIRST_ID, submitted_at=_iso_ms_ago(60_000)
+            )
+        },
+    )
+
+    assert server.submits == []
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c1"].query_id == FIRST_ID

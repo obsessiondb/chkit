@@ -1,3 +1,4 @@
+import { randomUUID } from 'node:crypto'
 import { setTimeout as sleep } from 'node:timers/promises'
 
 import {
@@ -59,9 +60,18 @@ export interface BackfillResult {
   progress: BackfillProgress
 }
 
-/** Build the deterministic query ID for a chunk. */
+/** Build the deterministic query ID of a chunk's first attempt. */
 function chunkQueryId(planId: string, chunkId: string): string {
   return `backfill-${planId}-${chunkId}`
+}
+
+/**
+ * Build the query ID of a replayed attempt (#765). It is random, so the
+ * system.query_log rows under it belong to that attempt alone, and it keeps the
+ * plan's prefix, so syncProgress still finds it.
+ */
+function replayQueryId(planId: string, chunkId: string): string {
+  return `${chunkQueryId(planId, chunkId)}-${randomUUID()}`
 }
 
 function applyQueryStatus(
@@ -180,9 +190,11 @@ export async function syncProgress(
   let updated = { ...progress }
 
   for (const chunkId of chunkIdsToSync) {
-    const queryId = chunkQueryId(planId, chunkId)
     const current = updated[chunkId]
     if (!current) continue
+    // A replayed attempt runs under the id recorded with it (#765). The
+    // deterministic id covers a first attempt whose record was never written.
+    const queryId = current.queryId ?? chunkQueryId(planId, chunkId)
 
     if (runningSet.has(queryId)) {
       updated = updateChunk(updated, chunkId, { ...current, status: 'running', queryId })
@@ -328,17 +340,16 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   }
 
   // Reset confirmed-failed chunks to pending AFTER sync so we operate on
-  // ground truth. The deterministic query_id is reused; the afterTime filter
-  // in queryStatus ensures we ignore stale query_log entries from prior attempts.
+  // ground truth. Each replay gets a new random query id, recorded here and
+  // persisted below before it is submitted, so polling and a later sync only
+  // ever read that attempt's own system.query_log rows (#765). Reusing the
+  // failed attempt's id let its ExceptionWhileProcessing row mark the replay
+  // failed while it ran.
   if (replayFailed) {
-    // Stamp submittedAt with a 60s buffer so the afterTime filter in
-    // queryStatus ignores stale query_log entries from the prior failed
-    // attempt while tolerating clock skew between client and server.
-    const replayAfterTime = new Date(Date.now() - 60_000).toISOString()
     for (const chunk of chunks) {
       const state = progress[chunk.id]
       if (state?.status === 'failed') {
-        progress = updateChunk(progress, chunk.id, { status: 'pending', submittedAt: replayAfterTime })
+        progress = updateChunk(progress, chunk.id, { status: 'pending', queryId: replayQueryId(planId, chunk.id) })
       }
     }
   }
@@ -371,13 +382,13 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
         }
       }
 
-      // Submit and poll
-      // submittedAt is intentionally omitted on first submission — it's only
-      // used as an afterTime filter to ignore stale query_log entries when
-      // replaying a previously failed chunk with the same deterministic query_id.
-      // Setting it to local time here would cause clock-skew issues with the
-      // ClickHouse server, making the filter exclude valid entries.
-      const queryId = chunkQueryId(planId, chunk.id)
+      // Submit and poll. A pending chunk with a queryId is a replay whose id
+      // was recorded before its submit; a run that stopped after the record
+      // submits it under that same id, as a first attempt reuses the
+      // deterministic one. submittedAt is never set here: only a replay
+      // recorded by an older release carries one, and pollChunk then still
+      // passes it as the afterTime filter for that shared deterministic id.
+      const queryId = getChunk(progress, chunk.id).queryId ?? chunkQueryId(planId, chunk.id)
       const sql = buildQuery(chunk)
       await executor.submit(sql, queryId)
       const submitted: BackfillChunkState = {

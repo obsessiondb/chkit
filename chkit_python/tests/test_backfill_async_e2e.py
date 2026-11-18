@@ -31,7 +31,7 @@ from chkit_plugin_backfill.chunking.types import (
 )
 from chkit_plugin_backfill.plugin import _ThreadLocalExecutor
 from chkit_plugin_backfill.types import BackfillChunkState, BackfillProgress
-from tests.e2e_testkit import LiveEnv, create_prefix, resolve_live_env
+from tests.e2e_testkit import LiveEnv, create_prefix, poll_until, resolve_live_env
 
 SOURCE_ROWS = 2000
 
@@ -290,4 +290,63 @@ def test_replay_failed_re_runs_a_failed_chunk_and_restores_the_full_row_count(
 
     assert result.failed == 0
     assert result.completed == len(exec_ctx.plan.chunks)
+    assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == SOURCE_ROWS
+
+
+# #765: a replay started right after the failure used to reuse the failed
+# attempt's query id, so polling read that attempt's ExceptionWhileProcessing
+# row in the query_log flush gap and marked the finished replay failed.
+def test_a_replay_started_right_after_a_chunk_failed_ends_done(
+    exec_ctx: _ExecContext,
+) -> None:
+    exec_ctx.ddl.execute(f"TRUNCATE TABLE {exec_ctx.target_fqn}")
+
+    chunk_ids = [chunk.id for chunk in exec_ctx.plan.chunks]
+    assert len(chunk_ids) > 0, "plan produced no chunks"
+    failed_id = chunk_ids[0]
+    succeeded_ids = chunk_ids[1:]
+    for chunk_id in succeeded_ids:
+        exec_ctx.ddl.execute(_sql_for_chunk(exec_ctx, chunk_id))
+
+    plan_id = f"{exec_ctx.plan.plan_id}-quick-replay"
+    first_id = f"backfill-{plan_id}-{failed_id}"
+    # The first attempt fails while it runs, which query_log records as
+    # ExceptionWhileProcessing, the row a KILL QUERY also leaves. The submit
+    # fails with it, so the run stops before it records the chunk, like the
+    # run in #765.
+    with pytest.raises(Exception, match="chunk failed"):
+        execute_backfill(
+            executor=exec_ctx.run_executor,
+            plan_id=plan_id,
+            chunk_ids=[failed_id],
+            build_query=lambda _chunk_id: (
+                "SELECT throwIf(number = 3, 'chunk failed') FROM numbers(10)"
+                " SETTINGS max_block_size = 1"
+            ),
+            poll_interval_ms=100,
+        )
+    logged = poll_until(
+        lambda: exec_ctx.run_executor.query_status(first_id),
+        lambda status: status.status == "failed",
+    )
+    assert logged.status == "failed"
+
+    # Replay at once: the failure is seconds old.
+    resume_from: BackfillProgress = {
+        failed_id: BackfillChunkState(status="pending"),
+        **{chunk_id: BackfillChunkState(status="done") for chunk_id in succeeded_ids},
+    }
+    replay = execute_backfill(
+        executor=exec_ctx.run_executor,
+        plan_id=plan_id,
+        chunk_ids=chunk_ids,
+        build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
+        poll_interval_ms=100,
+        resume_from=resume_from,
+        replay_failed=True,
+    )
+
+    assert replay.progress[failed_id].status == "done"
+    assert replay.progress[failed_id].query_id != first_id
+    assert replay.failed == 0
     assert _count_rows(exec_ctx.ddl, exec_ctx.target_fqn) == SOURCE_ROWS

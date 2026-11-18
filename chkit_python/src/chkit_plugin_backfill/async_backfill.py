@@ -16,10 +16,11 @@ command hands in a per-thread-connection wrapper; the deterministic query-id +
 from __future__ import annotations
 
 import time
+import uuid
 from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, datetime
 from threading import Lock
 from typing import Protocol, TypeAlias
 
@@ -33,7 +34,6 @@ from chkit_plugin_backfill.types import (
 _DEFAULT_CONCURRENCY = 3
 _DEFAULT_POLL_INTERVAL_MS = 5000
 _DEFAULT_MAX_POLL_ERRORS = 10
-_REPLAY_AFTER_TIME_BUFFER_MS = 60_000
 
 _BuildQuery: TypeAlias = Callable[[str], str]
 _OnProgress: TypeAlias = "Callable[[BackfillProgress], None]"
@@ -65,8 +65,18 @@ def _now_iso() -> str:
 
 
 def chunk_query_id(plan_id: str, chunk_id: str) -> str:
-    """Build the deterministic query ID for a chunk."""
+    """Build the deterministic query ID of a chunk's first attempt."""
     return f"backfill-{plan_id}-{chunk_id}"
+
+
+def _replay_query_id(plan_id: str, chunk_id: str) -> str:
+    """Build the query ID of a replayed attempt (#765).
+
+    It is random, so the ``system.query_log`` rows under it belong to that
+    attempt alone, and it keeps the plan's prefix, so ``sync_progress`` still
+    finds it.
+    """
+    return f"{chunk_query_id(plan_id, chunk_id)}-{uuid.uuid4()}"
 
 
 def _apply_query_status(
@@ -191,10 +201,17 @@ def sync_progress(
     updated = dict(progress)
 
     for chunk_id in chunk_ids_to_sync:
-        query_id = chunk_query_id(plan_id, chunk_id)
         current = updated.get(chunk_id)
         if current is None:
             continue
+        # A replayed attempt runs under the id recorded with it (#765). The
+        # deterministic id covers a first attempt whose record was never
+        # written.
+        query_id = (
+            current.query_id
+            if current.query_id is not None
+            else chunk_query_id(plan_id, chunk_id)
+        )
 
         if query_id in running_set:
             updated[chunk_id] = current.model_copy(
@@ -323,25 +340,17 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
         )
 
     # Reset confirmed-failed chunks to pending AFTER sync so we operate on
-    # ground truth. The deterministic query_id is reused; the after_time filter
-    # in query_status ensures we ignore stale query_log entries from prior
-    # attempts.
+    # ground truth. Each replay gets a new random query id, recorded here and
+    # persisted below before it is submitted, so polling and a later sync only
+    # ever read that attempt's own system.query_log rows (#765). Reusing the
+    # failed attempt's id let its ExceptionWhileProcessing row mark the replay
+    # failed while it ran.
     if replay_failed:
-        # Stamp submitted_at with a 60s buffer so the after_time filter in
-        # query_status ignores stale query_log entries from the prior failed
-        # attempt while tolerating clock skew between client and server.
-        replay_after = datetime.now(tz=UTC) - timedelta(
-            milliseconds=_REPLAY_AFTER_TIME_BUFFER_MS
-        )
-        replay_after_time = (
-            replay_after.strftime("%Y-%m-%dT%H:%M:%S.")
-            + f"{replay_after.microsecond // 1000:03d}Z"
-        )
         for chunk_id in chunk_ids:
             state = progress.get(chunk_id)
             if state is not None and state.status == "failed":
                 progress[chunk_id] = BackfillChunkState(
-                    status="pending", submitted_at=replay_after_time
+                    status="pending", query_id=_replay_query_id(plan_id, chunk_id)
                 )
 
     lock = Lock()
@@ -416,13 +425,17 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
                 poll_chunk(state, chunk_id)
                 return
 
-        # Submit and poll.
-        # submitted_at is intentionally omitted on first submission — it's only
-        # used as an after_time filter to ignore stale query_log entries when
-        # replaying a previously failed chunk with the same deterministic
-        # query_id. Setting it to local time here would cause clock-skew issues
-        # with the ClickHouse server, making the filter exclude valid entries.
-        query_id = chunk_query_id(plan_id, chunk_id)
+        # Submit and poll. A pending chunk with a query_id is a replay whose id
+        # was recorded before its submit; a run that stopped after the record
+        # submits it under that same id, as a first attempt reuses the
+        # deterministic one. submitted_at is never set here: only a replay
+        # recorded by an older release carries one, and poll_chunk then still
+        # passes it as the after_time filter for that shared deterministic id.
+        with lock:
+            recorded_id = _get_chunk(progress, chunk_id).query_id
+        query_id = (
+            recorded_id if recorded_id is not None else chunk_query_id(plan_id, chunk_id)
+        )
         sql = build_query(chunk_id)
         executor.submit(sql, query_id)
         with lock:

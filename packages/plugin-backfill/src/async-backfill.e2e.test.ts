@@ -367,4 +367,61 @@ describe('e2e: executeBackfill against a live cluster', () => {
     const targetRows = await settledTargetRows()
     expect(targetRows).toBe(SOURCE_ROWS)
   }, 240_000)
+
+  // #765: a replay started right after the failure used to reuse the failed
+  // attempt's query id, so polling read that attempt's ExceptionWhileProcessing
+  // row in the query_log flush gap and marked the finished replay failed.
+  test('a replay started right after a chunk failed ends done', async () => {
+    await truncateTarget()
+    await waitUntilSourceVisible()
+
+    const chunkIds = plan.chunks.map((chunk) => chunk.id)
+    const failedId = chunkIds[0]
+    if (!failedId) throw new Error('plan produced no chunks')
+    const succeededIds = chunkIds.slice(1)
+    for (const id of succeededIds) {
+      await ddl.command(sqlForChunk(id))
+    }
+
+    const planId = `${plan.planId}-quick-replay`
+    const firstId = `backfill-${planId}-${failedId}`
+    // The first attempt fails while it runs, which query_log records as
+    // ExceptionWhileProcessing, the row a KILL QUERY also leaves. The submit
+    // fails with it (the server resets the started response), so the run
+    // stops before it records the chunk, like the run in #765.
+    await expect(
+      executeBackfill({
+        executor: runExecutor,
+        planId,
+        chunks: [{ id: failedId }],
+        buildQuery: () => 'SELECT throwIf(number = 3, \'chunk failed\') FROM numbers(10) SETTINGS max_block_size = 1',
+        pollIntervalMs: 100,
+      }),
+    ).rejects.toThrow()
+    const logged = await pollUntil(
+      () => runExecutor.queryStatus(firstId),
+      (status) => status.status === 'failed',
+    )
+    expect(logged.status).toBe('failed')
+
+    // Replay at once: the failure is seconds old.
+    const resumeFrom: BackfillProgress = {
+      [failedId]: { status: 'pending' },
+      ...Object.fromEntries(succeededIds.map((id) => [id, { status: 'done' as const }])),
+    }
+    const replay = await executeBackfill({
+      executor: runExecutor,
+      planId,
+      chunks: plan.chunks,
+      buildQuery: ({ id }) => sqlForChunk(id),
+      pollIntervalMs: 100,
+      resumeFrom,
+      replayFailed: true,
+    })
+
+    expect(replay.progress[failedId]?.status).toBe('done')
+    expect(replay.progress[failedId]?.queryId).not.toBe(firstId)
+    expect(replay.failed).toBe(0)
+    expect(await settledTargetRows()).toBe(SOURCE_ROWS)
+  }, 240_000)
 })
