@@ -831,6 +831,35 @@ def test_a_function_call_named_like_a_column_is_not_a_read() -> None:
     ]
 
 
+def test_a_dotted_run_followed_by_a_paren_is_a_function_call_not_a_read() -> None:
+    assert _sqls(
+        [_t([])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("n.x(1)")},
+            {"name": "n", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT n.x(1);",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;",
+    ]
+
+
+def test_a_dotted_run_reads_only_its_longest_leading_column_not_a_later_part() -> None:
+    # `n.a` reads the element `a` of the tuple `n`, not the column `a`; reading
+    # `a` too made a cycle with `a DEFAULT z + 1` that kept the key order.
+    assert _sqls(
+        [_t([{"name": "n", "type": "Tuple(a UInt64)"}])],
+        [_t([
+            {"name": "n", "type": "Tuple(a UInt64)"},
+            {"name": "a", "type": "UInt64", "default": _expr("z + 1")},
+            {"name": "z", "type": "UInt64", "default": _expr("n.a")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT n.a;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z + 1;",
+    ]
+
+
 def test_keeps_key_order_for_a_cycle_of_dropped_columns() -> None:
     assert _sqls(
         [_t([

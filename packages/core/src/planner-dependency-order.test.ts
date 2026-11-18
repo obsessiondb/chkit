@@ -788,6 +788,43 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 
+  test('a dotted run followed by ( is a function call, not a read', () => {
+    expect(
+      sqls(
+        [t([])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'n.x(1)' } },
+            { name: 'n', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT n.x(1);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `n` UInt64;',
+    ])
+  })
+
+  // `n.a` reads the element `a` of the tuple `n`, not the column `a`; reading
+  // `a` too made a cycle with `a DEFAULT z + 1` that kept the key order.
+  test('a dotted run reads only its longest leading column, not a later part', () => {
+    expect(
+      sqls(
+        [t([{ name: 'n', type: 'Tuple(a UInt64)' }])],
+        [
+          t([
+            { name: 'n', type: 'Tuple(a UInt64)' },
+            { name: 'a', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'z', type: 'UInt64', default: { expression: 'n.a' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT n.a;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT z + 1;',
+    ])
+  })
+
   test('keeps key order for a cycle', () => {
     expect(
       sqls(
