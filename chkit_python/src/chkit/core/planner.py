@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 import json
 import re
-from collections.abc import Callable, Iterable, Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -76,7 +76,6 @@ from chkit.core.sql_lexer import (
     is_trivia,
     js_regex,
     js_trim,
-    string_literal_value,
     tokenize_sql,
 )
 from chkit.core.sql_normalizer import sql_expression_fingerprint
@@ -907,8 +906,9 @@ def order_column_statements(
     - a MODIFY whose new expression would close a cycle with an old
       expression runs after the MODIFY that removes that old read
       (``_cycle_releases``);
-    - when the order still closes a cycle, the first breaker in key order runs
-      before the MODIFY that closes it (``_break_closed_cycles``, #775);
+    - when the order still closes a cycle in a table whose reads are certain
+      (``_unchecked_tables``), the first breaker in key order runs before the
+      MODIFY that closes it (``_break_closed_cycles``, #775);
     - statements of the same column keep their order.
 
     Members of a cycle keep their key order. The statements fill the positions
@@ -970,26 +970,49 @@ def order_column_statements(
         found.pop(index, None)
         prerequisites.append(list(found))
 
-    changes = _default_changes(statements, reads, previous, next_)
-    renamed_tables = [_column_key(rename.database, rename.table, "") for rename in renames]
+    ordered = iter(
+        _repaired_order(
+            prerequisites,
+            statements,
+            _default_changes(statements, reads, previous, next_),
+            old_reads,
+            _unchecked_tables(previous, next_, renames),
+        )
+    )
+    return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
 
-    # A table with a RENAME COLUMN is not checked: the replay does not rename.
-    def checked(index: int) -> bool:
-        key = statements[index].key
-        return index in changes and not any(key.startswith(prefix) for prefix in renamed_tables)
 
+def _repaired_order(
+    prerequisites: list[list[int]],
+    statements: Sequence[MigrationOperation],
+    changes: dict[int, set[str]],
+    old_reads: dict[str, set[str]],
+    unchecked: set[str],
+) -> list[int]:
+    """The sorted statement order, with closed cycles broken where the reads are certain (#775).
+
+    The replay covers only the tables whose ``_table_prefix`` is not in
+    ``unchecked``. A table whose cycle no statement can break keeps its sorted
+    order too, and the other tables are repaired again without it.
+    """
     sorted_order = order_by_dependencies(
         list(range(len(statements))),
         str,
         lambda key: [str(other) for other in prerequisites[int(key)]],
     )
-    ordered_indices = sorted_order
-    if _closes_cycle(sorted_order, statements, changes, old_reads, checked):
-        repaired = _break_closed_cycles(prerequisites, statements, changes, old_reads, checked)
-        if repaired is not None:
-            ordered_indices = repaired
-    ordered = iter(ordered_indices)
-    return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
+    while True:
+
+        def replayed(key: str) -> bool:
+            return _table_prefix(key) not in unchecked
+
+        if not _closes_cycle(sorted_order, statements, changes, old_reads, replayed):
+            return sorted_order
+        repaired = _break_closed_cycles(
+            [list(before) for before in prerequisites], statements, changes, old_reads, replayed
+        )
+        if isinstance(repaired, list):
+            return repaired
+        unchecked.add(repaired)
 
 
 def _closes_cycle(
@@ -997,19 +1020,23 @@ def _closes_cycle(
     statements: Sequence[MigrationOperation],
     changes: dict[int, set[str]],
     old_reads: dict[str, set[str]],
-    checked: Callable[[int], bool],
+    replayed: Callable[[str], bool],
 ) -> bool:
-    """Whether replaying ``order`` reaches a ``checked`` ADD or MODIFY that closes a cycle (#775).
+    """Whether replaying ``order`` reaches an ADD or MODIFY that closes a cycle (#775).
 
-    ClickHouse rejects such an expression (``Cyclic alias detected``). When
-    the replay reaches none, the sorted order stays.
+    ClickHouse rejects such an expression (``Cyclic alias detected``). Only
+    the ``replayed`` columns count. When the replay reaches none, the sorted
+    order stays.
     """
-    replay = _DefaultReplay(old_reads)
+    replay = _DefaultReplay(old_reads, replayed)
     for index in order:
         op = statements[index]
-        replay.apply(op, changes.get(index))
-        if checked(index) and replay.cycle_through(op.key):
+        if not replayed(op.key):
+            continue
+        change = changes.get(index)
+        if change is not None and replay.closed_cycle(op.key, change):
             return True
+        replay.apply(op, change)
     return False
 
 
@@ -1018,9 +1045,9 @@ def _break_closed_cycles(
     statements: Sequence[MigrationOperation],
     changes: dict[int, set[str]],
     old_reads: dict[str, set[str]],
-    checked: Callable[[int], bool],
-) -> list[int] | None:
-    """The order with a cycle's breakers moved before the MODIFY closing it, or none (#775).
+    replayed: Callable[[str], bool],
+) -> list[int] | str:
+    """The order with a cycle's breakers moved before the MODIFY closing it (#775).
 
     ``_cycle_releases`` adds an edge only when one MODIFY must break the
     cycle in every order. When several could, or the cycle closes through two
@@ -1033,14 +1060,19 @@ def _break_closed_cycles(
     the group's statements are replayed back. A breaker that already waits for
     the statement is skipped, so the edges never form a new cycle. The groups
     before it keep their places, so this is the order that adding the edge and
-    sorting again would give. With no breaker it returns none.
+    sorting again would give. With no breaker it returns the ``_table_prefix``
+    of the cycle's table instead. Only the ``replayed`` columns are replayed.
     """
-    replay = _DefaultReplay(old_reads)
+    replay = _DefaultReplay(old_reads, replayed)
     groups = [sorted(members) for members in strongly_connected_components(prerequisites)]
     group_of = [0] * len(prerequisites)
     for group, members in enumerate(groups):
         for member in members:
             group_of[member] = group
+    # The statements that change each column's expression, in key order.
+    changing: dict[str, list[int]] = {}
+    for index in sorted(changes):
+        changing.setdefault(statements[index].key, []).append(index)
     # A group runs once every prerequisite of its members outside it has run.
     remaining = [0] * len(groups)
     dependents: list[list[int]] = [[] for _ in prerequisites]
@@ -1064,36 +1096,37 @@ def _break_closed_cycles(
         blocked = False
         for target in groups[group]:
             op = statements[target]
-            undo.append((op.key, replay.reads(op.key)))
-            replay.apply(op, changes.get(target))
-            cycle = replay.cycle_through(op.key) if checked(target) else set()
-            if not cycle:
+            if not replayed(op.key):
                 continue
-            breaker = next(
-                (
-                    j
-                    for j, other in enumerate(statements)
-                    if not placed[j]
-                    and group_of[j] != group
-                    and other.key != op.key
-                    and other.key in cycle
-                    and j in changes
-                    and any(
-                        read in cycle and read not in changes[j]
-                        for read in replay.reads(other.key) or ()
-                    )
-                    and not _waits_for(prerequisites, j, target)
-                ),
-                None,
-            )
-            if breaker is None:
-                return None
-            for key, reads in reversed(undo):
-                replay.assign(key, reads)
-            prerequisites[target].append(breaker)
-            wait(target, breaker)
-            blocked = True
-            break
+            change = changes.get(target)
+            cycle = replay.closed_cycle(op.key, change) if change is not None else set()
+            if cycle:
+                breaker = _breaker(
+                    cycle,
+                    op.key,
+                    target,
+                    candidates=[
+                        j
+                        for column in cycle
+                        if column != op.key
+                        for j in changing.get(column, ())
+                        if not placed[j] and group_of[j] != group
+                    ],
+                    statements=statements,
+                    changes=changes,
+                    replay=replay,
+                    prerequisites=prerequisites,
+                )
+                if breaker is None:
+                    return _table_prefix(op.key)
+                for key, reads in reversed(undo):
+                    replay.assign(key, reads)
+                prerequisites[target].append(breaker)
+                wait(target, breaker)
+                blocked = True
+                break
+            undo.append((op.key, replay.reads(op.key)))
+            replay.apply(op, change)
         if blocked:
             continue
         for member in groups[group]:
@@ -1105,6 +1138,32 @@ def _break_closed_cycles(
                 if remaining[group_of[other]] == 0:
                     heapq.heappush(ready, (groups[group_of[other]][0], group_of[other]))
     return order
+
+
+def _breaker(
+    cycle: set[str],
+    column: str,
+    target: int,
+    *,
+    candidates: list[int],
+    statements: Sequence[MigrationOperation],
+    changes: dict[int, set[str]],
+    replay: _DefaultReplay,
+    prerequisites: list[list[int]],
+) -> int | None:
+    """The first of ``candidates`` in key order whose change removes a read on ``cycle``.
+
+    It is a statement of another column on the cycle that ``column``'s
+    statement ``target`` would close, and must not already wait for it.
+    """
+    for j in sorted(candidates):
+        other = statements[j].key
+        removes = any(
+            read in cycle and read not in changes[j] for read in replay.reads(other) or ()
+        )
+        if other != column and removes and not _waits_for(prerequisites, j, target):
+            return j
+    return None
 
 
 def _waits_for(prerequisites: list[list[int]], start: int, target: int) -> bool:
@@ -1179,20 +1238,25 @@ def _expression_removals(
 class _DefaultReplay:
     """The reads of every column's expression while a plan runs, from the old expressions.
 
-    It keeps each column's readers too, so the search back to a column
-    follows edges instead of scanning every column.
+    The state never holds a cycle, so a new read Y of column X closes one
+    exactly when Y reaches X. That search runs from both ends at once,
+    widening the smaller frontier (in turns on a tie), so it stops early when
+    either side runs out; a wide table does not cost a walk over every column
+    per statement. Only the ``replayed`` columns take part.
     """
 
-    def __init__(self, old_reads: dict[str, set[str]]) -> None:
+    def __init__(self, old_reads: dict[str, set[str]], replayed: Callable[[str], bool]) -> None:
         self._state: dict[str, set[str]] = {}
         self._readers: dict[str, set[str]] = {}
         for column, reads in old_reads.items():
-            self.assign(column, reads)
+            if replayed(column):
+                self.assign(column, reads)
 
     def reads(self, column: str) -> set[str] | None:
         return self._state.get(column)
 
     def assign(self, column: str, reads: set[str] | None) -> None:
+        """Give ``column`` the ``reads`` (none removes it); they must close no cycle."""
         for read in self._state.get(column, ()):
             self._readers[read].discard(column)
         if reads is None:
@@ -1209,23 +1273,128 @@ class _DefaultReplay:
         if change is not None:
             self.assign(op.key, change)
 
-    def cycle_through(self, column: str) -> set[str]:
-        """The columns on a cycle of reads through ``column``, or none."""
-        reads_from = _reached(column, lambda other: self._state.get(other, ()))
-        if column not in reads_from:
-            return set()
-        return reads_from & _reached(column, lambda other: self._readers.get(other, ()))
+    def closed_cycle(self, column: str, reads: set[str]) -> set[str]:
+        """The columns on a cycle through ``column`` that giving it ``reads`` would close."""
+        current = self._state.get(column, set())
+        cycle: set[str] = set()
+        for read in reads:
+            if read in current or not self._reaches(read, column):
+                continue
+            # The cycle's columns: those ``read`` reaches that reach ``column``.
+            below = {read}
+            pending = [read]
+            while pending:
+                for other in self._state.get(pending.pop(), ()):
+                    if other != column and other not in below:
+                        below.add(other)
+                        pending.append(other)
+            cycle.add(column)
+            back = [column]
+            while back:
+                for reader in self._readers.get(back.pop(), ()):
+                    if reader in below and reader not in cycle:
+                        cycle.add(reader)
+                        back.append(reader)
+        return cycle
+
+    def _reaches(self, start: str, goal: str) -> bool:
+        """Whether ``start`` reaches ``goal`` through reads."""
+        down, up = {start}, {goal}
+        down_front, up_front = [start], [goal]
+        widen_down = False
+        while down_front and up_front:
+            # The smaller frontier widens; on a tie, the sides take turns.
+            if len(down_front) == len(up_front):
+                widen_down = not widen_down
+            else:
+                widen_down = len(down_front) < len(up_front)
+            seen, other = (down, up) if widen_down else (up, down)
+            graph = self._state if widen_down else self._readers
+            front: list[str] = []
+            for column in down_front if widen_down else up_front:
+                for reached in graph.get(column, ()):
+                    if reached in other:
+                        return True
+                    if reached not in seen:
+                        seen.add(reached)
+                        front.append(reached)
+            if widen_down:
+                down_front = front
+            else:
+                up_front = front
+        return False
 
 
-def _reached(start: str, following: Callable[[str], Iterable[str]]) -> set[str]:
-    seen: set[str] = set()
-    pending = [start]
-    while pending:
-        for other in following(pending.pop()):
-            if other not in seen:
-                seen.add(other)
-                pending.append(other)
-    return seen
+def _table_prefix(key: str) -> str:
+    """The ``table:db.t:column:`` prefix of a column statement's key."""
+    at = key.find(":column")
+    return key if at == -1 else f"{key[:at]}:column:"
+
+
+# Words that ClickHouse reads as keywords, not columns, in an expression.
+_RESERVED_WORDS = frozenset(
+    [
+        "all", "and", "any", "as", "asc", "between", "both", "by", "case", "desc", "distinct",
+        "div", "else", "end", "exists", "extract", "false", "filter", "for", "from", "global",
+        "ilike", "in", "inf", "interval", "is", "leading", "like", "mod", "nan", "not", "null",
+        "nulls", "or", "over", "regexp", "then", "trailing", "true", "when",
+    ]
+)
+_UNCERTAIN_HINT = re.compile("interval|extract|case|as", re.IGNORECASE)
+
+
+def _unchecked_tables(
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
+    renames: Sequence[ColumnRenameSuggestion],
+) -> set[str]:
+    """The ``_table_prefix`` of every table the cycle repair leaves in its sorted order (#775).
+
+    A table with a RENAME COLUMN in ``renames`` (the replay does not rename),
+    and a table where an old or new column expression has a part the reads
+    may get wrong (``_has_uncertain_reads``).
+    """
+    unchecked = {_column_key(rename.database, rename.table, "") for rename in renames}
+    for definition in [*previous, *next_]:
+        if not isinstance(definition, TableDefinition):
+            continue
+        reserved = {
+            column.name for column in definition.columns if column.name.lower() in _RESERVED_WORDS
+        }
+        for column in definition.columns:
+            if column.default is None:
+                continue
+            parsed = parse_column_default(column.default)
+            if parsed.kind == "expression" and _has_uncertain_reads(parsed.sql, reserved):
+                unchecked.add(_column_key(definition.database, definition.name, ""))
+                break
+    return unchecked
+
+
+def _has_uncertain_reads(sql: str, reserved_columns: set[str]) -> bool:
+    """Whether the reads of ``sql`` may be wrong.
+
+    It has INTERVAL, EXTRACT or CASE, an alias (``x AS y``, but not the AS of
+    a CAST), or a bare reserved word that is also the name of a column in
+    ``reserved_columns``.
+    """
+    if not reserved_columns and _UNCERTAIN_HINT.search(sql) is None:
+        return False
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    skipped = _not_column_names(tokens)
+    for i, token in enumerate(tokens):
+        if token.kind != "identifier":
+            continue
+        word = token.text.lower()
+        if word in ("interval", "extract", "case"):
+            return True
+        if word == "as":
+            if i not in skipped:
+                return True
+            continue
+        if token.text in reserved_columns:
+            return True
+    return False
 
 
 def _cycle_releases(
@@ -1389,8 +1558,7 @@ def _not_column_names(tokens: list[SQLToken]) -> set[int]:
     and the type of ``CAST(x AS T)`` and ``x::T``, with its arguments
     (``Array(Tuple(a UInt64))``). A lambda body runs to the first ``,`` or
     unmatched closing bracket at its own depth, so a name after the lambda
-    still reads a column. Also the unit of ``INTERVAL 1 day`` and of
-    ``EXTRACT(day FROM ts)``, with the INTERVAL keyword (#775, ``_interval_unit``).
+    still reads a column.
     """
     skipped: set[int] = set()
     count = len(tokens)
@@ -1409,20 +1577,7 @@ def _not_column_names(tokens: list[SQLToken]) -> set[int]:
         return 0 <= i < count and identifier_name(tokens[i]) is not None
 
     for i, token in enumerate(tokens):
-        word = token.text.lower() if token.kind == "identifier" else None
-        if word == "interval":
-            unit = _interval_unit(tokens, i)
-            if unit is not None:
-                skipped.add(i)
-                skipped.add(unit)
-        elif (
-            word == "extract"
-            and text_at(i + 1) == "("
-            and _is_unit(tokens, i + 2)
-            and _is_word(tokens, i + 3, "from")
-        ):
-            skipped.add(i + 2)
-        elif is_pair(i, "-", ">"):
+        if is_pair(i, "-", ">"):
             params = _lambda_parameters(tokens, i)
             if params is None:
                 continue
@@ -1456,89 +1611,6 @@ def _not_column_names(tokens: list[SQLToken]) -> set[int]:
                     skipped.update(range(j, close))
                     break
     return skipped
-
-
-# The units ClickHouse 26.3 accepts in ``INTERVAL n <unit>`` (any case).
-_INTERVAL_UNITS = frozenset(
-    [
-        form
-        for unit in (
-            "nanosecond", "microsecond", "millisecond", "second", "minute", "hour",
-            "day", "week", "month", "quarter", "year",
-        )
-        for form in (unit, f"{unit}s", f"sql_tsi_{unit}")
-    ]
-    + ["ns", "ms", "s", "m", "h", "d", "mm", "q", "yy", "yyyy", "qq"]
-    + ["wk", "ww", "dd", "hh", "mi", "n", "ss"]
-)
-
-
-def _is_word(tokens: list[SQLToken], i: int, word: str) -> bool:
-    return (
-        0 <= i < len(tokens) and tokens[i].kind == "identifier" and tokens[i].text.lower() == word
-    )
-
-
-def _is_unit(tokens: list[SQLToken], i: int) -> bool:
-    return (
-        0 <= i < len(tokens)
-        and tokens[i].kind == "identifier"
-        and tokens[i].text.lower() in _INTERVAL_UNITS
-    )
-
-
-# Words that end an INTERVAL operand for this scan: operators and the CASE
-# parts. ClickHouse may take some into the operand, but a unit after them is
-# not skipped, so the words before it stay reads.
-_INTERVAL_STOP_WORDS = frozenset(
-    [
-        "and", "as", "between", "case", "div", "else", "end", "global", "ilike", "in", "interval",
-        "is", "like", "mod", "not", "or", "regexp", "then", "when",
-    ]
-)
-_INTERVAL_OPERATORS = frozenset(["+", "-", "*", "/", "%", "."])
-_NUMBER_STRING = re.compile(r"\s*[+-]?[0-9.]+\s*")
-
-
-def _interval_unit(tokens: list[SQLToken], keyword: int) -> int | None:
-    """Index of the unit of the ``INTERVAL`` at ``keyword``, or none (#775).
-
-    Like ClickHouse's parser, a string right after INTERVAL that holds more
-    than a number is the whole interval (``INTERVAL '1 day'``), so no unit
-    follows it. Otherwise the unit is the first bare unit word, at the
-    operand's depth, in the place of an operator: after a name, number, string
-    or closing bracket. A unit word that starts an operand is a column
-    (``INTERVAL d d`` reads ``d``). The search stops at anything but
-    arithmetic, brackets and names at that depth (a comparison, ``,``, AND,
-    CASE and the like), or at an unmatched closing bracket; then nothing is
-    skipped, since a missing read can break a migration and an extra one only
-    holds a statement back.
-    """
-    if keyword + 1 < len(tokens) and tokens[keyword + 1].kind == "string":
-        value = string_literal_value(tokens[keyword + 1])
-        if _NUMBER_STRING.fullmatch(value or "") is None:
-            return None
-    depth = 0
-    after_value = False
-    for j in range(keyword + 1, len(tokens)):
-        token = tokens[j]
-        if depth == 0 and after_value and _is_unit(tokens, j):
-            return j
-        if token.text in ("(", "[", "{"):
-            depth += 1
-        elif token.text in (")", "]", "}"):
-            depth -= 1
-            if depth < 0:
-                return None
-        elif depth == 0:
-            if token.kind == "punctuation":
-                stops = token.text not in _INTERVAL_OPERATORS
-            else:
-                stops = token.kind == "identifier" and token.text.lower() in _INTERVAL_STOP_WORDS
-            if stops:
-                return None
-        after_value = depth == 0 and (token.kind != "punctuation" or token.text in (")", "]", "}"))
-    return None
 
 
 def _lambda_parameters(tokens: list[SQLToken], arrow: int) -> tuple[set[str], int] | None:

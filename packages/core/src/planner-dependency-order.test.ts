@@ -9,7 +9,7 @@ import {
   table,
   view,
 } from './index'
-import type { ColumnDefinition, SchemaDefinition } from './index'
+import type { ColumnDefinition, MigrationOperation, SchemaDefinition } from './index'
 import { buildDependencyGraph, orderByDependencies } from './object-dependencies.js'
 import { columnDefaultReads } from './planner.js'
 
@@ -1279,10 +1279,58 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     ])
   })
 
-  // An INTERVAL unit named like a column is no read, so no cycle
-  // `a` → `month` → `z` → `a` appears and `month` keeps its place after the
-  // ALIAS that still calls `length(month)` on the old String column.
-  test('an INTERVAL unit named like a column closes no cycle', () => {
+  // Each column reads the one before it and changes to read the one two
+  // places ahead, so every MODIFY waits for a breaker. Four times the columns
+  // take about four times as long; a quadratic repair would take sixteen.
+  test('plans a wide table whose every MODIFY closes a cycle in time that grows with its width', () => {
+    const name = (i: number) => `c${String(i).padStart(4, '0')}`
+    const plan = (count: number) => {
+      const before = Array.from({ length: count }, (_, i) => u(name(i), i === 0 ? '1' : name(i - 1)))
+      const after = Array.from({ length: count }, (_, i) => u(name(i), i + 2 < count ? name(i + 2) : '1'))
+      let best = Number.POSITIVE_INFINITY
+      let operations: MigrationOperation[] = []
+      for (let run = 0; run < 2; run += 1) {
+        const start = performance.now()
+        operations = planDiff([t(before)], [t(after)]).operations
+        best = Math.min(best, performance.now() - start)
+      }
+      return { best, first: operations.slice(0, 3).map((op) => op.key.slice('table:app.t:column:'.length)) }
+    }
+    const narrow = plan(1200)
+    const wide = plan(4800)
+    expect(wide.first).toEqual(['c4798', 'c4797', 'c4796'])
+    expect(wide.best).toBeLessThan(Math.max(8 * narrow.best, 50))
+    expect(wide.best).toBeLessThan(5_000)
+  }, 60_000)
+
+  // Each expression reads `day` after an INTERVAL. The reads keep it, so the
+  // ADD of `day` runs first.
+  test.each([
+    "now() + INTERVAL '1 day' > toDateTime(id) AND day",
+    'toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)',
+  ])('adds the column that %s reads after an INTERVAL first', (expression) => {
+    expect(sqls([t([])], [t([u('a', expression), { name: 'day', type: 'UInt8' }])])).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `day` UInt8;',
+      `ALTER TABLE app.t ADD COLUMN IF NOT EXISTS \`a\` UInt64 DEFAULT ${expression};`,
+    ])
+  })
+
+  // `interval.x` reads the column `interval`, so its ADD runs first.
+  test('adds a column named interval before the expression that reads it', () => {
+    expect(
+      sqls([t([])], [t([u('a', 'tuple(interval.x day).1'), { name: 'interval', type: 'Tuple(x UInt64)' }])])
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `interval` Tuple(x UInt64);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT tuple(interval.x day).1;',
+    ])
+  })
+
+  // The reads take each INTERVAL unit for a column (`day`, `month`, `hour`),
+  // so these tables seem to close a cycle `a` → `month` → `z` → `a`. A table
+  // with INTERVAL keeps its sorted order: `month` still runs after the ALIAS
+  // that calls `length(month)` on the old String, and `a` changes to String
+  // before the ALIAS `length(a)` is added.
+  test('keeps the sorted order of a table whose expression has an INTERVAL', () => {
     expect(
       sqls(
         [
@@ -1308,92 +1356,81 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
       'ALTER TABLE app.t MODIFY COLUMN `month` UInt64 DEFAULT id;',
       'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
     ])
-  })
-
-  // Each of 600 columns reads the one before it and changes to read the one
-  // two places ahead, so every MODIFY waits for a breaker.
-  test('plans a wide table whose every MODIFY closes a cycle in under two seconds', () => {
-    const name = (i: number) => `c${String(i).padStart(4, '0')}`
-    const count = 600
-    const before = Array.from({ length: count }, (_, i) => u(name(i), i === 0 ? '1' : name(i - 1)))
-    const after = Array.from({ length: count }, (_, i) => u(name(i), i + 2 < count ? name(i + 2) : '1'))
-    const start = performance.now()
-    const operations = planDiff([t(before)], [t(after)]).operations
-    expect(performance.now() - start).toBeLessThan(2_000)
-    expect(operations.map((op) => op.key.slice('table:app.t:column:'.length)).slice(0, 3)).toEqual(['c0598', 'c0597', 'c0596'])
-  })
-
-  // ClickHouse ends `INTERVAL '1 day'` at the string, so the `day` after AND
-  // is a read and its ADD runs first; so is the `day` inside a CASE operand.
-  test.each([
-    "now() + INTERVAL '1 day' > toDateTime(id) AND day",
-    'toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)',
-  ])('adds the column that %s reads after an INTERVAL first', (expression) => {
-    expect(sqls([t([])], [t([u('a', expression), { name: 'day', type: 'UInt8' }])])).toEqual([
-      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `day` UInt8;',
-      `ALTER TABLE app.t ADD COLUMN IF NOT EXISTS \`a\` UInt64 DEFAULT ${expression};`,
+    expect(
+      sqls(
+        [t([u('a'), { name: 'hour', type: 'String', default: { expression: 'toString(z)' } }, u('z', 'length(toString(a))')])],
+        [
+          t([
+            { name: 'a', type: 'String', default: { expression: 'toString(toDateTime(id) + INTERVAL CASE WHEN id > 0 THEN 1 ELSE 2 END hour)' } },
+            u('guard', 'length(a)', { defaultKind: 'ALIAS' }),
+            u('hour', 'id'),
+            u('z', 'id'),
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` String DEFAULT toString(toDateTime(id) + INTERVAL CASE WHEN id > 0 THEN 1 ELSE 2 END hour);',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `guard` UInt64 ALIAS length(a);',
+      'ALTER TABLE app.t MODIFY COLUMN `hour` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
     ])
   })
 
-  // `when` inside the CASE is read as a column, so the two DROPs wait for
-  // each other. That cycle keeps its key order and the breaker still moves.
-  test('runs the breaker first when another cycle among the statements keeps its order', () => {
+  const cycleBefore = [u('a'), u('b', 'c'), u('c', 'a')]
+  const cycleAfter = [u('a', 'b'), u('b', 'id'), u('c', 'id')]
+  const named = (name: string, columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name,
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+
+  // `when` inside the CASE is read as a column, so `u` keeps its sorted
+  // order, while `t` is still repaired.
+  test('keeps the sorted order of a table whose expression has a CASE and repairs the other table', () => {
     expect(
       sqls(
-        [t([u('a'), u('b', 'c'), u('c', 'a'), u('when', 'zz'), u('zz', 'case when id > 0 then 1 else 0 end')])],
-        [t([u('a', 'b'), u('b', 'id'), u('c', 'id')])]
+        [named('t', cycleBefore), named('u', [...cycleBefore, u('when', 'zz'), u('zz', 'case when id > 0 then 1 else 0 end')])],
+        [named('t', cycleAfter), named('u', cycleAfter)]
       )
     ).toEqual([
       'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
       'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
       'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
-      'ALTER TABLE app.t DROP COLUMN IF EXISTS `when`;',
-      'ALTER TABLE app.t DROP COLUMN IF EXISTS `zz`;',
+      'ALTER TABLE app.u MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.u MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.u MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.u DROP COLUMN IF EXISTS `when`;',
+      'ALTER TABLE app.u DROP COLUMN IF EXISTS `zz`;',
     ])
   })
-})
 
-describe('columnDefaultReads skips INTERVAL and EXTRACT units (#775)', () => {
-  const columns = ['d', 'day', 'DAY', 'hour', 'id', 'month', 'ts', 'x']
-  const readsOf = (expression: string) => {
-    const definition = table({
-      database: 'app',
-      name: 't',
-      columns: [
-        ...columns.map((name) => ({ name, type: 'UInt64' })),
-        { name: 'v', type: 'UInt64', default: { expression } },
-      ],
-      engine: 'MergeTree()',
-      primaryKey: ['id'],
-      orderBy: ['id'],
-    })
-    const reads = columnDefaultReads([definition]).get('table:app.t:column:v') ?? new Set<string>()
-    return [...reads].map((key) => key.slice('table:app.t:column:'.length)).sort()
-  }
-
+  // An alias makes the reads uncertain; the AS of a CAST does not.
   test.each<[string, string[]]>([
-    ['ts + INTERVAL 1 day', ['ts']],
-    ['ts + INTERVAL 1 DAY', ['ts']],
-    ['ts + interval 2 Month', ['ts']],
-    ['ts + INTERVAL 1 SQL_TSI_DAY', ['ts']],
-    ['toStartOfInterval(ts, INTERVAL 1 hour)', ['ts']],
-    ['ts + INTERVAL 1 d + INTERVAL 2 hour', ['ts']],
-    ['ts + INTERVAL x day', ['ts', 'x']],
-    ['ts + INTERVAL d d', ['d', 'ts']],
-    ['ts + INTERVAL day + 1 day', ['day', 'ts']],
-    ['ts + INTERVAL abs(day) day', ['day', 'ts']],
-    ['ts + INTERVAL (day) day', ['day', 'ts']],
-    ["ts + INTERVAL '1 day' + day", ['day', 'ts']],
-    ['EXTRACT(day FROM ts)', ['ts']],
-    ['extract(DAY from ts)', ['ts']],
-    ["extract(toString(day), 'x')", ['day']],
-    ['day + hour + month', ['day', 'hour', 'month']],
-    ["ts + INTERVAL '2' day", ['ts']],
-    ["now() + INTERVAL '1 day' > toDateTime(id) AND day", ['day', 'id']],
-    ['toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)', ['day']],
-    ['ts + INTERVAL x day > ts AND day', ['day', 'ts', 'x']],
-    ['ts + INTERVAL x > 1 day', ['day', 'ts', 'x']],
-  ])('%s reads %p', (expression, expected) => {
-    expect(readsOf(expression)).toEqual(expected)
+    ['identity(id AS v)', ['a', 'b', 'c']],
+    ['CAST(id AS UInt64)', ['b', 'a', 'c']],
+  ])('with c DEFAULT %s, the MODIFYs run in the order %p', (expression, order) => {
+    const before = [u('a'), u('b', 'c'), u('c', 'a')]
+    const after = [u('a', 'b'), u('b', 'id'), u('c', expression)]
+    expect(planDiff([t(before)], [t(after)]).operations.map((op) => op.key.slice('table:app.t:column:'.length))).toEqual(order)
+  })
+
+  // `p` and `q` read each other in the new schema, so their ADDs form a
+  // cycle among the prerequisites. ADD `p` replays, then ADD `q` closes
+  // `p` → `q` → `p`, which no statement breaks: the group is replayed back,
+  // `u` keeps its sorted order, and `t` is still repaired.
+  test('keeps the sorted order of a table whose cycle no statement breaks and repairs the other table', () => {
+    expect(
+      sqls([named('t', cycleBefore), named('u', [])], [named('t', cycleAfter), named('u', [u('p', 'q'), u('q', 'p')])])
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `p` UInt64 DEFAULT q;',
+      'ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `q` UInt64 DEFAULT p;',
+    ])
   })
 })

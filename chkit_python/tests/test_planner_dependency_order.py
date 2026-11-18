@@ -10,6 +10,7 @@ import pytest
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     DictionaryDefinition,
+    MigrationOperation,
     SchemaDefinition,
     SQLExpression,
     TableDefinition,
@@ -1203,10 +1204,64 @@ def test_keeps_key_order_when_no_statement_closes_a_cycle() -> None:
     ]
 
 
-def test_an_interval_unit_named_like_a_column_closes_no_cycle() -> None:
-    # An INTERVAL unit named like a column is no read, so no cycle
-    # `a` -> `month` -> `z` -> `a` appears and `month` keeps its place after
-    # the ALIAS that still calls `length(month)` on the old String column.
+def test_plans_a_wide_table_whose_every_modify_closes_a_cycle_in_time_that_grows_with_its_width() -> None:
+    # Each column reads the one before it and changes to read the one two
+    # places ahead, so every MODIFY waits for a breaker. Four times the columns
+    # take about four times as long; a quadratic repair would take sixteen.
+    def name(i: int) -> str:
+        return f"c{i:04d}"
+
+    def plan(count: int) -> tuple[float, list[str]]:
+        before = [_u(name(i), "1" if i == 0 else name(i - 1)) for i in range(count)]
+        after = [_u(name(i), name(i + 2) if i + 2 < count else "1") for i in range(count)]
+        best = float("inf")
+        operations: list[MigrationOperation] = []
+        for _ in range(2):
+            start = time.perf_counter()
+            operations = plan_diff([_t(before)], [_t(after)]).operations
+            best = min(best, time.perf_counter() - start)
+        return best, [op.key[len("table:app.t:column:"):] for op in operations[:3]]
+
+    narrow, _ = plan(1200)
+    wide, first = plan(4800)
+    assert first == ["c4798", "c4797", "c4796"]
+    assert wide < max(8 * narrow, 0.05)
+    assert wide < 5
+
+
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "now() + INTERVAL '1 day' > toDateTime(id) AND day",
+        "toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)",
+    ],
+)
+def test_adds_the_column_read_after_an_interval_first(expression: str) -> None:
+    # Each expression reads `day` after an INTERVAL. The reads keep it, so the
+    # ADD of `day` runs first.
+    assert _sqls([_t([])], [_t([_u("a", expression), {"name": "day", "type": "UInt8"}])]) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `day` UInt8;",
+        f"ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT {expression};",
+    ]
+
+
+def test_adds_a_column_named_interval_before_the_expression_that_reads_it() -> None:
+    # `interval.x` reads the column `interval`, so its ADD runs first.
+    assert _sqls(
+        [_t([])],
+        [_t([_u("a", "tuple(interval.x day).1"), {"name": "interval", "type": "Tuple(x UInt64)"}])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `interval` Tuple(x UInt64);",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT tuple(interval.x day).1;",
+    ]
+
+
+def test_keeps_the_sorted_order_of_a_table_whose_expression_has_an_interval() -> None:
+    # The reads take each INTERVAL unit for a column (`day`, `month`, `hour`),
+    # so these tables seem to close a cycle `a` -> `month` -> `z` -> `a`. A
+    # table with INTERVAL keeps its sorted order: `month` still runs after the
+    # ALIAS that calls `length(month)` on the old String, and `a` changes to
+    # String before the ALIAS `length(a)` is added.
     assert _sqls(
         [_t([
             _u("a", "toUInt64(toDateTime(id) + INTERVAL 1 day)"),
@@ -1226,111 +1281,79 @@ def test_an_interval_unit_named_like_a_column_closes_no_cycle() -> None:
         "ALTER TABLE app.t MODIFY COLUMN `month` UInt64 DEFAULT id;",
         "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;",
     ]
-
-
-def test_plans_a_wide_table_whose_every_modify_closes_a_cycle_in_under_two_seconds() -> None:
-    # Each of 600 columns reads the one before it and changes to read the one
-    # two places ahead, so every MODIFY waits for a breaker.
-    count = 600
-
-    def name(i: int) -> str:
-        return f"c{i:04d}"
-
-    before = [_u(name(i), "1" if i == 0 else name(i - 1)) for i in range(count)]
-    after = [_u(name(i), name(i + 2) if i + 2 < count else "1") for i in range(count)]
-    start = time.perf_counter()
-    operations = plan_diff([_t(before)], [_t(after)]).operations
-    assert time.perf_counter() - start < 2
-    assert [op.key[len("table:app.t:column:"):] for op in operations[:3]] == [
-        "c0598",
-        "c0597",
-        "c0596",
-    ]
-
-
-@pytest.mark.parametrize(
-    "expression",
-    [
-        "now() + INTERVAL '1 day' > toDateTime(id) AND day",
-        "toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)",
-    ],
-)
-def test_adds_the_column_read_after_an_interval_first(expression: str) -> None:
-    # ClickHouse ends `INTERVAL '1 day'` at the string, so the `day` after AND
-    # is a read and its ADD runs first; so is the `day` inside a CASE operand.
-    assert _sqls([_t([])], [_t([_u("a", expression), {"name": "day", "type": "UInt8"}])]) == [
-        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `day` UInt8;",
-        f"ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT {expression};",
-    ]
-
-
-def test_runs_the_breaker_first_when_another_cycle_among_the_statements_keeps_its_order() -> None:
-    # `when` inside the CASE is read as a column, so the two DROPs wait for
-    # each other. That cycle keeps its key order and the breaker still moves.
+    interval_case = (
+        "toString(toDateTime(id) + INTERVAL CASE WHEN id > 0 THEN 1 ELSE 2 END hour)"
+    )
     assert _sqls(
         [_t([
             _u("a"),
-            _u("b", "c"),
-            _u("c", "a"),
-            _u("when", "zz"),
-            _u("zz", "case when id > 0 then 1 else 0 end"),
+            {"name": "hour", "type": "String", "default": _expr("toString(z)")},
+            _u("z", "length(toString(a))"),
         ])],
-        [_t([_u("a", "b"), _u("b", "id"), _u("c", "id")])],
+        [_t([
+            {"name": "a", "type": "String", "default": _expr(interval_case)},
+            _u("guard", "length(a)", default_kind="ALIAS"),
+            _u("hour", "id"),
+            _u("z", "id"),
+        ])],
+    ) == [
+        f"ALTER TABLE app.t MODIFY COLUMN `a` String DEFAULT {interval_case};",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `guard` UInt64 ALIAS length(a);",
+        "ALTER TABLE app.t MODIFY COLUMN `hour` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;",
+    ]
+
+
+_CYCLE_BEFORE = [_u("a"), _u("b", "c"), _u("c", "a")]
+_CYCLE_AFTER = [_u("a", "b"), _u("b", "id"), _u("c", "id")]
+
+
+def test_keeps_the_sorted_order_of_a_table_whose_expression_has_a_case_and_repairs_the_other() -> None:
+    # `when` inside the CASE is read as a column, so `u` keeps its sorted
+    # order, while `t` is still repaired.
+    case_columns = [_u("when", "zz"), _u("zz", "case when id > 0 then 1 else 0 end")]
+    assert _sqls(
+        [_t(_CYCLE_BEFORE, "t"), _t([*_CYCLE_BEFORE, *case_columns], "u")],
+        [_t(_CYCLE_AFTER, "t"), _t(_CYCLE_AFTER, "u")],
     ) == [
         "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
         "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
         "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
-        "ALTER TABLE app.t DROP COLUMN IF EXISTS `when`;",
-        "ALTER TABLE app.t DROP COLUMN IF EXISTS `zz`;",
+        "ALTER TABLE app.u MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.u MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.u MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.u DROP COLUMN IF EXISTS `when`;",
+        "ALTER TABLE app.u DROP COLUMN IF EXISTS `zz`;",
     ]
 
 
-_UNIT_COLUMNS =["d", "day", "DAY", "hour", "id", "month", "ts", "x"]
-
-
-def _unit_reads_of(expression: str) -> list[str]:
-    columns: list[dict[str, object]] = [{"name": name, "type": "UInt64"} for name in _UNIT_COLUMNS]
-    columns.append({"name": "v", "type": "UInt64", "default": _expr(expression)})
-    definition = table(
-        database="app",
-        name="t",
-        columns=list(columns),
-        engine="MergeTree()",
-        primary_key=["id"],
-        order_by=["id"],
-    )
-    reads = _column_default_reads([definition]).get("table:app.t:column:v", set())
-    return sorted(key[len("table:app.t:column:"):] for key in reads)
-
-
 @pytest.mark.parametrize(
-    ("expression", "expected"),
-    [
-        ("ts + INTERVAL 1 day", ["ts"]),
-        ("ts + INTERVAL 1 DAY", ["ts"]),
-        ("ts + interval 2 Month", ["ts"]),
-        ("ts + INTERVAL 1 SQL_TSI_DAY", ["ts"]),
-        ("toStartOfInterval(ts, INTERVAL 1 hour)", ["ts"]),
-        ("ts + INTERVAL 1 d + INTERVAL 2 hour", ["ts"]),
-        ("ts + INTERVAL x day", ["ts", "x"]),
-        ("ts + INTERVAL d d", ["d", "ts"]),
-        ("ts + INTERVAL day + 1 day", ["day", "ts"]),
-        ("ts + INTERVAL abs(day) day", ["day", "ts"]),
-        ("ts + INTERVAL (day) day", ["day", "ts"]),
-        ("ts + INTERVAL '1 day' + day", ["day", "ts"]),
-        ("EXTRACT(day FROM ts)", ["ts"]),
-        ("extract(DAY from ts)", ["ts"]),
-        ("extract(toString(day), 'x')", ["day"]),
-        ("day + hour + month", ["day", "hour", "month"]),
-        ("ts + INTERVAL '2' day", ["ts"]),
-        ("now() + INTERVAL '1 day' > toDateTime(id) AND day", ["day", "id"]),
-        ("toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)", ["day"]),
-        ("ts + INTERVAL x day > ts AND day", ["day", "ts", "x"]),
-        ("ts + INTERVAL x > 1 day", ["day", "ts", "x"]),
-    ],
+    ("expression", "order"),
+    [("identity(id AS v)", ["a", "b", "c"]), ("CAST(id AS UInt64)", ["b", "a", "c"])],
 )
-def test_reads_skip_interval_and_extract_units(expression: str, expected: list[str]) -> None:
-    assert _unit_reads_of(expression) == expected
+def test_an_alias_keeps_the_sorted_order_and_a_cast_does_not(expression: str, order: list[str]) -> None:
+    # An alias makes the reads uncertain; the AS of a CAST does not.
+    operations = plan_diff(
+        [_t(_CYCLE_BEFORE)], [_t([_u("a", "b"), _u("b", "id"), _u("c", expression)])]
+    ).operations
+    assert [op.key[len("table:app.t:column:"):] for op in operations] == order
+
+
+def test_keeps_the_sorted_order_of_a_table_whose_cycle_no_statement_breaks() -> None:
+    # `p` and `q` read each other in the new schema, so their ADDs form a
+    # cycle among the prerequisites. ADD `p` replays, then ADD `q` closes
+    # `p` -> `q` -> `p`, which no statement breaks: the group is replayed back,
+    # `u` keeps its sorted order, and `t` is still repaired.
+    assert _sqls(
+        [_t(_CYCLE_BEFORE, "t"), _t([], "u")],
+        [_t(_CYCLE_AFTER, "t"), _t([_u("p", "q"), _u("q", "p")], "u")],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `p` UInt64 DEFAULT q;",
+        "ALTER TABLE app.u ADD COLUMN IF NOT EXISTS `q` UInt64 DEFAULT p;",
+    ]
 
 
 # ---------- the column reads skip lambda parameters and CAST types (#768) ----------
