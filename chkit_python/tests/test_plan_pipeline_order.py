@@ -415,3 +415,52 @@ def test_column_rename_keeps_index_constraint_and_projection_drops_before_the_dr
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
         "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
     ]
+
+
+# ---------- a table TTL change stays between the columns it reads and drops (#769) ----------
+
+
+def _with_ttl(columns: list[dict[str, Any]], ttl: str) -> TableDefinition:
+    return table(
+        database="app",
+        name="t",
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+        columns=[{"name": "id", "type": "UInt64"}, *columns],
+        ttl=ttl,
+    )
+
+
+def test_ttl_change_keeps_its_order_with_a_column_rename() -> None:
+    assert _renamed(
+        [_with_ttl(
+            [{"name": "a", "type": "UInt64"}, {"name": "x", "type": "DateTime"}], "x + INTERVAL 1 DAY"
+        )],
+        [_with_ttl(
+            [{"name": "b", "type": "UInt64"}, {"name": "y", "type": "DateTime"}], "y + INTERVAL 1 DAY"
+        )],
+        "a",
+        "b",
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;",
+        "ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+    ]
+
+
+def test_ttl_change_keeps_its_order_with_a_table_rename() -> None:
+    planned = plan_diff(
+        [_with_ttl([{"name": "x", "type": "DateTime"}], "x + INTERVAL 1 DAY")],
+        [_with_ttl([{"name": "y", "type": "DateTime"}], "y + INTERVAL 1 DAY")],
+    )
+    plan = apply_explicit_table_renames(
+        planned, [TableRenameMapping("app", "old_t", "app", "t", "cli")]
+    )
+    assert [op.sql for op in plan.operations] == [
+        "RENAME TABLE IF EXISTS app.old_t TO app.t;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;",
+        "ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+    ]

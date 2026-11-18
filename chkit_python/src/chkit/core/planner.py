@@ -860,12 +860,15 @@ def _order_operations(
     ]
 
 
+# The table TTL statement (MODIFY or REMOVE TTL) sorts with the column
+# statements: it reads columns that are added and dropped (#769).
 _COLUMN_STATEMENTS = frozenset(
     {
         "alter_table_add_column",
         "alter_table_modify_column",
         "alter_table_drop_column",
         "alter_table_rename_column",
+        "alter_table_modify_ttl",
     }
 )
 
@@ -886,17 +889,21 @@ def order_column_statements(
     next_: Sequence[SchemaDefinition],
     renames: Sequence[ColumnRenameSuggestion],
 ) -> list[MigrationOperation]:
-    """Order the column statements of every table in one dependency sort (TS orderColumnStatements).
+    """Order the column and TTL statements of every table in one sort (TS orderColumnStatements).
 
-    The statements are ADD, MODIFY, DROP and RENAME COLUMN, from their key
-    order (#681, #745, #746, #758):
+    The statements are ADD, MODIFY, DROP and RENAME COLUMN and the table TTL
+    statement, from their key order (#681, #745, #746, #758, #769):
 
-    - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression
-      reads column X runs after the ADD of X or the RENAME to X;
+    - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
+      a table TTL that reads column X runs after the ADD of X or the RENAME to X;
     - a DROP of X runs after the MODIFY or DROP of every column whose old
-      expression reads X, since ClickHouse refuses to drop a column another
-      column still reads. A RENAME away from X needs no such wait: ClickHouse
-      rewrites the expressions that read X to the new name;
+      expression reads X, and after the TTL change when the old TTL reads X,
+      since ClickHouse refuses to drop a column something still reads. A
+      RENAME away from X needs no such wait: ClickHouse rewrites the
+      expressions and the TTL that read X to the new name;
+    - a MODIFY whose new expression would close a cycle with an old
+      expression runs after the MODIFY that removes that old read
+      (``_cycle_releases``);
     - statements of the same column keep their order.
 
     Members of a cycle keep their key order. The statements fill the positions
@@ -906,6 +913,8 @@ def order_column_statements(
     """
     reads = _column_default_reads(next_)
     old_reads = _column_default_reads(previous)
+    ttl_reads = _table_ttl_reads(next_)
+    old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
         column_rename_key(rename): _column_key(rename.database, rename.table, rename.to)
         for rename in renames
@@ -914,16 +923,23 @@ def order_column_statements(
 
     providers: dict[str, list[int]] = {}
     releasers: dict[str, list[int]] = {}
+    modifies: dict[str, list[int]] = {}
     for index, op in enumerate(statements):
         if op.type == "alter_table_add_column":
             providers.setdefault(op.key, []).append(index)
         renamed = renamed_to.get(op.key)
         if op.type == "alter_table_rename_column" and renamed is not None:
             providers.setdefault(renamed, []).append(index)
+        if op.type == "alter_table_modify_column":
+            modifies.setdefault(op.key, []).append(index)
         if op.type in ("alter_table_modify_column", "alter_table_drop_column"):
             for read in old_reads.get(op.key, ()):
                 releasers.setdefault(read, []).append(index)
+        if op.type == "alter_table_modify_ttl":
+            for read in old_ttl_reads.get(op.key, ()):
+                releasers.setdefault(read, []).append(index)
 
+    added = {op.key for op in statements if op.type == "alter_table_add_column"}
     prerequisites: list[list[str]] = []
     for index, op in enumerate(statements):
         found: dict[int, None] = {}
@@ -931,9 +947,19 @@ def order_column_statements(
             for read in reads.get(op.key, ()):
                 for other in providers.get(read, []):
                     found[other] = None
+        if op.type == "alter_table_modify_ttl":
+            for read in ttl_reads.get(op.key, ()):
+                for other in providers.get(read, []):
+                    found[other] = None
         if op.type == "alter_table_drop_column":
             for other in releasers.get(op.key, []):
                 found[other] = None
+        # A column's last statement is the MODIFY COLUMN that sets its new expression.
+        is_last = index + 1 == len(statements) or statements[index + 1].key != op.key
+        if op.type == "alter_table_modify_column" and is_last:
+            for column in _cycle_releases(op.key, reads, old_reads, added):
+                for other in modifies.get(column, []):
+                    found[other] = None
         if index > 0 and statements[index - 1].key == op.key:
             found[index - 1] = None
         found.pop(index, None)
@@ -947,6 +973,51 @@ def order_column_statements(
         )
     )
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
+
+
+def _cycle_releases(
+    key: str,
+    reads: dict[str, set[str]],
+    old_reads: dict[str, set[str]],
+    added: set[str],
+) -> list[str]:
+    """Columns whose MODIFY must run before the MODIFY that sets ``key``'s expression (#769).
+
+    ClickHouse rejects an expression that closes a cycle. The new expression
+    closes one through column P when it reads a column that leads to P, and
+    P's old expression reads a column that leads back to ``key``, which P's
+    new expression no longer reads. "Leads to" follows reads that both the
+    old and the new expression of their column have, so the path exists in
+    every intermediate state and only P's MODIFY breaks it. On the way to P
+    it also follows the reads of ``added`` columns: the MODIFY runs after the
+    ADD of every added column its expression reads through them. Every such
+    P is read by the new expression through the new schema, so these edges
+    can't form a cycle unless the new schema has one.
+    """
+
+    def reachable(start: str, through_added: bool) -> set[str]:
+        seen = {start}
+        pending = [start]
+        while pending:
+            column = pending.pop()
+            follow = through_added and column in added
+            for read in reads.get(column, ()):
+                if (follow or read in old_reads.get(column, ())) and read not in seen:
+                    seen.add(read)
+                    pending.append(read)
+        return seen
+
+    released: dict[str, None] = {}
+    for read in reads.get(key, ()):
+        for column in reachable(read, through_added=True):
+            if column == key:
+                continue
+            for dropped in old_reads.get(column, ()):
+                if dropped not in reads.get(column, ()) and key in reachable(
+                    dropped, through_added=False
+                ):
+                    released[column] = None
+    return list(released)
 
 
 def _column_key(database: str, table: str, column: str) -> str:
@@ -1036,6 +1107,24 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
                 if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
+    return graph
+
+
+def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+    """Table TTL operation key to the keys of the table's columns the TTL names.
+
+    The TTL is read with the same rules as a column's default expression
+    (``_dotted_names``).
+    """
+    graph: dict[str, set[str]] = {}
+    for definition in definitions:
+        if not isinstance(definition, TableDefinition) or definition.ttl is None:
+            continue
+        names = {column.name for column in definition.columns}
+        graph[f"table:{definition.database}.{definition.name}:ttl"] = {
+            _column_key(definition.database, definition.name, name)
+            for name in _dotted_names(definition.ttl, names)
+        }
     return graph
 
 

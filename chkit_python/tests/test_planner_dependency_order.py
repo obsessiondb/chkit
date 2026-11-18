@@ -980,6 +980,152 @@ def test_keeps_the_other_statements_other_tables_and_same_column_statements_in_p
     ]
 
 
+# ---------- MODIFY read releases and table TTL changes (#769) ----------
+
+
+def test_removes_the_old_default_that_reads_a_column_before_that_column_reads_it_back() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "z", "type": "UInt64", "default": _expr("a")}])],
+        [_t([{"name": "a", "type": "UInt64", "default": _expr("z")}, {"name": "z", "type": "UInt64"}])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `z` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;",
+    ]
+
+
+def test_releases_a_read_that_closes_a_longer_cycle_through_an_unchanged_column() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "UInt64"},
+            {"name": "b", "type": "UInt64", "default": _expr("c")},
+            {"name": "c", "type": "UInt64", "default": _expr("a")},
+        ])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("b")},
+            {"name": "b", "type": "UInt64", "default": _expr("c")},
+            {"name": "c", "type": "UInt64", "default": _expr("id")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+    ]
+
+
+def test_releases_a_read_that_closes_a_cycle_through_an_added_column() -> None:
+    # `b` -> `a` -> `c` -> `b` once `a` is added, which runs first.
+    assert _sqls(
+        [_t([{"name": "b", "type": "UInt64"}, {"name": "c", "type": "UInt64", "default": _expr("b")}])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("c")},
+            {"name": "b", "type": "UInt64", "default": _expr("a")},
+            {"name": "c", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT c;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;",
+    ]
+
+
+def test_keeps_key_order_when_the_read_back_only_appears_after_the_release() -> None:
+    # `y` reads `a` only in the new schema, so `a` -> `x` -> `y` -> `a` never
+    # exists at once: the key order works and stays.
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "UInt64"},
+            {"name": "x", "type": "UInt64", "default": _expr("y")},
+            {"name": "y", "type": "UInt64"},
+        ])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("x")},
+            {"name": "x", "type": "UInt64", "default": _expr("id")},
+            {"name": "y", "type": "UInt64", "default": _expr("a")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT x;",
+        "ALTER TABLE app.t MODIFY COLUMN `x` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT a;",
+    ]
+
+
+def test_changes_the_table_ttl_between_the_add_it_reads_and_the_drop_it_releases() -> None:
+    assert _sqls(
+        [_t([{"name": "x", "type": "DateTime"}], ttl="x + INTERVAL 1 DAY")],
+        [_t([{"name": "y", "type": "DateTime"}], ttl="y + INTERVAL 1 DAY")],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;",
+        "ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+    ]
+
+
+def test_removes_the_table_ttl_before_the_drop_of_the_column_it_reads() -> None:
+    assert _sqls([_t([{"name": "x", "type": "DateTime"}], ttl="x + INTERVAL 1 DAY")], [_t([])]) == [
+        "ALTER TABLE app.t REMOVE TTL;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+    ]
+
+
+def test_a_drop_held_back_by_the_ttl_takes_a_later_slot_and_other_statements_stay() -> None:
+    # The statements fill the column statement slots: the DROP moves to the
+    # TTL statement's slot, after the setting change.
+    assert _sqls(
+        [_t(
+            [{"name": "b", "type": "UInt64"}, {"name": "x", "type": "DateTime"}],
+            ttl="x + INTERVAL 1 DAY",
+        )],
+        [_t(
+            [{"name": "b", "type": "String"}, {"name": "y", "type": "DateTime"}],
+            ttl="y + INTERVAL 1 DAY",
+            settings={"ttl_only_drop_parts": 1},
+        )],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` String;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;",
+        "ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;",
+        "ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+    ]
+
+
+def test_a_cast_type_in_the_ttl_is_not_a_read_of_a_column_with_that_name() -> None:
+    # The TTL is read like a column expression: the CAST type is no column, so
+    # the DROP of a column named `DateTime` does not wait for the TTL change.
+    assert _sqls(
+        [_t(
+            [{"name": "DateTime", "type": "UInt64"}, {"name": "ts", "type": "UInt64"}],
+            ttl="CAST(ts AS DateTime) + INTERVAL 1 DAY",
+        )],
+        [_t(
+            [{"name": "a", "type": "UInt64"}, {"name": "ts", "type": "UInt64"}],
+            ttl="CAST(ts AS DateTime) + INTERVAL 2 DAY",
+        )],
+    ) == [
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `DateTime`;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64;",
+        "ALTER TABLE app.t MODIFY TTL CAST(ts AS DateTime) + INTERVAL 2 DAY;",
+    ]
+
+
+def test_a_ttl_change_that_reads_no_changed_column_keeps_its_slot() -> None:
+    assert _sqls(
+        [_t(
+            [{"name": "ts", "type": "DateTime"}, {"name": "x", "type": "UInt64"}],
+            ttl="ts + INTERVAL 1 DAY",
+        )],
+        [_t(
+            [{"name": "a", "type": "UInt64"}, {"name": "ts", "type": "DateTime"}],
+            ttl="ts + INTERVAL 2 DAY",
+        )],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
+        "ALTER TABLE app.t MODIFY TTL ts + INTERVAL 2 DAY;",
+    ]
+
+
 # ---------- the column reads skip lambda parameters and CAST types (#768) ----------
 
 
