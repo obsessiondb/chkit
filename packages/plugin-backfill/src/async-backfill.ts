@@ -345,12 +345,16 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // ever read that attempt's own system.query_log rows (#765). Reusing the
   // failed attempt's id let its ExceptionWhileProcessing row mark the replay
   // failed while it ran.
-  if (replayFailed) {
-    for (const chunk of chunks) {
-      const state = progress[chunk.id]
-      if (state?.status === 'failed') {
-        progress = updateChunk(progress, chunk.id, { status: 'pending', queryId: replayQueryId(planId, chunk.id) })
-      }
+  //
+  // A chunk still pending under a recorded id is a replay that sync did not
+  // find: never submitted, or submitted and not yet in query_log (a failed
+  // submit stops the run before the chunk's state changes). It gets a new id
+  // too, so a failure row that is flushed later is never read as its result.
+  for (const chunk of chunks) {
+    const state = progress[chunk.id]
+    const replay = (replayFailed && state?.status === 'failed') || (state?.status === 'pending' && state.queryId !== undefined)
+    if (replay) {
+      progress = updateChunk(progress, chunk.id, { status: 'pending', queryId: replayQueryId(planId, chunk.id) })
     }
   }
 
@@ -383,9 +387,8 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
       }
 
       // Submit and poll. A pending chunk with a queryId is a replay whose id
-      // was recorded before its submit; a run that stopped after the record
-      // submits it under that same id, as a first attempt reuses the
-      // deterministic one. submittedAt is never set here: only a replay
+      // was recorded and persisted above, before this submit. submittedAt is
+      // never set here: only a replay
       // recorded by an older release carries one, and pollChunk then still
       // passes it as the afterTime filter for that shared deterministic id.
       const queryId = getChunk(progress, chunk.id).queryId ?? chunkQueryId(planId, chunk.id)

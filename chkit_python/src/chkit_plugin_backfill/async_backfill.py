@@ -345,13 +345,21 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
     # ever read that attempt's own system.query_log rows (#765). Reusing the
     # failed attempt's id let its ExceptionWhileProcessing row mark the replay
     # failed while it ran.
-    if replay_failed:
-        for chunk_id in chunk_ids:
-            state = progress.get(chunk_id)
-            if state is not None and state.status == "failed":
-                progress[chunk_id] = BackfillChunkState(
-                    status="pending", query_id=_replay_query_id(plan_id, chunk_id)
-                )
+    #
+    # A chunk still pending under a recorded id is a replay that sync did not
+    # find: never submitted, or submitted and not yet in query_log (a failed
+    # submit stops the run before the chunk's state changes). It gets a new id
+    # too, so a failure row that is flushed later is never read as its result.
+    for chunk_id in chunk_ids:
+        state = progress.get(chunk_id)
+        replay = state is not None and (
+            (replay_failed and state.status == "failed")
+            or (state.status == "pending" and state.query_id is not None)
+        )
+        if replay:
+            progress[chunk_id] = BackfillChunkState(
+                status="pending", query_id=_replay_query_id(plan_id, chunk_id)
+            )
 
     lock = Lock()
     # Serializes snapshot + on_progress so checkpoint writes stay ordered and
@@ -426,9 +434,8 @@ def execute_backfill(  # noqa: PLR0915 — mirrors the TS loop's structure
                 return
 
         # Submit and poll. A pending chunk with a query_id is a replay whose id
-        # was recorded before its submit; a run that stopped after the record
-        # submits it under that same id, as a first attempt reuses the
-        # deterministic one. submitted_at is never set here: only a replay
+        # was recorded and persisted above, before this submit. submitted_at is
+        # never set here: only a replay
         # recorded by an older release carries one, and poll_chunk then still
         # passes it as the after_time filter for that shared deterministic id.
         with lock:

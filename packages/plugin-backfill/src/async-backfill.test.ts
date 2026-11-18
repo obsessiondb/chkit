@@ -534,7 +534,9 @@ function statusReads(queries: string[]): string[] {
 // attempt is in system.processes for `runningPolls` status reads, then neither
 // running nor logged for `unflushedPolls` reads (the query_log flush gap), then
 // logged. Earlier attempts' query_log rows stay visible throughout, and
-// queryStatus applies afterTime to query_start_time as the real one does.
+// queryStatus applies afterTime to query_start_time as the real one does. An
+// attempt with `loggedAfterReads` ended before the run started and is logged
+// once the server has answered that many status reads.
 interface SimAttempt {
   queryId: string
   startMs: number
@@ -542,6 +544,7 @@ interface SimAttempt {
   runningPolls: number
   unflushedPolls: number
   polls: number
+  loggedAfterReads?: number
 }
 
 function createSimulatedServer(options: {
@@ -557,8 +560,12 @@ function createSimulatedServer(options: {
     ...attempt,
   }))
   const submits: string[] = []
+  let statusReads = 0
   const isRunning = (attempt: SimAttempt) => attempt.polls < attempt.runningPolls
-  const isLogged = (attempt: SimAttempt) => attempt.polls >= attempt.runningPolls + attempt.unflushedPolls
+  const isLogged = (attempt: SimAttempt) =>
+    attempt.loggedAfterReads === undefined
+      ? attempt.polls >= attempt.runningPolls + attempt.unflushedPolls
+      : statusReads >= attempt.loggedAfterReads
   // Latest first, as both readers order by event_time DESC.
   const logged = () => attempts.filter(isLogged).reverse()
 
@@ -572,6 +579,7 @@ function createSimulatedServer(options: {
     return id
   }
   executor.queryStatus = async (queryId, statusOptions) => {
+    statusReads += 1
     const latest = attempts.filter((attempt) => attempt.queryId === queryId).at(-1)
     if (latest && isRunning(latest)) {
       latest.polls += 1
@@ -647,13 +655,30 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     expect(result.progress.c1).toMatchObject({ status: 'done', queryId: replayId, writtenRows: 42 })
   })
 
-  test('a run stopped after recording the replay id submits it once under that id', async () => {
+  test('a run stopped after recording the replay id submits the chunk once under a new id', async () => {
     const server = createSimulatedServer({ attempts: [killedFirst], nextOutcomes: ['finished'] })
 
     const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId } })
 
-    expect(server.submits).toEqual([recordedReplayId])
-    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: recordedReplayId })
+    expect(server.submits).toHaveLength(1)
+    expect(new Set([firstId, recordedReplayId, ...server.submits]).size).toBe(3)
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: server.submits[0] })
+  })
+
+  test('a resume in the flush gap of a replay that failed does not read that failure', async () => {
+    // The replay's submit returned its failure, so the run stopped with the
+    // chunk pending, and the resume reads query_log before the failure is in it.
+    const server = createSimulatedServer({
+      attempts: [killedFirst, { queryId: recordedReplayId, outcome: 'failed', loggedAfterReads: 1 }],
+      nextOutcomes: ['finished'],
+    })
+
+    const result = await runOnce(server, { c1: { status: 'pending', queryId: recordedReplayId } })
+
+    expect(result.progress.c1?.status).toBe('done')
+    expect(server.submits).toHaveLength(1)
+    expect(server.submits[0]).not.toBe(recordedReplayId)
+    expect(result.progress.c1?.queryId).toBe(server.submits[0])
   })
 
   test('a run stopped between the replay submit and its state write attaches to it', async () => {

@@ -578,6 +578,8 @@ def test_resume_submits_nothing_when_a_replica_cannot_be_read() -> None:
 # neither running nor logged for ``unflushed_polls`` reads (the query_log flush
 # gap), then logged. Earlier attempts' query_log rows stay visible throughout,
 # and query_status applies after_time to query_start_time as the real one does.
+# An attempt with ``logged_after_reads`` ended before the run started and is
+# logged once the server has answered that many status reads.
 @dataclass
 class _SimAttempt:
     query_id: str
@@ -586,11 +588,14 @@ class _SimAttempt:
     running_polls: int = 0
     unflushed_polls: int = 0
     polls: int = 0
+    logged_after_reads: int | None = None
 
     def running(self) -> bool:
         return self.polls < self.running_polls
 
-    def logged(self) -> bool:
+    def logged(self, status_reads: int) -> bool:
+        if self.logged_after_reads is not None:
+            return status_reads >= self.logged_after_reads
         return self.polls >= self.running_polls + self.unflushed_polls
 
 
@@ -605,10 +610,15 @@ class SimulatedServer(MockExecutor):
         self.attempts = list(attempts or [])
         self.next_outcomes = list(next_outcomes or [])
         self.submits: list[str] = []
+        self.status_reads = 0
 
     def _logged(self) -> list[_SimAttempt]:
         # Latest first, as both readers order by event_time DESC.
-        return [attempt for attempt in reversed(self.attempts) if attempt.logged()]
+        return [
+            attempt
+            for attempt in reversed(self.attempts)
+            if attempt.logged(self.status_reads)
+        ]
 
     def submit(self, statement: str, query_id: str | None = None) -> str:
         submitted = query_id if query_id is not None else str(uuid.uuid4())
@@ -629,6 +639,7 @@ class SimulatedServer(MockExecutor):
 
     def query_status(self, query_id: str, *, after_time: str | None = None) -> QueryStatus:
         with self._lock:
+            self.status_reads += 1
             own = [attempt for attempt in self.attempts if attempt.query_id == query_id]
             latest = own[-1] if own else None
             if latest is not None and latest.running():
@@ -750,16 +761,40 @@ def test_replay_started_seconds_after_the_failure_ends_done() -> None:
     assert result.progress["c1"].written_rows == 42
 
 
-def test_run_stopped_after_recording_the_replay_id_submits_it_once() -> None:
+def test_run_stopped_after_recording_the_replay_id_submits_once_under_a_new_id() -> None:
     server = SimulatedServer(attempts=[_killed_first()], next_outcomes=["finished"])
 
     result = _run_once(
         server, {"c1": BackfillChunkState(status="pending", query_id=RECORDED_REPLAY_ID)}
     )
 
-    assert server.submits == [RECORDED_REPLAY_ID]
+    assert len(server.submits) == 1
+    assert len({FIRST_ID, RECORDED_REPLAY_ID, *server.submits}) == 3
     assert result.progress["c1"].status == "done"
-    assert result.progress["c1"].query_id == RECORDED_REPLAY_ID
+    assert result.progress["c1"].query_id == server.submits[0]
+
+
+def test_resume_in_the_flush_gap_of_a_failed_replay_does_not_read_that_failure() -> None:
+    # The replay's submit returned its failure, so the run stopped with the
+    # chunk pending, and the resume reads query_log before the failure is in it.
+    server = SimulatedServer(
+        attempts=[
+            _killed_first(),
+            _SimAttempt(
+                query_id=RECORDED_REPLAY_ID, outcome="failed", logged_after_reads=1
+            ),
+        ],
+        next_outcomes=["finished"],
+    )
+
+    result = _run_once(
+        server, {"c1": BackfillChunkState(status="pending", query_id=RECORDED_REPLAY_ID)}
+    )
+
+    assert result.progress["c1"].status == "done"
+    assert len(server.submits) == 1
+    assert server.submits[0] != RECORDED_REPLAY_ID
+    assert result.progress["c1"].query_id == server.submits[0]
 
 
 def test_run_stopped_between_replay_submit_and_state_write_attaches() -> None:
