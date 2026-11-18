@@ -21,6 +21,7 @@ import typer
 
 from chkit.cli import command_lifecycle
 from chkit.cli.command_target import run_on_config_loaded_or_exit
+from chkit.cli.commands.pull import builtin_pull_plugin
 from chkit.cli.config_loader import load_config, loaded_config_path
 from chkit.cli.flag_errors import report_flag_error, report_usage_error
 from chkit.cli.json_output import emit_json, print_output
@@ -289,11 +290,12 @@ def dispatch_plugin_command(  # noqa: PLR0912, PLR0915
         ChxConfigEnv(command=invoking_command),
         allow_synthesized_profile=plugin_name == "obsessiondb",
     )
+    plugins = [p for p in config.plugins if isinstance(p, ChxPlugin)]
+    is_forwarder = invoking_command == "plugin"
     runtime = load_plugin_runtime(
-        [p for p in config.plugins if isinstance(p, ChxPlugin)]
+        _with_builtin_pull(plugins, plugin_name) if is_forwarder else plugins
     )
     resolved_config_path = loaded_config_path(config_path)
-    is_forwarder = invoking_command == "plugin"
 
     # The global flags TS parses with the command's own: --json, and on a
     # shortcut also --config (`chkit plugin` strips it, so passes no
@@ -503,7 +505,9 @@ def run(
             allow_synthesized_profile=plugin_name == "obsessiondb",
         )
         runtime = load_plugin_runtime(
-            [p for p in config.plugins if isinstance(p, ChxPlugin)]
+            _with_builtin_pull(
+                [p for p in config.plugins if isinstance(p, ChxPlugin)], plugin_name
+            )
         )
         # As in TS, listing is a command too: on_init and get_context run.
         resolved_config_path = loaded_config_path(config_path)
@@ -540,3 +544,12 @@ def run(
         config_path=config_path,
         output_json=output_json,
     )
+
+
+def _with_builtin_pull(plugins: list[ChxPlugin], plugin_name: str | None) -> list[ChxPlugin]:
+    """The configured plugins and, for ``chkit plugin pull``, the TS pull
+    plugin (#771) unless one named pull is configured: chkit-py has pull as
+    the built-in ``chkit pull``, and TS runs it as a plugin."""
+    if plugin_name != "pull" or any(p.manifest.name == "pull" for p in plugins):
+        return plugins
+    return [*plugins, builtin_pull_plugin()]

@@ -42,6 +42,10 @@ PROJECT_ONLY_COMMANDS = frozenset(
 )
 
 
+class ConfigNotFoundError(FileNotFoundError):
+    """No config file where one was looked for (TS ``ConfigNotFoundError``)."""
+
+
 class ProjectConfigRequiredError(RuntimeError):
     """A project-only command ran from the user profile alone."""
 
@@ -102,6 +106,7 @@ def load_config(
     env: ChxConfigEnv | None = None,
     *,
     allow_synthesized_profile: bool = False,
+    allow_profile_only: bool = False,
 ) -> ChxResolvedConfig:
     """Resolve a ``ChxResolvedConfig`` from a config file.
 
@@ -118,7 +123,8 @@ def load_config(
     stand in for a profile that registers ``obsessiondb()``.
 
     Without a project config (and no explicit ``config_path``) the profile is
-    used alone, except for :data:`PROJECT_ONLY_COMMANDS` (``env.command``).
+    used alone, except for :data:`PROJECT_ONLY_COMMANDS` (``env.command``)
+    unless ``allow_profile_only``.
     """
     path = config_path if config_path is not None else Path(DEFAULT_CONFIG_FILE)
     if path.exists():
@@ -131,7 +137,7 @@ def load_config(
     shown_path = _resolve_like_node(path)
     if config_path is not None:
         msg = f"Config not found at {shown_path}."
-        raise FileNotFoundError(msg)
+        raise ConfigNotFoundError(msg)
 
     command = env.command if env is not None else None
     profile = _read_profile_layer(env, allow_synthesized=allow_synthesized_profile)
@@ -149,8 +155,8 @@ def load_config(
                 "Either run 'chkit init' in your project, or run "
                 "'chkit obsessiondb login' to use chkit from any directory."
             )
-        raise FileNotFoundError(msg)
-    if command in PROJECT_ONLY_COMMANDS:
+        raise ConfigNotFoundError(msg)
+    if command in PROJECT_ONLY_COMMANDS and not allow_profile_only:
         msg = (
             f'Command "{command}" requires a project config ({DEFAULT_CONFIG_FILE}) '
             "in the current directory.\n"

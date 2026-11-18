@@ -5,6 +5,7 @@ from __future__ import annotations
 import contextlib
 import logging
 import re
+from pathlib import Path
 from typing import Any, NoReturn
 
 import typer
@@ -29,9 +30,11 @@ from chkit.cli.commands import (
     snapshot,
     status,
 )
+from chkit.cli.config_loader import DEFAULT_CONFIG_FILE, ConfigNotFoundError, load_config
 from chkit.cli.flag_errors import report_flag_error
 from chkit.cli.help import (
     HELP_PLUGINS_META,
+    HELP_PULL_SERVICE_META,
     HELP_SUBCOMMAND_META,
     PLUGIN_FLAG_NAMES,
     command_help_text,
@@ -46,6 +49,7 @@ from chkit.core.flags import (
     UnknownFlagError,
     expand_short_flags,
 )
+from chkit.core.model import ChxConfigEnv
 
 _HELP_OPTION_NAMES = ("-h", "--help")
 _HELP_PLUGINS_OPTION = "--help-plugins"
@@ -326,6 +330,28 @@ def _check_config_value(args: list[str], params: list[Any]) -> None:
             raise MissingFlagValueError("--config")
 
 
+def _pull_help_lists_service(args: list[str]) -> bool:
+    """Whether ``chkit pull -h`` lists the ObsessionDB ``--service`` flag. TS
+    loads the config for the help of pull, a plugin command there (#771): a
+    config that fails to load is the error, a config lists the flag when it
+    registers ``obsessiondb()``, and without a project config the help lists
+    the flags that ``chkit obsessiondb login`` adds. As in TS, a user profile
+    used alone must load too, and an empty ``--config`` value is no path."""
+    config_path = extract_config_path(expand_short_flags(args, GLOBAL_FLAGS)) or None
+    path = Path(config_path) if config_path is not None else None
+    try:
+        config = load_config(path, ChxConfigEnv(command="pull"), allow_profile_only=True)
+    except ConfigNotFoundError:
+        return True
+    if not (path or Path(DEFAULT_CONFIG_FILE)).exists():
+        # The profile alone: TS lists the profile's plugins and those flags.
+        return True
+    return any(
+        getattr(getattr(plugin, "manifest", None), "name", None) == "obsessiondb"
+        for plugin in config.plugins
+    )
+
+
 def _first_plugin_positional(args: list[str]) -> str | None:
     """Port of TS ``firstPluginPositional``, the subcommand whose help a
     forwarder shows: the first token that is not a global flag (or ``--table``)
@@ -365,8 +391,9 @@ class _ChkitCommand(TyperCommand):
 
     def parse_args(self, ctx: Any, args: list[str]) -> list[str]:
         params = self.get_params(ctx)
-        if ctx.ignore_unknown_options:
-            # `chkit obsessiondb login -h` shows the help of `login`.
+        if ctx.ignore_unknown_options or self.name == "pull":
+            # `chkit obsessiondb login -h` shows the help of `login`, and
+            # `chkit pull schema -h` that of `schema` (#771).
             ctx.meta[HELP_SUBCOMMAND_META] = _first_plugin_positional(args)
         args = _read_help_plugins(ctx, args)
         # TS shows the help of a built-in command before reading --config,
@@ -398,6 +425,8 @@ class _ChkitCommand(TyperCommand):
                             )
                         ],
                     )
+                if self.name == "pull":
+                    ctx.meta[HELP_PULL_SERVICE_META] = _pull_help_lists_service(args)
                 normalized = ["--help"]
             else:
                 # query first moves its SQL arguments behind `--` (#584), so SQL

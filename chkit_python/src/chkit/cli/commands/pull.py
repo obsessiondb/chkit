@@ -27,7 +27,7 @@ import secrets
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import typer
 from typer.exceptions import TyperException
@@ -46,6 +46,8 @@ from chkit.cli.commands.pull_view_parser import (
     parse_to_clause,
 )
 from chkit.cli.config_loader import load_config
+from chkit.cli.flag_errors import report_usage_error
+from chkit.cli.help import PULL_SCHEMA_COMMAND, PULL_SCHEMA_DESCRIPTION
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
@@ -95,7 +97,16 @@ from chkit.core.model import (
 )
 from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_scan import strip_wrapping_parens
-from chkit.plugins import ChxOnConfigLoadedContext, ChxOnPullIntrospectContext, ChxPlugin
+from chkit.plugins import (
+    ChxOnConfigLoadedContext,
+    ChxOnPullIntrospectContext,
+    ChxPlugin,
+    ChxPluginCommand,
+    ChxPluginCommandContext,
+    ChxPluginManifest,
+)
+
+_DEFAULT_OUT_FILE = Path("src/db/schema/pulled.py")
 
 
 def _introspected_table_to_definition(
@@ -515,7 +526,23 @@ def run(  # noqa: PLR0917
         bool, typer.Option("--json", help="Emit a JSON-formatted summary.")
     ] = False,
     service: ServiceOption = None,
+    args: Annotated[list[str] | None, typer.Argument(hidden=True)] = None,
 ) -> None:
+    # TS's pull is a plugin whose one command is `schema`: `chkit pull` runs it,
+    # and so does `chkit pull schema` (#771). As there, a first argument
+    # `schema` names the command; any other
+    # argument is stray, in click's words, before the config is read.
+    stray = list(args or [])
+    if stray[:1] == [PULL_SCHEMA_COMMAND]:
+        stray = stray[1:]
+    if stray:
+        report_usage_error(
+            "pull",
+            f"Got unexpected extra argument(s) ({' '.join(stray)})",
+            json_mode=output_json,
+        )
+    # As TS parses a string[] flag: comma-separated and repeated values (#771).
+    database = _database_names(database) if database is not None else None
     # As in TS, the hooks get the flags that were passed, keyed by long name.
     hook_flags = passed_flags(
         {
@@ -531,7 +558,7 @@ def run(  # noqa: PLR0917
     )
     overwrite = overwrite or force
     if out_file is None:
-        out_file = Path("src/db/schema/pulled.py")
+        out_file = _DEFAULT_OUT_FILE
     config = load_config(config_path, ChxConfigEnv(command="pull"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
@@ -574,14 +601,111 @@ def run(  # noqa: PLR0917
     except (typer.Exit, typer.Abort, TyperException):
         raise
     except Exception as error:
-        # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
-        # an error on stdout and exits 2 for a config error, else 1.
-        message = clickhouse_error_message(error)
-        if output_json:
-            print_output({"ok": False, "command": "schema", "error": message}, json_mode=True)
-        else:
-            typer.echo(f"Pull schema failed: {message}")
-        raise typer.Exit(code=2 if isinstance(error, PullConfigError) else 1) from error
+        raise typer.Exit(code=_report_failure(error, output_json=output_json)) from error
+
+
+def _database_names(values: list[str]) -> list[str]:
+    """The ``--database`` values as TS ``parseFlags`` reads a ``string[]`` flag
+    (``chkit.core.flags``): each split on commas, trimmed, empty ones dropped."""
+    return [name for value in values for name in (js_trim(v) for v in value.split(",")) if name]
+
+
+def _report_failure(error: Exception, *, output_json: bool) -> int:
+    """TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
+    an error on stdout and exits 2 for a config error, else 1."""
+    message = clickhouse_error_message(error)
+    if output_json:
+        print_output({"ok": False, "command": "schema", "error": message}, json_mode=True)
+    else:
+        typer.echo(f"Pull schema failed: {message}")
+    return 2 if isinstance(error, PullConfigError) else 1
+
+
+# The flags of the TS pull plugin's `schema` command.
+_SCHEMA_FLAGS: list[dict[str, Any]] = [
+    {"name": "--dryrun", "type": "boolean", "description": "Preview without writing files"},
+    {
+        "name": "--force",
+        "short": "-f",
+        "type": "boolean",
+        "description": "Overwrite existing output file",
+    },
+    {
+        "name": "--overwrite",
+        "type": "boolean",
+        "description": "Overwrite existing output file (alias for --force)",
+    },
+    {
+        "name": "--out-file",
+        "short": "-o",
+        "type": "string",
+        "description": "Output file path",
+        "placeholder": "<path>",
+    },
+    {
+        "name": "--database",
+        "short": "-d",
+        "type": "string[]",
+        "description": "Database names to pull",
+        "placeholder": "<name>",
+    },
+]
+
+
+def builtin_pull_plugin() -> ChxPlugin:
+    """The TS pull plugin, which ``chkit plugin pull`` runs when no configured
+    plugin is named pull (#771). It runs ``chkit pull`` through the plugin
+    command lifecycle, as TS runs its pull plugin there."""
+    return ChxPlugin(
+        manifest=ChxPluginManifest(name="pull", api_version=1),
+        commands=[
+            ChxPluginCommand(
+                name=PULL_SCHEMA_COMMAND,
+                description=PULL_SCHEMA_DESCRIPTION,
+                run=_run_schema_command,
+                takes_args=False,
+                flags=list(_SCHEMA_FLAGS),
+            )
+        ],
+    )
+
+
+def _run_schema_command(ctx: ChxPluginCommandContext) -> int:
+    flags = ctx.flags
+    out_file = flags.get("--out-file")
+    database = flags.get("--database")
+    executor = ctx.plugin_context.executor if ctx.plugin_context.has_executor else None
+    try:
+        _run(
+            ctx.config,
+            # `chkit plugin` runs the command with its PluginRuntime.
+            cast("PluginRuntime", ctx.plugin_runtime),
+            executor,
+            hook_flags=dict(flags),
+            database=list(database) if isinstance(database, list) else None,
+            out_file=Path(out_file) if isinstance(out_file, str) else _DEFAULT_OUT_FILE,
+            dryrun=flags.get("--dryrun") is True,
+            overwrite=flags.get("--force") is True or flags.get("--overwrite") is True,
+            output_json=ctx.json_mode,
+            # `chkit plugin` opened this client and closes it.
+            executor_borrowed=True,
+        )
+    except (typer.Exit, typer.Abort, TyperException):
+        raise
+    except Exception as error:
+        return _report_failure(error, output_json=ctx.json_mode)
+    return 0
+
+
+def _open_client(
+    executor: ClickHouseClient | None, config: ChxResolvedConfig, *, borrowed: bool
+) -> contextlib.AbstractContextManager[ClickHouseClient]:
+    """The client pull reads with. Pull closes a client it opens, and the plugin
+    executor of ``chkit pull``, but not one it borrows from ``chkit plugin``,
+    whose dispatcher closes it."""
+    if borrowed and executor is not None:
+        return contextlib.nullcontext(executor)
+    return open_client(executor, config.clickhouse)
 
 
 def _introspect(
@@ -591,6 +715,7 @@ def _introspect(
     *,
     hook_flags: dict[str, Any],
     selected: list[str],
+    executor_borrowed: bool,
 ) -> tuple[list[str], list[object], list[SchemaDefinition], list[str]]:
     """Return the databases, the listed objects, the definitions and warnings."""
     raw_objects: list[object] = []  # objects from system.tables (for skipped count)
@@ -602,7 +727,7 @@ def _introspect(
         # databases the hook gets and count what it skipped (#698).
         custom_introspect = plugin_runtime.has_on_pull_introspect()
         if custom_introspect and not selected:
-            client = stack.enter_context(open_client(executor, config.clickhouse))
+            client = stack.enter_context(_open_client(executor, config, borrowed=executor_borrowed))
             raw_objects = [o for o in list_schema_objects(client) if _is_pulled_object(o)]
             selected = sorted({getattr(o, "database", "") for o in raw_objects})
 
@@ -628,7 +753,9 @@ def _introspect(
         else:
             listed = client is not None
             if client is None:
-                client = stack.enter_context(open_client(executor, config.clickhouse))
+                client = stack.enter_context(
+                    _open_client(executor, config, borrowed=executor_borrowed)
+                )
             # The pulled tables are compared later against definitions
             # canonicalized with clickhouse.indexGranularity, which must be this
             # server's default. A custom introspector reads elsewhere.
@@ -654,6 +781,7 @@ def _run(
     dryrun: bool,
     overwrite: bool,
     output_json: bool,
+    executor_borrowed: bool = False,
 ) -> None:
     if executor is None and config.clickhouse is None:
         msg = (
@@ -665,7 +793,12 @@ def _run(
     selected = sorted({name for name in (js_trim(d) for d in database or []) if name})
 
     selected, raw_objects, definitions, inner_storage_warnings = _introspect(
-        config, plugin_runtime, executor, hook_flags=hook_flags, selected=selected
+        config,
+        plugin_runtime,
+        executor,
+        hook_flags=hook_flags,
+        selected=selected,
+        executor_borrowed=executor_borrowed,
     )
     definitions = [d for d in definitions if _is_pulled_object(d)]
 

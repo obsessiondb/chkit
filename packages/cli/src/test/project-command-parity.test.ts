@@ -167,6 +167,46 @@ describe('commands in a project match chkit-py (#776)', () => {
     }
   }, 120_000)
 
+  test('plugin pull runs without the plugin in the config, as in chkit-py (#771)', async () => {
+    const projects = [
+      await createProject(),
+      await createProject(withObsessionDB),
+      await createProject({ imports: `import { pull } from '${PULL_PLUGIN_ENTRY}'\n`, list: 'pull()' }),
+    ]
+    const description = 'Pull live ClickHouse table schema and write chkit schema file'
+    try {
+      for (const project of projects) {
+        const listed = project.run(['plugin', 'pull'])
+        expect([listed.exitCode, listed.stdout.trim(), listed.stderr]).toEqual([
+          0,
+          `Plugin commands for "pull":\n- schema: ${description}`,
+          '',
+        ])
+        const listedJson = project.run(['plugin', '--json', 'pull'])
+        expect(JSON.parse(listedJson.stdout)).toEqual({
+          command: 'plugin',
+          schemaVersion: 1,
+          plugin: 'pull',
+          commands: [{ name: 'schema', description }],
+        })
+        const text = project.run(['plugin', 'pull', 'schema', '--dryrun'])
+        expect([text.exitCode, text.stdout.trim(), text.stderr]).toEqual([2, `Pull schema failed: ${NO_TARGET}`, ''])
+        const json = project.run(['plugin', 'pull', 'schema', '--dryrun', '--json'])
+        expect([json.exitCode, json.stderr]).toEqual([2, ''])
+        expect(JSON.parse(json.stdout)).toEqual({ ok: false, command: 'schema', error: NO_TARGET })
+        const unknown = project.run(['plugin', 'pull', 'foo'])
+        expect([unknown.exitCode, unknown.stderr.trim()]).toEqual([1, 'Unknown pull command "foo". Available: schema.'])
+        const stray = project.run(['plugin', 'pull', 'schema', 'foo'])
+        expect([stray.exitCode, stray.stderr.trim()]).toEqual([1, 'Got unexpected extra argument(s) (foo)'])
+      }
+      // Guard: only `chkit plugin pull` gets the fallback, not the plugin listing.
+      const absent = projects[0]
+      expect(absent?.run(['plugin']).stderr.trim()).toBe('No plugins configured. Add entries to config.plugins first.')
+    } finally {
+      for (const project of projects) await project.cleanup()
+    }
+  }, 180_000)
+
   test('a disabled pull plugin is still not configured', async () => {
     const project = await createProject({
       imports: `import { pull } from '${PULL_PLUGIN_ENTRY}'\n`,
