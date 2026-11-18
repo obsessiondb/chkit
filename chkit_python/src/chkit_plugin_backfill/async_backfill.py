@@ -302,6 +302,14 @@ def _classify_attempt(  # noqa: PLR0911 — mirrors the TS classifier
     query_id = _attempt_query_id(plan_id, chunk_id, state)
     if query_id in evidence.running:
         return _Outcome("running")
+    # Any QueryFinish of the id means a whole attempt of the chunk committed,
+    # so it counts whenever it started (an older release's bound is the
+    # client's clock). The bound only keeps an earlier attempt's QueryStart or
+    # failure from being read as this attempt's.
+    own = [row for row in evidence.log_rows if str(row.get("query_id")) == query_id]
+    finish = next((row for row in own if row.get("type") == "QueryFinish"), None)
+    if finish is not None:
+        return _Outcome("done", finish)
     bound = (
         int(_parse_iso_ms(state.submitted_at) // 1000)
         if state.submitted_at
@@ -309,17 +317,11 @@ def _classify_attempt(  # noqa: PLR0911 — mirrors the TS classifier
     )
     rows = [
         row
-        for row in evidence.log_rows
-        if str(row.get("query_id")) == query_id
-        and (
-            bound is None
-            or row.get("start_unix") is None
-            or (_to_int(row.get("start_unix")) or 0) >= bound
-        )
+        for row in own
+        if bound is None
+        or row.get("start_unix") is None
+        or (_to_int(row.get("start_unix")) or 0) >= bound
     ]
-    finish = next((row for row in rows if row.get("type") == "QueryFinish"), None)
-    if finish is not None:
-        return _Outcome("done", finish)
     kind = _attempt_kind(plan_id, chunk_id, state)
     failure = next(
         (row for row in rows if row.get("type") == "ExceptionWhileProcessing"), None

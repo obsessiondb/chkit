@@ -275,12 +275,15 @@ function classifyAttempt(
 ): AttemptOutcome {
   const queryId = attemptQueryId(planId, chunkId, state)
   if (evidence.running.has(queryId)) return { kind: 'running' }
-  const bound = state.submittedAt ? Math.floor(Date.parse(state.submittedAt) / 1000) : undefined
-  const rows = evidence.logRows.filter(
-    (row) => row.query_id === queryId && (bound === undefined || row.start_unix === undefined || Number(row.start_unix) >= bound),
-  )
-  const finish = rows.find((row) => row.type === 'QueryFinish')
+  // Any QueryFinish of the id means a whole attempt of the chunk committed, so
+  // it counts whenever it started (an older release's bound is the client's
+  // clock). The bound only keeps an earlier attempt's QueryStart or failure
+  // from being read as this attempt's.
+  const own = evidence.logRows.filter((row) => row.query_id === queryId)
+  const finish = own.find((row) => row.type === 'QueryFinish')
   if (finish) return { kind: 'done', row: finish }
+  const bound = state.submittedAt ? Math.floor(Date.parse(state.submittedAt) / 1000) : undefined
+  const rows = own.filter((row) => bound === undefined || row.start_unix === undefined || Number(row.start_unix) >= bound)
   const kind = attemptKind(planId, chunkId, state)
   const failure = rows.find((row) => row.type === 'ExceptionWhileProcessing')
   if (failure) return kind === 'legacy' && !final ? { kind: 'wait' } : { kind: 'failed', row: failure }

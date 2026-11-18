@@ -1019,6 +1019,26 @@ def test_older_release_replay_committed_in_the_flush_gap_is_not_taken_for_the_fa
     assert result.progress["c1"].query_id == FIRST_ID
 
 
+def test_older_release_replay_that_committed_is_done_when_its_clock_ran_ahead() -> None:
+    # The older release stamped submitted_at from a client clock 3 minutes
+    # ahead, so the replay's QueryFinish started before that bound.
+    server = SimulatedServer(
+        attempts=[
+            _killed_first(),
+            _SimAttempt(query_id=FIRST_ID, outcome="finished"),
+        ]
+    )
+
+    result = _run_once(
+        server,
+        {"c1": BackfillChunkState(status="pending", submitted_at=_iso_ms_ago(-2 * 60_000))},
+    )
+
+    assert server.submits == []
+    assert result.progress["c1"].status == "done"
+    assert result.progress["c1"].query_id == FIRST_ID
+
+
 def test_older_release_shared_id_replay_that_failed_is_recorded_failed() -> None:
     server = SimulatedServer(attempts=[_killed_first()])
 

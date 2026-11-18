@@ -54,7 +54,7 @@ The pipeline has three stages, and you can use any subset:
 
 1. **Plan** — `generateChunkPlan(...)` introspects a table and returns a `ChunkPlan` describing how to partition the work into roughly equal-sized chunks.
 2. **Build SQL** — `buildChunkExecutionSql(...)` turns a single `Chunk` into an `INSERT … SELECT` statement.
-3. **Execute** — `executeBackfill(...)` submits chunks against a real `ClickHouseExecutor` with deterministic query IDs, polling, and resume support.
+3. **Execute** — `executeBackfill(...)` submits chunks against a real `ClickHouseExecutor` with deterministic first-attempt query IDs (each replay gets one of its own), polling, and resume support.
 
 ### Plan a backfill
 

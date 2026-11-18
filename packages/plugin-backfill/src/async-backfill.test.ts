@@ -811,6 +811,18 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     expect(server.submits).toEqual([])
   })
 
+  test('an older release\'s replay that committed is done even when that client\'s clock ran ahead', async () => {
+    // The older release stamped submittedAt from a client clock 3 minutes
+    // ahead, so the replay's QueryFinish started before that bound.
+    const submittedAt = new Date(Date.now() + 2 * 60_000).toISOString()
+    const server = createSimulatedServer({ attempts: [killedFirst, { queryId: firstId, outcome: 'finished' }] })
+
+    const result = await runOnce(server, { c1: { status: 'pending', submittedAt } })
+
+    expect(server.submits).toEqual([])
+    expect(result.progress.c1).toMatchObject({ status: 'done', queryId: firstId })
+  })
+
   test('an older release\'s shared-id replay that failed is recorded failed after the flush window', async () => {
     const submittedAt = new Date(Date.now() - 60_000).toISOString()
     const server = createSimulatedServer({ attempts: [killedFirst] })
