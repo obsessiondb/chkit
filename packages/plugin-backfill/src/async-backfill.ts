@@ -750,6 +750,9 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // the request is created, records attempts as single-send (#765).
   const sendsOnce = executor.submitSendsOnce === true
   const handoffs = new Set<Promise<void>>()
+  // Aborted once no chunk may be sent: a submit still waiting for a
+  // connection slot is refused without reaching the HTTP agent.
+  const dispatchStopped = new AbortController()
 
   // How long polls wait for a finished attempt's outcome to reach query_log:
   // never shorter than the resume's recheck window, whatever the poll interval.
@@ -776,10 +779,12 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
         if (lost) {
           pollUnknown.push(lost)
           stopDispatch = true
+          dispatchStopped.abort()
         }
       } catch (error) {
         stopError ??= { error }
         stopDispatch = true
+        dispatchStopped.abort()
       }
     },
     { concurrency },
@@ -788,6 +793,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     const onAbort = () => {
       closed = true
       stopDispatch = true
+      dispatchStopped.abort()
       // Admitted chunks hand their request off, or are refused and saved
       // back, before the interrupt returns.
       void Promise.all([...handoffs])
@@ -881,6 +887,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
             if (admitted) settle()
             return admitted
           },
+          signal: dispatchStopped.signal,
         })
       } else {
         // Nothing proves when another executor's request starts, so its

@@ -6,7 +6,7 @@ import https from 'node:https'
 import type { AddressInfo } from 'node:net'
 
 import { createStatelessClickHouseExecutor, isSendNotAdmitted, type ClickHouseExecutor } from './index.js'
-import { createAdmissionAgent } from './send-admission.js'
+import { createAdmissionAgent, createSendQueue, urlConnectionOptions } from './send-admission.js'
 
 // A stand-in for ClickHouse's HTTP interface that records each request's
 // query_id and answers it, after `answerAfterMs`, as a finished command.
@@ -99,23 +99,25 @@ describe('submit with an admission (#765)', () => {
   })
 })
 
-// The admission agent replaces the one @clickhouse/client builds, so it must
-// connect as the configured client would.
-describe('createAdmissionAgent', () => {
-  test('keeps the driver defaults: keep-alive on, 10 sockets', () => {
-    const agent = createAdmissionAgent('http://localhost:8123', new Map())
-
-    expect(agent).toBeInstanceOf(http.Agent)
-    expect(agent.maxSockets).toBe(10)
-    expect((agent as unknown as { keepAlive: boolean }).keepAlive).toBe(true)
-    agent.destroy()
+// The admission agent replaces the one @clickhouse/client builds, so it reads
+// clickhouse.url's connection options with the driver's rules.
+describe('urlConnectionOptions', () => {
+  test('keeps the driver defaults: keep-alive on, 10 connections', () => {
+    expect(urlConnectionOptions('http://localhost:8123')).toEqual({ keepAlive: true, maxOpenConnections: 10 })
   })
 
-  test('takes the keep-alive and socket limit clickhouse.url sets, and TLS for https', () => {
+  test('reads booleans and limits as the driver does', () => {
+    expect(urlConnectionOptions('http://h/?keep_alive_enabled=0&max_open_connections=1.5')).toEqual({ keepAlive: false, maxOpenConnections: 1.5 })
+    expect(urlConnectionOptions('http://h/?keep_alive_enabled=1&max_open_connections=3')).toEqual({ keepAlive: true, maxOpenConnections: 3 })
+    expect(() => urlConnectionOptions('http://h/?keep_alive_enabled=yes')).toThrow('"keep_alive_enabled" has invalid boolean value: yes')
+    expect(() => urlConnectionOptions('http://h/?max_open_connections=0')).toThrow('"max_open_connections" value 0 is less than min allowed 1')
+  })
+
+  test('the agent leaves the connection limit to the send queue', () => {
     const agent = createAdmissionAgent('https://ch.example.com:8443/?max_open_connections=3&keep_alive_enabled=false', new Map())
 
     expect(agent).toBeInstanceOf(https.Agent)
-    expect(agent.maxSockets).toBe(3)
+    expect(agent.maxSockets).toBe(Number.POSITIVE_INFINITY)
     expect((agent as unknown as { keepAlive: boolean }).keepAlive).toBe(false)
     agent.destroy()
   })
@@ -159,24 +161,49 @@ describe('a refused submit stays refused', () => {
   })
 
   // The same checks under Node, which the published CLI runs on.
-  test('under Node: a cold refusal stays refused, and the socket limit holds on HTTP and HTTPS agents', async () => {
+  test('under Node: a cold refusal stays refused, and the URL options read the same', async () => {
     const dist = new URL('../dist/index.js', import.meta.url).pathname
     const agentModule = new URL('../dist/send-admission.js', import.meta.url).pathname
     const script = `
       const { createStatelessClickHouseExecutor, isSendNotAdmitted } = await import(${JSON.stringify(dist)})
-      const { createAdmissionAgent } = await import(${JSON.stringify(agentModule)})
+      const { urlConnectionOptions } = await import(${JSON.stringify(agentModule)})
       const db = createStatelessClickHouseExecutor({ url: 'http://127.0.0.1:${await closedPort()}', username: 'default', password: '', database: 'default' })
       const error = await db.submit('INSERT INTO t SELECT 1', 'refused-node-1', undefined, { admit: () => false }).catch((e) => e)
       await db.close()
-      const http = createAdmissionAgent('http://h/?max_open_connections=3', new Map())
-      const https = createAdmissionAgent('https://h/?max_open_connections=2', new Map())
-      console.log(JSON.stringify({ refused: isSendNotAdmitted(error), http: http.maxSockets, https: https.maxSockets }))
-      http.destroy(); https.destroy()
+      const options = urlConnectionOptions('https://h/?max_open_connections=1.5&keep_alive_enabled=0')
+      console.log(JSON.stringify({ refused: isSendNotAdmitted(error), options }))
     `
     const node = spawnSync('node', ['--input-type=module', '-e', script], { encoding: 'utf8' })
 
     expect(node.stderr).toBe('')
-    expect(JSON.parse(node.stdout.trim())).toEqual({ refused: true, http: 3, https: 2 })
+    expect(JSON.parse(node.stdout.trim())).toEqual({ refused: true, options: { keepAlive: false, maxOpenConnections: 1.5 } })
+  })
+})
+
+// Round 6: submits wait for a connection slot in chkit's queue, never in the
+// agent's, so a stop refuses a waiting submit before it reaches the agent.
+describe('createSendQueue', () => {
+  test('refuses a waiting submit when its signal aborts, and never hands it a slot', async () => {
+    const queue = createSendQueue(1)
+    const first = await queue.acquire()
+    const stop = new AbortController()
+
+    const waiting = queue.acquire(stop.signal).then(() => 'slot', (error: unknown) => error)
+    stop.abort()
+    const outcome = await waiting
+    first()
+
+    expect(isSendNotAdmitted(outcome)).toBe(true)
+    // The slot freed by the first goes to the next waiter, not the refused one.
+    const next = await queue.acquire()
+    next()
+  })
+
+  test('a submit with an aborted signal never waits', async () => {
+    const stop = new AbortController()
+    stop.abort()
+
+    await expect(createSendQueue(5).acquire(stop.signal)).rejects.toThrow('The request was not sent')
   })
 })
 

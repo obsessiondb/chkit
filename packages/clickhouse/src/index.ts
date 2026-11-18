@@ -21,7 +21,15 @@ import { type ClickHouseSettings, ClickHouseLogLevel, createClient } from '@clic
 import { getLogger } from '@logtape/logtape'
 import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
-import { createAdmissionAgent, isSendNotAdmitted, recordingAdmission, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
+import {
+	createAdmissionAgent,
+	createSendQueue,
+	isSendNotAdmitted,
+	recordingAdmission,
+	sendNotAdmittedError,
+	urlConnectionOptions,
+	type SubmitAdmission,
+} from './send-admission.js'
 import {
 	parseConstraintsFromCreateTableQuery,
 	parseEngineFromCreateTableQuery,
@@ -842,6 +850,7 @@ export function createExecutorWithClient(
 	// the admission as each request is created.
 	const admissions = new Map<string, SubmitAdmission>()
 	let admissionClient: ClickHouseClient | undefined
+	let sendQueue: ReturnType<typeof createSendQueue> | undefined
 	let compressedClient: ClickHouseClient | undefined
 	let controlClient: ClickHouseClient | undefined
 
@@ -1114,13 +1123,18 @@ export function createExecutorWithClient(
 			const { query_id: _ignored, ...clickhouseSettings } = settings ?? {}
 			let target = fireAndForgetClient
 			const recorded = admission ? recordingAdmission(admission) : undefined
-			if (recorded) {
+			let releaseSlot: (() => void) | undefined
+			if (recorded && admission) {
 				admissionClient ??= createStatelessClickHouseClient(
 					config,
 					{ wait_end_of_query: 0 },
 					{ httpAgent: createAdmissionAgent(config.url, admissions) },
 				)
+				sendQueue ??= createSendQueue(urlConnectionOptions(config.url).maxOpenConnections)
 				target = admissionClient
+				// Waits for a connection slot here, not in the agent: a stop
+				// refuses a waiting submit before it reaches the agent.
+				releaseSlot = await sendQueue.acquire(admission.signal)
 				admissions.set(id, recorded.admission)
 			}
 			try {
@@ -1135,6 +1149,7 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			} finally {
 				if (admission) admissions.delete(id)
+				releaseSlot?.()
 			}
 			return id
 		},

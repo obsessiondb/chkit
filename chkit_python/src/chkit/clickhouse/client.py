@@ -117,6 +117,10 @@ class QueryStatus(BaseModel):
 class ClickHouseClient:
     """Imperative client wrapper. Use as a context manager."""
 
+    #: ``submit_once`` asks ``SEND_ADMISSION`` at its transport (#765): an
+    #: executor needs this marker for an interruptible backfill.
+    transport_admission = True
+
     __slots__ = (
         "_client",
         "_closed",
@@ -212,7 +216,7 @@ class ClickHouseClient:
         if send_once_client is not None:
             send_once_client.close()
         if send_once_pool is not None:
-            send_once_pool.clear()
+            _dispose_pool(send_once_pool)
 
     def __enter__(self) -> Self:
         return self
@@ -430,7 +434,13 @@ class ClickHouseClient:
         if client is None and not self._closed:
             pool = _own_pool_manager(self._config.url)
             # Opened outside the lock, so close() does not wait for it.
-            opened = self._open_driver(self._config, autogenerate_session_id=False, pool_mgr=pool)
+            try:
+                opened = self._open_driver(
+                    self._config, autogenerate_session_id=False, pool_mgr=pool
+                )
+            except BaseException:
+                _dispose_pool(pool)
+                raise
             with self._submit_client_lock:
                 if self._send_once_client is None and not self._closed:
                     self._send_once_client = opened
@@ -438,7 +448,7 @@ class ClickHouseClient:
                 client = self._send_once_client
             if client is not opened:
                 opened.close()
-                pool.clear()
+                _dispose_pool(pool)
         if self._closed or client is None:
             msg = "ClickHouse client is closed."
             raise RuntimeError(msg)
@@ -642,24 +652,33 @@ _CURRENT_SEND: ContextVar[_Send | None] = ContextVar("chkit_current_send", defau
 
 
 def _own_pool_manager(url: str) -> Any:
-    """A urllib3 pool for ``submit_once`` alone, built as clickhouse-connect
-    builds its default one (an environment proxy included), with a stable
-    ``urlopen`` that resolves the current request's own ``_Send``. It is
-    never shared, and the hook is never removed."""
+    """A urllib3 pool for ``submit_once`` alone, routed as clickhouse-connect
+    routes a driver without a pool of its own: an HTTPS URL takes
+    ``HTTPS_PROXY``, then (like any URL) ``HTTP_PROXY``, each unless
+    ``NO_PROXY`` names the host; otherwise a direct pool. Its ``urlopen``
+    carries a stable hook that resolves the current request's own ``_Send``.
+    It is never shared, and ``_dispose_pool`` clears and unregisters it."""
     parsed = urlparse(url)
     scheme = parsed.scheme
+    host = parsed.hostname or ""
     port = parsed.port or (443 if scheme == "https" else 80)
-    proxy = httputil.check_env_proxy(scheme, parsed.hostname or "", port)
-    if proxy and scheme == "https":
-        pool = httputil.get_pool_manager(https_proxy=proxy)
-    elif proxy:
-        pool = httputil.get_pool_manager(
-            http_proxy=proxy if proxy.startswith("http") else f"http://{proxy}"
-        )
+    https_proxy = httputil.check_env_proxy("https", host, port) if scheme == "https" else None
+    http_proxy = None if https_proxy else httputil.check_env_proxy("http", host, port)
+    if https_proxy:
+        pool = httputil.get_pool_manager(https_proxy=https_proxy)
+    elif http_proxy:
+        pool = httputil.get_pool_manager(http_proxy=http_proxy)
     else:
         pool = httputil.get_pool_manager()
     install_send_hook(pool)
     return pool
+
+
+def _dispose_pool(pool: Any) -> None:
+    """Close a ``submit_once`` pool and drop it from clickhouse-connect's
+    process-wide registry of managers, which would keep it alive."""
+    pool.clear()
+    httputil.all_managers.pop(pool, None)
 
 
 def install_send_hook(pool: Any) -> None:

@@ -88,6 +88,8 @@ class MockExecutor:
     def submit(self, statement: str, query_id: str | None = None) -> str:
         return query_id if query_id is not None else str(uuid.uuid4())
 
+    transport_admission = True
+
     def submit_once(self, statement: str, query_id: str) -> str:
         """Sends once, asking the admission as the request enters the
         transport, as ``ClickHouseClient.submit_once`` does."""
@@ -1993,6 +1995,8 @@ def _client_executor(pool: _FakePool) -> tuple[object, ClickHouseClient]:
     )
 
     class Executor:
+        transport_admission = True
+
         def submit(self, statement: str, query_id: str | None = None) -> str:
             raise AssertionError("submit_once is used")
 
@@ -2125,7 +2129,7 @@ def test_an_interruptible_run_refuses_an_executor_without_submit_once() -> None:
         def query(self, statement: str) -> object:
             return _Result([])
 
-    with pytest.raises(ValueError, match="An interruptible backfill needs an executor with submit_once"):
+    with pytest.raises(ValueError, match="An interruptible backfill needs an executor with transport_admission"):
         execute_backfill(
             executor=SubmitOnly(),
             plan_id=PLAN_ID,
@@ -2154,3 +2158,43 @@ def test_a_version_2_checkpoint_keeps_its_never_sent_chunks_and_drops_single_sen
     result = _run_once(fresh, {"c1": BackfillChunkState(status="pending")}, checkpoint_version=2)
     assert fresh.submits == [FIRST_ID]
     assert result.progress["c1"].status == "done"
+
+
+# Round 6 item 2: a submit_once of another executor may ignore the run's
+# admission; only the declared capability counts.
+def test_an_interruptible_run_refuses_a_submit_once_without_the_transport_admission_marker() -> None:
+    sent: list[str] = []
+
+    class OneShot:
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            raise AssertionError("submit is not used")
+
+        def submit_once(self, statement: str, query_id: str) -> str:
+            sent.append(query_id)
+            return query_id
+
+        def query(self, statement: str) -> object:
+            return _Result([])
+
+    with pytest.raises(ValueError, match="needs an executor with transport_admission"):
+        execute_backfill(
+            executor=OneShot(),
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            stop=threading.Event(),
+        )
+    assert sent == []
+
+    # Without a stop it runs, through submit, and records no single_send.
+    saved: list[BackfillProgress] = []
+    with pytest.raises(AssertionError, match="submit is not used"):
+        execute_backfill(
+            executor=OneShot(),
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            on_progress=saved.append,
+        )
+    assert saved[-1]["c1"].single_send is None
+

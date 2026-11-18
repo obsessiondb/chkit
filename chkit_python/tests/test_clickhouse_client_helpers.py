@@ -10,10 +10,14 @@ from __future__ import annotations
 
 import threading
 import time
+from typing import Any
 from unittest.mock import MagicMock
+from urllib.parse import urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
 import pytest
+from clickhouse_connect.driver import client as driver_client  # type: ignore[import-untyped]
+from clickhouse_connect.driver import httputil
 from clickhouse_connect.driver.exceptions import DatabaseError  # type: ignore[import-untyped]
 from clickhouse_connect.driver.httpclient import HttpClient  # type: ignore[import-untyped]
 from pytest_httpx import HTTPXMock
@@ -30,6 +34,8 @@ from chkit.clickhouse import (
 from chkit.clickhouse.client import (
     SEND_ADMISSION,
     SendNotAdmittedError,
+    _dispose_pool,
+    _own_pool_manager,
     clickhouse_error_message,
     install_send_hook,
 )
@@ -716,3 +722,81 @@ def test_native_control_accepts_zero_exception_header(
     client, _fake = _stub_client()
     httpx_mock.add_response(text='{"n":0}\n', headers={"X-ClickHouse-Exception-Code": code} if code else {})
     assert client.query_control("SELECT 0 AS n", 1000).rows == [{"n": 0}]
+
+
+# #765 round 6: submit_once's private pools never stay in clickhouse-connect's
+# process-wide registry: not after close, a failed open, or a lost race.
+def test_submit_once_pools_leave_the_driver_registry(monkeypatch: pytest.MonkeyPatch) -> None:
+    before = len(httputil.all_managers)
+    calls = {"n": 0}
+
+    def get_client(**kwargs: object) -> MagicMock:
+        calls["n"] += 1
+        if kwargs.get("pool_mgr") is not None and calls["n"] == 2:
+            msg = "Code: 210. NETWORK_ERROR"
+            raise ConnectionError(msg)
+        return MagicMock()
+
+    monkeypatch.setattr("chkit.clickhouse.client.clickhouse_connect.get_client", get_client)
+    config = ChxResolvedClickHouseConfig(
+        url="http://localhost:8123", username="u", password="p", database="d", secure=False
+    )
+    client = ClickHouseClient.connect(config)
+    with pytest.raises(Exception, match=r"NETWORK_ERROR|Could not connect"):
+        client.prepare_submit_once()
+    assert len(httputil.all_managers) == before
+    client.prepare_submit_once()
+    assert len(httputil.all_managers) == before + 1
+    client.close()
+    assert len(httputil.all_managers) == before
+
+
+# #765 round 6: submit_once routes as the driver routes its other requests:
+# an HTTPS URL falls back to HTTP_PROXY, and NO_PROXY exempts the host.
+@pytest.mark.parametrize(
+    ("env", "url"),
+    [
+        ({"HTTP_PROXY": "http://proxy.internal:3128"}, "https://ch.example.com:8443"),
+        ({"HTTPS_PROXY": "http://secure-proxy.internal:3128"}, "https://ch.example.com:8443"),
+        ({"HTTP_PROXY": "http://proxy.internal:3128", "NO_PROXY": "example.com"}, "https://ch.example.com:8443"),
+        ({"HTTP_PROXY": "http://proxy.internal:3128"}, "http://ch.example.com:8123"),
+        ({}, "https://ch.example.com:8443"),
+    ],
+)
+def test_submit_once_routes_through_the_same_proxy_as_the_driver(
+    monkeypatch: pytest.MonkeyPatch, env: dict[str, str], url: str
+) -> None:
+
+
+    for name in ("HTTP_PROXY", "HTTPS_PROXY", "NO_PROXY", "http_proxy", "https_proxy", "no_proxy"):
+        monkeypatch.delenv(name, raising=False)
+    for name, value in env.items():
+        monkeypatch.setenv(name, value)
+    # The driver picks its pool before its connect-time queries, which stop
+    # here, carrying the half-built driver out.
+    class Built(Exception):  # noqa: N818 — a carrier, not an error
+        def __init__(self, driver: Any) -> None:
+            super().__init__()
+            self.driver = driver
+
+    def stop(self: object, *_args: object, **_kwargs: object) -> None:
+        raise Built(self)
+
+    monkeypatch.setattr(driver_client.Client, "__init__", stop)
+    parsed = urlparse(url)
+    with pytest.raises(Built) as built:
+        HttpClient(
+            interface=parsed.scheme, host=parsed.hostname, port=parsed.port, username="u",
+            password="p", database="d",
+        )
+    driver = built.value.driver
+
+    def route(manager: object) -> str | None:
+        proxy = getattr(manager, "proxy", None)
+        return None if proxy is None else str(proxy.url)
+
+    own = _own_pool_manager(url)
+    try:
+        assert route(own) == route(driver.http)
+    finally:
+        _dispose_pool(own)

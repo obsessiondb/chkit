@@ -1,5 +1,7 @@
 import { describe, expect, spyOn, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
+import http from 'node:http'
+import type { AddressInfo } from 'node:net'
 import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
 import { existsSync, fstatSync, statSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
@@ -283,5 +285,114 @@ describe('run lock durability and ownership (#765, round 3)', () => {
     expect(result.stderr).toContain(`Backfill plan ${PLAN_ID}: cancel interrupted (SIGINT); the lock is released.`)
     await rm(join(runsDir, '..'), { recursive: true, force: true })
   }, 30_000)
+})
+
+// Round 6: at a one-connection cap, with the first INSERT held open, the
+// second waits in chkit's send queue. An interrupt, either while it waits or
+// just as its submit starts, releases the lock without the second INSERT ever
+// being written, on Bun (the sources) and on Node (the built package).
+describe('an interrupt with a held INSERT at a one-connection cap', () => {
+  async function heldServer() {
+    const received: string[] = []
+    const server = http.createServer((req) => {
+      received.push(new URL(req.url ?? '/', 'http://localhost').searchParams.get('query_id') ?? '')
+      req.resume() // never answered: the INSERT runs on
+    })
+    await new Promise<void>((resolve) => server.listen(0, '127.0.0.1', resolve))
+    return { received, server, url: `http://127.0.0.1:${(server.address() as AddressInfo).port}/?max_open_connections=1` }
+  }
+
+  function script(modules: { runLock: string; asyncBackfill: string; clickhouse: string }, lockPath: string, url: string): string {
+    return `
+      const { withRunLock } = await import(${JSON.stringify(modules.runLock)})
+      const { executeBackfill } = await import(${JSON.stringify(modules.asyncBackfill)})
+      const { createStatelessClickHouseExecutor } = await import(${JSON.stringify(modules.clickhouse)})
+      await withRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)}, async (signal) => {
+        const db = createStatelessClickHouseExecutor({ url: ${JSON.stringify(url)}, username: 'default', password: '', database: 'default' })
+        const submit = db.submit.bind(db)
+        db.submit = (sql, id, settings, admission) => {
+          console.log('submit ' + id)
+          return submit(sql, id, settings, admission)
+        }
+        try {
+          return await executeBackfill({
+            executor: db, planId: ${JSON.stringify(PLAN_ID)}, chunks: [{ id: 'c1' }, { id: 'c2' }],
+            buildQuery: () => 'INSERT INTO t SELECT 1', concurrency: 2, pollIntervalMs: 10, signal,
+          })
+        } finally {
+          // As the plugin does after an interrupt: a close that is not awaited.
+          if (signal.aborted) void db.close().catch(() => undefined)
+          else await db.close()
+        }
+      })
+    `
+  }
+
+  const runtimes = [
+    {
+      name: 'Bun',
+      command: process.execPath,
+      args: (code: string) => ['-e', code],
+      modules: {
+        runLock: RUN_LOCK_MODULE,
+        asyncBackfill: ASYNC_BACKFILL_MODULE,
+        clickhouse: new URL('../../clickhouse/src/index.ts', import.meta.url).pathname,
+      },
+    },
+    {
+      name: 'Node',
+      // The node binary itself: a version manager's shim on PATH would take
+      // the signal in its place.
+      command: spawnSync('node', ['-p', 'process.execPath'], { encoding: 'utf8' }).stdout.trim(),
+      args: (code: string) => ['--input-type=module', '-e', code],
+      modules: {
+        runLock: new URL('../dist/run-lock.js', import.meta.url).pathname,
+        asyncBackfill: new URL('../dist/async-backfill.js', import.meta.url).pathname,
+        clickhouse: new URL('../../clickhouse/dist/index.js', import.meta.url).pathname,
+      },
+    },
+  ]
+
+  for (const runtime of runtimes) {
+    for (const timing of ['while the second waits for its slot', 'as the second submit starts'] as const) {
+      test(`${runtime.name}: an interrupt ${timing} writes no second INSERT and releases the lock`, async () => {
+        const runsDir = await tempRunsDir()
+        const lockPath = runLockPath(runsDir, PLAN_ID)
+        const { received, server, url } = await heldServer()
+        const child = spawn(runtime.command, runtime.args(script(runtime.modules, lockPath, url)), { stdio: ['ignore', 'pipe', 'pipe'] })
+        let stderr = ''
+        let stdout = ''
+        child.stderr?.on('data', (chunk) => { stderr += String(chunk) })
+        child.stdout?.on('data', (chunk) => { stdout += String(chunk) })
+        const exited = new Promise<number | null>((resolve) => child.on('exit', resolve))
+        const second = `backfill-${PLAN_ID}-c2`
+        await new Promise<void>((resolve, reject) => {
+          const timer = setTimeout(() => reject(new Error(`no second submit: ${stdout} ${stderr}`)), 10_000)
+          child.stdout?.on('data', () => {
+            if (stdout.includes(`submit ${second}`)) {
+              clearTimeout(timer)
+              resolve()
+            }
+          })
+        })
+        if (timing === 'while the second waits for its slot') {
+          // The first INSERT holds the only connection.
+          while (!received.includes(`backfill-${PLAN_ID}-c1`)) await new Promise((r) => setTimeout(r, 10))
+          await new Promise((r) => setTimeout(r, 100))
+        }
+
+        child.kill('SIGINT')
+        const code = await exited
+        await new Promise((r) => setTimeout(r, 300))
+        server.close()
+        server.closeAllConnections?.()
+
+        expect(code, `${stdout}\n${stderr}`).toBe(130)
+        expect(existsSync(lockPath)).toBe(false)
+        expect(received).not.toContain(second)
+        await rm(join(runsDir, '..'), { recursive: true, force: true })
+      }, 30_000)
+    }
+  }
 })
 

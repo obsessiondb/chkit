@@ -303,6 +303,7 @@ class Empty:
         return Result([])
     def submit(self, statement, query_id=None):
         raise AssertionError("submitted")
+    transport_admission = True
     def submit_once(self, statement, query_id):
         raise AssertionError("submitted")
 
@@ -339,6 +340,7 @@ class Hung:
         threading.Event().wait(60)
     def submit(self, statement, query_id=None):
         raise AssertionError("submitted")
+    transport_admission = True
     def submit_once(self, statement, query_id):
         raise AssertionError("submitted")
 

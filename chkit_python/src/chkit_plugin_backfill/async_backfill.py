@@ -633,6 +633,17 @@ def _interrupted_error(plan_id: str) -> BackfillInterruptedError:
     )
 
 
+def _admits_at_transport(executor: object) -> bool:
+    """Whether the executor declares (``transport_admission = True``) that its
+    ``submit_once`` sends once and asks ``SEND_ADMISSION`` as the request
+    enters its transport: only such an attempt is single-send, and only
+    such an executor can serve an interruptible run. A method named
+    ``submit_once`` alone proves neither."""
+    return getattr(executor, "transport_admission", False) is True and callable(
+        getattr(executor, "submit_once", None)
+    )
+
+
 @dataclass(frozen=True)
 class _Handoff:
     """A chunk's ``SendAdmission``: asks the run again at the transport and
@@ -730,11 +741,11 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     stops the run: no new chunk starts, no progress is reported after the
     last report finishes, and a ``BackfillInterruptedError`` is raised.
     Chunks already submitted keep running on the server."""
-    if stop is not None and not callable(getattr(executor, "submit_once", None)):
+    if stop is not None and not _admits_at_transport(executor):
         msg = (
-            "An interruptible backfill needs an executor with submit_once, which sends "
-            "once and asks the run's admission at the transport: another executor could "
-            "send a chunk after the interrupt returned."
+            "An interruptible backfill needs an executor with transport_admission and "
+            "submit_once, which sends once and asks the run's admission at the "
+            "transport: another executor could send a chunk after the interrupt returned."
         )
         raise ValueError(msg)
     saved = (
@@ -824,7 +835,7 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     # and it never waits for an INSERT's response.
     admission = threading.Condition(Lock())
     admitted = [0]
-    single_send = callable(getattr(executor, "submit_once", None))
+    single_send = _admits_at_transport(executor)
 
     def stopping() -> bool:
         # The stop itself counts at once, before the dispatching thread sees it.
@@ -1015,7 +1026,7 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         # a stop that comes meanwhile refuses the send, and close() never
         # waits for it.
         prepare = getattr(executor, "prepare_submit_once", None)
-        if callable(prepare):
+        if single_send and callable(prepare):
             prepare()
         if not admit():
             return None
@@ -1033,7 +1044,7 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                 record(chunk_id, previous)
                 return None
             submit_once = getattr(executor, "submit_once", None)
-            if callable(submit_once):
+            if single_send and callable(submit_once):
                 token = SEND_ADMISSION.set(_Handoff(may_send, release_once))
                 submit_once(sql, query_id)
             else:

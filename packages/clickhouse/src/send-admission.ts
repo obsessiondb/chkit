@@ -12,6 +12,10 @@ import https from 'node:https'
  */
 export interface SubmitAdmission {
   admit(): boolean
+  /** Aborted when the caller stops. A submit still waiting for a connection
+   *  slot (see `createSendQueue`) is then refused without ever reaching the
+   *  HTTP agent. */
+  signal?: AbortSignal
 }
 
 const NOT_ADMITTED = 'CHKIT_SEND_NOT_ADMITTED'
@@ -28,20 +32,87 @@ export function isSendNotAdmitted(error: unknown): boolean {
 type RequestAgent = http.Agent & { addRequest(req: http.ClientRequest, options: unknown): void }
 
 /**
- * The options @clickhouse/client gives the agent it builds itself, so the
- * admission agent connects as the configured client does: keep-alive and the
- * socket limit, which `clickhouse.url` can set (`keep_alive_enabled`,
- * `max_open_connections`; defaults true and 10). chkit's config has no TLS
- * options, so neither agent gets a CA or a client certificate: both use
+ * The connection options `clickhouse.url` sets for @clickhouse/client
+ * (`keep_alive_enabled`, `max_open_connections`; defaults true and 10),
+ * parsed with the driver's own rules (its `booleanConfigURLValue` and
+ * `numberConfigURLValue`): a boolean is `true`, `1`, `false` or `0`, and a
+ * limit is any number of at least 1, fractions included. An invalid value
+ * throws, as it does when the driver builds its client. chkit's config has
+ * no TLS options, so no agent gets a CA or a client certificate: both use
  * Node's (or Bun's) defaults, `NODE_EXTRA_CA_CERTS` and
  * `NODE_TLS_REJECT_UNAUTHORIZED` included.
  */
-export function admissionAgentOptions(url: string): { keepAlive: boolean; maxSockets: number } {
+export function urlConnectionOptions(url: string): { keepAlive: boolean; maxOpenConnections: number } {
   const params = new URL(url).searchParams
-  const maxSockets = Number(params.get('max_open_connections') ?? '10')
+  const keepAlive = params.get('keep_alive_enabled')
+  const maxOpen = params.get('max_open_connections')
   return {
-    keepAlive: params.get('keep_alive_enabled') !== 'false',
-    maxSockets: Number.isInteger(maxSockets) && maxSockets > 0 ? maxSockets : 10,
+    keepAlive: keepAlive === null ? true : urlBoolean('keep_alive_enabled', keepAlive),
+    maxOpenConnections: maxOpen === null ? 10 : urlNumber('max_open_connections', maxOpen, 1),
+  }
+}
+
+function urlBoolean(key: string, value: string): boolean {
+  const trimmed = value.trim()
+  if (trimmed === 'true' || trimmed === '1') return true
+  if (trimmed === 'false' || trimmed === '0') return false
+  throw new Error(`"${key}" has invalid boolean value: ${trimmed}. Expected one of: 0, 1, true, false.`)
+}
+
+function urlNumber(key: string, value: string, min: number): number {
+  const trimmed = value.trim()
+  const number = Number(trimmed)
+  if (Number.isNaN(number)) throw new Error(`"${key}" has invalid numeric value: ${trimmed}`)
+  if (number < min) throw new Error(`"${key}" value ${trimmed} is less than min allowed ${min}`)
+  return number
+}
+
+/**
+ * The connection slots of admitted submits, `limit` at a time (a slot is
+ * free while fewer than `limit` are taken, as Node's agent counts
+ * `maxSockets`). A submit waits here, never in the HTTP agent's own queue:
+ * the agent gets a request only when a slot is free, so a request leaves this
+ * queue straight for its socket. A submit whose admission's signal aborts
+ * while it waits is refused at once, never having reached the agent.
+ */
+export function createSendQueue(limit: number): { acquire(signal?: AbortSignal): Promise<() => void> } {
+  let taken = 0
+  const waiting: Array<() => void> = []
+  const release = () => {
+    taken--
+    waiting.shift()?.()
+  }
+  return {
+    acquire(signal?: AbortSignal): Promise<() => void> {
+      if (signal?.aborted) return Promise.reject(sendNotAdmittedError())
+      if (taken < limit) {
+        taken++
+        return Promise.resolve(once(release))
+      }
+      return new Promise((resolve, reject) => {
+        const take = () => {
+          signal?.removeEventListener('abort', onAbort)
+          taken++
+          resolve(once(release))
+        }
+        const onAbort = () => {
+          const index = waiting.indexOf(take)
+          if (index >= 0) waiting.splice(index, 1)
+          reject(sendNotAdmittedError())
+        }
+        waiting.push(take)
+        signal?.addEventListener('abort', onAbort, { once: true })
+      })
+    },
+  }
+}
+
+function once(fn: () => void): () => void {
+  let done = false
+  return () => {
+    if (done) return
+    done = true
+    fn()
   }
 }
 
@@ -52,7 +123,8 @@ export function admissionAgentOptions(url: string): { keepAlive: boolean; maxSoc
  * a socket error (ECONNREFUSED, EPERM) can reach the driver first.
  */
 export function createAdmissionAgent(url: string, admissions: Map<string, SubmitAdmission>): http.Agent {
-  const options = admissionAgentOptions(url)
+  // The socket limit is the send queue's: the agent never queues a request.
+  const options = { keepAlive: urlConnectionOptions(url).keepAlive, maxSockets: Number.POSITIVE_INFINITY }
   const agent = (new URL(url).protocol === 'https:'
     ? new https.Agent(options)
     : new http.Agent(options)) as RequestAgent
