@@ -56,13 +56,13 @@ class _FakeClient:
 
 
 def test_strips_select_wrapper_and_maps_each_fragment() -> None:
-    client = _FakeClient(["SELECT cityHash64(a, b)", "SELECT (n * 2) + 1"])
+    client = _FakeClient(["SELECT 0, cityHash64(a, b)", "SELECT 0, (n * 2) + 1"])
 
     result = canonicalize_sql_fragments(client, ["cityHash64(a,b)", "n*2+1"], wrap=True)
 
     assert result["cityHash64(a,b)"] == "cityHash64(a, b)"
     assert result["n*2+1"] == "(n * 2) + 1"
-    assert "formatQuerySingleLineOrNull('SELECT ' || fragment)" in client.sqls[-1]
+    assert "formatQuerySingleLineOrNull('SELECT 0, ' || fragment)" in client.sqls[-1]
 
 
 def test_does_not_wrap_when_formatting_full_queries() -> None:
@@ -74,17 +74,57 @@ def test_does_not_wrap_when_formatting_full_queries() -> None:
     assert "formatQuerySingleLineOrNull(fragment)" in client.sqls[-1]
 
 
-def test_omits_fragments_clickhouse_could_not_format() -> None:
-    client = _FakeClient(["SELECT cityHash64(a, b)", None])
+@dataclass
+class _ReplayClient:
+    """Answers the system.functions read from ``TEST_REGISTRY_ROWS`` and
+    replays one canned arrayMap result per formatting query, in order."""
 
-    result = canonicalize_sql_fragments(client, ["cityHash64(a,b)", "((bad"], wrap=True)
+    replies: list[list[str | None]]
+    sqls: list[str] = field(default_factory=list[str])
+
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        if "system.functions" in sql:
+            return QueryResult(
+                column_names=["name", "case_insensitive", "alias_to"], rows=TEST_REGISTRY_ROWS
+            )
+        self.sqls.append(sql)
+        return QueryResult(
+            column_names=["formatted"], rows=[{"formatted": self.replies[len(self.sqls) - 1]}]
+        )
+
+
+def test_retries_bare_what_did_not_format_after_0_and_omits_what_never_formats() -> None:
+    client = _ReplayClient(
+        [["SELECT 0, cityHash64(a, b)", None, None], ["SELECT FLOOR(`from`)", None]]
+    )
+
+    result = canonicalize_sql_fragments(
+        client, ["cityHash64(a,b)", "FLOOR(from)", "((bad"], wrap=True
+    )
 
     assert result["cityHash64(a,b)"] == "cityHash64(a, b)"
+    # The retried result resolves function names too.
+    assert result["FLOOR(from)"] == "floor(`from`)"
     assert "((bad" not in result
+    assert len(client.sqls) == 2
+    assert "formatQuerySingleLineOrNull('SELECT ' || fragment)" in client.sqls[1]
+    assert "['FLOOR(from)', '((bad']" in client.sqls[1]
+
+
+def test_does_not_retry_a_fragment_led_by_all_or_distinct() -> None:
+    client = _ReplayClient([[None, None, None, None], ["SELECT `from`"]])
+
+    result = canonicalize_sql_fragments(
+        client, ["all from", " /* c */ DISTINCT from", "from", "`all` from"], wrap=True
+    )
+
+    assert len(client.sqls) == 2
+    assert "['from', '`all` from']" in client.sqls[1]
+    assert "all from" not in result
 
 
 def test_escapes_quotes_and_backslashes_and_drops_blank_input() -> None:
-    client = _FakeClient(["SELECT concat(a, 'x,y')"])
+    client = _FakeClient(["SELECT 0, concat(a, 'x,y')"])
 
     result = canonicalize_sql_fragments(client, ["concat(a,'x,y')", "", "   "], wrap=True)
 
@@ -94,7 +134,7 @@ def test_escapes_quotes_and_backslashes_and_drops_blank_input() -> None:
 
 
 def test_escapes_backslashes() -> None:
-    client = _FakeClient(["SELECT 'a\\\\b'"])
+    client = _FakeClient(["SELECT 0, 'a\\\\b'"])
 
     canonicalize_sql_fragments(client, ["'a\\b'"], wrap=True)
 
@@ -120,7 +160,7 @@ class _EchoClient:
             return QueryResult(column_names=["name", "case_insensitive", "alias_to"], rows=[])
         literal_count = len(re.findall("'", sql)) // 2
         return QueryResult(
-            column_names=["formatted"], rows=[{"formatted": ["SELECT ok"] * literal_count}]
+            column_names=["formatted"], rows=[{"formatted": ["SELECT 0, ok"] * literal_count}]
         )
 
 
