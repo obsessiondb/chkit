@@ -870,7 +870,7 @@ export function columnRenameKey(rename: ColumnRename): string {
 /**
  * Orders the column statements (ADD, MODIFY, DROP and RENAME COLUMN) and the
  * table TTL statement of every table in one dependency sort, from their key
- * order (#681, #745, #746, #758, #769):
+ * order (#681, #745, #746, #758, #769, #775):
  * - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
  *   a table TTL that reads column X runs after the ADD of X or the RENAME to X;
  * - a DROP of X runs after the MODIFY or DROP of every column whose old
@@ -880,6 +880,8 @@ export function columnRenameKey(rename: ColumnRename): string {
  *   the TTL that read X to the new name;
  * - a MODIFY whose new expression would close a cycle with an old expression
  *   runs after the MODIFY that removes that old read (`cycleReleases`);
+ * - when the order still closes a cycle, the first breaker in key order runs
+ *   before the MODIFY that closes it (`breakClosedCycles`, #775);
  * - statements of the same column keep their order.
  * Members of a cycle keep their key order. The statements fill the positions
  * the column statements had, so every other operation keeps its place, and a
@@ -938,16 +940,169 @@ export function orderColumnStatements(
     }
     if (index > 0 && statements[index - 1]?.key === op.key) found.add(index - 1)
     found.delete(index)
-    return [...found].map(String)
+    return [...found]
   })
 
-  const ordered = orderByDependencies(
-    statements.map((op, index) => ({ op, index })),
-    (item) => String(item.index),
-    (key) => prerequisites[Number(key)] ?? []
-  )
+  const changes = defaultChanges(statements, reads, definitions)
+  const ordered = breakClosedCycles(prerequisites, (order) => firstClosedCycle(order, statements, changes, oldReads, renames))
   let next = 0
-  return operations.map((op) => (isColumnStatement(op) ? (ordered[next++]?.op ?? op) : op))
+  return operations.map((op) => (isColumnStatement(op) ? (statements[ordered[next++] ?? -1] ?? op) : op))
+}
+
+/** A statement whose new expression closes a cycle, and the later statements that remove a read on it. */
+interface ClosedCycle {
+  statement: number
+  breakers: number[]
+}
+
+/**
+ * The statement order, with the MODIFYs that break a cycle moved before the
+ * MODIFY that would close it (#775). `cycleReleases` adds an edge only when
+ * one MODIFY must break the cycle in every order. When several could, or the
+ * cycle closes through two new expressions, this replays the sorted order and,
+ * at the first statement that closes a cycle, moves the breaker with the
+ * lowest key order before it, then replays again. A breaker that already
+ * waits for that statement is skipped, so the edges never form a cycle. Each
+ * round adds a new edge, so the rounds end. When the replay finds no closed
+ * cycle in the sorted order, that order is returned unchanged; when the
+ * repaired order still closes one, the sorted order is returned too.
+ */
+function breakClosedCycles(
+  prerequisites: number[][],
+  closedCycle: (order: number[]) => ClosedCycle | undefined
+): number[] {
+  const sort = () =>
+    orderByDependencies(
+      prerequisites.map((_, index) => index),
+      String,
+      (key) => (prerequisites[Number(key)] ?? []).map(String)
+    )
+  const sorted = sort()
+  let order = sorted
+  for (let closed = closedCycle(order); closed !== undefined; closed = closedCycle(order)) {
+    const target = closed.statement
+    const breaker = closed.breakers.find((other) => !waitsFor(prerequisites, other, target))
+    if (breaker === undefined) return sorted
+    prerequisites[target]?.push(breaker)
+    order = sort()
+  }
+  return order
+}
+
+/** Whether statement `from` runs after statement `target` through `prerequisites`. */
+function waitsFor(prerequisites: number[][], from: number, target: number): boolean {
+  const seen = new Set([from])
+  const pending = [from]
+  for (let index = pending.pop(); index !== undefined; index = pending.pop()) {
+    for (const other of prerequisites[index] ?? []) {
+      if (other === target) return true
+      if (!seen.has(other)) {
+        seen.add(other)
+        pending.push(other)
+      }
+    }
+  }
+  return false
+}
+
+/**
+ * Statement index → the reads its column's expression has after it runs, for
+ * the statements that set an expression: an ADD, a column's last MODIFY
+ * (which sets the new expression or keeps none), and the REMOVE DEFAULT,
+ * MATERIALIZED or ALIAS that runs first when the new column has no
+ * expression. The other statements (REMOVE COMMENT, REMOVE CODEC) keep it.
+ */
+function defaultChanges(
+  statements: MigrationOperation[],
+  reads: DependencyGraph,
+  definitions: ColumnStatementDefinitions
+): Map<number, ReadonlySet<string>> {
+  const removed = expressionRemovals(definitions)
+  const changes = new Map<number, ReadonlySet<string>>()
+  statements.forEach((op, index) => {
+    const first = statements[index - 1]?.key !== op.key
+    const last = statements[index + 1]?.key !== op.key
+    const isModify = op.type === 'alter_table_modify_column'
+    if (op.type === 'alter_table_add_column' || (isModify && last)) changes.set(index, reads.get(op.key) ?? new Set())
+    else if (isModify && first && removed.has(op.key)) changes.set(index, new Set())
+  })
+  return changes
+}
+
+/** Keys of the changed columns whose MODIFY starts with REMOVE DEFAULT (`renderAlterRemoveColumnExpression`). */
+function expressionRemovals(definitions: ColumnStatementDefinitions): Set<string> {
+  const previous = new Map<string, ColumnDefinition>()
+  for (const def of definitions.previous) {
+    if (def.kind !== 'table') continue
+    for (const column of def.columns) previous.set(columnKey({ database: def.database, table: def.name }, column.name), column)
+  }
+  const removed = new Set<string>()
+  for (const def of definitions.next) {
+    if (def.kind !== 'table') continue
+    for (const column of def.columns) {
+      const key = columnKey({ database: def.database, table: def.name }, column.name)
+      const old = previous.get(key)
+      if (old?.default !== undefined && column.default === undefined && column.defaultKind !== 'EPHEMERAL') removed.add(key)
+    }
+  }
+  return removed
+}
+
+/**
+ * Replays `order` over the old expressions and returns the first ADD or
+ * MODIFY whose new expression closes a cycle, which ClickHouse rejects
+ * (`Cyclic alias detected`), with the later statements that remove a read
+ * on that cycle, in key order. A DROP removes its column. A table with a
+ * RENAME COLUMN in `renames` is not checked: the replay does not rename.
+ */
+function firstClosedCycle(
+  order: number[],
+  statements: MigrationOperation[],
+  changes: ReadonlyMap<number, ReadonlySet<string>>,
+  oldReads: DependencyGraph,
+  renames: readonly ColumnRename[]
+): ClosedCycle | undefined {
+  const renamed = renames.map((rename) => columnKey(rename, ''))
+  const state = new Map<string, ReadonlySet<string>>(oldReads)
+  for (const [position, index] of order.entries()) {
+    const op = statements[index]
+    if (op === undefined) continue
+    if (op.type === 'alter_table_drop_column') state.delete(op.key)
+    const change = changes.get(index)
+    if (change === undefined) continue
+    state.set(op.key, change)
+    const cycle = cycleThrough(op.key, state)
+    if (cycle.size === 0 || renamed.some((prefix) => op.key.startsWith(prefix))) continue
+    const breakers = order.slice(position + 1).filter((other) => {
+      const column = statements[other]?.key ?? ''
+      const after = changes.get(other)
+      if (column === op.key || !cycle.has(column) || after === undefined) return false
+      return [...(state.get(column) ?? [])].some((read) => cycle.has(read) && !after.has(read))
+    })
+    return { statement: index, breakers: breakers.sort((a, b) => a - b) }
+  }
+  return undefined
+}
+
+/** The columns on a cycle of reads through `key` in `state`, or none. */
+function cycleThrough(key: string, state: ReadonlyMap<string, ReadonlySet<string>>): Set<string> {
+  const reached = (next: (column: string) => Iterable<string>): Set<string> => {
+    const seen = new Set<string>()
+    const pending = [key]
+    for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
+      for (const other of next(column)) {
+        if (!seen.has(other)) {
+          seen.add(other)
+          pending.push(other)
+        }
+      }
+    }
+    return seen
+  }
+  const readsFrom = reached((column) => state.get(column) ?? [])
+  if (!readsFrom.has(key)) return new Set()
+  const readBy = reached((column) => [...state].filter(([, read]) => read.has(column)).map(([reader]) => reader))
+  return new Set([...readsFrom].filter((column) => readBy.has(column)))
 }
 
 /**

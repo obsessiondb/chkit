@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -892,7 +892,7 @@ def order_column_statements(
     """Order the column and TTL statements of every table in one sort (TS orderColumnStatements).
 
     The statements are ADD, MODIFY, DROP and RENAME COLUMN and the table TTL
-    statement, from their key order (#681, #745, #746, #758, #769):
+    statement, from their key order (#681, #745, #746, #758, #769, #775):
 
     - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
       a table TTL that reads column X runs after the ADD of X or the RENAME to X;
@@ -904,6 +904,8 @@ def order_column_statements(
     - a MODIFY whose new expression would close a cycle with an old
       expression runs after the MODIFY that removes that old read
       (``_cycle_releases``);
+    - when the order still closes a cycle, the first breaker in key order runs
+      before the MODIFY that closes it (``_break_closed_cycles``, #775);
     - statements of the same column keep their order.
 
     Members of a cycle keep their key order. The statements fill the positions
@@ -940,7 +942,7 @@ def order_column_statements(
                 releasers.setdefault(read, []).append(index)
 
     added = {op.key for op in statements if op.type == "alter_table_add_column"}
-    prerequisites: list[list[str]] = []
+    prerequisites: list[list[int]] = []
     for index, op in enumerate(statements):
         found: dict[int, None] = {}
         if op.type in ("alter_table_add_column", "alter_table_modify_column"):
@@ -963,16 +965,184 @@ def order_column_statements(
         if index > 0 and statements[index - 1].key == op.key:
             found[index - 1] = None
         found.pop(index, None)
-        prerequisites.append([str(other) for other in found])
+        prerequisites.append(list(found))
 
+    changes = _default_changes(statements, reads, previous, next_)
     ordered = iter(
-        order_by_dependencies(
-            list(range(len(statements))),
-            str,
-            lambda key: prerequisites[int(key)],
+        _break_closed_cycles(
+            prerequisites,
+            lambda order: _first_closed_cycle(order, statements, changes, old_reads, renames),
         )
     )
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
+
+
+def _break_closed_cycles(
+    prerequisites: list[list[int]],
+    closed_cycle: Callable[[list[int]], tuple[int, list[int]] | None],
+) -> list[int]:
+    """The statement order, with a cycle's breakers moved before the MODIFY closing it (#775).
+
+    ``_cycle_releases`` adds an edge only when one MODIFY must break the
+    cycle in every order. When several could, or the cycle closes through two
+    new expressions, this replays the sorted order and, at the first statement
+    that closes a cycle, moves the breaker with the lowest key order before
+    it, then replays again. A breaker that already waits for that statement is
+    skipped, so the edges never form a cycle. Each round adds a new edge, so
+    the rounds end. When the replay finds no closed cycle in the sorted order,
+    that order is returned unchanged; when the repaired order still closes
+    one, the sorted order is returned too.
+    """
+
+    def sort() -> list[int]:
+        return order_by_dependencies(
+            list(range(len(prerequisites))),
+            str,
+            lambda key: [str(other) for other in prerequisites[int(key)]],
+        )
+
+    ordered = sort()
+    order = ordered
+    closed = closed_cycle(order)
+    while closed is not None:
+        target, breakers = closed
+        breaker = next(
+            (other for other in breakers if not _waits_for(prerequisites, other, target)), None
+        )
+        if breaker is None:
+            return ordered
+        prerequisites[target].append(breaker)
+        order = sort()
+        closed = closed_cycle(order)
+    return order
+
+
+def _waits_for(prerequisites: list[list[int]], start: int, target: int) -> bool:
+    """Whether statement ``start`` runs after statement ``target`` through ``prerequisites``."""
+    seen = {start}
+    pending = [start]
+    while pending:
+        for other in prerequisites[pending.pop()]:
+            if other == target:
+                return True
+            if other not in seen:
+                seen.add(other)
+                pending.append(other)
+    return False
+
+
+def _default_changes(
+    statements: Sequence[MigrationOperation],
+    reads: dict[str, set[str]],
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
+) -> dict[int, set[str]]:
+    """Statement index to the reads its column's expression has after it runs.
+
+    Only for the statements that set an expression: an ADD, a column's last
+    MODIFY (which sets the new expression or keeps none), and the REMOVE
+    DEFAULT, MATERIALIZED or ALIAS that runs first when the new column has no
+    expression. The other statements (REMOVE COMMENT, REMOVE CODEC) keep it.
+    """
+    removed = _expression_removals(previous, next_)
+    changes: dict[int, set[str]] = {}
+    for index, op in enumerate(statements):
+        first = index == 0 or statements[index - 1].key != op.key
+        last = index + 1 == len(statements) or statements[index + 1].key != op.key
+        is_modify = op.type == "alter_table_modify_column"
+        if op.type == "alter_table_add_column" or (is_modify and last):
+            changes[index] = reads.get(op.key, set())
+        elif is_modify and first and op.key in removed:
+            changes[index] = set()
+    return changes
+
+
+def _expression_removals(
+    previous: Sequence[SchemaDefinition], next_: Sequence[SchemaDefinition]
+) -> set[str]:
+    """Keys of the changed columns whose MODIFY starts with REMOVE DEFAULT.
+
+    The condition is ``render_alter_remove_column_expression``'s.
+    """
+    old_columns: dict[str, ColumnDefinition] = {}
+    for definition in previous:
+        if isinstance(definition, TableDefinition):
+            for column in definition.columns:
+                old_columns[_column_key(definition.database, definition.name, column.name)] = column
+    removed: set[str] = set()
+    for definition in next_:
+        if not isinstance(definition, TableDefinition):
+            continue
+        for column in definition.columns:
+            key = _column_key(definition.database, definition.name, column.name)
+            old = old_columns.get(key)
+            if (
+                old is not None
+                and old.default is not None
+                and column.default is None
+                and column.default_kind != "EPHEMERAL"
+            ):
+                removed.add(key)
+    return removed
+
+
+def _first_closed_cycle(
+    order: list[int],
+    statements: Sequence[MigrationOperation],
+    changes: dict[int, set[str]],
+    old_reads: dict[str, set[str]],
+    renames: Sequence[ColumnRenameSuggestion],
+) -> tuple[int, list[int]] | None:
+    """Replay ``order`` and return the first ADD or MODIFY whose new expression closes a cycle.
+
+    ClickHouse rejects such an expression (``Cyclic alias detected``). The
+    result is that statement's index with the later statements that remove a
+    read on that cycle, in key order. A DROP removes its column. A table with
+    a RENAME COLUMN in ``renames`` is not checked: the replay does not rename.
+    """
+    renamed = [_column_key(rename.database, rename.table, "") for rename in renames]
+    state: dict[str, set[str]] = dict(old_reads)
+    for position, index in enumerate(order):
+        op = statements[index]
+        if op.type == "alter_table_drop_column":
+            state.pop(op.key, None)
+        change = changes.get(index)
+        if change is None:
+            continue
+        state[op.key] = change
+        cycle = _cycle_through(op.key, state)
+        if not cycle or any(op.key.startswith(prefix) for prefix in renamed):
+            continue
+        breakers = []
+        for other in order[position + 1 :]:
+            column = statements[other].key
+            after = changes.get(other)
+            if column == op.key or column not in cycle or after is None:
+                continue
+            if any(read in cycle and read not in after for read in state.get(column, ())):
+                breakers.append(other)
+        return index, sorted(breakers)
+    return None
+
+
+def _cycle_through(key: str, state: dict[str, set[str]]) -> set[str]:
+    """The columns on a cycle of reads through ``key`` in ``state``, or none."""
+
+    def reached(following: Callable[[str], Iterable[str]]) -> set[str]:
+        seen: set[str] = set()
+        pending = [key]
+        while pending:
+            for other in following(pending.pop()):
+                if other not in seen:
+                    seen.add(other)
+                    pending.append(other)
+        return seen
+
+    reads_from = reached(lambda column: state.get(column, ()))
+    if key not in reads_from:
+        return set()
+    read_by = reached(lambda column: [reader for reader, read in state.items() if column in read])
+    return reads_from & read_by
 
 
 def _cycle_releases(

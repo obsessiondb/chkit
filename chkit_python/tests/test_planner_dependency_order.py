@@ -1126,6 +1126,82 @@ def test_a_ttl_change_that_reads_no_changed_column_keeps_its_slot() -> None:
     ]
 
 
+# ---------- a breaker runs before the MODIFY that closes a temporary cycle (#775) ----------
+
+
+def _u(name: str, expression: str | None = None, **extra: Any) -> dict[str, Any]:
+    column: dict[str, Any] = {"name": name, "type": "UInt64", **extra}
+    if expression is not None:
+        column["default"] = _expr(expression)
+    return column
+
+
+def test_runs_the_first_breaker_in_key_order_before_the_modify_that_would_close_the_cycle() -> None:
+    # `a DEFAULT b` closes `a` -> `b` -> `c` -> `a`; either `b` or `c` breaks it.
+    assert _sqls(
+        [_t([_u("a"), _u("b", "c"), _u("c", "a")])],
+        [_t([_u("a", "b"), _u("b", "id"), _u("c", "id")])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+    ]
+
+
+def test_removes_the_breaking_default_before_the_second_of_two_modifies_that_close_a_cycle() -> None:
+    # `a DEFAULT b` and `b DEFAULT c` close `a` -> `b` -> `c` -> `a` together,
+    # so whichever runs second waits for `c` to drop its read of `a`.
+    assert _sqls(
+        [_t([_u("a"), _u("b"), _u("c", "a")])],
+        [_t([_u("a", "b"), _u("b", "c"), _u("c")])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT c;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64;",
+    ]
+
+
+def test_moves_another_breaker_before_a_breaker_that_would_close_a_cycle_itself() -> None:
+    # `b` breaks `a` -> `d` -> `b` -> `a` but closes `b` -> `d` -> `b` itself,
+    # so `d` runs before `b`, and `b` before `a`.
+    assert _sqls(
+        [_t([_u("a", "1"), _u("b", "a"), _u("c"), _u("d", "b + c")])],
+        [_t([_u("a", "c + d"), _u("b", "c + d"), _u("c"), _u("d", "1")])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT 1;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT c + d;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT c + d;",
+    ]
+
+
+def test_the_breaker_is_the_remove_default_not_the_comment_removal_of_the_same_column() -> None:
+    # The REMOVE DEFAULT breaks the cycle; the REMOVE COMMENT after it does not.
+    assert _sqls(
+        [_t([_u("a"), _u("b", "c", comment="x"), _u("c", "a")])],
+        [_t([_u("a", "b"), _u("b"), _u("c", "id")])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE COMMENT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+    ]
+
+
+def test_keeps_key_order_when_no_statement_closes_a_cycle() -> None:
+    # `c` reads `a` only until it changes, and `a` reads `b` only after it:
+    # the key order never holds the cycle, so nothing moves.
+    assert _sqls(
+        [_t([_u("a"), _u("b"), _u("c", "a")])],
+        [_t([_u("a", "b"), _u("b", "id"), _u("c", "id")])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+    ]
+
+
 # ---------- the column reads skip lambda parameters and CAST types (#768) ----------
 
 

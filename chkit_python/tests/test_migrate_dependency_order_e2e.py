@@ -448,6 +448,36 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "order": ["column:a", "column:b"],
         "columns": ["a", "b", "c", "id"],
     },
+    # #775: in key order each of these fails with `Cyclic alias detected`: a
+    # MODIFY closes a cycle that more than one other MODIFY could break first.
+    {
+        "label": "breakany",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('id')}}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:b", "column:a", "column:c"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "breaktwo",
+        "before": "{'name': 'a', 'type': 'UInt64'}, {'name': 'b', 'type': 'UInt64'}, "
+        f"{{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64'}}",
+        "order": ["column:a", "column:c", "column:b"],
+        "columns": ["a", "b", "c", "id"],
+    },
+    {
+        "label": "breakcomment",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('c')}, 'comment': 'x'}}, "
+        f"{{'name': 'c', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64'}}, {{'name': 'c', 'type': 'UInt64', {_e('id')}}}",
+        "order": ["column:b", "column:a", "column:c"],
+        "columns": ["a", "b", "c", "id"],
+    },
 ]
 
 

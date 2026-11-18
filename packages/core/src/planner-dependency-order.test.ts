@@ -1201,3 +1201,81 @@ describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () 
     expect(readsOf(expression)).toEqual(expected)
   })
 })
+
+describe('planDiff moves a breaker before the MODIFY that closes a temporary cycle (#775)', () => {
+  const t = (columns: ColumnDefinition[]) =>
+    table({
+      database: 'app',
+      name: 't',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+  const u = (name: string, expression?: string, extra: Partial<ColumnDefinition> = {}): ColumnDefinition => ({
+    name,
+    type: 'UInt64',
+    ...(expression === undefined ? {} : { default: { expression } }),
+    ...extra,
+  })
+  const sqls = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => op.sql)
+
+  // `a DEFAULT b` closes `a` → `b` → `c` → `a`; either `b` or `c` breaks it.
+  test('runs the first breaker in key order before the MODIFY that would close the cycle', () => {
+    expect(sqls([t([u('a'), u('b', 'c'), u('c', 'a')])], [t([u('a', 'b'), u('b', 'id'), u('c', 'id')])])).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // `a DEFAULT b` and `b DEFAULT c` close `a` → `b` → `c` → `a` together, so
+  // whichever runs second waits for `c` to drop its read of `a`.
+  test('removes the breaking DEFAULT before the second of two MODIFYs that close a cycle', () => {
+    expect(sqls([t([u('a'), u('b'), u('c', 'a')])], [t([u('a', 'b'), u('b', 'c'), u('c')])])).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT c;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64;',
+    ])
+  })
+
+  // `b` breaks `a` → `d` → `b` → `a` but closes `b` → `d` → `b` itself, so
+  // `d` runs before `b`, and `b` before `a`.
+  test('moves another breaker before a breaker that would close a cycle itself', () => {
+    expect(
+      sqls(
+        [t([u('a', '1'), u('b', 'a'), u('c'), u('d', 'b + c')])],
+        [t([u('a', 'c + d'), u('b', 'c + d'), u('c'), u('d', '1')])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `d` UInt64 DEFAULT 1;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT c + d;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT c + d;',
+    ])
+  })
+
+  // The REMOVE DEFAULT breaks the cycle; the REMOVE COMMENT after it does not.
+  test('the breaker is the REMOVE DEFAULT, not the comment removal of the same column', () => {
+    expect(
+      sqls([t([u('a'), u('b', 'c', { comment: 'x' }), u('c', 'a')])], [t([u('a', 'b'), u('b'), u('c', 'id')])])
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE COMMENT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // `c` reads `a` only until it changes, and `a` reads `b` only after it:
+  // the key order never holds the cycle, so nothing moves.
+  test('keeps key order when no statement closes a cycle', () => {
+    expect(sqls([t([u('a'), u('b'), u('c', 'a')])], [t([u('a', 'b'), u('b', 'id'), u('c', 'id')])])).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+    ])
+  })
+})
