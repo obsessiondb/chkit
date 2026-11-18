@@ -276,15 +276,35 @@ export function summarizeDriftReasons(input: {
   }
 }
 
-function normalizeColumnShape(column: ColumnDefinition): string {
+// system.columns stores SQL, whereas schema strings are literals unless fn:-prefixed.
+function liveColumns(actual: ActualTableShape): ColumnDefinition[] {
+  return actual.columns.map((column) => ({
+    ...column,
+    default: typeof column.default === 'string' && !column.default.startsWith('fn:')
+      ? `fn:${column.default}`
+      : column.default,
+  }))
+}
+
+// ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
+// which introspection reads back as no expression; an explicit one matches it.
+function columnDefaultSql(column: ColumnDefinition): string | undefined {
   const rendered = column.default === undefined ? undefined : renderDefault(column.default)
-  // ClickHouse stores a bare EPHEMERAL column as defaultValueOfTypeName('<type>'),
-  // which introspection reads back as no expression; an explicit one matches it.
+  if (rendered === undefined) return undefined
+  if (column.defaultKind === 'EPHEMERAL' && isSyntheticEphemeralDefault(rendered)) return undefined
+  return rendered
+}
+
+// A DEFAULT, MATERIALIZED or ALIAS expression goes through the canonicalizer,
+// since ClickHouse re-formats it when it stores it (`id*2+1` comes back as
+// `(id * 2) + 1`). A literal compares by its value (#466).
+function normalizeColumnShape(column: ColumnDefinition, canonicalizer?: SqlCanonicalizer): string {
+  const rendered = columnDefaultSql(column)
   const normalizedDefault =
-    rendered === undefined ||
-    (column.defaultKind === 'EPHEMERAL' && isSyntheticEphemeralDefault(rendered))
+    rendered === undefined
       ? ''
-      : (literalDefaultFingerprint(rendered) ?? sqlExpressionFingerprint(rendered))
+      : (literalDefaultFingerprint(rendered) ??
+        sqlExpressionFingerprint(canonicalizer?.expression(rendered.trim()) ?? rendered))
   const parts = [
     // Introspection unwraps Nullable(T) into type=T plus nullable=true, and
     // ClickHouse spaces the type its own way (`Decimal(10, 2)`).
@@ -528,8 +548,9 @@ function enginesMatch(expected: string | undefined, actual: string | undefined):
 
 /**
  * Every SQL fragment `compareTableShape` will look up in a `SqlCanonicalizer`,
- * at the exact granularity it looks them up (whole expressions for index/ttl,
- * per-element for key/partition clauses, whole query for SELECT projections).
+ * at the exact granularity it looks them up (whole expressions for column
+ * defaults and index/ttl, per-element for key/partition clauses, whole query
+ * for SELECT projections).
  * The drift command collects these across all compared tables, formats them in
  * one round-trip, and hands back a map-backed canonicalizer.
  */
@@ -540,6 +561,10 @@ export function collectTableSqlFragments(
   const expressions: string[] = []
   const queries: string[] = []
 
+  for (const column of [...expected.columns, ...liveColumns(actual)]) {
+    const sql = columnDefaultSql(column)
+    if (sql !== undefined && literalDefaultFingerprint(sql) === undefined) expressions.push(sql.trim())
+  }
   for (const index of [...(expected.indexes ?? []), ...actual.indexes]) {
     expressions.push(index.type === 'text' ? textIndexExpressionBase(index) : indexExpressionBase(index))
   }
@@ -571,15 +596,9 @@ export function compareTableShape(
 ): TableDriftDetail | null {
   const columnDiff = diffByName(
     expected.columns,
-    // system.columns stores SQL, whereas schema strings are literals unless fn:-prefixed.
-    actual.columns.map((column) => ({
-      ...column,
-      default: typeof column.default === 'string' && !column.default.startsWith('fn:')
-        ? `fn:${column.default}`
-        : column.default,
-    })),
+    liveColumns(actual),
     (column: ColumnDefinition) => column.name,
-    normalizeColumnShape
+    (column: ColumnDefinition) => normalizeColumnShape(column, canonicalizer)
   )
   const missingColumns = columnDiff.missing
   const extraColumns = columnDiff.extra

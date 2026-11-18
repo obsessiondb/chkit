@@ -127,6 +127,127 @@ export default schema(table({
     }
   }, 240_000)
 
+  test('column expressions read clean as ClickHouse formats them, and a changed one drifts (#752)', async () => {
+    const executor = createLiveExecutor(liveEnv)
+    const database = liveEnv.clickhouseDatabase
+    const usersTable = `${createPrefix('drift_col_expr')}users`
+    const journalTable = createJournalTableName('drift_col_expr')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const fixture = await createFixture({ database, usersTableName: usersTable })
+    const object = `${quoteIdent(database)}.${quoteIdent(usersTable)}`
+    const args = ['--config', fixture.configPath, '--table', `${database}.${usersTable}`, '--json']
+
+    try {
+      // ClickHouse stores these as `(id * 2) + 1`, `ts + toIntervalDay(1)`,
+      // `floor(id)` and `lower(s)`.
+      await writeFile(fixture.schemaPath, `import { schema, table } from '${CORE_ENTRY}'
+export default schema(table({
+  database: '${database}', name: '${usersTable}', engine: 'MergeTree()', orderBy: ['id'],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'ts', type: 'DateTime' },
+    { name: 's', type: 'String' },
+    { name: 'bucket', type: 'UInt64', default: { expression: 'FLOOR(id)' } },
+    { name: 'lowered', type: 'String', defaultKind: 'MATERIALIZED', default: { expression: 'LCASE(s)' } },
+    { name: 'score', type: 'UInt64', default: { expression: 'id * 2 + 1' } },
+    { name: 'due', type: 'DateTime', defaultKind: 'MATERIALIZED', default: { expression: 'ts + INTERVAL 1 DAY' } },
+    { name: 'twice', type: 'UInt64', defaultKind: 'ALIAS', default: { expression: 'id * 2 + 1' } },
+  ],
+}))
+`, 'utf8')
+      const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic('column expression generate failed', generated))
+      const migrated = await runCliWithRetry(
+        fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'], { extraEnv: cliEnv }
+      )
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic('column expression migrate failed', migrated))
+      await waitForTable(executor, database, usersTable)
+
+      const drift = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(drift.exitCode).toBe(0)
+      expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
+      const check = runCli(fixture.dir, ['check', '--strict', ...args], cliEnv)
+      expect(check.exitCode).toBe(0)
+      expect(JSON.parse(check.stdout)).toMatchObject({ ok: true, drifted: false, failedChecks: [] })
+
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN score UInt64 DEFAULT id * 3 + 1`)
+      await waitForRows<{ default_expression: string }>(executor,
+        `SELECT default_expression FROM system.columns WHERE database = '${database}' AND table = '${usersTable}' AND name = 'score'`,
+        (rows) => rows[0]?.default_expression === '(id * 3) + 1',
+        'score default change'
+      )
+      const changed = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(changed.exitCode).toBe(0)
+      expect(JSON.parse(changed.stdout)).toMatchObject({
+        drifted: true,
+        tableDrift: [{ table: `${database}.${usersTable}`, changedColumns: ['score'], reasonCodes: ['changed_column'] }],
+      })
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${object}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 240_000)
+
+  test('columns named from and all read clean in an index, TTL and default, and a changed default drifts', async () => {
+    const executor = createLiveExecutor(liveEnv)
+    const database = liveEnv.clickhouseDatabase
+    const usersTable = `${createPrefix('drift_kw_names')}users`
+    const journalTable = createJournalTableName('drift_kw_names')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const fixture = await createFixture({ database, usersTableName: usersTable })
+    const object = `${quoteIdent(database)}.${quoteIdent(usersTable)}`
+    const args = ['--config', fixture.configPath, '--table', `${database}.${usersTable}`, '--json']
+
+    try {
+      // `from` does not format after `SELECT 0,`, and `all` reads as the
+      // modifier right after `SELECT`.
+      await writeFile(fixture.schemaPath, `import { schema, table } from '${CORE_ENTRY}'
+export default schema(table({
+  database: '${database}', name: '${usersTable}', engine: 'MergeTree()', orderBy: ['id'],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'from', type: 'DateTime' },
+    { name: 'all', type: 'UInt64' },
+    { name: 'score', type: 'UInt64', default: { expression: 'all + id' } },
+  ],
+  indexes: [{ name: 'idx_from', expression: 'from', type: 'minmax', granularity: 1 }],
+  ttl: 'from',
+}))
+`, 'utf8')
+      const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic('keyword names generate failed', generated))
+      const migrated = await runCliWithRetry(
+        fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'], { extraEnv: cliEnv }
+      )
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic('keyword names migrate failed', migrated))
+      await waitForTable(executor, database, usersTable)
+
+      const drift = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(drift.exitCode).toBe(0)
+      expect(JSON.parse(drift.stdout)).toMatchObject({ drifted: false, tableDrift: [] })
+
+      await executor.command(`ALTER TABLE ${object} MODIFY COLUMN score UInt64 DEFAULT id`)
+      await waitForRows<{ default_expression: string }>(executor,
+        `SELECT default_expression FROM system.columns WHERE database = '${database}' AND table = '${usersTable}' AND name = 'score'`,
+        (rows) => rows[0]?.default_expression === 'id',
+        'score default change'
+      )
+      const changed = runCli(fixture.dir, ['drift', ...args], cliEnv)
+      expect(changed.exitCode).toBe(0)
+      expect(JSON.parse(changed.stdout)).toMatchObject({
+        drifted: true,
+        tableDrift: [{ table: `${database}.${usersTable}`, changedColumns: ['score'], reasonCodes: ['changed_column'] }],
+      })
+    } finally {
+      await executor.command(`DROP TABLE IF EXISTS ${object}`)
+      await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(database)}.${quoteIdent(journalTable)}`)
+      await executor.close()
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 240_000)
+
   test('every codec form migrates without drift, and server codec changes drift (#383, #465)', async () => {
     const executor = createLiveExecutor(liveEnv)
     const database = liveEnv.clickhouseDatabase
@@ -728,6 +849,66 @@ export default schema(orders, byDay('${byDay}'), byDay('${byDayAlt}'), statuses,
       await executor.command(`DROP VIEW IF EXISTS ${q(report)}`)
       await executor.command(`DROP DICTIONARY IF EXISTS ${q(statuses)}`)
       for (const name of [orders, byDay, byDayAlt, journalTable]) {
+        await executor.command(`DROP TABLE IF EXISTS ${q(name)}`)
+      }
+      await executor.close()
+      await rm(fixture.dir, { recursive: true, force: true })
+    }
+  }, 240_000)
+
+  test('view queries with differently-cased function names and aliases read clean after migrate (#731)', async () => {
+    const executor = createLiveExecutor(liveEnv)
+    const database = liveEnv.clickhouseDatabase
+    const prefix = createPrefix('drift_fn_case')
+    const journalTable = createJournalTableName('drift_fn_case')
+    const cliEnv = { CHKIT_JOURNAL_TABLE: journalTable }
+    const orders = `${prefix}orders`
+    const report = `${prefix}report`
+    const fixture = await createFixture({ database, usersTableName: orders })
+    const q = (name: string) => `${quoteIdent(database)}.${quoteIdent(name)}`
+
+    try {
+      // ClickHouse stores FLOOR as floor and the alias CEILING as ceil, while
+      // case-sensitive names such as toUnixTimestamp are stored as written.
+      // Drift must converge the registered spellings without lowercasing
+      // case-sensitive or unknown names.
+      await writeFile(fixture.schemaPath, `import { schema, table, view } from '${CORE_ENTRY}'
+const orders = table({
+  database: '${database}', name: '${orders}', engine: 'MergeTree()', orderBy: ['id'],
+  columns: [
+    { name: 'id', type: 'UInt64' },
+    { name: 'amount', type: 'Float64' },
+  ],
+})
+const report = view({
+  database: '${database}', name: '${report}',
+  as: 'SELECT FLOOR(amount) AS floored, CEILING(amount) AS ceiled, toUnixTimestamp(now64()) AS ts FROM ${orders}',
+})
+export default schema(orders, report)
+`, 'utf8')
+      const generated = runCli(fixture.dir, ['generate', '--config', fixture.configPath, '--json'], cliEnv)
+      if (generated.exitCode !== 0) throw new Error(formatTestDiagnostic('function-case generate failed', generated))
+      const migrated = await runCliWithRetry(
+        fixture.dir, ['migrate', '--config', fixture.configPath, '--execute', '--json'], { extraEnv: cliEnv }
+      )
+      if (migrated.exitCode !== 0) throw new Error(formatTestDiagnostic('function-case migrate failed', migrated))
+      await waitForView(executor, database, report)
+
+      const clean = runCli(fixture.dir, ['drift', '--config', fixture.configPath, '--json'], cliEnv)
+      expect(clean.exitCode).toBe(0)
+      const cleanPayload = JSON.parse(clean.stdout) as {
+        drifted: boolean
+        objectDrift: Array<{ code: string }>
+        tableDrift: unknown[]
+      }
+      // A shared test database holds other runs' objects, reported as extra_object.
+      expect(cleanPayload).toMatchObject({ drifted: false, tableDrift: [] })
+      expect(cleanPayload.objectDrift.filter((item) => item.code !== 'extra_object')).toEqual([])
+      const cleanCheck = runCli(fixture.dir, ['check', '--strict', '--config', fixture.configPath, '--json'], cliEnv)
+      expect(cleanCheck.exitCode).toBe(0)
+    } finally {
+      await executor.command(`DROP VIEW IF EXISTS ${q(report)}`)
+      for (const name of [orders, journalTable]) {
         await executor.command(`DROP TABLE IF EXISTS ${q(name)}`)
       }
       await executor.close()

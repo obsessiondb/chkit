@@ -87,8 +87,7 @@ def _is_unknown_database_error(error: BaseException) -> bool:
     return (
         "UNKNOWN_DATABASE" in message
         or "code: 81" in message
-        or ("Database " in message
-        and "doesn't exist" in message)
+        or ("Database " in message and "doesn't exist" in message)
     )
 
 
@@ -112,10 +111,28 @@ def _build_sql_canonicalizer(
     if not expressions and not queries:
         return None
 
+    # Report an unreadable system.functions registry once for both calls:
+    # without it the #729 FLOOR drift would silently come back.
+    registry_warning_logged = False
+
+    def on_registry_unavailable(error: Exception) -> None:
+        nonlocal registry_warning_logged
+        if registry_warning_logged:
+            return
+        registry_warning_logged = True
+        debug(
+            "drift",
+            f"function registry unavailable, keeping function names as written: {error}",
+        )
+
     try:
         return MapSqlCanonicalizer(
-            expressions=canonicalize_sql_fragments(client, expressions, wrap=True),
-            queries=canonicalize_sql_fragments(client, queries, wrap=False),
+            expressions=canonicalize_sql_fragments(
+                client, expressions, wrap=True, on_registry_unavailable=on_registry_unavailable
+            ),
+            queries=canonicalize_sql_fragments(
+                client, queries, wrap=False, on_registry_unavailable=on_registry_unavailable
+            ),
         )
     except Exception as error:
         debug("drift", f"sql canonicalization unavailable, using string comparison: {error}")
@@ -156,9 +173,7 @@ def build_drift_payload(
         actual_objects = list_schema_objects(client)
     except Exception as error:
         if _is_unknown_database_error(error):
-            all_expected = [
-                f"{d.database}.{d.name}" for d in _expected_filtered()
-            ]
+            all_expected = [f"{d.database}.{d.name}" for d in _expected_filtered()]
             return DriftPayload(
                 snapshot_file=snapshot_file,
                 expected_count=len(all_expected),
@@ -241,9 +256,7 @@ def build_drift_payload(
     table_drift_unsorted = [
         detail
         for expected, actual in pairs
-        if (
-            detail := compare_table_shape(expected, actual, canonicalizer, index_granularity)
-        )
+        if (detail := compare_table_shape(expected, actual, canonicalizer, index_granularity))
         is not None
     ]
     table_drift = sorted(table_drift_unsorted, key=lambda d: d.table)
