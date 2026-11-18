@@ -34,6 +34,7 @@ from chkit.clickhouse.client import (
     ClickHouseJsonQueryResult,
     QueryResult,
     QueryStatus,
+    query_log_outcome,
 )
 from chkit.clickhouse.control import (
     STRICT_CONTROL_SETTINGS,
@@ -351,31 +352,21 @@ class RemoteClickHouseClient:
             if include_before_start
             else "'QueryFinish', 'ExceptionWhileProcessing'"
         )
+        # With ExceptionBeforeStart, every entry of the id is read: a rejected
+        # duplicate delivery logs one early, which must not hide the
+        # QueryFinish of the attempt that ran (#767).
         log = self.query(
-            "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
+            "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
+            "exception_code "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}'"
             f"  AND type IN ({types})"
             f"{after_filter}"
-            " ORDER BY event_time DESC LIMIT 1"
+            " ORDER BY event_time DESC"
+            f"{'' if include_before_start else ' LIMIT 1'}"
             f"{read_settings}"
         )
-        if not log.rows:
-            return QueryStatus(status="unknown")
-        row = log.rows[0]
-        if str(row.get("type")) == "QueryFinish":
-            return QueryStatus(
-                status="finished",
-                written_rows=_safe_int(row.get("written_rows")),
-                written_bytes=_safe_int(row.get("written_bytes")),
-                duration_ms=_safe_int(row.get("query_duration_ms")),
-            )
-        return QueryStatus(
-            status="failed",
-            duration_ms=_safe_int(row.get("query_duration_ms")),
-            error=str(row.get("exception") or "") or None,
-            before_start=str(row.get("type")) == "ExceptionBeforeStart",
-        )
+        return query_log_outcome(log.rows)
 
 
 def _render_sql_literal(value: Any) -> str:

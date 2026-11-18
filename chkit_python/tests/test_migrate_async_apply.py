@@ -8,7 +8,7 @@ import threading
 import time
 from dataclasses import dataclass
 from datetime import UTC, datetime
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import pytest
@@ -332,7 +332,9 @@ def _input(
     defaults: dict[str, Any] = {
         "client": client,
         "journal_store": journal,
-        "sql": "ALTER TABLE db.t MODIFY COLUMN x UInt64",
+        # An INSERT: only a SELECT or an INSERT runs nothing when the server
+        # rejects it before it starts (#767); TS's BASE_INPUT is one too.
+        "sql": "INSERT INTO db.t SELECT 1",
         "migration_name": "20260101_000000_async.sql",
         "migration_checksum": "abc",
         "statement_index": 0,
@@ -361,7 +363,7 @@ def test_apply_async_happy_path_writes_started_then_completed() -> None:
     assert result.operation.status == "completed"
     # A first attempt gets a random id of its own too (#767).
     query_id = _submitted_query_id(client.submitted)
-    assert client.submitted == [("ALTER TABLE db.t MODIFY COLUMN x UInt64", query_id)]
+    assert client.submitted == [("INSERT INTO db.t SELECT 1", query_id)]
     # Without migrate --setting the submission carries no settings.
     assert client.sent_settings == [("submit", None)]
     assert journal.writes is not None
@@ -425,9 +427,11 @@ def test_apply_async_running_query_without_a_fenced_record_stops_instead_of_atta
     assert info.value.message == (
         "Async migration step alter_table_modify_column (statement 1 of "
         f"20260101_000000_async.sql, query_id {checked_id}) is still running on the server, "
-        f"{reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish "
-        f"or run KILL QUERY WHERE query_id = '{checked_id}', then run chkit migrate --apply "
-        "again."
+        f"{reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish, "
+        f"or stop it with KILL QUERY WHERE query_id = '{checked_id}'. A stopped statement can "
+        "still have applied effects (an ALTER's mutation keeps running, see system.mutations), "
+        "so check what it applied and reconcile before you run chkit migrate --apply again: "
+        "until its outcome is known, migrate stops with async_outcome_unknown."
     )
     assert client.status_ids == [checked_id]
     assert client.after_times == [None]
@@ -564,7 +568,7 @@ def test_apply_async_resubmit_runs_before_retry(monkeypatch: pytest.MonkeyPatch)
     retry_id = _submitted_query_id(client.submitted)
     assert retry_id != prior.query_id
     assert client.status_ids == [prior.query_id, retry_id]
-    assert client.submitted == [("ALTER TABLE db.t MODIFY COLUMN x UInt64", retry_id)]
+    assert client.submitted == [("INSERT INTO db.t SELECT 1", retry_id)]
     assert client.after_times == [None, RETRY_BOUND]
     # The retry submits right after the check, without waiting on the server clock.
     assert client.events == [SERVER_TIME_QUERY, "status", "submit", "status"]
@@ -1280,7 +1284,8 @@ def test_apply_async_refuses_to_attach_to_a_running_attempt_of_other_sql() -> No
         apply_async_statement(_input(client=client, journal=journal, fingerprint="v1:new"))
     assert (
         "an earlier attempt with different SQL is still running on the server. Wait for "
-        f"it to finish or run KILL QUERY WHERE query_id = '{_QUERY_ID}'"
+        f"it to finish, or stop it with KILL QUERY WHERE query_id = '{_QUERY_ID}'. A stopped "
+        "statement can still have applied effects"
     ) in str(info.value)
     assert client.submitted == []
     assert journal.writes == []
@@ -2483,3 +2488,87 @@ def test_a_rejected_terminal_journal_write_does_not_wait_for_a_submit_that_never
     finally:
         client.release.set()
     assert time.monotonic() - started < 10
+
+
+def test_a_started_alter_rejected_before_it_started_stops_the_rerun(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus review): an ExceptionBeforeStart shows nothing ran only for a
+    SELECT or an INSERT. A killed ALTER ... UPDATE logs one while its mutation
+    still completes, so its re-run stops instead of compensating."""
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(
+                status="failed",
+                error="Code: 394. DB::Exception: Query was cancelled",
+                before_start=True,
+            ),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, client)
+    journal = _FakeJournalStore(state=_started_record())
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _rerun_input(client, journal, sql="ALTER TABLE db.t UPDATE v = v + 100 WHERE 1")
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "rejected before it started (ExceptionBeforeStart)" in info.value.message
+    assert client.executed == []
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_an_alter_rejected_before_it_started_while_polling_keeps_its_fenced_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus review): during polling too, an ExceptionBeforeStart of a
+    statement other than a SELECT or an INSERT is no proof that it applied
+    nothing: the fenced started record stays, and the run stops."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(
+                status="failed",
+                error="Code: 341. DB::Exception: Value passed to throwIf",
+                before_start=True,
+            ),
+        ]
+    )
+    journal = _FakeJournalStore()
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(
+            _input(client=client, journal=journal, sql="ALTER TABLE db.t UPDATE v = throwIf(k = 4) WHERE 1")
+        )
+    assert info.value.code == "async_outcome_unknown"
+    assert "system.mutations" in info.value.message
+    assert [w.operations[0].status for w in journal.writes or []] == ["started", "started"]
+    assert client.executed == []
+
+
+def test_a_failed_query_tracking_write_before_the_submit_puts_the_attempt_back_to_prepared(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus review): a failure after the attempt was journaled as one
+    that may have been sent, but before its submit, puts the record back to
+    prepared, so the next run resolves it without an abandon."""
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+
+    class _FailingTracker:
+        def record_async(self, *_args: Any) -> None:
+            msg = "tracking write failed"
+            raise RuntimeError(msg)
+
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")])
+    journal = _FakeJournalStore()
+    with pytest.raises(RuntimeError, match="tracking write failed"):
+        apply_async_statement(
+            _input(client=client, journal=journal, query_tracker=cast(Any, _FailingTracker()))
+        )
+    assert client.submitted == []
+    assert [w.operations[0].last_error for w in journal.writes or []] == [
+        _PREPARED_MARKER,
+        "submitted under its own query id; a retry reads its outcome from system.query_log",
+        _PREPARED_MARKER,
+    ]

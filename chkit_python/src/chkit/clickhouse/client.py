@@ -521,34 +521,23 @@ class ClickHouseClient:
             if include_before_start
             else "'QueryFinish', 'ExceptionWhileProcessing'"
         )
+        # With ExceptionBeforeStart, every entry of the id is read: a rejected
+        # duplicate delivery logs one early, which must not hide the
+        # QueryFinish of the attempt that ran (#767).
         log_sql = (
-            "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
+            "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
+            "exception_code "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' "
             f"AND type IN ({types}) "
             "AND is_initial_query = 1 "
             f"AND query_start_time >= parseDateTimeBestEffort('{after}') "
             f"AND event_date >= toDate32(parseDateTimeBestEffort('{after}')) - 1 "
-            "ORDER BY event_time DESC LIMIT 1"
+            "ORDER BY event_time DESC"
+            f"{'' if include_before_start else ' LIMIT 1'}"
         )
         log = self.query(log_sql, settings=read_settings)
-        if not log.rows:
-            return QueryStatus(status="unknown")
-
-        row = log.rows[0]
-        if str(row.get("type")) == "QueryFinish":
-            return QueryStatus(
-                status="finished",
-                written_rows=_safe_int(row.get("written_rows")),
-                written_bytes=_safe_int(row.get("written_bytes")),
-                duration_ms=_safe_int(row.get("query_duration_ms")),
-            )
-        return QueryStatus(
-            status="failed",
-            duration_ms=_safe_int(row.get("query_duration_ms")),
-            error=str(row.get("exception") or "") or None,
-            before_start=str(row.get("type")) == "ExceptionBeforeStart",
-        )
+        return query_log_outcome(log.rows)
 
     def list_databases(self) -> list[str]:
         result = self.query("SHOW DATABASES")
@@ -603,6 +592,52 @@ class _SingleAttemptPool:
             raise RuntimeError(msg)
         self._sent = True
         return self._pool.request(*args, **{**kwargs, "retries": False})
+
+
+# QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING: a second delivery of the id, rejected
+# while the first runs. It says nothing about that first one.
+_SAME_ID_RUNNING = 216
+
+
+def query_log_outcome(rows: list[dict[str, Any]]) -> QueryStatus:
+    """The outcome query_log records for a query id, from its entries newest first (#767).
+
+    A QueryFinish, then an ExceptionWhileProcessing, outranks an
+    ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
+    that rejection is never the query's own failure.
+    """
+    finished = next((row for row in rows if str(row.get("type")) == "QueryFinish"), None)
+    if finished is not None:
+        return QueryStatus(
+            status="finished",
+            written_rows=_safe_int(finished.get("written_rows")),
+            written_bytes=_safe_int(finished.get("written_bytes")),
+            duration_ms=_safe_int(finished.get("query_duration_ms")),
+        )
+    failed = next(
+        (row for row in rows if str(row.get("type")) == "ExceptionWhileProcessing"), None
+    ) or next(
+        (
+            row
+            for row in rows
+            if str(row.get("type")) == "ExceptionBeforeStart" and not _is_same_id_running(row)
+        ),
+        None,
+    )
+    if failed is None:
+        return QueryStatus(status="unknown")
+    return QueryStatus(
+        status="failed",
+        duration_ms=_safe_int(failed.get("query_duration_ms")),
+        error=str(failed.get("exception") or "") or None,
+        before_start=str(failed.get("type")) == "ExceptionBeforeStart",
+    )
+
+
+def _is_same_id_running(row: dict[str, Any]) -> bool:
+    return _safe_int(row.get("exception_code")) == _SAME_ID_RUNNING or (
+        "QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING" in str(row.get("exception") or "")
+    )
 
 
 # The check a submit runs right before its request is sent, per thread: the

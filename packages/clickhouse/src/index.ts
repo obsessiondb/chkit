@@ -103,6 +103,52 @@ export interface ClickHouseJsonQueryResult<
 export type ObservableSystemTable = 'processes' | 'query_log'
 
 /** Control proofs require fresh, complete results rather than cached or truncated data. */
+/** One `system.query_log` entry of a query id, newest first. */
+export interface QueryLogRow {
+	type: string
+	written_rows: number | string
+	written_bytes: number | string
+	query_duration_ms: number | string
+	exception: string
+	exception_code?: number | string
+}
+
+// QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING: a second delivery of the id, rejected
+// while the first runs. It says nothing about that first one.
+const SAME_ID_RUNNING = 216
+
+/**
+ * The outcome query_log records for a query id, from its entries newest
+ * first (#767). A QueryFinish, then an ExceptionWhileProcessing, outranks an
+ * ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
+ * that rejection is never the query's own failure.
+ */
+export function queryLogOutcome(rows: readonly QueryLogRow[]): QueryStatus {
+	const finished = rows.find((row) => row.type === 'QueryFinish')
+	if (finished) {
+		return {
+			status: 'finished',
+			writtenRows: Number(finished.written_rows),
+			writtenBytes: Number(finished.written_bytes),
+			durationMs: Number(finished.query_duration_ms),
+		}
+	}
+	const failed =
+		rows.find((row) => row.type === 'ExceptionWhileProcessing') ??
+		rows.find((row) => row.type === 'ExceptionBeforeStart' && !isSameIdRunning(row))
+	if (!failed) return { status: 'unknown' }
+	return {
+		status: 'failed',
+		durationMs: Number(failed.query_duration_ms),
+		error: failed.exception,
+		...(failed.type === 'ExceptionBeforeStart' ? { beforeStart: true } : {}),
+	}
+}
+
+function isSameIdRunning(row: QueryLogRow): boolean {
+	return Number(row.exception_code) === SAME_ID_RUNNING || /QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING/.test(row.exception)
+}
+
 export const STRICT_CONTROL_SETTINGS: ClickHouseSettings = {
 	use_query_cache: 0,
 	enable_reads_from_query_cache: 0,
@@ -1181,8 +1227,11 @@ export function createExecutorWithClient(
 					? "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
 					: "'QueryFinish', 'ExceptionWhileProcessing'"
 				const queryLogFrom = from('query_log')
+				// With ExceptionBeforeStart, every entry of the id is read: a
+				// rejected duplicate delivery logs one early, which must not hide
+				// the QueryFinish of the attempt that ran (#767).
 				const log = await client.query({
-					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
+					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code
 FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}
@@ -1191,42 +1240,12 @@ WHERE user = currentUser()
   AND query_start_time >= parseDateTimeBestEffort({after:String})
   AND event_date >= toDate32(parseDateTimeBestEffort({after:String})) - 1
 ORDER BY event_time DESC
-LIMIT 1
+${options?.includeBeforeStart ? '' : 'LIMIT 1'}
 SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
 					format: 'JSONEachRow',
 				})
-				const logRows = parseJsonEachRow<{
-					type: string
-					written_rows: number | string
-					written_bytes: number | string
-					query_duration_ms: number | string
-					exception: string
-				}>(await log.text())
-
-				if (logRows.length === 0) {
-					return { status: 'unknown' }
-				}
-
-				const [row] = logRows
-				if (!row) {
-					return { status: 'unknown' }
-				}
-				if (row.type === 'QueryFinish') {
-					return {
-						status: 'finished',
-						writtenRows: Number(row.written_rows),
-						writtenBytes: Number(row.written_bytes),
-						durationMs: Number(row.query_duration_ms),
-					}
-				}
-
-				return {
-					status: 'failed',
-					durationMs: Number(row.query_duration_ms),
-					error: row.exception,
-					...(row.type === 'ExceptionBeforeStart' ? { beforeStart: true } : {}),
-				}
+				return queryLogOutcome(parseJsonEachRow<QueryLogRow>(await log.text()))
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}

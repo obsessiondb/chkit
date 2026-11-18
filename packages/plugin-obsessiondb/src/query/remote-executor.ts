@@ -4,7 +4,6 @@ import type {
 	ClickHouseInsertParams,
 	ClickHouseJsonQueryResult,
 	ClickHouseSettings,
-	QueryStatus,
 	SchemaObjectRef,
 } from '@chkit/clickhouse'
 import {
@@ -12,6 +11,8 @@ import {
 	allReplicas,
 	buildIntrospectedTables,
 	inferSchemaKindFromEngine,
+	queryLogOutcome,
+	type QueryLogRow,
 	resolveReplicaFanout,
 	type SystemColumnRow,
 	type SystemSkippingIndexRow,
@@ -264,42 +265,21 @@ export function createRemoteExecutor(deps: {
 			}
 			if (options?.runningOnly) return { status: 'unknown' as const }
 
-			const log = await executor.query<{
-				type: string
-				written_rows: string
-				written_bytes: string
-				query_duration_ms: string
-				exception: string
-			}>(
-				`SELECT type, written_rows, written_bytes, query_duration_ms, exception
+			// With ExceptionBeforeStart, every entry of the id is read: a rejected
+			// duplicate delivery logs one early, which must not hide the
+			// QueryFinish of the attempt that ran (#767).
+			const log = await executor.query<QueryLogRow>(
+				`SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code
 FROM ${from('system.query_log')}
 WHERE user = currentUser()
   AND query_id = '${queryId}'
   AND type IN (${options?.includeBeforeStart ? "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'" : "'QueryFinish', 'ExceptionWhileProcessing'"})
   ${afterFilter}
 ORDER BY event_time DESC
-LIMIT 1
+${options?.includeBeforeStart ? '' : 'LIMIT 1'}
 ${readSettings}`,
 			)
-
-			const [row] = log
-			if (!row) return { status: 'unknown' as const }
-
-			if (row.type === 'QueryFinish') {
-				return {
-					status: 'finished' as const,
-					writtenRows: Number(row.written_rows),
-					writtenBytes: Number(row.written_bytes),
-					durationMs: Number(row.query_duration_ms),
-				}
-			}
-
-			return {
-				status: 'failed' as const,
-				durationMs: Number(row.query_duration_ms),
-				error: row.exception,
-				...(row.type === 'ExceptionBeforeStart' ? { beforeStart: true } : {}),
-			} satisfies QueryStatus
+			return queryLogOutcome(log)
 		},
 
 		async listSchemaObjects() {

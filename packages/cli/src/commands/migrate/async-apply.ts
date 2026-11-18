@@ -10,6 +10,7 @@ import {
   type OperationState,
   resolveJournalTableName,
 } from '../../runtime/journal-store.js'
+import { rejectionRunsNothing } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import { inProgressChecksumMismatchError, MigrateError } from './errors.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
@@ -138,7 +139,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   )
   const recorded =
     reusableOutcome(input.known, priorOpState, fingerprint) ??
-    (await resolveRecordedAttempt({ db, journalStore, migrationName, op: priorOpState, fingerprint, queryId, operationType, log, sleep }))
+    (await resolveRecordedAttempt({ db, journalStore, migrationName, op: priorOpState, fingerprint, sql, queryId, operationType, log, sleep }))
   if (recorded.kind === 'running') {
     if (recorded.afterTime === undefined || priorOpState === undefined) {
       throw runningElsewhereError({ operationType, statementIndex, migrationName, queryId, reason: recorded.reason })
@@ -148,6 +149,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     )
     // The record already names the attempt, and stays as it is.
     return await pollUntilTerminal({
+      rejectionRunsNothing: rejectionRunsNothing(sql),
       db,
       journalStore,
       migrationState: initialMigrationState,
@@ -277,24 +279,27 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
   await assertAttemptStored({ ...stored, lastError: PREPARED_RECORD_MARKER })
   await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(ATTEMPT_RECORD_MARKER), now))
+  let stateAfterStart: MigrationRowState | null
   try {
     await assertAttemptStored({ ...stored, lastError: ATTEMPT_RECORD_MARKER })
+    // Re-read so we have the row's actual stored applied_at (matters for
+    // subsequent ReplacingMergeTree writes during polling).
+    stateAfterStart = await journalStore.readMigrationState(migrationName)
+    await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
   } catch (error) {
-    // Not sent: put the record back to prepared, so a re-run runs it again.
+    // Nothing was sent: put the record back to prepared, so a re-run runs
+    // it again without an abandon (#767).
     await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now)).catch(() => {})
     throw error
   }
-  // Re-read so we have the row's actual stored applied_at (matters for
-  // subsequent ReplacingMergeTree writes during polling).
-  const stateAfterStart = await journalStore.readMigrationState(migrationName)
   const pollAfterTime = queryLogLowerBound(serverNowMs)
-  await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
   // Aborted when the run stops without an outcome, so a request not sent yet
   // never starts after the run released the migrate lock (#767).
   const submitAbort = new AbortController()
   const submitPromise = db.submit(sql, attemptQueryId, settings, { signal: submitAbort.signal })
 
   return await pollUntilTerminal({
+    rejectionRunsNothing: rejectionRunsNothing(sql),
     db,
     journalStore,
     migrationState: stateAfterStart,
@@ -337,6 +342,8 @@ interface PollUntilTerminalInput {
   /** Gives up on the submit request: the run stops without waiting for it. */
   abortSubmit?: () => void
   startedAt: string
+  /** Whether an ExceptionBeforeStart of the statement shows it applied nothing (#767). */
+  rejectionRunsNothing: boolean
 }
 
 async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncApplyResult> {
@@ -469,11 +476,11 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         // Only a statement the server rejected before it started (#767) ran
         // nothing: one that failed while it ran can have applied some writes,
         // so its fenced started record stays for the operator to reconcile.
-        if (status.beforeStart !== true) {
+        if (status.beforeStart !== true || !input.rejectionRunsNothing) {
           // A proxy may hold the submit's response: the run stops as every
           // other stop without an outcome does, without waiting for it.
           abandonSubmit()
-          throw failedWhileRunningError({ operationType, statementIndex, migrationName, queryId, error: status.error ?? '<unknown>' })
+          throw failedWhileRunningError({ operationType, statementIndex, migrationName, queryId, error: status.error ?? '<unknown>', beforeStart: status.beforeStart === true })
         }
         const failedOp: OperationState = {
           operationIndex: statementIndex,
@@ -602,6 +609,8 @@ const UNVERIFIED_FAILURE_REASON =
   'the journal records it as failed, but not from a rejection the server recorded before it started (an earlier chkit release recorded it, it failed while it ran, or a run lost its submit response), so some of its writes may have been applied'
 const WHILE_PROCESSING_REASON =
   'the server reports it failed while it ran (ExceptionWhileProcessing), and a statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts)'
+const BEFORE_START_EFFECTS_REASON =
+  "the server reports it was rejected before it started (ExceptionBeforeStart), but a statement other than a SELECT or an INSERT can apply effects before that (an ALTER's mutation keeps running in system.mutations, or applied to some partitions before one failed)"
 const STALE_PREPARED_REASON =
   'the journal records it as prepared, not sent, but chkit cannot read every copy of the journal to rule out a newer record of it (one that may have been sent)'
 const OTHER_SQL_REASON =
@@ -653,6 +662,8 @@ export async function resolveRecordedAttempt(input: {
   migrationName: string
   op: OperationState | undefined
   fingerprint: string
+  /** The statement's SQL, when known: only it can show a rejection ran nothing (#767). */
+  sql: string | undefined
   queryId: string
   operationType: string
   log: (line: string) => void
@@ -680,7 +691,7 @@ export async function resolveRecordedAttempt(input: {
       // The running attempt is the SQL its record names (#599): an attempt
       // of other SQL, kept by --abandon and an edit, must not finish as this one.
       throw new Error(
-        `Async migration step ${operationType} (query_id ${queryId}): an earlier attempt with different SQL is still running on the server. Wait for it to finish or run KILL QUERY WHERE query_id = '${queryId}', then re-run chkit migrate --apply.`,
+        `Async migration step ${operationType} (query_id ${queryId}): an earlier attempt with different SQL is still running on the server. ${stopRunningAdvice(queryId)}`,
       )
     }
     return { kind: 'running', afterTime, reason: op?.status === 'failed' ? FAILED_RUNNING : NOT_RECORDED_RUNNING }
@@ -688,9 +699,10 @@ export async function resolveRecordedAttempt(input: {
   if (op !== undefined && afterTime !== undefined) {
     if (status.status === 'finished') return otherSql ? { kind: 'unknown', reason: OTHER_SQL_REASON } : { kind: 'finished', status }
     if (status.status === 'failed') {
-      return status.beforeStart === true
+      if (status.beforeStart !== true) return { kind: 'unknown', reason: WHILE_PROCESSING_REASON }
+      return input.sql !== undefined && rejectionRunsNothing(input.sql)
         ? { kind: 'failed', error: status.error ?? '<unknown>' }
-        : { kind: 'unknown', reason: WHILE_PROCESSING_REASON }
+        : { kind: 'unknown', reason: BEFORE_START_EFFECTS_REASON }
     }
     if (!prepared) return { kind: 'unknown', reason: NO_ENTRY_REASON }
     // A prepared attempt with nothing of its id on the server was never sent,
@@ -750,10 +762,15 @@ function failedWhileRunningError(input: {
   migrationName: string
   queryId: string
   error: string
+  /** The server recorded it before the statement started, for one that can apply effects before that. */
+  beforeStart: boolean
 }): MigrateError {
+  const what = input.beforeStart
+    ? `was rejected before it started (ExceptionBeforeStart): ${input.error}. A statement other than a SELECT or an INSERT can apply effects before that (an ALTER's mutation keeps running in system.mutations, or applied to some partitions before one failed)`
+    : `failed while it ran: ${input.error}. A statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts)`
   return new MigrateError(
     'async_outcome_unknown',
-    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) failed while it ran: ${input.error}. A statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts), so chkit does not run it, or its before-retry SQL, again. Check in ClickHouse what the statement applied. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) ${what}, so chkit does not run it, or its before-retry SQL, again. Check in ClickHouse what the statement applied. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
   )
 }
 
@@ -828,6 +845,14 @@ async function assertAttemptStored(input: {
   )
 }
 
+/**
+ * What to do about an attempt still running (#767): a killed statement can
+ * still have applied effects, so the operator reconciles before applying.
+ */
+export function stopRunningAdvice(queryId: string): string {
+  return `Wait for it to finish, or stop it with KILL QUERY WHERE query_id = '${queryId}'. A stopped statement can still have applied effects (an ALTER's mutation keeps running, see system.mutations), so check what it applied and reconcile before you run chkit migrate --apply again: until its outcome is known, migrate stops with async_outcome_unknown.`
+}
+
 function runningElsewhereError(input: {
   operationType: string
   statementIndex: number
@@ -837,7 +862,7 @@ function runningElsewhereError(input: {
 }): MigrateError {
   return new MigrateError(
     'async_outcome_unknown',
-    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) is still running on the server, ${input.reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${input.queryId}', then run chkit migrate --apply again.`,
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) is still running on the server, ${input.reason}. Nothing was submitted and no before-retry SQL ran. ${stopRunningAdvice(input.queryId)}`,
   )
 }
 

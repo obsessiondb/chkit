@@ -347,7 +347,7 @@ describe('applyAsyncStatement', () => {
 
       await expect(run).rejects.toMatchObject({
         code: 'async_outcome_unknown',
-        message: `Async migration step load_table_data (statement 1 of m.sql, query_id ${checkedId}) is still running on the server, ${reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${checkedId}', then run chkit migrate --apply again.`,
+        message: `Async migration step load_table_data (statement 1 of m.sql, query_id ${checkedId}) is still running on the server, ${reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish, or stop it with KILL QUERY WHERE query_id = '${checkedId}'. A stopped statement can still have applied effects (an ALTER's mutation keeps running, see system.mutations), so check what it applied and reconcile before you run chkit migrate --apply again: until its outcome is known, migrate stops with async_outcome_unknown.`,
       })
       expect(statusCalls).toEqual([{ queryId: checkedId, afterTime: undefined, everyReplica: true, runningOnly: true }])
       expect(submitCalls).toEqual([])
@@ -581,7 +581,9 @@ describe('applyAsyncStatement', () => {
     await expect(
       applyAsyncStatement({
         ...BASE_INPUT,
-        sql: 'NOT VALID SQL',
+        // An INSERT the server cannot parse: an INSERT applies nothing
+        // before its pipeline starts (#767).
+        sql: 'INSERT INTO t SELECT FROM',
         db,
         journalStore: store,
         log: (line) => lines.push(line),
@@ -902,6 +904,42 @@ describe('applyAsyncStatement', () => {
     })
   }
 
+  // #767 (Opus review): during polling too, an ExceptionBeforeStart of a
+  // statement other than a SELECT or an INSERT is no proof that it applied
+  // nothing: the fenced started record stays, and the run stops.
+  test('an ALTER rejected before it started while polling keeps its fenced record and stops', async () => {
+    const fake = createFakeExecutor([
+      { status: 'unknown' },
+      { status: 'failed', error: 'Code: 341. DB::Exception: Value passed to throwIf', beforeStart: true },
+    ])
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({ ...BASE_INPUT, sql: 'ALTER TABLE t UPDATE v = throwIf(k = 4) WHERE 1', db: fake.db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('system.mutations') })
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
+    expect(fake.commandCalls).toEqual([])
+  })
+
+  // #767 (Opus review): a failure after the attempt was journaled as one
+  // that may have been sent, but before its submit, puts the record back to
+  // prepared, so the next run resolves it without an abandon.
+  test('a failed query tracking write before the submit puts the attempt back to prepared', async () => {
+    const fake = createFakeExecutor([{ status: 'unknown' }])
+    const { store, writes } = createFakeJournalStore(null)
+    const queryTracker = {
+      async recordAsync() {
+        throw new Error('tracking write failed')
+      },
+    } as unknown as NonNullable<Parameters<typeof applyAsyncStatement>[0]['queryTracker']>
+
+    await expect(
+      applyAsyncStatement({ ...BASE_INPUT, db: fake.db, journalStore: store, queryTracker, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+    ).rejects.toThrow('tracking write failed')
+    expect(fake.submitCalls).toEqual([])
+    expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PREPARED_RECORD_MARKER, ATTEMPT_RECORD_MARKER, PREPARED_RECORD_MARKER])
+  })
+
   // #767 (round 3): only unknown polls in a row count; a failed poll request
   // starts the count again.
   test('a failed poll request resets the unknown-poll count', async () => {
@@ -1168,7 +1206,7 @@ describe('applyAsyncStatement with recorded fingerprints', () => {
         now: FIXED_NOW,
       }),
     ).rejects.toThrow(
-      `an earlier attempt with different SQL is still running on the server. Wait for it to finish or run KILL QUERY WHERE query_id = '${QUERY_ID}'`,
+      `an earlier attempt with different SQL is still running on the server. Wait for it to finish, or stop it with KILL QUERY WHERE query_id = '${QUERY_ID}'. A stopped statement can still have applied effects`,
     )
     expect(submitCalls).toEqual([])
     expect(writes).toEqual([])
@@ -1335,6 +1373,23 @@ describe('applyAsyncStatement re-run of a started step', () => {
     )
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'started', 'completed'])
     expect(writes[0]?.operations[0]).toMatchObject({ lastError: 'Code: 60. DB::Exception: Unknown table\nstack', attemptFenced: true })
+  })
+
+  // #767 (Opus review): an ExceptionBeforeStart shows nothing ran only for
+  // a SELECT or an INSERT. A killed ALTER ... UPDATE logs one while its
+  // mutation still completes, so its re-run stops instead of compensating.
+  test('a started ALTER the server rejected before it started stops the re-run with async_outcome_unknown', async () => {
+    const fake = clockedExecutor([
+      { status: 'failed', error: 'Code: 394. DB::Exception: Query was cancelled', beforeStart: true },
+    ])
+    const { store, writes } = createFakeJournalStore(startedRecord())
+
+    await expect(
+      applyAsyncStatement({ ...input, sql: 'ALTER TABLE t UPDATE v = v + 100 WHERE 1', db: fake.db, journalStore: store, sleep: fake.sleep }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('rejected before it started (ExceptionBeforeStart)') })
+    expect(fake.commandCalls).toEqual([])
+    expect(fake.submitCalls).toEqual([])
+    expect(writes).toEqual([])
   })
 
   // #767 (round 3): a failure while it ran (ExceptionWhileProcessing) can

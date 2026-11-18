@@ -56,6 +56,7 @@ from chkit.cli.journal_store import (
     OperationState,
     resolve_journal_table_name,
 )
+from chkit.cli.safety_markers import rejection_runs_nothing
 from chkit.clickhouse.client import (
     SUBMIT_CONNECT_TIMEOUT_SECONDS,
     ClickHouseClient,
@@ -336,7 +337,7 @@ class _Submission:
         return self.error
 
 
-def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
+def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:  # noqa: PLR0912
     """Submit ``sql`` and poll until terminal, journalling each transition."""
     client = input_.client
     journal_store = input_.journal_store
@@ -390,6 +391,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         migration_name=input_.migration_name,
         op=prior_op,
         fingerprint=input_.fingerprint,
+        sql=input_.sql,
         query_id=query_id,
         operation_type=input_.operation_type,
         log=input_.log,
@@ -472,19 +474,23 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     base_state = initial_state or fresh_migration_state(
         input_.migration_name, input_.migration_checksum
     )
-    _record_attempt(input_, base_state, attempt_query_id, started_at)
-    state_after_start = journal_store.read_migration_state(input_.migration_name)
+    back_to_prepared = _record_attempt(input_, base_state, attempt_query_id, started_at)
+    try:
+        state_after_start = journal_store.read_migration_state(input_.migration_name)
+        if input_.query_tracker is not None:
+            input_.query_tracker.record_async(
+                QueryContext(
+                    input_.migration_name, input_.statement_index,
+                    input_.sql, input_.before_retry,
+                ),
+                attempt_query_id,
+            )
+    except Exception:
+        back_to_prepared()
+        raise
     poll_after_time = _query_log_lower_bound(server_now_ms)
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
-    if input_.query_tracker is not None:
-        input_.query_tracker.record_async(
-            QueryContext(
-                input_.migration_name, input_.statement_index,
-                input_.sql, input_.before_retry,
-            ),
-            attempt_query_id,
-        )
     submission = _Submission(
         lambda before_send: client.submit(
             input_.sql,
@@ -524,8 +530,12 @@ def _assert_lock_held(input_: AsyncApplyInput) -> None:
 
 def _record_attempt(
     input_: AsyncApplyInput, base_state: MigrationRowState, attempt_query_id: str, started_at: str
-) -> None:
-    """Journal the attempt before its submit, read back from the server (#767)."""
+) -> Callable[[], None]:
+    """Journal the attempt before its submit, read back from the server (#767).
+
+    Returns what puts the record back to prepared when the run stops before
+    the submit.
+    """
     journal_store = input_.journal_store
     # These writes alone fence a record (#767). The attempt is prepared first,
     # and moves to "may have been sent" only once the server returned the
@@ -555,13 +565,19 @@ def _record_attempt(
     write_attempt(PREPARED_RECORD_MARKER)
     _assert_attempt_stored(input_, attempt_query_id, PREPARED_RECORD_MARKER)
     write_attempt(ATTEMPT_RECORD_MARKER)
+
+    def back_to_prepared() -> None:
+        # Not sent: put the record back to prepared, so a re-run runs it
+        # again without an abandon (#767).
+        with contextlib.suppress(Exception):
+            write_attempt(PREPARED_RECORD_MARKER)
+
     try:
         _assert_attempt_stored(input_, attempt_query_id, ATTEMPT_RECORD_MARKER)
     except Exception:
-        # Not sent: put the record back to prepared, so a re-run runs it again.
-        with contextlib.suppress(Exception):
-            write_attempt(PREPARED_RECORD_MARKER)
+        back_to_prepared()
         raise
+    return back_to_prepared
 
 
 def _attach(
@@ -581,9 +597,7 @@ def _attach(
             f"Async migration step {input_.operation_type} (statement "
             f"{input_.statement_index + 1} of {input_.migration_name}, query_id "
             f"{query_id}) is still running on the server, {reason}. Nothing was "
-            "submitted and no before-retry SQL ran. Wait for it to finish or run "
-            f"KILL QUERY WHERE query_id = '{query_id}', then run chkit migrate "
-            "--apply again."
+            f"submitted and no before-retry SQL ran. {stop_running_advice(query_id)}"
         )
         raise MigrateError("async_outcome_unknown", msg)
     input_.log(
@@ -775,12 +789,17 @@ def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
             # Only a statement the server rejected before it started (#767)
             # ran nothing: one that failed while it ran can have applied
             # writes, so its fenced started record stays for the operator.
-            if not status.before_start:
+            if not status.before_start or not rejection_runs_nothing(input_.sql):
                 # A proxy may hold the submit's response: the run stops as
                 # every other stop without an outcome does, without waiting.
                 if submission is not None:
                     submission.abandon()
-                raise _failed_while_running_error(input_, query_id, status.error or "<unknown>")
+                raise _failed_while_running_error(
+                    input_,
+                    query_id,
+                    status.error or "<unknown>",
+                    before_start=bool(status.before_start),
+                )
             failed_op = OperationState(
                 operation_index=input_.statement_index,
                 operation_key=input_.operation_key,
@@ -1064,6 +1083,12 @@ _WHILE_PROCESSING_REASON = (
     "that fails while it runs can leave some of its writes applied (parts of an INSERT ... "
     "SELECT, a DDL that ran on some hosts)"
 )
+_BEFORE_START_EFFECTS_REASON = (
+    "the server reports it was rejected before it started (ExceptionBeforeStart), but a "
+    "statement other than a SELECT or an INSERT can apply effects before that (an ALTER's "
+    "mutation keeps running in system.mutations, or applied to some partitions before one "
+    "failed)"
+)
 _STALE_PREPARED_REASON = (
     "the journal records it as prepared, not sent, but chkit cannot read every copy of the "
     "journal to rule out a newer record of it (one that may have been sent)"
@@ -1093,6 +1118,8 @@ def resolve_recorded_attempt(  # noqa: PLR0911, PLR0912 - one return per outcome
     migration_name: str,
     op: OperationState | None,
     fingerprint: str,
+    # The statement's SQL, when known: only it can show a rejection ran nothing (#767).
+    sql: str | None,
     query_id: str,
     operation_type: str,
     log: Callable[[str], None],
@@ -1140,9 +1167,8 @@ def resolve_recorded_attempt(  # noqa: PLR0911, PLR0912 - one return per outcome
             # of other SQL, kept by --abandon and an edit, must not finish as this one.
             msg = (
                 f"Async migration step {operation_type} (query_id {query_id}): an "
-                "earlier attempt with different SQL is still running on the server. Wait "
-                f"for it to finish or run KILL QUERY WHERE query_id = '{query_id}', then "
-                "re-run chkit migrate --apply."
+                "earlier attempt with different SQL is still running on the server. "
+                f"{stop_running_advice(query_id)}"
             )
             raise RuntimeError(msg)
         reason = (
@@ -1155,9 +1181,11 @@ def resolve_recorded_attempt(  # noqa: PLR0911, PLR0912 - one return per outcome
                 return RecordedAttempt(kind="unknown", reason=_OTHER_SQL_REASON)
             return RecordedAttempt(kind="finished", status=status)
         if status.status == "failed":
-            if status.before_start:
+            if not status.before_start:
+                return RecordedAttempt(kind="unknown", reason=_WHILE_PROCESSING_REASON)
+            if sql is not None and rejection_runs_nothing(sql):
                 return RecordedAttempt(kind="failed", error=status.error or "<unknown>")
-            return RecordedAttempt(kind="unknown", reason=_WHILE_PROCESSING_REASON)
+            return RecordedAttempt(kind="unknown", reason=_BEFORE_START_EFFECTS_REASON)
         if not prepared:
             return RecordedAttempt(kind="unknown", reason=_NO_ENTRY_REASON)
         # A prepared attempt with nothing of its id on the server was never
@@ -1268,16 +1296,39 @@ def _assert_attempt_stored(input_: AsyncApplyInput, query_id: str, last_error: s
     raise RuntimeError(msg) from read_error
 
 
+def stop_running_advice(query_id: str) -> str:
+    """What to do about an attempt still running (#767).
+
+    A killed statement can still have applied effects, so the operator
+    reconciles before applying.
+    """
+    return (
+        f"Wait for it to finish, or stop it with KILL QUERY WHERE query_id = '{query_id}'. "
+        "A stopped statement can still have applied effects (an ALTER's mutation keeps "
+        "running, see system.mutations), so check what it applied and reconcile before you "
+        "run chkit migrate --apply again: until its outcome is known, migrate stops with "
+        "async_outcome_unknown."
+    )
+
+
 def _failed_while_running_error(
-    input_: AsyncApplyInput, query_id: str, error: str
+    input_: AsyncApplyInput, query_id: str, error: str, *, before_start: bool
 ) -> MigrateError:
+    what = (
+        f"was rejected before it started (ExceptionBeforeStart): {error}. A statement other "
+        "than a SELECT or an INSERT can apply effects before that (an ALTER's mutation keeps "
+        "running in system.mutations, or applied to some partitions before one failed)"
+        if before_start
+        else f"failed while it ran: {error}. A statement that fails while it runs can leave "
+        "some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some "
+        "hosts)"
+    )
     msg = (
         f"Async migration step {input_.operation_type} (statement "
         f"{input_.statement_index + 1} of {input_.migration_name}, query_id {query_id}) "
-        f"failed while it ran: {error}. A statement that fails while it runs can leave some "
-        "of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts), "
-        "so chkit does not run it, or its before-retry SQL, again. Check in ClickHouse what "
-        f"the statement applied. Then reconcile every statement of {input_.migration_name} "
+        f"{what}, so chkit does not run it, or its before-retry SQL, again. Check in "
+        "ClickHouse what the statement applied. Then reconcile every statement of "
+        f"{input_.migration_name} "
         "that already ran, since an abandon runs the migration again from statement 1, run "
         f"chkit migrate --apply --abandon {input_.migration_name}, and apply again."
     )

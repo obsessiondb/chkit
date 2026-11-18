@@ -29,6 +29,7 @@ from chkit.cli.commands.migrate_async_apply import (
     outcome_unknown_error,
     resolve_recorded_attempt,
     reusable_outcome,
+    stop_running_advice,
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import (
@@ -154,6 +155,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
     migration_checksum = checksum_sql(sql)
     # What the journal records for each statement run, and checks against (#599).
     fingerprints = [statement_fingerprint(statement) for statement in statements]
+    sql_by_fingerprint = dict(zip(fingerprints, statements, strict=True))
 
     initial_state = journal_store.read_migration_state(file)
     # Releases before #562 did not know `//` and `#` comments, so the statement
@@ -198,6 +200,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 file=file,
                 state=initial_state.model_copy(update={"operations": omitted}),
                 rebased=initial_state,
+                sql_by_fingerprint=sql_by_fingerprint,
                 log=input_.log,
             )
     # The file is unchanged, so the statements this run gets should be those
@@ -231,6 +234,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             state=initial_state,
             checksum=migration_checksum,
             identities=statement_identities(operation_summaries, fingerprints),
+            sql_by_fingerprint=sql_by_fingerprint,
             retry=input_.retry,
             journal_store=journal_store,
             log=input_.log,
@@ -320,6 +324,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                 state=state_before,
                 op=prior_attempt,
                 fingerprint=fingerprint,
+                sql=statement,
                 operation_type=identity.type,
                 log=input_.log,
                 known=edit_resolved.get(index),
@@ -622,6 +627,7 @@ def _accept_edited_migration(
     state: MigrationRowState,
     checksum: str,
     identities: list[StatementIdentity],
+    sql_by_fingerprint: dict[str, str],
     retry: RetryResume | None,
     journal_store: JournalStore,
     log: Callable[[str], None],
@@ -664,7 +670,13 @@ def _accept_edited_migration(
         applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
     resolved = _assert_recorded_attempts_resolved(
-        client, journal_store, file=file, state=state, rebased=rebased, log=log
+        client,
+        journal_store,
+        file=file,
+        state=state,
+        rebased=rebased,
+        sql_by_fingerprint=sql_by_fingerprint,
+        log=log,
     )
     journal_store.write_migration_state(rebased)
     return resolved
@@ -677,6 +689,7 @@ def _assert_recorded_attempts_resolved(
     file: str,
     state: MigrationRowState,
     rebased: MigrationRowState,
+    sql_by_fingerprint: dict[str, str],
     log: Callable[[str], None],
 ) -> dict[int, KnownOutcome]:
     """Resolve every recorded async attempt before an edit is accepted (#767).
@@ -699,6 +712,8 @@ def _assert_recorded_attempts_resolved(
             migration_name=file,
             op=op,
             fingerprint=op.fingerprint,
+            # The record's own SQL, when it is one of the statements this run has.
+            sql=sql_by_fingerprint.get(op.fingerprint) if op.fingerprint else None,
             query_id=op.query_id,
             operation_type=op.operation_type,
             log=log,
@@ -749,6 +764,7 @@ def _resolve_async_attempt_before_sync(
     state: MigrationRowState,
     op: OperationState,
     fingerprint: str,
+    sql: str,
     operation_type: str,
     log: Callable[[str], None],
     known: KnownOutcome | None = None,
@@ -776,6 +792,7 @@ def _resolve_async_attempt_before_sync(
         migration_name=file,
         op=op,
         fingerprint=fingerprint,
+        sql=sql,
         query_id=op.query_id,
         operation_type=operation_type,
         log=log,
@@ -814,9 +831,8 @@ def _attempt_still_running_error(file: str, op: OperationState) -> MigrateError:
         "retry_mismatch",
         f"Cannot apply {file}: the earlier attempt of statement "
         f"{op.operation_index + 1} (query_id {op.query_id}) is still running on the "
-        "server, and continuing would discard its query id. Wait for it to "
-        f"finish or run KILL QUERY WHERE query_id = '{op.query_id}', then run chkit "
-        "migrate --apply again.",
+        "server, and continuing would discard its query id. "
+        f"{stop_running_advice(op.query_id)}",
     )
 
 

@@ -318,6 +318,50 @@ describe('createRemoteExecutor queryStatus', () => {
 		}
 	})
 
+	// #767 (Opus review): a rejected duplicate delivery of the id logs an
+	// early ExceptionBeforeStart, which never hides the attempt's QueryFinish.
+	test('a QueryFinish outranks a newer ExceptionBeforeStart of a duplicate delivery', async () => {
+		const meta = ['type', 'written_rows', 'written_bytes', 'query_duration_ms', 'exception', 'exception_code']
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			queryLog: {
+				meta,
+				data: [
+					['ExceptionBeforeStart', '0', '0', '0', 'Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING', '216'],
+					['QueryFinish', '25', '200', '25000', '', '0'],
+				],
+			},
+		})
+		try {
+			const remote = connect(workbench.url)
+
+			expect(await remote.queryStatus('qid-1', { includeBeforeStart: true })).toEqual({
+				status: 'finished',
+				writtenRows: 25,
+				writtenBytes: 200,
+				durationMs: 25000,
+			})
+			const queryLog = workbench.queries.find((query) => query.includes('system.query_log')) ?? ''
+			expect(queryLog).not.toContain('LIMIT 1')
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('a duplicate delivery alone is no failure', async () => {
+		const meta = ['type', 'written_rows', 'written_bytes', 'query_duration_ms', 'exception', 'exception_code']
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			queryLog: { meta, data: [['ExceptionBeforeStart', '0', '0', '0', 'Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING', '216']] },
+		})
+		try {
+			const remote = connect(workbench.url)
+			expect(await remote.queryStatus('qid-1', { includeBeforeStart: true })).toEqual({ status: 'unknown' })
+		} finally {
+			workbench.stop()
+		}
+	})
+
 	test('an unreadable replica fails a read that needs every replica', async () => {
 		const workbench = startScriptedWorkbench({
 			replicas: 2,
@@ -411,6 +455,7 @@ function startScriptedWorkbench(script: {
 	processesError?: string
 	truncated?: boolean
 	tables?: { meta: string[]; data: string[][] }
+	queryLog?: { meta: string[]; data: string[][] }
 }) {
 	const queries: string[] = []
 	const inputs: Array<Record<string, unknown>> = []
@@ -429,6 +474,12 @@ function startScriptedWorkbench(script: {
 			}
 			if (script.tables && input.query.includes('FROM system.tables')) {
 				const { meta, data } = script.tables
+				return Response.json({
+					json: { data, meta: meta.map((name) => ({ name, type: 'String' })), rows: data.length },
+				})
+			}
+			if (script.queryLog && input.query.includes('system.query_log')) {
+				const { meta, data } = script.queryLog
 				return Response.json({
 					json: { data, meta: meta.map((name) => ({ name, type: 'String' })), rows: data.length },
 				})

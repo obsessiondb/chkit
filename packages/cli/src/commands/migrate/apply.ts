@@ -41,6 +41,7 @@ import {
   outcomeUnknownError,
   resolveRecordedAttempt,
   reusableOutcome,
+  stopRunningAdvice,
   upsertOperation,
 } from './async-apply.js'
 import {
@@ -197,6 +198,8 @@ async function resolveAsyncAttemptBeforeSync(input: {
   state: MigrationRowState
   op: OperationState
   fingerprint: string
+  /** The statement this run runs at that position. */
+  sql: string
   operationType: string
   log: (line: string) => void
   /** The outcome the edit's check read for this attempt, if it did (#767). */
@@ -207,7 +210,7 @@ async function resolveAsyncAttemptBeforeSync(input: {
   const recorded =
     reusableOutcome(known, op, input.fingerprint) ??
     (await resolveRecordedAttempt({
-        db: input.db, journalStore: input.journalStore, migrationName: file, op, fingerprint: input.fingerprint, queryId: op.queryId,
+        db: input.db, journalStore: input.journalStore, migrationName: file, op, fingerprint: input.fingerprint, sql: input.sql, queryId: op.queryId,
         operationType: input.operationType, log: input.log, sleep: defaultSleep,
       }))
   switch (recorded.kind) {
@@ -297,6 +300,7 @@ export async function applyMigration(input: {
   const migrationChecksum = checksumSQL(sql)
   // What the journal records for each statement run, and checks against (#599).
   const fingerprints = statements.map(statementFingerprint)
+  const sqlByFingerprint = new Map(statements.map((statement, index) => [fingerprints[index] ?? '', statement]))
 
   // Resume support (#6): if a prior run left per-statement journal state for
   // this migration, statements already marked completed are skipped instead of
@@ -336,7 +340,7 @@ export async function applyMigration(input: {
   if (initialState !== null && !initialState.migrationCompleted && initialState.checksum === migrationChecksum) {
     const omitted = initialState.operations.filter((op) => op.operationIndex >= statements.length)
     if (omitted.length > 0) {
-      await assertRecordedAttemptsResolved(db, journalStore, file, { ...initialState, operations: omitted }, initialState, log)
+      await assertRecordedAttemptsResolved(db, journalStore, file, { ...initialState, operations: omitted }, initialState, sqlByFingerprint, log)
     }
   }
 
@@ -373,6 +377,7 @@ export async function applyMigration(input: {
       state: initialState,
       checksum: migrationChecksum,
       identities: statementIdentities(operationSummaries, fingerprints),
+      sqlByFingerprint,
       retry,
       journalStore,
       log,
@@ -448,7 +453,7 @@ export async function applyMigration(input: {
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
     let resolved: 'completed' | 'run' | 'unsent' = 'run'
     if (priorAttempt !== undefined && stateBefore !== null) {
-      resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, operationType: identity.type, log, known: editResolved.get(i) })
+      resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, sql: statement, operationType: identity.type, log, known: editResolved.get(i) })
       if (resolved === 'completed') continue
     }
     // An async attempt that was never sent ran nothing: no before-retry SQL.
@@ -603,6 +608,7 @@ async function acceptEditedMigration(input: {
   state: MigrationRowState
   checksum: string
   identities: StatementIdentity[]
+  sqlByFingerprint: ReadonlyMap<string, string>
   retry: { previousChecksum: string; checksum: string } | undefined
   journalStore: JournalStore
   log: (line: string) => void
@@ -629,7 +635,7 @@ async function acceptEditedMigration(input: {
     )
   }
   const rebased = rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) })
-  const resolved = await assertRecordedAttemptsResolved(input.db, journalStore, file, state, rebased, input.log)
+  const resolved = await assertRecordedAttemptsResolved(input.db, journalStore, file, state, rebased, input.sqlByFingerprint, input.log)
   await journalStore.writeMigrationState(rebased)
   return resolved
 }
@@ -648,12 +654,15 @@ async function assertRecordedAttemptsResolved(
   file: string,
   state: MigrationRowState,
   rebased: MigrationRowState,
+  /** The statements this run has, by fingerprint: a record's own SQL, when it is one of them. */
+  sqlByFingerprint: ReadonlyMap<string, string>,
   log: (line: string) => void,
 ): Promise<Map<number, KnownOutcome>> {
   const resolved = new Map<number, KnownOutcome>()
   for (const op of state.operations) {
     if (op.status === 'completed' || op.queryId === '') continue
-    const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName: file, op, fingerprint: op.fingerprint, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })
+    const sql = op.fingerprint === '' ? undefined : sqlByFingerprint.get(op.fingerprint)
+    const recorded = await resolveRecordedAttempt({ db, journalStore, migrationName: file, op, fingerprint: op.fingerprint, sql, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })
     if (recorded.kind === 'running') throw attemptStillRunningError(file, op)
     const dropped = !rebased.operations.includes(op)
     const reason =
@@ -673,7 +682,7 @@ async function assertRecordedAttemptsResolved(
 function attemptStillRunningError(file: string, op: OperationState): MigrateError {
   return new MigrateError(
     'retry_mismatch',
-    `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
+    `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. ${stopRunningAdvice(op.queryId)}`,
   )
 }
 
