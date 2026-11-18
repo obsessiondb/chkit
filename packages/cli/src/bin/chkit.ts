@@ -33,6 +33,13 @@ const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   pull: 'Pull',
 }
 
+/**
+ * The plugin commands that chkit-py has as top-level commands. Outside a
+ * project they report the missing config; any other unknown command is
+ * unknown, as in chkit-py (#687).
+ */
+const CONFIGLESS_PLUGIN_COMMANDS = new Set(['codegen', 'pull'])
+
 /** Commands that parse their own arguments before any config is loaded. */
 const OWN_PARSER_COMMANDS = new Set(['init', 'skills', 'add', 'registry'])
 
@@ -218,7 +225,7 @@ async function reportsWithoutProjectConfig(input: {
   const resolved = registry.get(commandName)
   if (!resolved) {
     // A plugin in the config can add this command.
-    if (WELL_KNOWN_PLUGIN_COMMANDS[commandName]) return false
+    if (CONFIGLESS_PLUGIN_COMMANDS.has(commandName)) return false
     reportUsageError({
       command: commandName,
       code: 'unknown_command',

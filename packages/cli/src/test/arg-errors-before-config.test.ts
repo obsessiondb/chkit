@@ -136,6 +136,25 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
     }
   }, 60_000)
 
+  test('a plugin command that chkit-py has no top-level command for is unknown', async () => {
+    const { dir, run } = await createEmptyDir()
+    try {
+      // chkit-py runs these plugins only through `chkit plugin <name>`.
+      for (const command of ['ingest', 'backfill', 'tinybird']) {
+        const result = run([command, '--json'])
+        expect([command, result.exitCode, result.stderr.trim()]).toEqual([command, 1, `Unknown command: ${command}`])
+        expect(JSON.parse(result.stdout)).toEqual({
+          command,
+          schemaVersion: 1,
+          ok: false,
+          error: { code: 'unknown_command', message: `Unknown command: ${command}` },
+        })
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
   test('a user profile without a project config reports the argument error first', async () => {
     const { dir, run } = await createEmptyDir({ profile: 'export default { schema: [], plugins: [] }\n' })
     try {
