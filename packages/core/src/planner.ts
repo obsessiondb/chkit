@@ -56,9 +56,10 @@ import {
   buildDependencyGraph,
   invertDependencyGraph,
   orderByDependencies,
+  stronglyConnectedComponents,
   type DependencyGraph,
 } from './object-dependencies.js'
-import { type SQLToken, identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
+import { type SQLToken, identifierName, isTrivia, stringLiteralValue, tokenizeSQL } from './sql-lexer.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -988,14 +989,16 @@ function closesCycle(
  * MODIFY that would close it (#775), or none when that fails. `cycleReleases`
  * adds an edge only when one MODIFY must break the cycle in every order. When
  * several could, or the cycle closes through two new expressions, this sorts
- * like `orderByDependencies` (the ready statement with the lowest key order
- * runs next) while replaying each statement. A statement that would close a
- * cycle waits for the breaker with the lowest key order: a later statement of
- * a column on the cycle whose change removes a read on it. A breaker that
- * already waits for the statement is skipped, so the edges never form a
- * cycle. The statements before it keep their places, so this is the order
- * that adding the edge and sorting again would give. With no breaker, or with
- * a cycle among the prerequisites, it returns none.
+ * like `orderByDependencies` while replaying each statement: the ready group
+ * with the lowest key order runs next, a group being one statement or the
+ * members of a cycle among the prerequisites, in key order. A statement that
+ * would close a cycle makes its group wait for the breaker with the lowest
+ * key order: a later statement of a column on the cycle whose change removes
+ * a read on it, and the group's statements are replayed back. A breaker that
+ * already waits for the statement is skipped, so the edges never form a new
+ * cycle. The groups before it keep their places, so this is the order that
+ * adding the edge and sorting again would give. With no breaker it returns
+ * none.
  */
 function breakClosedCycles(
   prerequisites: number[][],
@@ -1005,44 +1008,65 @@ function breakClosedCycles(
   checked: (index: number) => boolean
 ): number[] | undefined {
   const replay = defaultReplay(oldReads)
-  const remaining = prerequisites.map((before) => before.length)
+  const groups = stronglyConnectedComponents(prerequisites).map((members) => [...members].sort((a, b) => a - b))
+  const groupOf = new Array<number>(prerequisites.length).fill(0)
+  groups.forEach((members, group) => {
+    for (const member of members) groupOf[member] = group
+  })
+  // A group runs once every prerequisite of its members outside it has run.
+  const remaining = groups.map(() => 0)
   const dependents = prerequisites.map((): number[] => [])
+  const wait = (index: number, other: number) => {
+    const group = groupOf[index] ?? 0
+    if (groupOf[other] === group) return
+    remaining[group] = (remaining[group] ?? 0) + 1
+    dependents[other]?.push(index)
+  }
   prerequisites.forEach((before, index) => {
-    for (const other of before) dependents[other]?.push(index)
+    for (const other of before) wait(index, other)
   })
   const placed = prerequisites.map(() => false)
-  const ready = remaining.flatMap((count, index) => (count === 0 ? [index] : []))
+  const first = (group: number) => groups[group]?.[0] ?? 0
+  const ready = groups.flatMap((_, group) => (remaining[group] === 0 ? [group] : [])).sort((a, b) => first(a) - first(b))
   const order: number[] = []
-  for (let index = ready.shift(); index !== undefined; index = ready.shift()) {
-    const target = index
-    const op = statements[target]
-    if (op === undefined) continue
-    const change = changes.get(target)
-    const previous = replay.reads(op.key)
-    replayStatement(replay, op, change)
-    const cycle = checked(target) ? replay.cycleThrough(op.key) : new Set<string>()
-    if (cycle.size > 0) {
+  for (let group = ready.shift(); group !== undefined; group = ready.shift()) {
+    const members = groups[group] ?? []
+    const undo: Array<[string, ReadonlySet<string> | undefined]> = []
+    let blocked = false
+    for (const target of members) {
+      const op = statements[target]
+      if (op === undefined) continue
+      undo.push([op.key, replay.reads(op.key)])
+      replayStatement(replay, op, changes.get(target))
+      const cycle = checked(target) ? replay.cycleThrough(op.key) : new Set<string>()
+      if (cycle.size === 0) continue
       const breaker = statements.findIndex((other, j) => {
         const after = changes.get(j)
-        if (placed[j] || other.key === op.key || !cycle.has(other.key) || after === undefined) return false
+        if (placed[j] || groupOf[j] === group || other.key === op.key || !cycle.has(other.key) || after === undefined) return false
         const removes = [...(replay.reads(other.key) ?? [])].some((read) => cycle.has(read) && !after.has(read))
         return removes && !waitsFor(prerequisites, j, target)
       })
       if (breaker === -1) return undefined
-      replay.assign(op.key, previous)
+      for (const [key, reads] of undo.reverse()) replay.assign(key, reads)
       prerequisites[target]?.push(breaker)
-      dependents[breaker]?.push(target)
-      remaining[target] = (remaining[target] ?? 0) + 1
-      continue
+      wait(target, breaker)
+      blocked = true
+      break
     }
-    placed[target] = true
-    order.push(target)
-    for (const other of dependents[target] ?? []) {
-      remaining[other] = (remaining[other] ?? 0) - 1
-      if (remaining[other] === 0) ready.splice(sortedIndex(ready, other), 0, other)
+    if (blocked) continue
+    for (const member of members) {
+      placed[member] = true
+      order.push(member)
+    }
+    for (const member of members) {
+      for (const other of dependents[member] ?? []) {
+        const waiting = groupOf[other] ?? 0
+        remaining[waiting] = (remaining[waiting] ?? 0) - 1
+        if (remaining[waiting] === 0) ready.splice(sortedIndex(ready.map(first), first(waiting)), 0, waiting)
+      }
     }
   }
-  return order.length === statements.length ? order : undefined
+  return order
 }
 
 /** Position of `value` in the ascending `values`. */
@@ -1393,15 +1417,30 @@ function isUnit(token: SQLToken | undefined): boolean {
   return token?.kind === 'identifier' && INTERVAL_UNITS.has(token.text.toLowerCase())
 }
 
+// Words that end an INTERVAL operand for this scan: operators and the CASE
+// parts. ClickHouse may take some into the operand, but a unit after them is
+// not skipped, so the words before it stay reads.
+const INTERVAL_STOP_WORDS: ReadonlySet<string> = new Set([
+  'and', 'as', 'between', 'case', 'div', 'else', 'end', 'global', 'ilike', 'in', 'interval', 'is', 'like', 'mod',
+  'not', 'or', 'regexp', 'then', 'when',
+])
+const INTERVAL_OPERATORS: ReadonlySet<string> = new Set(['+', '-', '*', '/', '%', '.'])
+
 /**
- * Index of the unit of the `INTERVAL` at `keyword`, or none. Its operand is an
- * expression (`INTERVAL x + 1 day`), so the unit is the first bare unit word
- * at the operand's depth that follows a value (a name, number, string or
- * closing bracket); a unit word that starts an operand is a column
- * (`INTERVAL d d` reads `d`). The search ends at a `,`, an unmatched closing
- * bracket or the next INTERVAL, so `INTERVAL '1 day'` has no unit.
+ * Index of the unit of the `INTERVAL` at `keyword`, or none (#775). Like
+ * ClickHouse's parser, a string right after INTERVAL that holds more than a
+ * number is the whole interval (`INTERVAL '1 day'`), so no unit follows it.
+ * Otherwise the unit is the first bare unit word, at the operand's depth, in
+ * the place of an operator: after a name, number, string or closing bracket.
+ * A unit word that starts an operand is a column (`INTERVAL d d` reads `d`).
+ * The search stops at anything but arithmetic, brackets and names at that
+ * depth (a comparison, `,`, AND, CASE and the like), or at an unmatched
+ * closing bracket; then nothing is skipped, since a missing read can break a
+ * migration and an extra one only holds a statement back.
  */
 function intervalUnit(tokens: SQLToken[], keyword: number): number | undefined {
+  const first = tokens[keyword + 1]
+  if (first?.kind === 'string' && !/^\s*[+-]?[0-9.]+\s*$/.test(stringLiteralValue(first) ?? '')) return undefined
   let depth = 0
   let afterValue = false
   for (let j = keyword + 1; j < tokens.length; j += 1) {
@@ -1411,7 +1450,13 @@ function intervalUnit(tokens: SQLToken[], keyword: number): number | undefined {
     else if (token.text === ')' || token.text === ']' || token.text === '}') {
       depth -= 1
       if (depth < 0) return undefined
-    } else if (depth === 0 && (token.text === ',' || isWord(token, 'interval'))) return undefined
+    } else if (depth === 0) {
+      const stops =
+        token.kind === 'punctuation'
+          ? !INTERVAL_OPERATORS.has(token.text)
+          : token.kind === 'identifier' && INTERVAL_STOP_WORDS.has(token.text.toLowerCase())
+      if (stops) return undefined
+    }
     afterValue = depth === 0 && (token.kind !== 'punctuation' || token.text === ')' || token.text === ']' || token.text === '}')
   }
   return undefined

@@ -1322,6 +1322,35 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     expect(performance.now() - start).toBeLessThan(2_000)
     expect(operations.map((op) => op.key.slice('table:app.t:column:'.length)).slice(0, 3)).toEqual(['c0598', 'c0597', 'c0596'])
   })
+
+  // ClickHouse ends `INTERVAL '1 day'` at the string, so the `day` after AND
+  // is a read and its ADD runs first; so is the `day` inside a CASE operand.
+  test.each([
+    "now() + INTERVAL '1 day' > toDateTime(id) AND day",
+    'toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)',
+  ])('adds the column that %s reads after an INTERVAL first', (expression) => {
+    expect(sqls([t([])], [t([u('a', expression), { name: 'day', type: 'UInt8' }])])).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `day` UInt8;',
+      `ALTER TABLE app.t ADD COLUMN IF NOT EXISTS \`a\` UInt64 DEFAULT ${expression};`,
+    ])
+  })
+
+  // `when` inside the CASE is read as a column, so the two DROPs wait for
+  // each other. That cycle keeps its key order and the breaker still moves.
+  test('runs the breaker first when another cycle among the statements keeps its order', () => {
+    expect(
+      sqls(
+        [t([u('a'), u('b', 'c'), u('c', 'a'), u('when', 'zz'), u('zz', 'case when id > 0 then 1 else 0 end')])],
+        [t([u('a', 'b'), u('b', 'id'), u('c', 'id')])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `when`;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `zz`;',
+    ])
+  })
 })
 
 describe('columnDefaultReads skips INTERVAL and EXTRACT units (#775)', () => {
@@ -1359,6 +1388,11 @@ describe('columnDefaultReads skips INTERVAL and EXTRACT units (#775)', () => {
     ['extract(DAY from ts)', ['ts']],
     ["extract(toString(day), 'x')", ['day']],
     ['day + hour + month', ['day', 'hour', 'month']],
+    ["ts + INTERVAL '2' day", ['ts']],
+    ["now() + INTERVAL '1 day' > toDateTime(id) AND day", ['day', 'id']],
+    ['toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)', ['day']],
+    ['ts + INTERVAL x day > ts AND day', ['day', 'ts', 'x']],
+    ['ts + INTERVAL x > 1 day', ['day', 'ts', 'x']],
   ])('%s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
   })

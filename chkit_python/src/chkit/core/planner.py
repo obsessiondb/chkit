@@ -43,6 +43,7 @@ from chkit.core.object_dependencies import (
     build_dependency_graph,
     invert_dependency_graph,
     order_by_dependencies,
+    strongly_connected_components,
 )
 from chkit.core.sql import (
     column_codec_fingerprint,
@@ -75,6 +76,7 @@ from chkit.core.sql_lexer import (
     is_trivia,
     js_regex,
     js_trim,
+    string_literal_value,
     tokenize_sql,
 )
 from chkit.core.sql_normalizer import sql_expression_fingerprint
@@ -1022,38 +1024,57 @@ def _break_closed_cycles(
 
     ``_cycle_releases`` adds an edge only when one MODIFY must break the
     cycle in every order. When several could, or the cycle closes through two
-    new expressions, this sorts like ``order_by_dependencies`` (the ready
-    statement with the lowest key order runs next) while replaying each
-    statement. A statement that would close a cycle waits for the breaker
-    with the lowest key order: a later statement of a column on the cycle
-    whose change removes a read on it. A breaker that already waits for the
-    statement is skipped, so the edges never form a cycle. The statements
+    new expressions, this sorts like ``order_by_dependencies`` while replaying
+    each statement: the ready group with the lowest key order runs next, a
+    group being one statement or the members of a cycle among the
+    prerequisites, in key order. A statement that would close a cycle makes
+    its group wait for the breaker with the lowest key order: a later
+    statement of a column on the cycle whose change removes a read on it, and
+    the group's statements are replayed back. A breaker that already waits for
+    the statement is skipped, so the edges never form a new cycle. The groups
     before it keep their places, so this is the order that adding the edge and
-    sorting again would give. With no breaker, or with a cycle among the
-    prerequisites, it returns none.
+    sorting again would give. With no breaker it returns none.
     """
     replay = _DefaultReplay(old_reads)
-    remaining = [len(before) for before in prerequisites]
+    groups = [sorted(members) for members in strongly_connected_components(prerequisites)]
+    group_of = [0] * len(prerequisites)
+    for group, members in enumerate(groups):
+        for member in members:
+            group_of[member] = group
+    # A group runs once every prerequisite of its members outside it has run.
+    remaining = [0] * len(groups)
     dependents: list[list[int]] = [[] for _ in prerequisites]
+
+    def wait(index: int, other: int) -> None:
+        if group_of[other] == group_of[index]:
+            return
+        remaining[group_of[index]] += 1
+        dependents[other].append(index)
+
     for index, before in enumerate(prerequisites):
         for other in before:
-            dependents[other].append(index)
+            wait(index, other)
     placed = [False] * len(prerequisites)
-    ready = [index for index, count in enumerate(remaining) if count == 0]
+    ready = [(groups[group][0], group) for group in range(len(groups)) if remaining[group] == 0]
+    heapq.heapify(ready)
     order: list[int] = []
     while ready:
-        target = heapq.heappop(ready)
-        op = statements[target]
-        change = changes.get(target)
-        previous = replay.reads(op.key)
-        replay.apply(op, change)
-        cycle = replay.cycle_through(op.key) if checked(target) else set()
-        if cycle:
+        _, group = heapq.heappop(ready)
+        undo: list[tuple[str, set[str] | None]] = []
+        blocked = False
+        for target in groups[group]:
+            op = statements[target]
+            undo.append((op.key, replay.reads(op.key)))
+            replay.apply(op, changes.get(target))
+            cycle = replay.cycle_through(op.key) if checked(target) else set()
+            if not cycle:
+                continue
             breaker = next(
                 (
                     j
                     for j, other in enumerate(statements)
                     if not placed[j]
+                    and group_of[j] != group
                     and other.key != op.key
                     and other.key in cycle
                     and j in changes
@@ -1067,18 +1088,23 @@ def _break_closed_cycles(
             )
             if breaker is None:
                 return None
-            replay.assign(op.key, previous)
+            for key, reads in reversed(undo):
+                replay.assign(key, reads)
             prerequisites[target].append(breaker)
-            dependents[breaker].append(target)
-            remaining[target] += 1
+            wait(target, breaker)
+            blocked = True
+            break
+        if blocked:
             continue
-        placed[target] = True
-        order.append(target)
-        for other in dependents[target]:
-            remaining[other] -= 1
-            if remaining[other] == 0:
-                heapq.heappush(ready, other)
-    return order if len(order) == len(statements) else None
+        for member in groups[group]:
+            placed[member] = True
+            order.append(member)
+        for member in groups[group]:
+            for other in dependents[member]:
+                remaining[group_of[other]] -= 1
+                if remaining[group_of[other]] == 0:
+                    heapq.heappush(ready, (groups[group_of[other]][0], group_of[other]))
+    return order
 
 
 def _waits_for(prerequisites: list[list[int]], start: int, target: int) -> bool:
@@ -1461,16 +1487,37 @@ def _is_unit(tokens: list[SQLToken], i: int) -> bool:
     )
 
 
-def _interval_unit(tokens: list[SQLToken], keyword: int) -> int | None:
-    """Index of the unit of the ``INTERVAL`` at ``keyword``, or none.
+# Words that end an INTERVAL operand for this scan: operators and the CASE
+# parts. ClickHouse may take some into the operand, but a unit after them is
+# not skipped, so the words before it stay reads.
+_INTERVAL_STOP_WORDS = frozenset(
+    [
+        "and", "as", "between", "case", "div", "else", "end", "global", "ilike", "in", "interval",
+        "is", "like", "mod", "not", "or", "regexp", "then", "when",
+    ]
+)
+_INTERVAL_OPERATORS = frozenset(["+", "-", "*", "/", "%", "."])
+_NUMBER_STRING = re.compile(r"\s*[+-]?[0-9.]+\s*")
 
-    Its operand is an expression (``INTERVAL x + 1 day``), so the unit is the
-    first bare unit word at the operand's depth that follows a value (a name,
-    number, string or closing bracket); a unit word that starts an operand is
-    a column (``INTERVAL d d`` reads ``d``). The search ends at a ``,``, an
-    unmatched closing bracket or the next INTERVAL, so ``INTERVAL '1 day'``
-    has no unit.
+
+def _interval_unit(tokens: list[SQLToken], keyword: int) -> int | None:
+    """Index of the unit of the ``INTERVAL`` at ``keyword``, or none (#775).
+
+    Like ClickHouse's parser, a string right after INTERVAL that holds more
+    than a number is the whole interval (``INTERVAL '1 day'``), so no unit
+    follows it. Otherwise the unit is the first bare unit word, at the
+    operand's depth, in the place of an operator: after a name, number, string
+    or closing bracket. A unit word that starts an operand is a column
+    (``INTERVAL d d`` reads ``d``). The search stops at anything but
+    arithmetic, brackets and names at that depth (a comparison, ``,``, AND,
+    CASE and the like), or at an unmatched closing bracket; then nothing is
+    skipped, since a missing read can break a migration and an extra one only
+    holds a statement back.
     """
+    if keyword + 1 < len(tokens) and tokens[keyword + 1].kind == "string":
+        value = string_literal_value(tokens[keyword + 1])
+        if _NUMBER_STRING.fullmatch(value or "") is None:
+            return None
     depth = 0
     after_value = False
     for j in range(keyword + 1, len(tokens)):
@@ -1483,8 +1530,13 @@ def _interval_unit(tokens: list[SQLToken], keyword: int) -> int | None:
             depth -= 1
             if depth < 0:
                 return None
-        elif depth == 0 and (token.text == "," or _is_word(tokens, j, "interval")):
-            return None
+        elif depth == 0:
+            if token.kind == "punctuation":
+                stops = token.text not in _INTERVAL_OPERATORS
+            else:
+                stops = token.kind == "identifier" and token.text.lower() in _INTERVAL_STOP_WORDS
+            if stops:
+                return None
         after_value = depth == 0 and (token.kind != "punctuation" or token.text in (")", "]", "}"))
     return None
 

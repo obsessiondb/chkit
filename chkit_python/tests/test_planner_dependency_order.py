@@ -1248,7 +1248,44 @@ def test_plans_a_wide_table_whose_every_modify_closes_a_cycle_in_under_two_secon
     ]
 
 
-_UNIT_COLUMNS = ["d", "day", "DAY", "hour", "id", "month", "ts", "x"]
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "now() + INTERVAL '1 day' > toDateTime(id) AND day",
+        "toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)",
+    ],
+)
+def test_adds_the_column_read_after_an_interval_first(expression: str) -> None:
+    # ClickHouse ends `INTERVAL '1 day'` at the string, so the `day` after AND
+    # is a read and its ADD runs first; so is the `day` inside a CASE operand.
+    assert _sqls([_t([])], [_t([_u("a", expression), {"name": "day", "type": "UInt8"}])]) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `day` UInt8;",
+        f"ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT {expression};",
+    ]
+
+
+def test_runs_the_breaker_first_when_another_cycle_among_the_statements_keeps_its_order() -> None:
+    # `when` inside the CASE is read as a column, so the two DROPs wait for
+    # each other. That cycle keeps its key order and the breaker still moves.
+    assert _sqls(
+        [_t([
+            _u("a"),
+            _u("b", "c"),
+            _u("c", "a"),
+            _u("when", "zz"),
+            _u("zz", "case when id > 0 then 1 else 0 end"),
+        ])],
+        [_t([_u("a", "b"), _u("b", "id"), _u("c", "id")])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `when`;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `zz`;",
+    ]
+
+
+_UNIT_COLUMNS =["d", "day", "DAY", "hour", "id", "month", "ts", "x"]
 
 
 def _unit_reads_of(expression: str) -> list[str]:
@@ -1285,6 +1322,11 @@ def _unit_reads_of(expression: str) -> list[str]:
         ("extract(DAY from ts)", ["ts"]),
         ("extract(toString(day), 'x')", ["day"]),
         ("day + hour + month", ["day", "hour", "month"]),
+        ("ts + INTERVAL '2' day", ["ts"]),
+        ("now() + INTERVAL '1 day' > toDateTime(id) AND day", ["day", "id"]),
+        ("toUInt64(now() + INTERVAL CASE WHEN day THEN 1 ELSE 2 END HOUR)", ["day"]),
+        ("ts + INTERVAL x day > ts AND day", ["day", "ts", "x"]),
+        ("ts + INTERVAL x > 1 day", ["day", "ts", "x"]),
     ],
 )
 def test_reads_skip_interval_and_extract_units(expression: str, expected: list[str]) -> None:

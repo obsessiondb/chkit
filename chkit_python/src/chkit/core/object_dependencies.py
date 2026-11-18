@@ -117,7 +117,7 @@ def order_by_dependencies(
                     found[other] = None
         prerequisites.append(list(found))
 
-    components = _strongly_connected_components(prerequisites)
+    components = strongly_connected_components(prerequisites)
     component_of = [0] * len(items)
     for component, members in enumerate(components):
         for member in members:
@@ -394,7 +394,7 @@ def _text_at(tokens: list[SQLToken], i: int) -> str:
     return tokens[i].text if 0 <= i < len(tokens) else ""
 
 
-def _strongly_connected_components(edges: list[list[int]]) -> list[list[int]]:
+def strongly_connected_components(edges: list[list[int]]) -> list[list[int]]:
     # Tarjan's algorithm over index-based edges (`edges[v]` = nodes v points to).
     counter = 0
     index: dict[int, int] = {}
