@@ -75,6 +75,7 @@
       },
       "optionalDependencies": {
         "@chkit/plugin-obsessiondb": "workspace:*",
+        "@chkit/plugin-pull": "workspace:*",
       },
     },
     "packages/clickhouse": {
