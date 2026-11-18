@@ -825,6 +825,26 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 
+  // `t.1.a.b` is a path into the tuple `t`; reading its suffix as the column
+  // `a.b` made a cycle with `a.b DEFAULT z + 1` that kept the key order.
+  test('a dotted run ends at a tuple element by position', () => {
+    expect(
+      sqls(
+        [t([{ name: 't', type: 'Tuple(u Tuple(a Tuple(b UInt64)))' }])],
+        [
+          t([
+            { name: 't', type: 'Tuple(u Tuple(a Tuple(b UInt64)))' },
+            { name: 'a.b', type: 'UInt64', default: { expression: 'z + 1' } },
+            { name: 'z', type: 'UInt64', default: { expression: 't.1.a.b' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT t.1.a.b;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a.b` UInt64 DEFAULT z + 1;',
+    ])
+  })
+
   test('keeps key order for a cycle', () => {
     expect(
       sqls(

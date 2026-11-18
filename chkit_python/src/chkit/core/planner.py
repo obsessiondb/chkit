@@ -953,21 +953,34 @@ def _dotted_names(sql: str, columns: set[str]) -> list[str]:
     ClickHouse, a run reads its longest leading part that is a column: ``n.x``
     reads the column ``n.x`` when there is one, and otherwise ``n`` (a subcolumn
     of ``n``). A run whose leading parts are no column is read without them, so
-    ``t.col`` and ``db.t.col`` read ``col`` (#748). A run followed by ``(`` is a
-    function call, not a column.
+    ``t.col`` and ``db.t.col`` read ``col`` (#748). A tuple element by position
+    ends the run: ``t.1.a`` reads ``t``. A run followed by ``(`` is a function
+    call, not a column.
     """
     tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
     found: list[str] = []
     i = 0
     while i < len(tokens):
         run: list[str] = []
+        # A tuple element by position (``t.1``) and the parts after it are one path
+        # into the run before it, so ``t.1.a.b`` reads only ``t``.
+        element = False
         name = identifier_name(tokens[i])
         while name is not None:
-            run.append(name)
+            if not element:
+                run.append(name)
             i += 1
             if i >= len(tokens) or tokens[i].text != ".":
                 break
-            name = identifier_name(tokens[i + 1]) if i + 1 < len(tokens) else None
+            following = tokens[i + 1] if i + 1 < len(tokens) else None
+            if following is not None and following.kind == "number":
+                element = True
+            if following is None:
+                name = None
+            elif following.kind == "number":
+                name = following.text
+            else:
+                name = identifier_name(following)
             if name is not None:
                 i += 1
         if not run:

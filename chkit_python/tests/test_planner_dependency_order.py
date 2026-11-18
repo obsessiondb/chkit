@@ -860,6 +860,22 @@ def test_a_dotted_run_reads_only_its_longest_leading_column_not_a_later_part() -
     ]
 
 
+def test_a_dotted_run_ends_at_a_tuple_element_by_position() -> None:
+    # `t.1.a.b` is a path into the tuple `t`; reading its suffix as the column
+    # `a.b` made a cycle with `a.b DEFAULT z + 1` that kept the key order.
+    assert _sqls(
+        [_t([{"name": "t", "type": "Tuple(u Tuple(a Tuple(b UInt64)))"}])],
+        [_t([
+            {"name": "t", "type": "Tuple(u Tuple(a Tuple(b UInt64)))"},
+            {"name": "a.b", "type": "UInt64", "default": _expr("z + 1")},
+            {"name": "z", "type": "UInt64", "default": _expr("t.1.a.b")},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT t.1.a.b;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a.b` UInt64 DEFAULT z + 1;",
+    ]
+
+
 def test_keeps_key_order_for_a_cycle_of_dropped_columns() -> None:
     assert _sqls(
         [_t([

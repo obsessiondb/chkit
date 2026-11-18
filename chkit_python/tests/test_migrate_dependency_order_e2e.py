@@ -555,6 +555,8 @@ def test_adds_a_dotted_column_before_the_add_column_whose_default_reads_it_unquo
 ) -> None:
     # `a` sorts before `n.x`, and its DEFAULT reads `n.x` without backquotes
     # (#748). ClickHouse rejects the ADD COLUMN of `a` while `n.x` is missing.
+    # Then `k.b` sorts before `z`, whose `t.1.k.b` is a path into the tuple `t`,
+    # not a read of `k.b`; ClickHouse rejects `k.b DEFAULT z + 1` before `z`.
     client = ch_client._client
     env = resolve_live_env()
     db = client.database
@@ -585,7 +587,9 @@ def test_adds_a_dotted_column_before_the_add_column_whose_default_reads_it_unquo
         (tmp_path / "schema.py").write_text(
             "from chkit import SQLExpression, schema, table\n\n"
             f"definitions = schema(table(database={db!r}, name={orders!r}, "
-            f"columns=[{{'name': 'id', 'type': 'UInt64'}}{columns}], engine='MergeTree()', "
+            f"columns=[{{'name': 'id', 'type': 'UInt64'}}, "
+            f"{{'name': 't', 'type': 'Tuple(u Tuple(k Tuple(b UInt64)))'}}{columns}], "
+            "engine='MergeTree()', "
             "primary_key=['id'], order_by=['id']))\n"
         )
         gen = runner.invoke(
@@ -610,6 +614,23 @@ def test_adds_a_dotted_column_before_the_add_column_whose_default_reads_it_unquo
             f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, `n.x`) VALUES (1, [40, 2])")
         rows = client.query(f"SELECT a FROM {quote_ident(db)}.{quote_ident(orders)}").result_rows
         assert [int(row[0]) for row in rows] == [42]
+
+        element_sql = generate_and_migrate(
+            ", {'name': 'a', 'type': 'UInt64', 'default': SQLExpression(expression='arraySum(n.x)')}, "
+            "{'name': 'n.x', 'type': 'Array(UInt64)'}, "
+            "{'name': 'k.b', 'type': 'UInt64', 'default': SQLExpression(expression='z + 1')}, "
+            "{'name': 'z', 'type': 'UInt64', 'default': SQLExpression(expression='t.1.k.b')}",
+            "element",
+            "20990101000002",
+        )
+        _assert_in_order(element_sql, [f"table:{db}.{orders}:column:z",
+                                       f"table:{db}.{orders}:column:k.b"])
+
+        client.command(
+            f"INSERT INTO {quote_ident(db)}.{quote_ident(orders)} (id, t) VALUES (2, (((41))))")
+        rows = client.query(
+            f"SELECT z, `k.b` FROM {quote_ident(db)}.{quote_ident(orders)} WHERE id = 2").result_rows
+        assert [(int(row[0]), int(row[1])) for row in rows] == [(41, 42)]
     finally:
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")

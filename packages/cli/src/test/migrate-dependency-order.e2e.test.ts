@@ -295,6 +295,8 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
 
   // `a` sorts before `n.x`, and its DEFAULT reads `n.x` without backquotes
   // (#748). ClickHouse rejects the ADD COLUMN of `a` while `n.x` is missing.
+  // Then `k.b` sorts before `z`, whose `t.1.k.b` is a path into the tuple `t`,
+  // not a read of `k.b`; ClickHouse rejects `k.b DEFAULT z + 1` before `z`.
   test('adds a dotted column before the ADD COLUMN whose DEFAULT reads it unquoted', async () => {
     const liveEnv = getLiveEnv()
     const executor = createLiveExecutor(liveEnv)
@@ -310,7 +312,7 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
       writeFile(
         schemaPath,
         `import { schema, table } from '${CORE_ENTRY}'\n\n` +
-          `export default schema(table({ database: '${db}', name: '${orders}', columns: [{ name: 'id', type: 'UInt64' }${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
+          `export default schema(table({ database: '${db}', name: '${orders}', columns: [{ name: 'id', type: 'UInt64' }, { name: 't', type: 'Tuple(u Tuple(k Tuple(b UInt64)))' }${columns}], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'] }))\n`,
         'utf8'
       )
     const generateAndMigrate = async (name: string, migrationId: string) => {
@@ -360,6 +362,23 @@ describe('@chkit/cli migrate dependency order e2e (#231)', () => {
       await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, \`n.x\`) VALUES (1, [40, 2])`)
       const rows = await executor.query<{ a: string }>(`SELECT a FROM ${quoteIdent(db)}.${quoteIdent(orders)}`)
       expect(rows.map((row) => Number(row.a))).toEqual([42])
+
+      await writeSchema(
+        ", { name: 'a', type: 'UInt64', default: { expression: 'arraySum(n.x)' } }, { name: 'n.x', type: 'Array(UInt64)' }" +
+          ", { name: 'k.b', type: 'UInt64', default: { expression: 'z + 1' } }, { name: 'z', type: 'UInt64', default: { expression: 't.1.k.b' } }"
+      )
+      const elementSql = await generateAndMigrate('element', '20990101000002')
+      expectInOrder(elementSql, [
+        'ADD COLUMN IF NOT EXISTS `z` UInt64 DEFAULT t.1.k.b;',
+        'ADD COLUMN IF NOT EXISTS `k.b` UInt64 DEFAULT z + 1;',
+      ])
+      await waitForColumn(executor, db, orders, 'k.b')
+
+      await executor.command(`INSERT INTO ${quoteIdent(db)}.${quoteIdent(orders)} (id, t) VALUES (2, (((41))))`)
+      const elementRows = await executor.query<{ z: string; kb: string }>(
+        `SELECT z, \`k.b\` AS kb FROM ${quoteIdent(db)}.${quoteIdent(orders)} WHERE id = 2`
+      )
+      expect(elementRows.map((row) => [Number(row.z), Number(row.kb)])).toEqual([[41, 42]])
     } finally {
       await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(orders)}`)
       await executor.command(`DROP TABLE IF EXISTS ${quoteIdent(db)}.${quoteIdent(journalTable)}`)

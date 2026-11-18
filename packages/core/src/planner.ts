@@ -936,8 +936,8 @@ function columnKey(table: { database: string; table: string }, column: string): 
  * run reads its longest leading part that is a column: `n.x` reads the column
  * `n.x` when there is one, and otherwise `n` (a subcolumn of `n`). A run whose
  * leading parts are no column is read without them, so `t.col` and
- * `db.t.col` read `col` (#748). A run followed by `(` is a function call, not
- * a column.
+ * `db.t.col` read `col` (#748). A tuple element by position ends the run:
+ * `t.1.a` reads `t`. A run followed by `(` is a function call, not a column.
  */
 function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
   const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
@@ -945,12 +945,16 @@ function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
   let i = 0
   while (i < tokens.length) {
     const run: string[] = []
+    // A tuple element by position (`t.1`) and the parts after it are one path
+    // into the run before it, so `t.1.a.b` reads only `t`.
+    let element = false
     for (let name = identifierName(tokens[i]!); name !== undefined; ) {
-      run.push(name)
+      if (!element) run.push(name)
       i += 1
       if (tokens[i]?.text !== '.') break
       const next = tokens[i + 1]
-      name = next === undefined ? undefined : identifierName(next)
+      if (next?.kind === 'number') element = true
+      name = next === undefined ? undefined : next.kind === 'number' ? next.text : identifierName(next)
       if (name !== undefined) i += 1
     }
     if (run.length === 0) i += 1
