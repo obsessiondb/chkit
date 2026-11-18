@@ -70,6 +70,7 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
       }
 
       for (const [args, usage] of [
+        // Guard, unchanged by #687: --help already printed the help without a config.
         [['status', 'foo', '--help'], 'chkit status [options]'],
         [['status', '--help-plugins', 'foo'], 'chkit status [options]'],
         [['pull', '--help'], 'chkit pull <command> [options]'],
@@ -106,7 +107,7 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
         expect([args, json.exitCode, json.stderr.trim()]).toEqual([args, 1, message])
         expect(JSON.parse(json.stdout)).toEqual({ command: 'query', schemaVersion: 1, ok: false, error: { code: 'error', message } })
       }
-      // snapshot rebuild checks its own arguments once the config is loaded, as in chkit-py.
+      // Guard, unchanged by #687: snapshot rebuild checks its own arguments once the config is loaded, as in chkit-py.
       const rebuild = run(['snapshot', 'rebuild', 'foo'])
       expect([rebuild.exitCode, rebuild.stderr]).toEqual([1, expect.stringContaining('Config not found at ')])
     } finally {
@@ -146,6 +147,7 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
       ] as const) {
         expect([args, ...usageResult(run(args))]).toEqual([args, 1, '', message])
       }
+      // Guard, unchanged by #687: without an argument error, the project config is still required.
       const status = run(['status'])
       expect([status.exitCode, status.stderr]).toEqual([1, expect.stringContaining('Command "status" requires a project config')])
     } finally {
@@ -153,13 +155,22 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
     }
   }, 60_000)
 
-  test('flags and commands that plugins add need the config', async () => {
+  test('a flag that only a plugin adds is unknown without a config', async () => {
+    const { dir, run } = await createEmptyDir()
+    try {
+      expect(usageResult(run(['snapshot', 'rebuild', '--probe']))).toEqual([1, '', 'Unknown flag: --probe'])
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  // Guards: this behavior is the same before and after #687 and must not change.
+  test('guard: plugin commands, plugin flags and a broken or plugin-extended project config are unchanged', async () => {
     const empty = await createEmptyDir()
     try {
       // The config names the plugins. Outside a project, a plugin command and
-      // a valid ObsessionDB flag report the missing config, as in chkit-py. A
-      // flag that only another plugin adds is unknown. Valid `pull` flags need
-      // the config too.
+      // a valid ObsessionDB flag report the missing config, as in chkit-py.
+      // Valid `pull` flags need the config too.
       for (const args of [
         ['pull', '--dryrun'],
         ['codegen', '--bogus'],
@@ -170,7 +181,6 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
         const result = empty.run(args)
         expect([args, result.exitCode, result.stderr]).toEqual([args, 1, expect.stringContaining('Config not found at ')])
       }
-      expect(usageResult(empty.run(['snapshot', 'rebuild', '--probe']))).toEqual([1, '', 'Unknown flag: --probe'])
     } finally {
       await rm(empty.dir, { recursive: true, force: true })
     }
