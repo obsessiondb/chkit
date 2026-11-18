@@ -2,6 +2,6 @@
 "chkit": patch
 ---
 
-An async statement's first attempt now runs under a random query id recorded in the journal before its submit, and a re-run reads only that id's outcome, so it never records the statement as completed from an earlier attempt's `system.query_log` entry. When the outcome cannot be told (no `query_log` entry, or a started record from an earlier release), `chkit migrate --apply` stops with `async_outcome_unknown` instead of running the statement again.
+A re-run of `chkit migrate --apply` no longer records an async statement as completed from an earlier attempt's `system.query_log` entry: every attempt runs under a random query id recorded in the journal first, and a statement whose outcome cannot be told stops with `async_outcome_unknown` instead of running again.
 
-- Breaking: finish async migrations with the release that started them before upgrading; this release stops with `async_outcome_unknown` on a statement an earlier release left started, and an earlier release from #599 on refuses to resume one this release left started.
+- Breaking: don't upgrade while an async migration is in progress; this release stops with `async_outcome_unknown` on a statement an earlier release left started.

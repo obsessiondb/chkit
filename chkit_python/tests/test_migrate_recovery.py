@@ -412,6 +412,24 @@ def test_rebase_in_progress_state_keeps_completed_and_unchanged() -> None:
     )
 
 
+@pytest.mark.parametrize("fenced", [True, False])
+def test_rebase_in_progress_state_carries_the_attempt_fence_as_read(fenced: bool) -> None:
+    """#767 (Codex review of #770): a --retry re-key carries each started
+    record's fence as the journal returned it, so it never makes an unfenced
+    record trusted, nor drops the fence of one this release wrote."""
+    started = op(0, "started", LOAD, query_id="q-0").model_copy(
+        update={"attempt_fenced": fenced}
+    )
+    rebased = rebase_in_progress_state(
+        in_progress([started], checksum="old"),
+        checksum="new",
+        identities=identities(LOAD),
+        applied_at="T",
+    )
+    assert rebased.operations == [started]
+    assert rebased.operations[0].attempt_fenced is fenced
+
+
 def test_has_statement_progress() -> None:
     assert not has_statement_progress(in_progress([]))
     assert not has_statement_progress(in_progress([op(0, "failed", A)]))
@@ -1143,6 +1161,50 @@ def test_a_mode_only_async_to_sync_edit_journals_the_stopped_async_attempt_faile
         "not running; recorded failed before a sync or barrier run of the statement ran its "
         "before-retry SQL",
     )
+
+
+class _NoOutcomeAsyncClient(_RecordingClient):
+    """No replica runs the recorded async attempt; nothing is ever submitted."""
+
+    def query(self, _sql: str) -> QueryResult:
+        return QueryResult(
+            column_names=["now_ms", "database"],
+            rows=[{"now_ms": "1700000000000", "database": "db"}],
+        )
+
+    def query_status(
+        self, _query_id: str, *, every_replica: bool = False, running_only: bool = False
+    ) -> QueryStatus:
+        _ = (every_replica, running_only)
+        return QueryStatus(status="unknown")
+
+    def submit(self, *_args: Any, **_kwargs: Any) -> str:
+        msg = "never submitted"
+        raise AssertionError(msg)
+
+
+def test_an_async_statement_without_a_readable_outcome_keeps_async_outcome_unknown(
+    tmp_path: Path,
+) -> None:
+    """#767: the stop keeps its code through apply_migration's statement
+    error, so --json reports async_outcome_unknown."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    sql = f"-- operation: load_table_data key=table:db.a risk=safe mode=async\n{statement}\n"
+    attempt = op(0, "started", LOAD, query_id="legacy-query-id").model_copy(
+        update={"fingerprint": statement_fingerprint(statement)}
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(sql)))
+    client = _NoOutcomeAsyncClient()
+    with pytest.raises(MigrateError) as info:
+        _apply(_write(tmp_path, sql), cast(Any, client), store)
+    assert info.value.code == "async_outcome_unknown"
+    assert info.value.message.startswith("Migration m.sql failed at statement 1 of 1")
+    assert (
+        "query_id legacy-query-id): the journal records an attempt as started"
+        in info.value.message
+    )
+    assert client.calls == []
+    assert store.writes == []
 
 
 def _retry_for(sql: str, previous: str = "old") -> RetryResume:

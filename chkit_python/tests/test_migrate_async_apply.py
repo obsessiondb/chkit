@@ -383,13 +383,20 @@ def test_apply_async_running_query_without_a_fenced_record_stops_instead_of_atta
             _input(client=client, journal=journal, before_retry="TRUNCATE TABLE db.t")
         )
     assert info.value.code == "async_outcome_unknown"
+    reason = (
+        "but the journal records that attempt as failed, so chkit does not attach to it, and "
+        "the next chkit migrate --apply runs the statement again (after its before-retry SQL, "
+        "when it has one)"
+        if kind == "failed"
+        else "but its query id was not recorded by this chkit release for that attempt alone, "
+        "so chkit cannot tell its outcome from system.query_log once it ends"
+    )
     assert info.value.message == (
         "Async migration step alter_table_modify_column (statement 1 of "
         f"20260101_000000_async.sql, query_id {checked_id}) is still running on the server, "
-        "but its query id was not recorded by this chkit release for that attempt alone, so "
-        "chkit cannot tell its outcome from system.query_log once it ends. Nothing was "
-        "submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY "
-        f"WHERE query_id = '{checked_id}', then run chkit migrate --apply again."
+        f"{reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish "
+        f"or run KILL QUERY WHERE query_id = '{checked_id}', then run chkit migrate --apply "
+        "again."
     )
     assert client.status_ids == [checked_id]
     assert client.after_times == [None]
@@ -796,8 +803,9 @@ def test_apply_async_submit_failing_after_the_query_ran_gives_up_after_the_poll_
         f"Async migration step alter_table_modify_column (query_id "
         f"{_submitted_query_id(client.submitted)}): "
         "the submit request failed (error code: 524) and polling found no outcome 21\u00d7. "
-        "A re-run of `chkit migrate --apply` attaches to the query if it still runs and runs "
-        "the statement again if not."
+        "A re-run of `chkit migrate --apply` attaches to the query if it still runs, records "
+        "its outcome from system.query_log, and stops with async_outcome_unknown when there "
+        "is none."
     )
     # The outcome is unknown, so the attempt stays started.
     assert journal.writes is not None

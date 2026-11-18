@@ -810,6 +810,39 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     })
   })
 
+  // #767: the stop keeps its code through applyMigration's statement error,
+  // so --json reports async_outcome_unknown.
+  test('an async statement whose started attempt has no readable outcome stops with async_outcome_unknown', async () => {
+    const sql = 'INSERT INTO db.a SELECT 1;'
+    const file = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n${sql}\n`
+    const dir = writeMigration(file)
+    const { store, writes } = createFakeStore(inProgressState(checksumSQL(file), [{
+      ...operation(0, 'started', { type: 'load_table_data', key: 'table:db.a' }),
+      queryId: 'legacy-query-id',
+      fingerprint: statementFingerprint(sql),
+    }]))
+    const { db: recording, commandCalls } = recordingDb()
+    const db = {
+      ...recording,
+      async query() { return [{ now_ms: '1700000000000', database: 'db' }] },
+      async queryStatus() { return { status: 'unknown' } },
+      async submit() { throw new Error('never submitted') },
+    } as unknown as ClickHouseExecutor
+
+    const run = applyMigration({
+      db, journalStore: store, pluginRuntime: fakePluginRuntime(), config: CONFIG,
+      tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql', log: () => {},
+    })
+    await expect(run).rejects.toBeInstanceOf(MigrateError)
+    await expect(run).rejects.toMatchObject({
+      code: 'async_outcome_unknown',
+      message: expect.stringMatching(/^Migration m\.sql failed at statement 1 of 1[\s\S]*query_id legacy-query-id\): the journal records an attempt as started/),
+    })
+    rmSync(dir, { recursive: true, force: true })
+    expect(commandCalls).toEqual([])
+    expect(writes).toEqual([])
+  })
+
   test('a started statement still requires --retry: it may have run', async () => {
     const dir = writeMigration(EDITED_SQL)
     const { db, commandCalls } = recordingDb()

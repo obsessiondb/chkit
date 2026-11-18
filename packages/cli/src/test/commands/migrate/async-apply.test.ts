@@ -302,18 +302,20 @@ describe('applyAsyncStatement', () => {
   // #463: an older chkit derived the id from the migration alone; a
   // statement it journaled is still checked under that id.
   const LEGACY_ID = 'f2d1c4e0-1111-2222-3333-444455556666'
-  const runningPriors: Array<[string, MigrationRowState | null, string]> = [
-    ['no journal record', null, QUERY_ID],
+  const NOT_RECORDED = 'but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends'
+  const RECORDED_FAILED = 'but the journal records that attempt as failed, so chkit does not attach to it, and the next chkit migrate --apply runs the statement again (after its before-retry SQL, when it has one)'
+  const runningPriors: Array<[string, MigrationRowState | null, string, string]> = [
+    ['no journal record', null, QUERY_ID, NOT_RECORDED],
     ['an earlier release\'s started record', freshStateWith({
       operationIndex: 0, operationKey: BASE_INPUT.operationKey, operationType: BASE_INPUT.operationType,
       queryId: LEGACY_ID, status: 'started', startedAt: '2026-05-26 11:00:00.000', finishedAt: null, lastError: '', fingerprint: '',
-    }), LEGACY_ID],
+    }), LEGACY_ID, NOT_RECORDED],
     ['a failed record', freshStateWith({
       operationIndex: 0, operationKey: BASE_INPUT.operationKey, operationType: BASE_INPUT.operationType,
       queryId: LEGACY_ID, status: 'failed', startedAt: '2026-05-26 11:00:00.000', finishedAt: '2026-05-26 11:00:01.000', lastError: 'boom', fingerprint: '',
-    }), LEGACY_ID],
+    }), LEGACY_ID, RECORDED_FAILED],
   ]
-  for (const [label, prior, checkedId] of runningPriors) {
+  for (const [label, prior, checkedId, reason] of runningPriors) {
     test(`a running query under ${label} stops the run instead of attaching (#767)`, async () => {
       const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
         { status: 'running', writtenRows: 50, elapsedMs: RUNNING_ELAPSED_MS },
@@ -332,7 +334,7 @@ describe('applyAsyncStatement', () => {
 
       await expect(run).rejects.toMatchObject({
         code: 'async_outcome_unknown',
-        message: `Async migration step load_table_data (statement 1 of m.sql, query_id ${checkedId}) is still running on the server, but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${checkedId}', then run chkit migrate --apply again.`,
+        message: `Async migration step load_table_data (statement 1 of m.sql, query_id ${checkedId}) is still running on the server, ${reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${checkedId}', then run chkit migrate --apply again.`,
       })
       expect(statusCalls).toEqual([{ queryId: checkedId, afterTime: undefined, everyReplica: true, runningOnly: true }])
       expect(submitCalls).toEqual([])
@@ -700,7 +702,7 @@ describe('applyAsyncStatement', () => {
         now: FIXED_NOW,
       }),
     ).rejects.toThrow(
-      `): the submit request failed (error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+      `): the submit request failed (error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs, records its outcome from system.query_log, and stops with async_outcome_unknown when there is none.`,
     )
     // The outcome is unknown, so the attempt stays started.
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])

@@ -150,9 +150,13 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // may also name earlier attempts, whose QueryFinish polls could take for
     // this one's outcome (#767).
     if (attemptCheck === undefined || priorOpState === undefined) {
+      const reason =
+        priorOpState?.status === 'failed'
+          ? 'but the journal records that attempt as failed, so chkit does not attach to it, and the next chkit migrate --apply runs the statement again (after its before-retry SQL, when it has one)'
+          : 'but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends'
       throw new MigrateError(
         'async_outcome_unknown',
-        `Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}, query_id ${queryId}) is still running on the server, but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${queryId}', then run chkit migrate --apply again.`,
+        `Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}, query_id ${queryId}) is still running on the server, ${reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${queryId}', then run chkit migrate --apply again.`,
       )
     }
     log(
@@ -489,7 +493,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         unknownPollsAfterSubmitError += 1
         if (unknownPollsAfterSubmitError > MAX_TRANSIENT_POLL_ERRORS) {
           throw new Error(
-            `Async migration step ${operationType} (query_id ${queryId}): the submit request failed (${describeError(submitError)}) and polling found no outcome ${unknownPollsAfterSubmitError}×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+            `Async migration step ${operationType} (query_id ${queryId}): the submit request failed (${describeError(submitError)}) and polling found no outcome ${unknownPollsAfterSubmitError}×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs, records its outcome from system.query_log, and stops with async_outcome_unknown when there is none.`,
           )
         }
       }

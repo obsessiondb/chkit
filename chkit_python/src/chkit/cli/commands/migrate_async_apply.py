@@ -427,12 +427,18 @@ def _attach(
     # may also name earlier attempts, whose QueryFinish polls could take
     # for this one's outcome (#767).
     if attempt_check is None or prior_op is None:
+        reason = (
+            "but the journal records that attempt as failed, so chkit does not attach to "
+            "it, and the next chkit migrate --apply runs the statement again (after its "
+            "before-retry SQL, when it has one)"
+            if prior_op is not None and prior_op.status == "failed"
+            else "but its query id was not recorded by this chkit release for that attempt "
+            "alone, so chkit cannot tell its outcome from system.query_log once it ends"
+        )
         msg = (
             f"Async migration step {input_.operation_type} (statement "
             f"{input_.statement_index + 1} of {input_.migration_name}, query_id "
-            f"{query_id}) is still running on the server, but its query id was not "
-            "recorded by this chkit release for that attempt alone, so chkit cannot "
-            "tell its outcome from system.query_log once it ends. Nothing was "
+            f"{query_id}) is still running on the server, {reason}. Nothing was "
             "submitted and no before-retry SQL ran. Wait for it to finish or run "
             f"KILL QUERY WHERE query_id = '{query_id}', then run chkit migrate "
             "--apply again."
@@ -675,8 +681,9 @@ def _poll(
                     f"(query_id {query_id}): the submit request failed "
                     f"({_describe_error(submit_error)}) and polling found no outcome "
                     f"{unknown_polls_after_submit_error}\u00d7. A re-run of `chkit migrate "
-                    f"--apply` attaches to the query if it still runs and runs the statement "
-                    f"again if not."
+                    f"--apply` attaches to the query if it still runs, records its outcome "
+                    f"from system.query_log, and stops with async_outcome_unknown when there "
+                    f"is none."
                 )
                 raise RuntimeError(msg) from submit_error
         input_.log(
