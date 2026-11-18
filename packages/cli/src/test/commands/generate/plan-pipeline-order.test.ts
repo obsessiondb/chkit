@@ -392,6 +392,52 @@ describe('plan-pipeline orders column statements with the column renames (#746, 
   })
 })
 
+describe('plan-pipeline keeps a table TTL change between the columns it reads and drops (#769)', () => {
+  const withTtl = (columns: ColumnDefinition[], ttl: string) =>
+    table({
+      database: 'app',
+      name: 't',
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      ttl,
+    })
+  const previous = [withTtl([{ name: 'a', type: 'UInt64' }, { name: 'x', type: 'DateTime' }], 'x + INTERVAL 1 DAY')]
+  const next = [withTtl([{ name: 'b', type: 'UInt64' }, { name: 'y', type: 'DateTime' }], 'y + INTERVAL 1 DAY')]
+
+  test('with a column rename', () => {
+    const planned = planDiff(previous, next)
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'a', to: 'b', source: 'cli' }]),
+      { previous, next }
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `a` TO `b`;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  test('with a table rename', () => {
+    const plan = applyExplicitTableRenames(
+      planDiff(
+        [withTtl([{ name: 'x', type: 'DateTime' }], 'x + INTERVAL 1 DAY')],
+        [withTtl([{ name: 'y', type: 'DateTime' }], 'y + INTERVAL 1 DAY')]
+      ),
+      [{ oldDatabase: 'app', oldName: 'old_t', newDatabase: 'app', newName: 't', source: 'cli' }]
+    )
+    expect(plan.operations.map((operation) => operation.sql)).toEqual([
+      'RENAME TABLE IF EXISTS app.old_t TO app.t;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+})
+
 describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {
   const EMPTY_PLAN: MigrationPlan = { operations: [], riskSummary: { safe: 0, caution: 0, danger: 0 }, renameSuggestions: [] }
 

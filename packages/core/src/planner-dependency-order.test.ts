@@ -790,3 +790,155 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 })
+
+describe('planDiff orders MODIFY read releases and table TTL changes (#769)', () => {
+  const t = (columns: ColumnDefinition[], extra: { ttl?: string; settings?: Record<string, number> } = {}) =>
+    table({
+      database: 'app',
+      name: 't',
+      columns: [{ name: 'id', type: 'UInt64' }, ...columns],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+      ...extra,
+    })
+  const sqls = (previous: SchemaDefinition[], next: SchemaDefinition[]) =>
+    planDiff(previous, next).operations.map((op) => op.sql)
+
+  test('removes the old DEFAULT that reads a column before that column reads it back', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'z', type: 'UInt64', default: { expression: 'a' } }])],
+        [t([{ name: 'a', type: 'UInt64', default: { expression: 'z' } }, { name: 'z', type: 'UInt64' }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `z` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT z;',
+    ])
+  })
+
+  test('releases a read that closes a longer cycle through an unchanged column', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'a' } },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'c', type: 'UInt64', default: { expression: 'id' } },
+          ]),
+        ]
+      )
+    ).toEqual(['ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;', 'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;'])
+  })
+
+  // `b` → `a` → `c` → `b` once `a` is added, which runs first.
+  test('releases a read that closes a cycle through an added column', () => {
+    expect(
+      sqls(
+        [t([{ name: 'b', type: 'UInt64' }, { name: 'c', type: 'UInt64', default: { expression: 'b' } }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'c' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'a' } },
+            { name: 'c', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT c;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT a;',
+    ])
+  })
+
+  // `y` reads `a` only in the new schema, so `a` → `x` → `y` → `a` never
+  // exists at once: the key order works and stays.
+  test('keeps key order when the read back only appears after the release', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'a', type: 'UInt64' },
+            { name: 'x', type: 'UInt64', default: { expression: 'y' } },
+            { name: 'y', type: 'UInt64' },
+          ]),
+        ],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'x' } },
+            { name: 'x', type: 'UInt64', default: { expression: 'id' } },
+            { name: 'y', type: 'UInt64', default: { expression: 'a' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT x;',
+      'ALTER TABLE app.t MODIFY COLUMN `x` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT a;',
+    ])
+  })
+
+  test('changes the table TTL after the ADD of the column it reads and before the DROP of the column it stops reading', () => {
+    expect(
+      sqls(
+        [t([{ name: 'x', type: 'DateTime' }], { ttl: 'x + INTERVAL 1 DAY' })],
+        [t([{ name: 'y', type: 'DateTime' }], { ttl: 'y + INTERVAL 1 DAY' })]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  test('removes the table TTL before the DROP of the column it reads', () => {
+    expect(sqls([t([{ name: 'x', type: 'DateTime' }], { ttl: 'x + INTERVAL 1 DAY' })], [t([])])).toEqual([
+      'ALTER TABLE app.t REMOVE TTL;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  // The statements fill the column statement slots: the DROP moves to the
+  // TTL statement's slot, after the setting change.
+  test('a DROP held back by the TTL takes a later slot and other statements stay in place', () => {
+    expect(
+      sqls(
+        [t([{ name: 'b', type: 'UInt64' }, { name: 'x', type: 'DateTime' }], { ttl: 'x + INTERVAL 1 DAY' })],
+        [
+          t([{ name: 'b', type: 'String' }, { name: 'y', type: 'DateTime' }], {
+            ttl: 'y + INTERVAL 1 DAY',
+            settings: { ttl_only_drop_parts: 1 },
+          }),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` String;',
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `y` DateTime;',
+      'ALTER TABLE app.t MODIFY TTL y + INTERVAL 1 DAY;',
+      'ALTER TABLE app.t MODIFY SETTING ttl_only_drop_parts = 1;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+    ])
+  })
+
+  test('a TTL change that reads no changed column keeps its slot', () => {
+    expect(
+      sqls(
+        [t([{ name: 'ts', type: 'DateTime' }, { name: 'x', type: 'UInt64' }], { ttl: 'ts + INTERVAL 1 DAY' })],
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'ts', type: 'DateTime' }], { ttl: 'ts + INTERVAL 2 DAY' })]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64;',
+      'ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;',
+      'ALTER TABLE app.t MODIFY TTL ts + INTERVAL 2 DAY;',
+    ])
+  })
+})

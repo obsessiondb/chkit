@@ -848,11 +848,14 @@ export interface ColumnStatementDefinitions {
 /** The columns a RENAME COLUMN operation renames. */
 export type ColumnRename = Pick<ColumnRenameSuggestion, 'database' | 'table' | 'from' | 'to'>
 
+// The table TTL statement (MODIFY or REMOVE TTL) sorts with the column
+// statements: it reads columns that are added and dropped (#769).
 const COLUMN_STATEMENTS: ReadonlySet<MigrationOperation['type']> = new Set([
   'alter_table_add_column',
   'alter_table_modify_column',
   'alter_table_drop_column',
   'alter_table_rename_column',
+  'alter_table_modify_ttl',
 ])
 
 export function isColumnStatement(op: MigrationOperation): boolean {
@@ -865,14 +868,18 @@ export function columnRenameKey(rename: ColumnRename): string {
 }
 
 /**
- * Orders the column statements (ADD, MODIFY, DROP and RENAME COLUMN) of every
- * table in one dependency sort, from their key order (#681, #745, #746, #758):
- * - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression reads
- *   column X runs after the ADD of X or the RENAME to X;
+ * Orders the column statements (ADD, MODIFY, DROP and RENAME COLUMN) and the
+ * table TTL statement of every table in one dependency sort, from their key
+ * order (#681, #745, #746, #758, #769):
+ * - an ADD or MODIFY whose new DEFAULT, MATERIALIZED or ALIAS expression, or
+ *   a table TTL that reads column X runs after the ADD of X or the RENAME to X;
  * - a DROP of X runs after the MODIFY or DROP of every column whose old
- *   expression reads X, since ClickHouse refuses to drop a column another
- *   column still reads. A RENAME away from X needs no such wait: ClickHouse
- *   rewrites the expressions that read X to the new name;
+ *   expression reads X, and after the TTL change when the old TTL reads X,
+ *   since ClickHouse refuses to drop a column something still reads. A RENAME
+ *   away from X needs no such wait: ClickHouse rewrites the expressions and
+ *   the TTL that read X to the new name;
+ * - a MODIFY whose new expression would close a cycle with an old expression
+ *   runs after the MODIFY that removes that old read (`cycleReleases`);
  * - statements of the same column keep their order.
  * Members of a cycle keep their key order. The statements fill the positions
  * the column statements had, so every other operation keeps its place, and a
@@ -886,6 +893,8 @@ export function orderColumnStatements(
 ): MigrationOperation[] {
   const reads = columnDefaultReads(definitions.next)
   const oldReads = columnDefaultReads(definitions.previous)
+  const ttlReads = tableTtlReads(definitions.next)
+  const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
   const statements = operations
     .filter(isColumnStatement)
@@ -893,24 +902,39 @@ export function orderColumnStatements(
 
   const providers = new Map<string, number[]>()
   const releasers = new Map<string, number[]>()
+  const modifies = new Map<string, number[]>()
   const append = (map: Map<string, number[]>, key: string, index: number) =>
     map.set(key, [...(map.get(key) ?? []), index])
   statements.forEach((op, index) => {
     if (op.type === 'alter_table_add_column') append(providers, op.key, index)
     const renamed = renamedTo.get(op.key)
     if (op.type === 'alter_table_rename_column' && renamed !== undefined) append(providers, renamed, index)
+    if (op.type === 'alter_table_modify_column') append(modifies, op.key, index)
     if (op.type === 'alter_table_modify_column' || op.type === 'alter_table_drop_column') {
       for (const read of oldReads.get(op.key) ?? []) append(releasers, read, index)
     }
+    if (op.type === 'alter_table_modify_ttl') {
+      for (const read of oldTtlReads.get(op.key) ?? []) append(releasers, read, index)
+    }
   })
 
+  const added = new Set(statements.filter((op) => op.type === 'alter_table_add_column').map((op) => op.key))
   const prerequisites = statements.map((op, index) => {
     const found = new Set<number>()
     if (op.type === 'alter_table_add_column' || op.type === 'alter_table_modify_column') {
       for (const read of reads.get(op.key) ?? []) for (const other of providers.get(read) ?? []) found.add(other)
     }
+    if (op.type === 'alter_table_modify_ttl') {
+      for (const read of ttlReads.get(op.key) ?? []) for (const other of providers.get(read) ?? []) found.add(other)
+    }
     if (op.type === 'alter_table_drop_column') {
       for (const other of releasers.get(op.key) ?? []) found.add(other)
+    }
+    // A column's last statement is the MODIFY COLUMN that sets its new expression.
+    if (op.type === 'alter_table_modify_column' && statements[index + 1]?.key !== op.key) {
+      for (const column of cycleReleases(op.key, reads, oldReads, added)) {
+        for (const other of modifies.get(column) ?? []) found.add(other)
+      }
     }
     if (index > 0 && statements[index - 1]?.key === op.key) found.add(index - 1)
     found.delete(index)
@@ -926,8 +950,74 @@ export function orderColumnStatements(
   return operations.map((op) => (isColumnStatement(op) ? (ordered[next++]?.op ?? op) : op))
 }
 
+/**
+ * The columns whose MODIFY must run before the MODIFY that gives column `key`
+ * its new expression (#769). ClickHouse rejects an expression that closes a
+ * cycle. The new expression closes one through column P when it reads a
+ * column that leads to P, and P's old expression reads a column that leads
+ * back to `key`, which P's new expression no longer reads. "Leads to" follows
+ * reads that both the old and the new expression of their column have, so
+ * the path exists in every intermediate state and only P's MODIFY breaks it.
+ * On the way to P it also follows the reads of `added` columns: the MODIFY
+ * runs after the ADD of every added column its expression reads through them.
+ * Every such P is read by the new expression through the new schema, so these
+ * edges can't form a cycle unless the new schema has one.
+ */
+function cycleReleases(
+  key: string,
+  reads: DependencyGraph,
+  oldReads: DependencyGraph,
+  added: ReadonlySet<string>
+): string[] {
+  const reachable = (from: string, throughAdded: boolean): Set<string> => {
+    const seen = new Set([from])
+    const pending = [from]
+    for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
+      const follow = throughAdded && added.has(column)
+      for (const read of reads.get(column) ?? []) {
+        if ((follow || oldReads.get(column)?.has(read)) && !seen.has(read)) {
+          seen.add(read)
+          pending.push(read)
+        }
+      }
+    }
+    return seen
+  }
+  const released = new Set<string>()
+  for (const read of reads.get(key) ?? []) {
+    for (const column of reachable(read, true)) {
+      if (column === key) continue
+      for (const dropped of oldReads.get(column) ?? []) {
+        if (!reads.get(column)?.has(dropped) && reachable(dropped, false).has(key)) released.add(column)
+      }
+    }
+  }
+  return [...released]
+}
+
 function columnKey(table: { database: string; table: string }, column: string): string {
   return `table:${table.database}.${table.table}:column:${column}`
+}
+
+/**
+ * Table TTL operation key → keys of the table's columns the TTL names. As in
+ * `columnDefaultReads`, a name followed by `(` is a function call.
+ */
+function tableTtlReads(definitions: SchemaDefinition[]): DependencyGraph {
+  const graph = new Map<string, Set<string>>()
+  for (const def of definitions) {
+    if (def.kind !== 'table' || def.ttl === undefined) continue
+    const names = new Set(def.columns.map((column) => column.name))
+    const read = new Set<string>()
+    const tokens = tokenizeSQL(def.ttl).filter((token) => !isTrivia(token))
+    tokens.forEach((token, index) => {
+      const name = identifierName(token)
+      if (name === undefined || tokens[index + 1]?.text === '(' || !names.has(name)) return
+      read.add(columnKey({ database: def.database, table: def.name }, name))
+    })
+    graph.set(`table:${def.database}.${def.name}:ttl`, read)
+  }
+  return graph
 }
 
 /**
