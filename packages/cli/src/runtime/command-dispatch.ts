@@ -222,6 +222,8 @@ export function parseInitFlags(input: {
 	resolved: RegisteredCommand
 	registry: CommandRegistry
 	plugins: PluginRuntime['plugins']
+	/** Read the subcommand name as `chkit plugin` reads the command name. */
+	forwardsCommandName?: boolean
 }): ParsedFlags | null {
 	const argsAfterCommand = input.argv.slice(1)
 	if (input.commandName === 'plugin') {
@@ -231,6 +233,7 @@ export function parseInitFlags(input: {
 		argsAfterCommand,
 		input.resolved,
 		input.registry.globalFlags,
+		input.forwardsCommandName,
 	)
 	// runResolvedCommand prints help or the unknown subcommand error after onInit.
 	if (!subcommand.ok) return {}
@@ -343,17 +346,22 @@ function matchSubcommand(
 	argsAfterCommand: string[],
 	resolved: RegisteredCommand,
 	globalFlags: readonly FlagDef[],
+	forwardsCommandName = false,
 ):
 	| { ok: true; name: string | undefined }
 	| { ok: false; token: string | undefined } {
 	if (!resolved.subcommands) return { ok: true, name: undefined }
 	// A subcommand may declare --table, so its value is never the subcommand name;
 	// the subcommand's own flag parsing then accepts or rejects it (#565).
-	const commandToken = extractPositionals(argsAfterCommand, [
-		...globalFlags,
-		TABLE_FLAG,
-		...resolved.flags,
-	])[0]
+	// A forwarder takes the first token that is not --json or --config, any
+	// other flag included, as `chkit plugin` takes the command name (#771).
+	const commandToken = forwardsCommandName
+		? routeForwardedArgs(stripGlobalFlags(argsAfterCommand).rest).pluginName
+		: extractPositionals(argsAfterCommand, [
+				...globalFlags,
+				TABLE_FLAG,
+				...resolved.flags,
+			])[0]
 	const matchedSub = resolved.subcommands.find((s) => s.name === commandToken)
 	if (matchedSub) return { ok: true, name: matchedSub.name }
 	if (resolved.subcommands.length === 1) {
@@ -481,6 +489,8 @@ export async function runResolvedCommand(input: {
 	config: Parameters<PluginRuntime['runOnConfigLoaded']>[0]['config']
 	configPath: string
 	pluginRuntime: PluginRuntime
+	/** Read the subcommand name as `chkit plugin` reads the command name. */
+	forwardsCommandName?: boolean
 	/** Called with the unmatched subcommand token, or `undefined` when none was given. */
 	onAmbiguousPluginSubcommand?: (token: string | undefined) => void
 }): Promise<void> {
@@ -490,6 +500,7 @@ export async function runResolvedCommand(input: {
 		argsAfterCommand,
 		input.resolved,
 		input.registry.globalFlags,
+		input.forwardsCommandName,
 	)
 	if (!subcommand.ok) {
 		input.onAmbiguousPluginSubcommand?.(subcommand.token)

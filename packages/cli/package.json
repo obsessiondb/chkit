@@ -54,6 +54,7 @@
     "zod": "^4.3.6"
   },
   "optionalDependencies": {
+    "@chkit/plugin-codegen": "workspace:*",
     "@chkit/plugin-obsessiondb": "workspace:*",
     "@chkit/plugin-pull": "workspace:*"
   },

@@ -174,6 +174,77 @@ describe('argument errors come before a missing config, as in chkit-py (#687)', 
     }
   }, 60_000)
 
+  test('codegen and pull print their help without a project config, as in chkit-py (#771)', async () => {
+    const empty = await createEmptyDir()
+    const profile = await createEmptyDir({ profile: 'export default { schema: [], plugins: [] }\n' })
+    try {
+      for (const { run } of [empty, profile]) {
+        for (const [args, usage] of [
+          [['codegen', '--help'], 'chkit codegen [options]'],
+          [['codegen', '--help', '--json'], 'chkit codegen [options]'],
+          [['codegen', '-h'], 'chkit codegen [options]'],
+          [['codegen', '--help-plugins'], 'chkit codegen [options]'],
+          [['codegen', '--help', '--config', 'missing.ts'], 'chkit codegen [options]'],
+          [['pull', '--help'], 'chkit pull <command> [options]'],
+          [['pull', '--help', '--json'], 'chkit pull <command> [options]'],
+        ] as const) {
+          const help = run(args)
+          expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+          expect(help.stdout).toContain(usage)
+        }
+      }
+      // Guard: codegen checks its arguments once the config is loaded, as in chkit-py.
+      for (const args of [['codegen'], ['codegen', 'foo'], ['codegen', '--bogus'], ['codegen', '--bogus', '--json']]) {
+        const result = empty.run(args)
+        expect([args, result.exitCode, result.stderr]).toEqual([args, 1, expect.stringContaining('Config not found at ')])
+      }
+    } finally {
+      await rm(empty.dir, { recursive: true, force: true })
+      await rm(profile.dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
+  test('obsessiondb reads its first argument as the command name, as in chkit-py (#771)', async () => {
+    const { dir, run } = await createEmptyDir()
+    try {
+      // As `chkit plugin obsessiondb ...`: only --json and --config are skipped.
+      for (const [args, token] of [
+        [['obsessiondb', '--bogus'], '--bogus'],
+        [['obsessiondb', '--bogus=1'], '--bogus=1'],
+        [['obsessiondb', '--bogus', 'login'], '--bogus'],
+        [['obsessiondb', '--service', 'prod'], '--service'],
+        [['obsessiondb', '--table', 'x'], '--table'],
+        [['obsessiondb', '--', '--bogus'], '--bogus'],
+        [['obsessiondb', 'nosuch'], 'nosuch'],
+      ] as const) {
+        const message = `Unknown obsessiondb command "${token}". Available: login, signup, logout, whoami, service.`
+        const text = run(args)
+        expect([args, text.exitCode, text.stderr.trim()]).toEqual([args, 1, message])
+        expect(text.stdout).toContain('chkit obsessiondb <command> [options]')
+        // After `--`, --json is an argument, not an option.
+        const jsonForms = [['obsessiondb', '--json', ...args.slice(1)], ...(args.includes('--') ? [] : [[...args, '--json']])]
+        for (const jsonArgs of jsonForms) {
+          const json = run(jsonArgs)
+          expect([jsonArgs, json.exitCode, json.stderr.trim()]).toEqual([jsonArgs, 1, message])
+          expect(JSON.parse(json.stdout)).toEqual({
+            command: 'obsessiondb',
+            schemaVersion: 1,
+            ok: false,
+            error: { code: 'unknown_subcommand', message },
+          })
+        }
+      }
+      // Guard: without a command name, obsessiondb prints its help.
+      for (const args of [['obsessiondb'], ['obsessiondb', '--json'], ['obsessiondb', '--help', '--bogus']]) {
+        const help = run(args)
+        expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+        expect(help.stdout).toContain('chkit obsessiondb <command> [options]')
+      }
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
+
   test('a flag that only a plugin adds is unknown without a config', async () => {
     const { dir, run } = await createEmptyDir()
     try {
