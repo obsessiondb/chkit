@@ -27,7 +27,7 @@ import secrets
 import time
 from collections.abc import Sequence
 from pathlib import Path
-from typing import Annotated, Any
+from typing import Annotated, Any, cast
 
 import typer
 from typer.exceptions import TyperException
@@ -47,7 +47,7 @@ from chkit.cli.commands.pull_view_parser import (
 )
 from chkit.cli.config_loader import load_config
 from chkit.cli.flag_errors import report_usage_error
-from chkit.cli.help import PULL_SCHEMA_COMMAND
+from chkit.cli.help import PULL_SCHEMA_COMMAND, PULL_SCHEMA_DESCRIPTION
 from chkit.cli.hook_flags import passed_flags
 from chkit.cli.json_output import print_output
 from chkit.cli.plugin_runtime import PluginRuntime, load_plugin_runtime
@@ -97,7 +97,16 @@ from chkit.core.model import (
 )
 from chkit.core.sql_lexer import js_trim
 from chkit.core.sql_scan import strip_wrapping_parens
-from chkit.plugins import ChxOnConfigLoadedContext, ChxOnPullIntrospectContext, ChxPlugin
+from chkit.plugins import (
+    ChxOnConfigLoadedContext,
+    ChxOnPullIntrospectContext,
+    ChxPlugin,
+    ChxPluginCommand,
+    ChxPluginCommandContext,
+    ChxPluginManifest,
+)
+
+_DEFAULT_OUT_FILE = Path("src/db/schema/pulled.py")
 
 
 def _introspected_table_to_definition(
@@ -548,7 +557,7 @@ def run(  # noqa: PLR0917
     )
     overwrite = overwrite or force
     if out_file is None:
-        out_file = Path("src/db/schema/pulled.py")
+        out_file = _DEFAULT_OUT_FILE
     config = load_config(config_path, ChxConfigEnv(command="pull"))
     plugin_runtime = load_plugin_runtime(
         [p for p in config.plugins if isinstance(p, ChxPlugin)]
@@ -591,14 +600,92 @@ def run(  # noqa: PLR0917
     except (typer.Exit, typer.Abort, TyperException):
         raise
     except Exception as error:
-        # TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
-        # an error on stdout and exits 2 for a config error, else 1.
-        message = clickhouse_error_message(error)
-        if output_json:
-            print_output({"ok": False, "command": "schema", "error": message}, json_mode=True)
-        else:
-            typer.echo(f"Pull schema failed: {message}")
-        raise typer.Exit(code=2 if isinstance(error, PullConfigError) else 1) from error
+        raise typer.Exit(code=_report_failure(error, output_json=output_json)) from error
+
+
+def _report_failure(error: Exception, *, output_json: bool) -> int:
+    """TS runs pull as a plugin command, whose runner (wrapPluginRun) reports
+    an error on stdout and exits 2 for a config error, else 1."""
+    message = clickhouse_error_message(error)
+    if output_json:
+        print_output({"ok": False, "command": "schema", "error": message}, json_mode=True)
+    else:
+        typer.echo(f"Pull schema failed: {message}")
+    return 2 if isinstance(error, PullConfigError) else 1
+
+
+# The flags of the TS pull plugin's `schema` command.
+_SCHEMA_FLAGS: list[dict[str, Any]] = [
+    {"name": "--dryrun", "type": "boolean", "description": "Preview without writing files"},
+    {
+        "name": "--force",
+        "short": "-f",
+        "type": "boolean",
+        "description": "Overwrite existing output file",
+    },
+    {
+        "name": "--overwrite",
+        "type": "boolean",
+        "description": "Overwrite existing output file (alias for --force)",
+    },
+    {
+        "name": "--out-file",
+        "short": "-o",
+        "type": "string",
+        "description": "Output file path",
+        "placeholder": "<path>",
+    },
+    {
+        "name": "--database",
+        "short": "-d",
+        "type": "string[]",
+        "description": "Database names to pull",
+        "placeholder": "<name>",
+    },
+]
+
+
+def builtin_pull_plugin() -> ChxPlugin:
+    """The TS pull plugin, which ``chkit plugin pull`` runs when no configured
+    plugin is named pull (#771). It runs ``chkit pull`` through the plugin
+    command lifecycle, as TS runs its pull plugin there."""
+    return ChxPlugin(
+        manifest=ChxPluginManifest(name="pull", api_version=1),
+        commands=[
+            ChxPluginCommand(
+                name=PULL_SCHEMA_COMMAND,
+                description=PULL_SCHEMA_DESCRIPTION,
+                run=_run_schema_command,
+                takes_args=False,
+                flags=list(_SCHEMA_FLAGS),
+            )
+        ],
+    )
+
+
+def _run_schema_command(ctx: ChxPluginCommandContext) -> int:
+    flags = ctx.flags
+    out_file = flags.get("--out-file")
+    database = flags.get("--database")
+    executor = ctx.plugin_context.executor if ctx.plugin_context.has_executor else None
+    try:
+        _run(
+            ctx.config,
+            # `chkit plugin` runs the command with its PluginRuntime.
+            cast("PluginRuntime", ctx.plugin_runtime),
+            executor,
+            hook_flags=dict(flags),
+            database=list(database) if isinstance(database, list) else None,
+            out_file=Path(out_file) if isinstance(out_file, str) else _DEFAULT_OUT_FILE,
+            dryrun=flags.get("--dryrun") is True,
+            overwrite=flags.get("--force") is True or flags.get("--overwrite") is True,
+            output_json=ctx.json_mode,
+        )
+    except (typer.Exit, typer.Abort, TyperException):
+        raise
+    except Exception as error:
+        return _report_failure(error, output_json=ctx.json_mode)
+    return 0
 
 
 def _introspect(
