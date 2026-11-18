@@ -314,7 +314,7 @@ def test_async_submission_completes_and_rerun_skips(
     )
     try:
         assert apply_async_statement(statement).kind == "completed"
-        assert journal.statuses() == ["started", "completed"]
+        assert journal.statuses() == ["started", "started", "completed"]
         assert apply_async_statement(statement).kind == "skipped"
         rows = _poll_until(
             lambda: int(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"]),
@@ -343,7 +343,7 @@ def test_first_submission_completes_without_query_log(
     )
     try:
         assert apply_async_statement(statement).kind == "completed"
-        assert journal.statuses() == ["started", "completed"]
+        assert journal.statuses() == ["started", "started", "completed"]
         rows = _poll_until(
             lambda: int(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"]),
             lambda n: n >= 3,
