@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import time
 from typing import Any
 
 import pytest
@@ -1200,6 +1201,94 @@ def test_keeps_key_order_when_no_statement_closes_a_cycle() -> None:
         "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
         "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
     ]
+
+
+def test_an_interval_unit_named_like_a_column_closes_no_cycle() -> None:
+    # An INTERVAL unit named like a column is no read, so no cycle
+    # `a` -> `month` -> `z` -> `a` appears and `month` keeps its place after
+    # the ALIAS that still calls `length(month)` on the old String column.
+    assert _sqls(
+        [_t([
+            _u("a", "toUInt64(toDateTime(id) + INTERVAL 1 day)"),
+            _u("day", "length(month)", default_kind="ALIAS"),
+            {"name": "month", "type": "String", "default": _expr("toString(z)")},
+            _u("z", "a"),
+        ])],
+        [_t([
+            _u("a", "toUInt64(toDateTime(id) + INTERVAL 1 month)"),
+            _u("day", "a", default_kind="ALIAS"),
+            _u("month", "id"),
+            _u("z", "id"),
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT toUInt64(toDateTime(id) + INTERVAL 1 month);",
+        "ALTER TABLE app.t MODIFY COLUMN `day` UInt64 ALIAS a;",
+        "ALTER TABLE app.t MODIFY COLUMN `month` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;",
+    ]
+
+
+def test_plans_a_wide_table_whose_every_modify_closes_a_cycle_in_under_two_seconds() -> None:
+    # Each of 600 columns reads the one before it and changes to read the one
+    # two places ahead, so every MODIFY waits for a breaker.
+    count = 600
+
+    def name(i: int) -> str:
+        return f"c{i:04d}"
+
+    before = [_u(name(i), "1" if i == 0 else name(i - 1)) for i in range(count)]
+    after = [_u(name(i), name(i + 2) if i + 2 < count else "1") for i in range(count)]
+    start = time.perf_counter()
+    operations = plan_diff([_t(before)], [_t(after)]).operations
+    assert time.perf_counter() - start < 2
+    assert [op.key[len("table:app.t:column:"):] for op in operations[:3]] == [
+        "c0598",
+        "c0597",
+        "c0596",
+    ]
+
+
+_UNIT_COLUMNS = ["d", "day", "DAY", "hour", "id", "month", "ts", "x"]
+
+
+def _unit_reads_of(expression: str) -> list[str]:
+    columns: list[dict[str, object]] = [{"name": name, "type": "UInt64"} for name in _UNIT_COLUMNS]
+    columns.append({"name": "v", "type": "UInt64", "default": _expr(expression)})
+    definition = table(
+        database="app",
+        name="t",
+        columns=list(columns),
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+    )
+    reads = _column_default_reads([definition]).get("table:app.t:column:v", set())
+    return sorted(key[len("table:app.t:column:"):] for key in reads)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("ts + INTERVAL 1 day", ["ts"]),
+        ("ts + INTERVAL 1 DAY", ["ts"]),
+        ("ts + interval 2 Month", ["ts"]),
+        ("ts + INTERVAL 1 SQL_TSI_DAY", ["ts"]),
+        ("toStartOfInterval(ts, INTERVAL 1 hour)", ["ts"]),
+        ("ts + INTERVAL 1 d + INTERVAL 2 hour", ["ts"]),
+        ("ts + INTERVAL x day", ["ts", "x"]),
+        ("ts + INTERVAL d d", ["d", "ts"]),
+        ("ts + INTERVAL day + 1 day", ["day", "ts"]),
+        ("ts + INTERVAL abs(day) day", ["day", "ts"]),
+        ("ts + INTERVAL (day) day", ["day", "ts"]),
+        ("ts + INTERVAL '1 day' + day", ["day", "ts"]),
+        ("EXTRACT(day FROM ts)", ["ts"]),
+        ("extract(DAY from ts)", ["ts"]),
+        ("extract(toString(day), 'x')", ["day"]),
+        ("day + hour + month", ["day", "hour", "month"]),
+    ],
+)
+def test_reads_skip_interval_and_extract_units(expression: str, expected: list[str]) -> None:
+    assert _unit_reads_of(expression) == expected
 
 
 # ---------- the column reads skip lambda parameters and CAST types (#768) ----------

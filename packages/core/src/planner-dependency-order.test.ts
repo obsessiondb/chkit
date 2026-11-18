@@ -1278,4 +1278,88 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
       'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
     ])
   })
+
+  // An INTERVAL unit named like a column is no read, so no cycle
+  // `a` → `month` → `z` → `a` appears and `month` keeps its place after the
+  // ALIAS that still calls `length(month)` on the old String column.
+  test('an INTERVAL unit named like a column closes no cycle', () => {
+    expect(
+      sqls(
+        [
+          t([
+            u('a', 'toUInt64(toDateTime(id) + INTERVAL 1 day)'),
+            u('day', 'length(month)', { defaultKind: 'ALIAS' }),
+            { name: 'month', type: 'String', default: { expression: 'toString(z)' } },
+            u('z', 'a'),
+          ]),
+        ],
+        [
+          t([
+            u('a', 'toUInt64(toDateTime(id) + INTERVAL 1 month)'),
+            u('day', 'a', { defaultKind: 'ALIAS' }),
+            u('month', 'id'),
+            u('z', 'id'),
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT toUInt64(toDateTime(id) + INTERVAL 1 month);',
+      'ALTER TABLE app.t MODIFY COLUMN `day` UInt64 ALIAS a;',
+      'ALTER TABLE app.t MODIFY COLUMN `month` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
+    ])
+  })
+
+  // Each of 600 columns reads the one before it and changes to read the one
+  // two places ahead, so every MODIFY waits for a breaker.
+  test('plans a wide table whose every MODIFY closes a cycle in under two seconds', () => {
+    const name = (i: number) => `c${String(i).padStart(4, '0')}`
+    const count = 600
+    const before = Array.from({ length: count }, (_, i) => u(name(i), i === 0 ? '1' : name(i - 1)))
+    const after = Array.from({ length: count }, (_, i) => u(name(i), i + 2 < count ? name(i + 2) : '1'))
+    const start = performance.now()
+    const operations = planDiff([t(before)], [t(after)]).operations
+    expect(performance.now() - start).toBeLessThan(2_000)
+    expect(operations.map((op) => op.key.slice('table:app.t:column:'.length)).slice(0, 3)).toEqual(['c0598', 'c0597', 'c0596'])
+  })
+})
+
+describe('columnDefaultReads skips INTERVAL and EXTRACT units (#775)', () => {
+  const columns = ['d', 'day', 'DAY', 'hour', 'id', 'month', 'ts', 'x']
+  const readsOf = (expression: string) => {
+    const definition = table({
+      database: 'app',
+      name: 't',
+      columns: [
+        ...columns.map((name) => ({ name, type: 'UInt64' })),
+        { name: 'v', type: 'UInt64', default: { expression } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const reads = columnDefaultReads([definition]).get('table:app.t:column:v') ?? new Set<string>()
+    return [...reads].map((key) => key.slice('table:app.t:column:'.length)).sort()
+  }
+
+  test.each<[string, string[]]>([
+    ['ts + INTERVAL 1 day', ['ts']],
+    ['ts + INTERVAL 1 DAY', ['ts']],
+    ['ts + interval 2 Month', ['ts']],
+    ['ts + INTERVAL 1 SQL_TSI_DAY', ['ts']],
+    ['toStartOfInterval(ts, INTERVAL 1 hour)', ['ts']],
+    ['ts + INTERVAL 1 d + INTERVAL 2 hour', ['ts']],
+    ['ts + INTERVAL x day', ['ts', 'x']],
+    ['ts + INTERVAL d d', ['d', 'ts']],
+    ['ts + INTERVAL day + 1 day', ['day', 'ts']],
+    ['ts + INTERVAL abs(day) day', ['day', 'ts']],
+    ['ts + INTERVAL (day) day', ['day', 'ts']],
+    ["ts + INTERVAL '1 day' + day", ['day', 'ts']],
+    ['EXTRACT(day FROM ts)', ['ts']],
+    ['extract(DAY from ts)', ['ts']],
+    ["extract(toString(day), 'x')", ['day']],
+    ['day + hour + month', ['day', 'hour', 'month']],
+  ])('%s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
 })
