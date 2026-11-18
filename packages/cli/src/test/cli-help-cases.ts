@@ -26,6 +26,7 @@ const CLI_HELP_CASES: string[][] = [
   ...CORE_COMMANDS.map((command) => [command, '--help']),
   ...CORE_COMMANDS.map((command) => [command, '--help-plugins']),
   ['codegen', '--help'],
+  ['pull', '--help'],
   ['pull', 'schema', '--help'],
   ['obsessiondb', '--help'],
   ...OBSESSIONDB_COMMANDS.map((command) => ['obsessiondb', command, '--help']),
