@@ -1159,13 +1159,16 @@ export function createExecutorWithClient(
 				// event_date prunes query_log's partitions: the entry is logged no earlier
 				// than the query started. A day of slack covers a session time zone other
 				// than the server's; toDate32, as a Date before 1970 wraps around.
+				// A query the server rejected before it started (a syntax error, an
+				// unknown table) is logged as ExceptionBeforeStart: its failure, as
+				// the server recorded it under the id (#767).
 				const queryLogFrom = from('query_log')
 				const log = await client.query({
 					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart')
   AND is_initial_query = 1
   AND query_start_time >= parseDateTimeBestEffort({after:String})
   AND event_date >= toDate32(parseDateTimeBestEffort({after:String})) - 1

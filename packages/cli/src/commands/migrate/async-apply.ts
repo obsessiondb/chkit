@@ -124,40 +124,10 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     'migrate:async',
     `${migrationName}#${statementIndex} query_id=${queryId} type=${operationType}`,
   )
-  const attemptCheck = startedAttemptCheck(priorOpState, fingerprint)
-  let inFlight = await checkInFlight(db, queryId, operationType, attemptCheck?.afterTime)
-  if (attemptCheck !== undefined && inFlight.status === 'unknown') {
-    log(
-      `  ${operationType}: previous attempt of query_id=${queryId} is not running and has no outcome in system.query_log yet — checking again while query_log is flushed`,
-    )
-    for (let recheck = 0; recheck < QUERY_LOG_FLUSH_RECHECKS && inFlight.status === 'unknown'; recheck += 1) {
-      await sleep(QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS)
-      inFlight = await checkInFlight(db, queryId, operationType, attemptCheck.afterTime)
-    }
-  }
-  // Only the outcome read of a started attempt can tell that it ended.
-  const attemptOutcome = attemptCheck === undefined ? 'unknown' : inFlight.status
-  if (inFlight.status === 'running') {
-    // The running attempt is the SQL its record names (#599): an attempt of
-    // other SQL, kept by --abandon and an edit, must not finish as this one.
-    const attemptFingerprint = priorOpState?.fingerprint ?? ''
-    if (attemptFingerprint !== '' && attemptFingerprint !== fingerprint) {
-      throw new Error(
-        `Async migration step ${operationType} (query_id ${queryId}): an earlier attempt with different SQL is still running on the server. Wait for it to finish or run KILL QUERY WHERE query_id = '${queryId}', then re-run chkit migrate --apply.`,
-      )
-    }
-    // Only a fenced record's id names the running attempt alone; any other
-    // may also name earlier attempts, whose QueryFinish polls could take for
-    // this one's outcome (#767).
-    if (attemptCheck === undefined || priorOpState === undefined) {
-      const reason =
-        priorOpState?.status === 'failed'
-          ? 'but the journal records that attempt as failed, so chkit does not attach to it, and the next chkit migrate --apply runs the statement again (after its before-retry SQL, when it has one)'
-          : 'but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends'
-      throw new MigrateError(
-        'async_outcome_unknown',
-        `Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}, query_id ${queryId}) is still running on the server, ${reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${queryId}', then run chkit migrate --apply again.`,
-      )
+  const recorded = await resolveRecordedAttempt({ db, op: priorOpState, fingerprint, queryId, operationType, log, sleep })
+  if (recorded.kind === 'running') {
+    if (recorded.afterTime === undefined || priorOpState === undefined) {
+      throw runningElsewhereError({ operationType, statementIndex, migrationName, queryId, reason: recorded.reason })
     }
     log(
       `  ${operationType}: query_id=${queryId} already running on server — attaching to in-flight query`,
@@ -174,7 +144,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       operationKey,
       fingerprint,
       queryId,
-      pollAfterTime: attemptCheck.afterTime,
+      pollAfterTime: recorded.afterTime,
       log,
       pollIntervalMs,
       sleep,
@@ -189,28 +159,21 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // 3. A started attempt that no replica runs any more finished on the server
   // when query_log has its QueryFinish (#672): its run ended before it
   // journaled the outcome. Record it, without compensating or resubmitting.
-  if (attemptOutcome === 'finished' && initialMigrationState !== null && priorOpState !== undefined) {
-    const finishedOp: OperationState = {
-      ...priorOpState,
-      status: 'completed',
-      finishedAt: isoWithoutZone(new Date(now())),
-      lastError: '',
-    }
+  if (recorded.kind === 'finished' && initialMigrationState !== null && priorOpState !== undefined) {
+    const finishedOp = finishedRecordOf(priorOpState, now)
     await journalStore.writeMigrationState(upsertOperation(initialMigrationState, finishedOp, now))
     log(
-      `  ${operationType}: previous attempt of query_id=${queryId} finished on the server — written=${formatRows(inFlight.writtenRows)} (${formatBytes(inFlight.writtenBytes)}) in ${Math.round((inFlight.durationMs ?? 0) / 1000)}s, recording it as completed`,
+      `  ${operationType}: previous attempt of query_id=${queryId} finished on the server — written=${formatRows(recorded.status.writtenRows)} (${formatBytes(recorded.status.writtenBytes)}) in ${Math.round((recorded.status.durationMs ?? 0) / 1000)}s, recording it as completed`,
     )
     return { kind: 'completed', operation: finishedOp }
   }
 
-  // 4. A started attempt of this statement's SQL without an outcome: no
-  // query_log entry of its fenced id, or a record whose id may name earlier
-  // attempts too (#767). It may have finished, so running it again, even
-  // after before-retry SQL that cannot tell, could load its rows twice or
-  // take a stale outcome for it. Stop, writing nothing, so a later run still
-  // finds a late query_log entry.
-  if (attemptOutcome !== 'failed' && isAttemptOfStatement(priorOpState, fingerprint)) {
-    throw outcomeUnknownError({ operationType, statementIndex, migrationName, queryId, fenced: attemptCheck !== undefined })
+  // 4. An attempt of this statement's SQL without a server-recorded outcome
+  // may have finished (#767), so running it again, even after before-retry
+  // SQL, could load its rows twice or remove rows that landed. Stop, writing
+  // nothing, so a later run still finds a late query_log entry.
+  if (recorded.kind === 'unknown') {
+    throw outcomeUnknownError({ operationType, statementIndex, migrationName, queryId, reason: recorded.reason })
   }
 
   // 5. Prior in-progress row exists but no replica runs the query → RETRY.
@@ -224,8 +187,8 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   const attemptQueryId = randomUUID()
   if (priorOpState !== undefined) {
     const prior =
-      attemptOutcome === 'failed'
-        ? { status: 'failed', lastError: inFlight.error ?? '<unknown>' }
+      recorded.kind === 'failed'
+        ? { status: 'failed', lastError: recorded.error }
         : priorOpState
     const errorTail = prior.lastError ? `: ${firstLine(prior.lastError)}` : ''
     log(
@@ -237,7 +200,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // the next 'started' write must not take it for this statement's outcome
     // on its re-run (#672). Without compensation nothing is written until
     // the next 'started' write, which replaces the record.
-    if (attemptCheck !== undefined && initialMigrationState !== null && beforeRetry !== null) {
+    if (recorded.kind === 'failed' && initialMigrationState !== null && beforeRetry !== null) {
       await journalStore.writeMigrationState(
         upsertOperation(
           initialMigrationState,
@@ -287,16 +250,10 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     ),
   )
 
+  await assertAttemptStored({ journalStore, migrationName, statementIndex, operationType, queryId: attemptQueryId, fingerprint, sleep })
   // Re-read so we have the row's actual stored applied_at (matters for
   // subsequent ReplacingMergeTree writes during polling).
   const stateAfterStart = await journalStore.readMigrationState(migrationName)
-  // Only the journal knows the random id, so it is never submitted before
-  // the journal has it (#767).
-  if (stateAfterStart?.operations.find((op) => op.operationIndex === statementIndex)?.queryId !== attemptQueryId) {
-    throw new Error(
-      `Async migration step ${operationType} (query_id ${attemptQueryId}): the journal does not have the attempt's started record, so it was not submitted. Re-run \`chkit migrate --apply\`.`,
-    )
-  }
   const pollAfterTime = queryLogLowerBound(serverNowMs)
   await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
   const submitPromise = db.submit(sql, attemptQueryId, settings)
@@ -376,10 +333,9 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
 
   const pollStartedAt = now()
   let transientPollErrors = 0
-  // Once a poll found the query running, the server has it, so a failed
-  // submit request (a gateway 524, a timeout) says nothing about its outcome (#657).
-  let seenRunning = false
-  let unknownPollsAfterSubmitError = 0
+  // Polls in a row that found the query neither running nor in query_log,
+  // however polling started (#767).
+  let unknownPolls = 0
   try {
     for (;;) {
       await sleep(pollIntervalMs)
@@ -411,6 +367,31 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         continue
       }
       const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
+
+      // A submit error (a gateway 524, a lost response) says nothing about
+      // the outcome: the query may have run (#657, #767). Only the server's
+      // record for the id decides it. After the budget, every replica is
+      // read once more, through a query_log flush, before the run stops with
+      // the attempt still recorded as started.
+      if (status.status === 'unknown') {
+        unknownPolls += 1
+        if (unknownPolls > MAX_TRANSIENT_POLL_ERRORS) {
+          status = await checkInFlight(db, queryId, operationType, pollAfterTime)
+          if (status.status === 'unknown') status = await recheckThroughFlush(db, queryId, operationType, pollAfterTime, sleep)
+          if (status.status === 'unknown') {
+            if (submitPromiseGuarded) await submitPromiseGuarded
+            const submitTail = submitError ? `, and the submit request failed (${describeError(submitError)})` : ''
+            throw outcomeUnknownError({
+              operationType,
+              statementIndex,
+              migrationName,
+              queryId,
+              reason: `polling found it neither running nor in system.query_log ${unknownPolls}× in a row${submitTail}`,
+            })
+          }
+        }
+      }
+      if (status.status !== 'unknown') unknownPolls = 0
 
       if (status.status === 'finished') {
         const finishedSec = Math.round((status.durationMs ?? 0) / 1000)
@@ -447,6 +428,8 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
           finishedAt: isoWithoutZone(new Date(now())),
           lastError: status.error ?? '<unknown>',
           fingerprint,
+          // The server's failure of this id: a re-run may retry it (#767).
+          attemptFenced: true,
         }
         const baseState =
           migrationState ?? freshMigrationState(migrationName, migrationChecksum)
@@ -459,44 +442,11 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       }
 
       if (status.status === 'running') {
-        seenRunning = true
-        unknownPollsAfterSubmitError = 0
         log(progressLine(operationType, status, elapsedSec))
         continue
       }
 
       // status === 'unknown'
-      // If submit has already rejected and no poll found the query running, it
-      // never made it server-side (e.g. SQL parse error) — record the attempt as
-      // failed and surface that error. Known gap: a load that ends before the
-      // first poll, with a transport error on its submit, also lands here (#657).
-      // Otherwise it's a transient gap (just-submitted, or just-finished before
-      // query_log has it); loop.
-      if (submitError && !seenRunning) {
-        const failedOp: OperationState = {
-          operationIndex: statementIndex,
-          operationKey,
-          operationType,
-          queryId,
-          status: 'failed',
-          startedAt,
-          finishedAt: isoWithoutZone(new Date(now())),
-          lastError: describeError(submitError),
-          fingerprint,
-        }
-        const baseState =
-          migrationState ?? freshMigrationState(migrationName, migrationChecksum)
-        await journalStore.writeMigrationState(upsertOperation(baseState, failedOp, now))
-        throw submitError
-      }
-      if (submitError) {
-        unknownPollsAfterSubmitError += 1
-        if (unknownPollsAfterSubmitError > MAX_TRANSIENT_POLL_ERRORS) {
-          throw new Error(
-            `Async migration step ${operationType} (query_id ${queryId}): the submit request failed (${describeError(submitError)}) and polling found no outcome ${unknownPollsAfterSubmitError}×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs, records its outcome from system.query_log, and stops with async_outcome_unknown when there is none.`,
-          )
-        }
-      }
       log(
         `  ${operationType}: status unknown — still polling (elapsed ${elapsedSec}s)`,
       )
@@ -569,40 +519,169 @@ async function checkInFlight(
 // and the ObsessionDB console relay it.
 const QUERY_LOG_ACCESS_DENIED = /(ACCESS_DENIED|Code: 497|Not enough privileges)[\s\S]*query_log|query_log[\s\S]*(ACCESS_DENIED|Code: 497)/
 
-interface StartedAttemptCheck {
-  /** Only query_log entries of queries started at or after this time count. */
-  afterTime: string
+/** What the server shows of the attempt a statement's record names (#767). */
+export type RecordedAttempt =
+  /** Running. afterTime is set when the record is fenced, so its id names that attempt alone. */
+  | { kind: 'running'; afterTime: string | undefined; reason: string }
+  | { kind: 'finished'; status: QueryStatus }
+  /** The server's failure of the fenced id. */
+  | { kind: 'failed'; error: string }
+  /** An attempt of this statement without a server-recorded outcome. */
+  | { kind: 'unknown'; reason: string }
+  /** No attempt to resolve: none, a server-recorded failure or an abandon, or another statement's SQL. */
+  | { kind: 'ended' }
+
+const NO_ENTRY_REASON =
+  'system.query_log has no entry for its query id (query logging is off for the user, query_log is flushed later than chkit waits, or the run stopped before it submitted the statement)'
+const UNFENCED_REASON =
+  "an earlier chkit release recorded it, or the journal could not store the record's fence (it has no operation_fingerprints column), so its query id may name earlier attempts too"
+const UNVERIFIED_FAILURE_REASON =
+  'the journal records it as failed, but not from a failure the server reported for its query id (an earlier chkit release recorded it, or a run lost its submit response), so it may have finished'
+const NOT_RECORDED_RUNNING =
+  'but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends'
+const FAILED_RUNNING =
+  'but the journal records that attempt as failed, so chkit does not attach to it, and the next chkit migrate --apply runs the statement again (after its before-retry SQL, when it has one)'
+// The lastError prefix of a record --abandon reset: the operator's decision
+// to run the statement again (abandon.ts).
+const ABANDONED_PREFIX = 'abandoned via chkit migrate --abandon (was '
+
+/**
+ * Reads the outcome of the attempt `op` records, on every replica (#246).
+ * Only a fenced record's id names its attempt alone, so only its query_log
+ * entries count (#767): a QueryFinish completes it, a server failure lets it
+ * be retried, and no entry, after the query_log flush rechecks (#701), is
+ * unknown. A started record without the fence, or a failed one that no server
+ * failure or abandon recorded, may have finished, so it is unknown once it no
+ * longer runs. A failed attempt of other SQL (kept by --abandon and an edit)
+ * did not run this statement.
+ */
+export async function resolveRecordedAttempt(input: {
+  db: ClickHouseExecutor
+  op: OperationState | undefined
+  fingerprint: string
+  queryId: string
+  operationType: string
+  log: (line: string) => void
+  sleep: (ms: number) => Promise<void>
+}): Promise<RecordedAttempt> {
+  const { db, op, fingerprint, queryId, operationType, sleep } = input
+  const ofStatement = op !== undefined && op.queryId !== '' && (op.fingerprint === '' || op.fingerprint === fingerprint)
+  const fenced = ofStatement && op.status === 'started' && op.attemptFenced === true
+  const afterTime = fenced ? queryLogLowerBound(journalTimeMs(op.startedAt)) : undefined
+  let status = await checkInFlight(db, queryId, operationType, afterTime)
+  if (afterTime !== undefined && status.status === 'unknown') {
+    input.log(
+      `  ${operationType}: previous attempt of query_id=${queryId} is not running and has no outcome in system.query_log yet — checking again while query_log is flushed`,
+    )
+    status = await recheckThroughFlush(db, queryId, operationType, afterTime, sleep)
+  }
+  if (status.status === 'running') {
+    if (op !== undefined && op.fingerprint !== '' && op.fingerprint !== fingerprint) {
+      // The running attempt is the SQL its record names (#599): an attempt
+      // of other SQL, kept by --abandon and an edit, must not finish as this one.
+      throw new Error(
+        `Async migration step ${operationType} (query_id ${queryId}): an earlier attempt with different SQL is still running on the server. Wait for it to finish or run KILL QUERY WHERE query_id = '${queryId}', then re-run chkit migrate --apply.`,
+      )
+    }
+    return { kind: 'running', afterTime, reason: op?.status === 'failed' ? FAILED_RUNNING : NOT_RECORDED_RUNNING }
+  }
+  if (fenced) {
+    if (status.status === 'finished') return { kind: 'finished', status }
+    if (status.status === 'failed') return { kind: 'failed', error: status.error ?? '<unknown>' }
+    return { kind: 'unknown', reason: NO_ENTRY_REASON }
+  }
+  if (!ofStatement || op.status === 'completed') return { kind: 'ended' }
+  if (op.status === 'started') return { kind: 'unknown', reason: UNFENCED_REASON }
+  return isRecordedFailure(op) ? { kind: 'ended' } : { kind: 'unknown', reason: UNVERIFIED_FAILURE_REASON }
 }
 
-// Only a started attempt of this statement's SQL can have finished without
-// its run journaling the outcome: a failed attempt has its outcome, a record
-// without a query id never ran under one, and a finished attempt of other SQL
-// (kept by --abandon and an edit) did not run this statement. Its outcome is
-// read from query_log only when the record is fenced: its id names that
-// attempt alone (#767). Any other started record is checked in
-// system.processes only.
-function startedAttemptCheck(op: OperationState | undefined, fingerprint: string): StartedAttemptCheck | undefined {
-  if (op?.attemptFenced !== true || !isAttemptOfStatement(op, fingerprint)) return undefined
-  return { afterTime: queryLogLowerBound(journalTimeMs(op.startedAt)) }
+/** Whether a failed record was a server failure this release recorded, or an abandon (#767). */
+function isRecordedFailure(op: OperationState): boolean {
+  return op.attemptFenced === true || op.lastError.startsWith(ABANDONED_PREFIX)
 }
 
-function isAttemptOfStatement(op: OperationState | undefined, fingerprint: string): boolean {
-  return op?.status === 'started' && op.queryId !== '' && (op.fingerprint === '' || op.fingerprint === fingerprint)
+/** The record of an attempt that finished on the server. */
+export function finishedRecordOf(op: OperationState, now: () => number): OperationState {
+  return { ...op, status: 'completed', finishedAt: isoWithoutZone(new Date(now())), lastError: '' }
 }
 
-function outcomeUnknownError(input: {
+async function recheckThroughFlush(
+  db: ClickHouseExecutor,
+  queryId: string,
+  operationType: string,
+  afterTime: string,
+  sleep: (ms: number) => Promise<void>,
+): Promise<QueryStatus> {
+  let status: QueryStatus = { status: 'unknown' }
+  for (let recheck = 0; recheck < QUERY_LOG_FLUSH_RECHECKS && status.status === 'unknown'; recheck += 1) {
+    await sleep(QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS)
+    status = await checkInFlight(db, queryId, operationType, afterTime)
+  }
+  return status
+}
+
+// How many times, and how far apart, a started record's read-back is tried
+// before the attempt is not submitted: a read can land on a replica that has
+// not got the write yet.
+const STORED_ATTEMPT_READS = 5
+const STORED_ATTEMPT_READ_INTERVAL_MS = 1_000
+
+/**
+ * Refuses to submit an attempt until the journal's server returns its
+ * started record with its id, fingerprint and fence (#767): only the journal
+ * knows the random id, and only the fence stops an earlier release from
+ * resuming the record without recording it failed first.
+ */
+async function assertAttemptStored(input: {
+  journalStore: JournalStore
+  migrationName: string
+  statementIndex: number
+  operationType: string
+  queryId: string
+  fingerprint: string
+  sleep: (ms: number) => Promise<void>
+}): Promise<void> {
+  let stored: OperationState | undefined
+  for (let read = 0; read < STORED_ATTEMPT_READS; read += 1) {
+    if (read > 0) await input.sleep(STORED_ATTEMPT_READ_INTERVAL_MS)
+    stored = await input.journalStore.readStoredOperation(input.migrationName, input.statementIndex)
+    if (stored?.status === 'started' && stored.queryId === input.queryId && stored.fingerprint === input.fingerprint && stored.attemptFenced === true) return
+  }
+  const prefix = `Async migration step ${input.operationType} (query_id ${input.queryId})`
+  if (stored?.queryId === input.queryId && stored.attemptFenced !== true) {
+    throw new MigrateError(
+      'async_attempt_unfenced',
+      `${prefix}: the journal stored the attempt without its fence, because it has no operation_fingerprints column, so it was not submitted. An earlier chkit release could resume an attempt stored that way and run its before-retry SQL without recording it, which loses rows. Add the column with a user that can alter the journal (ALTER TABLE <database>.${resolveJournalTableName()} ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT [] ON every replica, or any chkit migrate --apply by that user), then run chkit migrate --apply --abandon ${input.migrationName} and apply again.`,
+    )
+  }
+  throw new Error(
+    `${prefix}: the journal did not return the attempt's started record, so it was not submitted. Re-run \`chkit migrate --apply\`.`,
+  )
+}
+
+function runningElsewhereError(input: {
   operationType: string
   statementIndex: number
   migrationName: string
   queryId: string
-  fenced: boolean
+  reason: string
 }): MigrateError {
-  const reason = input.fenced
-    ? 'system.query_log has no entry for its query id (query logging is off for the user, query_log is flushed later than chkit waits, or the run stopped before it submitted the statement)'
-    : 'an earlier chkit release recorded it, or the journal could not store the record\'s fence (it has no operation_fingerprints column), so its query id may name earlier attempts too'
   return new MigrateError(
     'async_outcome_unknown',
-    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}): the journal records an attempt as started and no replica runs it, but chkit cannot tell whether it finished: ${reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) is still running on the server, ${input.reason}. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${input.queryId}', then run chkit migrate --apply again.`,
+  )
+}
+
+export function outcomeUnknownError(input: {
+  operationType: string
+  statementIndex: number
+  migrationName: string
+  queryId: string
+  reason: string
+}): MigrateError {
+  return new MigrateError(
+    'async_outcome_unknown',
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${input.reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
   )
 }
 

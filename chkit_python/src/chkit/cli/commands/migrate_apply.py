@@ -22,8 +22,11 @@ from chkit import __version__
 from chkit.cli.commands.migrate_async_apply import (
     AsyncApplyInput,
     apply_async_statement,
+    finished_record_of,
     fresh_migration_state,
     iso_without_zone,
+    outcome_unknown_error,
+    resolve_recorded_attempt,
     upsert_operation,
 )
 from chkit.cli.commands.migrate_errors import (
@@ -266,31 +269,23 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             if state_before is not None
             else None
         )
-        if prior_attempt is not None:
-            _assert_async_attempt_stopped(input_.client, file, prior_attempt)
+        if (
+            prior_attempt is not None
+            and state_before is not None
+            and _resolve_async_attempt_before_sync(
+                input_.client,
+                journal_store,
+                file=file,
+                state=state_before,
+                op=prior_attempt,
+                fingerprint=fingerprint,
+                operation_type=identity.type,
+                log=input_.log,
+            )
+            == "completed"
+        ):
+            continue
         if prior_attempt is not None and operation is not None and operation.before_retry:
-            # A started async attempt is journaled failed before the
-            # before-retry SQL runs: until then its record names a query id
-            # whose QueryFinish a re-run in async mode would take for the
-            # outcome of rows that SQL removed (#767).
-            if (
-                state_before is not None
-                and prior_attempt.status == "started"
-                and prior_attempt.query_id != ""
-            ):
-                journal_store.write_migration_state(
-                    upsert_operation(
-                        state_before,
-                        prior_attempt.model_copy(
-                            update={
-                                "status": "failed",
-                                "finished_at": iso_without_zone(datetime.now(tz=UTC)),
-                                "last_error": _SUPERSEDED_ASYNC_ATTEMPT_ERROR,
-                            }
-                        ),
-                        iso_without_zone(datetime.now(tz=UTC)),
-                    )
-                )
             try:
                 _run_before_retry(
                     input_.client,
@@ -622,7 +617,105 @@ def _accept_edited_migration(
         applied_at=iso_without_zone(datetime.now(tz=UTC)),
     )
     _assert_dropped_attempts_stopped(client, file, state, rebased)
+    _assert_kept_attempts_resolvable(client, file, rebased, log)
     journal_store.write_migration_state(rebased)
+
+
+def _assert_kept_attempts_resolvable(
+    client: ClickHouseClient,
+    file: str,
+    rebased: MigrationRowState,
+    log: Callable[[str], None],
+) -> None:
+    """Stop an edit before the re-key when a kept async attempt's outcome is unknown (#767).
+
+    The journal stays as it was and nothing runs.
+    """
+    for op in rebased.operations:
+        if op.status == "completed" or op.query_id == "":
+            continue
+        recorded = resolve_recorded_attempt(
+            client,
+            op=op,
+            fingerprint=op.fingerprint,
+            query_id=op.query_id,
+            operation_type=op.operation_type,
+            log=log,
+        )
+        if recorded.kind == "running":
+            raise _attempt_still_running_error(file, op)
+        if recorded.kind == "unknown":
+            raise outcome_unknown_error(
+                op.operation_type, op.operation_index, file, op.query_id, recorded.reason
+            )
+
+
+def _resolve_async_attempt_before_sync(
+    client: ClickHouseClient,
+    journal_store: JournalStore,
+    *,
+    file: str,
+    state: MigrationRowState,
+    op: OperationState,
+    fingerprint: str,
+    operation_type: str,
+    log: Callable[[str], None],
+) -> str:
+    """Resolve a recorded async attempt before a sync or barrier run of its statement.
+
+    A mode-only edit with --retry resolves the attempt as an async re-run
+    does (#767): a QueryFinish records the statement completed, a server
+    failure is journaled failed before any before-retry SQL runs, and an
+    attempt that may have finished stops the run before anything is written
+    or run. A running attempt keeps its record: its query id is the only way
+    to find it later.
+    """
+    if op.status == "completed" or op.query_id == "":
+        return "run"
+    recorded = resolve_recorded_attempt(
+        client,
+        op=op,
+        fingerprint=fingerprint,
+        query_id=op.query_id,
+        operation_type=operation_type,
+        log=log,
+    )
+    if recorded.kind == "running":
+        raise _attempt_still_running_error(file, op)
+    if recorded.kind == "unknown":
+        raise outcome_unknown_error(
+            operation_type, op.operation_index, file, op.query_id, recorded.reason
+        )
+    now = iso_without_zone(datetime.now(tz=UTC))
+    if recorded.kind == "finished":
+        journal_store.write_migration_state(upsert_operation(state, finished_record_of(op), now))
+        log(
+            f"  {operation_type}: earlier async attempt of query_id={op.query_id} finished "
+            "on the server, recording it as completed"
+        )
+        return "completed"
+    if recorded.kind == "failed":
+        journal_store.write_migration_state(
+            upsert_operation(
+                state,
+                op.model_copy(
+                    update={"status": "failed", "finished_at": now, "last_error": recorded.error}
+                ),
+                now,
+            )
+        )
+    return "run"
+
+
+def _attempt_still_running_error(file: str, op: OperationState) -> MigrateError:
+    return MigrateError(
+        "retry_mismatch",
+        f"Cannot apply {file}: the earlier attempt of statement "
+        f"{op.operation_index + 1} (query_id {op.query_id}) is still running on the "
+        "server, and continuing would discard its query id. Wait for it to "
+        f"finish or run KILL QUERY WHERE query_id = '{op.query_id}', then run chkit "
+        "migrate --apply again.",
+    )
 
 
 def _assert_dropped_attempts_stopped(
@@ -666,14 +759,7 @@ def _assert_async_attempt_stopped(
         )
         raise RuntimeError(msg) from error
     if status.status == "running":
-        raise MigrateError(
-            "retry_mismatch",
-            f"Cannot apply {file}: the earlier attempt of statement "
-            f"{op.operation_index + 1} (query_id {op.query_id}) is still running on the "
-            "server, and continuing would discard its query id. Wait for it to "
-            f"finish or run KILL QUERY WHERE query_id = '{op.query_id}', then run chkit "
-            "migrate --apply again.",
-        )
+        raise _attempt_still_running_error(file, op)
 
 
 def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool:
@@ -683,14 +769,6 @@ def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool
         op.operation_index == index and op.status == "completed"
         for op in state.operations
     )
-
-
-# The last_error of a started async attempt that a sync or barrier run of the
-# statement journals failed before its before-retry SQL runs (#767).
-_SUPERSEDED_ASYNC_ATTEMPT_ERROR = (
-    "not running; recorded failed before a sync or barrier run of the statement ran its "
-    "before-retry SQL"
-)
 
 
 def _sync_operation_state(

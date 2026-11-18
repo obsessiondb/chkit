@@ -1,5 +1,6 @@
 import { readFile } from 'node:fs/promises'
 import { join } from 'node:path'
+import { setTimeout as defaultSleep } from 'node:timers/promises'
 
 import {
   assertNoFireAndForgetAsyncInserts,
@@ -33,8 +34,11 @@ import { CLI_VERSION } from '../../runtime/version.js'
 import type { QueryContext, QueryTracker } from './query-intents.js'
 import {
   applyAsyncStatement,
+  finishedRecordOf,
   freshMigrationState,
   isoWithoutZone,
+  outcomeUnknownError,
+  resolveRecordedAttempt,
   upsertOperation,
 } from './async-apply.js'
 import {
@@ -168,19 +172,46 @@ interface RecordedIdentity {
   fingerprint: string
 }
 
-// The lastError of a started async attempt that a sync or barrier run of the
-// statement journals failed before its before-retry SQL runs (#767).
-const SUPERSEDED_ASYNC_ATTEMPT_ERROR = 'not running; recorded failed before a sync or barrier run of the statement ran its before-retry SQL'
-
-// A started async attempt is journaled failed before a sync or barrier run's
-// before-retry SQL runs: until then its record names a query id whose
-// QueryFinish a re-run in async mode would take for the outcome of rows that
-// SQL removed (#767).
-async function journalAsyncAttemptSuperseded(journalStore: JournalStore, state: MigrationRowState, op: OperationState): Promise<void> {
-  if (op.status !== 'started' || op.queryId === '') return
-  await journalStore.writeMigrationState(
-    upsertOperation(state, { ...op, status: 'failed', finishedAt: isoWithoutZone(new Date()), lastError: SUPERSEDED_ASYNC_ATTEMPT_ERROR }, Date.now),
-  )
+// A sync or barrier run of a statement whose record names an async attempt
+// (a mode-only edit with --retry) resolves that attempt first, as an async
+// re-run does (#767): a QueryFinish records the statement completed, a
+// server failure is journaled failed before any before-retry SQL runs, and
+// an attempt that may have finished stops the run before anything is written
+// or run. A running attempt keeps its record: its query id is the only way to
+// find it later.
+async function resolveAsyncAttemptBeforeSync(input: {
+  db: ClickHouseExecutor
+  journalStore: JournalStore
+  file: string
+  state: MigrationRowState
+  op: OperationState
+  fingerprint: string
+  operationType: string
+  log: (line: string) => void
+}): Promise<'completed' | 'run'> {
+  const { op, file } = input
+  if (op.status === 'completed' || op.queryId === '') return 'run'
+  const recorded = await resolveRecordedAttempt({
+    db: input.db, op, fingerprint: input.fingerprint, queryId: op.queryId, operationType: input.operationType,
+    log: input.log, sleep: defaultSleep,
+  })
+  switch (recorded.kind) {
+    case 'running':
+      throw attemptStillRunningError(file, op)
+    case 'unknown':
+      throw outcomeUnknownError({ operationType: input.operationType, statementIndex: op.operationIndex, migrationName: file, queryId: op.queryId, reason: recorded.reason })
+    case 'finished':
+      await input.journalStore.writeMigrationState(upsertOperation(input.state, finishedRecordOf(op, Date.now), Date.now))
+      input.log(`  ${input.operationType}: earlier async attempt of query_id=${op.queryId} finished on the server, recording it as completed`)
+      return 'completed'
+    case 'failed':
+      await input.journalStore.writeMigrationState(
+        upsertOperation(input.state, { ...op, status: 'failed', finishedAt: isoWithoutZone(new Date()), lastError: recorded.error }, Date.now),
+      )
+      return 'run'
+    case 'ended':
+      return 'run'
+  }
 }
 
 function syncOperationState(
@@ -371,9 +402,11 @@ export async function applyMigration(input: {
       continue
     }
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
-    if (priorAttempt !== undefined) await assertAsyncAttemptStopped(db, file, priorAttempt)
+    if (priorAttempt !== undefined && stateBefore !== null) {
+      const resolved = await resolveAsyncAttemptBeforeSync({ db, journalStore, file, state: stateBefore, op: priorAttempt, fingerprint: identity.fingerprint, operationType: identity.type, log })
+      if (resolved === 'completed') continue
+    }
     if (priorAttempt !== undefined && operation?.beforeRetry) {
-      if (stateBefore !== null) await journalAsyncAttemptSuperseded(journalStore, stateBefore, priorAttempt)
       try {
         await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
           cluster: config.clickhouse?.cluster,
@@ -551,7 +584,34 @@ async function acceptEditedMigration(input: {
   }
   const rebased = rebaseInProgressState(state, { checksum, identities, appliedAt: isoWithoutZone(new Date()) })
   await assertDroppedAttemptsStopped(input.db, file, state, rebased)
+  await assertKeptAttemptsResolvable(input.db, file, rebased, input.log)
   await journalStore.writeMigrationState(rebased)
+}
+
+// An async attempt the re-key keeps must have an outcome the statement's run
+// can act on before the edit is accepted (#767): a run whose outcome is
+// unknown stops here, with the journal as it was and nothing run.
+async function assertKeptAttemptsResolvable(
+  db: ClickHouseExecutor,
+  file: string,
+  rebased: MigrationRowState,
+  log: (line: string) => void,
+): Promise<void> {
+  for (const op of rebased.operations) {
+    if (op.status === 'completed' || op.queryId === '') continue
+    const recorded = await resolveRecordedAttempt({ db, op, fingerprint: op.fingerprint, queryId: op.queryId, operationType: op.operationType, log, sleep: defaultSleep })
+    if (recorded.kind === 'running') throw attemptStillRunningError(file, op)
+    if (recorded.kind === 'unknown') {
+      throw outcomeUnknownError({ operationType: op.operationType, statementIndex: op.operationIndex, migrationName: file, queryId: op.queryId, reason: recorded.reason })
+    }
+  }
+}
+
+function attemptStillRunningError(file: string, op: OperationState): MigrateError {
+  return new MigrateError(
+    'retry_mismatch',
+    `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
+  )
 }
 
 // An async retry runs under a random query id (#701), so the record a rebase
@@ -587,10 +647,5 @@ async function assertAsyncAttemptStopped(
       { cause: error },
     )
   }
-  if (status.status === 'running') {
-    throw new MigrateError(
-      'retry_mismatch',
-      `Cannot apply ${file}: the earlier attempt of statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, and continuing would discard its query id. Wait for it to finish or run KILL QUERY WHERE query_id = '${op.queryId}', then run chkit migrate --apply again.`,
-    )
-  }
+  if (status.status === 'running') throw attemptStillRunningError(file, op)
 }

@@ -798,7 +798,8 @@ describe('createJournalStore', () => {
       await store.writeMigrationState(state(['v1:a', "v1:'b"]))
 
       const insert = commands.find((sql) => sql.startsWith('INSERT INTO'))
-      expect(insert).toContain('migration_completed, operations, operation_fingerprints) VALUES')
+      // Never an asynchronous insert, on any transport (#767).
+      expect(insert).toContain('migration_completed, operations, operation_fingerprints) SETTINGS async_insert = 0 VALUES')
       expect(insert).toEndWith(", ['v1:a','v1:\\'b'])")
       expect(commands.some((sql) => sql.startsWith('ALTER TABLE'))).toBe(false)
     })
@@ -833,13 +834,15 @@ describe('createJournalStore', () => {
         expect(insertOf(commands)).toEndWith(", ['v1:a'])")
       })
 
-      for (const status of ['completed', 'failed'] as const) {
-        test(`a ${status} copy of a fenced record is stored without the fence`, async () => {
+      // A failed record keeps the fence (the server recorded its failure); a
+      // completed one never has it, so every release skips it as before.
+      for (const [status, stored] of [['completed', 'v1:a'], ['failed', 'fenced-attempt;v1:a']] as const) {
+        test(`a ${status} copy of a fenced record is stored as ${stored}`, async () => {
           const { store, commands } = storeWith({})
 
           await store.writeMigrationState(started({ attemptFenced: true, status, finishedAt: '2026-11-09T12:00:02.000' }))
 
-          expect(insertOf(commands)).toEndWith(", ['v1:a'])")
+          expect(insertOf(commands)).toEndWith(`, ['${stored}'])`)
         })
       }
 
@@ -849,6 +852,23 @@ describe('createJournalStore', () => {
         const read = await store.readMigrationState('m.sql')
 
         expect(read?.operations[0]?.attemptFenced).toBeUndefined()
+      })
+
+      // #767 (round 2): an async submit requires the server's record, not
+      // this process's last write.
+      test('readStoredOperation returns the server row only, never the last write', async () => {
+        const { store } = storeWith({})
+
+        await store.writeMigrationState(started({ attemptFenced: true }))
+
+        expect((await store.readMigrationState('m.sql'))?.operations[0]?.queryId).toBe('q-1')
+        expect(await store.readStoredOperation('m.sql', 0)).toBeUndefined()
+      })
+
+      test('readStoredOperation returns the fenced record the server has', async () => {
+        const { store } = storeWith({ rows: [row([{ ...tuple(0), status: 'started', query_id: 'q-1', finished_at: null }], ['fenced-attempt;v1:a'])] })
+
+        expect(await store.readStoredOperation('m.sql', 0)).toMatchObject({ queryId: 'q-1', fingerprint: 'v1:a', attemptFenced: true })
       })
 
       test('a journal without the column stores no fence, and the cached write has none either', async () => {
@@ -980,7 +1000,7 @@ describe('createJournalStore', () => {
     test('an INSERT that fails on the column is not written again without it', async () => {
       const { store, commands } = storeWith({
         commandError: (sql) =>
-          sql.includes('operation_fingerprints) VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
+          sql.includes('operation_fingerprints) SETTINGS async_insert = 0 VALUES') ? clickHouseError('16', 'NO_SUCH_COLUMN_IN_TABLE') : undefined,
       })
 
       await expect(store.writeMigrationState(state(['v1:a']))).rejects.toThrow('NO_SUCH_COLUMN_IN_TABLE')

@@ -9,6 +9,7 @@ new database.
 from __future__ import annotations
 
 import json
+import re
 from collections.abc import Iterator
 from pathlib import Path
 from typing import Any
@@ -42,6 +43,21 @@ def live() -> Iterator[ClickHouseClient]:
         )
     ) as client:
         yield client
+
+
+def _assert_async_load_journaled(live: ClickHouseClient, database: str, journal_table: str) -> None:
+    """The async load completed under a random id of its own (#767)."""
+    load = live.query(
+        "SELECT op.query_id AS query_id, op.status AS status FROM "
+        f"{quote_ident(database)}.{quote_ident(journal_table)} FINAL "
+        "ARRAY JOIN operations AS op WHERE op.operation_type = 'load_table_data'"
+    ).rows
+    assert [row["status"] for row in load] == ["completed"]
+    assert re.fullmatch(
+        r"[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}", load[0]["query_id"]
+    )
+    count = live.query(f"SELECT toString(count()) AS n FROM {quote_ident(database)}.events")
+    assert count.rows[0]["n"] == "3"
 
 
 def test_migrate_apply_creates_a_missing_database(
@@ -94,6 +110,14 @@ def test_migrate_apply_creates_a_missing_database(
         assert generated.exit_code == 0, format_test_diagnostic("chkit generate", generated)
         migration = next((tmp_path / "chkit" / "migrations").glob("*.sql"))
         assert f"CREATE DATABASE IF NOT EXISTS {database}" in migration.read_text()
+        # #767: this run takes no migrate lock, and an async load in it still
+        # journals its own random query id before its submit.
+        with migration.open("a", encoding="utf-8") as handle:
+            handle.write(
+                f"\n-- operation: load_table_data key=table:{database}.events risk=safe "
+                f"mode=async\nINSERT INTO {quote_ident(database)}.events "
+                "SELECT number FROM numbers(3);\n"
+            )
 
         status = chkit_json("status")
         assert status["databaseMissing"] is True
@@ -122,6 +146,7 @@ def test_migrate_apply_creates_a_missing_database(
         assert [(row["name"], bool(row["migration_completed"])) for row in journal] == [
             (migration.name, True)
         ]
+        _assert_async_load_journaled(live, database, journal_table)
         # A statement that fails on the missing database is retried without
         # it, in the server's default database: no journal may land there (#493).
         stray = live.query(

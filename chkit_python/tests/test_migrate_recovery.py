@@ -148,6 +148,11 @@ class FakeStore:
         self.reads.append(name)
         return self.state
 
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
+
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)
         self.state = state
@@ -1101,34 +1106,44 @@ def test_sync_retry_tracks_compensation_and_forward_separately(tmp_path: Path) -
     assert store.state.migration_completed is True
 
 
-class _StoppedAsyncAttemptClient(_RecordingClient):
-    """No replica runs the recorded async attempt; the compensation stops the run."""
+class _ModeOnlyEditClient(_RecordingClient):
+    """Answers the recorded async attempt's check; records the journal at each command."""
 
-    def __init__(self, store: FakeStore) -> None:
+    def __init__(self, store: FakeStore, status: QueryStatus) -> None:
         super().__init__()
         self._store = store
-        self.record_at_compensation: list[OperationState | None] = []
+        self._status = status
+        self.checks: list[tuple[str, str | None, bool]] = []
+        self.record_at_command: list[OperationState | None] = []
+
+    def query(self, sql: str, settings: dict[str, Any] | None = None) -> QueryResult:
+        _ = settings
+        return QueryResult(column_names=["x"], rows=[{"x": 1}] if "system.tables" in sql else [])
 
     def query_status(
-        self, _query_id: str, *, every_replica: bool = False, running_only: bool = False
+        self,
+        query_id: str,
+        *,
+        after_time: str | None = None,
+        every_replica: bool = False,
+        running_only: bool = False,
     ) -> QueryStatus:
-        assert (every_replica, running_only) == (True, True)
-        return QueryStatus(status="unknown")
+        assert every_replica
+        self.checks.append((query_id, after_time, running_only))
+        return self._status
 
     def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
         state = self._store.state
-        self.record_at_compensation.append(state.operations[0] if state is not None else None)
-        msg = f"killed at {statement}"
-        raise RuntimeError(msg)
+        self.record_at_command.append(state.operations[0] if state is not None else None)
+        super().execute(statement, settings)
 
 
-def test_a_mode_only_async_to_sync_edit_journals_the_stopped_async_attempt_failed_first(
-    tmp_path: Path,
-) -> None:
-    """#767 (Codex review of #770, 770b): a mode-only async to sync edit runs
-    the before-retry SQL of a fenced async attempt that finished. A run that
-    stops after that SQL, before its own started write, must not leave the
-    async record, whose QueryFinish a re-run in async mode would trust."""
+def _mode_only_edit(
+    tmp_path: Path, status: QueryStatus
+) -> tuple[FakeStore, _ModeOnlyEditClient, Callable[[], MigrationJournalEntry], str]:
+    """#767 (Codex review of #770, rounds 1 and 2): a mode-only async to sync
+    edit with --retry resolves the recorded async attempt before the sync path
+    runs anything."""
     statement = "INSERT INTO db.a SELECT 1;"
     original = (
         "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
@@ -1144,23 +1159,54 @@ def test_a_mode_only_async_to_sync_edit_journals_the_stopped_async_attempt_faile
         }
     )
     store = FakeStore(in_progress([attempt], checksum=checksum_sql(original)))
-    client = _StoppedAsyncAttemptClient(store)
-    with pytest.raises(RuntimeError, match=r"killed at TRUNCATE TABLE db\.a"):
-        _apply(
-            _write(tmp_path, edited),
-            cast(Any, client),
-            store,
-            retry=_retry_for(edited, previous=checksum_sql(original)),
-        )
-    assert len(client.record_at_compensation) == 1
-    recorded = client.record_at_compensation[0]
+    client = _ModeOnlyEditClient(store, status)
+    directory = _write(tmp_path, edited)
+    retry = _retry_for(edited, previous=checksum_sql(original))
+    return store, client, lambda: _apply(directory, cast(Any, client), store, retry=retry), statement
+
+
+def test_a_mode_only_edit_records_an_attempt_that_finished_as_completed_and_runs_nothing(
+    tmp_path: Path,
+) -> None:
+    store, client, run, _statement = _mode_only_edit(
+        tmp_path, QueryStatus(status="finished", written_rows=1, duration_ms=10)
+    )
+    run()
+    assert client.calls == []
+    assert client.checks[0] == ("fenced-query-id", "2026-09-28T23:11:10.000Z", False)
+    assert store.state is not None
+    assert (store.state.operations[0].status, store.state.operations[0].query_id) == (
+        "completed", "fenced-query-id"
+    )
+    assert store.state.migration_completed is True
+
+
+def test_a_mode_only_edit_journals_a_server_failure_before_its_before_retry_sql(
+    tmp_path: Path,
+) -> None:
+    _store, client, run, statement = _mode_only_edit(
+        tmp_path, QueryStatus(status="failed", error="Code: 241. MEMORY_LIMIT_EXCEEDED")
+    )
+    run()
+    assert client.calls == ["TRUNCATE TABLE db.a", statement]
+    recorded = client.record_at_command[0]
     assert recorded is not None
     assert (recorded.status, recorded.query_id, recorded.last_error) == (
-        "failed",
-        "fenced-query-id",
-        "not running; recorded failed before a sync or barrier run of the statement ran its "
-        "before-retry SQL",
+        "failed", "fenced-query-id", "Code: 241. MEMORY_LIMIT_EXCEEDED"
     )
+
+
+def test_a_mode_only_edit_stops_with_async_outcome_unknown_without_an_outcome(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    monkeypatch.setattr("chkit.cli.commands.migrate_async_apply.time.sleep", lambda _s: None)
+    store, client, run, _statement = _mode_only_edit(tmp_path, QueryStatus(status="unknown"))
+    with pytest.raises(MigrateError) as info:
+        run()
+    assert info.value.code == "async_outcome_unknown"
+    assert "query_id fenced-query-id" in info.value.message
+    assert client.calls == []
+    assert store.writes == []
 
 
 class _NoOutcomeAsyncClient(_RecordingClient):
@@ -1200,7 +1246,7 @@ def test_an_async_statement_without_a_readable_outcome_keeps_async_outcome_unkno
     assert info.value.code == "async_outcome_unknown"
     assert info.value.message.startswith("Migration m.sql failed at statement 1 of 1")
     assert (
-        "query_id legacy-query-id): the journal records an attempt as started"
+        "query_id legacy-query-id): the journal records an attempt of it"
         in info.value.message
     )
     assert client.calls == []
@@ -1622,7 +1668,10 @@ def test_apply_edit_dropping_an_async_attempt_checks_it_stopped(
 
 
 @pytest.mark.parametrize("mode", ["sync", "barrier"])
-@pytest.mark.parametrize("prior", ["started", "failed", "abandoned", "stopped", "unreadable", "no-before-retry"])
+@pytest.mark.parametrize(
+    "prior",
+    ["started", "failed", "abandoned", "stopped", "unverified", "unreadable", "no-before-retry"],
+)
 def test_mode_only_edit_preserves_async_attempt_until_stopped(
     tmp_path: Path, mode: str, prior: str
 ) -> None:
@@ -1638,9 +1687,16 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
     edited = original.replace("mode=async", f"mode={mode}")
     recorded = in_progress(
         [op(
-            0, "failed" if prior in {"failed", "stopped", "unreadable"} else "started",
+            0, "failed" if prior in {"failed", "stopped", "unverified", "unreadable"} else "started",
             LOAD, query_id="random-retry-query-id",
-        ).model_copy(update={"fingerprint": statement_fingerprint(sql)})],
+        ).model_copy(
+            update={
+                "fingerprint": statement_fingerprint(sql),
+                # A failure the server recorded for the id (#767); 'unverified'
+                # is a failed record without one, as an earlier release wrote.
+                "attempt_fenced": prior != "unverified",
+            }
+        )],
         checksum=checksum_sql(original),
     )
 
@@ -1657,7 +1713,11 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
     store = CrashStore(recorded)
     if prior == "abandoned":
         abandon_migration_state(recorded, journal_store=store)
-    client = ModeClient(RuntimeError("replica unavailable") if prior == "unreadable" else prior != "stopped")
+    client = ModeClient(
+        RuntimeError("replica unavailable")
+        if prior == "unreadable"
+        else prior not in {"stopped", "unverified"}
+    )
     _write(tmp_path, edited)
     retry = _retry_for(edited, checksum_sql(original))
     if prior == "stopped":
@@ -1665,6 +1725,13 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
         assert client.calls == (["TRUNCATE TABLE db.a", sql] if mode == "sync" else ["TRUNCATE TABLE db.a"])
         assert store.state is not None
         assert store.state.migration_completed is True
+    elif prior == "unverified":
+        # #767 (round 2): it may have finished, so nothing is written or run.
+        with pytest.raises(MigrateError) as unknown:
+            _apply(tmp_path, client, store, retry=retry)
+        assert unknown.value.code == "async_outcome_unknown"
+        assert client.calls == []
+        assert store.writes == []
     else:
         if prior == "unreadable":
             with pytest.raises(RuntimeError, match="replica unavailable"):
@@ -1678,7 +1745,10 @@ def test_mode_only_edit_preserves_async_attempt_until_stopped(
         assert store.state is not None
         assert store.state.operations[0].query_id == "random-retry-query-id"
         assert all(write.operations[0].query_id == "random-retry-query-id" for write in store.writes)
-    assert client.status_calls == [("random-retry-query-id", True, True)]
+    # A fenced started attempt is also read from query_log (#767). An attempt
+    # that ended is read before the re-key and again before the statement runs.
+    check = ("random-retry-query-id", True, prior not in {"started", "no-before-retry"})
+    assert client.status_calls == ([check, check] if prior == "stopped" else [check])
 
 
 def test_apply_started_statement_still_requires_retry(tmp_path: Path) -> None:

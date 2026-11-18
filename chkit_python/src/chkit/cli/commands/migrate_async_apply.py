@@ -291,27 +291,40 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         input_.migration_name,
         input_.statement_index,
     )
-    attempt_check = _started_attempt_check(prior_op, input_.fingerprint)
-    in_flight = _check_attempt(input_, query_id, attempt_check)
-    # Only the outcome read of a started attempt can tell that it ended.
-    attempt_outcome = "unknown" if attempt_check is None else in_flight.status
-    if in_flight.status == "running":
-        return _attach(input_, initial_state, prior_op, query_id, attempt_check)
+    recorded = resolve_recorded_attempt(
+        client,
+        op=prior_op,
+        fingerprint=input_.fingerprint,
+        query_id=query_id,
+        operation_type=input_.operation_type,
+        log=input_.log,
+    )
+    if recorded.kind == "running":
+        return _attach(input_, initial_state, prior_op, query_id, recorded)
 
     # 3. A started attempt that no replica runs any more finished on the
     # server when query_log has its QueryFinish (#672): its run ended before
     # it journaled the outcome. Record it, without compensating or resubmitting.
-    if attempt_outcome == "finished" and initial_state is not None and prior_op is not None:
-        return _record_finished_attempt(input_, initial_state, prior_op, in_flight)
+    if (
+        recorded.kind == "finished"
+        and recorded.status is not None
+        and initial_state is not None
+        and prior_op is not None
+    ):
+        return _record_finished_attempt(input_, initial_state, prior_op, recorded.status)
 
-    # 4. A started attempt of this statement's SQL without an outcome: no
-    # query_log entry of its fenced id, or a record whose id may name earlier
-    # attempts too (#767). It may have finished, so running it again, even
-    # after before-retry SQL that cannot tell, could load its rows twice or
-    # take a stale outcome for it. Stop, writing nothing, so a later run
-    # still finds a late query_log entry.
-    if attempt_outcome != "failed" and _is_attempt_of_statement(prior_op, input_.fingerprint):
-        raise _outcome_unknown_error(input_, query_id, fenced=attempt_check is not None)
+    # 4. An attempt of this statement's SQL without a server-recorded outcome
+    # may have finished (#767), so running it again, even after before-retry
+    # SQL, could load its rows twice or remove rows that landed. Stop,
+    # writing nothing, so a later run still finds a late query_log entry.
+    if recorded.kind == "unknown":
+        raise outcome_unknown_error(
+            input_.operation_type,
+            input_.statement_index,
+            input_.migration_name,
+            query_id,
+            recorded.reason,
+        )
 
     # 5 / 6. Submit (with optional before-retry on resubmit) under a new
     # random id, which no other attempt or run ever submits and which is
@@ -321,9 +334,9 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
     if prior_op is not None:
         prior_status: str = prior_op.status
         prior_error = prior_op.last_error
-        if attempt_outcome == "failed":
+        if recorded.kind == "failed":
             prior_status = "failed"
-            prior_error = in_flight.error or "<unknown>"
+            prior_error = recorded.error
         err_tail = f": {_first_line(prior_error)}" if prior_error else ""
         input_.log(
             f"  {input_.operation_type}: previous attempt of query_id={query_id} is "
@@ -337,7 +350,7 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         # outcome on its re-run (#672). Without compensation nothing is written
         # until the next 'started' write, which replaces the record.
         if (
-            attempt_check is not None
+            recorded.kind == "failed"
             and initial_state is not None
             and input_.before_retry is not None
         ):
@@ -376,8 +389,8 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:
         )
     )
 
+    _assert_attempt_stored(input_, attempt_query_id)
     state_after_start = journal_store.read_migration_state(input_.migration_name)
-    _assert_attempt_recorded(input_, state_after_start, attempt_query_id)
     poll_after_time = _query_log_lower_bound(server_now_ms)
     # Polling decides the outcome, as in TS: the submit error is raised only
     # when the server never saw the query, so it is not logged here (#561).
@@ -409,32 +422,14 @@ def _attach(
     initial_state: MigrationRowState | None,
     prior_op: OperationState | None,
     query_id: str,
-    attempt_check: _StartedAttemptCheck | None,
+    recorded: RecordedAttempt,
 ) -> AsyncApplyResult:
     """Poll a running earlier attempt until terminal, when its fenced record names it."""
-    # The running attempt is the SQL its record names (#599): an attempt
-    # of other SQL, kept by --abandon and an edit, must not finish as this one.
-    attempt_fingerprint = prior_op.fingerprint if prior_op is not None else ""
-    if attempt_fingerprint not in ("", input_.fingerprint):
-        msg = (
-            f"Async migration step {input_.operation_type} (query_id {query_id}): an "
-            "earlier attempt with different SQL is still running on the server. Wait "
-            f"for it to finish or run KILL QUERY WHERE query_id = '{query_id}', then "
-            "re-run chkit migrate --apply."
-        )
-        raise RuntimeError(msg)
     # Only a fenced record's id names the running attempt alone; any other
     # may also name earlier attempts, whose QueryFinish polls could take
     # for this one's outcome (#767).
-    if attempt_check is None or prior_op is None:
-        reason = (
-            "but the journal records that attempt as failed, so chkit does not attach to "
-            "it, and the next chkit migrate --apply runs the statement again (after its "
-            "before-retry SQL, when it has one)"
-            if prior_op is not None and prior_op.status == "failed"
-            else "but its query id was not recorded by this chkit release for that attempt "
-            "alone, so chkit cannot tell its outcome from system.query_log once it ends"
-        )
+    if recorded.after_time is None or prior_op is None:
+        reason = recorded.reason
         msg = (
             f"Async migration step {input_.operation_type} (statement "
             f"{input_.statement_index + 1} of {input_.migration_name}, query_id "
@@ -453,35 +448,11 @@ def _attach(
         input_=input_,
         migration_state=initial_state,
         query_id=query_id,
-        poll_after_time=attempt_check.after_time,
+        poll_after_time=recorded.after_time,
         submission=None,
         fingerprint=input_.fingerprint,
         started_at=prior_op.started_at,
     )
-
-
-def _assert_attempt_recorded(
-    input_: AsyncApplyInput, state: MigrationRowState | None, query_id: str
-) -> None:
-    """Refuse to submit an attempt whose random id the journal does not have (#767).
-
-    Only the journal knows the id, so a re-run could not find the attempt.
-    """
-    recorded = next(
-        (
-            o
-            for o in (state.operations if state is not None else [])
-            if o.operation_index == input_.statement_index
-        ),
-        None,
-    )
-    if recorded is None or recorded.query_id != query_id:
-        msg = (
-            f"Async migration step {input_.operation_type} (query_id {query_id}): "
-            "the journal does not have the attempt's started record, so it was not "
-            "submitted. Re-run `chkit migrate --apply`."
-        )
-        raise RuntimeError(msg)
 
 
 def _execute_before_retry(input_: AsyncApplyInput, before_retry: str) -> None:
@@ -542,10 +513,9 @@ def _poll(
 ) -> AsyncApplyResult:
     poll_started_at = time.monotonic()
     transient_errors = 0
-    # Once a poll found the query running, the server has it, so a failed
-    # submit request (a gateway 524, a timeout) says nothing about its outcome (#657).
-    seen_running = False
-    unknown_polls_after_submit_error = 0
+    # Polls in a row that found the query neither running nor in query_log,
+    # however polling started (#767).
+    unknown_polls = 0
 
     while True:
         time.sleep(input_.poll_interval_seconds)
@@ -583,6 +553,39 @@ def _poll(
         base_state = migration_state or fresh_migration_state(
             input_.migration_name, input_.migration_checksum
         )
+
+        # A submit error (a gateway 524, a lost response) says nothing about
+        # the outcome: the query may have run (#657, #767). Only the server's
+        # record for the id decides it. After the budget, every replica is
+        # read once more, through a query_log flush, before the run stops
+        # with the attempt still recorded as started.
+        if status.status == "unknown":
+            unknown_polls += 1
+            if unknown_polls > MAX_TRANSIENT_POLL_ERRORS:
+                status = _check_in_flight(
+                    input_.client, query_id, input_.operation_type, poll_after_time
+                )
+                if status.status == "unknown":
+                    status = _recheck_through_flush(
+                        input_.client, query_id, input_.operation_type, poll_after_time
+                    )
+                if status.status == "unknown":
+                    submit_error = submission.wait() if submission is not None else None
+                    submit_tail = (
+                        f", and the submit request failed ({_describe_error(submit_error)})"
+                        if submit_error is not None
+                        else ""
+                    )
+                    raise outcome_unknown_error(
+                        input_.operation_type,
+                        input_.statement_index,
+                        input_.migration_name,
+                        query_id,
+                        "polling found it neither running nor in system.query_log "
+                        f"{unknown_polls}\u00d7 in a row{submit_tail}",
+                    )
+        if status.status != "unknown":
+            unknown_polls = 0
 
         if status.status == "finished":
             finished_op = OperationState(
@@ -625,6 +628,8 @@ def _poll(
                 finished_at=iso_without_zone(datetime.now(tz=UTC)),
                 last_error=status.error or "<unknown>",
                 fingerprint=fingerprint,
+                # The server's failure of this id: a re-run may retry it (#767).
+                attempt_fenced=True,
             )
             input_.journal_store.write_migration_state(
                 upsert_operation(
@@ -640,52 +645,9 @@ def _poll(
             raise RuntimeError(msg)
 
         if status.status == "running":
-            seen_running = True
-            unknown_polls_after_submit_error = 0
             input_.log(_progress_line(input_.operation_type, status, elapsed_sec))
             continue
 
-        # status is "unknown" here. If submit already raised and no poll found
-        # the query running, it never made it server-side (e.g. SQL parse
-        # error): record the attempt as failed and surface that error. Known
-        # gap: a load that ends before the first poll, with a transport error
-        # on its submit, also lands here (#657). Otherwise it's a transient gap
-        # (just-submitted, or just-finished before query_log has it).
-        submit_error = submission.error if submission is not None else None
-        if submit_error is not None and not seen_running:
-            input_.journal_store.write_migration_state(
-                upsert_operation(
-                    base_state,
-                    OperationState.model_validate(
-                        {
-                            "operationIndex": input_.statement_index,
-                            "operationKey": input_.operation_key,
-                            "operationType": input_.operation_type,
-                            "queryId": query_id,
-                            "status": "failed",
-                            "startedAt": started_at,
-                            "finishedAt": iso_without_zone(datetime.now(tz=UTC)),
-                            "lastError": _describe_error(submit_error),
-                            "fingerprint": fingerprint,
-                        }
-                    ),
-                    iso_without_zone(datetime.now(tz=UTC)),
-                )
-            )
-            raise submit_error
-        if submit_error is not None:
-            unknown_polls_after_submit_error += 1
-            if unknown_polls_after_submit_error > MAX_TRANSIENT_POLL_ERRORS:
-                msg = (
-                    f"Async migration step {input_.operation_type} "
-                    f"(query_id {query_id}): the submit request failed "
-                    f"({_describe_error(submit_error)}) and polling found no outcome "
-                    f"{unknown_polls_after_submit_error}\u00d7. A re-run of `chkit migrate "
-                    f"--apply` attaches to the query if it still runs, records its outcome "
-                    f"from system.query_log, and stops with async_outcome_unknown when there "
-                    f"is none."
-                )
-                raise RuntimeError(msg) from submit_error
         input_.log(
             f"  {input_.operation_type}: status unknown — still polling "
             f"(elapsed {elapsed_sec}s)"
@@ -719,25 +681,17 @@ def _accept_changed_checksum(
     return state.model_copy(update={"checksum": migration_checksum})
 
 
-def _check_attempt(
-    input_: AsyncApplyInput, query_id: str, attempt_check: _StartedAttemptCheck | None
+def _recheck_through_flush(
+    client: ClickHouseClient, query_id: str, operation_type: str, after_time: str
 ) -> QueryStatus:
-    """The in-flight check, repeated while query_log is flushed when it waits (#701)."""
-    after_time = attempt_check.after_time if attempt_check is not None else None
-    in_flight = _check_in_flight(input_.client, query_id, input_.operation_type, after_time)
-    if attempt_check is None or in_flight.status != "unknown":
-        return in_flight
-    input_.log(
-        f"  {input_.operation_type}: previous attempt of query_id={query_id} is not "
-        "running and has no outcome in system.query_log yet — checking again while "
-        "query_log is flushed"
-    )
+    """Check the attempt again while query_log is flushed (#701)."""
+    status = QueryStatus(status="unknown")
     for _ in range(QUERY_LOG_FLUSH_RECHECKS):
         time.sleep(QUERY_LOG_FLUSH_RECHECK_INTERVAL_SECONDS)
-        in_flight = _check_in_flight(input_.client, query_id, input_.operation_type, after_time)
-        if in_flight.status != "unknown":
+        status = _check_in_flight(client, query_id, operation_type, after_time)
+        if status.status != "unknown":
             break
-    return in_flight
+    return status
 
 
 def _check_in_flight(
@@ -836,58 +790,196 @@ def _journal_attempt_failed(
     )
 
 
+RecordedAttemptKind = Literal["running", "finished", "failed", "unknown", "ended"]
+
+
 @dataclass(frozen=True, slots=True)
-class _StartedAttemptCheck:
-    # Only query_log entries of queries started at or after this time count.
-    after_time: str
+class RecordedAttempt:
+    """What the server shows of the attempt a statement's record names (#767).
 
-
-def _started_attempt_check(
-    op: OperationState | None, fingerprint: str
-) -> _StartedAttemptCheck | None:
-    """How a re-run reads the outcome of a started attempt (#672, #767).
-
-    Only a started attempt of this statement's SQL can have finished without
-    its run journaling the outcome: a failed attempt has its outcome, a record
-    without a query id never ran under one, and a finished attempt of other
-    SQL (kept by --abandon and an edit) did not run this statement. Its
-    outcome is read from query_log only when the record is fenced: its id
-    names that attempt alone (#767). Any other started record is checked in
-    system.processes only.
+    ``running``: ``after_time`` is set when the record is fenced, so its id
+    names that attempt alone. ``failed``: the server's failure of the fenced
+    id. ``unknown``: an attempt of this statement without a server-recorded
+    outcome. ``ended``: no attempt to resolve (none, a server-recorded failure
+    or an abandon, or another statement's SQL).
     """
-    if op is None or not op.attempt_fenced or not _is_attempt_of_statement(op, fingerprint):
-        return None
-    return _StartedAttemptCheck(after_time=_query_log_lower_bound(_journal_time_ms(op.started_at)))
+
+    kind: RecordedAttemptKind
+    after_time: str | None = None
+    reason: str = ""
+    status: QueryStatus | None = None
+    error: str = ""
 
 
-def _is_attempt_of_statement(op: OperationState | None, fingerprint: str) -> bool:
-    return (
-        op is not None
-        and op.status == "started"
-        and op.query_id != ""
-        and op.fingerprint in ("", fingerprint)
+_NO_ENTRY_REASON = (
+    "system.query_log has no entry for its query id (query logging is off for the user, "
+    "query_log is flushed later than chkit waits, or the run stopped before it submitted "
+    "the statement)"
+)
+_UNFENCED_REASON = (
+    "an earlier chkit release recorded it, or the journal could not store the record's "
+    "fence (it has no operation_fingerprints column), so its query id may name earlier "
+    "attempts too"
+)
+_UNVERIFIED_FAILURE_REASON = (
+    "the journal records it as failed, but not from a failure the server reported for its "
+    "query id (an earlier chkit release recorded it, or a run lost its submit response), so "
+    "it may have finished"
+)
+_NOT_RECORDED_RUNNING = (
+    "but its query id was not recorded by this chkit release for that attempt alone, so "
+    "chkit cannot tell its outcome from system.query_log once it ends"
+)
+_FAILED_RUNNING = (
+    "but the journal records that attempt as failed, so chkit does not attach to it, and "
+    "the next chkit migrate --apply runs the statement again (after its before-retry SQL, "
+    "when it has one)"
+)
+# The last_error prefix of a record --abandon reset: the operator's decision
+# to run the statement again (migrate_abandon.py).
+_ABANDONED_PREFIX = "abandoned via chkit migrate --abandon (was "
+
+
+def resolve_recorded_attempt(  # noqa: PLR0911 - one return per outcome, as in TS
+    client: ClickHouseClient,
+    *,
+    op: OperationState | None,
+    fingerprint: str,
+    query_id: str,
+    operation_type: str,
+    log: Callable[[str], None],
+) -> RecordedAttempt:
+    """Read the outcome of the attempt ``op`` records, on every replica (#246).
+
+    Only a fenced record's id names its attempt alone, so only its query_log
+    entries count (#767): a QueryFinish completes it, a server failure lets it
+    be retried, and no entry, after the query_log flush rechecks (#701), is
+    unknown. A started record without the fence, or a failed one that no
+    server failure or abandon recorded, may have finished, so it is unknown
+    once it no longer runs. A failed attempt of other SQL (kept by --abandon
+    and an edit) did not run this statement.
+    """
+    of_statement = op is not None and op.query_id != "" and op.fingerprint in ("", fingerprint)
+    fenced = of_statement and op is not None and op.status == "started" and op.attempt_fenced
+    after_time = (
+        _query_log_lower_bound(_journal_time_ms(op.started_at))
+        if fenced and op is not None
+        else None
+    )
+    status = _check_in_flight(client, query_id, operation_type, after_time)
+    if after_time is not None and status.status == "unknown":
+        log(
+            f"  {operation_type}: previous attempt of query_id={query_id} is not "
+            "running and has no outcome in system.query_log yet — checking again while "
+            "query_log is flushed"
+        )
+        status = _recheck_through_flush(client, query_id, operation_type, after_time)
+    if status.status == "running":
+        if op is not None and op.fingerprint not in ("", fingerprint):
+            # The running attempt is the SQL its record names (#599): an attempt
+            # of other SQL, kept by --abandon and an edit, must not finish as this one.
+            msg = (
+                f"Async migration step {operation_type} (query_id {query_id}): an "
+                "earlier attempt with different SQL is still running on the server. Wait "
+                f"for it to finish or run KILL QUERY WHERE query_id = '{query_id}', then "
+                "re-run chkit migrate --apply."
+            )
+            raise RuntimeError(msg)
+        reason = (
+            _FAILED_RUNNING if op is not None and op.status == "failed" else _NOT_RECORDED_RUNNING
+        )
+        return RecordedAttempt(kind="running", after_time=after_time, reason=reason)
+    if fenced:
+        if status.status == "finished":
+            return RecordedAttempt(kind="finished", status=status)
+        if status.status == "failed":
+            return RecordedAttempt(kind="failed", error=status.error or "<unknown>")
+        return RecordedAttempt(kind="unknown", reason=_NO_ENTRY_REASON)
+    if not of_statement or op is None or op.status == "completed":
+        return RecordedAttempt(kind="ended")
+    if op.status == "started":
+        return RecordedAttempt(kind="unknown", reason=_UNFENCED_REASON)
+    if op.attempt_fenced or op.last_error.startswith(_ABANDONED_PREFIX):
+        return RecordedAttempt(kind="ended")
+    return RecordedAttempt(kind="unknown", reason=_UNVERIFIED_FAILURE_REASON)
+
+
+def finished_record_of(op: OperationState) -> OperationState:
+    """The record of an attempt that finished on the server."""
+    return op.model_copy(
+        update={
+            "status": "completed",
+            "finished_at": iso_without_zone(datetime.now(tz=UTC)),
+            "last_error": "",
+        }
     )
 
 
-def _outcome_unknown_error(input_: AsyncApplyInput, query_id: str, *, fenced: bool) -> MigrateError:
-    reason = (
-        "system.query_log has no entry for its query id (query logging is off for the "
-        "user, query_log is flushed later than chkit waits, or the run stopped before it "
-        "submitted the statement)"
-        if fenced
-        else "an earlier chkit release recorded it, or the journal could not store the "
-        "record's fence (it has no operation_fingerprints column), so its query id may "
-        "name earlier attempts too"
-    )
+# How many times, and how far apart, a started record's read-back is tried
+# before the attempt is not submitted: a read can land on a replica that has
+# not got the write yet.
+_STORED_ATTEMPT_READS = 5
+_STORED_ATTEMPT_READ_INTERVAL_SECONDS = 1.0
+
+
+def _assert_attempt_stored(input_: AsyncApplyInput, query_id: str) -> None:
+    """Refuse to submit until the journal's server returns the started record (#767).
+
+    It must carry the attempt's id, fingerprint and fence: only the journal
+    knows the random id, and only the fence stops an earlier release from
+    resuming the record without recording it failed first.
+    """
+    stored: OperationState | None = None
+    for read in range(_STORED_ATTEMPT_READS):
+        if read > 0:
+            time.sleep(_STORED_ATTEMPT_READ_INTERVAL_SECONDS)
+        stored = input_.journal_store.read_stored_operation(
+            input_.migration_name, input_.statement_index
+        )
+        if (
+            stored is not None
+            and stored.status == "started"
+            and stored.query_id == query_id
+            and stored.fingerprint == input_.fingerprint
+            and stored.attempt_fenced
+        ):
+            return
+    prefix = f"Async migration step {input_.operation_type} (query_id {query_id})"
+    if stored is not None and stored.query_id == query_id and not stored.attempt_fenced:
+        msg = (
+            f"{prefix}: the journal stored the attempt without its fence, because it has no "
+            "operation_fingerprints column, so it was not submitted. An earlier chkit release "
+            "could resume an attempt stored that way and run its before-retry SQL without "
+            "recording it, which loses rows. Add the column with a user that can alter the "
+            f"journal (ALTER TABLE <database>.{resolve_journal_table_name()} ADD COLUMN IF NOT "
+            "EXISTS operation_fingerprints Array(String) DEFAULT [] ON every replica, or any "
+            "chkit migrate --apply by that user), then run chkit migrate --apply --abandon "
+            f"{input_.migration_name} and apply again."
+        )
+        raise MigrateError("async_attempt_unfenced", msg)
     msg = (
-        f"Async migration step {input_.operation_type} (statement "
-        f"{input_.statement_index + 1} of {input_.migration_name}, query_id {query_id}): "
-        "the journal records an attempt as started and no replica runs it, but chkit "
-        f"cannot tell whether it finished: {reason}. Nothing was submitted and no "
-        "before-retry SQL ran. Check in ClickHouse whether the statement's rows reached "
-        f"its target. Then reconcile every statement of {input_.migration_name} that "
-        "already ran, since an abandon runs the migration again from statement 1, run "
-        f"chkit migrate --apply --abandon {input_.migration_name}, and apply again."
+        f"{prefix}: the journal did not return the attempt's started record, so it was not "
+        "submitted. Re-run `chkit migrate --apply`."
+    )
+    raise RuntimeError(msg)
+
+
+def outcome_unknown_error(
+    operation_type: str,
+    statement_index: int,
+    migration_name: str,
+    query_id: str,
+    reason: str,
+) -> MigrateError:
+    msg = (
+        f"Async migration step {operation_type} (statement "
+        f"{statement_index + 1} of {migration_name}, query_id {query_id}): "
+        "the journal records an attempt of it and no replica runs it, but chkit cannot "
+        f"tell whether it finished: {reason}. Nothing was submitted and no before-retry SQL "
+        "ran. Check in ClickHouse whether the statement's rows reached its target. Then "
+        f"reconcile every statement of {migration_name} that already ran, since an abandon "
+        "runs the migration again from statement 1, run chkit migrate --apply --abandon "
+        f"{migration_name}, and apply again."
     )
     return MigrateError("async_outcome_unknown", msg)
 

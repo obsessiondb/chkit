@@ -263,6 +263,11 @@ class _MemoryJournal:
     def read_migration_state(self, _name: str) -> MigrationRowState | None:
         return self.state
 
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
+
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)
         self.state = state
@@ -351,6 +356,32 @@ def test_first_submission_completes_without_query_log(
             lambda n: n >= 3,
         )
         assert rows == 3
+    finally:
+        live.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def test_a_statement_the_server_rejects_is_recorded_failed_from_its_query_log_entry(
+    live_env: LiveEnv, remote: RemoteClickHouseClient, live: ClickHouseClient
+) -> None:
+    """#767: a statement the server rejects before it starts has no
+    QueryFinish; query_log records its ExceptionBeforeStart under the
+    attempt's id, which is the failure that lets a re-run run it again."""
+    prefix = create_prefix("py_remote_rejected")
+    name = f"{prefix}dst"
+    table = _create_table(live, live_env.clickhouse_database, name)
+    journal = _MemoryJournal(None)
+    statement = _statement(
+        client=remote,
+        journal=journal,
+        migration_name=f"20990101000000_{prefix}rejected.sql",
+        operation_key=f"table:{live_env.clickhouse_database}.{name}",
+        # A syntax error: the server rejects it before it starts.
+        sql=f"INSERT INTO {table} SELEC number FROM numbers(3)",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="SYNTAX_ERROR"):
+            apply_async_statement(statement)
+        assert journal.statuses() == ["started", "failed"]
     finally:
         live.execute(f"DROP TABLE IF EXISTS {table}")
 

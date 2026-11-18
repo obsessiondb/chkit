@@ -88,15 +88,17 @@ class OperationState(BaseModel):
     # recorded: an older chkit wrote the row, or the journal has no column for
     # it. Never part of a report.
     fingerprint: str = Field(..., exclude=True)
-    # Whether this started async record names a query id that only this
-    # attempt was submitted under, recorded before its submit (#767). Only
-    # that write sets it; every other write carries it as a read returned it.
-    # A write stores it in the fingerprint (FENCED_FINGERPRINT_PREFIX), so a
-    # journal without the fingerprint column never has it. Never part of a report.
+    # Whether this async record names a query id that only this attempt was
+    # submitted under, recorded before its submit (#767). Only that write sets
+    # it; every other write carries it as a read returned it. On a failed
+    # record it also means the server recorded the failure. A write stores it
+    # in the fingerprint (FENCED_FINGERPRINT_PREFIX), never on a completed
+    # record, so a journal without the fingerprint column never has it. Never
+    # part of a report.
     attempt_fenced: bool = Field(default=False, alias="attemptFenced", exclude=True)
 
 
-# The prefix of the stored fingerprint of a fenced started record (#767).
+# The prefix of the stored fingerprint of a fenced started or failed record (#767).
 # Releases from #599 on compare a started record's fingerprint with the
 # statement's before they resume, so an earlier release stops with
 # statement_split_changed instead of running before-retry SQL without
@@ -106,7 +108,7 @@ FENCED_FINGERPRINT_PREFIX: Final[str] = "fenced-attempt;"
 
 def stored_fingerprint(op: OperationState) -> str:
     """The fingerprint a write stores for ``op`` (#767)."""
-    if op.status == "started" and op.attempt_fenced:
+    if op.status != "completed" and op.attempt_fenced:
         return f"{FENCED_FINGERPRINT_PREFIX}{op.fingerprint}"
     return op.fingerprint
 
@@ -881,6 +883,27 @@ class JournalStore:
             )
         )
 
+    def read_stored_operation(
+        self, migration_name: str, statement_index: int
+    ) -> OperationState | None:
+        """One statement's record as the journal's server returns it (#767).
+
+        Without the last write this process made: what an async submit requires.
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return None
+        self._try_sync_replica()
+        rows = self._journal_rows(
+            f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1"
+        )
+        if not rows:
+            return None
+        operations = _parse_operations(
+            rows[0].get("operations"), rows[0].get(_FINGERPRINTS_COLUMN)
+        )
+        return next((op for op in operations if op.operation_index == statement_index), None)
+
     def read_migration_state(self, migration_name: str) -> MigrationRowState | None:
         """Return the latest row for ``migration_name`` (including in-progress)."""
         self._ensure_table(create=False)
@@ -962,7 +985,11 @@ class JournalStore:
         sql = (
             f"INSERT INTO {self._qualified_table()} "
             f"(name, applied_at, checksum, chkit_version, "
-            f"migration_completed, operations{fingerprint_column}) VALUES ("
+            # Acknowledged once written on every transport, never as an
+            # asynchronous insert, so what follows a journal write runs after it
+            # is stored (#767).
+            f"migration_completed, operations{fingerprint_column}) SETTINGS async_insert = 0 "
+            "VALUES ("
             f"'{_escape_sql_string(state.name)}', "
             f"'{_escape_sql_string(state.applied_at)}', "
             f"'{_escape_sql_string(state.checksum)}', "

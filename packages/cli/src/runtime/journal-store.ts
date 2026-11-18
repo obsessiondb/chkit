@@ -35,17 +35,18 @@ export interface OperationState {
    */
   fingerprint: string
   /**
-   * Whether this started async record names a query id that only this
-   * attempt was submitted under, recorded before its submit (#767). Only that
-   * write sets it; every other write carries it as a read returned it. A
-   * write stores it in the fingerprint (FENCED_FINGERPRINT_PREFIX), so a
-   * journal without the fingerprint column never has it.
+   * Whether this async record names a query id that only this attempt was
+   * submitted under, recorded before its submit (#767). Only that write sets
+   * it; every other write carries it as a read returned it. On a failed
+   * record it also means the server recorded the failure. A write stores it
+   * in the fingerprint (FENCED_FINGERPRINT_PREFIX), never on a completed
+   * record, so a journal without the fingerprint column never has it.
    */
   attemptFenced?: boolean
 }
 
 /**
- * The prefix of the stored fingerprint of a fenced started record (#767).
+ * The prefix of the stored fingerprint of a fenced started or failed record (#767).
  * Releases from #599 on compare a started record's fingerprint with the
  * statement's before they resume, so an earlier release stops with
  * statement_split_changed instead of running before-retry SQL without
@@ -55,7 +56,7 @@ const FENCED_FINGERPRINT_PREFIX = 'fenced-attempt;'
 
 /** The fingerprint a write stores for `op` (#767). */
 function storedFingerprint(op: OperationState): string {
-  return op.status === 'started' && op.attemptFenced === true ? `${FENCED_FINGERPRINT_PREFIX}${op.fingerprint}` : op.fingerprint
+  return op.status !== 'completed' && op.attemptFenced === true ? `${FENCED_FINGERPRINT_PREFIX}${op.fingerprint}` : op.fingerprint
 }
 
 /** The fingerprint a read finds stored, and whether it was fenced (#767). */
@@ -83,6 +84,11 @@ export interface MigrationRowState {
 export interface JournalStore {
   readJournal(): Promise<MigrationJournal>
   readMigrationState(migrationName: string): Promise<MigrationRowState | null>
+  /**
+   * One statement's record as the journal's server returns it, without the
+   * last write this process made (#767): what an async submit requires.
+   */
+  readStoredOperation(migrationName: string, statementIndex: number): Promise<OperationState | undefined>
   writeMigrationState(state: MigrationRowState): Promise<void>
   appendEntry(entry: MigrationJournalEntry): Promise<void>
   /**
@@ -713,7 +719,9 @@ SETTINGS index_granularity = 1`
   async function insertState(state: MigrationRowState, fingerprints: boolean): Promise<void> {
     const fingerprintColumnName = fingerprints ? `, ${FINGERPRINTS_COLUMN}` : ''
     const fingerprintValue = fingerprints ? `, ${fingerprintsArrayLiteral(state.operations)}` : ''
-    const insertSql = `INSERT INTO ${await qualifiedJournal()} (name, applied_at, checksum, chkit_version, migration_completed, operations${fingerprintColumnName}) VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)}${fingerprintValue})`
+    // Acknowledged once written on every transport, never as an asynchronous
+    // insert, so what follows a journal write runs after it is stored (#767).
+    const insertSql = `INSERT INTO ${await qualifiedJournal()} (name, applied_at, checksum, chkit_version, migration_completed, operations${fingerprintColumnName}) SETTINGS async_insert = 0 VALUES ('${escapeSqlString(state.name)}', '${escapeSqlString(state.appliedAt)}', '${escapeSqlString(state.checksum)}', '${escapeSqlString(state.chkitVersion)}', ${state.migrationCompleted ? 'true' : 'false'}, ${operationsArrayLiteral(state.operations)}${fingerprintValue})`
     await whileDatabasePropagates(`write to ${journalTable}`, () => pRetry(() => db.command(insertSql), {
       retries: 4,
       minTimeout: 0,
@@ -770,6 +778,15 @@ SETTINGS index_granularity = 1`
           checksum: row.checksum,
         })),
       }
+    },
+
+    async readStoredOperation(migrationName: string, statementIndex: number): Promise<OperationState | undefined> {
+      await ensureTable(false)
+      if (_databaseMissing || tableMissing) return undefined
+      await trySyncReplica()
+      const [row] = await journalRows(`name = '${escapeSqlString(migrationName)}'`, ' LIMIT 1')
+      if (!row) return undefined
+      return parseOperations(row.operations, row.operation_fingerprints).find((op) => op.operationIndex === statementIndex)
     },
 
     async readMigrationState(migrationName: string): Promise<MigrationRowState | null> {

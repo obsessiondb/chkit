@@ -113,6 +113,9 @@ function createFakeJournalStore(initial: MigrationRowState | null = null, option
     async readMigrationState() {
       return current
     },
+    async readStoredOperation(_name, index) {
+      return current?.operations.find((op) => op.operationIndex === index)
+    },
     async writeMigrationState(state) {
       writes.push(state)
       // As the journal returns it; BASE_INPUT records no fingerprint.
@@ -360,6 +363,8 @@ describe('applyAsyncStatement', () => {
         startedAt: '2026-05-26 10:00:00.000',
         finishedAt: '2026-05-26 10:05:00.000',
         lastError: 'Memory limit exceeded',
+        // A failure the server recorded for the id (#767).
+        attemptFenced: true,
       }),
     )
     const lines: string[] = []
@@ -422,6 +427,8 @@ describe('applyAsyncStatement', () => {
         startedAt: '2026-05-26 10:00:00.000',
         finishedAt: '2026-05-26 10:05:00.000',
         lastError: 'boom',
+        // A failure the server recorded for the id (#767).
+        attemptFenced: true,
       }),
     )
     const settings = { max_table_size_to_drop: '0' }
@@ -457,6 +464,8 @@ describe('applyAsyncStatement', () => {
         startedAt: '2026-05-26 10:00:00.000',
         finishedAt: '2026-05-26 10:05:00.000',
         lastError: 'NETWORK_ERROR',
+        // A failure the server recorded for the id (#767).
+        attemptFenced: true,
       }),
     )
 
@@ -543,9 +552,11 @@ describe('applyAsyncStatement', () => {
     expect(writes[1]?.operations[0]?.lastError).toContain('NETWORK_ERROR: broken pipe')
   })
 
-  test('surfaces submit error when status remains unknown (SQL parse failure case)', async () => {
+  // The server logs a statement it rejects before it starts as
+  // ExceptionBeforeStart under the attempt's id: its recorded failure (#767).
+  test('a statement the server rejects before it starts is recorded failed from query_log (SQL parse failure case)', async () => {
     const { db } = createFakeExecutor(
-      [{ status: 'unknown' }, { status: 'unknown' }, { status: 'unknown' }],
+      [{ status: 'unknown' }, { status: 'unknown' }, { status: 'failed', error: 'Syntax error: failed at position 1' }],
       { failSubmit: () => new Error('Syntax error: failed at position 1') },
     )
     const { store, writes } = createFakeJournalStore(null)
@@ -565,12 +576,15 @@ describe('applyAsyncStatement', () => {
     const queryId = writes[0]?.operations[0]?.queryId ?? ''
     expect(queryId).toMatch(UUID_SHAPE)
 
-    // The query never started, so the attempt is recorded as failed (#233):
-    // an edited file can then run again without --retry.
+    // The server recorded the failure, so the attempt is recorded failed
+    // (#233): an edited file can then run again without --retry.
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
-    expect(writes[1]?.operations[0]?.lastError).toBe('Syntax error: failed at position 1')
+    expect(writes[1]?.operations[0]).toMatchObject({ lastError: 'Syntax error: failed at position 1', attemptFenced: true })
     // The submit error is the command's error; no progress line repeats it (#561).
-    expect(lines).toEqual([`  load_table_data: submitting async (query_id=${queryId})`])
+    expect(lines).toEqual([
+      `  load_table_data: submitting async (query_id=${queryId})`,
+      '  load_table_data: status unknown — still polling (elapsed 0s)',
+    ])
   })
 
   // When polling gives up, the submit error is the only trace of e.g. a rejected
@@ -681,31 +695,69 @@ describe('applyAsyncStatement', () => {
     ])
   })
 
-  test('a submit that fails after a poll found the query running gives up after the poll budget', async () => {
-    const { db } = createFakeExecutor(
-      [
-        { status: 'unknown' }, // initial in-flight check
-        { status: 'running', writtenRows: 9, writtenBytes: 72 },
-        ...Array.from({ length: 21 }, () => ({ status: 'unknown' as const })),
-      ],
-      { failSubmit: () => new Error('error code: 524') },
-    )
-    const { store, writes } = createFakeJournalStore(null)
+  // #767 (round 2): a lost submit response is no evidence of failure. The
+  // poller keeps the fenced started record, reads every replica once more
+  // through a query_log flush, then stops with async_outcome_unknown.
+  for (const [label, failSubmit] of [
+    ['a submit that fails after a poll found the query running', () => new Error('error code: 524')],
+    ['an acknowledged submit', undefined],
+  ] as const) {
+    test(`${label} stops with async_outcome_unknown after the unknown-poll budget`, async () => {
+      const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor(
+        [
+          { status: 'unknown' }, // initial in-flight check
+          { status: 'running', writtenRows: 9, writtenBytes: 72 },
+          ...Array.from({ length: 21 }, () => ({ status: 'unknown' as const })),
+          // The final check of every replica, then 5 rechecks while query_log is flushed.
+          ...Array.from({ length: 6 }, () => ({ status: 'unknown' as const })),
+        ],
+        failSubmit ? { failSubmit } : {},
+      )
+      const { store, writes } = createFakeJournalStore(null)
 
-    await expect(
-      applyAsyncStatement({
+      const run = applyAsyncStatement({
         ...BASE_INPUT,
         db,
         journalStore: store,
         log: () => {},
         sleep: NO_SLEEP,
         now: FIXED_NOW,
+      })
+
+      const tail = failSubmit ? ', and the submit request failed (error code: 524)' : ''
+      await expect(run).rejects.toMatchObject({
+        code: 'async_outcome_unknown',
+        message: expect.stringContaining(`chkit cannot tell whether it finished: polling found it neither running nor in system.query_log 21× in a row${tail}. Nothing was submitted`),
+      })
+      expect(submitCalls).toHaveLength(1)
+      expect(statusCalls.slice(-6).every((call) => call.everyReplica === true && call.queryId === submitCalls[0]?.queryId)).toBe(true)
+      expect(commandCalls).toEqual([])
+      // The outcome is unknown, so the attempt stays started, fenced.
+      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+    })
+  }
+
+  // #767 (round 2): an attached attempt that disappears from system.processes
+  // without a query_log entry stops the run too, instead of polling forever.
+  test('an attach that polls unknown past the budget stops with async_outcome_unknown', async () => {
+    const ownId = '0b7f9a52-3c1d-4e8f-9a6b-2d4c8e1f7a30'
+    const { db, submitCalls } = createFakeExecutor([
+      { status: 'running', writtenRows: 1 },
+      ...Array.from({ length: 21 + 6 }, () => ({ status: 'unknown' as const })),
+    ])
+    const { store, writes } = createFakeJournalStore(
+      freshStateWith({
+        operationIndex: 0, operationKey: BASE_INPUT.operationKey, operationType: BASE_INPUT.operationType,
+        queryId: ownId, status: 'started', startedAt: '2026-05-26 10:00:00.000', finishedAt: null,
+        lastError: ATTEMPT_RECORD_MARKER, fingerprint: 'v1:load', attemptFenced: true,
       }),
-    ).rejects.toThrow(
-      `): the submit request failed (error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs, records its outcome from system.query_log, and stops with async_outcome_unknown when there is none.`,
     )
-    // The outcome is unknown, so the attempt stays started.
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+
+    await expect(
+      applyAsyncStatement({ ...BASE_INPUT, fingerprint: 'v1:load', db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown' })
+    expect(submitCalls).toEqual([])
+    expect(writes).toEqual([])
   })
 
   // query_log still holds an earlier attempt's QueryFinish under the id an
@@ -730,7 +782,8 @@ describe('applyAsyncStatement', () => {
         // Like system.query_log: query_start_time >= parseDateTimeBestEffort(afterTime), in whole seconds.
         async queryStatus(id: string, opts?: { afterTime?: string }): Promise<QueryStatus> {
           statusCalls.push({ queryId: id, afterTime: opts?.afterTime })
-          if (id !== queryId) return { status: 'unknown' }
+          // The rejected submission's ExceptionBeforeStart (#767).
+          if (id !== queryId) return opts?.runningOnly ? { status: 'unknown' } : { status: 'failed', error: "Unknown table expression identifier 'default.src_typo'" }
           const afterSec = opts?.afterTime === undefined ? 0 : Math.floor(Date.parse(opts.afterTime) / 1000)
           return staleQueryStartSec >= afterSec
             ? { status: 'finished', writtenRows: 2, durationMs: 10 }
@@ -792,6 +845,8 @@ describe('applyAsyncStatement', () => {
         startedAt: '2026-05-26 10:00:00.000',
         finishedAt: '2026-05-26 10:05:00.000',
         lastError: 'Memory limit exceeded',
+        // A failure the server recorded for the id (#767).
+        attemptFenced: true,
       }),
     )
 
@@ -998,9 +1053,11 @@ describe('applyAsyncStatement re-run of a started step', () => {
       },
     }) as unknown as ClickHouseExecutor
   const outcomeUnknown = (queryId: string, reason: string) =>
-    `Async migration step load_table_data (statement 1 of m.sql, query_id ${queryId}): the journal records an attempt as started and no replica runs it, but chkit cannot tell whether it finished: ${reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of m.sql that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon m.sql, and apply again.`
+    `Async migration step load_table_data (statement 1 of m.sql, query_id ${queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of m.sql that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon m.sql, and apply again.`
   const NO_ENTRY_REASON =
     'system.query_log has no entry for its query id (query logging is off for the user, query_log is flushed later than chkit waits, or the run stopped before it submitted the statement)'
+  const UNVERIFIED_REASON =
+    'the journal records it as failed, but not from a failure the server reported for its query id (an earlier chkit release recorded it, or a run lost its submit response), so it may have finished'
   const UNFENCED_REASON =
     "an earlier chkit release recorded it, or the journal could not store the record's fence (it has no operation_fingerprints column), so its query id may name earlier attempts too"
 
@@ -1012,13 +1069,13 @@ describe('applyAsyncStatement re-run of a started step', () => {
       [
         { status: 'unknown' },
         { status: 'running', writtenRows: 9, writtenBytes: 72 },
-        ...Array.from({ length: 21 }, () => ({ status: 'unknown' as const })),
+        ...Array.from({ length: 21 + 6 }, () => ({ status: 'unknown' as const })),
       ],
       { failSubmit: () => new Error('error code: 524') },
     )
     await expect(
       applyAsyncStatement({ ...input, db: first.db, journalStore: store, sleep: NO_SLEEP }),
-    ).rejects.toThrow(/polling found no outcome 21×/)
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown' })
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
     const queryId = submittedQueryId(first.submitCalls)
     // The attempt's start is recorded on the server clock, fenced, under the submitted id.
@@ -1269,6 +1326,79 @@ describe('applyAsyncStatement re-run of a started step', () => {
     }
   }
 
+  // #767 (round 2): a failed record that no server failure or abandon
+  // recorded (a #721-era "no outcome" retry record, or a lost submit response
+  // an earlier release journaled failed) may have finished. It is checked in
+  // system.processes only and stops the run before anything is written or run.
+  for (const lastError of ['no longer running and no outcome in system.query_log; retried', 'error code: 524']) {
+    test(`an unverified failed record (${lastError}) stops with async_outcome_unknown`, async () => {
+      const fake = clockedExecutor([{ status: 'finished', writtenRows: 16, durationMs: 8000 }])
+      const { store, writes } = createFakeJournalStore(startedRecord({ status: 'failed', finishedAt: '2026-05-26 10:05:00.000', lastError, attemptFenced: undefined }))
+
+      await expect(
+        applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: fake.sleep }),
+      ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: outcomeUnknown(OWN_ID, UNVERIFIED_REASON) })
+      expect(fake.statusCalls).toEqual([{ queryId: OWN_ID, afterTime: undefined, everyReplica: true, runningOnly: true }])
+      expect(fake.commandCalls).toEqual([])
+      expect(fake.submitCalls).toEqual([])
+      expect(writes).toEqual([])
+    })
+  }
+
+  // #767 (round 2, all three reviews): the submit's response is lost after
+  // the INSERT committed, and the first polls run before query_log has its
+  // QueryFinish. The attempt is never journaled failed, so nothing is
+  // compensated or submitted again: the polls find the QueryFinish.
+  test('a lost submit response is no failure: the polls find the committed attempt', async () => {
+    const fake = clockedExecutor(
+      [
+        { status: 'unknown' }, // in-flight check before the submit
+        { status: 'unknown' },
+        { status: 'unknown' },
+        { status: 'finished', writtenRows: 16, durationMs: 8000 },
+      ],
+      { failSubmit: () => new Error('HTTP 524 after commit') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    const result = await applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: fake.sleep })
+
+    expect(result.kind).toBe('completed')
+    expect(fake.submitCalls).toHaveLength(1)
+    expect(fake.commandCalls).toEqual([])
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+  })
+
+  // #767 (round 2): only a fenced record stops an earlier release from
+  // resuming it, so a journal that cannot store the fence (no
+  // operation_fingerprints column, ALTER denied) gets no submit.
+  test('an attempt the journal stores without its fence is not submitted', async () => {
+    const fake = clockedExecutor([{ status: 'unknown' }])
+    const { store } = createFakeJournalStore(null, { fingerprints: false })
+
+    await expect(
+      applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: fake.sleep }),
+    ).rejects.toMatchObject({
+      code: 'async_attempt_unfenced',
+      message: expect.stringContaining('ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String)'),
+    })
+    expect(fake.submitCalls).toEqual([])
+  })
+
+  // The process's own last write is not the server's record (#767, round 2).
+  test('an attempt only this process remembers writing is not submitted', async () => {
+    const fake = clockedExecutor([{ status: 'unknown' }])
+    const { store } = createFakeJournalStore(null)
+    store.readStoredOperation = async () => undefined
+
+    await expect(
+      applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: fake.sleep }),
+    ).rejects.toThrow(/the journal did not return the attempt's started record, so it was not submitted/)
+    expect(fake.submitCalls).toEqual([])
+    // Read back 5 times, a second apart.
+    expect(fake.sleeps).toEqual([1_000, 1_000, 1_000, 1_000])
+  })
+
   // A fenced attempt that a recheck finds running (its submit reached the
   // server late) is attached to, not resubmitted.
   test('a started attempt that a recheck finds running is attached to', async () => {
@@ -1466,7 +1596,8 @@ describe('applyAsyncStatement re-run of a started step', () => {
       async queryStatus(id: string, opts?: QueryStatusOptions): Promise<QueryStatus> {
         if (opts?.runningOnly) return { status: 'unknown' }
         polled.push(id)
-        return id === QUERY_ID ? { status: 'finished', writtenRows: 2, durationMs: 10 } : { status: 'unknown' }
+        // The rejected submission's ExceptionBeforeStart under its own id.
+        return id === QUERY_ID ? { status: 'finished', writtenRows: 2, durationMs: 10 } : { status: 'failed', error: 'Code: 60. UNKNOWN_TABLE' }
       },
       async command() {},
       async submit() {
@@ -1503,7 +1634,7 @@ describe('applyAsyncStatement re-run of a started step', () => {
 
     await expect(
       applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: NO_SLEEP }),
-    ).rejects.toThrow(/the journal does not have the attempt's started record, so it was not submitted/)
+    ).rejects.toThrow(/the journal did not return the attempt's started record, so it was not submitted/)
     expect(fake.submitCalls).toEqual([])
   })
 })

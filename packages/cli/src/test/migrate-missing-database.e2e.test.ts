@@ -1,5 +1,5 @@
 import { describe, expect, test } from 'bun:test'
-import { mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
+import { appendFile, mkdtemp, readdir, rm, writeFile } from 'node:fs/promises'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -61,6 +61,13 @@ describe('migrate --apply into a database that does not exist yet', () => {
         expect(generate.exitCode).toBe(0)
         const [migration] = await readdir(migrationsDir)
         expect(migration).toEndWith(`_${migrationName}.sql`)
+        // #767: this run takes no migrate lock, and an async load in it still
+        // journals its own random query id before its submit.
+        await appendFile(
+          join(migrationsDir, migration as string),
+          `\n-- operation: load_table_data key=table:${database}.events risk=safe mode=async\nINSERT INTO ${quoteIdent(database)}.events SELECT number FROM numbers(3);\n`,
+          'utf8',
+        )
 
         const apply = runCli(dir, ['migrate', '--config', configPath, '--apply', '--json'], cliEnv)
         if (apply.exitCode !== 0) {
@@ -83,6 +90,13 @@ describe('migrate --apply into a database that does not exist yet', () => {
           'journal of the bootstrap migration',
         )
         expect(journal).toEqual([{ name: migration as string, migration_completed: true }])
+        const [load] = await executor.query<{ query_id: string; status: string }>(
+          `SELECT op.query_id AS query_id, op.status AS status FROM ${quoteIdent(database)}.${quoteIdent(journalTable)} FINAL ARRAY JOIN operations AS op WHERE op.operation_type = 'load_table_data'`,
+        )
+        expect(load?.status).toBe('completed')
+        expect(load?.query_id).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-4[0-9a-f]{3}-[0-9a-f]{4}-[0-9a-f]{12}$/)
+        const [rows] = await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${quoteIdent(database)}.events`)
+        expect(rows?.n).toBe('3')
 
         const status = runCli(dir, ['status', '--config', configPath, '--json'], cliEnv)
         expect(status.exitCode).toBe(0)

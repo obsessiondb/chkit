@@ -12,6 +12,9 @@ function makeJournalStore(): JournalStore {
     async readMigrationState() {
       return state
     },
+    async readStoredOperation(_name: string, index: number) {
+      return state?.operations.find((op) => op.operationIndex === index)
+    },
     async writeMigrationState(next: MigrationRowState) {
       state = next
     },

@@ -24,6 +24,7 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
 )
 from pydantic import BaseModel, ConfigDict
 from urllib3 import Timeout
+from urllib3.exceptions import HTTPError
 
 from chkit.clickhouse.control import (
     STRICT_CONTROL_SETTINGS,
@@ -217,19 +218,10 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
-    def _write_settings(self) -> dict[str, Any]:
-        """No asynchronous INSERT, as TS sends with every write: a journal write
-        is durable before what follows it runs (#767). A user that cannot change
-        the setting (readonly = 1) cannot write either, so it is left out there,
-        where clickhouse-connect would refuse it before the server's own error."""
-        setting = self._client.server_settings.get("async_insert")
-        return {"async_insert": 0} if setting is not None and not setting.readonly else {}
-
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
     ) -> None:
         """Check ownership before each command attempt, including an internal retry."""
-        settings = {**self._write_settings(), **(settings or {})}
         check()
         try:
             self._client.command(statement, settings=settings)
@@ -390,6 +382,9 @@ class ClickHouseClient:
         if submit_client is None and not self._closed:
             # Opened outside the lock, so close() does not wait for it.
             opened = self._open_driver(self._config, autogenerate_session_id=False)
+            # One physical send per submit: the id is journaled for this
+            # attempt alone, so the driver must not send it again (#767).
+            opened.http = _NoReplayPool(opened.http)
             with self._submit_client_lock:
                 if self._submit_client is None and not self._closed:
                     self._submit_client = opened
@@ -485,7 +480,7 @@ class ClickHouseClient:
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' "
-            "AND type IN ('QueryFinish', 'ExceptionWhileProcessing') "
+            "AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart') "
             "AND is_initial_query = 1 "
             f"AND query_start_time >= parseDateTimeBestEffort('{after}') "
             f"AND event_date >= toDate32(parseDateTimeBestEffort('{after}')) - 1 "
@@ -562,6 +557,32 @@ class _SingleAttemptPool:
             raise RuntimeError(msg)
         self._sent = True
         return self._pool.request(*args, **{**kwargs, "retries": False})
+
+
+class _NoReplayPool:
+    """Never replay a sent request, for clients whose requests run concurrently.
+
+    clickhouse-connect sends a request again when the server reset the
+    connection, even with ``query_retries=0``, and urllib3 has a retry budget
+    of its own. A replayed async submit could run its statement twice under
+    one journaled id (#767). The reset is raised as an error the driver does
+    not retry, so the poller decides the outcome from the server's record.
+    """
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        try:
+            return self._pool.request(*args, **{**kwargs, "retries": False})
+        except HTTPError as error:
+            if isinstance(error.__context__, ConnectionResetError):
+                msg = f"The connection was reset after the request was sent ({error})"
+                raise ConnectionError(msg) from error
+            raise
 
 
 def _use_ts_timeouts(client: Any) -> None:

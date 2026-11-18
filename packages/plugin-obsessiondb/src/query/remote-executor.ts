@@ -269,7 +269,7 @@ export function createRemoteExecutor(deps: {
 FROM ${from('system.query_log')}
 WHERE user = currentUser()
   AND query_id = '${queryId}'
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart')
   ${afterFilter}
 ORDER BY event_time DESC
 LIMIT 1

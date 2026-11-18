@@ -24,6 +24,7 @@ MigrateErrorCode = Literal[
     "journal_changed",
     "migrate_cancellation_failed",
     "async_outcome_unknown",
+    "async_attempt_unfenced",
 ]
 
 EMPTY_MIGRATIONS_SUMMARY = (

@@ -341,7 +341,7 @@ class RemoteClickHouseClient:
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}'"
-            "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')"
+            "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart')"
             f"{after_filter}"
             " ORDER BY event_time DESC LIMIT 1"
             f"{read_settings}"

@@ -90,6 +90,26 @@ describe('async migrate statements through the ObsessionDB remote executor (live
     }
   }, TIMEOUT_MS)
 
+  // #767: a statement the server rejects before it starts has no
+  // QueryFinish; query_log records its ExceptionBeforeStart under the
+  // attempt's id, which is the failure that lets a re-run run it again.
+  test('a statement the server rejects is recorded failed from its query_log entry', async () => {
+    const run = startRun('remote_rejected')
+    const journal = createMemoryJournal(null)
+    const statement = run.statement({
+      migrationName: `20990101000000_${run.prefix}rejected.sql`,
+      journalStore: journal.store,
+      // A syntax error: the server rejects it before it starts.
+      sql: `INSERT INTO ${run.table} SELEC number FROM numbers(3)`,
+    })
+    try {
+      await expect(applyAsyncStatement(statement)).rejects.toThrow(/SYNTAX_ERROR/)
+      expect(journal.statuses()).toEqual(['started', 'failed'])
+    } finally {
+      await run.cleanup()
+    }
+  }, TIMEOUT_MS)
+
   // A run that lost its connection leaves the statement 'started' while its
   // query runs on, and a re-run attaches to it. An earlier attempt finished
   // before under the id earlier releases gave a first attempt. The attached
@@ -296,6 +316,9 @@ function createMemoryJournal(initial: MigrationRowState | null) {
     },
     async readMigrationState() {
       return state
+    },
+    async readStoredOperation(_name, index) {
+      return state?.operations.find((op) => op.operationIndex === index)
     },
     async writeMigrationState(next) {
       writes.push(next)
