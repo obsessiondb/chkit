@@ -171,7 +171,8 @@ export function recordingAdmission(admission: SubmitAdmission): { admission: Sub
   return {
     admission: {
       admit: () => {
-        const admitted = !admission.signal?.aborted && admission.admit()
+        // Read before and after the caller's admit, which may stop the run.
+        const admitted = !admission.signal?.aborted && admission.admit() && !admission.signal?.aborted
         if (!admitted) refused = true
         return admitted
       },

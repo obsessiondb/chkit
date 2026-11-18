@@ -1139,6 +1139,9 @@ export function createExecutorWithClient(
 				admissions.set(id, recorded.admission)
 			}
 			try {
+				// The slot was granted a turn ago: a stop since then refuses the
+				// submit here, in the turn that would call the driver.
+				if (admission?.signal?.aborted) throw sendNotAdmittedError()
 				await target.command({
 					query: sql,
 					query_id: id,

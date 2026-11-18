@@ -1,4 +1,5 @@
-import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
+import { afterAll, beforeAll, describe, expect, spyOn, test } from 'bun:test'
+import { createClient } from '@clickhouse/client'
 import { spawnSync } from 'node:child_process'
 import net from 'node:net'
 import http from 'node:http'
@@ -12,6 +13,7 @@ import { acquireSendSlot, createAdmissionAgent, createSendQueue, urlConnectionOp
 // query_id and answers it, after `answerAfterMs`, as a finished command.
 let server: http.Server
 const received: string[] = []
+const bytesFor = new Map<string, number>()
 let url = ''
 let inFlight = 0
 let peakInFlight = 0
@@ -19,7 +21,9 @@ let answerAfterMs = 0
 
 beforeAll(async () => {
   server = http.createServer((req, res) => {
-    received.push(new URL(req.url ?? '/', 'http://localhost').searchParams.get('query_id') ?? '')
+    const queryId = new URL(req.url ?? '/', 'http://localhost').searchParams.get('query_id') ?? ''
+    received.push(queryId)
+    req.on('data', (chunk: Buffer) => bytesFor.set(queryId, (bytesFor.get(queryId) ?? 0) + chunk.length))
     inFlight++
     peakInFlight = Math.max(peakInFlight, inFlight)
     req.resume()
@@ -256,6 +260,61 @@ describe('acquireSendSlot at the grant-versus-abort boundary', () => {
     expect(isSendNotAdmitted(error)).toBe(true)
     await new Promise((resolve) => setTimeout(resolve, 50))
     expect(received).not.toContain('aborted-at-creation-1')
+    await db.close()
+  })
+})
+
+// Round 8: the caller's admit may itself stop the run, and a stop can land in
+// the turn between the slot grant and the driver call.
+describe('a stop at the last moment before the request', () => {
+  test('an admit that aborts its own signal and returns true sends nothing', async () => {
+    const db = executor()
+    const stop = new AbortController()
+
+    const error = await db.submit('INSERT INTO t SELECT 1', 'aborted-by-admit-1', undefined, {
+      admit: () => {
+        stop.abort()
+        return true
+      },
+      signal: stop.signal,
+    }).catch((e: unknown) => e)
+
+    expect(isSendNotAdmitted(error)).toBe(true)
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    expect(received).not.toContain('aborted-by-admit-1')
+    expect(bytesFor.get('aborted-by-admit-1') ?? 0).toBe(0)
+    await db.close()
+  })
+
+  test('a queued submit stopped after its slot grant never calls the driver', async () => {
+    const db = executor(`${url}/?max_open_connections=1`)
+    const commandProto = Object.getPrototypeOf(createClient({ url })) as { command: (...args: unknown[]) => unknown }
+    const command = spyOn(commandProto, 'command')
+    answerAfterMs = 100
+    const first = db.submit('INSERT INTO t SELECT 1', 'slot-holder-1', undefined, { admit: () => true })
+    // A signal that reads as aborted from its third read on: the queue's own
+    // check, the check after the grant, then the check before the driver.
+    let reads = 0
+    const signal = {
+      get aborted() {
+        reads++
+        return reads >= 3
+      },
+      addEventListener() {},
+      removeEventListener() {},
+    } as unknown as AbortSignal
+    await new Promise((resolve) => setTimeout(resolve, 20))
+    const callsBefore = command.mock.calls.length
+
+    const queued = await db.submit('INSERT INTO t SELECT 1', 'stopped-after-grant-1', undefined, { admit: () => true, signal }).catch((e: unknown) => e)
+    await first
+    answerAfterMs = 0
+
+    expect(isSendNotAdmitted(queued)).toBe(true)
+    expect(reads).toBe(3)
+    expect(command.mock.calls.length).toBe(callsBefore)
+    expect(received).not.toContain('stopped-after-grant-1')
+    command.mockRestore()
     await db.close()
   })
 })
