@@ -808,36 +808,6 @@ def test_drops_a_dotted_column_after_the_modify_of_the_column_whose_old_expressi
     ]
 
 
-def test_a_dotted_run_reads_the_column_after_a_column_named_like_its_table() -> None:
-    # ClickHouse resolves `dummy.z` in table `dummy` to the column `z` when the
-    # column `dummy` has no subcolumn `z`, so the run reads `z` too.
-    assert _sqls(
-        [_t([{"name": "dummy", "type": "UInt64"}], "dummy")],
-        [_t([
-            {"name": "dummy", "type": "UInt64"},
-            {"name": "a", "type": "UInt64", "default": _expr("dummy.z")},
-            {"name": "z", "type": "UInt64"},
-        ], "dummy")],
-    ) == [
-        "ALTER TABLE app.dummy ADD COLUMN IF NOT EXISTS `z` UInt64;",
-        "ALTER TABLE app.dummy ADD COLUMN IF NOT EXISTS `a` UInt64 DEFAULT dummy.z;",
-    ]
-    assert _sqls(
-        [_t([
-            {"name": "dummy", "type": "UInt64"},
-            {"name": "x", "type": "UInt64"},
-            {"name": "z", "type": "UInt64", "default_kind": "MATERIALIZED", "default": _expr("dummy.x")},
-        ], "dummy")],
-        [_t([
-            {"name": "dummy", "type": "UInt64"},
-            {"name": "z", "type": "UInt64", "default_kind": "MATERIALIZED", "default": _expr("id")},
-        ], "dummy")],
-    ) == [
-        "ALTER TABLE app.dummy MODIFY COLUMN `z` UInt64 MATERIALIZED id;",
-        "ALTER TABLE app.dummy DROP COLUMN IF EXISTS `x`;",
-    ]
-
-
 def test_drops_a_column_after_the_dropped_column_whose_expression_reads_it() -> None:
     assert _sqls(
         [_t([

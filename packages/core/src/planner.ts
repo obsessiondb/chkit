@@ -934,13 +934,10 @@ function columnKey(table: { database: string; table: string }, column: string): 
  * The column names that `sql` reads, from runs of bare or quoted names joined
  * by dots (`n.x`, `` `n`.`x` ``, comments around the dot). Like ClickHouse, a
  * run reads its longest leading part that is a column: `n.x` reads the column
- * `n.x` when there is one, and otherwise `n` (a subcolumn of `n`). Parts that
- * are no column are skipped, so `t.col` and `db.t.col` read `col` (#748). The
- * rest of the run after a column is read too: ClickHouse resolves `t.z` to the
- * column `z` of table `t` when `t` is also a column without a subcolumn `z`, so
- * `t.z` reads both `t` and `z`. An extra read only reorders statements or makes
- * a cycle that keeps the key order. A run followed by `(` is a function call,
- * not a column.
+ * `n.x` when there is one, and otherwise `n` (a subcolumn of `n`). A run whose
+ * leading parts are no column is read without them, so `t.col` and
+ * `db.t.col` read `col` (#748). A run followed by `(` is a function call, not
+ * a column.
  */
 function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
   const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
@@ -958,19 +955,22 @@ function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
     }
     if (run.length === 0) i += 1
     if (tokens[i]?.text === '(') continue
-    let start = 0
-    while (start < run.length) {
-      let end = run.length
-      while (end > start && !columns.has(run.slice(start, end).join('.'))) end -= 1
-      if (end === start) {
-        start += 1
-        continue
-      }
-      found.push(run.slice(start, end).join('.'))
-      start = end
+    for (let start = 0; start < run.length; start += 1) {
+      const name = longestColumnPrefix(run.slice(start), columns)
+      if (name === undefined) continue
+      found.push(name)
+      break
     }
   }
   return found
+}
+
+function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): string | undefined {
+  for (let end = parts.length; end > 0; end -= 1) {
+    const name = parts.slice(0, end).join('.')
+    if (columns.has(name)) return name
+  }
+  return undefined
 }
 
 /**
