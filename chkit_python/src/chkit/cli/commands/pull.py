@@ -496,7 +496,6 @@ def _write_schema_file(out_file: Path, content: str, *, overwrite: bool) -> None
 
 
 def run(  # noqa: PLR0917
-    ctx: typer.Context,
     config_path: Annotated[
         Path | None,
         typer.Option("--config", "-c", help="Path to clickhouse.config.py."),
@@ -538,7 +537,7 @@ def run(  # noqa: PLR0917
         stray = stray[1:]
     if stray:
         report_usage_error(
-            ctx.info_name or "pull",
+            "pull",
             f"Got unexpected extra argument(s) ({' '.join(stray)})",
             json_mode=output_json,
         )
