@@ -1,6 +1,6 @@
 # Release Process
 
-All 10 published npm packages share one semver version (a changesets `fixed` group) and publish together. While in beta, versions carry a `-beta.N` suffix. Registry templates are released independently, without an npm package bump.
+All 11 published npm packages share one semver version (a changesets `fixed` group) and publish together. While in beta, versions carry a `-beta.N` suffix. Registry templates are released independently, without an npm package bump.
 
 ## Registry template releases
 
@@ -78,7 +78,7 @@ Use `patch` while in beta. `major` changesets are rejected.
 
 ## One-time setup
 
-- On each of the 10 packages on npmjs.com: add a Trusted Publisher → GitHub Actions → `obsessiondb/chkit`, workflow `release-publish.yml`, environment `release`, and enable **Allow npm dist-tag** (off by default). Without it a beta release publishes but fails to move `latest`; enable it and re-run the run.
+- On each of the 11 packages on npmjs.com: add a Trusted Publisher → GitHub Actions → `obsessiondb/chkit`, workflow `release-publish.yml`, environment `release`, and enable **Allow npm dist-tag** (off by default). Without it a beta release publishes but fails to move `latest`; enable it and re-run the run.
 - In the GitHub repo: create the `release` environment with deployment branches limited to `main`.
 - Install the [pkg.pr.new GitHub App](https://github.com/apps/pkg-pr-new) on the repo.
 

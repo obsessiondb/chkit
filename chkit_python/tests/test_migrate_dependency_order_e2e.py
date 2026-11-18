@@ -300,3 +300,251 @@ def test_adds_a_column_before_the_add_column_whose_default_reads_it(
     finally:
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(orders)}")
         client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")
+
+
+def _e(sql: str) -> str:
+    return f"'default': SQLExpression(expression={sql!r})"
+
+
+_CONCAT_B = _e("concat(b, '!')")
+_LENGTH_ABC = _e("length('abc')")
+
+
+# Each change below fails on ClickHouse in the order of an earlier plan: a
+# statement reads a column that does not exist yet, or a DROP COLUMN runs
+# while another column still reads it (#745, #746, #758). `order` lists
+# operation keys after the table prefix; `rename` is a `from=to` mapping.
+_COLUMN_CHANGES: list[dict[str, Any]] = [
+    {
+        # #745: MODIFY COLUMN after the ADD COLUMN its new DEFAULT reads.
+        "label": "modafteradd",
+        "before": "{'name': 'Total', 'type': 'UInt64'}",
+        "after": f"{{'name': 'Total', 'type': 'UInt64', {_e('price + 1')}}}, "
+        "{'name': 'price', 'type': 'UInt64'}",
+        "order": ["column:price", "column:Total"],
+        "columns": ["Total", "id", "price"],
+    },
+    {
+        # #746: RENAME COLUMN before the ADD COLUMN that reads the new name.
+        "label": "addafterrename",
+        "before": "{'name': 'a', 'type': 'String'}",
+        "after": "{'name': 'b', 'type': 'String'}, {'name': 'Copy', 'type': 'String', "
+        f"'default_kind': 'MATERIALIZED', {_CONCAT_B}}}",
+        "rename": "a=b",
+        "order": ["column_rename:a:b", "column:Copy"],
+        "columns": ["Copy", "b", "id"],
+    },
+    {
+        # #758: RENAME COLUMN before the MODIFY COLUMN that reads the new name.
+        "label": "modafterrename",
+        "before": f"{{'name': 'a', 'type': 'String'}}, {{'name': 'code', 'type': 'String', {_e('a')}}}",
+        "after": f"{{'name': 'b', 'type': 'String'}}, {{'name': 'code', 'type': 'String', {_e('b')}}}",
+        "rename": "a=b",
+        "order": ["column_rename:a:b", "column:code"],
+        "columns": ["b", "code", "id"],
+    },
+    {
+        # Passes on main too; it fails when the DROP keeps its slot while the
+        # MODIFY of `b` moves behind the ADD of `z`.
+        "label": "dropaftermod",
+        "before": f"{{'name': 'b', 'type': 'UInt64', {_e('c')}}}, {{'name': 'c', 'type': 'UInt64'}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('z')}}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('z')}}}, {{'name': 'z', 'type': 'UInt64'}}",
+        "order": ["column:z", "column:b", "column:c"],
+        "columns": ["a", "b", "id", "z"],
+    },
+    {
+        "label": "dropafterdrop",
+        "before": "{'name': 'a', 'type': 'UInt64'}, "
+        f"{{'name': 'b', 'type': 'UInt64', 'default_kind': 'ALIAS', {_e('a + 1')}}}",
+        "after": "{'name': 'x', 'type': 'UInt64'}",
+        "order": ["column:b", "column:a"],
+        "columns": ["id", "x"],
+    },
+    {
+        # Passes on main too; it fails when the ADD and the RENAME move while
+        # the MODIFY of `d` keeps its slot before the ADD of `c`.
+        "label": "modaddrename",
+        "before": "{'name': 'a', 'type': 'UInt64'}, {'name': 'd', 'type': 'UInt64'}",
+        "after": f"{{'name': 'c', 'type': 'UInt64', {_LENGTH_ABC}}}, "
+        f"{{'name': 'd', 'type': 'UInt64', {_e('c + 1')}}}, {{'name': 'length', 'type': 'UInt64'}}",
+        "rename": "a=length",
+        "order": ["column:c", "column:d"],
+        "columns": ["c", "d", "id", "length"],
+    },
+    {
+        # A function call named like the new column is no read of it.
+        "label": "fnrename",
+        "before": f"{{'name': 'a', 'type': 'UInt64', {_LENGTH_ABC}}}",
+        "after": f"{{'name': 'b', 'type': 'UInt64', {_LENGTH_ABC}}}, "
+        f"{{'name': 'length', 'type': 'UInt64', {_e('b + 1')}}}",
+        "rename": "a=b",
+        "order": ["column_rename:a:b", "column:length"],
+        "columns": ["b", "id", "length"],
+    },
+]
+
+
+@pytest.mark.parametrize("change", _COLUMN_CHANGES, ids=[c["label"] for c in _COLUMN_CHANGES])
+def test_orders_the_column_statements_of_a_table(
+    change: dict[str, Any], ch_client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    client = ch_client._client
+    env = resolve_live_env()
+    db = client.database
+    journal_table = create_journal_table_name(f"{change['label']}_py")
+    name = f"{create_prefix(change['label'])}t"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
+    monkeypatch.setenv("CI", "1")
+    runner = CliRunner()
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": db,
+            },
+        })
+        + ")\n"
+    )
+
+    def generate_and_migrate(columns: str, step: str, migration_id: str, extra: list[str]) -> str:
+        (tmp_path / "schema.py").write_text(
+            "from chkit import SQLExpression, schema, table\n\n"
+            f"definitions = schema(table(database={db!r}, name={name!r}, "
+            f"columns=[{{'name': 'id', 'type': 'UInt64'}}, {columns}], engine='MergeTree()', "
+            "primary_key=['id'], order_by=['id']))\n"
+        )
+        gen = runner.invoke(
+            app, ["generate", "--name", step, "--migration-id", migration_id, *extra, "--json"])
+        assert gen.exit_code == 0, format_test_diagnostic(f"generate ({step}) failed", gen)
+        migrate = _run_migrate(runner, ["migrate", "--execute", "--allow-destructive", "--json"])
+        assert migrate.exit_code == 0, format_test_diagnostic(f"migrate ({step}) failed", migrate)
+        return (tmp_path / "chkit" / "migrations" / f"{migration_id}_{step}.sql").read_text()
+
+    def read_columns() -> list[str]:
+        rows = client.query(
+            "SELECT name FROM system.columns WHERE database = {db:String} AND table = {t:String} "
+            "ORDER BY name",
+            parameters={"db": db, "t": name},
+        ).result_rows
+        return [str(row[0]) for row in rows]
+
+    try:
+        generate_and_migrate(change["before"], "init", "20990101000000", [])
+        rename = change.get("rename")
+        sql = generate_and_migrate(
+            change["after"],
+            "change",
+            "20990101000001",
+            [] if rename is None else ["--rename-column", f"{db}.{name}.{rename}"],
+        )
+        _assert_in_order(sql, [f"table:{db}.{name}:{key}" for key in change["order"]])
+
+        expected = sorted(change["columns"])
+        deadline = time.monotonic() + 30
+        columns = read_columns()
+        while columns != expected and time.monotonic() < deadline:
+            time.sleep(0.5)
+            columns = read_columns()
+        assert columns == expected
+    finally:
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(name)}")
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")
+
+
+def test_drops_a_skip_index_before_the_column_it_reads_when_a_column_rename_is_applied(
+    ch_client: Any, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # The DROP INDEX sorts after the DROP COLUMN by key (`column` < `index`);
+    # the planner runs it first, and a rename in the same plan must keep that
+    # (#747). ClickHouse rejects dropping `x` while `idx_x` reads it.
+    client = ch_client._client
+    env = resolve_live_env()
+    db = client.database
+    journal_table = create_journal_table_name("idxdrop_py")
+    events = f"{create_prefix('idxdrop')}events"
+    monkeypatch.chdir(tmp_path)
+    monkeypatch.setenv("CHKIT_JOURNAL_TABLE", journal_table)
+    monkeypatch.setenv("CI", "1")
+    runner = CliRunner()
+    (tmp_path / "clickhouse.config.py").write_text(
+        "from chkit import define_config\n\nconfig = define_config("
+        + json.dumps({
+            "schema": "./schema.py",
+            "outDir": "./chkit",
+            "migrationsDir": "./chkit/migrations",
+            "metaDir": "./chkit/meta",
+            "clickhouse": {
+                "url": env.clickhouse_url,
+                "username": env.clickhouse_user,
+                "password": env.clickhouse_password,
+                "database": db,
+            },
+        })
+        + ")\n"
+    )
+
+    def generate_and_migrate(
+        columns: str, indexes: str, name: str, migration_id: str, extra_args: list[str]
+    ) -> str:
+        (tmp_path / "schema.py").write_text(
+            "from chkit import schema, table\n\n"
+            f"definitions = schema(table(database={db!r}, name={events!r}, "
+            f"columns=[{{'name': 'id', 'type': 'UInt64'}}{columns}], indexes=[{indexes}], "
+            "engine='MergeTree()', primary_key=['id'], order_by=['id']))\n"
+        )
+        gen = runner.invoke(
+            app,
+            ["generate", "--name", name, "--migration-id", migration_id, *extra_args, "--json"],
+        )
+        assert gen.exit_code == 0, format_test_diagnostic(f"generate ({name}) failed", gen)
+        migrate = _run_migrate(runner, ["migrate", "--execute", "--allow-destructive", "--json"])
+        assert migrate.exit_code == 0, format_test_diagnostic(f"migrate ({name}) failed", migrate)
+        return (tmp_path / "chkit" / "migrations" / f"{migration_id}_{name}.sql").read_text()
+
+    def read_columns() -> list[str]:
+        rows = client.query(
+            "SELECT name FROM system.columns WHERE database = {db:String} AND table = {t:String} "
+            "ORDER BY name",
+            parameters={"db": db, "t": events},
+        ).result_rows
+        return [str(row[0]) for row in rows]
+
+    try:
+        generate_and_migrate(
+            ", {'name': 'a', 'type': 'String'}, {'name': 'x', 'type': 'String'}",
+            "{'name': 'idx_x', 'expression': 'x', 'type': 'bloom_filter', 'granularity': 1}",
+            "init",
+            "20990101000000",
+            [],
+        )
+        drop_sql = generate_and_migrate(
+            ", {'name': 'b', 'type': 'String'}",
+            "",
+            "drop",
+            "20990101000001",
+            ["--rename-column", f"{db}.{events}.a=b"],
+        )
+        _assert_in_order(drop_sql, [
+            f"table:{db}.{events}:index:idx_x",
+            f"table:{db}.{events}:column:x",
+            f"table:{db}.{events}:column_rename:a:b",
+        ])
+
+        deadline = time.monotonic() + 60
+        columns = read_columns()
+        while columns != ["b", "id"] and time.monotonic() < deadline:
+            time.sleep(1)
+            columns = read_columns()
+        assert columns == ["b", "id"]
+    finally:
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(events)}")
+        client.command(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)}")

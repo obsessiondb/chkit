@@ -29,6 +29,7 @@ from chkit.core.model import (
     TableDefinition,
     _RiskSummary,
 )
+from chkit.core.planner import column_rename_key, is_column_statement, order_column_statements
 
 # Rank used to order operations within a plan. Drops happen first so the
 # subsequent create/alter steps see a clean slate; rename comes after
@@ -45,8 +46,17 @@ _CREATE_RANK = 4
 def apply_selected_rename_suggestions(
     plan: MigrationPlan,
     selected_suggestions: Sequence[ColumnRenameSuggestion],
+    *,
+    previous_definitions: Sequence[SchemaDefinition],
+    next_definitions: Sequence[SchemaDefinition],
 ) -> MigrationPlan:
-    """Replace pairs of (drop, add) column ops with a single RENAME COLUMN."""
+    """Replace pairs of (drop, add) column ops with a single RENAME COLUMN.
+
+    The column statements are then ordered again with the renames (#746,
+    #758): ``previous_definitions`` is the schema the plan was made from,
+    after table and dictionary renames, and ``next_definitions`` the schema
+    it reaches.
+    """
     if not selected_suggestions:
         return plan
 
@@ -59,17 +69,19 @@ def apply_selected_rename_suggestions(
         rename_operations.append(
             MigrationOperation(
                 type="alter_table_rename_column",
-                key=(
-                    f"table:{suggestion.database}.{suggestion.table}"
-                    f":column_rename:{suggestion.from_}:{suggestion.to}"
-                ),
+                key=column_rename_key(suggestion),
                 risk="caution",
                 sql=suggestion.confirmation_sql,
             )
         )
 
     kept = [op for op in plan.operations if op.key not in keys_to_remove]
-    operations = _sorted(kept + rename_operations)
+    operations = order_column_statements(
+        _sorted(kept, rename_operations),
+        previous=previous_definitions,
+        next_=next_definitions,
+        renames=selected_suggestions,
+    )
 
     return MigrationPlan(
         operations=operations,
@@ -133,7 +145,7 @@ def apply_explicit_table_renames(
         )
 
     kept = [op for op in plan.operations if op.key not in keys_to_remove]
-    operations = _sorted(kept + extra_operations)
+    operations = _sorted(kept, extra_operations)
 
     return MigrationPlan(
         operations=operations,
@@ -193,7 +205,7 @@ def apply_explicit_dictionary_renames(
         )
 
     kept = [op for op in plan.operations if op.key not in keys_to_remove]
-    operations = _sorted(kept + extra_operations)
+    operations = _sorted(kept, extra_operations)
 
     return MigrationPlan(
         operations=operations,
@@ -299,25 +311,39 @@ def _rank_operation(op: MigrationOperation) -> int:
     return _CREATE_RANK
 
 
-def _sorted(operations: Sequence[MigrationOperation]) -> list[MigrationOperation]:
+# As in plan_diff, these drops run before every other ALTER: a skip index,
+# constraint or projection that reads a column blocks its DROP COLUMN (#747).
+_DEPENDENT_DROPS = frozenset(
+    {"alter_table_drop_index", "alter_table_drop_constraint", "alter_table_drop_projection"}
+)
+
+
+def _sorted(
+    kept: Sequence[MigrationOperation], added: Sequence[MigrationOperation]
+) -> list[MigrationOperation]:
     """Combine the planner's operations with the ones this pipeline adds.
 
     Drops and object creates keep the planner's order, which is
     dependency-aware (#231); the classes this pipeline adds to are ordered by
-    key, and operations that share a key keep the planner's order (the sort is
-    stable), so a column's ``REMOVE DEFAULT`` still runs before its
-    ``MODIFY COLUMN``. The column ADDs fill their key-order positions in the
-    planner's order, which puts an ADD after the ADDs its default reads (#681).
+    key, after the drops of skip indexes, constraints and projections as in
+    plan_diff (#747), and operations that share a key keep the planner's order
+    (the sort is stable), so a column's ``REMOVE DEFAULT`` still runs before its
+    ``MODIFY COLUMN``. The planner's column statements fill their key-order
+    positions in the planner's order, which is dependency-aware (#681, #745);
+    ``apply_selected_rename_suggestions`` orders them again with its renames.
     """
 
-    def sort_key(op: MigrationOperation) -> tuple[int, str]:
+    def sort_key(op: MigrationOperation) -> tuple[int, int, str]:
         rank = _rank_operation(op)
-        return (rank, "" if rank in (_DROP_RANK, _CREATE_RANK) else op.key)
+        if rank in (_DROP_RANK, _CREATE_RANK):
+            return (rank, 0, "")
+        return (rank, 0 if op.type in _DEPENDENT_DROPS else 1, op.key)
 
-    adds = iter([op for op in operations if op.type == "alter_table_add_column"])
+    added_ids = {id(op) for op in added}
+    planned = iter([op for op in kept if is_column_statement(op)])
     return [
-        next(adds) if op.type == "alter_table_add_column" else op
-        for op in sorted(operations, key=sort_key)
+        next(planned) if is_column_statement(op) and id(op) not in added_ids else op
+        for op in sorted([*kept, *added], key=sort_key)
     ]
 
 

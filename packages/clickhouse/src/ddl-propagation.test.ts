@@ -283,6 +283,35 @@ describe('waitForDDLPropagation: deadline', () => {
       'app.events.raw definition not applied on every replica after 4 checks: replica r2 reports type "UInt32", replica r1 reports "UInt64" (the last check did not return within the 0.5s deadline)',
     )
   })
+
+  test('a check cut off by the deadline leaves the session free for the next request', async () => {
+    // A session runs one query at a time: a poll that never returns holds it.
+    const hang = () => new Promise<never>(() => {})
+    let held = false
+    let closed = 0
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        if (held) throw new Error('Session is locked by a concurrent client')
+        if (sql.includes('system.one')) return [{ replicas: 2 }] as T[]
+        held = true
+        return hang()
+      },
+      async command(): Promise<void> {
+        if (held) throw new Error('Session is locked by a concurrent client')
+      },
+      openConcurrent: () => ({ query: hang, close: async () => { closed += 1 } }),
+    } as unknown as ClickHouseExecutor
+
+    await expect(
+      waitForDDLPropagation(db, 'alter_table_modify_column', KEY, {
+        ...FAST,
+        deadlineMs: 500,
+        statement: 'ALTER TABLE app.events MODIFY COLUMN `raw` UInt64;',
+      }),
+    ).rejects.toThrow('a check did not return within the 0.5s deadline')
+    await db.command('DROP TABLE app.events')
+    expect(closed).toBe(1)
+  })
 })
 
 // chkit-py's tests/test_ddl_propagation.py pins the same budget (#578, #719).
