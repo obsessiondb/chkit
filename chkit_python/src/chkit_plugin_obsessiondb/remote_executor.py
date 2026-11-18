@@ -24,6 +24,7 @@ having to fake a ``clickhouse_connect`` Client object.
 
 from __future__ import annotations
 
+import re
 from collections.abc import Callable, Sequence
 from typing import Any
 
@@ -110,7 +111,17 @@ def normalize_query_json_result(
 
 def _raise_if_error(result: WorkbenchExecuteResult) -> None:
     if result.error:
-        raise RuntimeError(result.error)
+        error = RuntimeError(result.error)
+        # The console relays ClickHouse's own error text ("Code: 62.
+        # DB::Exception: ..."). Keep the exception code on the raised error so
+        # callers (async migrate's poller) can tell a server rejection from a
+        # transport failure, like clickhouse-connect's code (#671). Relayed
+        # client-side network codes (209 SOCKET_TIMEOUT, 210 NETWORK_ERROR) are
+        # transport failures: never keep them.
+        match = re.search(r"Code: (\d+)", result.error)
+        if match is not None and match.group(1) not in ("209", "210"):
+            error.code = match.group(1)  # type: ignore[attr-defined]
+        raise error
 
 
 class RemoteClickHouseClient:

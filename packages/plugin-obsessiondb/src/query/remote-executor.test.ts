@@ -333,6 +333,45 @@ describe('createRemoteExecutor queryStatus', () => {
 			workbench.stop()
 		}
 	})
+
+	// #671: the console relays ClickHouse's error text; the thrown error keeps
+	// the exception code so async migrate can tell a server rejection from a
+	// transport failure.
+	test('a ClickHouse rejection keeps its exception code on the thrown error', async () => {
+		const workbench = startScriptedWorkbench({
+			replicas: 1,
+			processesError: 'Code: 62. DB::Exception: Syntax error: failed at position 1',
+		})
+		try {
+			const remote = connect(workbench.url)
+
+			const error = await remote.queryStatus('qid-1', { everyReplica: true }).catch((e: unknown) => e)
+			expect(error).toBeInstanceOf(Error)
+			expect((error as Error).message).toContain('Syntax error')
+			expect((error as Error & { code?: string }).code).toBe('62')
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	// Relayed client-side network codes are transport failures, not rejections:
+	// they must not land on the thrown error as a ClickHouse exception code
+	// (#671 review).
+	test.each([
+		'Code: 209. DB::NetException: Timeout: connect timed out (SOCKET_TIMEOUT)',
+		'Code: 210. DB::NetException: Network error (NETWORK_ERROR)',
+	])('a relayed network code is not kept on the thrown error: %s', async (processesError) => {
+		const workbench = startScriptedWorkbench({ replicas: 1, processesError })
+		try {
+			const remote = connect(workbench.url)
+
+			const error = await remote.queryStatus('qid-1', { everyReplica: true }).catch((e: unknown) => e)
+			expect(error).toBeInstanceOf(Error)
+			expect((error as Error & { code?: string }).code).toBeUndefined()
+		} finally {
+			workbench.stop()
+		}
+	})
 })
 
 // drift and pull read object comments from system.tables.comment, as the

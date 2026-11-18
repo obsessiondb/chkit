@@ -25,8 +25,10 @@ Key invariants:
   flushed (#701).
 - Status ``unknown`` is a transient state (just-submitted or
   just-finished gap); loop until ``running`` / ``finished`` / ``failed``
-  unless the submit itself rejected before any poll found the query
-  running, which is recorded as failed.
+  unless the submit itself failed before any poll found the query
+  running: a definitive server rejection is recorded as failed, while a
+  transport failure gets a bounded grace, since the server may be running
+  the query unobserved (#671).
 - Every entry of a retry's id is that attempt's. The statement's first id,
   and an id an older release reused for every attempt, count only from the
   attempt's start on the server clock minus a margin for clock skew between
@@ -44,6 +46,11 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import Literal
+
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+    OperationalError,
+)
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import in_progress_checksum_mismatch_error
@@ -237,6 +244,71 @@ def _progress_line(label: str, status: QueryStatus, elapsed_sec: int) -> str:
 
 def _describe_error(error: BaseException) -> str:
     return clickhouse_error_message(error)
+
+
+# Codes a thrown error can carry without meaning the statement was rejected:
+# 216 QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING means a query with that id is
+# still running; 209 SOCKET_TIMEOUT and 210 NETWORK_ERROR are client-side
+# network codes a proxy can relay in the error text. All three leave the
+# outcome indeterminate.
+_NON_REJECTION_CODES = frozenset({"209", "210", "216"})
+
+
+def _clickhouse_exception_code(message: str) -> str | None:
+    """The ClickHouse exception code a clickhouse-connect DatabaseError carries.
+
+    The driver raises DatabaseError for any non-2xx response. Only a real
+    server answer carries a code: the X-ClickHouse-Exception-Code header,
+    relayed as "Received ClickHouse exception, code: N" (newer clients) or
+    "HTTPDriver for ... received ClickHouse error code N" (0.8.x), or
+    "Code: N" in the server's body. The 0.8.x driver appends that body on a
+    new line. A gateway or proxy failure without a ClickHouse code carries
+    neither.
+    """
+    header = re.search(r"Received ClickHouse exception, code: (\d+)", message)
+    if header is not None:
+        return header.group(1)
+    body = re.search(r"server response: Code: (\d+)", message)
+    if body is not None:
+        return body.group(1)
+    legacy_header = re.search(
+        r"^HTTPDriver for [^\n]+ received ClickHouse error code (\d+)", message
+    )
+    if legacy_header is not None:
+        return legacy_header.group(1)
+    legacy_body = re.search(
+        r"^HTTPDriver for [^\n]+ returned response code \d+\n[ \t]*Code: (\d+)",
+        message,
+    )
+    if legacy_body is not None:
+        return legacy_body.group(1)
+    return None
+
+
+def _is_server_rejection(error: BaseException) -> bool:
+    """Tell a definitive server rejection from a transport failure (#671).
+
+    A server rejection (the statement never ran) carries a ClickHouse
+    exception code: clickhouse-connect relays it in the DatabaseError message
+    (header or server body), and the ObsessionDB console executor keeps the
+    code from the server's error text. ``wrap_connection_error`` rethrows an
+    authentication failure as a plain error named by its message. All mean
+    the query will never appear in system.query_log, so the attempt can be
+    journaled failed right away. Anything else - an OperationalError (a read
+    timeout or connection reset the driver retried), a gateway or proxy non-2xx
+    without a ClickHouse code, a network cut, or a code that does not reject
+    the statement (209, 210, 216) - is indeterminate: the server may be
+    running the query without any poll having seen it.
+    """
+    if isinstance(error, OperationalError):
+        return False
+    if isinstance(error, DatabaseError):
+        code = _clickhouse_exception_code(str(error))
+        return code is not None and code not in _NON_REJECTION_CODES
+    code = getattr(error, "code", None)
+    if isinstance(code, str) and code.isdigit():
+        return code not in _NON_REJECTION_CODES
+    return re.search(r"authentication failed", str(error), re.IGNORECASE) is not None
 
 
 class _Submission:
@@ -659,13 +731,15 @@ def _poll(
             continue
 
         # status is "unknown" here. If submit already raised and no poll found
-        # the query running, it never made it server-side (e.g. SQL parse
-        # error): record the attempt as failed and surface that error. Known
-        # gap: a load that ends before the first poll, with a transport error
-        # on its submit, also lands here (#657). Otherwise it's a transient gap
-        # (just-submitted, or just-finished before query_log has it).
+        # the query running, a definitive server rejection (e.g. SQL parse
+        # error) means the query never made it server-side: record the attempt
+        # as failed and surface that error. A transport failure on the submit
+        # says nothing: the server may be running the query unobserved, so it
+        # falls through to the bounded grace below (#671). Without a submit
+        # error it's a transient gap (just-submitted, or just-finished before
+        # query_log has it).
         submit_error = submission.error if submission is not None else None
-        if submit_error is not None and not seen_running:
+        if submit_error is not None and not seen_running and _is_server_rejection(submit_error):
             input_.journal_store.write_migration_state(
                 upsert_operation(
                     base_state,

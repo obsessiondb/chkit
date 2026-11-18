@@ -663,7 +663,7 @@ describe('applyAsyncStatement', () => {
   test('surfaces submit error when status remains unknown (SQL parse failure case)', async () => {
     const { db } = createFakeExecutor(
       [{ status: 'unknown' }, { status: 'unknown' }, { status: 'unknown' }],
-      { failSubmit: () => new Error('Syntax error: failed at position 1') },
+      { failSubmit: () => Object.assign(new Error('Syntax error: failed at position 1'), { code: '62' }) },
     )
     const { store, writes } = createFakeJournalStore(null)
     const lines: string[] = []
@@ -820,6 +820,92 @@ describe('applyAsyncStatement', () => {
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
   })
 
+  // #671: a transport error on the submit (e.g. HTTP 524) with no poll having
+  // seen the query running says nothing about the outcome: the server may be
+  // running the query unobserved. It must not be journaled failed — the same
+  // bounded grace as after a seen-running submit failure applies, then the
+  // attempt stays started for a re-run to re-attach.
+  test('a transport-failed submit with no running sighting is not journaled failed', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'unknown' }, // first poll after the failed submit
+        { status: 'unknown' },
+        { status: 'finished', writtenRows: 25, writtenBytes: 200, durationMs: 9000 },
+      ],
+      { failSubmit: () => new Error('HTTP 524: error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+  })
+
+  test('a transport-failed submit with no server trace stays started after the grace', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        ...Array.from({ length: 21 }, () => ({ status: 'unknown' }) as QueryStatus),
+      ],
+      { failSubmit: () => new Error('HTTP 524: error code: 524') },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(
+      `Async migration step load_table_data (query_id ${QUERY_ID}): the submit request failed (HTTP 524: error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+    )
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+  })
+
+  // #671: the ObsessionDB console executor returns a rejected statement as a
+  // plain Error but keeps the ClickHouse exception code on it, so a rejection
+  // through the console is still journaled failed at once (#233).
+  test('a rejected statement with a ClickHouse code (console executor) fails at once', async () => {
+    const { db } = createFakeExecutor(
+      [{ status: 'unknown' }, { status: 'unknown' }, { status: 'unknown' }],
+      {
+        failSubmit: () =>
+          Object.assign(
+            new Error('Code: 62. DB::Exception: Syntax error: failed at position 1'),
+            { code: '62' },
+          ),
+      },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }),
+    ).rejects.toThrow(/Syntax error/)
+
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
+    expect(writes[1]?.operations[0]?.lastError).toBe('Code: 62. DB::Exception: Syntax error: failed at position 1')
+  })
+
   // The query id is deterministic, so query_log still holds the earlier
   // attempt's QueryFinish after `migrate --abandon` (#233). A submission that
   // then fails before it starts (no query_log row) must not inherit it.
@@ -836,7 +922,7 @@ describe('applyAsyncStatement', () => {
           return [{ now_ms: clock.ms, database: SERVER_DATABASE }]
         },
         async submit() {
-          throw new Error("Unknown table expression identifier 'default.src_typo'")
+          throw Object.assign(new Error("Unknown table expression identifier 'default.src_typo'"), { code: '60' })
         },
         // Like system.query_log: query_start_time >= parseDateTimeBestEffort(afterTime), in whole seconds.
         async queryStatus(id: string, opts?: { afterTime?: string }): Promise<QueryStatus> {
@@ -1600,7 +1686,14 @@ describe('applyAsyncStatement re-run of a started step', () => {
       },
       async command() {},
       async submit() {
-        throw new Error('Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING')
+        // What @clickhouse/client throws for 216: a ClickHouseError whose code
+        // is the exception code. 216 means the query is still running, so it
+        // is not a rejection: the attempt gets the bounded grace instead of a
+        // failed journal write (#671 review).
+        throw Object.assign(
+          new Error('Code: 216. DB::Exception: Query with id = x is already running. (QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING)'),
+          { code: '216' },
+        )
       },
     } as unknown as ClickHouseExecutor
     const { store, writes } = createFakeJournalStore(null)
@@ -1614,6 +1707,37 @@ describe('applyAsyncStatement re-run of a started step', () => {
     await expect(
       applyAsyncStatement({ ...input, beforeRetry: null, db, journalStore: store, sleep: NO_SLEEP }),
     ).rejects.toThrow(/QUERY_WITH_SAME_ID/)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
+    // Not journaled failed: a re-run attaches to the still-running query.
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+  })
+
+  test('a same-id-still-running submit error lets a running sighting win', async () => {
+    const { db } = createFakeExecutor(
+      [
+        { status: 'unknown' }, // initial in-flight check
+        { status: 'running', writtenRows: 9, writtenBytes: 72 },
+        { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+      ],
+      {
+        failSubmit: () =>
+          Object.assign(
+            new Error('Code: 216. DB::Exception: Query with id = x is already running. (QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING)'),
+            { code: '216' },
+          ),
+      },
+    )
+    const { store, writes } = createFakeJournalStore(null)
+
+    const result = await applyAsyncStatement({
+      ...BASE_INPUT,
+      db,
+      journalStore: store,
+      log: () => {},
+      sleep: NO_SLEEP,
+      now: FIXED_NOW,
+    })
+
+    expect(result.kind).toBe('completed')
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
   })
 })
