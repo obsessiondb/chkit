@@ -1004,8 +1004,8 @@ function notColumnNames(tokens: SQLToken[]): Set<number> {
       let depth = 0
       for (let j = i + 2; j < close; j += 1) {
         const inner = tokens[j]!
-        if (inner.text === '(') depth += 1
-        else if (inner.text === ')') depth -= 1
+        if (inner.text === '(' || inner.text === '[' || inner.text === '{') depth += 1
+        else if (inner.text === ')' || inner.text === ']' || inner.text === '}') depth -= 1
         else if (depth === 0 && inner.kind === 'identifier' && inner.text.toLowerCase() === 'as') {
           skip(j, close)
           break

@@ -1041,9 +1041,9 @@ def _not_column_names(tokens: list[SQLToken]) -> set[int]:
             depth = 0
             for j in range(i + 2, close):
                 inner = tokens[j]
-                if inner.text == "(":
+                if inner.text in ("(", "[", "{"):
                     depth += 1
-                elif inner.text == ")":
+                elif inner.text in (")", "]", "}"):
                     depth -= 1
                 elif depth == 0 and inner.kind == "identifier" and inner.text.lower() == "as":
                     skipped.update(range(j, close))

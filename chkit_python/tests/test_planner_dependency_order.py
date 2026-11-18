@@ -853,6 +853,21 @@ def test_a_cast_type_named_like_a_column_is_not_a_read() -> None:
     ]
 
 
+def test_an_alias_inside_a_cast_argument_does_not_hide_the_reads_after_it() -> None:
+    assert _sqls(
+        [_t([])],
+        [_t([
+            {"name": "a", "type": "Array(UInt64)",
+             "default": _expr("CAST([id AS q, z], 'Array(UInt64)')")},
+            {"name": "z", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;",
+        "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` Array(UInt64) DEFAULT "
+        "CAST([id AS q, z], 'Array(UInt64)');",
+    ]
+
+
 def test_keeps_key_order_for_a_cycle_of_dropped_columns() -> None:
     assert _sqls(
         [_t([
@@ -961,6 +976,10 @@ def test_reads_skip_lambda_parameters(expression: str, expected: list[str]) -> N
         ("id::UInt64", ["id"]),
         ("id::Nullable(UInt64) + x", ["id", "x"]),
         ("id::Array(Tuple(a UInt64)) + c", ["c", "id"]),
+        ("CAST([id AS q, c], 'Array(UInt64)')", ["c", "id"]),
+        ("CAST([id AS q, c] AS Array(UInt64))", ["c", "id"]),
+        ("CAST((id AS q, c) AS Tuple(UInt64, UInt64))", ["c", "id"]),
+        ("[id, c]::Array(UInt64)", ["c", "id"]),
     ],
 )
 def test_reads_skip_cast_types(expression: str, expected: list[str]) -> None:

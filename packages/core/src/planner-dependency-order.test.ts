@@ -768,6 +768,23 @@ describe('planDiff orders the column statements of a table by the columns they r
     ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `UInt64`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `A`;'])
   })
 
+  test('an alias inside a CAST argument does not hide the reads after it', () => {
+    expect(
+      sqls(
+        [t([])],
+        [
+          t([
+            { name: 'a', type: 'Array(UInt64)', default: { expression: "CAST([id AS q, z], 'Array(UInt64)')" } },
+            { name: 'z', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `z` UInt64;',
+      "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` Array(UInt64) DEFAULT CAST([id AS q, z], 'Array(UInt64)');",
+    ])
+  })
+
   test('keeps key order for a cycle', () => {
     expect(
       sqls(
@@ -877,6 +894,10 @@ describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () 
     ['id::UInt64', ['id']],
     ['id::Nullable(UInt64) + x', ['id', 'x']],
     ['id::Array(Tuple(a UInt64)) + c', ['c', 'id']],
+    ["CAST([id AS q, c], 'Array(UInt64)')", ['c', 'id']],
+    ['CAST([id AS q, c] AS Array(UInt64))', ['c', 'id']],
+    ['CAST((id AS q, c) AS Tuple(UInt64, UInt64))', ['c', 'id']],
+    ['[id, c]::Array(UInt64)', ['c', 'id']],
   ])('type: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
   })
