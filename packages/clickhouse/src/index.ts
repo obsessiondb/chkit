@@ -111,6 +111,9 @@ export interface QueryLogRow {
 	query_duration_ms: number | string
 	exception: string
 	exception_code?: number | string
+	/** The server that logged it: a fan-out that lists a node twice returns its entries twice. */
+	server?: string
+	event_at?: string
 }
 
 // QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING: a second delivery of the id, rejected
@@ -126,7 +129,10 @@ const SAME_ID_RUNNING = 216
  * may have applied part of its writes.
  */
 export function queryLogOutcome(rows: readonly QueryLogRow[]): QueryStatus {
-	if (rows.filter((row) => !isSameIdRunning(row)).length > 1) return { status: 'unknown' }
+	// Each entry once per server: one node the cluster lists twice is not a
+	// second run.
+	const entries = new Set(rows.filter((row) => !isSameIdRunning(row)).map((row) => `${row.server}|${row.type}|${row.event_at}|${row.exception}`))
+	if (entries.size > 1) return { status: 'unknown' }
 	const finished = rows.find((row) => row.type === 'QueryFinish')
 	if (finished) {
 		return {
@@ -1234,7 +1240,7 @@ export function createExecutorWithClient(
 				// rejected duplicate delivery logs one early, which must not hide
 				// the QueryFinish of the attempt that ran (#767).
 				const log = await client.query({
-					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code
+					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code, toString(serverUUID()) AS server, toString(event_time_microseconds) AS event_at
 FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}

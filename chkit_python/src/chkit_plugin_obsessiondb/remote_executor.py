@@ -357,7 +357,8 @@ class RemoteClickHouseClient:
         # QueryFinish of the attempt that ran (#767).
         log = self.query(
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
-            "exception_code "
+            "exception_code, toString(serverUUID()) AS server, "
+            "toString(event_time_microseconds) AS event_at "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}'"
             f"  AND type IN ({types})"

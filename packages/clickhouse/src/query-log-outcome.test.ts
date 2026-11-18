@@ -27,10 +27,18 @@ describe('queryLogOutcome', () => {
   // #767 (Opus re-review): a redelivered request that ran twice logs two
   // terminal entries; a partial ExceptionWhileProcessing beside a QueryFinish
   // says some writes may have been applied twice, so neither decides.
+  // #767 (Opus re-review): a fan-out that lists one node twice returns its
+  // entry twice; that is one run.
+  test('one entry returned twice by a node listed twice is one entry', () => {
+    const once = row('QueryFinish', { server: 'uuid-a', event_at: '2026-11-19 00:00:00.000001' })
+    expect(queryLogOutcome([once, { ...once }]).status).toBe('finished')
+    expect(queryLogOutcome([once, { ...once, server: 'uuid-b' }])).toEqual({ status: 'unknown' })
+  })
+
   test('two terminal entries of one id are unknown', () => {
     expect(queryLogOutcome([row('QueryFinish'), row('ExceptionWhileProcessing', { exception: 'Code: 241' })])).toEqual({ status: 'unknown' })
     expect(queryLogOutcome([row('ExceptionBeforeStart', { exception: 'Code: 60' }), row('QueryFinish')])).toEqual({ status: 'unknown' })
-    expect(queryLogOutcome([duplicate, row('QueryFinish'), row('QueryFinish')])).toEqual({ status: 'unknown' })
+    expect(queryLogOutcome([duplicate, row('QueryFinish', { event_at: '1' }), row('QueryFinish', { event_at: '2' })])).toEqual({ status: 'unknown' })
   })
 
   test('no entry is unknown', () => {

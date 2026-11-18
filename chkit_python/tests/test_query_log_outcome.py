@@ -36,6 +36,16 @@ def test_a_query_finish_outranks_a_newer_duplicate_delivery_rejection() -> None:
     )
 
 
+def test_one_entry_returned_twice_by_a_node_listed_twice_is_one_entry() -> None:
+    """#767 (Opus re-review): a fan-out that lists one node twice returns its
+    entry twice; that is one run."""
+    once = _row("QueryFinish", server="uuid-a", event_at="2026-11-19 00:00:00.000001")
+    assert query_log_outcome([once, dict(once)]).status == "finished"
+    assert query_log_outcome([once, {**once, "server": "uuid-b"}]) == QueryStatus(
+        status="unknown"
+    )
+
+
 def test_two_terminal_entries_of_one_id_are_unknown() -> None:
     """#767 (Opus re-review): a redelivered request that ran twice logs two
     terminal entries; a partial ExceptionWhileProcessing beside a QueryFinish
@@ -45,7 +55,8 @@ def test_two_terminal_entries_of_one_id_are_unknown() -> None:
     assert query_log_outcome([_row("QueryFinish"), partial]) == unknown
     rejected = _row("ExceptionBeforeStart", exception="Code: 60")
     assert query_log_outcome([rejected, _row("QueryFinish")]) == unknown
-    assert query_log_outcome([_DUPLICATE, _row("QueryFinish"), _row("QueryFinish")]) == unknown
+    twice = [_row("QueryFinish", event_at="1"), _row("QueryFinish", event_at="2")]
+    assert query_log_outcome([_DUPLICATE, *twice]) == unknown
 
 
 def test_a_duplicate_delivery_is_no_failure_of_the_query() -> None:

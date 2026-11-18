@@ -526,7 +526,8 @@ class ClickHouseClient:
         # QueryFinish of the attempt that ran (#767).
         log_sql = (
             "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
-            "exception_code "
+            "exception_code, toString(serverUUID()) AS server, "
+            "toString(event_time_microseconds) AS event_at "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' "
             f"AND type IN ({types}) "
@@ -608,7 +609,14 @@ def query_log_outcome(rows: list[dict[str, Any]]) -> QueryStatus:
     redelivered request that ran twice) leave the outcome unknown: one of them
     may have applied part of its writes.
     """
-    if len([row for row in rows if not _is_same_id_running(row)]) > 1:
+    # Each entry once per server: one node the cluster lists twice is not a
+    # second run.
+    entries = {
+        (row.get("server"), row.get("type"), row.get("event_at"), row.get("exception"))
+        for row in rows
+        if not _is_same_id_running(row)
+    }
+    if len(entries) > 1:
         return QueryStatus(status="unknown")
     finished = next((row for row in rows if str(row.get("type")) == "QueryFinish"), None)
     if finished is not None:

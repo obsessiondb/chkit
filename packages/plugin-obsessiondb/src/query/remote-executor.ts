@@ -269,7 +269,7 @@ export function createRemoteExecutor(deps: {
 			// duplicate delivery logs one early, which must not hide the
 			// QueryFinish of the attempt that ran (#767).
 			const log = await executor.query<QueryLogRow>(
-				`SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code
+				`SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code, toString(serverUUID()) AS server, toString(event_time_microseconds) AS event_at
 FROM ${from('system.query_log')}
 WHERE user = currentUser()
   AND query_id = '${queryId}'

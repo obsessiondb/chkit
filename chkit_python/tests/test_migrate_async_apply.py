@@ -1612,7 +1612,14 @@ def test_rerun_after_a_compensation_that_stopped_the_run_compensates_again(
 
 
 class _KilledBeforeSubmitJournal(_FakeJournalStore):
-    """The run stops after it journaled its attempt, before the submit leaves."""
+    """The run is killed after it journaled its attempt, before the submit leaves.
+
+    A kill runs no cleanup: once it hit, nothing the process would still write
+    reaches the journal. (Ctrl-C does run cleanup, and puts the record back to
+    prepared, #767.)
+    """
+
+    killed = False
 
     def read_stored_operation(self, name: str, index: int) -> OperationState | None:
         assert self.writes is not None
@@ -1620,9 +1627,15 @@ class _KilledBeforeSubmitJournal(_FakeJournalStore):
         if any(
             op.last_error == _ATTEMPT_MARKER for w in self.writes for op in w.operations
         ):
+            self.killed = True
             msg = "killed"
             raise KeyboardInterrupt(msg)
         return super().read_stored_operation(name, index)
+
+    def write_migration_state(self, state: MigrationRowState) -> None:
+        if self.killed:
+            return
+        super().write_migration_state(state)
 
 
 class _FinishedIdClient(_ScriptedClient):
@@ -2629,3 +2642,46 @@ def test_a_revert_to_prepared_that_fails_names_the_abandon(
     assert "journal unavailable" in message
     assert "--abandon 20260101_000000_async.sql" in message
     assert client.submitted == []
+
+
+class _InterruptedBeforeSubmitJournal(_FakeJournalStore):
+    """Ctrl-C after the attempt was journaled, before its submit: cleanup runs."""
+
+    interrupted = False
+
+    def read_stored_operation(self, name: str, index: int) -> OperationState | None:
+        assert self.writes is not None
+        if not self.interrupted and any(
+            op.last_error == _ATTEMPT_MARKER for w in self.writes for op in w.operations
+        ):
+            self.interrupted = True
+            raise KeyboardInterrupt
+        return super().read_stored_operation(name, index)
+
+
+def test_a_rerun_after_ctrl_c_before_the_submit_sends_the_attempt_once(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#767 (Opus re-review): Ctrl-C before the submit puts the record back to
+    prepared; nothing was sent, so the re-run submits it once, with no
+    before-retry SQL: the record never shows an attempt that may have run."""
+    journal = _InterruptedBeforeSubmitJournal()
+    first = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    with pytest.raises(KeyboardInterrupt):
+        apply_async_statement(_rerun_input(first, journal))
+    assert first.submitted == []
+    assert journal.state is not None
+    assert journal.state.operations[0].last_error == _PREPARED_MARKER
+
+    rerun = _ScriptedClient(
+        statuses=[
+            *_NO_ENTRY_CHECKS,
+            QueryStatus(status="finished", written_rows=16, duration_ms=8000),
+        ],
+        strict=True,
+    )
+    _advance_clock(monkeypatch, rerun)
+    result = apply_async_statement(_rerun_input(rerun, _FakeJournalStore(state=journal.state)))
+    assert result.kind == "completed"
+    assert rerun.executed == []
+    assert len(rerun.submitted) == 1
