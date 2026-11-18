@@ -400,7 +400,9 @@ describe('e2e: executeBackfill against a live cluster', () => {
     // The first attempt fails while it runs, which query_log records as
     // ExceptionWhileProcessing, the row a KILL QUERY also leaves. The submit
     // fails with it (the server resets the started response), so the run
-    // stops before it records the chunk, like the run in #765.
+    // stops before it records the outcome, like the run in #765. Its id is
+    // saved before the send, sent once.
+    const firstRun: BackfillProgress[] = []
     await expect(
       executeBackfill({
         executor: runExecutor,
@@ -408,6 +410,7 @@ describe('e2e: executeBackfill against a live cluster', () => {
         chunks: [{ id: failedId }],
         buildQuery: () => 'SELECT throwIf(number = 3, \'chunk failed\') FROM numbers(10) SETTINGS max_block_size = 1',
         pollIntervalMs: 100,
+        onProgress: (progress) => { firstRun.push(progress) },
       }),
     ).rejects.toThrow()
     const logged = await pollUntil(
@@ -418,9 +421,10 @@ describe('e2e: executeBackfill against a live cluster', () => {
 
     // Replay at once: the failure is seconds old.
     const resumeFrom: BackfillProgress = {
-      [failedId]: { status: 'pending' },
+      ...firstRun.at(-1),
       ...Object.fromEntries(succeededIds.map((id) => [id, { status: 'done' as const }])),
     }
+    expect(resumeFrom[failedId]).toEqual({ status: 'pending', queryId: firstId, singleSend: true })
     const replay = await executeBackfill({
       executor: runExecutor,
       planId,
@@ -428,6 +432,7 @@ describe('e2e: executeBackfill against a live cluster', () => {
       buildQuery: ({ id }) => sqlForChunk(id),
       pollIntervalMs: 100,
       resumeFrom,
+      checkpointVersion: CHECKPOINT_VERSION,
       replayFailed: true,
     })
 

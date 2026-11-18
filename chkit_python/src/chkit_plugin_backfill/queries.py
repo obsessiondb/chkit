@@ -6,7 +6,7 @@ from pathlib import Path
 
 from chkit.core import ChxResolvedConfig
 from chkit_plugin_backfill.errors import BackfillConfigError
-from chkit_plugin_backfill.run_lock import acquire_run_lock, run_lock_path
+from chkit_plugin_backfill.run_lock import run_lock_path, with_run_lock
 from chkit_plugin_backfill.state import (
     backfill_paths,
     now_iso,
@@ -80,11 +80,12 @@ def cancel_backfill_run(
     # Under the plan's lock, so cancel never replaces a checkpoint a running
     # run or resume is writing, which could drop a replay's query id (#765). A
     # running run holds the lock: cancel fails, and Ctrl-C stops that run.
-    lock = acquire_run_lock(run_lock_path(paths.runs_dir, plan.plan_id), plan.plan_id)
-    try:
-        return _cancel_locked(plan, paths)
-    finally:
-        lock.release()
+    return with_run_lock(
+        run_lock_path(paths.runs_dir, plan.plan_id),
+        plan.plan_id,
+        lambda _stop: _cancel_locked(plan, paths),
+        command="cancel",
+    )
 
 
 def _cancel_locked(plan: BackfillPlanState, paths: BackfillPathSet) -> BackfillStatusSummary:

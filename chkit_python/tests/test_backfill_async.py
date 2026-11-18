@@ -86,6 +86,9 @@ class MockExecutor:
         # A replay reads the server time for its query_log bound.
         if "now64" in statement:
             return [{"now_ms": str(int(time.time() * 1000))}]
+        # One replica, which answers the strict probe.
+        if "system.one" in statement:
+            return [{"replicas": 1}]
         ids = _ids_in(statement)
         if ids is None:
             ids = [key for key in self._statuses if not key.endswith("-*")]
@@ -416,7 +419,9 @@ def test_a_polling_outage_stops_the_run_after_the_chunk_in_flight() -> None:
     )
     assert executor.submit_order == [f"backfill-{PLAN_ID}-c1"]
     assert saved[-1] == {
-        "c1": BackfillChunkState(status="submitted", query_id=f"backfill-{PLAN_ID}-c1"),
+        "c1": BackfillChunkState(
+            status="submitted", query_id=f"backfill-{PLAN_ID}-c1", single_send=True
+        ),
         "c2": BackfillChunkState(status="pending"),
         "c3": BackfillChunkState(status="pending"),
     }
@@ -435,7 +440,9 @@ def test_replay_failed_replays_a_chunk_the_server_shows_failed_under_a_new_id() 
     }
 
     resume_from: BackfillProgress = {
-        "c1": BackfillChunkState(status="failed", query_id=query_id, error="OOM"),
+        "c1": BackfillChunkState(
+            status="failed", query_id=query_id, error="OOM", single_send=True
+        ),
         "c2": BackfillChunkState(
             status="done", query_id=f"backfill-{PLAN_ID}-c2", written_rows=10
         ),
@@ -466,7 +473,7 @@ def test_a_first_attempt_records_its_query_id_before_its_submit() -> None:
             # A run that stops while the INSERT runs must not leave a chunk
             # that looks never submitted: a resume would submit it again.
             assert saved[-1]["c1"] == BackfillChunkState(
-                status="pending", query_id=f"backfill-{PLAN_ID}-c1"
+                status="pending", query_id=f"backfill-{PLAN_ID}-c1", single_send=True
             )
             return super().submit(statement, query_id)
 
@@ -542,6 +549,8 @@ def test_sync_does_not_downgrade_done_chunks() -> None:
 def test_sync_updates_failed_server_state_for_locally_submitted_chunk() -> None:
     class FailedServerStateExecutor(MockExecutor):
         def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "system.one" in statement:
+                return [{"replicas": 1}]
             if "system.processes" in statement:
                 return []
             if "system.query_log" in statement:
@@ -561,6 +570,7 @@ def test_sync_updates_failed_server_state_for_locally_submitted_chunk() -> None:
         "c1": BackfillChunkState(
             status="submitted",
             query_id=f"backfill-{PLAN_ID}-c1",
+            single_send=True,
         ),
     }
 
@@ -802,8 +812,10 @@ class SimulatedServer(MockExecutor):
         return submitted
 
     def _rows(self, statement: str) -> list[dict[str, object]]:
-        if "system.one" in statement and self.deny_probe is not None:
-            raise RuntimeError(self.deny_probe)
+        if "system.one" in statement:
+            if self.deny_probe is not None:
+                raise RuntimeError(self.deny_probe)
+            return [{"replicas": 1}]
         ids = _ids_in(statement)
 
         def matches(query_id: str) -> bool:
@@ -935,7 +947,10 @@ def _run_once(
 def _pending_replay() -> BackfillProgress:
     return {
         "c1": BackfillChunkState(
-            status="pending", query_id=RECORDED_REPLAY_ID, submitted_at=_hour_ago()
+            status="pending",
+            query_id=RECORDED_REPLAY_ID,
+            submitted_at=_hour_ago(),
+            single_send=True,
         )
     }
 
@@ -947,7 +962,10 @@ def test_replay_started_seconds_after_the_failure_ends_done() -> None:
         server,
         {
             "c1": BackfillChunkState(
-                status="failed", query_id=FIRST_ID, error="Code: 394. QUERY_WAS_CANCELLED"
+                status="failed",
+                query_id=FIRST_ID,
+                error="Code: 394. QUERY_WAS_CANCELLED",
+                single_send=True,
             )
         },
         replay_failed=True,
@@ -1005,7 +1023,9 @@ def test_a_recorded_attempt_with_no_row_stops_the_resume_and_accept_unknown_repl
 ) -> None:
     def recorded() -> BackfillProgress:
         if recorded_id == FIRST_ID:
-            return {"c1": BackfillChunkState(status="pending", query_id=FIRST_ID)}
+            return {
+                "c1": BackfillChunkState(status="pending", query_id=FIRST_ID, single_send=True)
+            }
         return _pending_replay()
 
     server = SimulatedServer(
@@ -1086,7 +1106,10 @@ def test_resume_reads_a_finished_replay_by_its_own_id() -> None:
         server,
         {
             "c1": BackfillChunkState(
-                status="running", query_id=RECORDED_REPLAY_ID, submitted_at=_hour_ago()
+                status="running",
+                query_id=RECORDED_REPLAY_ID,
+                submitted_at=_hour_ago(),
+                single_send=True,
             )
         },
     )
@@ -1101,7 +1124,7 @@ def test_failed_replay_keeps_its_id_and_is_replayed_under_a_third_id() -> None:
 
     first = _run_once(
         server,
-        {"c1": BackfillChunkState(status="failed", query_id=FIRST_ID)},
+        {"c1": BackfillChunkState(status="failed", query_id=FIRST_ID, single_send=True)},
         replay_failed=True,
     )
     assert (first.progress["c1"].status, first.progress["c1"].query_id) == (
@@ -1163,7 +1186,9 @@ def test_replay_failed_and_accept_unknown_each_replay_their_own_chunks(
                     status="failed",
                     error="Lost contact with query after 10 consecutive poll errors",
                 ),
-                "c2": BackfillChunkState(status="failed", query_id=f"backfill-{PLAN_ID}-c2"),
+                "c2": BackfillChunkState(
+                    status="failed", query_id=f"backfill-{PLAN_ID}-c2", single_send=True
+                ),
             },
             checkpoint_version=CHECKPOINT_VERSION,
             replay_failed=replay_failed,
@@ -1201,7 +1226,10 @@ def test_a_failure_after_written_rows_is_unknown_and_only_accept_unknown_replays
     def recorded() -> BackfillProgress:
         return {
             "c1": BackfillChunkState(
-                status="failed", query_id=RECORDED_REPLAY_ID, submitted_at=_hour_ago()
+                status="failed",
+                query_id=RECORDED_REPLAY_ID,
+                submitted_at=_hour_ago(),
+                single_send=True,
             )
         }
 
@@ -1286,7 +1314,7 @@ def test_a_replay_stamped_by_a_replica_clock_days_behind_the_time_probe_settles_
 
     result = _run_once(
         server,
-        {"c1": BackfillChunkState(status="failed", query_id=FIRST_ID)},
+        {"c1": BackfillChunkState(status="failed", query_id=FIRST_ID, single_send=True)},
         replay_failed=True,
         max_poll_errors=4,
     )
@@ -1612,5 +1640,202 @@ def test_a_stopped_run_submits_no_new_chunk_and_reports_nothing_after_it_raises(
     assert executor.submit_order == [f"backfill-{PLAN_ID}-c1"]
     assert len(reports) == reported
     assert reports[-1]["c1"] == BackfillChunkState(
-        status="pending", query_id=f"backfill-{PLAN_ID}-c1"
+        status="pending", query_id=f"backfill-{PLAN_ID}-c1", single_send=True
     )
+
+
+# Round 3 item 1: before this release a resume could send the chunk's id a
+# second time, so a failure row of an older release's attempt may belong to a
+# send whose QueryFinish is still on its way.
+RESENT = (
+    "an older release may have sent it more than once under this query id, so the "
+    "failure in system.query_log may not be its last send"
+)
+
+
+@pytest.mark.parametrize("saved", ["missing", "pending", "failed"])
+def test_a_failure_row_of_an_attempt_an_older_release_recorded_is_unknown(saved: str) -> None:
+    resume_from: BackfillProgress = {
+        "missing": {},
+        "pending": {"c1": BackfillChunkState(status="pending")},
+        "failed": {"c1": BackfillChunkState(status="failed", query_id=FIRST_ID)},
+    }[saved]
+    server = SimulatedServer(attempts=[_killed_first()], next_outcomes=["finished"])
+
+    with pytest.raises(RuntimeError) as raised:
+        _run_once(server, resume_from, replay_failed=True)
+
+    assert str(raised.value) == _unknown_error(FIRST_ID, RESENT)
+    assert server.submits == []
+
+
+def test_an_older_releases_second_send_that_committed_is_done_once_its_finish_shows() -> None:
+    server = SimulatedServer(
+        attempts=[
+            _killed_first(),
+            _SimAttempt(query_id=FIRST_ID, outcome="finished", logged_at_log_read=2),
+        ]
+    )
+
+    result = _run_once(server, {"c1": BackfillChunkState(status="pending")}, replay_failed=True)
+
+    assert server.submits == []
+    assert (result.progress["c1"].status, result.progress["c1"].query_id) == ("done", FIRST_ID)
+
+
+# Round 3 item 2: two replicas, one unavailable. A probe that skipped it would
+# count one host and read one replica's log as the whole truth.
+def test_a_resume_whose_strict_probe_meets_an_unavailable_replica_submits_nothing() -> None:
+    class OneReplicaDown(SimulatedServer):
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "system.one" in statement:
+                if "skip_unavailable_shards = 0" in statement:
+                    msg = "Code: 279. DB::NetException: All connection tries failed."
+                    raise RuntimeError(msg)
+                return [{"replicas": 1}]
+            return super()._rows(statement)
+
+    server = OneReplicaDown(
+        attempts=[_SimAttempt(query_id=RECORDED_REPLAY_ID, outcome="failed")],
+        next_outcomes=["finished"],
+    )
+    state = _pending_replay()["c1"].model_copy(update={"status": "failed"})
+
+    with pytest.raises(RuntimeError, match=r"could not check which chunks are still running on the server \(Code: 279\."):
+        _run_once(server, {"c1": state}, replay_failed=True)
+    assert server.submits == []
+
+
+# Round 3 item 3: chunk B waits on its pre-send checkpoint while chunk A's
+# outcome turns out unknown. B must not be sent, and keeps its state.
+def test_a_chunk_whose_pre_send_checkpoint_finishes_after_the_dispatch_stopped_is_not_sent() -> None:
+    class PartialA(SubmitRecordingExecutor):
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            rows = super()._rows(statement)
+            return [{**row, "written_rows": "7"} if "type" in row else row for row in rows]
+
+    executor = PartialA(
+        {f"backfill-{PLAN_ID}-c1": [QueryStatus(status="failed", error="late block", duration_ms=1)]}
+    )
+    saved: list[BackfillProgress] = []
+    held: list[bool] = []
+
+    def on_progress(progress: BackfillProgress) -> None:
+        saved.append(progress)
+        # Hold B's pre-send write while A's polls classify A.
+        if progress["c2"].query_id is not None and not held:
+            held.append(True)
+            time.sleep(0.2)
+
+    with pytest.raises(RuntimeError, match=rf"chunk c1 \(query_id backfill-{PLAN_ID}-c1\): it failed after writing 7 rows"):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            concurrency=2,
+            poll_interval_ms=1,
+            on_progress=on_progress,
+        )
+
+    assert held == [True]
+    assert executor.submit_order == [f"backfill-{PLAN_ID}-c1"]
+    assert saved[-1]["c2"] == BackfillChunkState(status="pending")
+
+
+# Round 3 item 3: the interrupt lands while a worker builds its chunk's SQL.
+def test_a_worker_paused_in_build_query_during_an_interrupt_never_sends() -> None:
+    stop = threading.Event()
+    building = threading.Event()
+    resume_building = threading.Event()
+    executor = SubmitRecordingExecutor({})
+
+    def build_query(_chunk_id: str) -> str:
+        building.set()
+        resume_building.wait(5)
+        return "SELECT 1"
+
+    def interrupt() -> None:
+        building.wait(5)
+        stop.set()
+
+    threading.Thread(target=interrupt, daemon=True).start()
+    with pytest.raises(RuntimeError, match=rf"Backfill plan {PLAN_ID}: interrupted\."):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=build_query,
+            poll_interval_ms=1,
+            stop=stop,
+        )
+    # The worker finishes building only after execute_backfill returned.
+    resume_building.set()
+    time.sleep(0.2)
+
+    assert executor.submit_order == []
+
+
+# Round 3 item 8: a replay gets its id when it is sent, so a proved failure
+# the run never reaches keeps its evidence.
+def test_a_replay_the_run_never_reaches_keeps_its_failed_state_and_query_id() -> None:
+    class FailingSubmit(MockExecutor):
+        def submit(self, statement: str, query_id: str | None = None) -> str:
+            msg = "Code: 241. MEMORY_LIMIT_EXCEEDED"
+            raise RuntimeError(msg)
+
+    c2 = BackfillChunkState(status="failed", query_id=f"backfill-{PLAN_ID}-c2", single_send=True)
+    saved: list[BackfillProgress] = []
+
+    with pytest.raises(RuntimeError, match="MEMORY_LIMIT_EXCEEDED"):
+        execute_backfill(
+            executor=FailingSubmit(
+                {
+                    f"backfill-{PLAN_ID}-c1": [QueryStatus(status="failed", error="OOM", duration_ms=1)],
+                    f"backfill-{PLAN_ID}-c2": [QueryStatus(status="failed", error="OOM", duration_ms=1)],
+                }
+            ),
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            concurrency=1,
+            poll_interval_ms=1,
+            resume_from={
+                "c1": BackfillChunkState(
+                    status="failed", query_id=f"backfill-{PLAN_ID}-c1", single_send=True
+                ),
+                "c2": c2,
+            },
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=True,
+            on_progress=saved.append,
+        )
+
+    assert saved[-1]["c2"].status == "failed"
+    assert saved[-1]["c2"].query_id == c2.query_id
+    assert (saved[-1]["c1"].query_id or "").startswith(f"backfill-{PLAN_ID}-c1-")
+
+
+# Round 3 item 9: a read that hangs before the dispatch does not keep an
+# interrupted resume waiting.
+def test_a_stop_during_a_hung_resume_read_raises_at_once() -> None:
+    stop = threading.Event()
+
+    class Hung(MockExecutor):
+        def query(self, statement: str) -> _Result:
+            threading.Event().wait(30)
+            return _Result([])
+
+    threading.Timer(0.1, stop.set).start()
+    started = time.monotonic()
+    with pytest.raises(RuntimeError, match=rf"Backfill plan {PLAN_ID}: interrupted\."):
+        execute_backfill(
+            executor=Hung(),
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "SELECT 1",
+            resume_from={"c1": BackfillChunkState(status="pending", query_id=FIRST_ID, single_send=True)},
+            checkpoint_version=CHECKPOINT_VERSION,
+            stop=stop,
+        )
+    assert time.monotonic() - started < 5

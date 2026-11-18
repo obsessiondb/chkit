@@ -63,39 +63,57 @@ async function probeReplicas(
   executor: ClickHouseExecutor,
   cluster: string,
 ): Promise<ReplicaFanout | undefined> {
-  const access = await probeReplicaAccess(executor, cluster)
-  return access.kind === 'fanout' ? access.fanout : undefined
-}
-
-/**
- * What a read of every replica of `cluster` (default `default`) can see, for a
- * caller that must prove a query runs, or ran, on no replica (#765):
- * - `fanout`: several replicas, read through `clusterAllReplicas`;
- * - `single`: one replica, or no such cluster, so local reads see everything;
- * - `denied`: the user may not query the cluster, so a local read sees one
- *   replica of an unknown number, and a row it does not find may be on another.
- * Any other failure rejects. Not cached.
- */
-export type ReplicaAccess =
-  | { kind: 'fanout'; fanout: ReplicaFanout }
-  | { kind: 'single' }
-  | { kind: 'denied'; error: string }
-
-export async function probeReplicaAccess(
-  executor: ClickHouseExecutor,
-  cluster: string = DEFAULT_CLUSTER,
-): Promise<ReplicaAccess> {
   try {
     const rows = await executor.query<{ replicas: number | string }>(
       `SELECT count(DISTINCT hostName()) AS replicas FROM clusterAllReplicas(${stringLiteral(cluster)}, system.one)`,
     )
     const replicas = Number(rows[0]?.replicas ?? 0)
-    return replicas > 1 ? { kind: 'fanout', fanout: { cluster, replicas } } : { kind: 'single' }
+    return replicas > 1 ? { cluster, replicas } : undefined
   } catch (error) {
-    if (isMissingCluster(error)) return { kind: 'single' }
-    if (isAccessDenied(error)) return { kind: 'denied', error: error instanceof Error ? error.message : String(error) }
+    if (isMissingCluster(error) || isAccessDenied(error)) return undefined
     throw error
   }
+}
+
+/**
+ * Whether every replica of `cluster` (default `default`) can be read, for a
+ * caller that must prove a query runs, or ran, on no replica (#765). The
+ * probe reads every replica with `skip_unavailable_shards = 0`, so a replica
+ * that does not answer fails it instead of being left out:
+ * - `fanout`: every replica answered; read them through `clusterAllReplicas`.
+ *   One host is never taken for a single-node target: the fan-out reads it.
+ * - `partial`: the cluster does not exist, the user may not query it, or the
+ *   probe returned no replica count. A local read sees one replica of an
+ *   unknown number, and a row it does not find may be on another.
+ * Any other failure, an unavailable replica included, rejects. Not cached.
+ */
+export type ReplicaAccess =
+  | { kind: 'fanout'; fanout: ReplicaFanout }
+  | { kind: 'partial'; reason: string }
+
+export async function probeReplicaAccess(
+  executor: ClickHouseExecutor,
+  cluster: string = DEFAULT_CLUSTER,
+): Promise<ReplicaAccess> {
+  let rows: Array<{ replicas?: number | string }>
+  try {
+    rows = await executor.query<{ replicas?: number | string }>(
+      `SELECT count(DISTINCT hostName()) AS replicas FROM clusterAllReplicas(${stringLiteral(cluster)}, system.one) SETTINGS skip_unavailable_shards = 0`,
+    )
+  } catch (error) {
+    if (isMissingCluster(error)) {
+      return { kind: 'partial', reason: `the cluster ${cluster} does not exist, so not every replica can be read` }
+    }
+    if (isAccessDenied(error)) {
+      return { kind: 'partial', reason: `the user may not read every replica (${error instanceof Error ? error.message : String(error)})` }
+    }
+    throw error
+  }
+  const replicas = rows.length === 1 ? Number(rows[0]?.replicas) : Number.NaN
+  if (!Number.isInteger(replicas) || replicas < 1) {
+    return { kind: 'partial', reason: `the replica probe of cluster ${cluster} returned no replica count` }
+  }
+  return { kind: 'fanout', fanout: { cluster, replicas } }
 }
 
 /**

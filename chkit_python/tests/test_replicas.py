@@ -86,26 +86,51 @@ class _Failing:
         raise RuntimeError(self.message)
 
 
-def test_probe_replica_access_reports_a_denied_cluster_as_denied_not_as_one_replica() -> None:
-    message = "Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)"
+def test_probe_replica_access_reads_every_replica_strictly_and_fans_out_even_to_one_host() -> None:
+    client = _ReplicaClient([1], replicas=1)
 
-    assert probe_replica_access(_Failing(message)) == ReplicaAccess(kind="denied", error=message)
-    # The lenient and strict fan-out helpers keep their single-replica fallback.
-    assert resolve_replica_fanout_or_raise(_Failing(message)) is None
+    assert probe_replica_access(client) == ReplicaAccess(
+        kind="fanout", fanout=ReplicaFanout(cluster="default", replicas=1)
+    )
+    assert (
+        "FROM clusterAllReplicas('default', system.one) SETTINGS skip_unavailable_shards = 0"
+        in client.queries[0]
+    )
 
 
-def test_probe_replica_access_reports_a_missing_cluster_as_one_replica_and_raises_otherwise() -> None:
+def test_probe_replica_access_reports_a_denied_or_missing_cluster_or_no_count_as_partial() -> None:
+    denied = "Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)"
     missing = "Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)"
 
-    assert probe_replica_access(_Failing(missing)) == ReplicaAccess(kind="single")
-    with pytest.raises(RuntimeError, match="NETWORK_ERROR"):
-        probe_replica_access(_Failing("Code: 210. NETWORK_ERROR"))
+    class _Empty:
+        def query(self, sql: str) -> _Result:
+            return _Result([])
 
-
-def test_probe_replica_access_reports_several_replicas_as_a_fanout() -> None:
-    assert probe_replica_access(_ReplicaClient([2]), "prod") == ReplicaAccess(
-        kind="fanout", fanout=ReplicaFanout(cluster="prod", replicas=2)
+    assert probe_replica_access(_Failing(denied)) == ReplicaAccess(
+        kind="partial", reason=f"the user may not read every replica ({denied})"
     )
+    assert probe_replica_access(_Failing(missing)) == ReplicaAccess(
+        kind="partial", reason="the cluster default does not exist, so not every replica can be read"
+    )
+    assert probe_replica_access(_Empty()) == ReplicaAccess(
+        kind="partial", reason="the replica probe of cluster default returned no replica count"
+    )
+    # The lenient and strict fan-out helpers keep their single-replica fallback.
+    assert resolve_replica_fanout_or_raise(_Failing(denied)) is None
+
+
+# Two replicas, one unavailable: a probe that skipped it would count one host
+# and pass for a single-node target.
+def test_probe_replica_access_raises_when_a_replica_does_not_answer() -> None:
+    class _OneDown:
+        def query(self, sql: str) -> _Result:
+            if "skip_unavailable_shards = 0" in sql:
+                msg = "Code: 279. DB::NetException: All connection tries failed. (ALL_CONNECTION_TRIES_FAILED)"
+                raise RuntimeError(msg)
+            return _Result([{"replicas": 1}])
+
+    with pytest.raises(RuntimeError, match="ALL_CONNECTION_TRIES_FAILED"):
+        probe_replica_access(_OneDown())
 
 
 @dataclass

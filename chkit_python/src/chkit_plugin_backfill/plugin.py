@@ -25,7 +25,11 @@ from chkit.plugins import (
     ChxPluginCommandContext,
     ChxPluginManifest,
 )
-from chkit_plugin_backfill.async_backfill import CHECKPOINT_VERSION, execute_backfill
+from chkit_plugin_backfill.async_backfill import (
+    CHECKPOINT_VERSION,
+    execute_backfill,
+    run_interruptible,
+)
 from chkit_plugin_backfill.check import evaluate_backfill_check
 from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
 from chkit_plugin_backfill.chunking.types import QuerySettings
@@ -66,7 +70,7 @@ from chkit_plugin_backfill.queries import (
     get_backfill_doctor_report,
     get_backfill_status,
 )
-from chkit_plugin_backfill.run_lock import run_lock_path, with_run_lock
+from chkit_plugin_backfill.run_lock import StopFlag, run_lock_path, with_run_lock
 from chkit_plugin_backfill.state import (
     backfill_paths,
     ensure_environment_match,
@@ -256,7 +260,7 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
     json_mode: bool,
     resume: _ResumeRequest | None,
     insert_settings: dict[str, str | int | float | bool] | None,
-    stop: threading.Event,
+    stop: StopFlag,
 ) -> int:
     # Check for existing run state
     existing_run = read_run(paths.run_path)
@@ -317,8 +321,13 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
 
     try:
         database, table = plan.target.split(".")
-        insertable_columns = assert_backfill_target_safe(
-            database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+        # A metadata read that hangs must not keep an interrupted run, and its lock.
+        insertable_columns = run_interruptible(
+            lambda: assert_backfill_target_safe(
+                database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+            ),
+            stop,
+            plan.plan_id,
         )
         assert_replay_columns_still_insertable(
             plan_id=plan.plan_id,

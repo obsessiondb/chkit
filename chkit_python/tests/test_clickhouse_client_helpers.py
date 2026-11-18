@@ -27,7 +27,11 @@ from chkit.clickhouse import (
     is_unknown_database_error,
     wrap_connection_error,
 )
-from chkit.clickhouse.client import clickhouse_error_message
+from chkit.clickhouse.client import (
+    SEND_ADMISSION,
+    SendNotAdmittedError,
+    clickhouse_error_message,
+)
 from chkit.clickhouse.control import run_control_request
 from chkit.core.model import ChxResolvedClickHouseConfig
 
@@ -235,6 +239,29 @@ def test_submit_once_blocks_the_pinned_drivers_remote_close_retry() -> None:
         client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
     assert pool.request.call_count == 1
     assert pool.request.call_args.kwargs["retries"] is False
+    assert driver.http is pool
+
+
+# #765 round 3: a backfill that stopped asks again at the transport, after
+# any lazy connection setup, so no request starts once it returned.
+def test_submit_once_sends_nothing_when_the_send_admission_refuses() -> None:
+    client, _fake = _stub_client()
+    driver = MagicMock()
+    pool = driver.http
+
+    def command(statement: str, **_kwargs: object) -> None:
+        driver.http.request("POST", "http://localhost/")
+
+    driver.command.side_effect = command
+    client._submit_client = driver
+    token = SEND_ADMISSION.set(lambda: False)
+    try:
+        with pytest.raises(SendNotAdmittedError):
+            client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
+    finally:
+        SEND_ADMISSION.reset(token)
+
+    pool.request.assert_not_called()
     assert driver.http is pool
 
 

@@ -107,6 +107,11 @@ class BackfillChunkProgress(BaseModel):
     elapsed_ms: int | None = Field(default=None, alias="elapsedMs")
     duration_ms: int | None = Field(default=None, alias="durationMs")
     error: str | None = None
+    # Set on an attempt this release recorded: it is sent once under its query
+    # id (#765). Older releases could send one id twice (a resume resubmitted
+    # the chunk's id, and the driver resent a reset request), so a failure row
+    # of an attempt without it proves nothing.
+    single_send: bool | None = Field(default=None, alias="singleSend")
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 

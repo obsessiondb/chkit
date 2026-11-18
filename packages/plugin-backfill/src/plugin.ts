@@ -1,7 +1,7 @@
 import { createClickHouseExecutor, createStatelessClickHouseExecutor } from '@chkit/clickhouse'
 import { createPluginRunner, withFactoryDefaults } from '@chkit/core'
 
-import { CHECKPOINT_VERSION, executeBackfill } from './async-backfill.js'
+import { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, untilAborted } from './async-backfill.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { BackfillConfigError } from './errors.js'
@@ -148,7 +148,12 @@ async function runBackfillLocked(
   try {
     const [database, table] = plan.target.split('.')
     if (!database || !table) throw new BackfillConfigError('Invalid backfill target.')
-    const insertableColumns = await assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) })
+    // A metadata read that hangs must not keep an interrupted run, and its lock.
+    const insertableColumns = await untilAborted(
+      assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) }),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
     assertReplayColumnsStillInsertable({
       planId: plan.planId,
       target: plan.target,

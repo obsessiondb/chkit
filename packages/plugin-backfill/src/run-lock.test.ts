@@ -1,7 +1,7 @@
-import { describe, expect, test } from 'bun:test'
+import { describe, expect, spyOn, test } from 'bun:test'
 import { spawn, spawnSync } from 'node:child_process'
-import { copyFile, mkdir, mkdtemp, readFile, readdir, rm, writeFile } from 'node:fs/promises'
-import { existsSync } from 'node:fs'
+import { copyFile, mkdir, mkdtemp, open, readFile, readdir, rm, writeFile } from 'node:fs/promises'
+import { existsSync, fstatSync, statSync } from 'node:fs'
 import { hostname, tmpdir } from 'node:os'
 import { join } from 'node:path'
 
@@ -11,6 +11,7 @@ const PLAN_ID = '0123456789abcdef'
 // The lock chkit-py writes and reads too: same path, same format.
 const FIXTURE = new URL('../../../test/fixtures/backfill-run-lock.json', import.meta.url)
 const RUN_LOCK_MODULE = new URL('./run-lock.ts', import.meta.url).pathname
+const ASYNC_BACKFILL_MODULE = new URL('./async-backfill.ts', import.meta.url).pathname
 
 async function tempRunsDir(): Promise<string> {
   const runsDir = join(await mkdtemp(join(tmpdir(), 'chkit-backfill-lock-')), 'runs')
@@ -180,3 +181,107 @@ describe('withRunLock on SIGINT (#765)', () => {
     await rm(join(runsDir, '..'), { recursive: true, force: true })
   }, 30_000)
 })
+
+describe('run lock durability and ownership (#765, round 3)', () => {
+  async function fileHandlePrototype(dir: string): Promise<{ sync: () => Promise<void> }> {
+    await writeFile(join(dir, 'probe'), '')
+    const probe = await open(join(dir, 'probe'), 'r')
+    const proto = Object.getPrototypeOf(probe) as { sync: () => Promise<void> }
+    await probe.close()
+    await rm(join(dir, 'probe'))
+    return proto
+  }
+
+  // runs/ made by another process that never synced its parent.
+  test('syncs the state directory and its parent even when runs/ already exists', async () => {
+    const runsDir = await tempRunsDir()
+    const stateDir = join(runsDir, '..')
+    const proto = await fileHandlePrototype(stateDir)
+    const synced: number[] = []
+    const sync = spyOn(proto, 'sync').mockImplementation(async function (this: { fd: number }) {
+      synced.push(fstatSync(this.fd).ino)
+    })
+
+    const lock = await acquireRunLock(runLockPath(runsDir, PLAN_ID), PLAN_ID)
+    sync.mockRestore()
+    await lock.release()
+
+    expect(synced).toContain(statSync(stateDir).ino)
+    expect(synced).toContain(statSync(join(stateDir, '..')).ino)
+    expect(synced).toContain(statSync(runsDir).ino)
+    await rm(stateDir, { recursive: true, force: true })
+  })
+
+  test('a failure after the lock is linked removes it, and says so', async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+    const proto = await fileHandlePrototype(runsDir)
+    const runsIno = statSync(runsDir).ino
+    let runsSyncs = 0
+    const real = proto.sync
+    const sync = spyOn(proto, 'sync').mockImplementation(async function (this: { fd: number }) {
+      // The first sync of runs/ after the link fails; the removal's succeeds.
+      if (fstatSync(this.fd).ino === runsIno && existsSync(lockPath) && ++runsSyncs === 1) throw new Error('EIO: i/o error, fsync')
+      return real.call(this)
+    })
+
+    await expect(acquireRunLock(lockPath, PLAN_ID)).rejects.toThrow(
+      `Backfill plan ${PLAN_ID}: could not take its lock (EIO: i/o error, fsync); the lock file ${lockPath} was removed.`,
+    )
+    sync.mockRestore()
+    expect(await readdir(runsDir)).toEqual([])
+    await rm(join(runsDir, '..'), { recursive: true, force: true })
+  })
+
+  // Round 3 items 7 and 9: SIGTERM while a resume's read hangs, and a cancel.
+  test('SIGTERM during a hung resume read releases the lock and exits 143', async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+    const script = `
+      const { withRunLock } = await import(${JSON.stringify(RUN_LOCK_MODULE)})
+      const { executeBackfill } = await import(${JSON.stringify(ASYNC_BACKFILL_MODULE)})
+      const executor = { query: () => { console.log('reading'); return new Promise(() => undefined) }, submit: async () => '' }
+      await withRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)}, (signal) => executeBackfill({
+        executor, planId: ${JSON.stringify(PLAN_ID)}, chunks: [{ id: 'c1' }], buildQuery: () => 'SELECT 1',
+        resumeFrom: { c1: { status: 'pending' } }, signal,
+      }))
+    `
+    const run = runScript(script)
+    await new Promise<void>((resolve) => {
+      run.child.stdout?.on('data', (chunk) => { if (String(chunk).includes('reading')) resolve() })
+    })
+
+    run.child.kill('SIGTERM')
+    const result = await run
+
+    expect(result.code).toBe(143)
+    expect(existsSync(lockPath)).toBe(false)
+    expect(result.stderr).toContain(`Backfill plan ${PLAN_ID}: interrupted (SIGTERM). No new chunk was submitted, and the lock is released`)
+    await rm(join(runsDir, '..'), { recursive: true, force: true })
+  }, 30_000)
+
+  test('a cancel interrupted under the lock releases it with its own message', async () => {
+    const runsDir = await tempRunsDir()
+    const lockPath = runLockPath(runsDir, PLAN_ID)
+    const script = `
+      const { withRunLock } = await import(${JSON.stringify(RUN_LOCK_MODULE)})
+      await withRunLock(${JSON.stringify(lockPath)}, ${JSON.stringify(PLAN_ID)}, async (signal) => {
+        console.log('ready')
+        await new Promise((resolve) => signal.addEventListener('abort', resolve, { once: true }))
+      }, { command: 'cancel' })
+    `
+    const run = runScript(script)
+    await new Promise<void>((resolve) => {
+      run.child.stdout?.on('data', (chunk) => { if (String(chunk).includes('ready')) resolve() })
+    })
+
+    run.child.kill('SIGINT')
+    const result = await run
+
+    expect(result.code).toBe(130)
+    expect(existsSync(lockPath)).toBe(false)
+    expect(result.stderr).toContain(`Backfill plan ${PLAN_ID}: cancel interrupted (SIGINT); the lock is released.`)
+    await rm(join(runsDir, '..'), { recursive: true, force: true })
+  }, 30_000)
+})
+

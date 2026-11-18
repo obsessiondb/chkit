@@ -338,6 +338,8 @@ def test_a_replay_started_right_after_a_chunk_failed_ends_done(
     # ExceptionWhileProcessing, the row a KILL QUERY also leaves. The submit
     # fails with it (or with the reset of the started response), so the run
     # stops before it records the chunk, like the run in #765.
+    # Its id is saved before the send, sent once.
+    first_run: list[BackfillProgress] = []
     with pytest.raises(Exception):  # noqa: B017, PT011
         execute_backfill(
             executor=exec_ctx.run_executor,
@@ -348,6 +350,7 @@ def test_a_replay_started_right_after_a_chunk_failed_ends_done(
                 " SETTINGS max_block_size = 1"
             ),
             poll_interval_ms=100,
+            on_progress=first_run.append,
         )
     logged = poll_until(
         lambda: exec_ctx.run_executor.query_status(first_id),
@@ -356,8 +359,11 @@ def test_a_replay_started_right_after_a_chunk_failed_ends_done(
     assert logged.status == "failed"
 
     # Replay at once: the failure is seconds old.
+    assert first_run[-1][failed_id] == BackfillChunkState(
+        status="pending", query_id=first_id, single_send=True
+    )
     resume_from: BackfillProgress = {
-        failed_id: BackfillChunkState(status="pending"),
+        **first_run[-1],
         **{chunk_id: BackfillChunkState(status="done") for chunk_id in succeeded_ids},
     }
     replay = execute_backfill(
@@ -367,6 +373,7 @@ def test_a_replay_started_right_after_a_chunk_failed_ends_done(
         build_query=lambda chunk_id: _sql_for_chunk(exec_ctx, chunk_id),
         poll_interval_ms=100,
         resume_from=resume_from,
+        checkpoint_version=CHECKPOINT_VERSION,
         replay_failed=True,
     )
 

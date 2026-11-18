@@ -3,11 +3,9 @@ import { setTimeout as sleep } from 'node:timers/promises'
 
 import {
   allReplicas,
-  observableSystemTable,
   probeReplicaAccess,
   stringLiteral,
   type ClickHouseExecutor,
-  type ObservableSystemTable,
 } from '@chkit/clickhouse'
 import pMap from 'p-map'
 
@@ -50,10 +48,10 @@ export interface BackfillOptions {
   outcomeRecheckAttempts?: number
   /** Interval between those reads in ms. Default: 2000 */
   outcomeRecheckIntervalMs?: number
-  /** Aborting it stops the run: no new chunk starts, no progress is reported
-   *  after the last report finishes, and executeBackfill rejects with a
-   *  `BackfillInterruptedError`. Chunks already submitted keep running on the
-   *  server; their progress says they may have run. */
+  /** Aborting it stops the run: no read is waited for and no new chunk is
+   *  sent, no progress is reported after the last report finishes, and
+   *  executeBackfill rejects with a `BackfillInterruptedError`. Chunks already
+   *  sent keep running on the server; their progress says they may have run. */
   signal?: AbortSignal
 }
 
@@ -69,6 +67,11 @@ export interface BackfillChunkState {
   elapsedMs?: number
   durationMs?: number
   error?: string
+  /** Set on an attempt this release recorded: it is sent once under its
+   *  query id (#765). Older releases could send one id twice (a resume
+   *  resubmitted the chunk's id, and chkit-py's driver resent a reset
+   *  request), so a failure row of an attempt without it proves nothing. */
+  singleSend?: boolean
 }
 
 export type BackfillProgress = Record<string, BackfillChunkState>
@@ -304,13 +307,14 @@ const FAILURE_TYPES = new Set(['ExceptionBeforeStart', 'ExceptionWhileProcessing
  *
  * - Running on a replica, or any QueryFinish of the id: running, or done.
  *   A QueryFinish means a whole attempt of the chunk committed.
- * - A failure row of the attempt's own id, read on every replica, with no
- *   row of the id that wrote a row: failed. Only that proves a replay
- *   cannot write the chunk's rows twice. A failure after a written row is
- *   unknown at once: those rows stay, and a replay writes them again. An
- *   older release's replay shares the id with the earlier attempt, so its
- *   failure rows prove nothing, and a read of one replica (the probe was
- *   denied) cannot rule out a run or a QueryFinish on another.
+ * - A failure row of an attempt sent once under its id (`singleSend`), read
+ *   on every replica, with no row of the id that wrote a row: failed. Only
+ *   that proves a replay cannot write the chunk's rows twice. A failure
+ *   after a written row is unknown at once: those rows stay, and a replay
+ *   writes them again. An attempt an older release recorded may have been
+ *   sent twice under its id, so its failure rows prove nothing, and a read
+ *   that may have missed a replica cannot rule out a run or a QueryFinish
+ *   on it.
  * - Otherwise an attempt that may have run (see `attemptMayHaveRun`) waits
  *   through the flush window, then its outcome is unknown. An empty
  *   query_log is no proof that it never ran: logs can flush late, or not at
@@ -332,7 +336,7 @@ function classifyAttempt(
   if (finish) return { kind: 'done', row: finish }
   const kind = attemptKind(planId, chunkId, state)
   const failure = own.find((row) => FAILURE_TYPES.has(row.type))
-  if (failure && kind !== 'legacy' && evidence.denied === undefined) {
+  if (failure && state.singleSend === true && evidence.partial === undefined) {
     const written = Math.max(...own.map((row) => Number(row.written_rows) || 0))
     if (written === 0) return { kind: 'failed', row: failure }
     return { kind: 'unknown', reason: `it failed after writing ${written} rows, which a replay would write again` }
@@ -342,8 +346,11 @@ function classifyAttempt(
   if (failure && kind === 'legacy') {
     return { kind: 'unknown', reason: 'an older release ran it under the chunk\'s shared query id, so the failure in system.query_log may be an earlier attempt\'s' }
   }
-  if (evidence.denied !== undefined) {
-    return { kind: 'unknown', reason: `the user may not read every replica (${evidence.denied}), and the replica it can read shows neither a run of it nor a QueryFinish` }
+  if (evidence.partial !== undefined) {
+    return { kind: 'unknown', reason: `${evidence.partial}, and the replica it can read shows neither a run of it nor a QueryFinish` }
+  }
+  if (failure) {
+    return { kind: 'unknown', reason: 'an older release may have sent it more than once under this query id, so the failure in system.query_log may not be its last send' }
   }
   return { kind: 'unknown', reason: 'it is not running on any replica and system.query_log has no outcome for it' }
 }
@@ -422,8 +429,8 @@ interface ChunkLogRow {
 interface ChunkEvidence {
   running: Map<string, RunningRow>
   logRows: ChunkLogRow[]
-  /** Set when the replica probe was denied: the reads saw one replica only. */
-  denied?: string
+  /** Why the reads may have missed a replica (see `probeReplicaAccess`). */
+  partial?: string
 }
 
 function earliestBound(states: BackfillChunkState[]): string | undefined {
@@ -469,8 +476,10 @@ async function readChunkQueries(
  * Read the chunks' rows in system.processes and system.query_log: by the
  * plan's prefix, or by exact ids, pruned by event_date from `after`. The
  * pruning keeps a day of slack, and no row is filtered by its start time,
- * since replicas' clocks can differ (#765). A user denied the cluster reads
- * the local tables, also with `clickhouse.cluster` set, as chkit-py does.
+ * since replicas' clocks can differ (#765). When the probe cannot show that
+ * every replica answers, the reads use the local tables, also with
+ * `clickhouse.cluster` set, as chkit-py does, and what they do not find
+ * proves nothing.
  */
 async function readEvidence(
   executor: ClickHouseExecutor,
@@ -484,10 +493,8 @@ async function readEvidence(
     ? `\n  AND event_date >= toDate32(parseDateTimeBestEffort(${stringLiteral(scope.after)})) - 1`
     : ''
   const access = await probeReplicaAccess(executor, cluster)
-  const from = (table: ObservableSystemTable) => {
-    if (access.kind === 'fanout') return allReplicas(access.fanout, `system.${table}`)
-    return access.kind === 'denied' ? `system.${table}` : observableSystemTable(executor, table)
-  }
+  const from = (table: 'processes' | 'query_log') =>
+    access.kind === 'fanout' ? allReplicas(access.fanout, `system.${table}`) : `system.${table}`
   const runningRows = await executor.query<RunningRow>(
     `SELECT query_id, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE user = currentUser() AND ${match} SETTINGS skip_unavailable_shards = 0`
   )
@@ -504,7 +511,7 @@ SETTINGS skip_unavailable_shards = 0`
   return {
     running: new Map(runningRows.map((row) => [row.query_id, row])),
     logRows,
-    ...(access.kind === 'denied' ? { denied: access.error } : {}),
+    ...(access.kind === 'partial' ? { partial: access.reason } : {}),
   }
 }
 
@@ -534,6 +541,29 @@ function unknownOutcomeError(planId: string, unknown: UnknownAttempt[]): Error {
   return new Error(
     `Backfill plan ${planId}: the outcome of the last attempt is unknown for ${attempts.join('; ')}. A chunk whose outcome is unknown is not submitted again, as it may have written its rows. Re-run the resume once system.query_log records the outcome, or pass --accept-unknown to replay it under a new query id, which can write its rows twice.`,
   )
+}
+
+/** `work`, or a rejection with `abortError()` as soon as `signal` aborts. */
+export function untilAborted<T>(work: Promise<T>, signal: AbortSignal | undefined, abortError: () => Error): Promise<T> {
+  if (!signal) return work
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = () => {
+      work.catch(() => undefined)
+      reject(abortError())
+    }
+    if (signal.aborted) return onAbort()
+    signal.addEventListener('abort', onAbort, { once: true })
+    work.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort)
+        resolve(value)
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort)
+        reject(error)
+      },
+    )
+  })
 }
 
 function interruptedError(planId: string): BackfillInterruptedError {
@@ -634,13 +664,16 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // persisted (e.g. client crash between submit() and state file write), and
   // checks the failure of every chunk the checkpoint records failed.
   let unknown: UnknownAttempt[] = []
+  // A read that hangs (a stalled replica) must not keep an interrupted run,
+  // and its lock, waiting: an abort stops waiting for it.
+  const interruptible = <T>(work: Promise<T>) => untilAborted(work, signal, () => interruptedError(planId))
   if (resumeFrom) {
-    const reconciled = await reconcileProgress(executor, planId, chunks, progress, {
+    const reconciled = await interruptible(reconcileProgress(executor, planId, chunks, progress, {
       cluster,
       attempts: outcomeRecheckAttempts,
       intervalMs: outcomeRecheckIntervalMs,
       signal,
-    })
+    }))
     progress = reconciled.progress
     unknown = reconciled.unknown
   }
@@ -648,24 +681,19 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
 
   // Replay the chunks the server shows failed before they wrote a row (with
   // --replay-failed) and, with --accept-unknown, those whose outcome is
-  // unknown. Each replay gets a new random query id, recorded here with its
-  // query_log bound and persisted below before it is submitted, so polling
-  // and a later sync only ever read that attempt's own rows (#765).
+  // unknown. A replay gets a new random query id only when its chunk is
+  // about to be sent, recorded with its query_log bound before the send, so
+  // polling and a later sync only ever read that attempt's own rows (#765),
+  // and a chunk the run never reaches keeps its proven state.
   const accepted = new Set(acceptUnknown ? unknown.map((attempt) => attempt.chunkId) : [])
   if (acceptUnknown) unknown = []
-  if (unknown.length === 0) {
-    const replays = chunks.filter((chunk) => {
-      const state = progress[chunk.id]
-      if (!state) return false
-      return accepted.has(chunk.id) || (replayFailed === true && state.status === 'failed')
-    })
-    if (replays.length > 0) {
-      const submittedAt = await readReplayBound(executor, planId)
-      for (const chunk of replays) {
-        progress = updateChunk(progress, chunk.id, { status: 'pending', queryId: replayQueryId(planId, chunk.id), submittedAt })
-      }
-    }
-  }
+  const replays = new Set(chunks.filter((chunk) => {
+    const state = progress[chunk.id]
+    return state !== undefined && (accepted.has(chunk.id) || (replayFailed === true && state.status === 'failed'))
+  }).map((chunk) => chunk.id))
+  const replayBound = unknown.length === 0 && replays.size > 0
+    ? await interruptible(readReplayBound(executor, planId))
+    : undefined
 
   // After an abort, nothing is reported once the report in progress ends,
   // so a caller that stops right after never sees a later checkpoint.
@@ -705,10 +733,13 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     stopped: () => closed,
   }
   const pollUnknown: UnknownAttempt[] = []
+  // Checked again right before each send: a chunk can reach its send after
+  // another chunk stopped the dispatch, or the run was interrupted.
+  const mayStart = () => !stopDispatch && !closed
   const work = pMap(
     chunks,
     async (chunk) => {
-      if (stopDispatch || closed) return
+      if (!mayStart()) return
       try {
         const lost = await runChunk(chunk)
         if (lost) {
@@ -740,6 +771,14 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
 
   async function runChunk(chunk: { id: string; from?: string; to?: string }): Promise<UnknownAttempt | undefined> {
     const target = { planId, chunkId: chunk.id, cluster }
+
+    // A replay: its own query id, recorded with the bound right before the send.
+    if (replays.has(chunk.id) && replayBound !== undefined) {
+      const previous = getChunk(progress, chunk.id)
+      await setChunk(chunk.id, { status: 'pending', queryId: replayQueryId(planId, chunk.id), submittedAt: replayBound, singleSend: true })
+      return send(chunk, target, previous)
+    }
+
     const state = getChunk(progress, chunk.id)
 
     // Already terminal from a previous run
@@ -756,13 +795,34 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
 
     // Record the attempt's query id before its submit, so a run that stops
     // while the INSERT runs leaves a chunk that may have run, never one that
-    // looks unsubmitted. A replay's id and bound were recorded already. A
-    // first attempt runs under the chunk's id, without submittedAt.
+    // looks unsubmitted. A first attempt runs under the chunk's id, without
+    // submittedAt. (A pending chunk with an id here may have run, and the
+    // resume's sync settled it, so it is never resent under that id.)
     const pending = getChunk(progress, chunk.id)
-    const queryId = pending.queryId ?? chunkQueryId(planId, chunk.id)
-    if (pending.queryId === undefined) await setChunk(chunk.id, { ...pending, queryId })
-    if (closed) return undefined
+    if (pending.queryId !== undefined) return undefined
+    await setChunk(chunk.id, { ...pending, queryId: chunkQueryId(planId, chunk.id), singleSend: true })
+    return send(chunk, target, pending)
+  }
+
+  /**
+   * Send the chunk under the id just recorded, unless the run stopped while
+   * that record was written: then the chunk gets its `previous` state back,
+   * as it was never sent (once the run is interrupted nothing more is saved,
+   * and the record stays: may have run).
+   */
+  async function send(
+    chunk: { id: string; from?: string; to?: string },
+    target: { planId: string; chunkId: string; cluster?: string },
+    previous: BackfillChunkState,
+  ): Promise<UnknownAttempt | undefined> {
+    const queryId = getChunk(progress, chunk.id).queryId as string
     const sql = buildQuery(chunk)
+    // Nothing yields between this check and the submit's start, so no chunk
+    // is sent after the run stopped, or after an interrupt released the lock.
+    if (!mayStart()) {
+      await setChunk(chunk.id, previous)
+      return undefined
+    }
     await executor.submit(sql, queryId)
     const submitted: BackfillChunkState = {
       ...getChunk(progress, chunk.id),

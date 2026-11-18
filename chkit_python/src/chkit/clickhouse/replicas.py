@@ -63,45 +63,79 @@ def all_replicas(fanout: ReplicaFanout, source: str) -> str:
 
 
 def _probe_replicas(client: Any, cluster: str) -> ReplicaFanout | None:
-    access = probe_replica_access(client, cluster)
-    return access.fanout if access.kind == "fanout" else None
+    try:
+        rows = client.query(
+            "SELECT count(DISTINCT hostName()) AS replicas "
+            f"FROM clusterAllReplicas({string_literal(cluster)}, system.one)"
+        ).rows
+    except Exception as error:
+        if _is_missing_cluster(error) or _is_access_denied(error):
+            return None
+        raise
+    replicas = int(rows[0].get("replicas", 0)) if rows else 0
+    return ReplicaFanout(cluster=cluster, replicas=replicas) if replicas > 1 else None
 
 
 @dataclass(frozen=True)
 class ReplicaAccess:
-    """What a read of every replica of a cluster can see (TS ``ReplicaAccess``).
+    """Whether every replica of a cluster can be read (TS ``ReplicaAccess``).
 
-    - ``fanout``: several replicas, read through ``clusterAllReplicas``;
-    - ``single``: one replica, or no such cluster, so local reads see everything;
-    - ``denied``: the user may not query the cluster, so a local read sees one
-      replica of an unknown number, and a row it does not find may be on another.
+    The probe reads every replica with ``skip_unavailable_shards = 0``, so a
+    replica that does not answer fails it instead of being left out:
+
+    - ``fanout``: every replica answered; read them through
+      ``clusterAllReplicas``. One host is never taken for a single-node
+      target: the fan-out reads it.
+    - ``partial``: the cluster does not exist, the user may not query it, or
+      the probe returned no replica count. A local read sees one replica of an
+      unknown number, and a row it does not find may be on another.
     """
 
-    kind: str  # fanout | single | denied
+    kind: str  # fanout | partial
     fanout: ReplicaFanout | None = None
-    error: str | None = None
+    reason: str | None = None
 
 
 def probe_replica_access(client: Any, cluster: str | None = None) -> ReplicaAccess:
     """Probe ``cluster`` (default ``default``) for a caller that must prove a
-    query runs, or ran, on no replica (#765). Any failure other than a missing
-    cluster or a denied user raises. Not cached."""
+    query runs, or ran, on no replica (#765). Any other failure, an
+    unavailable replica included, raises. Not cached."""
     name = cluster or DEFAULT_CLUSTER
     try:
         rows = client.query(
             "SELECT count(DISTINCT hostName()) AS replicas "
-            f"FROM clusterAllReplicas({string_literal(name)}, system.one)"
+            f"FROM clusterAllReplicas({string_literal(name)}, system.one) "
+            "SETTINGS skip_unavailable_shards = 0"
         ).rows
     except Exception as error:
         if _is_missing_cluster(error):
-            return ReplicaAccess(kind="single")
+            return ReplicaAccess(
+                kind="partial",
+                reason=f"the cluster {name} does not exist, so not every replica can be read",
+            )
         if _is_access_denied(error):
-            return ReplicaAccess(kind="denied", error=str(error))
+            return ReplicaAccess(
+                kind="partial", reason=f"the user may not read every replica ({error})"
+            )
         raise
-    replicas = int(rows[0].get("replicas", 0)) if rows else 0
-    if replicas > 1:
-        return ReplicaAccess(kind="fanout", fanout=ReplicaFanout(cluster=name, replicas=replicas))
-    return ReplicaAccess(kind="single")
+    replicas = _replica_count(rows)
+    if replicas is None:
+        return ReplicaAccess(
+            kind="partial",
+            reason=f"the replica probe of cluster {name} returned no replica count",
+        )
+    return ReplicaAccess(kind="fanout", fanout=ReplicaFanout(cluster=name, replicas=replicas))
+
+
+def _replica_count(rows: Any) -> int | None:
+    if not isinstance(rows, list) or len(rows) != 1 or not isinstance(rows[0], dict):
+        return None
+    value = rows[0].get("replicas")
+    try:
+        replicas = int(str(value))
+    except ValueError:
+        return None
+    return replicas if replicas >= 1 else None
 
 
 _MISSING_CLUSTER_CODES = frozenset({"701", "170"})

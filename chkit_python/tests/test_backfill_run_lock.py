@@ -15,8 +15,10 @@ from pathlib import Path
 
 import pytest
 
+from chkit_plugin_backfill import run_lock as run_lock_module
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.run_lock import acquire_run_lock, run_lock_path
+from chkit_plugin_backfill.state import sync_directory
 
 SRC = Path(__file__).resolve().parents[1] / "src"
 
@@ -217,3 +219,158 @@ with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, body)
         f"Backfill plan {PLAN_ID}: interrupted (SIGINT). No new chunk was submitted, and "
         "the lock is released"
     ) in stderr
+
+
+# Round 3 item 5: runs/ made by another process that never synced its parent.
+def test_syncs_the_state_directory_and_its_parent_even_when_runs_already_exists(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_dir = _runs_dir(tmp_path)
+    synced: list[int] = []
+    real_fsync = os.fsync
+
+    def record_sync(fd: int) -> None:
+        synced.append(os.fstat(fd).st_ino)
+        real_fsync(fd)
+
+    monkeypatch.setattr("chkit_plugin_backfill.state.os.fsync", record_sync)
+
+    acquire_run_lock(run_lock_path(runs_dir, PLAN_ID), PLAN_ID).release()
+
+    assert tmp_path.stat().st_ino in synced
+    assert tmp_path.parent.stat().st_ino in synced
+    assert runs_dir.stat().st_ino in synced
+
+
+# Round 3 item 6: the lock is owned from the link on.
+def test_a_failure_after_the_lock_is_linked_removes_it_and_says_so(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    runs_dir = _runs_dir(tmp_path)
+    lock_path = run_lock_path(runs_dir, PLAN_ID)
+    calls: list[Path] = []
+
+    def failing_sync(directory: Path) -> None:
+        calls.append(directory)
+        # The first sync of runs/ after the link fails; the removal's succeeds.
+        if directory == runs_dir and lock_path.exists() and calls.count(runs_dir) == 1:
+            msg = "EIO: i/o error, fsync"
+            raise OSError(msg)
+        sync_directory(directory)
+
+    monkeypatch.setattr(run_lock_module, "sync_directory", failing_sync)
+
+    with pytest.raises(RuntimeError) as raised:
+        acquire_run_lock(lock_path, PLAN_ID)
+
+    assert str(raised.value) == (
+        f"Backfill plan {PLAN_ID}: could not take its lock (EIO: i/o error, fsync); the lock "
+        f"file {lock_path} was removed."
+    )
+    assert list(runs_dir.iterdir()) == []
+
+
+def _wait_for(child: subprocess.Popen[str], line: str) -> None:
+    assert child.stdout is not None
+    assert child.stdout.readline().strip() == line
+
+
+# Round 3 item 4: SIGINT while the main thread waits between reconcile reads.
+# A handler that set a threading.Event could deadlock inside that wait.
+def test_sigint_while_a_resume_waits_between_reads_releases_the_lock_and_exits_130(
+    tmp_path: Path,
+) -> None:
+    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
+    script = f"""
+from chkit_plugin_backfill.async_backfill import execute_backfill
+from chkit_plugin_backfill.run_lock import with_run_lock
+from chkit_plugin_backfill.types import BackfillChunkState
+
+class Result:
+    def __init__(self, rows):
+        self.rows = rows
+
+class Empty:
+    def __init__(self):
+        self.reads = 0
+    def query(self, statement):
+        if "system.one" in statement:
+            return Result([{{"replicas": 1}}])
+        if "system.query_log" in statement:
+            self.reads += 1
+            if self.reads == 1:
+                print("waiting", flush=True)
+        return Result([])
+    def submit(self, statement, query_id=None):
+        raise AssertionError("submitted")
+
+with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, lambda stop: execute_backfill(
+    executor=Empty(), plan_id={PLAN_ID!r}, chunk_ids=["c1"], build_query=lambda _c: "SELECT 1",
+    resume_from={{"c1": BackfillChunkState(status="pending", query_id="q", single_send=True)}},
+    checkpoint_version=2, outcome_recheck_attempts=5, outcome_recheck_interval_ms=30000, stop=stop,
+))
+"""
+    child = _python(script)
+    _wait_for(child, "waiting")
+    time.sleep(0.2)
+
+    child.send_signal(signal.SIGINT)
+    _stdout, stderr = child.communicate(timeout=20)
+
+    assert child.returncode == 130
+    assert not lock_path.exists()
+    assert f"Backfill plan {PLAN_ID}: interrupted (SIGINT). No new chunk was submitted, and the lock is released" in stderr
+
+
+# Round 3 item 9: SIGTERM while a resume's read hangs.
+def test_sigterm_during_a_hung_resume_read_releases_the_lock_and_exits_143(tmp_path: Path) -> None:
+    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
+    script = f"""
+import threading
+from chkit_plugin_backfill.async_backfill import execute_backfill
+from chkit_plugin_backfill.run_lock import with_run_lock
+from chkit_plugin_backfill.types import BackfillChunkState
+
+class Hung:
+    def query(self, statement):
+        print("reading", flush=True)
+        threading.Event().wait(60)
+    def submit(self, statement, query_id=None):
+        raise AssertionError("submitted")
+
+with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, lambda stop: execute_backfill(
+    executor=Hung(), plan_id={PLAN_ID!r}, chunk_ids=["c1"], build_query=lambda _c: "SELECT 1",
+    resume_from={{"c1": BackfillChunkState(status="pending")}}, stop=stop,
+))
+"""
+    child = _python(script)
+    _wait_for(child, "reading")
+
+    child.send_signal(signal.SIGTERM)
+    _stdout, stderr = child.communicate(timeout=20)
+
+    assert child.returncode == 143
+    assert not lock_path.exists()
+    assert f"Backfill plan {PLAN_ID}: interrupted (SIGTERM). No new chunk was submitted, and the lock is released" in stderr
+
+
+# Round 3 item 7: cancel uses the signal-aware wrapper, with its own message.
+def test_a_cancel_interrupted_under_the_lock_releases_it_with_its_own_message(tmp_path: Path) -> None:
+    lock_path = run_lock_path(_runs_dir(tmp_path), PLAN_ID)
+    script = f"""
+from chkit_plugin_backfill.run_lock import with_run_lock
+def body(stop):
+    print("ready", flush=True)
+    stop.wait(30)
+with_run_lock({str(lock_path)!r}, {PLAN_ID!r}, body, command="cancel")
+"""
+    child = _python(script)
+    _wait_for(child, "ready")
+
+    child.send_signal(signal.SIGINT)
+    _stdout, stderr = child.communicate(timeout=20)
+
+    assert child.returncode == 130
+    assert not lock_path.exists()
+    assert f"Backfill plan {PLAN_ID}: cancel interrupted (SIGINT); the lock is released." in stderr
+

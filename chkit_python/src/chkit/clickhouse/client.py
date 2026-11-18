@@ -14,6 +14,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable
+from contextvars import ContextVar
 from typing import Any, Literal, NoReturn, Self
 from urllib.parse import unquote, urlparse
 
@@ -394,7 +395,9 @@ class ClickHouseClient:
         request whose connection the remote closed, even with
         ``query_retries=0``, and the same id must never name a second send of
         a write (a backfill chunk could run twice). A connection failure
-        raises instead. TS's client sends a request once."""
+        raises instead. TS's client sends a request once. When
+        ``SEND_ADMISSION`` is set and refuses, nothing is sent and
+        ``SendNotAdmittedError`` is raised."""
         driver = self._submit_driver()
         with self._submit_once_lock:
             pool = driver.http
@@ -569,6 +572,19 @@ class ClickHouseClient:
         return list_table_details(self, databases)
 
 
+#: Set by a caller that must not send once it stops (#765). ``submit_once``
+#: asks it right before the request reaches the transport, after any lazy
+#: connection setup, so a caller that refuses admission and then returns knows
+#: no request can start afterwards.
+SEND_ADMISSION: ContextVar[Callable[[], bool] | None] = ContextVar(
+    "chkit_send_admission", default=None
+)
+
+
+class SendNotAdmittedError(RuntimeError):
+    """``submit_once`` did not send: ``SEND_ADMISSION`` refused it."""
+
+
 class _SingleAttemptPool:
     """Allow one driver HTTP send and disable urllib3's separate retry budget."""
 
@@ -587,6 +603,10 @@ class _SingleAttemptPool:
     def request(self, *args: Any, **kwargs: Any) -> Any:
         if self._sent:
             raise RuntimeError(self._message)
+        admit = SEND_ADMISSION.get()
+        if admit is not None and not admit():
+            msg = "The request was not sent: its caller stopped"
+            raise SendNotAdmittedError(msg)
         self._sent = True
         return self._pool.request(*args, **{**kwargs, "retries": False})
 

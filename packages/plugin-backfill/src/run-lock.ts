@@ -33,9 +33,17 @@ export function runLockPath(runsDir: string, planId: string): string {
   return join(runsDir, `${planId}.lock`)
 }
 
-/** Take the plan's lock, or fail at once when it exists. */
+/**
+ * Take the plan's lock, or fail at once when it exists. Before that, every
+ * directory entry on the way to the checkpoint is synced: `runs/` and the
+ * state directory, also when another process created them, so a power loss
+ * after a send cannot drop the checkpoint that names it (#765).
+ */
 export async function acquireRunLock(lockPath: string, planId: string): Promise<RunLock> {
-  await mkdirDurably(dirname(lockPath))
+  const runsDir = dirname(lockPath)
+  await mkdirDurably(runsDir)
+  await syncDirectory(dirname(runsDir))
+  await syncDirectory(dirname(dirname(runsDir)))
   const record: RunLockRecord = {
     pid: process.pid,
     host: hostname(),
@@ -49,25 +57,38 @@ export async function acquireRunLock(lockPath: string, planId: string): Promise<
   try {
     await link(tmpPath, lockPath)
   } catch (error) {
+    await unlink(tmpPath).catch(() => undefined)
     if (errorCode(error) !== 'EEXIST') throw error
     throw lockBusyError(planId, lockPath, await readLockRecord(lockPath))
-  } finally {
-    await unlink(tmpPath)
   }
-  await syncDirectory(dirname(lockPath))
-  return { release: () => releaseRunLock(lockPath, record.token) }
+  // Owned from the link on: a later failure removes the lock, by its token,
+  // and says whether that worked.
+  const release = () => releaseRunLock(lockPath, record.token)
+  try {
+    await unlink(tmpPath)
+    await syncDirectory(runsDir)
+  } catch (error) {
+    const removal = await release().then(
+      () => 'was removed',
+      (removeError: unknown) => `could not be removed (${errorMessage(removeError)}): delete it once no run, resume or cancel of this plan runs`,
+    )
+    throw new Error(`Backfill plan ${planId}: could not take its lock (${errorMessage(error)}); the lock file ${lockPath} ${removal}.`, { cause: error })
+  }
+  return { release }
 }
 
 /**
  * Run `body` holding the plan's lock. A SIGINT or SIGTERM aborts the signal
  * `body` gets; once `body` returns or throws, the lock is released and the
- * process exits with 128 + the signal's number. Later signals do nothing, so
- * the lock is never released while `body` can still write the checkpoint.
+ * process exits with 128 + the signal's number, saying whether the lock was
+ * removed. Later signals do nothing, so the lock is never released while
+ * `body` can still write the checkpoint or send a chunk.
  */
 export async function withRunLock<T>(
   lockPath: string,
   planId: string,
   body: (signal: AbortSignal) => Promise<T>,
+  options: { command?: 'run' | 'cancel' } = {},
 ): Promise<T> {
   const controller = new AbortController()
   let received: NodeJS.Signals | undefined
@@ -78,23 +99,45 @@ export async function withRunLock<T>(
   }
   process.on('SIGINT', onSignal)
   process.on('SIGTERM', onSignal)
+  let released: string | undefined
   try {
     const lock = await acquireRunLock(lockPath, planId)
-    try {
-      return await body(controller.signal)
-    } finally {
-      await lock.release()
+    const release = async () => {
+      released = await lock.release().then(
+        () => 'released',
+        (error: unknown) => `could not be removed (${errorMessage(error)}): delete ${lockPath} once no run, resume or cancel of this plan runs`,
+      )
     }
+    let result: T
+    try {
+      result = await body(controller.signal)
+    } catch (error) {
+      await release()
+      throw error
+    }
+    await release()
+    if (released !== 'released' && !received) throw new Error(`Backfill plan ${planId}: the lock ${released}.`)
+    return result
   } finally {
     process.off('SIGINT', onSignal)
     process.off('SIGTERM', onSignal)
     if (received) {
-      process.stderr.write(
-        `Backfill plan ${planId}: interrupted (${received}). No new chunk was submitted, and the lock is released; a chunk already submitted keeps running on the server, and a resume attaches to it.\n`,
-      )
+      process.stderr.write(`${interruptMessage(planId, received, options.command ?? 'run', released)}\n`)
       process.exit(received === 'SIGINT' ? 130 : 143)
     }
   }
+}
+
+function interruptMessage(planId: string, signal: string, command: 'run' | 'cancel', released: string | undefined): string {
+  const lock = released === undefined
+    ? 'the lock was not taken'
+    : released === 'released' ? 'the lock is released' : `the lock ${released}`
+  if (command === 'cancel') return `Backfill plan ${planId}: cancel interrupted (${signal}); ${lock}.`
+  return `Backfill plan ${planId}: interrupted (${signal}). No new chunk was submitted, and ${lock}; a chunk already submitted keeps running on the server, and a resume attaches to it.`
+}
+
+function errorMessage(error: unknown): string {
+  return error instanceof Error ? error.message : String(error)
 }
 
 async function readLockRecord(lockPath: string): Promise<RunLockRecord | undefined> {
