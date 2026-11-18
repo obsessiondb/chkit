@@ -27,6 +27,7 @@ import {
   parseSourceFromCreateDictionaryQuery,
   parseTTLFromCreateTableQuery,
   parseUniqueKeyFromCreateTableQuery,
+  replaceSourceInCreateDictionaryQuery,
 } from './index'
 
 type InsertCall = {
@@ -946,6 +947,41 @@ RANGE(MIN start_date MAX end_date)`
     expect(parseSourceFromCreateDictionaryQuery(shadowedRangeQuery)).toBe(
       "HTTP(url 'http://example.com/rates' format 'TSV')"
     )
+  })
+
+  describe('finds the dictionary-level SOURCE only outside names, strings, comments and other clauses', () => {
+    const realSource = "HTTP(URL 'https://user:fake-password@host/data?token=fake-token' FORMAT 'TSV')"
+    const tail = `SOURCE(${realSource}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())`
+    const cases: Array<[string, string]> = [
+      ['a quoted name', `CREATE DICTIONARY app.d (\`SOURCE(x)\` UInt64) PRIMARY KEY \`SOURCE(x)\` ${tail}`],
+      ['a quoted name with a closing paren', `CREATE DICTIONARY app.d (\`a) SOURCE(x\` UInt64) PRIMARY KEY \`a) SOURCE(x\` ${tail}`],
+      ['a block comment', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id /* SOURCE(x) */ ${tail}`],
+      ['a line comment', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id -- SOURCE(x)\n${tail}`],
+      ['a string literal', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id SETTINGS(format_csv_delimiter = 'SOURCE(x)') ${tail}`],
+      ['another clause', `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id LAYOUT(SOURCE(x)) ${tail}`],
+    ]
+    for (const [name, query] of cases) {
+      test(name, () => {
+        expect(parseSourceFromCreateDictionaryQuery(query)).toBe(realSource)
+        const masked = replaceSourceInCreateDictionaryQuery(query, 'NULL()') ?? ''
+        expect(masked).toContain('SOURCE(NULL())')
+        for (const marker of ['fake-password', 'fake-token', 'user:']) expect(masked).not.toContain(marker)
+      })
+    }
+
+    test('a quoted primary key name stays whole', () => {
+      expect(parseDictionaryPrimaryKeyFromCreateDictionaryQuery(cases[0]?.[1])).toEqual(['SOURCE(x)'])
+    })
+
+    test('a statement with no single top-level SOURCE is not masked', () => {
+      const twice = `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id SOURCE(NULL()) ${tail}`
+      const unterminated = `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id ${tail} COMMENT 'open`
+      const unbalanced = `CREATE DICTIONARY app.d (\`id\` UInt64) PRIMARY KEY id SOURCE(${realSource}`
+      for (const query of [twice, unterminated, unbalanced]) {
+        expect(replaceSourceInCreateDictionaryQuery(query, 'NULL()')).toBeUndefined()
+        expect(parseSourceFromCreateDictionaryQuery(query)).toBeUndefined()
+      }
+    })
   })
 })
 

@@ -887,7 +887,9 @@ interface SourcePair {
 
 /**
  * The dictionary statements `compareDictionaryShape` formats, or undefined when
- * the live `SOURCE` can't be parsed.
+ * the live statement has no single top-level `SOURCE` or can't be read whole.
+ * Then nothing of it reaches the formatter, which logs its input in
+ * `system.query_log`, and the dictionary is not compared.
  */
 export function collectDictionarySqlQueries(
   expected: DictionaryDefinition,

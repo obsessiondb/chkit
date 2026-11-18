@@ -3,7 +3,8 @@
 from __future__ import annotations
 
 import re
-from typing import Literal
+from pathlib import Path
+from typing import Any, Literal
 
 import pytest
 
@@ -27,6 +28,8 @@ from chkit.cli.commands.drift_diff import (
     diff_named_shape_maps,
     diff_settings,
 )
+from chkit.cli.commands.drift_payload import build_drift_payload
+from chkit.clickhouse.client import QueryResult
 from chkit.clickhouse.introspect import IntrospectedDictionary, IntrospectedTable, IntrospectedView
 from chkit.core.codec import parse_codec
 from chkit.core.model import (
@@ -39,6 +42,7 @@ from chkit.core.model import (
     SkipIndexBloomFilter,
     SkipIndexInput,
     SkipIndexMinmax,
+    SnapshotV1,
     TableDefinition,
     dictionary,
     materialized_view,
@@ -854,6 +858,57 @@ def test_dictionary_source_signed_number_is_a_value() -> None:
 def test_dictionary_source_with_unbalanced_parentheses_is_not_compared() -> None:
     extra_paren = _with_source("CLICKHOUSE(TABLE 'users'))")
     assert _compare(extra_paren, _live_dictionary("CLICKHOUSE(TABLE 'users_v2')")) == []
+
+
+def test_a_source_in_a_quoted_name_never_sends_the_credentials_to_the_formatter(
+    tmp_path: Path,
+) -> None:
+    source = "HTTP(URL 'https://user:fake-password@host/data?token=fake-token' FORMAT 'TSV')"
+    create_query = (
+        "CREATE DICTIONARY app.rates (`SOURCE(x)` UInt64) PRIMARY KEY `SOURCE(x)` "
+        f"SOURCE({source}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())"
+    )
+    expected = dictionary(
+        database="app",
+        name="rates",
+        attributes=[{"name": "SOURCE(x)", "type": "UInt64"}],
+        primary_key=["SOURCE(x)"],
+        source=source,
+        layout="FLAT()",
+        lifetime="0",
+    )
+    calls: list[tuple[object, ...]] = []
+
+    class _Client:
+        def query(self, *args: object, **kwargs: object) -> QueryResult:
+            calls.append((*args, kwargs))
+            sql = str(args[0])
+            rows: list[dict[str, Any]] = []
+            if "engine = 'Dictionary'" in sql:
+                rows = [{"database": "app", "name": "rates", "create_table_query": create_query}]
+            elif "formatQuerySingleLineOrNull" in sql:
+                rows = [{"formatted": []}]
+            elif "NOT startsWith(name, '_chkit_')" in sql:
+                rows = [{"database": "app", "name": "rates", "engine": "Dictionary", "comment": ""}]
+            return QueryResult(column_names=[], rows=rows)
+
+        def command(self, *args: object, **kwargs: object) -> None:
+            calls.append((*args, kwargs))
+
+    snapshot = SnapshotV1.model_validate(
+        {"version": 1, "generatedAt": "2026-01-01T00:00:00.000Z", "definitions": [expected]}
+    )
+
+    payload = build_drift_payload(
+        client=_Client(), meta_dir=tmp_path, snapshot=snapshot, database=None
+    )
+
+    assert any("formatQuerySingleLineOrNull" in str(call[0]) for call in calls)
+    sent = repr(calls)
+    printed = repr(payload)
+    for marker in ("fake-password", "fake-token", "user:"):
+        assert marker not in sent
+        assert marker not in printed
 
 
 # #383: a codec added, removed or changed on the server is drift, while the

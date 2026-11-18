@@ -1,4 +1,4 @@
-import { splitTopLevelComma } from '@chkit/core'
+import { isTrivia, splitTopLevelComma, tokenizeSQL, type SQLToken } from '@chkit/core'
 
 export interface ParsedDictionaryAttribute {
   name: string
@@ -20,82 +20,114 @@ const MODIFIER_KEYWORDS = [
   'IS_OBJECT_ID',
 ]
 
-function extractBalancedParenGroup(
-  text: string,
-  fromIndex: number
-): { content: string; endIndex: number } | undefined {
-  const openIndex = text.indexOf('(', fromIndex)
-  if (openIndex === -1) return undefined
-  let depth = 0
-  let inString = false
-  let escaped = false
-  let stringQuote = "'"
-  for (let i = openIndex; i < text.length; i += 1) {
-    const char = text[i]
-    if (!char) continue
-    if (inString) {
-      // A backslash escapes the next character, so in `'C:\\'` the quote ends the string.
-      if (escaped) escaped = false
-      else if (char === '\\') escaped = true
-      else if (char === stringQuote) inString = false
-      continue
-    }
-    if (char === "'" || char === '"') {
-      inString = true
-      stringQuote = char
-      continue
-    }
-    if (char === '(') {
-      depth += 1
-      continue
-    }
-    if (char === ')') {
-      depth -= 1
-      if (depth === 0) return { content: text.slice(openIndex + 1, i), endIndex: i + 1 }
-    }
-  }
-  return undefined
+/** The dictionary-level clauses written as `<keyword>(...)` after the attribute list. */
+const PAREN_CLAUSES = new Set(['SOURCE', 'LAYOUT', 'LIFETIME', 'RANGE', 'SETTINGS'])
+
+interface ParenGroup {
+  open: number
+  close: number
+}
+
+/** Where the parts of a `CREATE DICTIONARY` statement are, as offsets into it. */
+interface DictionaryStatement {
+  /** The parens of the attribute list. */
+  attributes: ParenGroup
+  /** The text after `PRIMARY KEY`, up to the next clause. */
+  primaryKey?: { start: number; end: number }
+  /** The parens of each `<keyword>(...)` clause, by keyword in upper case; repeated if written twice. */
+  clauses: Map<string, ParenGroup[]>
 }
 
 /**
- * Positions of the parens that open and close the attribute list — the close
- * being the one right before the dictionary's `PRIMARY KEY ...` clause.
- * Returns undefined when there is no balanced attribute list (e.g. a query we
- * can't parse).
+ * Locates the attribute list and the dictionary-level clauses with the SQL
+ * lexer, so a clause keyword in a quoted name, a string, a comment or inside
+ * another clause's parentheses is never taken for the clause: only a bare
+ * keyword at the top level, after the attribute list, followed by `(`.
+ * Undefined when the statement can't be read whole: no `DICTIONARY` keyword
+ * or attribute list, a string, name or comment without its end, or unbalanced
+ * parentheses.
  */
-function findAttributeListBounds(query: string): { open: number; close: number } | undefined {
-  const nameMatch = query.match(
-    /\bCREATE\s+(?:OR\s+REPLACE\s+)?DICTIONARY\s+(?:IF\s+NOT\s+EXISTS\s+)?[`\w.]+\s*/i
-  )
-  if (!nameMatch || nameMatch.index === undefined) return undefined
-  const start = nameMatch.index + nameMatch[0].length
-  const openIndex = query.indexOf('(', start)
-  if (openIndex === -1) return undefined
-  const group = extractBalancedParenGroup(query, start)
-  return group ? { open: openIndex, close: group.endIndex - 1 } : undefined
+function locateDictionaryStatement(query: string): DictionaryStatement | undefined {
+  const allTokens = tokenizeSQL(query)
+  if (allTokens.some((token) => !token.terminated)) return undefined
+  const tokens = allTokens.filter((token) => !isTrivia(token))
+  const clauses = new Map<string, ParenGroup[]>()
+  let sawDictionary = false
+  let attributesOpen: number | undefined
+  let attributes: ParenGroup | undefined
+  let attributesEnd = -1
+  let primaryKey: { start: number; end: number } | undefined
+  let clause: { keyword: string; open: number } | undefined
+  let depth = 0
+  for (const [i, token] of tokens.entries()) {
+    if (depth === 0 && attributes) primaryKey = trackPrimaryKey(tokens, i, attributesEnd, primaryKey, query.length)
+    if (token.kind === 'punctuation' && token.text === '(') {
+      const keyword = upperWord(tokens[i - 1])
+      if (depth === 0 && sawDictionary && attributesOpen === undefined) attributesOpen = token.start
+      else if (depth === 0 && attributes && keyword !== undefined && PAREN_CLAUSES.has(keyword)) {
+        clause = { keyword, open: token.start }
+      }
+      depth += 1
+    } else if (token.kind === 'punctuation' && token.text === ')') {
+      depth -= 1
+      if (depth < 0) return undefined
+      if (depth === 0 && !attributes && attributesOpen !== undefined) {
+        attributes = { open: attributesOpen, close: token.start }
+        attributesEnd = i
+      } else if (depth === 0 && clause) {
+        clauses.set(clause.keyword, [...(clauses.get(clause.keyword) ?? []), { open: clause.open, close: token.start }])
+        clause = undefined
+      }
+    } else if (depth === 0 && upperWord(token) === 'DICTIONARY') {
+      sawDictionary = true
+    }
+  }
+  if (depth !== 0 || !attributes) return undefined
+  return { attributes, primaryKey, clauses }
+}
+
+/**
+ * The `PRIMARY KEY` span after reading `tokens[i]`, a top-level token past the
+ * attribute list. The span opens right after `PRIMARY KEY`, the two tokens
+ * after the list, and ends at the first clause after it.
+ */
+function trackPrimaryKey(
+  tokens: SQLToken[],
+  i: number,
+  attributesEnd: number,
+  primaryKey: { start: number; end: number } | undefined,
+  endOfQuery: number
+): { start: number; end: number } | undefined {
+  const token = tokens[i]
+  if (!token) return primaryKey
+  if (i === attributesEnd + 2 && upperWord(token) === 'KEY' && upperWord(tokens[i - 1]) === 'PRIMARY') {
+    return { start: token.end, end: endOfQuery }
+  }
+  if (primaryKey?.end === endOfQuery && startsClauseAfterPrimaryKey(tokens, i)) {
+    return { start: primaryKey.start, end: token.start }
+  }
+  return primaryKey
+}
+
+/** The bare word a token is, in upper case; undefined for anything else. */
+function upperWord(token: SQLToken | undefined): string | undefined {
+  return token?.kind === 'identifier' ? token.text.toUpperCase() : undefined
+}
+
+/** Whether `tokens[i]`, at the top level, ends the `PRIMARY KEY` list: a `<clause>(`, `COMMENT` or `;`. */
+function startsClauseAfterPrimaryKey(tokens: SQLToken[], i: number): boolean {
+  const word = upperWord(tokens[i])
+  if (word === 'COMMENT' || tokens[i]?.text === ';') return true
+  return word !== undefined && PAREN_CLAUSES.has(word) && tokens[i + 1]?.text === '('
 }
 
 /** The attribute list as written, without its parentheses: `` `id` UInt64, `name` String ``. */
 export function parseAttributeListTextFromCreateDictionaryQuery(query: string | undefined): string | undefined {
   if (!query) return undefined
-  const bounds = findAttributeListBounds(query)
-  if (!bounds) return undefined
-  const body = query.slice(bounds.open + 1, bounds.close).trim()
+  const statement = locateDictionaryStatement(query)
+  if (!statement) return undefined
+  const body = query.slice(statement.attributes.open + 1, statement.attributes.close).trim()
   return body.length > 0 ? body : undefined
-}
-
-/**
- * Everything after the attribute list: `PRIMARY KEY ... SOURCE(...) LAYOUT(...)
- * ...`. This is where dictionary-level clauses live. Table-level keywords like
- * SOURCE/RANGE can also appear inside an attribute's EXPRESSION (`range()` is a
- * real ClickHouse array function) — searching the whole query would risk
- * matching one of those instead of the real clause. Falls back to the whole
- * query when the attribute list can't be located, preserving behaviour for
- * unparseable inputs.
- */
-function extractDictionaryOptions(query: string): string {
-  const bounds = findAttributeListBounds(query)
-  return bounds ? query.slice(bounds.close + 1) : query
 }
 
 function extractKeywordParenBody(query: string, keyword: string): string | undefined {
@@ -103,15 +135,14 @@ function extractKeywordParenBody(query: string, keyword: string): string | undef
   return group ? query.slice(group.open + 1, group.close).trim() : undefined
 }
 
-/** Positions of the parens of the dictionary-level `<keyword>(...)` clause. */
-function findKeywordParenGroup(query: string, keyword: string): { open: number; close: number } | undefined {
-  const options = extractDictionaryOptions(query)
-  const optionsStart = query.length - options.length
-  const match = new RegExp(`\\b${keyword}\\s*\\(`, 'i').exec(options)
-  if (!match || match.index === undefined) return undefined
-  const open = optionsStart + match.index + match[0].length - 1
-  const group = extractBalancedParenGroup(query, open)
-  return group ? { open, close: group.endIndex - 1 } : undefined
+/**
+ * Positions of the parens of the dictionary-level `<keyword>(...)` clause.
+ * Undefined unless the statement has exactly one, so a statement that can't be
+ * read whole never has its `SOURCE` masked in the wrong place.
+ */
+function findKeywordParenGroup(query: string, keyword: string): ParenGroup | undefined {
+  const groups = locateDictionaryStatement(query)?.clauses.get(keyword)
+  return groups?.length === 1 ? groups[0] : undefined
 }
 
 // Scans a single attribute's trailing text (everything after `name type`) for the
@@ -255,11 +286,8 @@ export function parseDictionaryPrimaryKeyFromCreateDictionaryQuery(
   query: string | undefined
 ): string[] {
   if (!query) return []
-  const options = extractDictionaryOptions(query)
-  const match = /^\s*PRIMARY\s+KEY\s+([\s\S]*?)(?:\bSOURCE\s*\(|\bLAYOUT\s*\(|\bLIFETIME\s*\(|\bCOMMENT\b|;|$)/i.exec(
-    options
-  )
-  const raw = match?.[1]?.trim()
+  const primaryKey = locateDictionaryStatement(query)?.primaryKey
+  const raw = primaryKey ? query.slice(primaryKey.start, primaryKey.end).trim() : ''
   if (!raw) return []
   return splitTopLevelComma(raw)
     .map((part) => part.trim().replace(/^`|`$/g, ''))
@@ -273,7 +301,8 @@ export function parseSourceFromCreateDictionaryQuery(query: string | undefined):
 
 /**
  * The query with the body of its `SOURCE(...)` clause replaced by `body`, or
- * undefined when the query has no `SOURCE` clause.
+ * undefined unless the query has exactly one top-level `SOURCE` clause and
+ * reads whole.
  */
 export function replaceSourceInCreateDictionaryQuery(query: string, body: string): string | undefined {
   const group = findKeywordParenGroup(query, 'SOURCE')

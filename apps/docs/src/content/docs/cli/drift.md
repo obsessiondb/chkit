@@ -46,7 +46,7 @@ A server-side change to any of these reports no drift, so neither `chkit drift` 
 - The `REFRESH` clause of a refreshable materialized view.
 - Column order: columns are matched by name.
 - The secrets in a dictionary's `SOURCE` (see [Dictionary definitions](#dictionary-definitions)): `drift` hides them on both sides, so a change to them alone reports no drift.
-- The `SOURCE` of a dictionary in which ClickHouse hid another value or that holds a function call, and a dictionary's other clauses when the server can't format the dictionary.
+- The `SOURCE` of a dictionary in which ClickHouse hid another value or that holds a function call, and a dictionary's other clauses when the server can't format the dictionary. A dictionary whose stored statement has no single top-level `SOURCE` clause is not compared at all, so its source never reaches the formatter.
 - Table settings the schema does not declare.
 
 Check these properties against `SHOW CREATE` output.

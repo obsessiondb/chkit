@@ -1063,7 +1063,9 @@ def collect_dictionary_sql_queries(
 ) -> DictionarySqlQueries | None:
     """The statements ``compare_dictionary_shape`` formats.
 
-    None when the live ``SOURCE`` can't be parsed.
+    None when the live statement has no single top-level ``SOURCE`` or can't be
+    read whole. Then nothing of it reaches the formatter, which logs its input
+    in ``system.query_log``, and the dictionary is not compared.
     """
     actual_source = parse_source_from_create_dictionary_query(actual.create_query)
     actual_query = replace_source_in_create_dictionary_query(actual.create_query, "NULL()")

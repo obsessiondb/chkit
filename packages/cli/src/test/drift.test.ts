@@ -1,11 +1,15 @@
 import { describe, expect, test } from 'bun:test'
 
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
+
 import { diffNamedShapeMaps, diffSettings } from '../commands/drift/diff.js'
+import { buildDriftPayload } from '../commands/drift/payload.js'
 
 import {
   type ColumnDefinition,
   type DictionaryDefinition,
   type SkipIndexDefinition,
+  type Snapshot,
   type TableConstraintDefinition,
   type TableInput,
   dictionary,
@@ -1791,6 +1795,52 @@ describe('@chkit/cli drift: dictionary SOURCE (#492)', () => {
   test('a source with unbalanced parentheses is not compared', () => {
     const extraParen = withSource("CLICKHOUSE(TABLE 'users'))")
     expect(compare(extraParen, live("CLICKHOUSE(TABLE 'users_v2')"))).toEqual([])
+  })
+
+  test('a SOURCE( in a quoted name never sends the credentials to the formatter', async () => {
+    const source = "HTTP(URL 'https://user:fake-password@host/data?token=fake-token' FORMAT 'TSV')"
+    const createQuery = `CREATE DICTIONARY app.rates (\`SOURCE(x)\` UInt64) PRIMARY KEY \`SOURCE(x)\` SOURCE(${source}) LIFETIME(MIN 0 MAX 0) LAYOUT(FLAT())`
+    const expected = dictionary({
+      database: 'app',
+      name: 'rates',
+      attributes: [{ name: 'SOURCE(x)', type: 'UInt64' }],
+      primaryKey: ['SOURCE(x)'],
+      source,
+      layout: 'FLAT()',
+      lifetime: '0',
+    })
+    const calls: unknown[][] = []
+    const db = {
+      listSchemaObjects: async (...args: unknown[]) => {
+        calls.push(args)
+        return [{ kind: 'dictionary', database: 'app', name: 'rates' }]
+      },
+      listTableDetails: async (...args: unknown[]) => {
+        calls.push(args)
+        return []
+      },
+      query: async (...args: unknown[]) => {
+        calls.push(args)
+        const sql = String(args[0])
+        if (sql.includes("engine = 'Dictionary'")) return [{ database: 'app', name: 'rates', create_table_query: createQuery }]
+        return sql.includes('formatQuerySingleLineOrNull') ? [{ formatted: [] }] : []
+      },
+      command: async (...args: unknown[]) => {
+        calls.push(args)
+      },
+    } as unknown as ClickHouseExecutor
+    const snapshot: Snapshot = { version: 1, generatedAt: '2026-01-01T00:00:00.000Z', definitions: [expected] }
+
+    const payload = await buildDriftPayload({}, '/tmp/meta', snapshot, undefined, db)
+
+    const formatterCalls = calls.filter((args) => String(args[0]).includes('formatQuerySingleLineOrNull'))
+    expect(formatterCalls.length).toBeGreaterThan(0)
+    const sent = JSON.stringify(calls)
+    const printed = JSON.stringify(payload)
+    for (const marker of ['fake-password', 'fake-token', 'user:']) {
+      expect(sent).not.toContain(marker)
+      expect(printed).not.toContain(marker)
+    }
   })
 })
 
