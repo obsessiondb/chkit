@@ -884,11 +884,14 @@ def test_the_handoff_follows_the_written_headers(monkeypatch: pytest.MonkeyPatch
     listener.listen(1)
     port = listener.getsockname()[1]
 
+    received: list[bytes] = []
+
     def serve() -> None:
         conn, _ = listener.accept()
         data = b""
-        while b"\r\n0\r\n\r\n" not in data and b"SELECT 1" not in data:
+        while b"SELECT 1" not in data:
             data += conn.recv(4096)
+        received.append(data)
         conn.sendall(b"HTTP/1.1 200 OK\r\nContent-Length: 0\r\nConnection: close\r\n\r\n")
         conn.close()
 
@@ -915,3 +918,8 @@ def test_the_handoff_follows_the_written_headers(monkeypatch: pytest.MonkeyPatch
 
     assert response.status == 200
     assert events == ["admitted", "headers written", "handed off"]
+    # Sent with its length, not chunked: some proxies reject chunked POSTs.
+    head = received[0].split(b"\r\n\r\n", 1)[0].lower()
+    assert b"content-length: 8" in head
+    assert b"transfer-encoding" not in head
+    assert received[0].endswith(b"\r\n\r\nSELECT 1")

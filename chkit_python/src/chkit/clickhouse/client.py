@@ -699,17 +699,25 @@ def _dispose_pool(pool: Any) -> None:
     httputil.all_managers.pop(pool, None)
 
 
-def _body_after_handoff(body: object, admission: SendAdmission) -> Any:
-    """``body`` as an iterable that reports the handoff when urllib3 first
-    reads it, after the request line and headers are on the socket."""
-    data = body.encode() if isinstance(body, str) else body
+def _body_after_handoff(kwargs: dict[str, Any], admission: SendAdmission) -> dict[str, Any]:
+    """``urlopen``'s arguments with the body as an iterable that reports the
+    handoff when urllib3 first reads it, after the request line and headers
+    are on the socket. The body's Content-Length is set explicitly, so
+    urllib3 sends it as is, not chunked: some proxies reject chunked POSTs."""
+    body = kwargs.get("body")
+    data = body.encode() if isinstance(body, str) else (body or b"")
 
     def chunks() -> Any:
         admission.handed_off()
         if data:
             yield data
 
-    return chunks()
+    headers = {
+        **{key: value for key, value in (kwargs.get("headers") or {}).items()
+           if key.lower() not in {"content-length", "transfer-encoding"}},
+        "Content-Length": str(len(data)),
+    }
+    return {**kwargs, "body": chunks(), "headers": headers}
 
 
 def install_send_hook(pool: Any) -> None:
@@ -733,7 +741,7 @@ def install_send_hook(pool: Any) -> None:
             # written the request line and headers to the socket, so the
             # request has started. A request that fails before that never
             # started; its caller ends the wait when submit_once returns.
-            kwargs = {**kwargs, "body": _body_after_handoff(kwargs.get("body"), admission)}
+            kwargs = _body_after_handoff(kwargs, admission)
         return original(method, url, *args, **{**kwargs, "retries": False})
 
     pool.urlopen = urlopen
