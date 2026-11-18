@@ -58,7 +58,7 @@ import {
   orderByDependencies,
   type DependencyGraph,
 } from './object-dependencies.js'
-import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
+import { type SQLToken, identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
 
 function createMap(definitions: SchemaDefinition[]): Map<string, SchemaDefinition> {
   return new Map(definitions.map((def) => [definitionKey(def), def]))
@@ -1000,33 +1000,62 @@ function columnKey(table: { database: string; table: string }, column: string): 
 }
 
 /**
- * Table TTL operation key → keys of the table's columns the TTL names. As in
- * `columnDefaultReads`, a name followed by `(` is a function call.
+ * The column names that `sql` reads, from runs of bare or quoted names joined
+ * by dots (`n.x`, `` `n`.`x` ``, comments around the dot). Like ClickHouse, a
+ * run reads its longest leading part that is a column: `n.x` reads the column
+ * `n.x` when there is one, and otherwise `n` (a subcolumn of `n`). A run whose
+ * leading parts are no column is read without them, so `t.col` and
+ * `db.t.col` read `col` (#748). A tuple element by position ends the run:
+ * `t.1.a` reads `t`. A run followed by `(` is a function call, not a column,
+ * and a run that starts on a name `notColumnNames` skips reads nothing, so
+ * `a -> a.x` reads no `a.x` (#768).
  */
-function tableTtlReads(definitions: SchemaDefinition[]): DependencyGraph {
-  const graph = new Map<string, Set<string>>()
-  for (const def of definitions) {
-    if (def.kind !== 'table' || def.ttl === undefined) continue
-    const names = new Set(def.columns.map((column) => column.name))
-    const read = new Set<string>()
-    const tokens = tokenizeSQL(def.ttl).filter((token) => !isTrivia(token))
-    tokens.forEach((token, index) => {
-      const name = identifierName(token)
-      if (name === undefined || tokens[index + 1]?.text === '(' || !names.has(name)) return
-      read.add(columnKey({ database: def.database, table: def.name }, name))
-    })
-    graph.set(`table:${def.database}.${def.name}:ttl`, read)
+function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
+  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  const skipped = notColumnNames(tokens)
+  const found: string[] = []
+  let i = 0
+  while (i < tokens.length) {
+    const first = i
+    const run: string[] = []
+    // A tuple element by position (`t.1`) and the parts after it are one path
+    // into the run before it, so `t.1.a.b` reads only `t`.
+    let element = false
+    for (let name = identifierName(tokens[i]!); name !== undefined; ) {
+      if (!element) run.push(name)
+      i += 1
+      if (tokens[i]?.text !== '.') break
+      const next = tokens[i + 1]
+      if (next?.kind === 'number') element = true
+      name = next === undefined ? undefined : next.kind === 'number' ? next.text : identifierName(next)
+      if (name !== undefined) i += 1
+    }
+    if (run.length === 0) i += 1
+    if (tokens[i]?.text === '(' || skipped.has(first)) continue
+    for (let start = 0; start < run.length; start += 1) {
+      const name = longestColumnPrefix(run.slice(start), columns)
+      if (name === undefined) continue
+      found.push(name)
+      break
+    }
   }
-  return graph
+  return found
+}
+
+function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): string | undefined {
+  for (let end = parts.length; end > 0; end -= 1) {
+    const name = parts.slice(0, end).join('.')
+    if (columns.has(name)) return name
+  }
+  return undefined
 }
 
 /**
  * Column operation key → keys of the other columns of the same table that the
  * column's default expression names. A name followed by `(` is a function
- * call, not a column. A name can also be a lambda parameter; such an extra
- * edge moves a statement later, or makes a cycle that keeps the key order.
+ * call, not a column, and neither are the names `notColumnNames` finds.
  */
-function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
@@ -1037,14 +1066,134 @@ function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
       const read = new Set<string>()
-      const tokens = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
-      tokens.forEach((token, index) => {
-        const name = identifierName(token)
-        if (name === undefined || tokens[index + 1]?.text === '(') return
-        if (name !== column.name && names.has(name)) read.add(keyOf(name))
-      })
+      for (const name of dottedNames(parsed.sql, names)) {
+        if (name !== column.name) read.add(keyOf(name))
+      }
       graph.set(keyOf(column.name), read)
     }
   }
   return graph
+}
+
+/**
+ * Table TTL operation key → keys of the table's columns the TTL names, read
+ * with the same rules as a column's default expression (`dottedNames`).
+ */
+function tableTtlReads(definitions: SchemaDefinition[]): DependencyGraph {
+  const graph = new Map<string, Set<string>>()
+  for (const def of definitions) {
+    if (def.kind !== 'table' || def.ttl === undefined) continue
+    const names = new Set(def.columns.map((column) => column.name))
+    const read = new Set(dottedNames(def.ttl, names).map((name) => columnKey({ database: def.database, table: def.name }, name)))
+    graph.set(`table:${def.database}.${def.name}:ttl`, read)
+  }
+  return graph
+}
+
+/**
+ * Indices of the `tokens` (trivia removed) that name no column (#768): a lambda
+ * parameter (`x -> x`, `(x, y) -> x + y`) where its lambda declares and uses it,
+ * with the `.name` parts after a use (`a -> a.x`), and the type of `CAST(x AS T)`
+ * and `x::T`, with its arguments (`Array(Tuple(a UInt64))`). A lambda body runs
+ * to the first `,` or unmatched closing bracket at its own depth, so a name
+ * after the lambda still reads a column.
+ */
+function notColumnNames(tokens: SQLToken[]): Set<number> {
+  const skipped = new Set<number>()
+  const isPair = (i: number, first: string, second: string) => {
+    const a = tokens[i]
+    const b = tokens[i + 1]
+    return a?.text === first && b?.text === second && a.end === b.start
+  }
+  const isName = (i: number) => {
+    const token = tokens[i]
+    return token !== undefined && identifierName(token) !== undefined
+  }
+  const skip = (from: number, to: number) => {
+    for (let i = from; i < to; i += 1) skipped.add(i)
+  }
+  tokens.forEach((token, i) => {
+    if (isPair(i, '-', '>')) {
+      const params = lambdaParameters(tokens, i)
+      if (params === undefined) return
+      skip(params.from, i)
+      const end = groupEnd(tokens, i + 2)
+      for (let j = i + 2; j < end; j += 1) {
+        const name = identifierName(tokens[j]!)
+        if (name === undefined || !params.names.has(name) || tokens[j - 1]?.text === '.') continue
+        skipped.add(j)
+        while (tokens[j + 1]?.text === '.' && isName(j + 2)) {
+          j += 2
+          skipped.add(j)
+        }
+      }
+    } else if (isPair(i, ':', ':')) {
+      if (!isName(i + 2)) return
+      skip(i + 2, tokens[i + 3]?.text === '(' ? closingParen(tokens, i + 3) + 1 : i + 3)
+    } else if (token.kind === 'identifier' && token.text.toLowerCase() === 'cast' && tokens[i + 1]?.text === '(') {
+      const close = closingParen(tokens, i + 1)
+      let depth = 0
+      for (let j = i + 2; j < close; j += 1) {
+        const inner = tokens[j]!
+        if (inner.text === '(' || inner.text === '[' || inner.text === '{') depth += 1
+        else if (inner.text === ')' || inner.text === ']' || inner.text === '}') depth -= 1
+        else if (depth === 0 && inner.kind === 'identifier' && inner.text.toLowerCase() === 'as') {
+          skip(j, close)
+          break
+        }
+      }
+    }
+  })
+  return skipped
+}
+
+/**
+ * The parameters of the lambda whose `->` starts at `arrow`: the name before
+ * it, or the names of a `(a, b)` list before it, with the index of the first
+ * token that declares them. Any other shape declares nothing.
+ */
+function lambdaParameters(tokens: SQLToken[], arrow: number): { names: Set<string>; from: number } | undefined {
+  const before = tokens[arrow - 1]
+  if (before === undefined) return undefined
+  const single = identifierName(before)
+  if (single !== undefined) return { names: new Set([single]), from: arrow - 1 }
+  if (before.text !== ')') return undefined
+  const names = new Set<string>()
+  for (let j = arrow - 2; j >= 0; j -= 2) {
+    const name = identifierName(tokens[j]!)
+    if (name === undefined) return undefined
+    names.add(name)
+    const separator = tokens[j - 1]?.text
+    if (separator === '(') return { names, from: j - 1 }
+    if (separator !== ',') return undefined
+  }
+  return undefined
+}
+
+/** Index of the first `,` or unmatched closing bracket at the depth of `from`, or the end. */
+function groupEnd(tokens: SQLToken[], from: number): number {
+  let depth = 0
+  for (let j = from; j < tokens.length; j += 1) {
+    const text = tokens[j]!.text
+    if (text === '(' || text === '[' || text === '{') depth += 1
+    else if (text === ')' || text === ']' || text === '}') {
+      if (depth === 0) return j
+      depth -= 1
+    } else if (text === ',' && depth === 0) return j
+  }
+  return tokens.length
+}
+
+/** Index of the `)` that closes the `(` at `open`, or the end. */
+function closingParen(tokens: SQLToken[], open: number): number {
+  let depth = 0
+  for (let j = open; j < tokens.length; j += 1) {
+    const text = tokens[j]!.text
+    if (text === '(') depth += 1
+    else if (text === ')') {
+      depth -= 1
+      if (depth === 0) return j
+    }
+  }
+  return tokens.length
 }
