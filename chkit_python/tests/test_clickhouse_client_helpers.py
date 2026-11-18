@@ -10,6 +10,7 @@ from __future__ import annotations
 
 import threading
 import time
+from types import SimpleNamespace
 from unittest.mock import MagicMock
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -117,6 +118,26 @@ def test_execute_retries_unknown_database_without_the_database() -> None:
     assert fake.command.call_count == 2
     assert "use_database" not in fake.command.call_args_list[0].kwargs
     assert fake.command.call_args_list[1].kwargs["use_database"] is False
+
+
+def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
+    """A journal write is durable before what follows it runs (#767): a
+    profile with async_insert = 1 and wait_for_async_insert = 0 must not
+    acknowledge it while it is buffered. A caller's setting still wins, and a
+    user that cannot change the setting gets the server's own error."""
+    client, fake = _stub_client()
+    fake.server_settings = {"async_insert": SimpleNamespace(readonly=False, value="1")}
+
+    client.execute("INSERT INTO _chkit_migrations VALUES (1)")
+    client.execute("INSERT INTO t VALUES (1)", settings={"async_insert": 1, "max_threads": 2})
+    fake.server_settings = {"async_insert": SimpleNamespace(readonly=True, value="1")}
+    client.execute("INSERT INTO _chkit_migrations VALUES (2)")
+
+    assert [call.kwargs["settings"] for call in fake.command.call_args_list] == [
+        {"async_insert": 0},
+        {"async_insert": 1, "max_threads": 2},
+        {},
+    ]
 
 
 def test_execute_reraises_other_database_errors_without_retry() -> None:

@@ -168,6 +168,21 @@ interface RecordedIdentity {
   fingerprint: string
 }
 
+// The lastError of a started async attempt that a sync or barrier run of the
+// statement journals failed before its before-retry SQL runs (#767).
+const SUPERSEDED_ASYNC_ATTEMPT_ERROR = 'not running; recorded failed before a sync or barrier run of the statement ran its before-retry SQL'
+
+// A started async attempt is journaled failed before a sync or barrier run's
+// before-retry SQL runs: until then its record names a query id whose
+// QueryFinish a re-run in async mode would take for the outcome of rows that
+// SQL removed (#767).
+async function journalAsyncAttemptSuperseded(journalStore: JournalStore, state: MigrationRowState, op: OperationState): Promise<void> {
+  if (op.status !== 'started' || op.queryId === '') return
+  await journalStore.writeMigrationState(
+    upsertOperation(state, { ...op, status: 'failed', finishedAt: isoWithoutZone(new Date()), lastError: SUPERSEDED_ASYNC_ATTEMPT_ERROR }, Date.now),
+  )
+}
+
 function syncOperationState(
   index: number,
   identity: RecordedIdentity,
@@ -358,6 +373,7 @@ export async function applyMigration(input: {
     const priorAttempt = stateBefore?.operations.find((op) => op.operationIndex === i)
     if (priorAttempt !== undefined) await assertAsyncAttemptStopped(db, file, priorAttempt)
     if (priorAttempt !== undefined && operation?.beforeRetry) {
+      if (stateBefore !== null) await journalAsyncAttemptSuperseded(journalStore, stateBefore, priorAttempt)
       try {
         await runBeforeRetry(db, operation.type, statement, operation.beforeRetry, {
           cluster: config.clickhouse?.cluster,

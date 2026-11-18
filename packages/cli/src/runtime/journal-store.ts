@@ -35,45 +35,37 @@ export interface OperationState {
    */
   fingerprint: string
   /**
-   * Set by a journal read when the record's fingerprint was stored fenced
-   * (#767): a started record that names its query_log bound, which releases
-   * before #767 refuse to resume. Never written; the fence follows from the
-   * record itself (see storedFingerprint).
+   * Whether this started async record names a query id that only this
+   * attempt was submitted under, recorded before its submit (#767). Only that
+   * write sets it; every other write carries it as a read returned it. A
+   * write stores it in the fingerprint (FENCED_FINGERPRINT_PREFIX), so a
+   * journal without the fingerprint column never has it.
    */
   attemptFenced?: boolean
 }
 
 /**
- * The lastError of a started async attempt that names its query_log bound
- * (#767): this text, followed by the bound. Defined here because a write
- * stores such a record's fingerprint fenced.
+ * The prefix of the stored fingerprint of a fenced started record (#767).
+ * Releases from #599 on compare a started record's fingerprint with the
+ * statement's before they resume, so an earlier release stops with
+ * statement_split_changed instead of running before-retry SQL without
+ * recording the attempt failed first. A read strips it again.
  */
-export const ATTEMPT_BOUND_MARKER = 'submitted; a retry reads its outcome from system.query_log entries started at or after '
-
-/**
- * The prefix of the stored fingerprint of a started record that names its
- * query_log bound (#767). Releases from #599 on compare a started record's
- * fingerprint with the statement's before they resume, so they stop with
- * statement_split_changed instead of compensating the attempt without a
- * record of it. A read strips it again (attemptFenced).
- */
-export const FENCED_FINGERPRINT_PREFIX = 'fenced-attempt;'
+const FENCED_FINGERPRINT_PREFIX = 'fenced-attempt;'
 
 /** The fingerprint a write stores for `op` (#767). */
-export function storedFingerprint(op: OperationState): string {
-  return op.status === 'started' && op.lastError.startsWith(ATTEMPT_BOUND_MARKER)
-    ? `${FENCED_FINGERPRINT_PREFIX}${op.fingerprint}`
-    : op.fingerprint
+function storedFingerprint(op: OperationState): string {
+  return op.status === 'started' && op.attemptFenced === true ? `${FENCED_FINGERPRINT_PREFIX}${op.fingerprint}` : op.fingerprint
 }
 
-/** The fingerprint a read finds stored, without its fence (#767). */
-export function readStoredFingerprint(stored: string): Pick<OperationState, 'fingerprint' | 'attemptFenced'> {
+/** The fingerprint a read finds stored, and whether it was fenced (#767). */
+function readStoredFingerprint(stored: string): Pick<OperationState, 'fingerprint' | 'attemptFenced'> {
   return stored.startsWith(FENCED_FINGERPRINT_PREFIX)
     ? { fingerprint: stored.slice(FENCED_FINGERPRINT_PREFIX.length), attemptFenced: true }
     : { fingerprint: stored }
 }
 
-/** `op` with the fence a read finds after a write with or without the fingerprint column (#767). */
+/** `op` as a read returns it after a write with or without the fingerprint column (#767). */
 export function operationAsStored(op: OperationState, fingerprints: boolean): OperationState {
   const { attemptFenced: _attemptFenced, ...rest } = op
   return fingerprints ? { ...rest, ...readStoredFingerprint(storedFingerprint(op)) } : rest
@@ -836,10 +828,7 @@ SETTINGS index_granularity = 1`
       await ensureFingerprintColumn()
       await insertState(state, fingerprintColumn)
       // As a read returns it, so a fence counts only where it was stored.
-      lastWritten.set(state.name, {
-        ...state,
-        operations: state.operations.map((op) => operationAsStored(op, fingerprintColumn)),
-      })
+      lastWritten.set(state.name, { ...state, operations: state.operations.map((op) => operationAsStored(op, fingerprintColumn)) })
       noteVersion(state.name, state.appliedAt)
       await trySyncReplica()
     },

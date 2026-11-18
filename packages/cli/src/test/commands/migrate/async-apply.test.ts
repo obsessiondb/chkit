@@ -5,11 +5,9 @@ import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus, QueryStatusOp
 import {
   applyAsyncStatement,
   ATTEMPT_RECORD_MARKER,
-  attemptRecordError,
   makeDeterministicQueryId,
-  PENDING_ATTEMPT_MARKER,
-  STARTED_RECORD_MARKER,
 } from '../../../commands/migrate/async-apply.js'
+import { abandonMigrationState } from '../../../commands/migrate/abandon.js'
 import {
   type JournalStore,
   type MigrationRowState,
@@ -36,14 +34,10 @@ interface FakeExecutor {
 // query_log bound must come from the server.
 const SERVER_NOW_MS = 1_700_000_100_000
 const SERVER_DATABASE = 'analytics'
-// SERVER_NOW_MS minus the 2 s skew margin.
-const SUBMISSION_BOUND = '2023-11-14T22:14:58.000Z'
 // How long the attempt an attach finds has been running.
 const RUNNING_ELAPSED_MS = 30_000
-// SERVER_NOW_MS minus RUNNING_ELAPSED_MS and the 2 s skew margin.
-const ATTACH_BOUND = '2023-11-14T22:14:28.000Z'
-// A retry's id is its own (#701): its polls count every query_log entry from
-// an hour before SERVER_NOW_MS, a bound that only lets query_log prune.
+// Every attempt's id is its own (#701, #767): its polls count every query_log
+// entry from an hour before SERVER_NOW_MS, a bound that only lets query_log prune.
 const RETRY_BOUND = '2023-11-14T21:15:00.000Z'
 const UUID_SHAPE = /^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/
 
@@ -105,9 +99,12 @@ interface FakeStore {
   writes: MigrationRowState[]
 }
 
-function createFakeJournalStore(initial: MigrationRowState | null = null): FakeStore {
+// fingerprints: false is a journal without the operation_fingerprints
+// column, which stores no fence (#767).
+function createFakeJournalStore(initial: MigrationRowState | null = null, options: { fingerprints?: boolean } = {}): FakeStore {
   let current: MigrationRowState | null = initial
   const writes: MigrationRowState[] = []
+  const fingerprints = options.fingerprints ?? true
   const store: JournalStore = {
     databaseMissing: false,
     async readJournal() {
@@ -118,11 +115,8 @@ function createFakeJournalStore(initial: MigrationRowState | null = null): FakeS
     },
     async writeMigrationState(state) {
       writes.push(state)
-      // As the journal returns it: with the fence of a record that names its bound (#767).
-      current = {
-        ...state,
-        operations: state.operations.map((op) => operationAsStored({ ...op, fingerprint: op.fingerprint ?? '' }, true)),
-      }
+      // As the journal returns it; BASE_INPUT records no fingerprint.
+      current = { ...state, operations: state.operations.map((op) => (op.fingerprint === undefined ? op : operationAsStored(op, fingerprints))) }
     },
     async appendEntry() {
       // not used in these tests
@@ -146,7 +140,7 @@ const BASE_INPUT = {
   beforeRetry: null,
 } as const
 
-// The id a statement with no journal row gets on SERVER_DATABASE.
+// The id an earlier release gave a statement's first attempt on SERVER_DATABASE.
 const QUERY_ID = makeDeterministicQueryId(
   SERVER_DATABASE,
   '_chkit_migrations',
@@ -154,8 +148,9 @@ const QUERY_ID = makeDeterministicQueryId(
   BASE_INPUT.statementIndex,
 )
 
-// The id a retry submitted under: a random one, never the statement's first id (#701).
-function retryQueryId(submitCalls: Array<{ queryId?: string }>): string {
+// The id an attempt submitted under: a random one, never the statement's
+// earlier first id (#701, #767).
+function submittedQueryId(submitCalls: Array<{ queryId?: string }>): string {
   const id = submitCalls[0]?.queryId ?? ''
   expect(id).toMatch(UUID_SHAPE)
   expect(id).not.toBe(QUERY_ID)
@@ -190,17 +185,7 @@ describe('applyAsyncStatement', () => {
     expect(a).toMatch(/^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$/)
   })
 
-  // TS and chkit-py read each other's journals: the markers are byte-identical
-  // in test_migrate_async_apply.py (#767).
-  test('started records name their query_log bound in the same text as chkit-py', () => {
-    expect(attemptRecordError('2023-11-14T22:14:58.000Z')).toBe(
-      'submitted; a retry reads its outcome from system.query_log entries started at or after 2023-11-14T22:14:58.000Z',
-    )
-    expect(PENDING_ATTEMPT_MARKER).toBe('not submitted yet; its system.query_log bound is not recorded')
-  })
-
   test('first attempt: writes started, submits, polls to completion', async () => {
-    const queryId = QUERY_ID
     const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
       { status: 'unknown' }, // initial in-flight check
       { status: 'running', writtenRows: 50_000 },
@@ -220,24 +205,23 @@ describe('applyAsyncStatement', () => {
 
     expect(result.kind).toBe('completed')
     expect(submitCalls).toHaveLength(1)
-    expect(submitCalls[0]?.queryId).toBe(queryId)
+    // A first attempt gets a random id of its own too (#767).
+    const queryId = submittedQueryId(submitCalls)
     expect(commandCalls).toEqual([]) // no before-retry on first attempt
     expect(statusCalls).toHaveLength(3)
-    // The in-flight check looks for any running query with this id; the polls
-    // after submitting only count queries started after the server-time bound.
-    expect(statusCalls.map((call) => call.afterTime)).toEqual([
-      undefined,
-      SUBMISSION_BOUND,
-      SUBMISSION_BOUND,
+    // The in-flight check looks for a running query under the id an earlier
+    // release would have used; the polls read the attempt's own id.
+    expect(statusCalls).toMatchObject([
+      { queryId: QUERY_ID, afterTime: undefined },
+      { queryId, afterTime: RETRY_BOUND },
+      { queryId, afterTime: RETRY_BOUND },
     ])
-    // The server time is read before the in-flight check (an attach would
-    // need it) and again right before the submission.
-    expect(events).toEqual([SERVER_TIME_QUERY, 'status', SERVER_TIME_QUERY, 'submit', 'status', 'status'])
-    // Three writes: started without a bound, started with the bound its
-    // polls use (#767), completed.
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started', 'completed'])
-    expect(writes[0]?.operations[0]?.lastError).toBe(PENDING_ATTEMPT_MARKER)
-    expect(writes[1]?.operations[0]?.lastError).toBe(attemptRecordError(SUBMISSION_BOUND))
+    expect(events).toEqual([SERVER_TIME_QUERY, 'status', 'submit', 'status', 'status'])
+    // Two writes: started + completed. The started record names the id and
+    // is fenced before the submit; the completed one is not (#767).
+    expect(writes).toHaveLength(2)
+    expect(writes[0]?.operations[0]).toMatchObject({ status: 'started', queryId, lastError: ATTEMPT_RECORD_MARKER, attemptFenced: true })
+    expect(writes[1]?.operations[0]?.status).toBe('completed')
     expect(lines.some((line) => line.includes('submitting async'))).toBe(true)
   })
 
@@ -311,172 +295,51 @@ describe('applyAsyncStatement', () => {
     expect(lines.some((line) => line.includes('already completed'))).toBe(true)
   })
 
-  test('in-flight attach: query already running on server → poll without resubmit', async () => {
-    const queryId = QUERY_ID
-    const { db, statusCalls, submitCalls, commandCalls, events } = createFakeExecutor([
-      { status: 'running', writtenRows: 50, elapsedMs: RUNNING_ELAPSED_MS }, // initial check sees it running
-      { status: 'running', writtenRows: 75 },
-      { status: 'finished', writtenRows: 100, durationMs: 5000 },
-    ])
-    const { store, writes } = createFakeJournalStore(
-      freshStateWith({
-        operationIndex: 0,
-        operationKey: BASE_INPUT.operationKey,
-        operationType: BASE_INPUT.operationType,
-        queryId,
-        status: 'started',
-        startedAt: '2026-05-26 11:00:00.000',
-        finishedAt: null,
-        lastError: '',
-      }),
-    )
-    const lines: string[] = []
+  // #767: only a fenced record's id names the running attempt alone. Any
+  // other id an earlier release may have reused, so polls could take an
+  // earlier attempt's QueryFinish for this one's outcome. The run stops
+  // instead of attaching, and writes nothing.
+  // #463: an older chkit derived the id from the migration alone; a
+  // statement it journaled is still checked under that id.
+  const LEGACY_ID = 'f2d1c4e0-1111-2222-3333-444455556666'
+  const runningPriors: Array<[string, MigrationRowState | null, string]> = [
+    ['no journal record', null, QUERY_ID],
+    ['an earlier release\'s started record', freshStateWith({
+      operationIndex: 0, operationKey: BASE_INPUT.operationKey, operationType: BASE_INPUT.operationType,
+      queryId: LEGACY_ID, status: 'started', startedAt: '2026-05-26 11:00:00.000', finishedAt: null, lastError: '', fingerprint: '',
+    }), LEGACY_ID],
+    ['a failed record', freshStateWith({
+      operationIndex: 0, operationKey: BASE_INPUT.operationKey, operationType: BASE_INPUT.operationType,
+      queryId: LEGACY_ID, status: 'failed', startedAt: '2026-05-26 11:00:00.000', finishedAt: '2026-05-26 11:00:01.000', lastError: 'boom', fingerprint: '',
+    }), LEGACY_ID],
+  ]
+  for (const [label, prior, checkedId] of runningPriors) {
+    test(`a running query under ${label} stops the run instead of attaching (#767)`, async () => {
+      const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
+        { status: 'running', writtenRows: 50, elapsedMs: RUNNING_ELAPSED_MS },
+      ])
+      const { store, writes } = createFakeJournalStore(prior)
 
-    const result = await applyAsyncStatement({
-      ...BASE_INPUT,
-      beforeRetry: 'TRUNCATE TABLE t',
-      db,
-      journalStore: store,
-      log: (line) => lines.push(line),
-      sleep: NO_SLEEP,
-      now: FIXED_NOW,
-    })
-
-    expect(result.kind).toBe('completed')
-    expect(submitCalls).toEqual([]) // never resubmitted
-    expect(commandCalls).toEqual([]) // before-retry NOT run on attach
-    // The polls only count queries that started with the attached attempt,
-    // which had run for RUNNING_ELAPSED_MS when the in-flight check saw it.
-    // A started record an older chkit wrote, with before-retry SQL, is
-    // checked in system.processes only (#672).
-    expect(statusCalls.map((call) => call.afterTime)).toEqual([undefined, ATTACH_BOUND, ATTACH_BOUND])
-    expect(events).toEqual([SERVER_TIME_QUERY, 'status', 'status', 'status'])
-    expect(lines.some((line) => line.includes('attaching'))).toBe(true)
-    // The attach journals the attempt started (#672), then completed.
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
-  })
-
-  // query_log is flushed on a timer. Right after the attached attempt ends, its
-  // entry can still be missing while an earlier attempt with the same query id
-  // (abandoned, or retried after an edit, #233) has its QueryFinish there.
-  test('an attach ignores query_log entries of an earlier attempt', async () => {
-    const queryId = QUERY_ID
-    const attachedStartSec = Math.floor((SERVER_NOW_MS - RUNNING_ELAPSED_MS) / 1000)
-    const earlierStartSec = attachedStartSec - 3_600
-    const phases = ['running', 'running', 'flush gap', 'flush gap', 'flushed']
-    const statusCalls: StatusCall[] = []
-    const db = {
-      async query() {
-        return [{ now_ms: SERVER_NOW_MS, database: SERVER_DATABASE }]
-      },
-      async submit() {
-        throw new Error('an attach never submits')
-      },
-      // system.processes while the attempt runs, then system.query_log:
-      // query_start_time >= parseDateTimeBestEffort(afterTime), in whole seconds.
-      async queryStatus(id: string, opts?: { afterTime?: string }): Promise<QueryStatus> {
-        statusCalls.push({ queryId: id, afterTime: opts?.afterTime })
-        const phase = phases.shift()
-        if (phase === undefined) throw new Error('queryStatus called after the attempt was reported')
-        if (phase === 'running') return { status: 'running', writtenRows: 1, elapsedMs: RUNNING_ELAPSED_MS }
-        const afterSec = opts?.afterTime === undefined ? 0 : Math.floor(Date.parse(opts.afterTime) / 1000)
-        if (phase === 'flushed' && attachedStartSec >= afterSec) {
-          return { status: 'failed', error: 'Memory limit exceeded' }
-        }
-        return earlierStartSec >= afterSec
-          ? { status: 'finished', writtenRows: 2, durationMs: 10 }
-          : { status: 'unknown' }
-      },
-      async command() {},
-    } as unknown as ClickHouseExecutor
-    const { store, writes } = createFakeJournalStore(
-      freshStateWith({
-        operationIndex: 0,
-        operationKey: BASE_INPUT.operationKey,
-        operationType: BASE_INPUT.operationType,
-        queryId,
-        status: 'started',
-        startedAt: '2023-11-14 22:14:30.000',
-        finishedAt: null,
-        lastError: '',
-      }),
-    )
-
-    await expect(
-      applyAsyncStatement({
+      const run = applyAsyncStatement({
         ...BASE_INPUT,
+        beforeRetry: 'TRUNCATE TABLE t',
         db,
         journalStore: store,
         log: () => {},
         sleep: NO_SLEEP,
         now: FIXED_NOW,
-      }),
-    ).rejects.toThrow(/Memory limit exceeded/)
+      })
 
-    expect(statusCalls.slice(1).map((call) => call.afterTime)).toEqual(Array(4).fill(ATTACH_BOUND))
-    // Recorded as the attached attempt's failure, never as completed.
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
-  })
-
-  test('an attach keeps the unbounded lookup when the running attempt reports no elapsed time', async () => {
-    const { db, statusCalls } = createFakeExecutor([
-      { status: 'running' },
-      { status: 'finished', writtenRows: 1, durationMs: 100 },
-    ])
-    const { store } = createFakeJournalStore(null)
-
-    const result = await applyAsyncStatement({
-      ...BASE_INPUT,
-      db,
-      journalStore: store,
-      log: () => {},
-      sleep: NO_SLEEP,
-      now: FIXED_NOW,
+      await expect(run).rejects.toMatchObject({
+        code: 'async_outcome_unknown',
+        message: `Async migration step load_table_data (statement 1 of m.sql, query_id ${checkedId}) is still running on the server, but its query id was not recorded by this chkit release for that attempt alone, so chkit cannot tell its outcome from system.query_log once it ends. Nothing was submitted and no before-retry SQL ran. Wait for it to finish or run KILL QUERY WHERE query_id = '${checkedId}', then run chkit migrate --apply again.`,
+      })
+      expect(statusCalls).toEqual([{ queryId: checkedId, afterTime: undefined, everyReplica: true, runningOnly: true }])
+      expect(submitCalls).toEqual([])
+      expect(commandCalls).toEqual([])
+      expect(writes).toEqual([])
     })
-
-    expect(result.kind).toBe('completed')
-    // Without its start, a bound could exclude the attempt's own entry.
-    expect(statusCalls.map((call) => call.afterTime)).toEqual([undefined, '1970-01-01 00:00:00'])
-  })
-
-  // #463: an older chkit derived the id from the migration alone. A statement
-  // it journaled keeps that id, so an upgrade mid-load still finds the attempt.
-  test('a statement the journal tracks keeps its journaled query id', async () => {
-    const legacyId = 'f2d1c4e0-1111-2222-3333-444455556666'
-    const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([
-      { status: 'running', writtenRows: 5, elapsedMs: RUNNING_ELAPSED_MS },
-      { status: 'finished', writtenRows: 12, durationMs: 12_000 },
-    ])
-    const { store, writes } = createFakeJournalStore(
-      freshStateWith({
-        operationIndex: 0,
-        operationKey: BASE_INPUT.operationKey,
-        operationType: BASE_INPUT.operationType,
-        queryId: legacyId,
-        status: 'started',
-        startedAt: '2026-05-26 11:00:00.000',
-        finishedAt: null,
-        lastError: '',
-      }),
-    )
-
-    const result = await applyAsyncStatement({
-      ...BASE_INPUT,
-      beforeRetry: 'TRUNCATE TABLE t',
-      db,
-      journalStore: store,
-      log: () => {},
-      sleep: NO_SLEEP,
-      now: FIXED_NOW,
-    })
-
-    expect(result.kind).toBe('completed')
-    expect(statusCalls.map((call) => call.queryId)).toEqual([legacyId, legacyId])
-    expect(submitCalls).toEqual([])
-    expect(commandCalls).toEqual([])
-    // The attach journals the attempt started (#672), under its journaled id.
-    expect(writes.map((state) => state.operations[0]?.queryId)).toEqual([legacyId, legacyId])
-  })
+  }
 
   test('retry: prior failed op + query no longer running → run before-retry, then resubmit', async () => {
     const queryId = QUERY_ID
@@ -517,7 +380,7 @@ describe('applyAsyncStatement', () => {
     // under an id of its own, so every query_log entry of it counts (#701).
     expect(statusCalls[0]?.queryId).toBe(queryId)
     expect(submitCalls).toHaveLength(1)
-    const retryId = retryQueryId(submitCalls)
+    const retryId = submittedQueryId(submitCalls)
     expect(statusCalls).toHaveLength(3)
     expect(statusCalls.slice(1)).toMatchObject([
       { queryId: retryId, afterTime: RETRY_BOUND },
@@ -535,7 +398,8 @@ describe('applyAsyncStatement', () => {
     expect(writes[0]?.operations[0]).toMatchObject({
       status: 'started',
       queryId: retryId,
-      lastError: attemptRecordError(RETRY_BOUND),
+      lastError: ATTEMPT_RECORD_MARKER,
+      attemptFenced: true,
     })
     expect(writes[1]?.operations[0]).toMatchObject({ status: 'completed', queryId: retryId })
   })
@@ -572,7 +436,7 @@ describe('applyAsyncStatement', () => {
     })
 
     expect(commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t', settings }])
-    expect(submitCalls).toEqual([{ sql: BASE_INPUT.sql, queryId: retryQueryId(submitCalls), settings }])
+    expect(submitCalls).toEqual([{ sql: BASE_INPUT.sql, queryId: submittedQueryId(submitCalls), settings }])
   })
 
   test('retry without before-retry SQL: still resubmits forward', async () => {
@@ -670,9 +534,11 @@ describe('applyAsyncStatement', () => {
       }),
     ).rejects.toThrow(/NETWORK_ERROR: broken pipe/)
 
-    // started (without, then with its bound) + failed
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started', 'failed'])
-    expect(writes[2]?.operations[0]?.lastError).toContain('NETWORK_ERROR: broken pipe')
+    // started + failed
+    expect(writes).toHaveLength(2)
+    expect(writes[0]?.operations[0]?.status).toBe('started')
+    expect(writes[1]?.operations[0]?.status).toBe('failed')
+    expect(writes[1]?.operations[0]?.lastError).toContain('NETWORK_ERROR: broken pipe')
   })
 
   test('surfaces submit error when status remains unknown (SQL parse failure case)', async () => {
@@ -694,13 +560,15 @@ describe('applyAsyncStatement', () => {
         now: FIXED_NOW,
       }),
     ).rejects.toThrow(/Syntax error/)
+    const queryId = writes[0]?.operations[0]?.queryId ?? ''
+    expect(queryId).toMatch(UUID_SHAPE)
 
     // The query never started, so the attempt is recorded as failed (#233):
     // an edited file can then run again without --retry.
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started', 'failed'])
-    expect(writes[2]?.operations[0]?.lastError).toBe('Syntax error: failed at position 1')
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
+    expect(writes[1]?.operations[0]?.lastError).toBe('Syntax error: failed at position 1')
     // The submit error is the command's error; no progress line repeats it (#561).
-    expect(lines).toEqual([`  load_table_data: submitting async (query_id=${QUERY_ID})`])
+    expect(lines).toEqual([`  load_table_data: submitting async (query_id=${queryId})`])
   })
 
   // When polling gives up, the submit error is the only trace of e.g. a rejected
@@ -712,7 +580,7 @@ describe('applyAsyncStatement', () => {
     [false, false],
   ] as const) {
     test(`polling that exhausts its budget names the submit error (submit fails: ${submitFails}, deferred: ${deferSubmit})`, async () => {
-      const { db } = createFakeExecutor(
+      const { db, submitCalls } = createFakeExecutor(
         [
           { status: 'unknown' }, // initial in-flight check
           ...Array.from({ length: 21 }, () => new Error('HTTP 502: bad gateway')),
@@ -722,20 +590,23 @@ describe('applyAsyncStatement', () => {
       const { store, writes } = createFakeJournalStore(null)
 
       const submitTail = submitFails ? ' The submit request failed too (Authentication failed).' : ''
-      await expect(
-        applyAsyncStatement({
-          ...BASE_INPUT,
-          db,
-          journalStore: store,
-          log: () => {},
-          sleep: NO_SLEEP,
-          now: FIXED_NOW,
-        }),
-      ).rejects.toThrow(
-        `Async migration step load_table_data (query_id ${QUERY_ID}): polling failed 21× (HTTP 502: bad gateway).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
+      const error = await applyAsyncStatement({
+        ...BASE_INPUT,
+        db,
+        journalStore: store,
+        log: () => {},
+        sleep: NO_SLEEP,
+        now: FIXED_NOW,
+      }).then(
+        () => undefined,
+        (reason: unknown) => reason,
+      )
+      expect(error).toBeInstanceOf(Error)
+      expect((error as Error).message).toBe(
+        `Async migration step load_table_data (query_id ${submittedQueryId(submitCalls)}): polling failed 21× (HTTP 502: bad gateway).${submitTail} The load may still be running server-side — re-run \`chkit migrate --apply\` to re-attach.`,
       )
       // The outcome is unknown, so the attempt stays started for a re-run to re-attach.
-      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
+      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
     })
   }
 
@@ -765,9 +636,9 @@ describe('applyAsyncStatement', () => {
 
     expect(result.kind).toBe('completed')
     expect(submitCalls).toHaveLength(1)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started', 'completed'])
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
     expect(lines).toEqual([
-      `  load_table_data: submitting async (query_id=${QUERY_ID})`,
+      `  load_table_data: submitting async (query_id=${submittedQueryId(submitCalls)})`,
       '  load_table_data: written=9 rows (72 B), elapsed 0s',
       '  load_table_data: finished — written=16 rows (128 B) in 8s',
     ])
@@ -777,7 +648,7 @@ describe('applyAsyncStatement', () => {
   // neither running nor yet in query_log (flushed on a timer). The server ran
   // the query, so the submit error does not mean it failed (#657).
   test('a submit that fails after a poll found the query running waits for query_log', async () => {
-    const { db } = createFakeExecutor(
+    const { db, submitCalls } = createFakeExecutor(
       [
         { status: 'unknown' }, // initial in-flight check
         { status: 'running', writtenRows: 9, writtenBytes: 72 },
@@ -799,9 +670,9 @@ describe('applyAsyncStatement', () => {
     })
 
     expect(result.kind).toBe('completed')
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started', 'completed'])
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
     expect(lines).toEqual([
-      `  load_table_data: submitting async (query_id=${QUERY_ID})`,
+      `  load_table_data: submitting async (query_id=${submittedQueryId(submitCalls)})`,
       '  load_table_data: written=9 rows (72 B), elapsed 0s',
       '  load_table_data: status unknown — still polling (elapsed 0s)',
       '  load_table_data: finished — written=16 rows (128 B) in 8s',
@@ -829,15 +700,16 @@ describe('applyAsyncStatement', () => {
         now: FIXED_NOW,
       }),
     ).rejects.toThrow(
-      `Async migration step load_table_data (query_id ${QUERY_ID}): the submit request failed (error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
+      `): the submit request failed (error code: 524) and polling found no outcome 21×. A re-run of \`chkit migrate --apply\` attaches to the query if it still runs and runs the statement again if not.`,
     )
     // The outcome is unknown, so the attempt stays started.
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
   })
 
-  // The query id is deterministic, so query_log still holds the earlier
-  // attempt's QueryFinish after `migrate --abandon` (#233). A submission that
-  // then fails before it starts (no query_log row) must not inherit it.
+  // query_log still holds an earlier attempt's QueryFinish under the id an
+  // earlier release gave a statement's first attempt, also after `migrate
+  // --abandon` (#233). A submission that then fails before it starts (no
+  // query_log row) must not inherit it: its id is its own (#767).
   for (const prior of ['none', 'abandoned'] as const) {
     test(`a new submission ignores query_log entries of an earlier attempt (prior op: ${prior})`, async () => {
       const queryId = QUERY_ID
@@ -892,18 +764,13 @@ describe('applyAsyncStatement', () => {
         }),
       ).rejects.toThrow(/src_typo/)
 
-      // A first attempt's polls are bounded by its start; a retry polls an id of its own (#701).
-      const poll =
-        prior === 'none'
-          ? { queryId, afterTime: SUBMISSION_BOUND }
-          : { queryId: statusCalls[1]?.queryId ?? '', afterTime: RETRY_BOUND }
+      // Every attempt polls an id of its own (#701, #767).
+      const poll = { queryId: statusCalls[1]?.queryId ?? '', afterTime: RETRY_BOUND }
       expect(poll.queryId).toMatch(UUID_SHAPE)
+      expect(poll.queryId).not.toBe(queryId)
       expect(statusCalls.slice(1).every((call) => call.queryId === poll.queryId && call.afterTime === poll.afterTime)).toBe(true)
-      // Recorded as a failed attempt, never as completed. A first attempt is
-      // journaled started twice: without, then with its bound (#767).
-      expect(writes.map((state) => state.operations[0]?.status)).toEqual(
-        prior === 'none' ? ['started', 'started', 'failed'] : ['started', 'failed'],
-      )
+      // Recorded as a failed attempt, never as completed.
+      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
     })
   }
 
@@ -1053,26 +920,6 @@ describe('applyAsyncStatement with recorded fingerprints', () => {
     expect(writes).toEqual([])
   })
 
-  test('an attach records the fingerprint of the attempt it attached to', async () => {
-    const { db } = createFakeExecutor([
-      { status: 'running', elapsedMs: RUNNING_ELAPSED_MS },
-      { status: 'finished', writtenRows: 1, durationMs: 1000 },
-    ])
-    const { store, writes } = createFakeJournalStore(abandonedRunning(''))
-
-    await applyAsyncStatement({
-      ...BASE_INPUT,
-      fingerprint: 'v1:new',
-      db,
-      journalStore: store,
-      log: () => {},
-      sleep: NO_SLEEP,
-      now: FIXED_NOW,
-    })
-
-    expect(writes.at(-1)?.operations[0]).toMatchObject({ status: 'completed', fingerprint: '' })
-  })
-
   test('refuses to skip a completed record of other SQL', async () => {
     const { db } = createFakeExecutor([])
     const { store } = createFakeJournalStore({
@@ -1097,19 +944,20 @@ describe('applyAsyncStatement with recorded fingerprints', () => {
 // #672: a run can leave a step started after its load finished on the server:
 // the poll budget ran out after a failed submit, or the run was killed before
 // it journaled the outcome. A re-run reads that attempt's outcome before it
-// compensates and resubmits.
+// compensates and resubmits, when the record is fenced (#767).
 describe('applyAsyncStatement re-run of a started step', () => {
+  // The random id this release recorded for an attempt before its submit.
+  const OWN_ID = '0b7f9a52-3c1d-4e8f-9a6b-2d4c8e1f7a30'
   const startedRecord = (overrides: Partial<OperationState> = {}): MigrationRowState =>
     freshStateWith({
       operationIndex: 0,
       operationKey: BASE_INPUT.operationKey,
       operationType: BASE_INPUT.operationType,
-      queryId: QUERY_ID,
+      queryId: OWN_ID,
       status: 'started',
       startedAt: '2026-05-26 10:00:00.000',
       finishedAt: null,
-      // The bound its polls used: its start minus the skew margin (RECORD_BOUND).
-      lastError: attemptRecordError('2026-05-26T09:59:58.000Z'),
+      lastError: ATTEMPT_RECORD_MARKER,
       fingerprint: 'v1:load',
       attemptFenced: true,
       ...overrides,
@@ -1135,13 +983,24 @@ describe('applyAsyncStatement re-run of a started step', () => {
     now: FIXED_NOW,
   }
   const iso = (ms: number) => new Date(ms).toISOString().replace('Z', '')
-  // The bound startedRecord() names for the statement's first id (#767).
-  const RECORD_BOUND = '2026-05-26T09:59:58.000Z'
-  // A retry id a #701 release recorded.
-  const LEGACY_RETRY_ID = '7d1c2f0e-4a5b-4c6d-8e9f-0a1b2c3d4e5f'
+  // The record's start minus the hour that only lets query_log prune.
+  const RECORD_BOUND = '2026-05-26T09:00:00.000Z'
   // A started attempt without a query_log entry: the check, then 5 rechecks
   // while query_log is flushed (#701).
   const NO_ENTRY_CHECKS = Array.from({ length: 6 }, () => ({ status: 'unknown' as const }))
+  const killedBeforeSubmit = (db: ClickHouseExecutor) =>
+    ({
+      ...db,
+      submit: () => {
+        throw new Error('killed')
+      },
+    }) as unknown as ClickHouseExecutor
+  const outcomeUnknown = (queryId: string, reason: string) =>
+    `Async migration step load_table_data (statement 1 of m.sql, query_id ${queryId}): the journal records an attempt as started and no replica runs it, but chkit cannot tell whether it finished: ${reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of m.sql that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon m.sql, and apply again.`
+  const NO_ENTRY_REASON =
+    'system.query_log has no entry for its query id (query logging is off for the user, query_log is flushed later than chkit waits, or the run stopped before it submitted the statement)'
+  const UNFENCED_REASON =
+    "an earlier chkit release recorded it, or the journal could not store the record's fence (it has no operation_fingerprints column), so its query id may name earlier attempts too"
 
   test('a re-run after the poll budget ran out finds the finished attempt and neither compensates nor resubmits', async () => {
     const { store, writes } = createFakeJournalStore(null)
@@ -1158,9 +1017,10 @@ describe('applyAsyncStatement re-run of a started step', () => {
     await expect(
       applyAsyncStatement({ ...input, db: first.db, journalStore: store, sleep: NO_SLEEP }),
     ).rejects.toThrow(/polling found no outcome 21×/)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
-    // The attempt's start is recorded on the server clock, and its record names the bound its polls used (#767).
-    expect(writes[1]?.operations[0]).toMatchObject({ startedAt: iso(SERVER_NOW_MS), lastError: attemptRecordError(SUBMISSION_BOUND) })
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+    const queryId = submittedQueryId(first.submitCalls)
+    // The attempt's start is recorded on the server clock, fenced, under the submitted id.
+    expect(writes[0]?.operations[0]).toMatchObject({ queryId, startedAt: iso(SERVER_NOW_MS), lastError: ATTEMPT_RECORD_MARKER, attemptFenced: true })
 
     // Run 2: the load is no longer running and query_log has its QueryFinish.
     const second = createFakeExecutor([{ status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 }])
@@ -1176,25 +1036,18 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(result.kind).toBe('completed')
     expect(second.commandCalls).toEqual([])
     expect(second.submitCalls).toEqual([])
-    // One read of every replica, bounded as run 1's polls were.
-    expect(second.statusCalls).toEqual([{ queryId: QUERY_ID, afterTime: SUBMISSION_BOUND, everyReplica: true }])
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started', 'completed'])
-    expect(writes[2]?.operations[0]).toMatchObject({
-      queryId: QUERY_ID,
+    // One read of every replica, of the recorded id only.
+    expect(second.statusCalls).toEqual([{ queryId, afterTime: RETRY_BOUND, everyReplica: true }])
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    expect(writes[1]?.operations[0]).toMatchObject({
+      queryId,
       startedAt: iso(SERVER_NOW_MS),
       fingerprint: 'v1:load',
       lastError: '',
     })
     expect(lines).toEqual([
-      `  load_table_data: previous attempt of query_id=${QUERY_ID} finished on the server — written=16 rows (128 B) in 8s, recording it as completed`,
+      `  load_table_data: previous attempt of query_id=${queryId} finished on the server — written=16 rows (128 B) in 8s, recording it as completed`,
     ])
-
-    // Run 3 skips the statement the recovery recorded as completed.
-    const third = createFakeExecutor([])
-    const skipped = await applyAsyncStatement({ ...input, db: third.db, journalStore: store, sleep: NO_SLEEP })
-    expect(skipped.kind).toBe('skipped')
-    expect(third.statusCalls).toEqual([])
-    expect(third.submitCalls).toEqual([])
   })
 
   test('a started attempt that failed on the server is journaled failed, then compensated and resubmitted', async () => {
@@ -1214,43 +1067,59 @@ describe('applyAsyncStatement re-run of a started step', () => {
     })
 
     expect(result.kind).toBe('completed')
-    expect(fake.statusCalls[0]).toEqual({ queryId: QUERY_ID, afterTime: RECORD_BOUND, everyReplica: true })
+    expect(fake.statusCalls[0]).toEqual({ queryId: OWN_ID, afterTime: RECORD_BOUND, everyReplica: true })
     expect(fake.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    const retryId = retryQueryId(fake.submitCalls)
+    const retryId = submittedQueryId(fake.submitCalls)
+    expect(retryId).not.toBe(OWN_ID)
     expect(fake.submitCalls).toEqual([{ sql: input.sql, queryId: retryId }])
     expect(lines[0]).toBe(
-      `  load_table_data: previous attempt of query_id=${QUERY_ID} is no longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — running before-retry then resubmitting as query_id=${retryId}`,
+      `  load_table_data: previous attempt of query_id=${OWN_ID} is no longer running (status=failed: Code: 241. DB::Exception: Memory limit exceeded) — running before-retry then resubmitting as query_id=${retryId}`,
     )
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
     expect(writes[0]?.operations[0]?.lastError).toBe('Code: 241. DB::Exception: Memory limit exceeded\nstack')
   })
 
-  test('a started attempt without a query_log entry is journaled failed, then compensated and resubmitted', async () => {
-    const fake = clockedExecutor([...NO_ENTRY_CHECKS, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
-    const { store, writes } = createFakeJournalStore(startedRecord())
+  // #767 (Codex review of #770, 770b): an attempt with no evidence may have
+  // finished (query logging off, a late flush) or never been submitted. Its
+  // record stays as it is, and nothing is compensated or submitted, with or
+  // without before-retry SQL.
+  for (const beforeRetry of ['TRUNCATE TABLE t', null]) {
+    test(`a fenced started attempt without a query_log entry stops with async_outcome_unknown (before-retry: ${beforeRetry ?? 'none'})`, async () => {
+      const fake = clockedExecutor(NO_ENTRY_CHECKS)
+      const { store, writes } = createFakeJournalStore(startedRecord())
 
-    await applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: fake.sleep })
+      const run = applyAsyncStatement({ ...input, beforeRetry, db: fake.db, journalStore: store, sleep: fake.sleep })
 
-    // Checked once, then 5 times 2 s apart while query_log is flushed (#701).
-    expect(fake.statusCalls.slice(0, 6)).toEqual(
-      Array.from({ length: 6 }, () => ({ queryId: QUERY_ID, afterTime: RECORD_BOUND, everyReplica: true })),
-    )
-    expect(fake.sleeps.slice(0, 5)).toEqual([2_000, 2_000, 2_000, 2_000, 2_000])
-    expect(fake.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    expect(fake.submitCalls).toHaveLength(1)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
-    expect(writes[0]?.operations[0]?.lastError).toBe('no longer running and no outcome in system.query_log; retried')
-  })
+      await expect(run).rejects.toMatchObject({ code: 'async_outcome_unknown', message: outcomeUnknown(OWN_ID, NO_ENTRY_REASON) })
+      // Checked once, then 5 times 2 s apart while query_log is flushed (#701).
+      expect(fake.statusCalls).toEqual(
+        Array.from({ length: 6 }, () => ({ queryId: OWN_ID, afterTime: RECORD_BOUND, everyReplica: true })),
+      )
+      expect(fake.sleeps).toEqual([2_000, 2_000, 2_000, 2_000, 2_000])
+      expect(fake.commandCalls).toEqual([])
+      expect(fake.submitCalls).toEqual([])
+      expect(writes).toEqual([])
+    })
+  }
 
-  test('without before-retry SQL a started attempt without a query_log entry stays started until it is resubmitted', async () => {
-    const fake = clockedExecutor([...NO_ENTRY_CHECKS, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
-    const { store, writes } = createFakeJournalStore(startedRecord())
+  // The stop leaves a way out: abandon, then apply, which compensates and
+  // submits once.
+  test('after async_outcome_unknown, an abandon lets the next apply compensate and submit once', async () => {
+    const { store } = createFakeJournalStore(startedRecord())
+    await expect(
+      applyAsyncStatement({ ...input, db: clockedExecutor(NO_ENTRY_CHECKS).db, journalStore: store, sleep: NO_SLEEP }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown' })
+    const stopped = await store.readMigrationState(BASE_INPUT.migrationName)
+    expect(stopped).not.toBeNull()
+    await abandonMigrationState(stopped as MigrationRowState, { journalStore: store, now: FIXED_NOW })
 
-    await applyAsyncStatement({ ...input, beforeRetry: null, db: fake.db, journalStore: store, sleep: fake.sleep })
+    const next = clockedExecutor([{ status: 'unknown' }, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
+    const result = await applyAsyncStatement({ ...input, db: next.db, journalStore: store, sleep: next.sleep })
 
-    // Nothing is compensated, so a re-run may still find its QueryFinish.
-    expect(fake.submitCalls).toHaveLength(1)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
+    expect(result.kind).toBe('completed')
+    expect(next.statusCalls[0]).toEqual({ queryId: OWN_ID, afterTime: undefined, everyReplica: true, runningOnly: true })
+    expect(next.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
+    expect(next.submitCalls).toHaveLength(1)
   })
 
   // The attempt's QueryFinish can reach query_log only after the check (it is
@@ -1259,8 +1128,8 @@ describe('applyAsyncStatement re-run of a started step', () => {
   // does not take for the outcome: the rows it loaded were truncated.
   test('a re-run after a compensation that stopped the run compensates and resubmits again', async () => {
     const { store, writes } = createFakeJournalStore(startedRecord())
-    // Run 1: no outcome yet; the TRUNCATE ran, but its response was lost.
-    const first = clockedExecutor(NO_ENTRY_CHECKS)
+    // Run 1: the attempt failed; the TRUNCATE ran, but its response was lost.
+    const first = clockedExecutor([{ status: 'failed', error: 'boom' }])
     const lostResponse = {
       ...first.db,
       command: async () => {
@@ -1271,9 +1140,9 @@ describe('applyAsyncStatement re-run of a started step', () => {
       applyAsyncStatement({ ...input, db: lostResponse, journalStore: store, sleep: first.sleep }),
     ).rejects.toThrow('socket hang up')
     expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed'])
-    expect(writes[0]?.operations[0]?.lastError).toBe('no longer running and no outcome in system.query_log; retried')
 
-    // Run 2: the first attempt's QueryFinish is in query_log by now.
+    // Run 2: query_log would now answer for the id, but a failed record is
+    // checked in system.processes only.
     const second = clockedExecutor([
       { status: 'finished', writtenRows: 16, durationMs: 8000 },
       { status: 'finished', writtenRows: 16, durationMs: 8000 },
@@ -1285,50 +1154,40 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(second.submitCalls).toHaveLength(1)
   })
 
-  // #701: every attempt submits under an id of its own, so a re-run never
-  // takes an earlier attempt's QueryFinish for a later attempt's outcome,
-  // however close together they started.
-  test("a re-run never takes an earlier attempt's QueryFinish for the outcome of the retry that followed it", async () => {
-    const { store, writes } = createFakeJournalStore(startedRecord({ startedAt: iso(SERVER_NOW_MS - 1_000) }))
-    // Run 2, a second after run 1's attempt: no outcome yet; it compensates,
-    // journals its own attempt, and stops before its submit leaves.
-    const second = clockedExecutor(NO_ENTRY_CHECKS)
-    const killedBeforeSubmit = {
-      ...second.db,
-      submit: () => {
-        throw new Error('killed')
-      },
-    } as unknown as ClickHouseExecutor
+  // #701, #767: every attempt submits under an id of its own, so a re-run
+  // never takes an earlier attempt's QueryFinish for a later attempt's
+  // outcome. A run killed between its journal write and its submit leaves
+  // an attempt without evidence, which stops the re-run.
+  test("a re-run never takes an earlier attempt's QueryFinish for an attempt killed before its submit", async () => {
+    const { store, writes } = createFakeJournalStore(null)
+    const first = clockedExecutor([{ status: 'unknown' }])
     await expect(
-      applyAsyncStatement({ ...input, db: killedBeforeSubmit, journalStore: store, sleep: second.sleep }),
+      applyAsyncStatement({ ...input, db: killedBeforeSubmit(first.db), journalStore: store, sleep: first.sleep }),
     ).rejects.toThrow('killed')
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started'])
-    const runTwoQueryId = writes[1]?.operations[0]?.queryId ?? ''
-    expect(runTwoQueryId).toMatch(UUID_SHAPE)
-    expect(writes[1]?.operations[0]).toMatchObject({
-      startedAt: iso(SERVER_NOW_MS),
-      lastError: attemptRecordError(RETRY_BOUND),
-    })
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
+    const recordedId = writes[0]?.operations[0]?.queryId ?? ''
+    expect(recordedId).toMatch(UUID_SHAPE)
+    expect(recordedId).not.toBe(QUERY_ID)
 
-    // Run 3: query_log now holds run 1's QueryFinish, and nothing of run 2's attempt.
-    const third = clockedExecutor([...NO_ENTRY_CHECKS, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
-    const answers = third.db.queryStatus.bind(third.db)
+    // query_log holds an earlier attempt's QueryFinish under the statement's
+    // earlier first id, and nothing of the recorded id.
+    const rerun = clockedExecutor(NO_ENTRY_CHECKS)
+    const answers = rerun.db.queryStatus.bind(rerun.db)
     const db = {
-      ...third.db,
+      ...rerun.db,
       async queryStatus(id: string, opts?: QueryStatusOptions): Promise<QueryStatus> {
         const answer = await answers(id, opts)
         return id === QUERY_ID ? { status: 'finished', writtenRows: 0, durationMs: 10 } : answer
       },
     } as unknown as ClickHouseExecutor
-    const result = await applyAsyncStatement({ ...input, db, journalStore: store, sleep: third.sleep })
+    await expect(
+      applyAsyncStatement({ ...input, db, journalStore: store, sleep: rerun.sleep }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: outcomeUnknown(recordedId, NO_ENTRY_REASON) })
 
-    // Every check reads run 2's id, from an hour before its recorded start.
-    const runTwoBound = new Date(SERVER_NOW_MS - 3_600_000).toISOString()
-    expect(third.statusCalls.slice(0, 6).every((call) => call.queryId === runTwoQueryId && call.afterTime === runTwoBound)).toBe(true)
-    expect(third.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    expect(third.submitCalls).toHaveLength(1)
-    expect([QUERY_ID, runTwoQueryId]).not.toContain(third.submitCalls[0]?.queryId)
-    expect(result.operation.status).toBe('completed')
+    expect(rerun.statusCalls.every((call) => call.queryId === recordedId)).toBe(true)
+    expect(rerun.commandCalls).toEqual([])
+    expect(rerun.submitCalls).toEqual([])
+    expect(writes).toHaveLength(1)
   })
 
   // Codex review of #701: two runs that read the same failed record. Run A
@@ -1342,18 +1201,12 @@ describe('applyAsyncStatement re-run of a started step', () => {
     const runA = clockedExecutor([{ status: 'unknown' }, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
     const journalA = createFakeJournalStore(failed)
     await applyAsyncStatement({ ...input, db: runA.db, journalStore: journalA.store, sleep: runA.sleep })
-    const runAQueryId = retryQueryId(runA.submitCalls)
+    const runAQueryId = submittedQueryId(runA.submitCalls)
     // Run B read the same failed record.
     const runB = clockedExecutor([{ status: 'unknown' }])
     const journalB = createFakeJournalStore(failed)
-    const killedBeforeSubmit = {
-      ...runB.db,
-      submit: () => {
-        throw new Error('killed')
-      },
-    } as unknown as ClickHouseExecutor
     await expect(
-      applyAsyncStatement({ ...input, db: killedBeforeSubmit, journalStore: journalB.store, sleep: runB.sleep }),
+      applyAsyncStatement({ ...input, db: killedBeforeSubmit(runB.db), journalStore: journalB.store, sleep: runB.sleep }),
     ).rejects.toThrow('killed')
     expect(runB.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
     const runBRecord = journalB.writes.at(-1)?.operations[0]
@@ -1361,7 +1214,7 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(runBRecord?.queryId).not.toBe(runAQueryId)
 
     // The re-run: query_log has run A's QueryFinish only.
-    const rerun = clockedExecutor([...NO_ENTRY_CHECKS, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
+    const rerun = clockedExecutor(NO_ENTRY_CHECKS)
     const answers = rerun.db.queryStatus.bind(rerun.db)
     const db = {
       ...rerun.db,
@@ -1370,151 +1223,52 @@ describe('applyAsyncStatement re-run of a started step', () => {
         return id === runAQueryId ? { status: 'finished', writtenRows: 16, durationMs: 8000 } : answer
       },
     } as unknown as ClickHouseExecutor
-    await applyAsyncStatement({ ...input, db, journalStore: journalB.store, sleep: rerun.sleep })
+    await expect(
+      applyAsyncStatement({ ...input, db, journalStore: journalB.store, sleep: rerun.sleep }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown' })
 
-    expect(rerun.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    expect(rerun.submitCalls).toHaveLength(1)
+    expect(rerun.commandCalls).toEqual([])
+    expect(rerun.submitCalls).toEqual([])
   })
 
-  // #767: a started record that names no query_log bound for an id earlier
-  // attempts may share cannot tell its own QueryFinish from theirs: the start
-  // older releases recorded lies before the bound their polls used, and a
-  // record left between the two writes of a first attempt was never
-  // submitted. Its id is checked in system.processes only, and the retry
-  // gets an id of its own.
-  const ambiguousRecords: Array<[string, MigrationRowState]> = [
-    ['a #701 record of the first id', startedRecord({ lastError: ATTEMPT_RECORD_MARKER })],
-    ['a #672 record', startedRecord({ lastError: STARTED_RECORD_MARKER })],
-    ['a #672 record of a retry id', startedRecord({ queryId: LEGACY_RETRY_ID, lastError: STARTED_RECORD_MARKER })],
-    ['a record with a malformed bound', startedRecord({ lastError: attemptRecordError('soon') })],
-    // An older release may have compensated it without a record: the journal
-    // has no fingerprint column, so the fence was not stored.
-    ['a record whose bound was stored without its fence', startedRecord({ attemptFenced: undefined })],
+  // #767: a started record without the fence names an id that earlier
+  // attempts may share (a first attempt's deterministic id, or an id an older
+  // release reused for every attempt), or one an older release may have
+  // compensated without recording it (a #701 retry id, then a TRUNCATE by a
+  // release that did not know the marker). Its QueryFinish is never taken for
+  // the outcome, and before-retry SQL cannot tell whether the rows landed
+  // either, so the run stops before it writes or runs anything.
+  const legacyRecords: Array<[string, MigrationRowState, { fingerprints?: boolean }]> = [
+    ['a record without a marker (before #672)', startedRecord({ queryId: QUERY_ID, lastError: '', fingerprint: '', attemptFenced: undefined }), {}],
+    ['a #672 record', startedRecord({ queryId: QUERY_ID, lastError: 'submitted; a retry reads its outcome from system.query_log', attemptFenced: undefined }), {}],
+    ["a #701 record of a first attempt's deterministic id", startedRecord({ queryId: QUERY_ID, attemptFenced: undefined }), {}],
+    ["a #701 record of a retry's random id", startedRecord({ attemptFenced: undefined }), {}],
+    ['a record of this release in a journal without the fingerprint column', startedRecord({ fingerprint: '' }), { fingerprints: false }],
   ]
-  for (const [label, state] of ambiguousRecords) {
-    test(`${label} never takes a QueryFinish of its id for the outcome: it is journaled failed, compensated and resubmitted`, async () => {
-      const fake = clockedExecutor([
-        { status: 'finished', writtenRows: 2, durationMs: 10 },
-        { status: 'finished', writtenRows: 16, durationMs: 8000 },
-      ])
-      const { store, writes } = createFakeJournalStore(state)
+  for (const [label, record, journal] of legacyRecords) {
+    for (const beforeRetry of ['TRUNCATE TABLE t', null]) {
+      test(`${label} is checked in system.processes only and stops with async_outcome_unknown (before-retry: ${beforeRetry ?? 'none'})`, async () => {
+        // query_log would answer QueryFinish for any id.
+        const fake = clockedExecutor([{ status: 'finished', writtenRows: 16, durationMs: 8000 }])
+        const { store, writes } = createFakeJournalStore(null, journal)
+        await store.writeMigrationState(record)
+        writes.length = 0
+        const queryId = record.operations[0]?.queryId ?? ''
 
-      const result = await applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: fake.sleep })
+        await expect(
+          applyAsyncStatement({ ...input, beforeRetry, db: fake.db, journalStore: store, sleep: fake.sleep }),
+        ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: outcomeUnknown(queryId, UNFENCED_REASON) })
 
-      expect(fake.statusCalls[0]).toMatchObject({ afterTime: undefined, everyReplica: true, runningOnly: true })
-      expect(fake.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-      const retryId = retryQueryId(fake.submitCalls)
-      // Journaled failed before the compensation, so no release takes the
-      // attempt's QueryFinish for the outcome once its rows are gone.
-      expect(writes.map((state) => state.operations[0]?.status)).toEqual(['failed', 'started', 'completed'])
-      expect(writes[1]?.operations[0]).toMatchObject({ queryId: retryId, lastError: attemptRecordError(RETRY_BOUND) })
-      expect(result.operation).toMatchObject({ status: 'completed', queryId: retryId })
-    })
-
-    // A finished INSERT without before-retry SQL would load its rows twice.
-    test(`${label} without before-retry SQL stops before it writes, compensates or submits anything`, async () => {
-      const fake = clockedExecutor([{ status: 'finished', writtenRows: 16, durationMs: 8000 }])
-      const { store, writes } = createFakeJournalStore(state)
-
-      const run = applyAsyncStatement({ ...input, beforeRetry: null, db: fake.db, journalStore: store, sleep: fake.sleep })
-
-      await expect(run).rejects.toMatchObject({ code: 'async_outcome_unknown' })
-      await expect(run).rejects.toThrow(
-        `Async migration step load_table_data (query_id ${state.operations[0]?.queryId}): the journal records it as started and it is no longer running, but chkit cannot tell from system.query_log whether it finished: an earlier chkit release recorded it, or the journal has no operation_fingerprints column. The statement has no -- before-retry: SQL to undo a partial run, so it was not submitted again and nothing ran. If an earlier release recorded it, finish m.sql with that release, then upgrade. Or check the query's outcome yourself (SELECT type, event_time FROM system.query_log WHERE query_id = '${state.operations[0]?.queryId}'), reconcile the target table, and discard the partial run with chkit migrate --apply --abandon m.sql; the next apply then runs the migration from statement 1.`,
-      )
-      expect(fake.statusCalls).toHaveLength(1)
-      expect(fake.commandCalls).toEqual([])
-      expect(fake.submitCalls).toEqual([])
-      expect(writes).toEqual([])
-    })
+        expect(fake.statusCalls).toEqual([{ queryId, afterTime: undefined, everyReplica: true, runningOnly: true }])
+        expect(fake.commandCalls).toEqual([])
+        expect(fake.submitCalls).toEqual([])
+        expect(writes).toEqual([])
+      })
+    }
   }
 
-  // Never submitted: nothing of it can have run, so it is retried without a stop.
-  test('a record not submitted yet is resubmitted, also without before-retry SQL', async () => {
-    const fake = clockedExecutor([
-      { status: 'finished', writtenRows: 2, durationMs: 10 },
-      { status: 'finished', writtenRows: 16, durationMs: 8000 },
-    ])
-    const { store, writes } = createFakeJournalStore(startedRecord({ lastError: PENDING_ATTEMPT_MARKER }))
-
-    const result = await applyAsyncStatement({ ...input, beforeRetry: null, db: fake.db, journalStore: store, sleep: fake.sleep })
-
-    expect(fake.statusCalls[0]).toMatchObject({ runningOnly: true })
-    const retryId = retryQueryId(fake.submitCalls)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'completed'])
-    expect(result.operation).toMatchObject({ status: 'completed', queryId: retryId })
-  })
-
-  // An ambiguous record whose attempt still runs is attached to, as before.
-  test('a #701 record of the first id whose attempt still runs is attached to', async () => {
-    const fake = clockedExecutor([
-      { status: 'running', writtenRows: 5, elapsedMs: RUNNING_ELAPSED_MS },
-      { status: 'finished', writtenRows: 16, durationMs: 8000 },
-    ])
-    const { store } = createFakeJournalStore(startedRecord({ lastError: ATTEMPT_RECORD_MARKER }))
-
-    const result = await applyAsyncStatement({ ...input, beforeRetry: null, db: fake.db, journalStore: store, sleep: fake.sleep })
-
-    expect(result.kind).toBe('completed')
-    expect(fake.submitCalls).toEqual([])
-    expect(fake.commandCalls).toEqual([])
-  })
-
-  // A #701 record of a retry's id names that attempt alone, so its
-  // QueryFinish is its outcome.
-  test('a #701 record of a retry id still reads the outcome from query_log', async () => {
-    const fake = clockedExecutor([{ status: 'finished', writtenRows: 16, durationMs: 8000 }])
-    const { store, writes } = createFakeJournalStore(
-      startedRecord({ queryId: LEGACY_RETRY_ID, lastError: ATTEMPT_RECORD_MARKER }),
-    )
-
-    const result = await applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: fake.sleep })
-
-    expect(fake.statusCalls).toEqual([
-      { queryId: LEGACY_RETRY_ID, afterTime: '2026-05-26T09:00:00.000Z', everyReplica: true },
-    ])
-    expect(fake.commandCalls).toEqual([])
-    expect(fake.submitCalls).toEqual([])
-    expect(result.operation).toMatchObject({ status: 'completed', queryId: LEGACY_RETRY_ID })
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['completed'])
-  })
-
-  // #767: a first attempt that stops between its two started writes was never
-  // submitted, so a re-run must not take a QueryFinish of its id (an earlier
-  // attempt whose record was lost) for the statement's outcome.
-  test('a re-run after a first attempt stopped before its bound was journaled compensates and resubmits', async () => {
-    const { store, writes } = createFakeJournalStore(null)
-    const first = clockedExecutor([{ status: 'unknown' }])
-    let serverReads = 0
-    const lostRead = {
-      ...first.db,
-      async query(sql: string) {
-        serverReads += 1
-        if (serverReads === 2) throw new Error('socket hang up')
-        return first.db.query(sql)
-      },
-    } as unknown as ClickHouseExecutor
-    await expect(
-      applyAsyncStatement({ ...input, db: lostRead, journalStore: store, sleep: first.sleep }),
-    ).rejects.toThrow('socket hang up')
-    expect(first.submitCalls).toEqual([])
-    expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PENDING_ATTEMPT_MARKER])
-
-    // Run 2: query_log has a QueryFinish of the first id.
-    const second = clockedExecutor([
-      { status: 'finished', writtenRows: 2, durationMs: 10 },
-      { status: 'finished', writtenRows: 16, durationMs: 8000 },
-    ])
-    const result = await applyAsyncStatement({ ...input, db: second.db, journalStore: store, sleep: second.sleep })
-
-    expect(second.statusCalls[0]).toMatchObject({ queryId: QUERY_ID, runningOnly: true })
-    expect(second.commandCalls).toEqual([{ sql: 'TRUNCATE TABLE t' }])
-    const retryId = retryQueryId(second.submitCalls)
-    expect(result.operation).toMatchObject({ status: 'completed', queryId: retryId })
-  })
-
-  // A started attempt of this release that is running again by a recheck (its
-  // submit reached the server late) is attached to, not resubmitted.
+  // A fenced attempt that a recheck finds running (its submit reached the
+  // server late) is attached to, not resubmitted.
   test('a started attempt that a recheck finds running is attached to', async () => {
     const fake = clockedExecutor([
       { status: 'unknown' },
@@ -1529,25 +1283,6 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(fake.commandCalls).toEqual([])
     expect(fake.submitCalls).toEqual([])
   })
-
-  // An older release's started record has a client-clock start, and a retry
-  // by that release may have run before-retry SQL without journaling the
-  // attempt failed first, so its QueryFinish is not the statement's outcome.
-  for (const beforeRetry of ['TRUNCATE TABLE t', null]) {
-    test(`an older release's started record is checked in system.processes only (before-retry: ${beforeRetry ?? 'none'})`, async () => {
-      const fake = clockedExecutor([
-        { status: 'finished', writtenRows: 16, durationMs: 8000 },
-        { status: 'finished', writtenRows: 16, durationMs: 8000 },
-      ])
-      const { store } = createFakeJournalStore(startedRecord({ lastError: '' }))
-
-      await applyAsyncStatement({ ...input, beforeRetry, db: fake.db, journalStore: store, sleep: fake.sleep })
-
-      expect(fake.statusCalls[0]).toMatchObject({ afterTime: undefined, everyReplica: true, runningOnly: true })
-      expect(fake.commandCalls).toEqual(beforeRetry === null ? [] : [{ sql: beforeRetry }])
-      expect(fake.submitCalls).toHaveLength(1)
-    })
-  }
 
   // Only a started attempt of this statement's SQL can have finished unseen:
   // a failed one has its outcome, a sync record never ran under this id, and
@@ -1572,26 +1307,20 @@ describe('applyAsyncStatement re-run of a started step', () => {
     })
   }
 
-  // An attach under a failed record (an attempt kept by --abandon, or one
-  // that a retry journaled failed) records the attempt started, so a run that
-  // stops while it polls leaves a record a re-run reads from query_log.
-  test('an attach journals the attempt started, and a re-run after a killed attach records its QueryFinish', async () => {
-    const { store, writes } = createFakeJournalStore(
-      startedRecord({ status: 'failed', finishedAt: '2026-05-26 10:05:00.000', lastError: 'boom' }),
-    )
+  // #767 (770b): an attach writes nothing before the outcome, so a run killed
+  // while it polls leaves the fenced record as it was, and a re-run reads the
+  // same id with the same bound.
+  test('an attach leaves the fenced record as it is, and a re-run after a killed attach records its QueryFinish', async () => {
+    const { store, writes } = createFakeJournalStore(startedRecord())
     const first = createFakeExecutor([
-      { status: 'running', writtenRows: 5, elapsedMs: RUNNING_ELAPSED_MS },
+      { status: 'running', writtenRows: 5 },
       ...Array.from({ length: 21 }, () => new Error('HTTP 502: bad gateway')),
     ])
     await expect(
       applyAsyncStatement({ ...input, beforeRetry: null, db: first.db, journalStore: store, sleep: NO_SLEEP }),
     ).rejects.toThrow(/polling failed 21×/)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started'])
-    expect(writes[0]?.operations[0]).toMatchObject({
-      startedAt: iso(SERVER_NOW_MS - RUNNING_ELAPSED_MS),
-      lastError: attemptRecordError(ATTACH_BOUND),
-      fingerprint: 'v1:load',
-    })
+    expect(writes).toEqual([])
+    expect(first.statusCalls.slice(1).every((call) => call.queryId === OWN_ID && call.afterTime === RECORD_BOUND)).toBe(true)
 
     const second = createFakeExecutor([{ status: 'finished', writtenRows: 16, durationMs: 8000 }])
     const result = await applyAsyncStatement({
@@ -1603,31 +1332,8 @@ describe('applyAsyncStatement re-run of a started step', () => {
     })
 
     expect(result.kind).toBe('completed')
-    expect(second.statusCalls[0]?.afterTime).toBe(ATTACH_BOUND)
+    expect(second.statusCalls).toEqual([{ queryId: OWN_ID, afterTime: RECORD_BOUND, everyReplica: true }])
     expect(second.submitCalls).toEqual([])
-  })
-
-  // The elapsed time is observed after the server time the attach reads, so
-  // a start derived from both can lie earlier than the attempt's own. The
-  // attach polls with the bound the record names, and keeps it, so a re-run
-  // reads the outcome as the attach did (#767).
-  test('an attach keeps the start and the bound a record of this release holds for the attempt', async () => {
-    const { db, statusCalls } = createFakeExecutor([
-      { status: 'running', writtenRows: 5, elapsedMs: RUNNING_ELAPSED_MS },
-      { status: 'finished', writtenRows: 16, durationMs: 8000 },
-    ])
-    const { store, writes } = createFakeJournalStore(
-      startedRecord({ startedAt: '2023-11-14 22:14:59.000', lastError: attemptRecordError(SUBMISSION_BOUND) }),
-    )
-
-    await applyAsyncStatement({ ...input, db, journalStore: store, sleep: NO_SLEEP })
-
-    expect(writes[0]?.operations[0]).toMatchObject({
-      status: 'started',
-      startedAt: '2023-11-14 22:14:59.000',
-      lastError: attemptRecordError(SUBMISSION_BOUND),
-    })
-    expect(statusCalls[1]?.afterTime).toBe(SUBMISSION_BOUND)
   })
 
   test('a user that cannot read system.query_log is told which grant it lacks', async () => {
@@ -1648,20 +1354,17 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(writes).toEqual([])
   })
 
-  // A #701 record of a retry's id is bounded by its recorded start.
   for (const [startedAt, label] of [
     ['2026-05-26T10:00:00.000Z', 'Z'],
     ['2026-05-26T12:00:00.000+02:00', '+02:00'],
   ] as const) {
     test(`a started record with a start time zoned ${label} is read with that zone`, async () => {
       const { db, statusCalls } = createFakeExecutor([{ status: 'finished', writtenRows: 16, durationMs: 8000 }])
-      const { store } = createFakeJournalStore(
-        startedRecord({ startedAt, queryId: LEGACY_RETRY_ID, lastError: ATTEMPT_RECORD_MARKER }),
-      )
+      const { store } = createFakeJournalStore(startedRecord({ startedAt }))
 
       await applyAsyncStatement({ ...input, db, journalStore: store, sleep: NO_SLEEP })
 
-      expect(statusCalls[0]?.afterTime).toBe('2026-05-26T09:00:00.000Z')
+      expect(statusCalls[0]?.afterTime).toBe(RECORD_BOUND)
     })
   }
 
@@ -1670,6 +1373,7 @@ describe('applyAsyncStatement re-run of a started step', () => {
   test('a re-run before query_log has the finished attempt waits for it instead of resubmitting', async () => {
     const { store, writes } = createFakeJournalStore(null)
     const first = createFakeExecutor([
+      { status: 'unknown' },
       { status: 'running', writtenRows: 9, writtenBytes: 72 },
       ...Array.from({ length: 21 }, () => new Error('HTTP 502: bad gateway')),
     ])
@@ -1692,7 +1396,7 @@ describe('applyAsyncStatement re-run of a started step', () => {
   })
 
   // #701: a retried attempt that ran on a replica whose clock is 3 s behind
-  // the one that gave its recorded start, more than the skew margin.
+  // the one that gave its recorded start.
   test('a re-run finds the QueryFinish of a retried attempt that ran on a replica 3 s behind', async () => {
     const { store, writes } = createFakeJournalStore(
       startedRecord({ status: 'failed', finishedAt: '2026-05-26 10:05:00.000', lastError: 'boom' }),
@@ -1746,95 +1450,58 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(writes.at(-1)?.operations[0]).toMatchObject({ status: 'completed', queryId: retriedQueryId })
   })
 
-  // Codex review of #701: the statement's first id is shared with an attempt
-  // whose record was lost. Its polls are bounded by the server time read
-  // after the journal writes, which can take long, so that attempt's
-  // QueryFinish is not taken for a rejected submission's.
-  test("a first attempt's polls ignore an earlier attempt of its id that finished during the journal writes", async () => {
-    const earlierStartSec = Math.floor((SERVER_NOW_MS - 1_000) / 1000)
+  // #767 (Codex review of #770, 770d): an earlier attempt finished under the
+  // statement's deterministic first id, and the journal writes before this
+  // submission were slow. The submission is rejected; its polls read its
+  // own id only, so the earlier QueryFinish is never taken for its outcome.
+  test("a first attempt's polls ignore an earlier attempt of the deterministic id however long the journal writes take", async () => {
     const clock = { ms: SERVER_NOW_MS }
-    const db = {
-      async query() {
-        return [{ now_ms: String(clock.ms), database: SERVER_DATABASE }]
-      },
-      async queryStatus(_id: string, opts?: QueryStatusOptions): Promise<QueryStatus> {
-        if (opts?.runningOnly) return { status: 'unknown' }
-        const afterSec = Math.floor(Date.parse(opts?.afterTime ?? '') / 1000)
-        return earlierStartSec >= afterSec ? { status: 'finished', writtenRows: 2, durationMs: 10 } : { status: 'unknown' }
-      },
-      async command() {},
-      async submit() {
-        throw new Error('Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING')
-      },
-    } as unknown as ClickHouseExecutor
-    const { store, writes } = createFakeJournalStore(null)
-    // Each journal write takes 6 s.
-    const write = store.writeMigrationState.bind(store)
-    store.writeMigrationState = async (state) => {
-      clock.ms += 6_000
-      await write(state)
-    }
-
-    await expect(
-      applyAsyncStatement({ ...input, beforeRetry: null, db, journalStore: store, sleep: NO_SLEEP }),
-    ).rejects.toThrow(/QUERY_WITH_SAME_ID/)
-    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started', 'failed'])
-  })
-
-  // #767: a re-run reads a started attempt's outcome with the bound its
-  // polls used, which the journal records with the attempt. Rebuilt from the
-  // start recorded before the journal writes, it took the earlier attempt's
-  // QueryFinish, which the first run ignored, for the statement's outcome.
-  test('a re-run never takes an earlier attempt of the first id that finished during the journal writes for the outcome', async () => {
-    const earlierStartSec = Math.floor((SERVER_NOW_MS - 1_000) / 1000)
-    const clock = { ms: SERVER_NOW_MS }
-    const submitted: Array<string | undefined> = []
-    // Run 1's polls fail; afterwards query_log answers by the bound it is asked for.
-    let pollsFail = true
+    const polled: string[] = []
     const db = {
       async query() {
         return [{ now_ms: String(clock.ms), database: SERVER_DATABASE }]
       },
       async queryStatus(id: string, opts?: QueryStatusOptions): Promise<QueryStatus> {
         if (opts?.runningOnly) return { status: 'unknown' }
-        if (pollsFail) throw new Error('HTTP 502: bad gateway')
-        // A resubmission's own load finishes at once.
-        if (id !== QUERY_ID) return { status: 'finished', writtenRows: 16, durationMs: 1 }
-        const afterSec = Math.floor(Date.parse(opts?.afterTime ?? '') / 1000)
-        return earlierStartSec >= afterSec ? { status: 'finished', writtenRows: 2, durationMs: 10 } : { status: 'unknown' }
+        polled.push(id)
+        return id === QUERY_ID ? { status: 'finished', writtenRows: 2, durationMs: 10 } : { status: 'unknown' }
       },
       async command() {},
-      async submit(_sql: string, queryId?: string) {
-        submitted.push(queryId)
-        if (queryId === QUERY_ID) throw new Error('Code: 216. QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING')
-        return queryId
+      async submit() {
+        throw new Error('Code: 60. UNKNOWN_TABLE')
       },
     } as unknown as ClickHouseExecutor
     const { store, writes } = createFakeJournalStore(null)
-    // Each journal write takes 6 s.
+    // Each journal write and read takes 6 s.
     const write = store.writeMigrationState.bind(store)
     store.writeMigrationState = async (state) => {
       clock.ms += 6_000
       await write(state)
     }
-    const sleep = async (ms: number) => {
-      clock.ms += ms
+    const read = store.readMigrationState.bind(store)
+    store.readMigrationState = async (name) => {
+      clock.ms += 6_000
+      return await read(name)
     }
 
-    // Run 1: its polls fail until the budget runs out; the attempt stays started.
     await expect(
       applyAsyncStatement({ ...input, beforeRetry: null, db, journalStore: store, sleep: NO_SLEEP }),
-    ).rejects.toThrow(/polling failed 21×/)
-    expect(writes.at(-1)?.operations[0]?.status).toBe('started')
-    expect(submitted).toEqual([QUERY_ID])
+    ).rejects.toThrow(/UNKNOWN_TABLE/)
+    expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'failed'])
+    expect(polled.length > 0).toBe(true)
+    expect(polled).not.toContain(QUERY_ID)
+  })
 
-    // Run 2: query_log has the earlier attempt's QueryFinish only.
-    pollsFail = false
-    const result = await applyAsyncStatement({ ...input, beforeRetry: null, db, journalStore: store, sleep })
+  // The random id is known only to the journal, so it is never submitted
+  // when the journal does not return the started record (#767).
+  test('an attempt the journal does not return after its started write is not submitted', async () => {
+    const fake = createFakeExecutor([{ status: 'unknown' }])
+    const { store } = createFakeJournalStore(null)
+    store.writeMigrationState = async () => {}
 
-    expect(submitted).toHaveLength(2)
-    expect(submitted[1]).toMatch(UUID_SHAPE)
-    expect(submitted[1]).not.toBe(QUERY_ID)
-    expect(result.operation).toMatchObject({ status: 'completed', queryId: submitted[1] })
+    await expect(
+      applyAsyncStatement({ ...input, db: fake.db, journalStore: store, sleep: NO_SLEEP }),
+    ).rejects.toThrow(/the journal does not have the attempt's started record, so it was not submitted/)
+    expect(fake.submitCalls).toEqual([])
   })
 })

@@ -88,46 +88,38 @@ class OperationState(BaseModel):
     # recorded: an older chkit wrote the row, or the journal has no column for
     # it. Never part of a report.
     fingerprint: str = Field(..., exclude=True)
-    # Set by a journal read when the record's fingerprint was stored fenced
-    # (#767): a started record that names its query_log bound, which releases
-    # before #767 refuse to resume. Never written; the fence follows from the
-    # record itself (see stored_fingerprint). Never part of a report.
+    # Whether this started async record names a query id that only this
+    # attempt was submitted under, recorded before its submit (#767). Only
+    # that write sets it; every other write carries it as a read returned it.
+    # A write stores it in the fingerprint (FENCED_FINGERPRINT_PREFIX), so a
+    # journal without the fingerprint column never has it. Never part of a report.
     attempt_fenced: bool = Field(default=False, alias="attemptFenced", exclude=True)
 
 
-# The last_error of a started async attempt that names its query_log bound
-# (#767): this text, followed by the bound. Defined here because a write
-# stores such a record's fingerprint fenced.
-ATTEMPT_BOUND_MARKER: Final[str] = (
-    "submitted; a retry reads its outcome from system.query_log entries started at or after "
-)
-# The prefix of the stored fingerprint of a started record that names its
-# query_log bound (#767). Releases from #599 on compare a started record's
-# fingerprint with the statement's before they resume, so they stop with
-# statement_split_changed instead of compensating the attempt without a
-# record of it. A read strips it again (attempt_fenced).
+# The prefix of the stored fingerprint of a fenced started record (#767).
+# Releases from #599 on compare a started record's fingerprint with the
+# statement's before they resume, so an earlier release stops with
+# statement_split_changed instead of running before-retry SQL without
+# recording the attempt failed first. A read strips it again.
 FENCED_FINGERPRINT_PREFIX: Final[str] = "fenced-attempt;"
 
 
 def stored_fingerprint(op: OperationState) -> str:
     """The fingerprint a write stores for ``op`` (#767)."""
-    if op.status == "started" and op.last_error.startswith(ATTEMPT_BOUND_MARKER):
+    if op.status == "started" and op.attempt_fenced:
         return f"{FENCED_FINGERPRINT_PREFIX}{op.fingerprint}"
     return op.fingerprint
 
 
 def read_stored_fingerprint(stored: str) -> tuple[str, bool]:
-    """The fingerprint a read finds stored, without its fence, and whether it had one (#767)."""
+    """The fingerprint a read finds stored, and whether it was fenced (#767)."""
     if stored.startswith(FENCED_FINGERPRINT_PREFIX):
         return stored[len(FENCED_FINGERPRINT_PREFIX) :], True
     return stored, False
 
 
 def operation_as_stored(op: OperationState, fingerprints: bool) -> OperationState:
-    """``op`` with the fence a read finds after a write (#767).
-
-    Without the fingerprint column a write stores no fence.
-    """
+    """``op`` as a read returns it after a write with or without the fingerprint column (#767)."""
     if not fingerprints:
         return op.model_copy(update={"attempt_fenced": False})
     fingerprint, fenced = read_stored_fingerprint(stored_fingerprint(op))

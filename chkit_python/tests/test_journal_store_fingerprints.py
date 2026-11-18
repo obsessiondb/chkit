@@ -15,7 +15,6 @@ from typing import Any
 
 import pytest
 
-from chkit.cli.commands.migrate_recovery import recorded_statement_mismatches
 from chkit.cli.journal_store import JournalStore, MigrationRowState, OperationState
 from chkit.clickhouse.replicas import ReplicaFanout
 
@@ -142,6 +141,99 @@ def test_writes_the_fingerprints_next_to_the_operations() -> None:
     assert "migration_completed, operations, operation_fingerprints) VALUES" in insert
     assert insert.endswith(", ['v1:a','v1:\\'b'])")
     assert not any(sql.startswith("ALTER TABLE") for sql in client.executed)
+
+
+# ---------- attempt fence (#767) ----------
+#
+# A fenced started record stores its fingerprint with a prefix, so releases
+# from #599 on stop at it. Only the write that sets the fence stores it; any
+# other write of the record stores it as it was read. Same cases as the TS
+# ``attempt fence (#767)`` tests.
+
+_ATTEMPT_MARKER = (
+    "submitted under its own query id; a retry reads its outcome from system.query_log"
+)
+
+
+def _started(**overrides: Any) -> MigrationRowState:
+    state = _state(["v1:a"])
+    op = state.operations[0].model_copy(
+        update={
+            "query_id": "q-1",
+            "status": "started",
+            "finished_at": None,
+            "last_error": _ATTEMPT_MARKER,
+            **overrides,
+        }
+    )
+    return state.model_copy(update={"operations": [op]})
+
+
+def _started_tuple() -> dict[str, Any]:
+    return {**_tuple(0), "status": "started", "query_id": "q-1", "finished_at": None}
+
+
+def _insert_of(client: _Client) -> str:
+    return next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
+
+
+def test_a_fenced_started_record_is_stored_with_the_prefix_and_read_back_fenced() -> None:
+    client = _Client(rows=[_row([_started_tuple()], ["fenced-attempt;v1:a"])])
+    store = _store(client)
+    store.write_migration_state(_started(attempt_fenced=True))
+    read = store.read_migration_state("m.sql")
+    assert _insert_of(client).endswith(", ['fenced-attempt;v1:a'])")
+    assert read is not None
+    assert (read.operations[0].fingerprint, read.operations[0].attempt_fenced) == ("v1:a", True)
+
+
+def test_a_started_record_with_the_marker_but_without_the_fence_is_stored_without_it() -> None:
+    """770b, 770c, 770d: a rewrite of a record read without the fence (a
+    --retry re-key, an abandon) never adds it, whatever its last_error says."""
+    client = _Client()
+    _store(client).write_migration_state(_started())
+    assert _insert_of(client).endswith(", ['v1:a'])")
+
+
+@pytest.mark.parametrize("status", ["completed", "failed"])
+def test_a_copy_of_a_fenced_record_in_another_status_is_stored_without_the_fence(
+    status: str,
+) -> None:
+    client = _Client()
+    _store(client).write_migration_state(
+        _started(attempt_fenced=True, status=status, finished_at="2026-11-09T12:00:02.000")
+    )
+    assert _insert_of(client).endswith(", ['v1:a'])")
+
+
+def test_a_row_without_the_prefix_is_read_without_the_fence() -> None:
+    client = _Client(rows=[_row([_started_tuple()], ["v1:a"])])
+    read = _store(client).read_migration_state("m.sql")
+    assert read is not None
+    assert read.operations[0].attempt_fenced is False
+
+
+def test_a_journal_without_the_column_stores_no_fence_and_the_cached_write_has_none() -> None:
+    client = _Client(
+        query_error=_no_column,
+        execute_error=lambda sql: (
+            _clickhouse_error(497, "ACCESS_DENIED") if sql.startswith("ALTER TABLE") else None
+        ),
+    )
+    store = _store(client)
+    store.write_migration_state(_started(attempt_fenced=True))
+    # The server returns no row, so the read returns the last write.
+    read = store.read_migration_state("m.sql")
+    assert "operation_fingerprints" not in _insert_of(client)
+    assert read is not None
+    assert read.operations[0].query_id == "q-1"
+    assert read.operations[0].attempt_fenced is False
+
+
+def test_the_fence_is_never_part_of_a_report() -> None:
+    op = _started(attempt_fenced=True).operations[0]
+    assert "attempt_fenced" not in op.model_dump()
+    assert "attemptFenced" not in op.model_dump(by_alias=True)
 
 
 def test_a_journal_without_the_column_is_read_without_fingerprints_and_not_altered() -> None:
@@ -557,91 +649,3 @@ def test_a_system_columns_probe_that_fails_for_another_reason_stops_the_read() -
 def test_the_abandon_report_leaves_fingerprints_out() -> None:
     state = _state(["v1:a"])
     assert "fingerprint" not in state.operations[0].model_dump(by_alias=True)
-
-
-# #767: a started async record that names its query_log bound is stored with a
-# fenced fingerprint, so a release from #599 to #767 refuses to resume it
-# instead of compensating it without a record. Same as the TS journal-store tests.
-_BOUND_ERROR = (
-    "submitted; a retry reads its outcome from system.query_log entries started at or "
-    "after 2026-11-09T11:59:58.000Z"
-)
-
-
-def _async_op(status: str, last_error: str, index: int = 0) -> OperationState:
-    return OperationState.model_validate(
-        {
-            "operationIndex": index,
-            "operationKey": "table:t",
-            "operationType": "load_table_data",
-            "queryId": "q-1",
-            "status": status,
-            "startedAt": "2026-11-09T12:00:00.000",
-            "finishedAt": None if status == "started" else "2026-11-09T12:00:05.000",
-            "lastError": last_error,
-            "fingerprint": "v1:load",
-        }
-    )
-
-
-def _with_ops(*ops: OperationState) -> MigrationRowState:
-    return _state([]).model_copy(update={"operations": list(ops)})
-
-
-def test_a_started_record_that_names_its_bound_is_stored_fenced_and_read_back_marked() -> None:
-    client = _Client()
-    _store(client).write_migration_state(_with_ops(_async_op("started", _BOUND_ERROR)))
-    insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
-    assert insert.endswith(", ['fenced-attempt;v1:load'])")
-
-    started = {**_tuple(0), "status": "started", "last_error": _BOUND_ERROR}
-    reader = _store(_Client(rows=[_row([started], ["fenced-attempt;v1:load"])]))
-    read = reader.read_migration_state("m.sql")
-    assert read is not None
-    assert read.operations[0].fingerprint == "v1:load"
-    assert read.operations[0].attempt_fenced is True
-
-
-def test_every_other_record_is_stored_unfenced() -> None:
-    client = _Client()
-    _store(client).write_migration_state(
-        _with_ops(
-            _async_op("completed", ""),
-            _async_op("failed", _BOUND_ERROR, 1),
-            _async_op("started", "not submitted yet; its system.query_log bound is not recorded", 2),
-        )
-    )
-    insert = next(sql for sql in client.executed if sql.startswith("INSERT INTO"))
-    assert insert.endswith(", ['v1:load','v1:load','v1:load'])")
-
-
-def test_a_release_from_599_to_767_that_reads_the_record_stops_before_it_resumes_it() -> None:
-    """An older release reads the stored fingerprint as it is and checks it
-    with recorded_statement_mismatches before it resumes, unchanged since #599."""
-    as_stored = _async_op("started", _BOUND_ERROR).model_copy(
-        update={"fingerprint": "fenced-attempt;v1:load"}
-    )
-    assert recorded_statement_mismatches([as_stored], ["v1:load"]) == [1]
-    no_fingerprint = as_stored.model_copy(update={"fingerprint": "fenced-attempt;"})
-    assert recorded_statement_mismatches([no_fingerprint], ["v1:load"]) == [1]
-
-
-def test_a_journal_without_the_column_stores_no_fence_and_a_read_your_write_keeps_none() -> None:
-    client = _Client(
-        query_error=_no_column,
-        execute_error=lambda sql: (
-            _clickhouse_error(497, "ACCESS_DENIED") if sql.startswith("ALTER TABLE") else None
-        ),
-    )
-    store = _store(client)
-    store.write_migration_state(_with_ops(_async_op("started", _BOUND_ERROR)))
-    read = store.read_migration_state("m.sql")
-    assert read is not None
-    assert read.operations[0].status == "started"
-    assert read.operations[0].fingerprint == "v1:load"
-    assert read.operations[0].attempt_fenced is False
-
-
-def test_the_abandon_report_leaves_the_fence_out() -> None:
-    op = _async_op("started", _BOUND_ERROR).model_copy(update={"attempt_fenced": True})
-    assert "attemptFenced" not in op.model_dump(by_alias=True)

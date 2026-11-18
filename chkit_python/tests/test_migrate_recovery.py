@@ -1083,6 +1083,68 @@ def test_sync_retry_tracks_compensation_and_forward_separately(tmp_path: Path) -
     assert store.state.migration_completed is True
 
 
+class _StoppedAsyncAttemptClient(_RecordingClient):
+    """No replica runs the recorded async attempt; the compensation stops the run."""
+
+    def __init__(self, store: FakeStore) -> None:
+        super().__init__()
+        self._store = store
+        self.record_at_compensation: list[OperationState | None] = []
+
+    def query_status(
+        self, _query_id: str, *, every_replica: bool = False, running_only: bool = False
+    ) -> QueryStatus:
+        assert (every_replica, running_only) == (True, True)
+        return QueryStatus(status="unknown")
+
+    def execute(self, statement: str, settings: dict[str, Any] | None = None) -> None:
+        state = self._store.state
+        self.record_at_compensation.append(state.operations[0] if state is not None else None)
+        msg = f"killed at {statement}"
+        raise RuntimeError(msg)
+
+
+def test_a_mode_only_async_to_sync_edit_journals_the_stopped_async_attempt_failed_first(
+    tmp_path: Path,
+) -> None:
+    """#767 (Codex review of #770, 770b): a mode-only async to sync edit runs
+    the before-retry SQL of a fenced async attempt that finished. A run that
+    stops after that SQL, before its own started write, must not leave the
+    async record, whose QueryFinish a re-run in async mode would trust."""
+    statement = "INSERT INTO db.a SELECT 1;"
+    original = (
+        "-- operation: load_table_data key=table:db.a risk=safe mode=async\n"
+        f"-- before-retry: TRUNCATE TABLE db.a\n{statement}\n"
+    )
+    edited = original.replace("mode=async", "mode=sync")
+    attempt = op(0, "started", LOAD, query_id="fenced-query-id").model_copy(
+        update={
+            "last_error": "submitted under its own query id; a retry reads its outcome from "
+            "system.query_log",
+            "fingerprint": statement_fingerprint(statement),
+            "attempt_fenced": True,
+        }
+    )
+    store = FakeStore(in_progress([attempt], checksum=checksum_sql(original)))
+    client = _StoppedAsyncAttemptClient(store)
+    with pytest.raises(RuntimeError, match=r"killed at TRUNCATE TABLE db\.a"):
+        _apply(
+            _write(tmp_path, edited),
+            cast(Any, client),
+            store,
+            retry=_retry_for(edited, previous=checksum_sql(original)),
+        )
+    assert len(client.record_at_compensation) == 1
+    recorded = client.record_at_compensation[0]
+    assert recorded is not None
+    assert (recorded.status, recorded.query_id, recorded.last_error) == (
+        "failed",
+        "fenced-query-id",
+        "not running; recorded failed before a sync or barrier run of the statement ran its "
+        "before-retry SQL",
+    )
+
+
 def _retry_for(sql: str, previous: str = "old") -> RetryResume:
     return RetryResume(
         migration="m.sql",

@@ -217,10 +217,19 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
+    def _write_settings(self) -> dict[str, Any]:
+        """No asynchronous INSERT, as TS sends with every write: a journal write
+        is durable before what follows it runs (#767). A user that cannot change
+        the setting (readonly = 1) cannot write either, so it is left out there,
+        where clickhouse-connect would refuse it before the server's own error."""
+        setting = self._client.server_settings.get("async_insert")
+        return {"async_insert": 0} if setting is not None and not setting.readonly else {}
+
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
     ) -> None:
         """Check ownership before each command attempt, including an internal retry."""
+        settings = {**self._write_settings(), **(settings or {})}
         check()
         try:
             self._client.command(statement, settings=settings)

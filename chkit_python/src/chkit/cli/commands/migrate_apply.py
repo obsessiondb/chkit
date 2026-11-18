@@ -269,6 +269,28 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         if prior_attempt is not None:
             _assert_async_attempt_stopped(input_.client, file, prior_attempt)
         if prior_attempt is not None and operation is not None and operation.before_retry:
+            # A started async attempt is journaled failed before the
+            # before-retry SQL runs: until then its record names a query id
+            # whose QueryFinish a re-run in async mode would take for the
+            # outcome of rows that SQL removed (#767).
+            if (
+                state_before is not None
+                and prior_attempt.status == "started"
+                and prior_attempt.query_id != ""
+            ):
+                journal_store.write_migration_state(
+                    upsert_operation(
+                        state_before,
+                        prior_attempt.model_copy(
+                            update={
+                                "status": "failed",
+                                "finished_at": iso_without_zone(datetime.now(tz=UTC)),
+                                "last_error": _SUPERSEDED_ASYNC_ATTEMPT_ERROR,
+                            }
+                        ),
+                        iso_without_zone(datetime.now(tz=UTC)),
+                    )
+                )
             try:
                 _run_before_retry(
                     input_.client,
@@ -661,6 +683,14 @@ def _operation_is_completed(state: MigrationRowState | None, index: int) -> bool
         op.operation_index == index and op.status == "completed"
         for op in state.operations
     )
+
+
+# The last_error of a started async attempt that a sync or barrier run of the
+# statement journals failed before its before-retry SQL runs (#767).
+_SUPERSEDED_ASYNC_ATTEMPT_ERROR = (
+    "not running; recorded failed before a sync or barrier run of the statement ran its "
+    "before-retry SQL"
+)
 
 
 def _sync_operation_state(

@@ -2,6 +2,6 @@
 "chkit": patch
 ---
 
-A re-run of `chkit migrate --apply` no longer records an interrupted async statement as completed from an earlier attempt's `system.query_log` entry that the interrupted run had ignored; it now reads the outcome with the same bound that run used, which the journal stores with the attempt.
+An async statement's first attempt now runs under a random query id recorded in the journal before its submit, and a re-run reads only that id's outcome, so it never records the statement as completed from an earlier attempt's `system.query_log` entry. When the outcome cannot be told (no `query_log` entry, or a started record from an earlier release), `chkit migrate --apply` stops with `async_outcome_unknown` instead of running the statement again.
 
-- Breaking: finish async migrations interrupted under an earlier release before upgrading; this release stops with `async_outcome_unknown` on such a statement without `-- before-retry:` SQL and runs it again after that SQL otherwise, and an earlier release refuses to resume an async statement this release left running.
+- Breaking: finish async migrations with the release that started them before upgrading; this release stops with `async_outcome_unknown` on a statement an earlier release left started, and an earlier release from #599 on refuses to resume one this release left started.

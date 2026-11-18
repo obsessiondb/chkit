@@ -8,6 +8,7 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
 
 import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
+import { ATTEMPT_RECORD_MARKER } from '../../../commands/migrate/async-apply.js'
 import { abandonMigrationState } from '../../../commands/migrate/abandon.js'
 import { MigrateError } from '../../../commands/migrate/errors.js'
 import type {
@@ -767,6 +768,47 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
       })
     }
   }
+
+  // #767 (Codex review of #770, 770b): a mode-only async to sync edit runs
+  // the before-retry SQL of a fenced async attempt that finished. A run that
+  // stops after that SQL, before its own started write, must not leave the
+  // async record, whose QueryFinish a re-run in async mode would trust.
+  test('a mode-only async to sync edit journals the stopped async attempt failed before its before-retry SQL', async () => {
+    const sql = 'INSERT INTO db.a SELECT 1;'
+    const original = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n-- before-retry: TRUNCATE TABLE db.a\n${sql}\n`
+    const edited = original.replace('mode=async', 'mode=sync')
+    const dir = writeMigration(edited)
+    const { store, state } = createFakeStore(inProgressState(checksumSQL(original), [{
+      ...operation(0, 'started', { type: 'load_table_data', key: 'table:db.a' }),
+      queryId: 'fenced-query-id',
+      lastError: ATTEMPT_RECORD_MARKER,
+      fingerprint: statementFingerprint(sql),
+      attemptFenced: true,
+    }]))
+    const recordAtCompensation: Array<OperationState | undefined> = []
+    const db = {
+      async query() { return [] },
+      async queryStatus() { return { status: 'unknown' } },
+      async command(command: string) {
+        recordAtCompensation.push(state()?.operations[0])
+        throw new Error(`killed at ${command}`)
+      },
+    } as unknown as ClickHouseExecutor
+
+    await expect(applyMigration({
+      db, journalStore: store, pluginRuntime: fakePluginRuntime(), config: CONFIG,
+      tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql',
+      retry: { previousChecksum: checksumSQL(original), checksum: checksumSQL(edited) }, log: () => {},
+    })).rejects.toThrow('killed at TRUNCATE TABLE db.a')
+    rmSync(dir, { recursive: true, force: true })
+
+    expect(recordAtCompensation).toHaveLength(1)
+    expect(recordAtCompensation[0]).toMatchObject({
+      status: 'failed',
+      queryId: 'fenced-query-id',
+      lastError: 'not running; recorded failed before a sync or barrier run of the statement ran its before-retry SQL',
+    })
+  })
 
   test('a started statement still requires --retry: it may have run', async () => {
     const dir = writeMigration(EDITED_SQL)
