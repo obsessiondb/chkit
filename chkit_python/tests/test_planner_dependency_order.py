@@ -7,6 +7,7 @@ import os
 import subprocess
 import sys
 import time
+from collections.abc import Callable
 from typing import Any
 
 import pytest
@@ -1499,6 +1500,140 @@ def test_plans_the_acyclic_groups_fixture_in_time_that_grows_with_its_width() ->
 
     narrow = plan(500)
     wide = plan(2000)
+    assert wide < max(10 * narrow, 0.05)
+
+
+def test_a_bare_null_is_no_read_of_a_column_named_null() -> None:
+    # A bare NULL is a literal even when a column is named `null`, so these
+    # tables keep their sorted order: the ALIAS `b` runs after `a` changes to
+    # String. Only a quoted `null` reads the column.
+    assert _order_of(
+        [_t([_u("a"), _text("null", "toString(z)"), _u("z", "length(toString(a))")])],
+        [_t([
+            _text("a", "ifNull(null, '')"),
+            _u("b", "match(a, 'x')", type="UInt8", default_kind="ALIAS"),
+            _u("null", "id"),
+            _u("z", "id"),
+        ])],
+    ) == ["t.a", "t.b", "t.null", "t.z"]
+    assert _order_of(
+        [_t([
+            _u("a"),
+            _u("b", "length(`null`)", default_kind="ALIAS"),
+            _text("null", "toString(z)"),
+            _u("z", "length(toString(a))"),
+        ])],
+        [_t([
+            _text("a", "toString(ifNull(null, 1))"),
+            _u("b", "length(a)", default_kind="ALIAS"),
+            _u("null", "id"),
+            _u("z", "id"),
+        ])],
+    ) == ["t.a", "t.b", "t.null", "t.z"]
+    assert _order_of(
+        [_t([_u("a"), _u("b", "c"), _u("c", "`null`"), _u("null", "a")])],
+        [_t([_u("a", "b"), _u("b", "id"), _u("c", "id"), _u("null", "a")])],
+    ) == ["t.b", "t.a", "t.c"]
+
+
+def test_a_key_that_also_names_an_unchanged_column_of_another_table_keeps_the_repair() -> None:
+    # Table `t:column:other` with column `a` and table `t` with column
+    # `other:column:a` give the same key; the unchanged `t` leaves the other
+    # table's repair alone.
+    other = "t:column:other"
+    assert _order_of(
+        [_t(_CYCLE_BEFORE, other), _t([_u("other:column:a")], "t")],
+        [_t(_CYCLE_AFTER, other), _t([_u("other:column:a")], "t")],
+    ) == [f"{other}.b", f"{other}.a", f"{other}.c"]
+
+
+_REPAIRED = ["t.b", "t.a", "t.c"]
+_SORTED = ["t.a", "t.b", "t.c"]
+
+
+@pytest.mark.parametrize(
+    ("extra", "order"),
+    [
+        (_text("extra", "hex(x'CAFE')"), _REPAIRED),
+        (_text("extra", "bin(b'0101')"), _REPAIRED),
+        (_u("extra", "0xFF + 0b11"), _REPAIRED),
+        (_u("extra", "CAST(id AS Nullable(UInt64))"), _REPAIRED),
+        (_u("extra", "CAST(id AS Enum8('a' = 1, 'b' = -2))"), _REPAIRED),
+        (_u("extra", "id::Tuple(a UInt64, b Array(String))"), _REPAIRED),
+        (_u("extra", "CAST(id AS DateTime64(3, 'UTC'))"), _REPAIRED),
+        (_u("extra", "CAST(id AS id ? a : b)"), _SORTED),
+        (_u("extra", "id::UInt64([a], {b:UInt64}, a -> b)"), _SORTED),
+        (_u("extra", "toString((SELECT (1)))"), _SORTED),
+    ],
+)
+def test_literals_and_casts_the_parser_accepts_keep_the_repair(
+    extra: dict[str, Any], order: list[str]
+) -> None:
+    # Literals and casts the parser accepts leave the table's repair alone;
+    # a cast it cannot parse, or a subquery, keeps the sorted order.
+    assert _order_of([_t([*_CYCLE_BEFORE, extra])], [_t([*_CYCLE_AFTER, extra])]) == order
+
+
+def _unbreakable_tables(tables: int) -> tuple[list[SchemaDefinition], list[SchemaDefinition]]:
+    names = [f"t{i}" for i in range(tables)]
+    before: list[SchemaDefinition] = [
+        _t([_u("a"), _u("null", "z"), _u("z", "a")], name) for name in names
+    ]
+    after: list[SchemaDefinition] = [
+        _t([_u("a"), _u("null", "z"), _u("p", "q"), _u("q", "p"), _u("z", "a")], name)
+        for name in names
+    ]
+    return before, after
+
+
+def _never_closed_tables(tables: int) -> tuple[list[SchemaDefinition], list[SchemaDefinition]]:
+    m = 300
+
+    def pad(prefix: str, i: int) -> str:
+        return f"{prefix}{i:04d}"
+
+    greatest = "greatest(" + ", ".join(pad("a", i) for i in range(m)) + ")"
+    c = [_u(pad("c", i), pad("c", i + 1) if i + 1 < m else "h") for i in range(m)]
+    names = [f"t{k}" for k in range(tables // 256)]
+    before: list[SchemaDefinition] = [
+        _t(
+            [_u(pad("a", i)) for i in range(m)]
+            + [_u(pad("b", i), pad("b", i + 1) if i + 1 < m else "z") for i in range(m)]
+            + [*c, _u("h", greatest), _u("z")],
+            name,
+        )
+        for name in names
+    ]
+    after: list[SchemaDefinition] = [
+        _t(
+            [_u(pad("a", i), pad("b", 0)) for i in range(m)]
+            + [_u(pad("b", i), "1") for i in range(m)]
+            + [*c, _u("h", greatest), _u("z", pad("c", 0))],
+            name,
+        )
+        for name in names
+    ]
+    return before, after
+
+
+@pytest.mark.parametrize("schemas", [_unbreakable_tables, _never_closed_tables])
+def test_plans_many_tables_in_time_that_grows_with_their_number(
+    schemas: Callable[[int], tuple[list[SchemaDefinition], list[SchemaDefinition]]],
+) -> None:
+    # Each table is replayed on its own, so many tables, or tables whose
+    # cycles no statement breaks, cost about as much as their statements:
+    # four times the tables take about four times as long.
+    def plan(tables: int) -> float:
+        previous, next_ = schemas(tables)
+        best = float("inf")
+        for _ in range(3):
+            start = time.perf_counter()
+            plan_diff(previous, next_)
+            best = min(best, time.perf_counter() - start)
+        return best
+
+    narrow = plan(512)
+    wide = plan(2048)
     assert wide < max(10 * narrow, 0.05)
 
 

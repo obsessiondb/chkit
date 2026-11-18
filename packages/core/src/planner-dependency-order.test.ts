@@ -1534,4 +1534,101 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     const wide = plan(2000)
     expect(wide).toBeLessThan(Math.max(10 * narrow, 50))
   }, 60_000)
+
+  // A bare NULL is a literal even when a column is named `null`, so these
+  // tables keep their sorted order: the ALIAS `b` runs after `a` changes to
+  // String. Only a quoted `null` reads the column.
+  test('a bare NULL is no read of a column named null', () => {
+    expect(
+      orderOf(
+        [t([u('a'), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([text('a', "ifNull(null, '')"), u('b', "match(a, 'x')", { type: 'UInt8', defaultKind: 'ALIAS' }), u('null', 'id'), u('z', 'id')])]
+      )
+    ).toEqual(['t.a', 't.b', 't.null', 't.z'])
+    expect(
+      orderOf(
+        [t([u('a'), u('b', 'length(`null`)', { defaultKind: 'ALIAS' }), text('null', 'toString(z)'), u('z', 'length(toString(a))')])],
+        [t([text('a', 'toString(ifNull(null, 1))'), u('b', 'length(a)', { defaultKind: 'ALIAS' }), u('null', 'id'), u('z', 'id')])]
+      )
+    ).toEqual(['t.a', 't.b', 't.null', 't.z'])
+    expect(
+      orderOf([t([u('a'), u('b', 'c'), u('c', '`null`'), u('null', 'a')])], [t([u('a', 'b'), u('b', 'id'), u('c', 'id'), u('null', 'a')])])
+    ).toEqual(['t.b', 't.a', 't.c'])
+  })
+
+  // Table `t:column:other` with column `a` and table `t` with column
+  // `other:column:a` give the same key; the unchanged `t` leaves the other
+  // table's repair alone.
+  test('a key that also names an unchanged column of another table keeps the repair', () => {
+    const other = 't:column:other'
+    expect(
+      orderOf([named(other, cycleBefore), named('t', [u('other:column:a')])], [named(other, cycleAfter), named('t', [u('other:column:a')])])
+    ).toEqual([`${other}.b`, `${other}.a`, `${other}.c`])
+  })
+
+  // Literals and casts the parser accepts leave the table's repair alone;
+  // a cast it cannot parse, or a subquery, keeps the sorted order.
+  test.each<[string, ColumnDefinition, string[]]>([
+    ["hex(x'CAFE')", text('extra', "hex(x'CAFE')"), ['t.b', 't.a', 't.c']],
+    ["bin(b'0101')", text('extra', "bin(b'0101')"), ['t.b', 't.a', 't.c']],
+    ['0xFF + 0b11', u('extra', '0xFF + 0b11'), ['t.b', 't.a', 't.c']],
+    ['CAST(id AS Nullable(UInt64))', u('extra', 'CAST(id AS Nullable(UInt64))'), ['t.b', 't.a', 't.c']],
+    ["CAST(id AS Enum8('a' = 1, 'b' = -2))", u('extra', "CAST(id AS Enum8('a' = 1, 'b' = -2))"), ['t.b', 't.a', 't.c']],
+    ['id::Tuple(a UInt64, b Array(String))', u('extra', 'id::Tuple(a UInt64, b Array(String))'), ['t.b', 't.a', 't.c']],
+    ["CAST(id AS DateTime64(3, 'UTC'))", u('extra', "CAST(id AS DateTime64(3, 'UTC'))"), ['t.b', 't.a', 't.c']],
+    ['CAST(id AS id ? a : b)', u('extra', 'CAST(id AS id ? a : b)'), ['t.a', 't.b', 't.c']],
+    ['id::UInt64([a], {b:UInt64}, a -> b)', u('extra', 'id::UInt64([a], {b:UInt64}, a -> b)'), ['t.a', 't.b', 't.c']],
+    ['toString((SELECT (1)))', u('extra', 'toString((SELECT (1)))'), ['t.a', 't.b', 't.c']],
+  ])('with an unchanged DEFAULT %s, the MODIFYs run in the order %p', (_, extra, order) => {
+    expect(orderOf([t([...cycleBefore, extra])], [t([...cycleAfter, extra])])).toEqual(order)
+  })
+
+  // Each table is replayed on its own, so many tables, or tables whose
+  // cycles no statement breaks, cost about as much as their statements:
+  // four times the tables take about four times as long.
+  test.each<[string, (tables: number) => [SchemaDefinition[], SchemaDefinition[]]]>([
+    [
+      'tables whose cycle no statement breaks',
+      (tables) => {
+        const range = Array.from({ length: tables }, (_, i) => `t${i}`)
+        return [
+          range.map((name) => named(name, [u('a'), u('null', 'z'), u('z', 'a')])),
+          range.map((name) => named(name, [u('a'), u('null', 'z'), u('p', 'q'), u('q', 'p'), u('z', 'a')])),
+        ]
+      },
+    ],
+    [
+      'tables whose reads have a cycle the sorted order never closes',
+      (tables) => {
+        const m = 300
+        const pad = (prefix: string, i: number) => `${prefix}${String(i).padStart(4, '0')}`
+        const range = Array.from({ length: m }, (_, i) => i)
+        const greatest = `greatest(${range.map((i) => pad('a', i)).join(', ')})`
+        const c = range.map((i) => u(pad('c', i), i + 1 < m ? pad('c', i + 1) : 'h'))
+        const names = Array.from({ length: tables / 256 }, (_, k) => `t${k}`)
+        return [
+          names.map((name) =>
+            named(name, [...range.map((i) => u(pad('a', i))), ...range.map((i) => u(pad('b', i), i + 1 < m ? pad('b', i + 1) : 'z')), ...c, u('h', greatest), u('z')])
+          ),
+          names.map((name) =>
+            named(name, [...range.map((i) => u(pad('a', i), pad('b', 0))), ...range.map((i) => u(pad('b', i), '1')), ...c, u('h', greatest), u('z', pad('c', 0))])
+          ),
+        ]
+      },
+    ],
+  ])('plans %s in time that grows with their number', (_, schemas) => {
+    const plan = (tables: number) => {
+      const [previous, next] = schemas(tables)
+      let best = Number.POSITIVE_INFINITY
+      for (let run = 0; run < 3; run += 1) {
+        const start = performance.now()
+        planDiff(previous, next)
+        best = Math.min(best, performance.now() - start)
+      }
+      return best
+    }
+    const narrow = plan(512)
+    const wide = plan(2048)
+    expect(wide).toBeLessThan(Math.max(10 * narrow, 50))
+  }, 120_000)
 })
