@@ -12,6 +12,8 @@ export interface RecoveryTargets {
   retryTarget: string | undefined
   /** `--abandon <migration>` as a file name. */
   abandonTarget: string | undefined
+  /** `--mark-applied <migration>` or `--mark-not-applied <migration>`. */
+  markTarget: { migration: string; outcome: 'applied' | 'not-applied' } | undefined
 }
 
 export interface StatementMarker {
@@ -88,11 +90,33 @@ export function resolveRecoveryTargets(flags: ParsedFlags): RecoveryTargets {
       )
     }
   }
-  return { retryTarget, abandonTarget }
+  return { retryTarget, abandonTarget, markTarget: resolveMarkTarget(flags) }
+}
+
+/** Flags that mean nothing next to --mark-applied or --mark-not-applied, which only change the journal. */
+const MARK_CONFLICTING_FLAGS = ['--retry', '--abandon', '--table', '--allow-destructive', '--cancel-lock-queries'] as const
+
+function resolveMarkTarget(flags: ParsedFlags): RecoveryTargets['markTarget'] {
+  const applied = flags['--mark-applied']
+  const notApplied = flags['--mark-not-applied']
+  if (typeof applied === 'string' && typeof notApplied === 'string') {
+    throw new MigrateError('invalid_usage', '--mark-applied and --mark-not-applied cannot be combined: each records one outcome of the stopped statement.')
+  }
+  const flag = typeof applied === 'string' ? '--mark-applied' : typeof notApplied === 'string' ? '--mark-not-applied' : undefined
+  if (flag === undefined) return undefined
+  const migration = normalizeMigrationName(String(flags[flag]), flag)
+  const conflicts = MARK_CONFLICTING_FLAGS.filter((name) => flags[name] !== undefined && flags[name] !== false)
+  if (conflicts.length > 0) {
+    throw new MigrateError(
+      'invalid_usage',
+      `${flag} cannot be combined with ${conflicts.join(', ')}. It only records the outcome of one statement in the journal and applies nothing.`,
+    )
+  }
+  return { migration, outcome: flag === '--mark-applied' ? 'applied' : 'not-applied' }
 }
 
 /** `name`, `name.sql` or a path to the file → `name.sql`. */
-export function normalizeMigrationName(raw: string, flag: '--retry' | '--abandon'): string {
+export function normalizeMigrationName(raw: string, flag: '--retry' | '--abandon' | '--mark-applied' | '--mark-not-applied'): string {
   const base = raw.trim().split(/[\\/]/).pop()?.trim() ?? ''
   if (base === '' || base === '.sql') {
     throw new MigrateError(
