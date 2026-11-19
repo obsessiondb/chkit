@@ -60,7 +60,7 @@ const QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS = 2_000
 // complete. They go after --setting values; a SETTINGS clause in the
 // statement still wins. A SELECT or an INSERT queues no such work and is sent
 // without them, so a profile that fixes one of them does not reject a load.
-export const ASYNC_COMPLETION_SETTINGS: ClickHouseSettings = {
+const ASYNC_COMPLETION_SETTINGS: ClickHouseSettings = {
   mutations_sync: '2',
   alter_sync: '2',
   distributed_ddl_task_timeout: '-1',
