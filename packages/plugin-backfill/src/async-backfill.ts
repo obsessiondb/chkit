@@ -296,7 +296,7 @@ async function reconcileProgress(
   const read = (scope: Parameters<typeof readChunkQueries>[2]) =>
     readChunkQueries(executor, planId, scope, reads, async (seen) => {
       current = observedProgress(planId, chunkIds, current, seen)
-      await save()
+      await saveDuringRead(save)
     })
   let evidence = await read({ prefix: `backfill-${planId}-` })
   let unknown: UnknownAttempt[] = []
@@ -613,6 +613,26 @@ interface ChunkEvidence {
 type ObserveProcesses = (seen: ChunkEvidence) => Promise<void>
 
 /**
+ * A checkpoint save that failed while a read was under way: it is not a read
+ * error the read may retry, so it ends the run as a failed save does
+ * anywhere else (see `saveDuringRead`).
+ */
+class CheckpointSaveError extends Error {
+  constructor(cause: unknown) {
+    super(errorMessage(cause), { cause })
+  }
+}
+
+/** `save()`, its failure marked so that read-error handling passes it on. */
+async function saveDuringRead(save: () => Promise<void>): Promise<void> {
+  try {
+    await save()
+  } catch (error) {
+    throw new CheckpointSaveError(error)
+  }
+}
+
+/**
  * `progress` with every observation of `evidence` merged into the attempts
  * of `chunkIds` (see `notedState`), whether the read was whole or partial.
  * The one place a read's evidence enters the progress; callers save the
@@ -669,6 +689,7 @@ async function readChunkQueries(
   try {
     return await readEvidence(executor, scope, reads, observe)
   } catch (error) {
+    if (error instanceof CheckpointSaveError) throw error.cause
     throw new Error(
       `Backfill plan ${planId}: could not check which chunks are still running on the server (${errorMessage(error)}). Nothing was submitted — re-run the resume.`,
       { cause: error },
@@ -881,11 +902,14 @@ async function pollChunk(
         const observed = notedState(planId, chunkId, state, seen)
         if (observed === state) return
         state = observed
-        await onChanged(state)
+        const saving = state
+        await saveDuringRead(async () => { await onChanged(saving) })
       })
       noted = notedState(planId, chunkId, state, evidence)
       outcome = classifyAttempt(planId, chunkId, noted, evidence, final)
     } catch (error) {
+      // A failed checkpoint save is no read error to retry: it ends the run.
+      if (error instanceof CheckpointSaveError) throw error.cause
       errors++
       if (errors >= limits.maxPollErrors) {
         return { chunkId, queryId, reason: `lost contact with the server after ${errors} consecutive poll errors (${errorMessage(error)})` }
@@ -967,9 +991,13 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // Every checkpoint write goes through one queue, one at a time and in
   // order, as chkit-py's are: an older write never lands after a newer one,
   // and waiting for the latest write waits for all of them.
+  // Set once an interrupt has seen the last checkpoint write end: no write
+  // starts after that, not even an admitted chunk's own record, nor one
+  // already queued (checked as it is dequeued).
+  let sealed = false
   let writeQueue: Promise<void> = Promise.resolve()
   const write = (snapshot: BackfillProgress): Promise<void> => {
-    const next = writeQueue.then(() => onProgress?.(snapshot))
+    const next = writeQueue.then(() => (sealed ? undefined : onProgress?.(snapshot)))
     writeQueue = next.then(() => undefined, () => undefined)
     return next
   }
@@ -1029,9 +1057,6 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     return lastReport
   }
 
-  // Set once an interrupt has seen the last checkpoint write end: no write
-  // starts after that, not even an admitted chunk's own record.
-  let sealed = false
 
   // Save the reconciled state, every chunk included, before anything is
   // submitted: a chunk this checkpoint lists as pending without a query id

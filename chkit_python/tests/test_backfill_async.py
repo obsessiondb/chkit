@@ -3214,3 +3214,39 @@ def test_a_stop_while_the_query_log_read_hangs_keeps_what_processes_showed() -> 
     assert isinstance(outcome[0], BackfillInterruptedError)
     assert saved
     assert saved[-1]["c1"].written_rows == 5
+
+
+# Codex round 13: a checkpoint save that fails while a poll reads is no read
+# error to retry: it ends the run, as it did before saves moved into the read.
+def test_a_checkpoint_save_that_fails_during_a_poll_ends_the_run() -> None:
+    executor = SubmitRecordingExecutor(
+        {
+            f"backfill-{PLAN_ID}-c1": [
+                QueryStatus(status="running", written_rows=5),
+                QueryStatus(status="finished", written_rows=5),
+            ],
+            f"backfill-{PLAN_ID}-c2": [QueryStatus(status="finished", written_rows=1)],
+        }
+    )
+    failed = [False]
+
+    def on_progress(progress: BackfillProgress) -> None:
+        if not failed[0] and progress["c1"].written_rows == 5:
+            failed[0] = True
+            msg = "ENOSPC checkpoint"
+            raise OSError(msg)
+
+    with pytest.raises(OSError, match="ENOSPC checkpoint"):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+            concurrency=1,
+            poll_interval_ms=1,
+            outcome_recheck_attempts=1,
+            outcome_recheck_interval_ms=1,
+            on_progress=on_progress,
+        )
+
+    assert executor.submit_order == [f"backfill-{PLAN_ID}-c1"]

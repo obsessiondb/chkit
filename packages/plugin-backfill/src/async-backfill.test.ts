@@ -2396,3 +2396,77 @@ test('checkpoint writes land in order, and an interrupt waits for an older slow 
   expect(slowDone).toBeGreaterThan(0)
   expect(returned).toBeGreaterThanOrEqual(slowDone)
 })
+
+// Codex round 13: a checkpoint save that fails while a poll reads is no
+// read error to retry: it ends the run, as it did before saves moved into
+// the read.
+test('a checkpoint save that fails during a poll ends the run', async () => {
+  const statuses = new Map<string, QueryStatus[]>([
+    [`backfill-${PLAN_ID}-c1`, [{ status: 'running', writtenRows: 5 }, { status: 'finished', writtenRows: 5 }]],
+    [`backfill-${PLAN_ID}-c2`, [{ status: 'finished', writtenRows: 1 }]],
+  ])
+  const executor = createMockExecutor(statuses)
+  const submits: string[] = []
+  const submit = executor.submit.bind(executor)
+  executor.submit = (sql, queryId, settings, admission) => {
+    submits.push(queryId ?? '')
+    return submit(sql, queryId, settings, admission)
+  }
+  let failed = false
+
+  const run = executeBackfill({
+    executor,
+    planId: PLAN_ID,
+    chunks: [{ id: 'c1' }, { id: 'c2' }],
+    buildQuery: () => 'INSERT INTO t SELECT 1',
+    concurrency: 1,
+    pollIntervalMs: 1,
+    outcomeRecheckAttempts: 1,
+    outcomeRecheckIntervalMs: 1,
+    onProgress: (progress) => {
+      if (!failed && progress.c1?.writtenRows === 5) {
+        failed = true
+        throw new Error('ENOSPC checkpoint')
+      }
+    },
+  })
+
+  await expect(run).rejects.toThrow('ENOSPC checkpoint')
+  expect(submits).toEqual([`backfill-${PLAN_ID}-c1`])
+})
+
+// Codex round 13: a checkpoint write already queued when the interrupt
+// returns never starts: the queue checks the seal as it dequeues.
+test('a write queued behind a hung one never starts after the interrupt returned', async () => {
+  const controller = new AbortController()
+  let calls = 0
+  let release: () => void = () => undefined
+  const run = executeBackfill({
+    executor: createMockExecutor(new Map([
+      [`backfill-${PLAN_ID}-c1`, [{ status: 'running' }]],
+      [`backfill-${PLAN_ID}-c2`, [{ status: 'running' }]],
+    ])),
+    planId: PLAN_ID,
+    chunks: [{ id: 'c1' }, { id: 'c2' }],
+    buildQuery: () => 'INSERT INTO t SELECT 1',
+    concurrency: 2,
+    pollIntervalMs: 1,
+    signal: controller.signal,
+    handoffTimeoutMs: 100,
+    onProgress: () => {
+      calls++
+      if (calls !== 2) return
+      return new Promise<void>((resolve) => { release = resolve })
+    },
+  })
+  while (calls < 2) await new Promise((resolve) => setTimeout(resolve, 1))
+  await new Promise((resolve) => setTimeout(resolve, 20))
+
+  controller.abort()
+  await run.then(() => undefined, () => undefined)
+  const atReturn = calls
+  release()
+  await new Promise((resolve) => setTimeout(resolve, 50))
+
+  expect(calls).toBe(atReturn)
+})

@@ -294,7 +294,7 @@ def _reconcile_progress(
     def observe(seen: _ChunkEvidence) -> None:
         nonlocal current
         current = _observed_progress(plan_id, to_sync, current, seen)
-        save()
+        _save_during_read(save)
 
     def read(**scope: object) -> _ChunkEvidence:
         # What system.processes shows is merged and saved before query_log is
@@ -461,6 +461,24 @@ def _raised_written_rows(state: BackfillChunkState, count: int | None) -> int:
     TS ``raisedWrittenRows``): the maximum of every count seen, never lower.
     Every write of ``written_rows`` goes through it."""
     return max(state.written_rows or 0, count or 0)
+
+
+class _CheckpointSaveError(Exception):
+    """A checkpoint save that failed while a read was under way (TS
+    ``CheckpointSaveError``): it is not a read error the read may retry, so it
+    ends the run as a failed save does anywhere else."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _save_during_read(save: Callable[[], None]) -> None:
+    """``save()``, its failure marked so that read-error handling passes it on."""
+    try:
+        save()
+    except Exception as error:
+        raise _CheckpointSaveError(error) from error
 
 
 #: Called with what system.processes showed, before query_log is read: the
@@ -710,6 +728,8 @@ def _read_chunk_queries(
             unprovable=unprovable,
             observe=observe,
         )
+    except _CheckpointSaveError as error:
+        raise error.cause from None
     except Exception as error:
         msg = (
             f"Backfill plan {plan_id}: could not check which chunks are still "
@@ -1305,7 +1325,7 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         max_poll_errors * poll_interval_ms,
     )
 
-    def poll_chunk(
+    def poll_chunk(  # noqa: PLR0912 — mirrors the TS pollChunk
         initial: BackfillChunkState, chunk_id: str
     ) -> _UnknownAttempt | None:
         """Follow a submitted attempt to its outcome, on every replica,
@@ -1334,7 +1354,8 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                 observed = _noted_state(plan_id, chunk_id, state, seen)
                 if observed is not state:
                     state = observed
-                    set_chunk(chunk_id, state)
+                    saving = state
+                    _save_during_read(lambda: set_chunk(chunk_id, saving))
 
             try:
                 evidence = _read_evidence(
@@ -1347,6 +1368,10 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                 )
                 noted = _noted_state(plan_id, chunk_id, state, evidence)
                 outcome = _classify_attempt(plan_id, chunk_id, noted, evidence, final=final)
+            except _CheckpointSaveError as error:
+                # A failed checkpoint save is no read error to retry: it ends
+                # the run.
+                raise error.cause from None
             except Exception as error:
                 errors += 1
                 if errors >= max_poll_errors:
