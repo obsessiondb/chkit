@@ -54,7 +54,7 @@ The pipeline has three stages, and you can use any subset:
 
 1. **Plan** — `generateChunkPlan(...)` introspects a table and returns a `ChunkPlan` describing how to partition the work into roughly equal-sized chunks.
 2. **Build SQL** — `buildChunkExecutionSql(...)` turns a single `Chunk` into an `INSERT … SELECT` statement.
-3. **Execute** — `executeBackfill(...)` submits chunks against a real `ClickHouseExecutor` with deterministic query IDs, polling, and resume support.
+3. **Execute** — `executeBackfill(...)` submits chunks against a real `ClickHouseExecutor` with deterministic first-attempt query IDs (each replay gets one of its own), polling, and resume support.
 
 ### Plan a backfill
 
@@ -97,6 +97,7 @@ console.log(`${plan.chunks.length} chunks, ${plan.totalRows.toLocaleString()} ro
 import { createClickHouseExecutor } from '@chkit/clickhouse'
 import {
   buildChunkExecutionSql,
+  CHECKPOINT_VERSION,
   executeBackfill,
   type BackfillProgress,
 } from '@chkit/plugin-backfill/sdk'
@@ -125,6 +126,14 @@ const result = await executeBackfill({
   concurrency: 4,
   pollIntervalMs: 5_000,
   resumeFrom: saved,
+  // The format of progress this release reported. Omit it for progress an
+  // older release reported: a chunk it lists as pending, or not at all, may
+  // have run, and is not submitted again without acceptUnknown.
+  checkpointVersion: CHECKPOINT_VERSION,
+  // signal: an AbortSignal that stops the run; it needs an executor with
+  // submitSendsOnce (the native one), so no chunk is sent after it aborts.
+  // unprovableFailures: the reason no failure of the target can be proven,
+  // for a Distributed target (its shards' rows are not in written_rows).
   onProgress: async (progress) => {
     saved = progress
     // persist to disk / state store

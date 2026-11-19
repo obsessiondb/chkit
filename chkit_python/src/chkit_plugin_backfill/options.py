@@ -199,6 +199,7 @@ class RunOptions(BaseModel):
 
 class ResumeOptions(RunOptions):
     replay_failed: bool = Field(default=False, alias="replayFailed")
+    accept_unknown: bool = Field(default=False, alias="acceptUnknown")
 
 
 class StatusOptions(BaseModel):
@@ -287,6 +288,14 @@ RESUME_FLAGS: list[dict[str, Any]] = [
         "type": "boolean",
         "description": "Re-execute failed chunks",
     },
+    {
+        "name": "--accept-unknown",
+        "type": "boolean",
+        "description": (
+            "Replay chunks whose last attempt has an unknown outcome"
+            " (can write their rows twice)"
+        ),
+    },
 ]
 
 PLAN_ID_FLAGS: list[dict[str, Any]] = [
@@ -357,6 +366,7 @@ RUN_FLAG_MAP: dict[str, dict[str, Any]] = {
 RESUME_FLAG_MAP: dict[str, dict[str, Any]] = {
     **RUN_FLAG_MAP,
     "--replay-failed": {"key": "replay_failed"},
+    "--accept-unknown": {"key": "accept_unknown"},
 }
 
 PLAN_ID_FLAG_MAP: dict[str, dict[str, Any]] = {
