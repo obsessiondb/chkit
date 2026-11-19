@@ -43,7 +43,8 @@ def _only_in_each(ts: str, py: str) -> tuple[list[str], list[str]]:
     )
 
 
-SAME_COMMANDS = ["generate", "migrate", "status", "snapshot", "query", "plugin"]
+# drift and check too: their no-op --live is hidden from the help, as TS has none (#776).
+SAME_COMMANDS = ["generate", "migrate", "status", "drift", "check", "snapshot", "query", "plugin"]
 
 
 @pytest.mark.parametrize("command", SAME_COMMANDS)
@@ -139,18 +140,6 @@ def test_init_help_describes_the_python_scaffold() -> None:
     assert _only_in_each(FIXTURE["init --help"], _help(["init", "-h"])) == (
         ["Create a TypeScript config and example schema; install project dependencies."],
         ["Create a Python config and example schema."],
-    )
-
-
-@pytest.mark.parametrize("command", ["drift", "check"])
-@pytest.mark.parametrize("flag", ["--help", "--help-plugins"])
-def test_drift_and_check_also_list_the_python_live_flag(command: str, flag: str) -> None:
-    assert _only_in_each(FIXTURE[f"{command} {flag}"], _help([command, flag])) == (
-        [],
-        [
-            f"  --live                 No-op, kept for existing scripts: {command} "
-            "always reads the live server"
-        ],
     )
 
 

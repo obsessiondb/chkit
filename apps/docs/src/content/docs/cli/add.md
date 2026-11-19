@@ -7,7 +7,7 @@ sidebar:
 
 Installs an editable provider template into a TypeScript project, including its schema, ingestion readers, environment examples, and required packages.
 
-This command belongs to [chkit Sync (beta)](/sync/). Schema management does not require provider templates.
+This command belongs to [chkit Sync (beta)](/sync/). It is TypeScript only: chkit-py has no `chkit add` (see [Differences from the TypeScript version](/python/overview/#differences-from-the-typescript-version)). Schema management does not require provider templates.
 
 ## Synopsis
 
