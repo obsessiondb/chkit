@@ -268,6 +268,8 @@ export async function applyMigration(input: {
   queryTracker?: QueryTracker
   /** Set when the run holds no migrate lock because the target database did not exist (#767). */
   locklessBootstrap?: boolean
+  /** Aborted by Ctrl-C: no statement starts after it. */
+  signal?: AbortSignal
   /** Set when --retry verified an edit of this in-progress migration before the run (#233). */
   retry?: { previousChecksum: string; checksum: string }
   /** Progress lines; the command sends them to stderr in --json mode. */
@@ -392,6 +394,7 @@ export async function applyMigration(input: {
   }
 
   for (let i = 0; i < statements.length; i++) {
+    input.signal?.throwIfAborted()
     const statement = statements[i] as string
     const operation = operationSummaries[i]
     if (operation?.mode === 'async') {
@@ -411,9 +414,11 @@ export async function applyMigration(input: {
           settings,
           queryTracker: input.queryTracker,
           locklessBootstrap: input.locklessBootstrap,
+          signal: input.signal,
           log,
         })
       } catch (error) {
+        if (error === input.signal?.reason) throw error
         const wrapped = statementError({ file, index: i, total: statements.length, statement, error })
         // A stop of an async statement keeps its code for --json (#767).
         if (error instanceof MigrateError && ASYNC_STOP_CODES.has(error.code)) {
