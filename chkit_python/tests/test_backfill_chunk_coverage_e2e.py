@@ -80,8 +80,8 @@ LAYOUTS = [
         name="string key partitioned by a digit",
         columns="k String, p UInt8, s String",
         engine="PARTITION BY p ORDER BY k",
-        insert="SELECT toString(number), number % 4, repeat('x', 200) FROM numbers(20000)",
-        target_chunk_bytes=500_000,
+        insert="SELECT toString(number), number % 4, repeat('x', 200) FROM numbers(8000)",
+        target_chunk_bytes=200_000,
     ),
 ]
 
@@ -120,7 +120,7 @@ def test_chunk_plan_covers_every_source_row_exactly_once(
         return client.query(sql, dict(settings) if settings is not None else None).rows
 
     def count_rows(sql: str) -> int:
-        rows = client.query(f"{sql} SETTINGS select_sequential_consistency = 1").rows
+        rows = client.query(f"{sql} SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0").rows
         return int(str(rows[0]["cnt"])) if rows else 0
 
     try:

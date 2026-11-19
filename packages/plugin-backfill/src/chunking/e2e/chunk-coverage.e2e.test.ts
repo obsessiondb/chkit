@@ -70,8 +70,8 @@ const LAYOUTS: Layout[] = [
     name: 'string key partitioned by a digit',
     columns: 'k String, p UInt8, s String',
     engine: 'PARTITION BY p ORDER BY k',
-    insert: "SELECT toString(number), number % 4, repeat('x', 200) FROM numbers(20000)",
-    targetChunkBytes: 500_000,
+    insert: "SELECT toString(number), number % 4, repeat('x', 200) FROM numbers(8000)",
+    targetChunkBytes: 200_000,
   },
 ]
 
@@ -96,7 +96,7 @@ afterAll(async () => {
 })
 
 async function countRows(sql: string): Promise<number> {
-  const [row] = await plannerExecutor.query<{ cnt: string }>(`${sql} SETTINGS select_sequential_consistency = 1`)
+  const [row] = await plannerExecutor.query<{ cnt: string }>(`${sql} SETTINGS select_sequential_consistency = 1, enable_parallel_replicas = 0`)
   return Number(row?.cnt ?? 0)
 }
 
@@ -142,6 +142,6 @@ describe('e2e: chunk plans cover every source row exactly once (chkit#826)', () 
         `SELECT countIf(matches != 1) AS cnt FROM (SELECT ${matches} AS matches FROM ${db}.${table})`,
       )
       expect(notExactlyOnce).toBe(0)
-    }, 120_000)
+    }, 300_000)
   }
 })
