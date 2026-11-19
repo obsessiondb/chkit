@@ -94,7 +94,7 @@ PINNED_INSERT_SETTINGS_SQL = ", ".join(
 
 #: Other names of the pinned settings (``system.settings.alias_for``), for a
 #: server that does not list them: ``enable_parallel_replicas`` is an alias of
-#: ``allow_experimental_parallel_reading_from_replicas`` from 25.3 on.
+#: ``allow_experimental_parallel_reading_from_replicas`` from 24.10 on.
 PINNED_SETTING_ALIASES: dict[str, str] = {
     "enable_parallel_replicas": "allow_experimental_parallel_reading_from_replicas",
 }
