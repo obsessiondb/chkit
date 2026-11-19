@@ -157,6 +157,14 @@ def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
             client.execute("INSERT INTO t VALUES (3)")
     assert fake.command.call_count == 3
 
+    # A readonly = 1 user cannot write at all: the server says so.
+    fake.server_settings = {
+        "readonly": SimpleNamespace(readonly=True, value="1"),
+        "async_insert": SimpleNamespace(readonly=True, value="1"),
+    }
+    client.execute("INSERT INTO t VALUES (4)")
+    assert fake.command.call_args.kwargs["settings"] == {}
+
 
 def test_submit_reads_the_durable_settings_of_the_driver_it_sends_through(
     monkeypatch: pytest.MonkeyPatch,

@@ -233,9 +233,13 @@ class ClickHouseClient:
         user cannot change (readonly = 1, or a constraint) is left out when it
         already has that value, where clickhouse-connect would refuse it before
         the server's own error. Fixed at another value, the write is refused, as
-        the server refuses TS's. Read from ``driver``, the one that sends the
-        write (the main one by default)."""
+        the server refuses TS's. A readonly = 1 user gets the server's own
+        error, which refuses its writes. Read from ``driver``, the one that
+        sends the write (the main one by default)."""
         server_settings = (driver or self._client).server_settings
+        mode = server_settings.get("readonly")
+        if mode is not None and str(mode.value) == "1":
+            return {}
         settings: dict[str, Any] = {}
         for name, value in _DURABLE_INSERT_SETTINGS.items():
             setting = server_settings.get(name)
