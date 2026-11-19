@@ -294,7 +294,7 @@ export async function applyMigration(input: {
     migration: file,
     sql,
     statements: parsedStatements,
-  })
+  }, input.signal)
 
   // migrate refused a file's non-SELECT barrier before the run; a plugin may
   // have rewritten the statements since (#634).
