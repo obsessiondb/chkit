@@ -462,6 +462,9 @@ def _run(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None,
             **({"fanout_override": recovery_coverage} if recovery_coverage else {}),
         )
+        # Reading the journal can upgrade its schema, a write (#790).
+        if execute_requested:
+            assert_insert_settings_changeable(cast(ClickHouseClient, raw_client))
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
         ctx = _MigrateContext(

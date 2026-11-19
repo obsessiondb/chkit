@@ -277,6 +277,8 @@ class ClickHouseClient:
         settings: dict[str, Any] | None = None,
     ) -> None:
         """Persist an id before each physical send; never replay an ambiguous send."""
+        # Refused before an id is recorded, as execute is (#790).
+        settings = {**self._write_settings(), **(settings or {})}
         check()
         query_id = before_attempt()
         check()
@@ -301,8 +303,7 @@ class ClickHouseClient:
             self._client.command(
                 statement,
                 settings={
-                    "wait_end_of_query": 1, **_DURABLE_INSERT_SETTINGS,
-                    **(settings or {}), "query_id": query_id,
+                    "wait_end_of_query": 1, **(settings or {}), "query_id": query_id,
                 },
                 use_database=use_database,
             )

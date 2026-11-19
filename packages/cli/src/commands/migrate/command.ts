@@ -371,6 +371,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       `--retry: no migration file named ${retryTarget} in ${migrationsDir}. To reset the journal state of a migration whose file was deleted, use chkit migrate --abandon ${retryTarget}.`,
     )
   }
+  // Reading the journal can upgrade its schema, a write (#790).
+  if (executeRequested) await assertInsertSettingsChangeable(rawDb)
   const journal = await journalStore.readJournal()
   const appliedNames = new Set(journal.applied.map((entry) => entry.name))
   const pendingAll = files.filter((file) => !appliedNames.has(file))

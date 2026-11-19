@@ -166,6 +166,29 @@ def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
     assert fake.command.call_args.kwargs["settings"] == {}
 
 
+def test_tracked_execute_applies_the_same_durable_settings_check_as_execute() -> None:
+    """#790: a setting fixed at chkit's value is left out, one fixed at another
+    value is refused before an id is recorded or anything is sent."""
+    client, fake = _stub_client()
+    recorded: list[str] = []
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=True, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
+    client.execute_tracked("INSERT INTO t VALUES (1)", lambda: None, lambda: recorded.append("id") or "id")
+    assert fake.command.call_args.kwargs["settings"] == {
+        "wait_end_of_query": 1, "wait_for_async_insert": 1, "query_id": "id",
+    }
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=True, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
+    with pytest.raises(RuntimeError, match="Setting async_insert is fixed at 1"):
+        client.execute_tracked("INSERT INTO t VALUES (2)", lambda: None, lambda: recorded.append("id") or "id")
+    assert recorded == ["id"]
+    assert fake.command.call_count == 1
+
+
 def test_submit_reads_the_durable_settings_of_the_driver_it_sends_through(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
@@ -212,6 +235,10 @@ def test_execute_reraises_other_database_errors_without_retry() -> None:
 
 def test_tracked_execute_records_a_fresh_id_for_the_database_fallback() -> None:
     client, fake = _stub_client()
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=False, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
     fake.command.side_effect = [DatabaseError("Code: 81. UNKNOWN_DATABASE"), None]
     events: list[str] = []
     ids = iter(["first", "fallback"])
