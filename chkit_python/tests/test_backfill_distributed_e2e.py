@@ -132,13 +132,15 @@ def ctx() -> Iterator[_Ctx]:
 
     def read_seen() -> int:
         # A new connection per read, so each one can land on another replica.
-        reader = ClickHouseClient.connect(config)
+        reader: ClickHouseClient | None = None
         try:
+            reader = ClickHouseClient.connect(config)
             full = context.count_rows(reader, "source") == SOURCE_ROWS
-        except Exception:  # a replica that does not list the table yet
+        except Exception:  # no connection, or a replica that does not list the table yet
             full = False
         finally:
-            reader.close()
+            if reader is not None:
+                reader.close()
         seen[0] = seen[0] + 1 if full else 0
         return seen[0]
 
