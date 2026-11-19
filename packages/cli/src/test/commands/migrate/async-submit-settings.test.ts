@@ -7,7 +7,6 @@ import { asyncSubmitSettings } from '../../../commands/migrate/async-apply.js'
 describe('asyncSubmitSettings', () => {
   const waits = {
     mutations_sync: '2',
-    lightweight_deletes_sync: '2',
     alter_sync: '2',
     distributed_ddl_task_timeout: '-1',
     distributed_ddl_output_mode: 'throw',
@@ -22,8 +21,11 @@ describe('asyncSubmitSettings', () => {
   ])('waits for the work of %s, over the --setting values', (sql) => {
     expect(asyncSubmitSettings(sql, { mutations_sync: '0', lightweight_deletes_sync: '0', alter_sync: '0', max_threads: '4' })).toEqual({
       ...waits,
+      lightweight_deletes_sync: '2',
       max_threads: '4',
     })
+    // A server before 24.4 does not know lightweight_deletes_sync.
+    expect(asyncSubmitSettings(sql, { max_threads: '4' })).toEqual({ ...waits, max_threads: '4' })
     expect(asyncSubmitSettings(sql, undefined)).toEqual(waits)
   })
 

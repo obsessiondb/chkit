@@ -109,7 +109,6 @@ QUERY_LOG_FLUSH_RECHECK_INTERVAL_SECONDS = 2.0
 # without them, so a profile that fixes one of them does not reject a load.
 ASYNC_COMPLETION_SETTINGS: dict[str, str] = {
     "mutations_sync": "2",
-    "lightweight_deletes_sync": "2",
     "alter_sync": "2",
     "distributed_ddl_task_timeout": "-1",
     "distributed_ddl_output_mode": "throw",
@@ -120,7 +119,15 @@ def async_submit_settings(sql: str, settings: dict[str, str] | None) -> dict[str
     """The settings an async statement is submitted with (TS ``asyncSubmitSettings``)."""
     if rejection_runs_nothing(sql):
         return settings
-    return {**(settings or {}), **ASYNC_COMPLETION_SETTINGS}
+    # A server before ClickHouse 24.4 rejects lightweight_deletes_sync as an
+    # unknown setting (its lightweight DELETE always waits), so it is pinned
+    # only over a --setting value, which that server would reject anyway.
+    deletes = (
+        {}
+        if settings is None or "lightweight_deletes_sync" not in settings
+        else {"lightweight_deletes_sync": "2"}
+    )
+    return {**(settings or {}), **ASYNC_COMPLETION_SETTINGS, **deletes}
 
 
 # ClickHouse's ACCESS_DENIED (497) for system.query_log, as the native client

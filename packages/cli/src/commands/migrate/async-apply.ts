@@ -62,14 +62,18 @@ const QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS = 2_000
 // without them, so a profile that fixes one of them does not reject a load.
 export const ASYNC_COMPLETION_SETTINGS: ClickHouseSettings = {
   mutations_sync: '2',
-  lightweight_deletes_sync: '2',
   alter_sync: '2',
   distributed_ddl_task_timeout: '-1',
   distributed_ddl_output_mode: 'throw',
 }
 
 export function asyncSubmitSettings(sql: string, settings: ClickHouseSettings | undefined): ClickHouseSettings | undefined {
-  return rejectionRunsNothing(sql) ? settings : { ...settings, ...ASYNC_COMPLETION_SETTINGS }
+  if (rejectionRunsNothing(sql)) return settings
+  // A server before ClickHouse 24.4 rejects lightweight_deletes_sync as an
+  // unknown setting (its lightweight DELETE always waits), so it is pinned
+  // only over a --setting value, which that server would reject anyway.
+  const deletes = settings?.lightweight_deletes_sync === undefined ? {} : { lightweight_deletes_sync: '2' }
+  return { ...settings, ...ASYNC_COMPLETION_SETTINGS, ...deletes }
 }
 
 function describeError(error: unknown): string {
