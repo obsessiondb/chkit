@@ -239,7 +239,6 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   if (!pluginContext.hasExecutor) {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
-  if (executeRequested) await assertInsertSettingsChangeable(pluginContext.executor)
   // Every request of the run, journal writes included, first checks that
   // the run still holds the migrate lock, once it took it (#716).
   let heldLock: MigrateLock | undefined
@@ -262,6 +261,8 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     await assertCancellationClear(rawDb, target, allowedClaim, identity)
   }
   const withLock: WithLock = async (fn, { selectedFiles = [], abandon } = {}) => {
+    // Every run that writes passes here first, interactive or not (#790).
+    await assertInsertSettingsChangeable(rawDb)
     if (migrateLockDisabled()) {
       console.error('⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a concurrent migrate can apply the same statements.')
       const target = await journalStore.lockTarget()

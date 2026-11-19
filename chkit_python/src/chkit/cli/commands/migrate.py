@@ -437,8 +437,6 @@ def _run(
         raise MigrateError("migration_not_found", msg)
 
     with open_client(executor, config.clickhouse) as configured_client:
-        if execute_requested:
-            assert_insert_settings_changeable(configured_client)
         raw_client = (
             FreshRecoveryClient(configured_client) if cancel_lock_queries else configured_client
         )
@@ -1015,6 +1013,8 @@ class _MigrateLockRunner(WithLock):
         abandon: str | None = None,
     ) -> _T:
         """`abandon` names the migration --abandon resets, which also leaves unfinished recovery."""
+        # Every run that writes passes here first, interactive or not (#790).
+        assert_insert_settings_changeable(self._raw_client)
         if migrate_lock_disabled():
             typer.echo(
                 "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "

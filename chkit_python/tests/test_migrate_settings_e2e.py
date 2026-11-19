@@ -15,6 +15,9 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 from typer.testing import CliRunner
 
 from chkit.cli.commands.migrate_errors import MigrateError
@@ -226,9 +229,16 @@ def test_insert_settings_check_passes_changeable_matching_and_readonly_users() -
          {"name": "wait_for_async_insert", "value": "1", "readonly": 1}],
         [{"name": "readonly", "value": "1", "readonly": 1},
          {"name": "async_insert", "value": "1", "readonly": 1}],
-        RuntimeError("denied"),
     ]:
         assert_insert_settings_changeable(_SettingsClient(rows))  # type: ignore[arg-type]
+
+
+def test_insert_settings_check_stops_the_run_when_it_cannot_read() -> None:
+    # As TS: a failed read stops the run, unless the database does not exist yet.
+    with pytest.raises(DatabaseError, match="denied"):
+        assert_insert_settings_changeable(_SettingsClient(DatabaseError("denied")))  # type: ignore[arg-type]
+    missing = DatabaseError("Code: 81. DB::Exception: Database x does not exist. (UNKNOWN_DATABASE)")
+    assert_insert_settings_changeable(_SettingsClient(missing))  # type: ignore[arg-type]
 
 
 @pytest.mark.parametrize(

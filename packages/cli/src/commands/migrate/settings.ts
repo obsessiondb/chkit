@@ -1,4 +1,4 @@
-import type { ClickHouseExecutor, ClickHouseSettings } from '@chkit/clickhouse'
+import { type ClickHouseExecutor, type ClickHouseSettings, isUnknownDatabaseError } from '@chkit/clickhouse'
 
 import { MigrateError } from './errors.js'
 
@@ -81,14 +81,17 @@ export function parseSettingFlags(values: readonly string[] | undefined): ClickH
  * constraints fix async_insert or wait_for_async_insert at another value than
  * chkit sends: its writes could not be made to be stored when they return
  * (#790). A readonly = 1 user is left to the server's own refusal of its
- * writes. When the settings cannot be read, the writes still fail closed.
+ * writes. A failed read stops the run, as any failed request does, except
+ * while the configured database does not exist yet: a run that creates it is
+ * then left to the server's refusal of its writes.
  */
 export async function assertInsertSettingsChangeable(db: ClickHouseExecutor): Promise<void> {
   let rows: Array<{ name: string; value: unknown; readonly: unknown }>
   try {
     rows = await db.query("SELECT name, value, readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')")
-  } catch {
-    return
+  } catch (error) {
+    if (isUnknownDatabaseError(error)) return
+    throw error
   }
   const byName = new Map(rows.map((row) => [row.name, row]))
   if (String(byName.get('readonly')?.value) === '1') return

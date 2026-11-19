@@ -64,7 +64,12 @@ describe('migrate refuses a user whose insert settings are fixed (#790)', () => 
     await assertInsertSettingsChangeable(executor(changeable))
     await assertInsertSettingsChangeable(executor([{ name: 'async_insert', value: '0', readonly: 1 }, { name: 'wait_for_async_insert', value: '1', readonly: 1 }]))
     await assertInsertSettingsChangeable(executor([{ name: 'readonly', value: '1', readonly: 1 }, { name: 'async_insert', value: '1', readonly: 1 }]))
-    await assertInsertSettingsChangeable({ query: async () => { throw new Error('denied') } } as unknown as ClickHouseExecutor)
+  })
+
+  test('a failed read stops the run, unless the database does not exist yet', async () => {
+    const failing = (error: Error) => ({ query: async () => { throw error } }) as unknown as ClickHouseExecutor
+    await expect(assertInsertSettingsChangeable(failing(new Error('denied')))).rejects.toThrow('denied')
+    await assertInsertSettingsChangeable(failing(Object.assign(new Error('UNKNOWN_DATABASE'), { code: '81' })))
   })
 
   for (const [name, value, durable] of [['async_insert', '1', '0'], ['wait_for_async_insert', '0', '1']] as const) {

@@ -9,7 +9,12 @@ import re
 from collections.abc import Sequence
 from typing import TYPE_CHECKING
 
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
+
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.clickhouse import is_unknown_database_error
 from chkit.core.sql_lexer import js_trim
 
 if TYPE_CHECKING:
@@ -101,15 +106,19 @@ def assert_insert_settings_changeable(client: ClickHouseClient) -> None:
     settings constraints fix ``async_insert`` or ``wait_for_async_insert`` at
     another value than chkit sends: its writes could not be made to be stored
     when they return (#790). A ``readonly = 1`` user is left to the server's
-    own refusal of its writes. When the settings cannot be read, the writes
-    still fail closed. TS ``assertInsertSettingsChangeable``."""
+    own refusal of its writes. A failed read stops the run, as any failed
+    request does, except while the configured database does not exist yet: a
+    run that creates it is then left to the server's refusal of its writes.
+    TS ``assertInsertSettingsChangeable``."""
     try:
         rows = client.query(
             "SELECT name, value, readonly FROM system.settings "
             "WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')"
         ).rows
-    except Exception:  # As TS: an unreadable table leaves the writes to fail closed.
-        return
+    except DatabaseError as error:
+        if is_unknown_database_error(error):
+            return
+        raise
     by_name = {str(row["name"]): row for row in rows}
     mode = by_name.get("readonly")
     if mode is not None and str(mode["value"]) == "1":

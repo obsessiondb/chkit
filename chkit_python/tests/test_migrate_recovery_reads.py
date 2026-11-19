@@ -184,8 +184,10 @@ def test_command_preflight_rejects_historical_async_before_kill_or_handoff(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     writes: list[str] = []
-    raw = SimpleNamespace(query_control=lambda *args, **kwargs: [], execute_tracked=lambda *args: None,
-                          execute=writes.append)
+    # The insert settings check (#790) reads system.settings first.
+    raw = SimpleNamespace(query_control=lambda sql, *args, **kwargs: (
+                              QueryResult(column_names=[], rows=[]) if "system.settings" in sql else []),
+                          execute_tracked=lambda *args: None, execute=writes.append)
     store = SimpleNamespace(lock_target=lambda: ("app", "_chkit_migrations", None),
                             read_migration_state=lambda _: SimpleNamespace(operations=[SimpleNamespace(status="started", query_id="old-async")]))
     monkeypatch.setattr(migrate_module, "resolve_query_identity", lambda *args: IDENTITY)
@@ -262,7 +264,9 @@ def test_attested_single_node_journal_coverage_skips_legacy_discovery() -> None:
 def test_changed_initial_identity_refuses_before_takeover(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     writes: list[str] = []
 
-    def control(_sql: str, _timeout: float, **kwargs: Any) -> QueryResult:
+    def control(sql: str, _timeout: float, **kwargs: Any) -> QueryResult:
+        if "system.settings" in sql:  # the insert settings check (#790)
+            return QueryResult(column_names=[], rows=[])
         return QueryResult(column_names=[], rows=[{"server_uuid": UUID, "principal": "writer"}])
 
     raw = SimpleNamespace(query_control=control, execute_tracked=lambda *args: None, execute=writes.append)
