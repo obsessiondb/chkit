@@ -1392,7 +1392,8 @@ def _case_follows(tokens: list[SQLToken], at: int) -> bool:
     """
 
     def is_when(i: int) -> bool:
-        return i < len(tokens) and tokens[i].kind == "identifier" and tokens[i].text.lower() == "when"
+        token = tokens[i] if i < len(tokens) else None
+        return token is not None and token.kind == "identifier" and token.text.lower() == "when"
 
     if is_when(at + 1):
         return True
