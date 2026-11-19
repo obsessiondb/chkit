@@ -138,7 +138,7 @@ def _running_state(
             "read_bytes": _to_int(row.get("read_bytes")),
             # Written rows are evidence against a failure proof (#765): never
             # lower than what the checkpoint or an earlier read already saw.
-            "written_rows": max(state.written_rows or 0, _row_count(row.get("written_rows")) or 0),
+            "written_rows": _raised_written_rows(state, _row_count(row.get("written_rows"))),
             "written_bytes": _to_int(row.get("written_bytes")),
             "elapsed_ms": int(js_math_round(float(str(elapsed)) * 1000))
             if elapsed is not None
@@ -268,6 +268,7 @@ def _reconcile_progress(
     interval_ms: int,
     stop: StopSignal | None,
     unprovable: str | None = None,
+    persist: Callable[[BackfillProgress], None] | None = None,
 ) -> tuple[BackfillProgress, list[_UnknownAttempt]]:
     """The sync before a resume submits anything: one read of every chunk,
     then reads of the chunks whose outcome is not settled yet, ``attempts``
@@ -275,14 +276,34 @@ def _reconcile_progress(
     (#765, as #721 does for async migrate). The last read has no time bound,
     so a replica clock that differs from the one the bound came from cannot
     hide a row. Returns the chunks whose attempt may have run and has no
-    settled outcome."""
+    settled outcome. ``persist`` saves the progress whenever a read changed
+    it, before the next read or wait: what a read saw outlives a later read
+    that fails."""
     to_sync = _chunks_to_sync(chunk_ids, progress)
     if not to_sync:
         return progress, []
-    evidence = _read_chunk_queries(
-        executor, plan_id, cluster, prefix=f"backfill-{plan_id}-", unprovable=unprovable
-    )
     current = progress
+    persisted = [progress]
+
+    def save() -> None:
+        if current != persisted[0]:
+            persisted[0] = current
+            if persist is not None:
+                persist(current)
+
+    def observe(seen: _ChunkEvidence) -> None:
+        nonlocal current
+        current = _observed_progress(plan_id, to_sync, current, seen)
+        _save_during_read(save)
+
+    def read(**scope: object) -> _ChunkEvidence:
+        # What system.processes shows is merged and saved before query_log is
+        # read, so a log read that fails or hangs loses none of it.
+        return _read_chunk_queries(
+            executor, plan_id, cluster, unprovable=unprovable, observe=observe, **scope  # type: ignore[arg-type]
+        )
+
+    evidence = read(prefix=f"backfill-{plan_id}-")
     unknown: list[_UnknownAttempt] = []
     round_ = 0
     while True:
@@ -291,6 +312,7 @@ def _reconcile_progress(
         )
         current = passed.progress
         unknown = [*unknown, *passed.unknown]
+        save()
         if not passed.waiting:
             return current, unknown
         to_sync = passed.waiting
@@ -300,16 +322,12 @@ def _reconcile_progress(
             time.sleep(interval_ms / 1000)
         states = [_get_chunk(current, chunk_id) for chunk_id in to_sync]
         last = round_ + 1 >= attempts
-        evidence = _read_chunk_queries(
-            executor,
-            plan_id,
-            cluster,
+        evidence = read(
             ids=[
                 _attempt_query_id(plan_id, chunk_id, state)
                 for chunk_id, state in zip(to_sync, states, strict=True)
             ],
             after=None if last else _earliest_bound(states),
-            unprovable=unprovable,
         )
         round_ += 1
 
@@ -426,13 +444,64 @@ def _noted_state(
     if secondary is not None and state.secondary_query_id is None:
         update["secondary_query_id"] = secondary
     running = evidence.running.get(query_id)
-    written = max(
-        _own_written_rows(query_id, evidence),
-        (_row_count(running.get("written_rows")) or 0) if running is not None else 0,
+    written = _raised_written_rows(
+        state,
+        max(
+            _own_written_rows(query_id, evidence),
+            (_row_count(running.get("written_rows")) or 0) if running is not None else 0,
+        ),
     )
-    if written > (state.written_rows or 0):
+    if written != (state.written_rows or 0):
         update["written_rows"] = written
     return state.model_copy(update=update) if update else state
+
+
+def _raised_written_rows(state: BackfillChunkState, count: int | None) -> int:
+    """The attempt's written rows after a read that reports ``count`` (#765,
+    TS ``raisedWrittenRows``): the maximum of every count seen, never lower.
+    Every write of ``written_rows`` goes through it."""
+    return max(state.written_rows or 0, count or 0)
+
+
+class _CheckpointSaveError(Exception):
+    """A checkpoint save that failed while a read was under way (TS
+    ``CheckpointSaveError``): it is not a read error the read may retry, so it
+    ends the run as a failed save does anywhere else."""
+
+    def __init__(self, cause: BaseException) -> None:
+        super().__init__(str(cause))
+        self.cause = cause
+
+
+def _save_during_read(save: Callable[[], None]) -> None:
+    """``save()``, its failure marked so that read-error handling passes it on."""
+    try:
+        save()
+    except Exception as error:
+        raise _CheckpointSaveError(error) from error
+
+
+#: Called with what system.processes showed, before query_log is read: the
+#: caller merges and saves it (see ``_observed_progress``). It is evidence
+#: against a proof, never a proof.
+_ObserveProcesses: TypeAlias = "Callable[[_ChunkEvidence], None]"
+
+
+def _observed_progress(
+    plan_id: str, chunk_ids: list[str], progress: BackfillProgress, evidence: _ChunkEvidence
+) -> BackfillProgress:
+    """``progress`` with every observation of ``evidence`` merged into the
+    attempts of ``chunk_ids`` (see ``_noted_state``), whether the read was
+    whole or partial (TS ``observedProgress``). The one place a read's
+    evidence enters the progress; callers save the result before their next
+    read or wait."""
+    updated = dict(progress)
+    for chunk_id in chunk_ids:
+        saved = _get_chunk(updated, chunk_id)
+        noted = _noted_state(plan_id, chunk_id, saved, evidence)
+        if noted is not saved:
+            updated[chunk_id] = noted
+    return updated
 
 
 def _secondary_query_of(query_id: str, evidence: _ChunkEvidence) -> str | None:
@@ -577,14 +646,11 @@ def _apply_evidence(
     *,
     final: bool,
 ) -> _EvidencePass:
-    updated = dict(progress)
+    updated = _observed_progress(plan_id, chunk_ids, progress, evidence)
     waiting: list[str] = []
     unknown: list[_UnknownAttempt] = []
     for chunk_id in chunk_ids:
-        saved = _get_chunk(updated, chunk_id)
-        current = _noted_state(plan_id, chunk_id, saved, evidence)
-        if current is not saved:
-            updated[chunk_id] = current
+        current = _get_chunk(updated, chunk_id)
         query_id = _attempt_query_id(plan_id, chunk_id, current)
         outcome = _classify_attempt(plan_id, chunk_id, current, evidence, final=final)
         if outcome.kind == "running":
@@ -610,7 +676,7 @@ def _settled_state(
                 "status": "done",
                 "query_id": query_id,
                 "finished_at": _now_iso(),
-                "written_rows": _to_int(row.get("written_rows")),
+                "written_rows": _raised_written_rows(current, _row_count(row.get("written_rows"))),
                 "written_bytes": _to_int(row.get("written_bytes")),
                 "duration_ms": _to_int(row.get("query_duration_ms")),
             }
@@ -647,14 +713,23 @@ def _read_chunk_queries(
     ids: list[str] | None = None,
     after: str | None = None,
     unprovable: str | None = None,
+    observe: _ObserveProcesses | None = None,
 ) -> _ChunkEvidence:
     """``_read_evidence`` for the resume's sync: a failed read, including a
     replica probe that fails for any reason other than a missing cluster or a
     denied user, stops the resume, whatever the flags: nothing was read."""
     try:
         return _read_evidence(
-            executor, cluster, prefix=prefix, ids=ids, after=after, unprovable=unprovable
+            executor,
+            cluster,
+            prefix=prefix,
+            ids=ids,
+            after=after,
+            unprovable=unprovable,
+            observe=observe,
         )
+    except _CheckpointSaveError as error:
+        raise error.cause from None
     except Exception as error:
         msg = (
             f"Backfill plan {plan_id}: could not check which chunks are still "
@@ -672,6 +747,7 @@ def _read_evidence(
     ids: list[str] | None = None,
     after: str | None = None,
     unprovable: str | None = None,
+    observe: _ObserveProcesses | None = None,
 ) -> _ChunkEvidence:
     """Read the chunks' rows in system.processes and system.query_log: by the
     plan's prefix, or by exact ids, pruned by event_date from ``after``. The
@@ -712,6 +788,21 @@ def _read_evidence(
         f"WHERE {own_or_secondary} "
         f"SETTINGS {STRICT_READ_SETTINGS}"
     )
+    running_rows = _rows_of(running_result)
+    # Saved before the next read: a query_log read that fails or hangs (and a
+    # stop during it) loses none of what system.processes showed.
+    if observe is not None:
+        observe(
+            _ChunkEvidence(
+                running={
+                    str(row.get("query_id")): row
+                    for row in running_rows
+                    if row.get("query_id") is not None and not _is_secondary(row)
+                },
+                log_rows=[],
+                secondary_running=[row for row in running_rows if _is_secondary(row)],
+            )
+        )
     log_result = executor.query(
         "SELECT query_id, initial_query_id, is_initial_query, type, written_rows, "
         "written_bytes, query_duration_ms, exception\n"
@@ -722,7 +813,6 @@ def _read_evidence(
         "ORDER BY event_time DESC\n"
         f"SETTINGS {STRICT_READ_SETTINGS}"
     )
-    running_rows = _rows_of(running_result)
     log_rows = _rows_of(log_result)
     running = {
         str(row.get("query_id")): row
@@ -998,21 +1088,52 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     unknown: list[_UnknownAttempt] = []
     if resume_from is not None:
         reconcile_from = progress
-        progress, unknown = run_interruptible(
-            lambda: _reconcile_progress(
-                executor,
+        # The resume's sync saves what each read saw before its next read or
+        # wait. A stop starts no such save, and waits for the one under way as
+        # for any checkpoint write: a write still under way keeps the lock.
+        sync_write = threading.Condition()
+        sync_state = {"writing": False, "sealed": False}
+
+        def persist_sync(next_progress: BackfillProgress) -> None:
+            if on_progress is None:
+                return
+            with sync_write:
+                if sync_state["sealed"] or (stop is not None and stop.is_set()):
+                    return
+                sync_state["writing"] = True
+            try:
+                on_progress(dict(next_progress))
+            finally:
+                with sync_write:
+                    sync_state["writing"] = False
+                    sync_write.notify_all()
+
+        try:
+            progress, unknown = run_interruptible(
+                lambda: _reconcile_progress(
+                    executor,
+                    plan_id,
+                    chunk_ids,
+                    reconcile_from,
+                    cluster=cluster,
+                    attempts=outcome_recheck_attempts,
+                    interval_ms=outcome_recheck_interval_ms,
+                    stop=stop,
+                    unprovable=unprovable_failures,
+                    persist=persist_sync,
+                ),
+                stop,
                 plan_id,
-                chunk_ids,
-                reconcile_from,
-                cluster=cluster,
-                attempts=outcome_recheck_attempts,
-                interval_ms=outcome_recheck_interval_ms,
-                stop=stop,
-                unprovable=unprovable_failures,
-            ),
-            stop,
-            plan_id,
-        )
+            )
+        except BackfillInterruptedError:
+            with sync_write:
+                sync_state["sealed"] = True
+                ended = sync_write.wait_for(
+                    lambda: not sync_state["writing"], handoff_timeout_ms / 1000
+                )
+            if not ended:
+                raise _interrupted_error(plan_id, write_hung=True) from None
+            raise
     if stop is not None and stop.is_set():
         raise _interrupted_error(plan_id)
 
@@ -1204,7 +1325,9 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         max_poll_errors * poll_interval_ms,
     )
 
-    def poll_chunk(initial: BackfillChunkState, chunk_id: str) -> _UnknownAttempt | None:
+    def poll_chunk(  # noqa: PLR0912 — mirrors the TS pollChunk
+        initial: BackfillChunkState, chunk_id: str
+    ) -> _UnknownAttempt | None:
         """Follow a submitted attempt to its outcome, on every replica,
         classified as the resume's sync does it, so a shared-id failure or a
         partial write is never taken for a failure a replay can follow. After
@@ -1226,6 +1349,14 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                 empty_since is not None
                 and time.monotonic() * 1000 - empty_since >= empty_window_ms
             )
+            def observe(seen: _ChunkEvidence) -> None:
+                nonlocal state
+                observed = _noted_state(plan_id, chunk_id, state, seen)
+                if observed is not state:
+                    state = observed
+                    saving = state
+                    _save_during_read(lambda: set_chunk(chunk_id, saving))
+
             try:
                 evidence = _read_evidence(
                     executor,
@@ -1233,9 +1364,14 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                     ids=[query_id],
                     after=None if final else state.submitted_at,
                     unprovable=unprovable_failures,
+                    observe=observe,
                 )
                 noted = _noted_state(plan_id, chunk_id, state, evidence)
                 outcome = _classify_attempt(plan_id, chunk_id, noted, evidence, final=final)
+            except _CheckpointSaveError as error:
+                # A failed checkpoint save is no read error to retry: it ends
+                # the run.
+                raise error.cause from None
             except Exception as error:
                 errors += 1
                 if errors >= max_poll_errors:

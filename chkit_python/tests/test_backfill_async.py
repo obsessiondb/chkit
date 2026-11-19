@@ -321,14 +321,15 @@ def test_reports_intermediate_metrics_while_running() -> None:
     assert len(progress_snapshots) >= 3
 
     # Find the running snapshots with metrics
+    # Each process snapshot is saved before query_log is read, so a poll can
+    # save twice: the process rows, then the poll's outcome.
     running_snapshots = [p for p in progress_snapshots if p["c1"].status == "running"]
-    assert len(running_snapshots) == 2
-    assert running_snapshots[0]["c1"].read_rows == 100
-    assert running_snapshots[0]["c1"].elapsed_ms == 1000
-    assert running_snapshots[1]["c1"].read_rows == 500
+    first = next(p for p in running_snapshots if p["c1"].read_rows == 100)
+    assert first["c1"].elapsed_ms == 1000
+    later = next(p for p in running_snapshots if p["c1"].read_rows == 500)
+    assert later["c1"].elapsed_ms == 3000
     # Written rows never go down: the scripted log already shows the finish.
-    assert (running_snapshots[1]["c1"].written_rows or 0) >= 50
-    assert running_snapshots[1]["c1"].elapsed_ms == 3000
+    assert (later["c1"].written_rows or 0) >= 50
 
     # Final snapshot should be done
     last_snapshot = progress_snapshots[-1]
@@ -3011,3 +3012,241 @@ def test_a_resume_records_the_rows_a_running_process_wrote() -> None:
     assert saved is not None
     assert saved.written_rows == 5
     assert executor.submit_order == []
+
+
+# Codex round 11: every successful observation is merged and saved before the
+# next read or wait, whatever comes next: a log read that fails after
+# system.processes answered, a later read of the resume's sync that fails,
+# and a QueryFinish that reports fewer rows.
+class _Failing(SubmitRecordingExecutor):
+    """``snapshot(read)`` gives (processes, log); an exception there is raised."""
+
+    def __init__(self, snapshot: Callable[[int], tuple[object, object]]) -> None:
+        super().__init__({})
+        self.snapshot = snapshot
+        self.reads = 0
+
+    def _rows(self, statement: str) -> list[dict[str, object]]:
+        if "now64" in statement:
+            return [{"now_ms": str(int(time.time() * 1000))}]
+        if "system.one" in statement:
+            return [{"replicas": 1}]
+        if "system.processes" in statement:
+            self.reads += 1
+            part = self.snapshot(self.reads)[0]
+        elif "system.query_log" in statement:
+            part = self.snapshot(self.reads)[1]
+        else:
+            return []
+        if isinstance(part, Exception):
+            raise part
+        return part  # type: ignore[return-value]
+
+
+def _observed_resume(
+    executor: _Failing, resume_from: BackfillProgress
+) -> tuple[BaseException | None, list[BackfillProgress]]:
+    saved: list[BackfillProgress] = []
+    error: BaseException | None = None
+    try:
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=list(resume_from),
+            build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+            resume_from=resume_from,
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=True,
+            poll_interval_ms=1,
+            outcome_recheck_attempts=2,
+            outcome_recheck_interval_ms=5,
+            on_progress=saved.append,
+        )
+    except RuntimeError as raised:
+        error = raised
+    return error, saved
+
+
+def test_a_poll_whose_log_read_fails_still_saves_the_rows_its_process_showed() -> None:
+    def snapshot(read: int) -> tuple[object, object]:
+        if read == 1:
+            return [_kept_running(_KEPT_ID, 1, "0")], []
+        if read == 2:
+            return [_kept_running(_KEPT_ID, 1, "5")], RuntimeError("query_log timed out")
+        return [], [_kept_log_row("ExceptionWhileProcessing", "0")]
+
+    executor = _Failing(snapshot)
+    error, saved = _observed_resume(
+        executor,
+        {"c1": BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True)},
+    )
+
+    assert _WROTE_5 in str(error)
+    assert saved[-1]["c1"].written_rows == 5
+    assert saved[-1]["c1"].status != "failed"
+    assert executor.submit_order == []
+
+
+def test_the_resume_sync_saves_a_whole_read_before_a_later_read_fails() -> None:
+    executor = _Failing(
+        lambda read: (
+            [_kept_running(_KEPT_ID, 1, "5"), _kept_running("secondary-1", 0, "0")],
+            [],
+        )
+        if read == 1
+        else (RuntimeError("replica unavailable"), [])
+    )
+
+    error, saved = _observed_resume(
+        executor,
+        {
+            "c1": BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True),
+            # Recorded, and with no outcome yet: the sync reads it again.
+            "c2": BackfillChunkState(
+                status="pending", query_id=f"backfill-{PLAN_ID}-c2", single_send=True
+            ),
+        },
+    )
+
+    assert "could not check which chunks are still running on the server (replica unavailable)" in str(error)
+    assert saved
+    assert (saved[-1]["c1"].written_rows, saved[-1]["c1"].secondary_query_id) == (5, "secondary-1")
+
+
+def test_a_query_finish_with_fewer_rows_does_not_lower_the_saved_maximum() -> None:
+    executor = _Failing(lambda _read: ([], [_kept_log_row("QueryFinish", "0")]))
+
+    error, saved = _observed_resume(
+        executor,
+        {
+            "c1": BackfillChunkState(
+                status="running", query_id=_KEPT_ID, single_send=True, written_rows=5
+            )
+        },
+    )
+
+    assert error is None
+    assert (saved[-1]["c1"].status, saved[-1]["c1"].written_rows) == ("done", 5)
+
+
+# Round 11: a save the resume's sync makes is a checkpoint write like any
+# other: a stop waits for it within its bound, or keeps the lock.
+def test_a_stop_during_a_hung_save_of_the_resume_sync_keeps_the_lock() -> None:
+    executor = _Failing(lambda _read: ([_kept_running(_KEPT_ID, 1, "5")], []))
+    writing = threading.Event()
+    stop = threading.Event()
+    outcome: list[BaseException] = []
+
+    def on_progress(_progress: BackfillProgress) -> None:
+        writing.set()
+        threading.Event().wait(30)
+
+    def run() -> None:
+        try:
+            execute_backfill(
+                executor=executor,
+                plan_id=PLAN_ID,
+                chunk_ids=["c1"],
+                build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+                resume_from={
+                    "c1": BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True)
+                },
+                checkpoint_version=CHECKPOINT_VERSION,
+                stop=stop,
+                handoff_timeout_ms=200,
+                on_progress=on_progress,
+            )
+        except BaseException as error:
+            outcome.append(error)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert writing.wait(5)
+    stop.set()
+    worker.join(5)
+
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], BackfillInterruptedError)
+    assert outcome[0].keep_lock is True
+
+
+# Codex round 12: what system.processes showed is saved before query_log is
+# read, so a stop while that read hangs keeps it.
+def test_a_stop_while_the_query_log_read_hangs_keeps_what_processes_showed() -> None:
+    log_read = threading.Event()
+
+    class Hanging(_Failing):
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "system.query_log" in statement:
+                log_read.set()
+                threading.Event().wait(30)
+            return super()._rows(statement)
+
+    executor = Hanging(lambda _read: ([_kept_running(_KEPT_ID, 1, "5")], []))
+    saved: list[BackfillProgress] = []
+    stop = threading.Event()
+    outcome: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            execute_backfill(
+                executor=executor,
+                plan_id=PLAN_ID,
+                chunk_ids=["c1"],
+                build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+                resume_from={
+                    "c1": BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True)
+                },
+                checkpoint_version=CHECKPOINT_VERSION,
+                stop=stop,
+                on_progress=saved.append,
+            )
+        except BaseException as error:
+            outcome.append(error)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert log_read.wait(5)
+    stop.set()
+    worker.join(5)
+
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], BackfillInterruptedError)
+    assert saved
+    assert saved[-1]["c1"].written_rows == 5
+
+
+# Codex round 13: a checkpoint save that fails while a poll reads is no read
+# error to retry: it ends the run, as it did before saves moved into the read.
+def test_a_checkpoint_save_that_fails_during_a_poll_ends_the_run() -> None:
+    executor = SubmitRecordingExecutor(
+        {
+            f"backfill-{PLAN_ID}-c1": [
+                QueryStatus(status="running", written_rows=5),
+                QueryStatus(status="finished", written_rows=5),
+            ],
+            f"backfill-{PLAN_ID}-c2": [QueryStatus(status="finished", written_rows=1)],
+        }
+    )
+    failed = [False]
+
+    def on_progress(progress: BackfillProgress) -> None:
+        if not failed[0] and progress["c1"].written_rows == 5:
+            failed[0] = True
+            msg = "ENOSPC checkpoint"
+            raise OSError(msg)
+
+    with pytest.raises(OSError, match="ENOSPC checkpoint"):
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1", "c2"],
+            build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+            concurrency=1,
+            poll_interval_ms=1,
+            outcome_recheck_attempts=1,
+            outcome_recheck_interval_ms=1,
+            on_progress=on_progress,
+        )
+
+    assert executor.submit_order == [f"backfill-{PLAN_ID}-c1"]
