@@ -218,14 +218,14 @@ describe('executeBackfill', () => {
     expect(progressSnapshots.length).toBeGreaterThanOrEqual(3)
 
     // Find the running snapshots with metrics
+    // Each process snapshot is saved before query_log is read, so a poll can
+    // save twice: the process rows, then the poll's outcome.
     const runningSnapshots = progressSnapshots.filter((p) => p.c1.status === 'running')
-    expect(runningSnapshots.length).toBe(2)
-    expect(runningSnapshots[0].c1.readRows).toBe(100)
-    expect(runningSnapshots[0].c1.elapsedMs).toBe(1000)
-    expect(runningSnapshots[1].c1.readRows).toBe(500)
+    expect(runningSnapshots.find((p) => p.c1.readRows === 100)?.c1.elapsedMs).toBe(1000)
+    const later = runningSnapshots.find((p) => p.c1.readRows === 500)
+    expect(later?.c1.elapsedMs).toBe(3000)
     // Written rows never go down: the scripted log already shows the finish.
-    expect(runningSnapshots[1].c1.writtenRows).toBeGreaterThanOrEqual(50)
-    expect(runningSnapshots[1].c1.elapsedMs).toBe(3000)
+    expect(later?.c1.writtenRows).toBeGreaterThanOrEqual(50)
 
     // Final snapshot should be done
     const lastSnapshot = progressSnapshots[progressSnapshots.length - 1]
@@ -1344,10 +1344,11 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
   // outcome turns out unknown. B must not be sent, and keeps its state.
   test('a chunk whose pre-send checkpoint finishes after the dispatch stopped is not sent', async () => {
     const submits: string[] = []
+    // A is in flight from an earlier run (its polls write nothing until it
+    // turns out unknown), and fails after writing rows: unknown at once.
     const executor = createMockExecutor(new Map<string, QueryStatus[]>([
-      [`backfill-${PLAN_ID}-c1`, [{ status: 'failed', error: 'late block', durationMs: 1 }]],
+      [`backfill-${PLAN_ID}-c1`, [{ status: 'running' }, { status: 'failed', error: 'late block', durationMs: 1 }]],
     ]))
-    // A failed after writing rows: unknown at once.
     const query = executor.query.bind(executor)
     executor.query = async <T>(sql: string): Promise<T[]> => {
       const rows = await query<T>(sql)
@@ -1367,6 +1368,8 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
       buildQuery: () => 'SELECT 1',
       concurrency: 2,
       pollIntervalMs: 1,
+      resumeFrom: { c1: { status: 'submitted', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true }, c2: { status: 'pending' } },
+      checkpointVersion: CHECKPOINT_VERSION,
       onProgress: async (progress) => {
         saved.push(progress)
         // Hold B's pre-send write while A's polls classify A.
@@ -1378,7 +1381,7 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     })).rejects.toThrow(`chunk c1 (query_id backfill-${PLAN_ID}-c1): it failed after writing 7 rows`)
 
     expect(held).toBe(true)
-    expect(submits).toEqual([`backfill-${PLAN_ID}-c1`])
+    expect(submits).toEqual([])
     expect(saved.at(-1)?.c2).toEqual({ status: 'pending' })
   })
 
@@ -2313,4 +2316,83 @@ test('an interrupt during a hung save of the resume’s sync keeps the lock', as
 
   expect(error).toBeInstanceOf(BackfillInterruptedError)
   expect(error).toMatchObject({ keepLock: true })
+})
+
+// Codex round 12: what system.processes showed is saved before query_log is
+// read, so an interrupt while that read hangs keeps it.
+test('an interrupt while the query_log read hangs keeps what system.processes showed', async () => {
+  const id = `backfill-${PLAN_ID}-c1`
+  const executor = createMockExecutor(new Map())
+  let logRead = false
+  executor.query = async <T>(sql: string): Promise<T[]> => {
+    if (sql.includes('system.one')) return [{ replicas: '1' }] as T[]
+    if (sql.includes('system.processes')) return [{ query_id: id, is_initial_query: 1, read_rows: '0', read_bytes: '0', written_rows: '5', written_bytes: '0', elapsed: 1 }] as T[]
+    if (sql.includes('system.query_log')) {
+      logRead = true
+      return new Promise<T[]>(() => undefined)
+    }
+    return [] as T[]
+  }
+  const controller = new AbortController()
+  const reports: BackfillProgress[] = []
+  const run = executeBackfill({
+    executor,
+    planId: PLAN_ID,
+    chunks: [{ id: 'c1' }],
+    buildQuery: () => 'INSERT INTO t SELECT 1',
+    resumeFrom: { c1: { status: 'submitted', queryId: id, singleSend: true } },
+    checkpointVersion: CHECKPOINT_VERSION,
+    signal: controller.signal,
+    onProgress: (progress) => { reports.push(progress) },
+  })
+  while (!logRead) await new Promise((resolve) => setTimeout(resolve, 5))
+
+  controller.abort()
+  const error = await run.then(() => undefined, (rejection: unknown) => rejection)
+
+  expect(error).toBeInstanceOf(BackfillInterruptedError)
+  expect(reports.at(-1)?.c1).toMatchObject({ writtenRows: 5 })
+})
+
+// Codex round 12: checkpoint writes run one at a time and in order, so an
+// older write never lands after a newer one, and an interrupt waits for all.
+test('checkpoint writes land in order, and an interrupt waits for an older slow one', async () => {
+  const statuses = new Map<string, QueryStatus[]>([
+    [`backfill-${PLAN_ID}-c1`, [{ status: 'running', writtenRows: 5 }]],
+    [`backfill-${PLAN_ID}-c2`, [{ status: 'running', writtenRows: 7 }]],
+  ])
+  const controller = new AbortController()
+  const called: number[] = []
+  const landed: number[] = []
+  let calls = 0
+  let slowDone = 0
+  const run = executeBackfill({
+    executor: createMockExecutor(statuses),
+    planId: PLAN_ID,
+    chunks: [{ id: 'c1' }, { id: 'c2' }],
+    buildQuery: () => 'INSERT INTO t SELECT 1',
+    concurrency: 2,
+    pollIntervalMs: 1,
+    signal: controller.signal,
+    handoffTimeoutMs: 2_000,
+    onProgress: async () => {
+      const call = ++calls
+      called.push(call)
+      // The second write (a chunk's pre-send record) is slow.
+      if (call === 2) {
+        await new Promise((resolve) => setTimeout(resolve, 150))
+        slowDone = Date.now()
+      }
+      landed.push(call)
+    },
+  })
+  while (calls < 3) await new Promise((resolve) => setTimeout(resolve, 1))
+
+  controller.abort()
+  await run.then(() => undefined, () => undefined)
+  const returned = Date.now()
+
+  expect(landed).toEqual([...landed].sort((a, b) => a - b))
+  expect(slowDone).toBeGreaterThan(0)
+  expect(returned).toBeGreaterThanOrEqual(slowDone)
 })

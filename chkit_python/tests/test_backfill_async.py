@@ -321,14 +321,15 @@ def test_reports_intermediate_metrics_while_running() -> None:
     assert len(progress_snapshots) >= 3
 
     # Find the running snapshots with metrics
+    # Each process snapshot is saved before query_log is read, so a poll can
+    # save twice: the process rows, then the poll's outcome.
     running_snapshots = [p for p in progress_snapshots if p["c1"].status == "running"]
-    assert len(running_snapshots) == 2
-    assert running_snapshots[0]["c1"].read_rows == 100
-    assert running_snapshots[0]["c1"].elapsed_ms == 1000
-    assert running_snapshots[1]["c1"].read_rows == 500
+    first = next(p for p in running_snapshots if p["c1"].read_rows == 100)
+    assert first["c1"].elapsed_ms == 1000
+    later = next(p for p in running_snapshots if p["c1"].read_rows == 500)
+    assert later["c1"].elapsed_ms == 3000
     # Written rows never go down: the scripted log already shows the finish.
-    assert (running_snapshots[1]["c1"].written_rows or 0) >= 50
-    assert running_snapshots[1]["c1"].elapsed_ms == 3000
+    assert (later["c1"].written_rows or 0) >= 50
 
     # Final snapshot should be done
     last_snapshot = progress_snapshots[-1]
@@ -3167,3 +3168,49 @@ def test_a_stop_during_a_hung_save_of_the_resume_sync_keeps_the_lock() -> None:
     assert len(outcome) == 1
     assert isinstance(outcome[0], BackfillInterruptedError)
     assert outcome[0].keep_lock is True
+
+
+# Codex round 12: what system.processes showed is saved before query_log is
+# read, so a stop while that read hangs keeps it.
+def test_a_stop_while_the_query_log_read_hangs_keeps_what_processes_showed() -> None:
+    log_read = threading.Event()
+
+    class Hanging(_Failing):
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "system.query_log" in statement:
+                log_read.set()
+                threading.Event().wait(30)
+            return super()._rows(statement)
+
+    executor = Hanging(lambda _read: ([_kept_running(_KEPT_ID, 1, "5")], []))
+    saved: list[BackfillProgress] = []
+    stop = threading.Event()
+    outcome: list[BaseException] = []
+
+    def run() -> None:
+        try:
+            execute_backfill(
+                executor=executor,
+                plan_id=PLAN_ID,
+                chunk_ids=["c1"],
+                build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+                resume_from={
+                    "c1": BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True)
+                },
+                checkpoint_version=CHECKPOINT_VERSION,
+                stop=stop,
+                on_progress=saved.append,
+            )
+        except BaseException as error:
+            outcome.append(error)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert log_read.wait(5)
+    stop.set()
+    worker.join(5)
+
+    assert len(outcome) == 1
+    assert isinstance(outcome[0], BackfillInterruptedError)
+    assert saved
+    assert saved[-1]["c1"].written_rows == 5

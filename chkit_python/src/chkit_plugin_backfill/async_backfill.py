@@ -291,20 +291,17 @@ def _reconcile_progress(
             if persist is not None:
                 persist(current)
 
-    def read(**scope: object) -> _ChunkEvidence:
-        # A read that fails after system.processes answered still adds what
-        # it saw, saved, then the resume stops.
+    def observe(seen: _ChunkEvidence) -> None:
         nonlocal current
-        try:
-            return _read_chunk_queries(
-                executor, plan_id, cluster, unprovable=unprovable, **scope  # type: ignore[arg-type]
-            )
-        except Exception as error:
-            seen = _partial_evidence(error)
-            if seen is not None:
-                current = _observed_progress(plan_id, to_sync, current, seen)
-                save()
-            raise
+        current = _observed_progress(plan_id, to_sync, current, seen)
+        save()
+
+    def read(**scope: object) -> _ChunkEvidence:
+        # What system.processes shows is merged and saved before query_log is
+        # read, so a log read that fails or hangs loses none of it.
+        return _read_chunk_queries(
+            executor, plan_id, cluster, unprovable=unprovable, observe=observe, **scope  # type: ignore[arg-type]
+        )
 
     evidence = read(prefix=f"backfill-{plan_id}-")
     unknown: list[_UnknownAttempt] = []
@@ -466,21 +463,10 @@ def _raised_written_rows(state: BackfillChunkState, count: int | None) -> int:
     return max(state.written_rows or 0, count or 0)
 
 
-class _PartialEvidenceError(RuntimeError):
-    """A read that failed after system.processes answered: the rows it got,
-    which are evidence against a proof but never a proof."""
-
-    def __init__(self, cause: BaseException, evidence: _ChunkEvidence) -> None:
-        super().__init__(str(cause))
-        self.evidence = evidence
-
-
-def _partial_evidence(error: BaseException) -> _ChunkEvidence | None:
-    """The evidence a failed read still got, if any."""
-    for candidate in (error, error.__cause__):
-        if isinstance(candidate, _PartialEvidenceError):
-            return candidate.evidence
-    return None
+#: Called with what system.processes showed, before query_log is read: the
+#: caller merges and saves it (see ``_observed_progress``). It is evidence
+#: against a proof, never a proof.
+_ObserveProcesses: TypeAlias = "Callable[[_ChunkEvidence], None]"
 
 
 def _observed_progress(
@@ -709,13 +695,20 @@ def _read_chunk_queries(
     ids: list[str] | None = None,
     after: str | None = None,
     unprovable: str | None = None,
+    observe: _ObserveProcesses | None = None,
 ) -> _ChunkEvidence:
     """``_read_evidence`` for the resume's sync: a failed read, including a
     replica probe that fails for any reason other than a missing cluster or a
     denied user, stops the resume, whatever the flags: nothing was read."""
     try:
         return _read_evidence(
-            executor, cluster, prefix=prefix, ids=ids, after=after, unprovable=unprovable
+            executor,
+            cluster,
+            prefix=prefix,
+            ids=ids,
+            after=after,
+            unprovable=unprovable,
+            observe=observe,
         )
     except Exception as error:
         msg = (
@@ -734,6 +727,7 @@ def _read_evidence(
     ids: list[str] | None = None,
     after: str | None = None,
     unprovable: str | None = None,
+    observe: _ObserveProcesses | None = None,
 ) -> _ChunkEvidence:
     """Read the chunks' rows in system.processes and system.query_log: by the
     plan's prefix, or by exact ids, pruned by event_date from ``after``. The
@@ -775,22 +769,10 @@ def _read_evidence(
         f"SETTINGS {STRICT_READ_SETTINGS}"
     )
     running_rows = _rows_of(running_result)
-    try:
-        log_result = executor.query(
-            "SELECT query_id, initial_query_id, is_initial_query, type, written_rows, "
-            "written_bytes, query_duration_ms, exception\n"
-            f"FROM {source('system.query_log')}\n"
-            f"WHERE {own_or_secondary}\n"
-            "  AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart',"
-            f" 'ExceptionWhileProcessing'){pruning}\n"
-            "ORDER BY event_time DESC\n"
-            f"SETTINGS {STRICT_READ_SETTINGS}"
-        )
-    except Exception as error:
-        # What system.processes showed is still evidence (written rows, a
-        # secondary query); it is never a proof (see _observed_progress).
-        raise _PartialEvidenceError(
-            error,
+    # Saved before the next read: a query_log read that fails or hangs (and a
+    # stop during it) loses none of what system.processes showed.
+    if observe is not None:
+        observe(
             _ChunkEvidence(
                 running={
                     str(row.get("query_id")): row
@@ -799,8 +781,18 @@ def _read_evidence(
                 },
                 log_rows=[],
                 secondary_running=[row for row in running_rows if _is_secondary(row)],
-            ),
-        ) from error
+            )
+        )
+    log_result = executor.query(
+        "SELECT query_id, initial_query_id, is_initial_query, type, written_rows, "
+        "written_bytes, query_duration_ms, exception\n"
+        f"FROM {source('system.query_log')}\n"
+        f"WHERE {own_or_secondary}\n"
+        "  AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart',"
+        f" 'ExceptionWhileProcessing'){pruning}\n"
+        "ORDER BY event_time DESC\n"
+        f"SETTINGS {STRICT_READ_SETTINGS}"
+    )
     log_rows = _rows_of(log_result)
     running = {
         str(row.get("query_id")): row
@@ -1313,7 +1305,7 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         max_poll_errors * poll_interval_ms,
     )
 
-    def poll_chunk(  # noqa: PLR0912 — mirrors the TS pollChunk
+    def poll_chunk(
         initial: BackfillChunkState, chunk_id: str
     ) -> _UnknownAttempt | None:
         """Follow a submitted attempt to its outcome, on every replica,
@@ -1337,6 +1329,13 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                 empty_since is not None
                 and time.monotonic() * 1000 - empty_since >= empty_window_ms
             )
+            def observe(seen: _ChunkEvidence) -> None:
+                nonlocal state
+                observed = _noted_state(plan_id, chunk_id, state, seen)
+                if observed is not state:
+                    state = observed
+                    set_chunk(chunk_id, state)
+
             try:
                 evidence = _read_evidence(
                     executor,
@@ -1344,17 +1343,11 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                     ids=[query_id],
                     after=None if final else state.submitted_at,
                     unprovable=unprovable_failures,
+                    observe=observe,
                 )
                 noted = _noted_state(plan_id, chunk_id, state, evidence)
                 outcome = _classify_attempt(plan_id, chunk_id, noted, evidence, final=final)
             except Exception as error:
-                # A partial read adds what it saw (saved), never a proof.
-                seen = _partial_evidence(error)
-                if seen is not None:
-                    observed = _noted_state(plan_id, chunk_id, state, seen)
-                    if observed is not state:
-                        state = observed
-                        set_chunk(chunk_id, state)
                 errors += 1
                 if errors >= max_poll_errors:
                     return _UnknownAttempt(

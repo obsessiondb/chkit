@@ -291,20 +291,13 @@ async function reconcileProgress(
     persisted = current
     await options.persist?.(current)
   }
-  // A read that fails after system.processes answered still adds what it
-  // saw, saved, then the resume stops.
-  const read = async (scope: Parameters<typeof readChunkQueries>[2]) => {
-    try {
-      return await readChunkQueries(executor, planId, scope, reads)
-    } catch (error) {
-      const seen = partialEvidence(error)
-      if (seen) {
-        current = observedProgress(planId, chunkIds, current, seen)
-        await save()
-      }
-      throw error
-    }
-  }
+  // What system.processes shows is merged and saved before query_log is
+  // read, so a log read that fails or hangs loses none of it.
+  const read = (scope: Parameters<typeof readChunkQueries>[2]) =>
+    readChunkQueries(executor, planId, scope, reads, async (seen) => {
+      current = observedProgress(planId, chunkIds, current, seen)
+      await save()
+    })
   let evidence = await read({ prefix: `backfill-${planId}-` })
   let unknown: UnknownAttempt[] = []
   for (let round = 0; ; round++) {
@@ -613,24 +606,11 @@ interface ChunkEvidence {
 }
 
 /**
- * A read that failed after system.processes answered: the rows it got, which
- * are evidence against a proof but never a proof.
+ * Called with what system.processes showed, before query_log is read: the
+ * caller merges and saves it (see `observedProgress`). It is evidence against
+ * a proof, never a proof.
  */
-class PartialEvidenceError extends Error {
-  readonly evidence: ChunkEvidence
-
-  constructor(cause: unknown, evidence: ChunkEvidence) {
-    super(errorMessage(cause), { cause })
-    this.evidence = evidence
-  }
-}
-
-/** The evidence a failed read still got, if any (see `PartialEvidenceError`). */
-function partialEvidence(error: unknown): ChunkEvidence | undefined {
-  if (error instanceof PartialEvidenceError) return error.evidence
-  if (error instanceof Error && error.cause instanceof PartialEvidenceError) return error.cause.evidence
-  return undefined
-}
+type ObserveProcesses = (seen: ChunkEvidence) => Promise<void>
 
 /**
  * `progress` with every observation of `evidence` merged into the attempts
@@ -684,9 +664,10 @@ async function readChunkQueries(
   planId: string,
   scope: { prefix: string } | { ids: string[]; after?: string },
   reads: EvidenceReads,
+  observe?: ObserveProcesses,
 ): Promise<ChunkEvidence> {
   try {
-    return await readEvidence(executor, scope, reads)
+    return await readEvidence(executor, scope, reads, observe)
   } catch (error) {
     throw new Error(
       `Backfill plan ${planId}: could not check which chunks are still running on the server (${errorMessage(error)}). Nothing was submitted — re-run the resume.`,
@@ -708,6 +689,7 @@ async function readEvidence(
   executor: ClickHouseExecutor,
   scope: { prefix: string } | { ids: string[]; after?: string },
   reads: EvidenceReads,
+  observe?: ObserveProcesses,
 ): Promise<ChunkEvidence> {
   const { cluster } = reads
   const matchOn = (column: string) => 'prefix' in scope
@@ -728,26 +710,22 @@ async function readEvidence(
     `SELECT query_id, initial_query_id, is_initial_query, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE ${ownOrSecondary} SETTINGS ${STRICT_READ_SETTINGS}`
   )
   const secondary = (row: { is_initial_query?: number | string }) => row.is_initial_query !== undefined && Number(row.is_initial_query) === 0
-  let logRows: ChunkLogRow[]
-  try {
-    logRows = await executor.query<ChunkLogRow>(
-      `SELECT query_id, initial_query_id, is_initial_query, type, written_rows, written_bytes, query_duration_ms, exception
+  // Saved before the next read: a query_log read that fails or hangs (and
+  // an interrupt during it) loses none of what system.processes showed.
+  await observe?.({
+    running: new Map(runningRows.filter((row) => !secondary(row)).map((row) => [row.query_id, row])),
+    logRows: [],
+    secondaryRunning: runningRows.filter(secondary),
+    secondaryLog: [],
+  })
+  const logRows = await executor.query<ChunkLogRow>(
+    `SELECT query_id, initial_query_id, is_initial_query, type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${from('query_log')}
 WHERE ${ownOrSecondary}
   AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart', 'ExceptionWhileProcessing')${pruning}
 ORDER BY event_time DESC
 SETTINGS ${STRICT_READ_SETTINGS}`
-    )
-  } catch (error) {
-    // What system.processes showed is still evidence (written rows, a
-    // secondary query); it is never a proof (see `observedProgress`).
-    throw new PartialEvidenceError(error, {
-      running: new Map(runningRows.filter((row) => !secondary(row)).map((row) => [row.query_id, row])),
-      logRows: [],
-      secondaryRunning: runningRows.filter(secondary),
-      secondaryLog: [],
-    })
-  }
+  )
   return {
     running: new Map(runningRows.filter((row) => !secondary(row)).map((row) => [row.query_id, row])),
     logRows: logRows.filter((row) => !secondary(row)),
@@ -899,19 +877,15 @@ async function pollChunk(
     let outcome: AttemptOutcome
     let noted = state
     try {
-      const evidence = await readEvidence(executor, { ids: [queryId], after: final ? undefined : state.submittedAt }, target)
+      const evidence = await readEvidence(executor, { ids: [queryId], after: final ? undefined : state.submittedAt }, target, async (seen) => {
+        const observed = notedState(planId, chunkId, state, seen)
+        if (observed === state) return
+        state = observed
+        await onChanged(state)
+      })
       noted = notedState(planId, chunkId, state, evidence)
       outcome = classifyAttempt(planId, chunkId, noted, evidence, final)
     } catch (error) {
-      // A partial read adds what it saw (saved), never a proof.
-      const seen = partialEvidence(error)
-      if (seen) {
-        const observed = notedState(planId, chunkId, state, seen)
-        if (observed !== state) {
-          state = observed
-          await onChanged(state)
-        }
-      }
       errors++
       if (errors >= limits.maxPollErrors) {
         return { chunkId, queryId, reason: `lost contact with the server after ${errors} consecutive poll errors (${errorMessage(error)})` }
@@ -990,6 +964,15 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // A read that hangs (a stalled replica) must not keep an interrupted run,
   // and its lock, waiting: an abort stops waiting for it.
   const interruptible = <T>(work: Promise<T>) => untilAborted(work, signal, () => interruptedError(planId))
+  // Every checkpoint write goes through one queue, one at a time and in
+  // order, as chkit-py's are: an older write never lands after a newer one,
+  // and waiting for the latest write waits for all of them.
+  let writeQueue: Promise<void> = Promise.resolve()
+  const write = (snapshot: BackfillProgress): Promise<void> => {
+    const next = writeQueue.then(() => onProgress?.(snapshot))
+    writeQueue = next.then(() => undefined, () => undefined)
+    return next
+  }
   if (resumeFrom) {
     // The resume's sync saves what each read saw before its next read or
     // wait. An interrupt starts no such save, and waits for the one under
@@ -997,7 +980,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     let syncWrite: Promise<void> = Promise.resolve()
     const persist = (next: BackfillProgress) => {
       if (signal?.aborted) return Promise.resolve()
-      syncWrite = Promise.resolve(onProgress?.(next))
+      syncWrite = write(next)
       return syncWrite
     }
     try {
@@ -1042,7 +1025,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   let lastReport: Promise<void> = Promise.resolve()
   const report = (): Promise<void> => {
     if (closed) return lastReport
-    lastReport = Promise.resolve(onProgress?.(progress))
+    lastReport = write(progress)
     return lastReport
   }
 
@@ -1071,7 +1054,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   const record = (id: string, next: BackfillChunkState) => {
     progress = updateChunk(progress, id, next)
     if (sealed) return lastReport
-    lastReport = Promise.resolve(onProgress?.(progress))
+    lastReport = write(progress)
     return lastReport
   }
   // Only an executor that sends a request once, and asks the admission as
