@@ -1068,6 +1068,8 @@ def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
         ("toUInt8(null = 1)", ["null"]),
         ("toUInt64(toDateTime(0) + interval case day)", ["case", "interval"]),
         ("length(substring(case c, 1))", ["c", "case"]),
+        ("length(substring(case when, 1))", ["case", "when"]),
+        ("toUInt64(toDateTime(0) + interval case when day)", ["case", "interval", "when"]),
         ("length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ["from", "interval"]),
     ],
 )

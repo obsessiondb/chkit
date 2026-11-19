@@ -1387,22 +1387,41 @@ def _case_follows(tokens: list[SQLToken], at: int) -> bool:
     """Whether the CASE at ``at`` is the keyword.
 
     That is when WHEN follows it, or one operand token and then WHEN (``CASE x
-    WHEN``). Otherwise it may read the column ``case`` (``INTERVAL case DAY``,
-    ``case TO DISK 'd'`` in a TTL), and keeps the read.
+    WHEN``), and a THEN follows at the same depth before any ``,`` or closing
+    bracket. Otherwise it may read the column ``case`` (``INTERVAL case DAY``,
+    ``case TO DISK 'd'`` in a TTL, ``substring(case when, 1)`` with the alias
+    ``when``), and keeps the read.
     """
 
-    def is_when(i: int) -> bool:
+    def is_word(i: int, word: str) -> bool:
         token = tokens[i] if i < len(tokens) else None
-        return token is not None and token.kind == "identifier" and token.text.lower() == "when"
+        return token is not None and token.kind == "identifier" and token.text.lower() == word
 
-    if is_when(at + 1):
-        return True
-    if at + 1 >= len(tokens) or not is_when(at + 2):
+    if at + 1 >= len(tokens):
         return False
-    following = tokens[at + 1]
-    if following.kind in ("number", "string", "quoted_identifier"):
-        return True
-    return following.kind == "identifier" and following.text.lower() not in _KEYWORD_WORDS
+    if not is_word(at + 1, "when"):
+        if not is_word(at + 2, "when"):
+            return False
+        following = tokens[at + 1]
+        operand = following.kind in ("number", "string", "quoted_identifier") or (
+            following.kind == "identifier" and following.text.lower() not in _KEYWORD_WORDS
+        )
+        if not operand:
+            return False
+    depth = 0
+    for j in range(at + 1, len(tokens)):
+        text = tokens[j].text
+        if text in ("(", "[", "{"):
+            depth += 1
+        elif text in (")", "]", "}"):
+            if depth == 0:
+                return False
+            depth -= 1
+        elif depth == 0 and text == ",":
+            return False
+        elif depth == 0 and is_word(j, "then"):
+            return True
+    return False
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:

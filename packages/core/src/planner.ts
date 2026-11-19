@@ -1296,14 +1296,34 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
 
 /**
  * Whether the CASE at `at` is the keyword: WHEN follows it, or one operand
- * token and then WHEN (`CASE x WHEN`). Otherwise it may read the column
- * `case` (`INTERVAL case DAY`, `case TO DISK 'd'` in a TTL), and keeps the read.
+ * token and then WHEN (`CASE x WHEN`), and a THEN follows at the same depth
+ * before any `,` or closing bracket. Otherwise it may read the column `case`
+ * (`INTERVAL case DAY`, `case TO DISK 'd'` in a TTL, `substring(case when, 1)`
+ * with the alias `when`), and keeps the read.
  */
 function caseFollows(tokens: SQLToken[], at: number): boolean {
-  const isWhen = (token: SQLToken | undefined) => token?.kind === 'identifier' && token.text.toLowerCase() === 'when'
+  const isWord = (token: SQLToken | undefined, word: string) =>
+    token?.kind === 'identifier' && token.text.toLowerCase() === word
   const next = tokens[at + 1]
-  if (isWhen(next)) return true
-  if (next === undefined || !isWhen(tokens[at + 2])) return false
-  if (next.kind === 'number' || next.kind === 'string' || next.kind === 'quoted_identifier') return true
-  return next.kind === 'identifier' && !isKeywordWord(next.text.toLowerCase())
+  if (next === undefined) return false
+  if (!isWord(next, 'when')) {
+    if (!isWord(tokens[at + 2], 'when')) return false
+    const operand =
+      next.kind === 'number' ||
+      next.kind === 'string' ||
+      next.kind === 'quoted_identifier' ||
+      (next.kind === 'identifier' && !isKeywordWord(next.text.toLowerCase()))
+    if (!operand) return false
+  }
+  let depth = 0
+  for (let j = at + 1; j < tokens.length; j += 1) {
+    const text = tokens[j]!.text
+    if (text === '(' || text === '[' || text === '{') depth += 1
+    else if (text === ')' || text === ']' || text === '}') {
+      if (depth === 0) return false
+      depth -= 1
+    } else if (depth === 0 && text === ',') return false
+    else if (depth === 0 && isWord(tokens[j], 'then')) return true
+  }
+  return false
 }
