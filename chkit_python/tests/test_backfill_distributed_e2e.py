@@ -34,8 +34,14 @@ from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
 from chkit_plugin_backfill.chunking.types import Chunk, TableProfile
 from chkit_plugin_backfill.plugin import _ThreadLocalExecutor
 from chkit_plugin_backfill.types import BackfillProgress
-from tests.e2e_testkit import create_prefix, poll_until, quote_ident, resolve_live_env
-from tests.test_backfill_async_e2e import _clickhouse_config, _connect_or_fail, _wait_for_table
+from tests.e2e_testkit import (
+    create_prefix,
+    poll_until,
+    quote_ident,
+    resolve_live_env,
+    wait_for_table_on_every_replica,
+)
+from tests.test_backfill_async_e2e import _clickhouse_config, _connect_or_fail
 
 ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
 CLUSTER = "cluster"
@@ -92,16 +98,18 @@ class _Ctx:
             executor=executor,
             plan_id=plan_id,
             chunk_ids=[CHUNK.id],
-            build_query=lambda _chunk_id: build_chunk_execution_sql(
-                plan_id=plan_id,
-                chunk=CHUNK,
-                target=self.fqn(target),
-                source_target=self.fqn("source"),
-                table=TableProfile.model_validate(
-                    {"database": self.database, "table": self.prefix + target, "sortKeys": []}
-                ),
-            )
-            + extra_settings,
+            build_query=lambda _chunk_id: (
+                build_chunk_execution_sql(
+                    plan_id=plan_id,
+                    chunk=CHUNK,
+                    target=self.fqn(target),
+                    source_target=self.fqn("source"),
+                    table=TableProfile.model_validate(
+                        {"database": self.database, "table": self.prefix + target, "sortKeys": []}
+                    ),
+                )
+                + extra_settings
+            ),
             concurrency=1,
             poll_interval_ms=500,
             on_progress=on_progress,  # type: ignore[arg-type]
@@ -119,10 +127,18 @@ def ctx() -> Iterator[_Ctx]:
     ddl.execute(f"CREATE TABLE {context.fqn('local')} (id UInt64) ENGINE = MergeTree ORDER BY id")
     # A chunk that lands on a replica which cannot see the source yet copies
     # nothing and still ends done: every one of a few stateless reads sees it.
+    wait_for_table_on_every_replica(ddl, context.database, context.prefix + "local")
     seen = [0]
 
     def read_seen() -> int:
-        full = context.count_rows(context.run_executor, "source") == SOURCE_ROWS
+        # A new connection per read, so each one can land on another replica.
+        reader = ClickHouseClient.connect(config)
+        try:
+            full = context.count_rows(reader, "source") == SOURCE_ROWS
+        except Exception:  # a replica that does not list the table yet
+            full = False
+        finally:
+            reader.close()
         seen[0] = seen[0] + 1 if full else 0
         return seen[0]
 
@@ -169,14 +185,16 @@ def test_a_chunk_into_a_distributed_table_is_done_only_once_its_rows_reached_the
 
 
 def test_a_chunk_whose_materialized_view_fails_to_write_is_not_done(ctx: _Ctx) -> None:
-    ctx.ddl.execute(f"CREATE TABLE {ctx.fqn('mv_target')} (id UInt64) ENGINE = MergeTree ORDER BY id")
+    ctx.ddl.execute(
+        f"CREATE TABLE {ctx.fqn('mv_target')} (id UInt64) ENGINE = MergeTree ORDER BY id"
+    )
     ctx.ddl.execute(f"CREATE TABLE {ctx.fqn('sink')} (id UInt64) ENGINE = MergeTree ORDER BY id")
     ctx.ddl.execute(
         f"CREATE MATERIALIZED VIEW {ctx.fqn('mv')} TO {ctx.fqn('sink')} AS "
         f"SELECT throwIf(id >= 0, 'view write failed') AS id FROM {ctx.fqn('mv_target')}"
     )
-    _wait_for_table(ctx.ddl, ctx.database, ctx.prefix + "mv_target")
-    _wait_for_table(ctx.ddl, ctx.database, ctx.prefix + "mv")
+    wait_for_table_on_every_replica(ctx.ddl, ctx.database, ctx.prefix + "mv_target")
+    wait_for_table_on_every_replica(ctx.ddl, ctx.database, ctx.prefix + "mv")
 
     executor = ctx.run_executor
     if not ON_OBSESSIONDB:
@@ -200,12 +218,17 @@ def test_a_chunk_whose_materialized_view_fails_to_write_is_not_done(ctx: _Ctx) -
     # The INSERT's error can come back as its send's response, which stops the
     # run, or later through system.query_log, which records it failed.
     try:
-        result = ctx.run_chunk(executor, "mv_target", f"{ctx.prefix}mv_plan", on_progress=on_progress)
-        outcome = f"run ended, chunk {result.progress[CHUNK.id].status}"
+        result = ctx.run_chunk(
+            executor, "mv_target", f"{ctx.prefix}mv_plan", on_progress=on_progress
+        )
+        state = result.progress[CHUNK.id]
+        outcome = f"run ended, chunk {state.status}: {state.error or ''}"
     except Exception as error:  # the run stopping is one of the two outcomes asserted
         outcome = f"run stopped: {error}"
     finally:
         if executor is not ctx.run_executor:
             executor.close()
     assert "done" not in statuses, f"statuses the checkpoint recorded: {statuses}"
-    assert re.match(r"^(run ended, chunk failed|run stopped: [\s\S]*view write failed)", outcome), outcome
+    assert re.match(r"^(run ended, chunk failed|run stopped): [\s\S]*view write failed", outcome), (
+        outcome
+    )

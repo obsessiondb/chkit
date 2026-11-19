@@ -97,9 +97,11 @@ beforeAll(async () => {
   await ddl.command(`CREATE TABLE ${fqn('local')} (id UInt64) ENGINE = MergeTree ORDER BY id`)
   // A chunk that lands on a replica which cannot see the source yet copies
   // nothing and still ends done: every one of a few stateless reads sees it.
+  await waitForTable(ddl, database, `${prefix}local`)
   let seen = 0
   await pollUntil(async () => {
-    seen = (await countRows(runExecutor, 'source')) === SOURCE_ROWS ? seen + 1 : 0
+    const full = await countRows(runExecutor, 'source').then((rows) => rows === SOURCE_ROWS, () => false)
+    seen = full ? seen + 1 : 0
     return seen
   }, (count) => count >= 3, { timeoutMs: 45_000, intervalMs: 250 })
   expect(seen, 'stateless reads in a row that see every source row').toBeGreaterThanOrEqual(3)
@@ -171,11 +173,11 @@ describe('e2e: a backfill chunk is done only once its rows are written', () => {
       const outcome = await runChunk(executor, 'mv_target', `${prefix}mv_plan`, '', (progress) => {
         statuses.push(progress[chunk.id]?.status)
       }).then(
-        (result) => `run ended, chunk ${result.progress[chunk.id]?.status}`,
+        (result) => `run ended, chunk ${result.progress[chunk.id]?.status}: ${result.progress[chunk.id]?.error ?? ''}`,
         (error: unknown) => `run stopped: ${error instanceof Error ? error.message : String(error)}`,
       )
       expect(statuses, 'statuses the checkpoint recorded').not.toContain('done')
-      expect(outcome).toMatch(/^(run ended, chunk failed|run stopped: [\s\S]*view write failed)/)
+      expect(outcome).toMatch(/^(run ended, chunk failed|run stopped): [\s\S]*view write failed/)
     } finally {
       if (executor !== runExecutor) await executor.close()
     }
