@@ -47,6 +47,7 @@ from chkit.clickhouse.client import (
     clickhouse_error_message,
     is_unknown_database_error,
 )
+from chkit.clickhouse.control import STRICT_CONTROL_SETTINGS
 from chkit.clickhouse.ddl_propagation import (
     MAX_RETRIES,
     RETRY_DELAY_SECONDS,
@@ -88,6 +89,44 @@ class OperationState(BaseModel):
     # recorded: an older chkit wrote the row, or the journal has no column for
     # it. Never part of a report.
     fingerprint: str = Field(..., exclude=True)
+    # Whether this async record names a query id that only this attempt was
+    # submitted under, recorded before its submit (#767). Only that write sets
+    # it; every other write carries it as a read returned it. On a failed
+    # record it also means the server recorded the failure. A write stores it
+    # in the fingerprint (FENCED_FINGERPRINT_PREFIX), never on a completed
+    # record, so a journal without the fingerprint column never has it. Never
+    # part of a report.
+    attempt_fenced: bool = Field(default=False, alias="attemptFenced", exclude=True)
+
+
+# The prefix of the stored fingerprint of a fenced started or failed record (#767).
+# Releases from #599 on compare a started record's fingerprint with the
+# statement's before they resume, so an earlier release stops with
+# statement_split_changed instead of running before-retry SQL without
+# recording the attempt failed first. A read strips it again.
+FENCED_FINGERPRINT_PREFIX: Final[str] = "fenced-attempt;"
+
+
+def stored_fingerprint(op: OperationState) -> str:
+    """The fingerprint a write stores for ``op`` (#767)."""
+    if op.status != "completed" and op.attempt_fenced:
+        return f"{FENCED_FINGERPRINT_PREFIX}{op.fingerprint}"
+    return op.fingerprint
+
+
+def read_stored_fingerprint(stored: str) -> tuple[str, bool]:
+    """The fingerprint a read finds stored, and whether it was fenced (#767)."""
+    if stored.startswith(FENCED_FINGERPRINT_PREFIX):
+        return stored[len(FENCED_FINGERPRINT_PREFIX) :], True
+    return stored, False
+
+
+def operation_as_stored(op: OperationState, fingerprints: bool) -> OperationState:
+    """``op`` as a read returns it after a write with or without the fingerprint column (#767)."""
+    if not fingerprints:
+        return op.model_copy(update={"attempt_fenced": False})
+    fingerprint, fenced = read_stored_fingerprint(stored_fingerprint(op))
+    return op.model_copy(update={"fingerprint": fingerprint, "attempt_fenced": fenced})
 
 
 class MigrationRowState(BaseModel):
@@ -143,6 +182,66 @@ _OPERATIONS_SELECT: Final[str] = f"toJSONString(CAST(operations, '{_OPERATIONS_R
 # it for that very record.
 _FINGERPRINTS_COLUMN: Final[str] = "operation_fingerprints"
 _FINGERPRINTS_COLUMN_DEFINITION: Final[str] = f"{_FINGERPRINTS_COLUMN} Array(String) DEFAULT []"
+
+
+class EveryCopyRead(BaseModel):
+    """A statement's record read from every copy of the journal (#767)."""
+
+    covered: bool
+    op: OperationState | None
+
+
+def every_copy_read(
+    rows: list[dict[str, Any]],
+    find_op: Callable[[Any, Any], OperationState | None],
+) -> EveryCopyRead:
+    """Whether one read's per-replica rows cover the journal's replica set (#767).
+
+    A row without a replica name, or a member no row names, leaves the read
+    uncovered; otherwise the newest record among them is the record.
+    """
+    if not rows or any(not isinstance(row["replica"], str) or row["replica"] == "" for row in rows):
+        return EveryCopyRead(covered=False, op=None)
+    read = {row["replica"] for row in rows}
+    # Each server answers once: a duplicate reply (one server listed twice, or
+    # two that share a name) leaves the read uncovered.
+    if len(read) != len(rows):
+        return EveryCopyRead(covered=False, op=None)
+    member_lists = [_decode_members(row["members"]) for row in rows]
+    if any(members is None for members in member_lists):
+        return EveryCopyRead(covered=False, op=None)
+    members = {member for members in member_lists for member in members or []}
+    if not members or not members <= read:
+        return EveryCopyRead(covered=False, op=None)
+    present = [row for row in rows if int(row["present"]) > 0]
+    if not present:
+        return EveryCopyRead(covered=True, op=None)
+    newest = max(present, key=lambda row: str(row["applied_at"]))
+    return EveryCopyRead(
+        covered=True, op=find_op(newest["operations"], newest["operation_fingerprints"])
+    )
+
+
+def _decode_members(value: Any) -> list[str] | None:
+    """A JSON array of non-empty strings, or None when it is anything else.
+
+    The replica set comes as JSON text: the Workbench API returns every cell
+    as a string.
+    """
+    if not isinstance(value, str):
+        return None
+    try:
+        decoded = json.loads(value)
+    except ValueError:
+        return None
+    if not isinstance(decoded, list) or any(
+        not isinstance(member, str) or member == "" for member in decoded
+    ):
+        return None
+    return decoded
+
+
+_SERVER_UUID = re.compile(r"^[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}$")
 
 
 class _UnknownDatabaseError(Exception):
@@ -228,10 +327,15 @@ def _parse_operations(value: Any, fingerprints_value: Any = None) -> list[Operat
                     else str(raw["finished_at"])
                 ),
                 last_error=str(raw.get("last_error", "")),
-                fingerprint=fingerprints[index] if index < len(fingerprints) else "",
+                **_fingerprint_fields(fingerprints[index] if index < len(fingerprints) else ""),
             )
         )
     return out
+
+
+def _fingerprint_fields(stored: str) -> dict[str, Any]:
+    fingerprint, fenced = read_stored_fingerprint(stored)
+    return {"fingerprint": fingerprint, "attempt_fenced": fenced}
 
 
 def _operation_to_tuple_literal(op: OperationState) -> str:
@@ -255,7 +359,7 @@ def _operations_array_literal(operations: list[OperationState]) -> str:
 
 
 def _fingerprints_array_literal(operations: list[OperationState]) -> str:
-    quoted = ["'" + _escape_sql_string(op.fingerprint) + "'" for op in operations]
+    quoted = ["'" + _escape_sql_string(stored_fingerprint(op)) + "'" for op in operations]
     return f"[{','.join(quoted)}]"
 
 
@@ -840,6 +944,116 @@ class JournalStore:
             )
         )
 
+    def read_operation_on_every_copy(
+        self, migration_name: str, statement_index: int
+    ) -> EveryCopyRead:
+        """The statement's record, read in one query from every copy of the journal (#767).
+
+        ``covered`` is false when that read cannot be shown to cover every
+        copy: a replicated journal with a replica the read did not reach, or
+        with replicas it cannot name, or a journal that is not replicated on a
+        target with several replicas.
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return EveryCopyRead(covered=True, op=None)
+        database = self._database_name()
+        rows = self._client.query(
+            "SELECT engine FROM system.tables WHERE database = currentDatabase() "
+            f"AND name = '{self._table}'"
+        ).rows
+        replicated = not rows or bool(re.match(r"^(Replicated|Shared)", str(rows[0]["engine"])))
+        fingerprints = (
+            f"toJSONString({_FINGERPRINTS_COLUMN})" if self._fingerprint_column else "'[]'"
+        )
+        name = _escape_sql_string(migration_name)
+        # Each server answers for itself, in the same query that reads its
+        # copy's newest version of the record. (A scalar subquery would run on
+        # the server that receives the query only.) The topology is read fresh
+        # for this read, never from an earlier probe: a cluster that does not
+        # exist, or that the user may not read, fails it.
+        latest = (
+            "(SELECT count() AS present, argMax(tuple(toString(applied_at), "
+            f"{_OPERATIONS_SELECT}, {fingerprints}), applied_at) AS latest FROM "
+            f"{self._qualified_table()} WHERE name = '{name}') AS j"
+        )
+        columns = (
+            "j.present AS present, j.latest.1 AS applied_at, j.latest.2 AS operations, "
+            "j.latest.3 AS operation_fingerprints"
+        )
+        # A replicated journal: every replica in the table's replica set, named
+        # by the set itself, must answer. One that is not replicated is one
+        # copy only on a single server: every server of the cluster answers by
+        # its server UUID, and there must be one.
+        per_copy = (
+            "SELECT r.replica_name AS replica, toJSONString(mapKeys(r.replica_is_active)) "
+            "AS members, "
+            f"{columns} FROM system.replicas AS r CROSS JOIN {latest} WHERE r.database = "
+            f"'{_escape_sql_string(database)}' AND r.table = '{self._table}'"
+            if replicated
+            else "SELECT toString(serverUUID()) AS replica, toJSONString([toString(serverUUID())]) "
+            f"AS members, {columns} FROM {latest}"
+        )
+        override = self._fanout_override
+        cluster = override.cluster if override is not None else (self._cluster or "default")
+        # Every server of the cluster answers, or the read fails: an
+        # unavailable one is never skipped, and no limit cuts the reply short.
+        copies = self._client.query(
+            "SELECT replica, members, present, applied_at, operations, operation_fingerprints "
+            f"FROM clusterAllReplicas('{_escape_sql_string(cluster)}', view({per_copy}))",
+            settings={**STRICT_CONTROL_SETTINGS, "skip_unavailable_shards": 0},
+        ).rows
+        # Not replicated: exactly one server, named by its UUID.
+        if not replicated and (
+            len(copies) != 1 or not _SERVER_UUID.match(str(copies[0]["replica"]))
+        ):
+            return EveryCopyRead(covered=False, op=None)
+
+        def find_op(operations: Any, fingerprints_value: Any) -> OperationState | None:
+            return next(
+                (
+                    op
+                    for op in _parse_operations(operations, fingerprints_value)
+                    if op.operation_index == statement_index
+                ),
+                None,
+            )
+
+        return every_copy_read(copies, find_op)
+
+    def stores_attempt_fences(self) -> bool:
+        """Whether the journal stores an async attempt's fence (#767).
+
+        It has, or this run adds, the operation_fingerprints column. A journal
+        not created yet gets it with the table.
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return True
+        self._ensure_fingerprint_column()
+        return self._fingerprint_column
+
+    def read_stored_operation(
+        self, migration_name: str, statement_index: int
+    ) -> OperationState | None:
+        """One statement's record as the journal's server returns it (#767).
+
+        Without the last write this process made: what an async submit requires.
+        """
+        self._ensure_table(create=False)
+        if self._database_missing or self._table_missing:
+            return None
+        self._try_sync_replica()
+        rows = self._journal_rows(
+            f"name = '{_escape_sql_string(migration_name)}'", limit=" LIMIT 1"
+        )
+        if not rows:
+            return None
+        operations = _parse_operations(
+            rows[0].get("operations"), rows[0].get(_FINGERPRINTS_COLUMN)
+        )
+        return next((op for op in operations if op.operation_index == statement_index), None)
+
     def read_migration_state(self, migration_name: str) -> MigrationRowState | None:
         """Return the latest row for ``migration_name`` (including in-progress)."""
         self._ensure_table(create=False)
@@ -897,7 +1111,14 @@ class JournalStore:
             return
         self._ensure_fingerprint_column()
         self._insert_state(state, fingerprints=self._fingerprint_column)
-        self._last_written[state.name] = state
+        # As a read returns it, so a fence counts only where it was stored.
+        self._last_written[state.name] = state.model_copy(
+            update={
+                "operations": [
+                    operation_as_stored(op, self._fingerprint_column) for op in state.operations
+                ]
+            }
+        )
         self._note_version(state.name, state.applied_at)
         self._try_sync_replica()
 
@@ -914,7 +1135,11 @@ class JournalStore:
         sql = (
             f"INSERT INTO {self._qualified_table()} "
             f"(name, applied_at, checksum, chkit_version, "
-            f"migration_completed, operations{fingerprint_column}) VALUES ("
+            # Acknowledged once written on every transport, never as an
+            # asynchronous insert, so what follows a journal write runs after it
+            # is stored (#767).
+            f"migration_completed, operations{fingerprint_column}) SETTINGS async_insert = 0 "
+            "VALUES ("
             f"'{_escape_sql_string(state.name)}', "
             f"'{_escape_sql_string(state.applied_at)}', "
             f"'{_escape_sql_string(state.checksum)}', "

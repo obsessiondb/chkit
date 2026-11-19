@@ -42,7 +42,7 @@ await wrapped.command('C', { s_command: 1 })
 await wrapped.query('Q', { s_query: 2 })
 await wrapped.queryJson('QJ', { s_query_json: 3 })
 await wrapped.insert({ table: 't', values: [{ a: 1 }], compressed: true })
-await wrapped.submit('S', 'id-1', { s_submit: 4 })
+await wrapped.submit('S', 'id-1', { s_submit: 4 }, { s_submit_options: 6 })
 await wrapped.queryStatus('id-1', { afterTime: '2026-01-01T00:00:00Z' })
 await wrapped.listSchemaObjects()
 await wrapped.listTableDetails(['db1', 'db2'])
@@ -78,7 +78,8 @@ describe('wrapExecutorWithDebug', () => {
         ['query', 'Q', { s_query: 2 }],
         ['queryJson', 'QJ', { s_query_json: 3 }],
         ['insert', { table: 't', values: [{ a: 1 }], compressed: true }],
-        ['submit', 'S', 'id-1', { s_submit: 4 }],
+        // The submit's options (its abort signal, #767) reach the executor too.
+        ['submit', 'S', 'id-1', { s_submit: 4 }, { s_submit_options: 6 }],
         ['queryStatus', 'id-1', { afterTime: '2026-01-01T00:00:00Z' }],
         ['listSchemaObjects'],
         ['listTableDetails', ['db1', 'db2']],
