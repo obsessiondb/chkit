@@ -754,8 +754,6 @@ def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
         # read once more, through a query_log flush, before the run stops
         # with the attempt still recorded as started.
         unknown_polls = unknown_polls + 1 if status.status == "unknown" else 0
-        if status.status != "unknown":
-            seen_on_server = True
         if unknown_polls >= MAX_UNKNOWN_POLLS:
             try:
                 status = _final_outcome_check(
@@ -779,6 +777,9 @@ def _poll(  # noqa: PLR0912, PLR0915 - one branch per poll outcome, as in TS
                     f"{unknown_polls}\u00d7 in a row",
                 )
             unknown_polls = 0
+        # After the final check too: it can find the query (#800).
+        if status.status != "unknown":
+            seen_on_server = True
 
         if status.status == "finished":
             finished_op = OperationState(

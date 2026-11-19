@@ -786,9 +786,10 @@ class _GuardedSend:
 
     def send(self, data: Any) -> None:
         guard, self._guard = self._guard, None
+        # Connected before any write, so a refused connect writes nothing (#800).
+        if self.sock is None:  # type: ignore[attr-defined]
+            self.connect()  # type: ignore[attr-defined]
         if guard is not None:
-            if self.sock is None:  # type: ignore[attr-defined]
-                self.connect()  # type: ignore[attr-defined]
             try:
                 guard_begin_write(guard)
             except BaseException:
@@ -797,8 +798,7 @@ class _GuardedSend:
             self._writing = guard
             self._timeout_before = self.sock.gettimeout()  # type: ignore[attr-defined]
             self.sock.settimeout(SUBMIT_WRITE_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
-        # Every write of a request, a proxy's CONNECT included (#800). A guarded
-        # send connected above, so a refused connect leaves it unset.
+        # Every write of a request, a proxy's CONNECT included (#800).
         _SUBMIT_SEND.wrote = True
         super().send(data)  # type: ignore[misc]
 

@@ -974,6 +974,55 @@ def test_a_not_sent_submit_error_after_a_poll_found_the_query_running_keeps_the_
     ]
 
 
+class _NotSentAtFinalCheckClient(_ScriptedClient):
+    """Its submit fails as never sent while the final check of every replica runs."""
+
+    def __init__(self, statuses: list[QueryStatus | BaseException]) -> None:
+        super().__init__(statuses, strict=True)
+        self._final_check = threading.Event()
+
+    def submit(self, statement: str, query_id: str | None = None, *args: Any, **kwargs: Any) -> str:
+        self.submitted.append((statement, query_id))
+        self._final_check.wait(timeout=5)
+        raise SubmitNotSentError(_REFUSED_TEXT)
+
+    def query_status(self, query_id: str, **kwargs: Any) -> QueryStatus:
+        if self._final_check.is_set():
+            _wait_for_submit(0)
+        status = super().query_status(query_id, **kwargs)
+        # The check before the submit reads every replica too.
+        if kwargs.get("every_replica") and self.submitted:
+            self._final_check.set()
+            _wait_for_submit(0)
+        return status
+
+
+def test_a_not_sent_submit_error_after_the_final_check_found_the_query_keeps_the_record(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#800: the final check of every replica that finds the query counts too."""
+    monkeypatch.setattr(
+        "chkit.cli.commands.migrate_async_apply.time.sleep", lambda _seconds: None
+    )
+    client = _NotSentAtFinalCheckClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            *[QueryStatus(status="unknown") for _ in range(20)],
+            QueryStatus(status="running", written_rows=9, written_bytes=72),
+            QueryStatus(status="finished", written_rows=16, written_bytes=128, duration_ms=8000),
+        ]
+    )
+    journal = _FakeJournalStore()
+    result = apply_async_statement(_input(client=client, journal=journal))
+    assert result.kind == "completed"
+    assert journal.writes is not None
+    assert [w.operations[0].last_error for w in journal.writes] == [
+        _PREPARED_MARKER,
+        _ATTEMPT_MARKER,
+        "",
+    ]
+
+
 def test_apply_async_an_attach_that_polls_unknown_past_the_budget_stops() -> None:
     """#767 (round 2): an attached attempt that disappears from
     system.processes without a query_log entry stops the run too, instead of

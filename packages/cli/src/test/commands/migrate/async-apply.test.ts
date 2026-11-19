@@ -809,6 +809,34 @@ describe('applyAsyncStatement', () => {
     expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PREPARED_RECORD_MARKER, ATTEMPT_RECORD_MARKER])
   })
 
+  // #800: the final check of every replica that finds the query counts too.
+  test('a not-sent submit error after the final check found the query running keeps the started record', async () => {
+    const fake = createFakeExecutor([
+      { status: 'unknown' },
+      ...Array.from({ length: 20 }, () => ({ status: 'unknown' as const })),
+      { status: 'running', writtenRows: 9, writtenBytes: 72 },
+      { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+    ])
+    let reject: (error: Error) => void = () => {}
+    const db = {
+      ...fake.db,
+      submit: () => new Promise((_resolve, rejectSubmit) => {
+        reject = rejectSubmit
+      }),
+      queryStatus: async (queryId: string, opts?: QueryStatusOptions) => {
+        const status = await fake.db.queryStatus(queryId, opts)
+        if (opts?.everyReplica === true) reject(new SubmitNotSentError('Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)'))
+        return status
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, writes } = createFakeJournalStore(null)
+
+    const result = await applyAsyncStatement({ ...BASE_INPUT, db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW })
+
+    expect(result.kind).toBe('completed')
+    expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PREPARED_RECORD_MARKER, ATTEMPT_RECORD_MARKER, ''])
+  })
+
   // #767 (round 3): a submit request that never settles (a proxy holding the
   // socket open) does not keep the run, and its migrate lock, waiting after
   // the final check: the run aborts the request and stops.

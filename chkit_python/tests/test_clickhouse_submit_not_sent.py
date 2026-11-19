@@ -117,6 +117,13 @@ def test_a_refused_connect_of_the_request_is_never_sent() -> None:
     assert "connection refused" in str(error)
 
 
+def test_a_refused_connect_of_a_submit_without_a_guard_is_never_sent() -> None:
+    """As in TS, the proof needs no guard: backfill submits without one."""
+    port = _closed_port()
+    with pytest.raises(SubmitNotSentError, match="connection refused"):
+        _client_sending_to(port).submit("INSERT INTO t SELECT 1", query_id="r800-id")
+
+
 def _reset_after_read(conn: socket.socket, listener: _Listener) -> None:
     listener.read_request(conn)
     # SO_LINGER 0: close() sends a RST.

@@ -452,7 +452,6 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       // read once more, through a query_log flush, before the run stops with
       // the attempt still recorded as started.
       unknownPolls = status.status === 'unknown' ? unknownPolls + 1 : 0
-      if (status.status !== 'unknown') seenOnServer = true
       if (unknownPolls >= MAX_UNKNOWN_POLLS) {
         try {
           status = await finalOutcomeCheck({ db, queryId, operationType, pollAfterTime, sleep })
@@ -466,6 +465,8 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         }
         unknownPolls = 0
       }
+      // After the final check too: it can find the query (#800).
+      if (status.status !== 'unknown') seenOnServer = true
 
       if (status.status === 'finished') {
         const finishedSec = Math.round((status.durationMs ?? 0) / 1000)
