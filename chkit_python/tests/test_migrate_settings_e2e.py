@@ -15,10 +15,16 @@ from pathlib import Path
 from typing import Any
 
 import pytest
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 from typer.testing import CliRunner
 
 from chkit.cli.commands.migrate_errors import MigrateError
-from chkit.cli.commands.migrate_settings import parse_setting_flags
+from chkit.cli.commands.migrate_settings import (
+    assert_insert_settings_changeable,
+    parse_setting_flags,
+)
 from chkit.cli.main import app
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import ChxResolvedClickHouseConfig
@@ -76,6 +82,26 @@ def test_parse_setting_flags() -> None:
             parse_setting_flags([f"max_table_size_to_drop=0,{name}=secret"])
         assert "secret" not in str(error.value)
 
+
+def test_parse_setting_flags_keeps_async_inserts_off_and_waited_for() -> None:
+    # #790: migrate cannot tell a buffered asynchronous INSERT from a stored one.
+    assert parse_setting_flags(["async_insert=0", " async_insert = FALSE "]) == {
+        "async_insert": "0"
+    }
+    assert parse_setting_flags(["wait_for_async_insert=True"]) == {"wait_for_async_insert": "1"}
+    refused = [
+        *(f"async_insert={value}" for value in ["1", "true", "True", "2", ""]),
+        *(f"wait_for_async_insert={value}" for value in ["0", "false", ""]),
+        "profile=bulk",
+    ]
+    for entry in refused:
+        with pytest.raises(MigrateError) as error:
+            parse_setting_flags([f"max_threads=1,{entry}"])
+        assert error.value.code == "invalid_usage"
+        assert str(error.value) == (
+            f"--setting {entry} is not allowed: migrate would record an "
+            "asynchronous INSERT as applied while its rows may still be buffered. Nothing ran."
+        )
 
 def test_migrate_sends_settings_with_every_statement(
     live: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
@@ -176,3 +202,59 @@ def test_migrate_sends_settings_with_every_statement(
         live.execute(f"DROP TABLE IF EXISTS {fqn} SYNC", {"max_table_size_to_drop": 0})
         live.execute(f"DROP TABLE IF EXISTS {sink_fqn} SYNC")
         live.execute(f"DROP TABLE IF EXISTS {quote_ident(db)}.{quote_ident(journal_table)} SYNC")
+
+
+class _SettingsClient:
+    def __init__(self, rows: list[dict[str, object]] | Exception) -> None:
+        self._rows = rows
+
+    def query(self, _sql: str) -> object:
+        if isinstance(self._rows, Exception):
+            raise self._rows
+        return type("Result", (), {"rows": self._rows})()
+
+
+_CHANGEABLE: list[dict[str, object]] = [
+    {"name": "readonly", "value": "0", "readonly": 0},
+    {"name": "async_insert", "value": "1", "readonly": 0},
+    {"name": "wait_for_async_insert", "value": "0", "readonly": 0},
+]
+
+
+def test_insert_settings_check_passes_changeable_matching_and_readonly_users() -> None:
+    # #790, as TS settings.test.ts.
+    for rows in [
+        _CHANGEABLE,
+        [{"name": "async_insert", "value": "0", "readonly": 1},
+         {"name": "wait_for_async_insert", "value": "1", "readonly": 1}],
+        [{"name": "readonly", "value": "1", "readonly": 1},
+         {"name": "async_insert", "value": "1", "readonly": 1}],
+    ]:
+        assert_insert_settings_changeable(_SettingsClient(rows))  # type: ignore[arg-type]
+
+
+def test_insert_settings_check_stops_the_run_when_it_cannot_read() -> None:
+    # As TS: a failed read stops the run, unless the database does not exist yet.
+    with pytest.raises(DatabaseError, match="denied"):
+        assert_insert_settings_changeable(_SettingsClient(DatabaseError("denied")))  # type: ignore[arg-type]
+    missing = DatabaseError("Code: 81. DB::Exception: Database x does not exist. (UNKNOWN_DATABASE)")
+    assert_insert_settings_changeable(_SettingsClient(missing))  # type: ignore[arg-type]
+
+
+@pytest.mark.parametrize(
+    ("name", "value", "durable"),
+    [("async_insert", "1", "0"), ("wait_for_async_insert", "0", "1")],
+)
+def test_insert_settings_fixed_elsewhere_are_refused(name: str, value: str, durable: str) -> None:
+    rows = [
+        {"name": name, "value": value, "readonly": 1} if row["name"] == name else row
+        for row in _CHANGEABLE
+    ]
+    with pytest.raises(MigrateError) as error:
+        assert_insert_settings_changeable(_SettingsClient(rows))  # type: ignore[arg-type]
+    assert error.value.code == "insert_settings_fixed"
+    assert str(error.value) == (
+        f"Setting {name} is fixed at {value} for this ClickHouse user, and chkit migrate "
+        f"needs {name} = {durable} so that a statement it records as applied is stored. "
+        "Nothing ran."
+    )

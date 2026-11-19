@@ -821,10 +821,18 @@ const PROGRESS_SETTINGS: ClickHouseSettings = {
 	http_headers_progress_interval_ms: '30000',
 }
 
-// Sent with writes only (command and insert): no asynchronous INSERTs, and
-// progress headers that keep a long migration's connection alive.
-const WRITE_SETTINGS: ClickHouseSettings = {
+// A write is stored when it returns: no asynchronous INSERT, and one that a
+// table's own async_insert setting still makes asynchronous waits for its
+// flush (#790).
+const DURABLE_INSERT_SETTINGS: ClickHouseSettings = {
 	async_insert: 0,
+	wait_for_async_insert: 1,
+}
+
+// Sent with writes only (command and insert): stored writes, and progress
+// headers that keep a long migration's connection alive.
+const WRITE_SETTINGS: ClickHouseSettings = {
+	...DURABLE_INSERT_SETTINGS,
 	...PROGRESS_SETTINGS,
 }
 
@@ -1230,7 +1238,9 @@ export function createExecutorWithClient(
 				await target.command({
 					query: sql,
 					query_id: id,
-					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
+					// Stored when it finishes, as a command is: an asynchronous INSERT
+					// would finish while its rows are still buffered (#790).
+					clickhouse_settings: { ...DURABLE_INSERT_SETTINGS, ...clickhouseSettings },
 					...(submitOptions?.signal ? { abort_signal: submitOptions.signal } : {}),
 				})
 			} catch (error) {

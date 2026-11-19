@@ -7,9 +7,18 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
+
+from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untyped]
+    DatabaseError,
+)
 
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.clickhouse import is_unknown_database_error
 from chkit.core.sql_lexer import js_trim
+
+if TYPE_CHECKING:
+    from chkit.clickhouse.client import ClickHouseClient
 
 _SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -26,6 +35,28 @@ _RESERVED_NAMES = frozenset({
     "user",
     "password",
 })
+
+
+# migrate journals a statement as completed when the server finishes it, and
+# an asynchronous INSERT finishes before its rows leave the buffer unless it
+# waits for the flush. chkit sends ``async_insert = 0`` and
+# ``wait_for_async_insert = 1`` with every statement, so ``--setting`` may only
+# repeat them, as 0 or 1, and may not name a settings profile that would apply
+# over them (#790).
+_DURABLE_INSERT_SETTINGS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "async_insert": ("0", ("0", "false")),
+    "wait_for_async_insert": ("1", ("1", "true")),
+}
+
+
+def _durable_insert_value(name: str, value: str) -> str | None:
+    if name == "profile":
+        return None
+    durable = _DURABLE_INSERT_SETTINGS.get(name)
+    if durable is None:
+        return value
+    stored, spellings = durable
+    return stored if value.lower() in spellings else None
 
 
 def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
@@ -57,5 +88,51 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
                 "parameter, not a query setting."
             )
             raise MigrateError("invalid_usage", msg)
-        settings[name] = js_trim(value)
+        raw = js_trim(value)
+        durable = _durable_insert_value(name, raw)
+        if durable is None:
+            msg = (
+                f"--setting {name}={raw} is not allowed: migrate would record an "
+                "asynchronous INSERT as applied while its rows may still be buffered. "
+                "Nothing ran."
+            )
+            raise MigrateError("invalid_usage", msg)
+        settings[name] = durable
     return settings
+
+
+def assert_insert_settings_changeable(client: ClickHouseClient) -> None:
+    """Refuse an applying run, before anything is sent, for a user whose
+    settings constraints fix ``async_insert`` or ``wait_for_async_insert`` at
+    another value than chkit sends: its writes could not be made to be stored
+    when they return (#790). A ``readonly = 1`` user is left to the server's
+    own refusal of its writes. A failed read stops the run, as any failed
+    request does, except while the configured database does not exist yet: a
+    run that creates it is then left to the server's refusal of its writes.
+    TS ``assertInsertSettingsChangeable``."""
+    try:
+        rows = client.query(
+            "SELECT name, value, readonly FROM system.settings "
+            "WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')"
+        ).rows
+    except DatabaseError as error:
+        if is_unknown_database_error(error):
+            return
+        raise
+    by_name = {str(row["name"]): row for row in rows}
+    mode = by_name.get("readonly")
+    if mode is not None and str(mode["value"]) == "1":
+        return
+    for name, (durable, _spellings) in _DURABLE_INSERT_SETTINGS.items():
+        row = by_name.get(name)
+        if row is not None and str(row["readonly"]) != "0" and str(row["value"]) != durable:
+            msg = insert_settings_fixed_message(name, str(row["value"]), durable)
+            raise MigrateError("insert_settings_fixed", msg)
+
+
+def insert_settings_fixed_message(name: str, value: str, durable: str) -> str:
+    return (
+        f"Setting {name} is fixed at {value} for this ClickHouse user, and chkit migrate "
+        f"needs {name} = {durable} so that a statement it records as applied is stored. "
+        "Nothing ran."
+    )

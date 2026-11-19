@@ -2014,6 +2014,7 @@ class _FakePool:
 
 def _client_executor(pool: _FakePool) -> tuple[object, ClickHouseClient]:
     driver = MagicMock()
+    driver.server_settings = {}
     driver.http = pool
     driver.command.side_effect = lambda statement, **_kw: driver.http.request("POST", "http://ch/")
     client = ClickHouseClient(
@@ -2274,6 +2275,7 @@ def test_an_unmarked_submit_once_is_still_preferred_over_a_resending_submit() ->
         driver.url = "http://localhost:8123"
         driver.server_host_name = None
         driver.http = pool
+        driver.server_settings = {}
         driver.command.side_effect = lambda statement, **_kw: HttpClient._raw_request(driver, statement, {})
         return driver
 

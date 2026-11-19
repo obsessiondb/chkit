@@ -103,7 +103,10 @@ from chkit.cli.commands.migrate_retry import (
     retry_payload,
 )
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
-from chkit.cli.commands.migrate_settings import parse_setting_flags
+from chkit.cli.commands.migrate_settings import (
+    assert_insert_settings_changeable,
+    parse_setting_flags,
+)
 from chkit.cli.config_loader import load_config
 from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
@@ -459,6 +462,9 @@ def _run(
             client, cluster=config.clickhouse.cluster if config.clickhouse else None,
             **({"fanout_override": recovery_coverage} if recovery_coverage else {}),
         )
+        # Reading the journal can upgrade its schema, a write (#790).
+        if execute_requested:
+            assert_insert_settings_changeable(cast(ClickHouseClient, raw_client))
         journal = journal_store.read_journal(project_files=files)
         applied_names = {entry.name for entry in journal.applied}
         ctx = _MigrateContext(
@@ -1010,6 +1016,8 @@ class _MigrateLockRunner(WithLock):
         abandon: str | None = None,
     ) -> _T:
         """`abandon` names the migration --abandon resets, which also leaves unfinished recovery."""
+        # Every run that writes passes here first, interactive or not (#790).
+        assert_insert_settings_changeable(self._raw_client)
         if migrate_lock_disabled():
             typer.echo(
                 "⚠ CHKIT_MIGRATE_LOCK is off: this run takes no migrate lock, so a "

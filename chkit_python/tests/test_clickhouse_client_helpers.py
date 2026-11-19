@@ -58,6 +58,7 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 
 def _stub_client() -> tuple[ClickHouseClient, MagicMock]:
     fake = MagicMock()
+    fake.server_settings = {}
     cfg = ChxResolvedClickHouseConfig(
         url="http://localhost:8123",
         username="default",
@@ -145,21 +146,109 @@ def test_execute_retries_unknown_database_without_the_database() -> None:
 
 def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
     """A write is stored when it returns, as TS sends with every command
-    (#767). A caller's setting still wins, and a user that cannot change the
-    setting gets the server's own error."""
+    (#767, #790). A caller's setting still wins. A user that cannot change a
+    setting it already has at chkit's value gets the server's own error, and
+    one fixed at another value is refused before anything is sent, as the
+    server refuses TS's write."""
     client, fake = _stub_client()
-    fake.server_settings = {"async_insert": SimpleNamespace(readonly=False, value="1")}
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=False, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
 
     client.execute("INSERT INTO t VALUES (1)")
     client.execute("INSERT INTO t VALUES (1)", settings={"async_insert": 1, "max_threads": 2})
-    fake.server_settings = {"async_insert": SimpleNamespace(readonly=True, value="1")}
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=True, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=True, value="1"),
+    }
     client.execute("INSERT INTO t VALUES (2)")
 
     assert [call.kwargs["settings"] for call in fake.command.call_args_list] == [
-        {"async_insert": 0},
-        {"async_insert": 1, "max_threads": 2},
+        {"async_insert": 0, "wait_for_async_insert": 1},
+        {"async_insert": 1, "wait_for_async_insert": 1, "max_threads": 2},
         {},
     ]
+
+    for name, fixed in [("async_insert", "1"), ("wait_for_async_insert", "0")]:
+        fake.server_settings = {
+            "async_insert": SimpleNamespace(readonly=False, value="0"),
+            "wait_for_async_insert": SimpleNamespace(readonly=False, value="1"),
+            name: SimpleNamespace(readonly=True, value=fixed),
+        }
+        with pytest.raises(RuntimeError, match=f"Setting {name} is fixed at {fixed}"):
+            client.execute("INSERT INTO t VALUES (3)")
+    assert fake.command.call_count == 3
+
+    # A readonly = 1 user cannot write at all: the server says so.
+    fake.server_settings = {
+        "readonly": SimpleNamespace(readonly=True, value="1"),
+        "async_insert": SimpleNamespace(readonly=True, value="1"),
+    }
+    client.execute("INSERT INTO t VALUES (4)")
+    assert fake.command.call_args.kwargs["settings"] == {}
+
+
+def test_tracked_execute_applies_the_same_durable_settings_check_as_execute() -> None:
+    """#790: a setting fixed at chkit's value is left out, one fixed at another
+    value is refused before an id is recorded or anything is sent."""
+    client, fake = _stub_client()
+    recorded: list[str] = []
+
+    def record() -> str:
+        recorded.append("id")
+        return "id"
+
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=True, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
+    client.execute_tracked("INSERT INTO t VALUES (1)", lambda: None, record)
+    assert fake.command.call_args.kwargs["settings"] == {
+        "wait_end_of_query": 1, "wait_for_async_insert": 1, "query_id": "id",
+    }
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=True, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
+    with pytest.raises(RuntimeError, match="Setting async_insert is fixed at 1"):
+        client.execute_tracked("INSERT INTO t VALUES (2)", lambda: None, record)
+    assert recorded == ["id"]
+    assert fake.command.call_count == 1
+
+
+def test_submit_reads_the_durable_settings_of_the_driver_it_sends_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#790: submit sends through a driver of its own, whose settings snapshot
+    may differ from the main driver's; it is the sender's that decides."""
+    durable = {
+        "async_insert": SimpleNamespace(readonly=False, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=True, value="1"),
+    }
+    drivers: list[MagicMock] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        driver.server_settings = (
+            {**durable, "wait_for_async_insert": SimpleNamespace(readonly=True, value="0")}
+            if kwargs.get("autogenerate_session_id") is False
+            else durable
+        )
+        drivers.append(driver)
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123", username="default", password="pw",
+            database="analytics", secure=False,
+        )
+    )
+    with pytest.raises(RuntimeError, match="Setting wait_for_async_insert is fixed at 0"):
+        client.submit("INSERT INTO t VALUES (1)", query_id="q1")
+    [_, submit_driver] = drivers
+    submit_driver.command.assert_not_called()
 
 
 def test_execute_reraises_other_database_errors_without_retry() -> None:
@@ -174,6 +263,10 @@ def test_execute_reraises_other_database_errors_without_retry() -> None:
 
 def test_tracked_execute_records_a_fresh_id_for_the_database_fallback() -> None:
     client, fake = _stub_client()
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=False, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
     fake.command.side_effect = [DatabaseError("Code: 81. UNKNOWN_DATABASE"), None]
     events: list[str] = []
     ids = iter(["first", "fallback"])
@@ -188,8 +281,10 @@ def test_tracked_execute_records_a_fresh_id_for_the_database_fallback() -> None:
 
     assert events == ["check", "first", "check", "check", "fallback", "check"]
     assert [call.kwargs["settings"] for call in fake.command.call_args_list] == [
-        {"wait_end_of_query": 1, "async_insert": 0, "max_threads": 2, "query_id": "first"},
-        {"wait_end_of_query": 1, "async_insert": 0, "max_threads": 2, "query_id": "fallback"},
+        {"wait_end_of_query": 1, "async_insert": 0, "wait_for_async_insert": 1, "max_threads": 2,
+         "query_id": "first"},
+        {"wait_end_of_query": 1, "async_insert": 0, "wait_for_async_insert": 1, "max_threads": 2,
+         "query_id": "fallback"},
     ]
     assert [call.kwargs["use_database"] for call in fake.command.call_args_list] == [True, False]
 
@@ -301,6 +396,7 @@ def _send_once_client(
     driver.url = "http://localhost:8123"
     driver.server_host_name = None
     driver.http = pool
+    driver.server_settings = {}
     client._send_once_client = driver
     return client, driver
 
@@ -317,6 +413,28 @@ def test_submit_once_blocks_the_pinned_drivers_remote_close_retry() -> None:
     with pytest.raises(RuntimeError, match="cannot be resent after a connection failure"):
         client.submit_once("INSERT INTO t SELECT 1", "backfill-plan-c1")
     assert len(pool.urlopened) == 1
+
+
+# #790: submit_once sends the durable insert settings submit sends, and
+# refuses before the send when one is fixed at another value.
+def test_submit_once_sends_the_durable_insert_settings() -> None:
+    client, driver = _send_once_client(_FakePoolManager(), hook=False)
+    driver.server_settings = {
+        "async_insert": SimpleNamespace(readonly=False, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
+    client.submit_once("INSERT INTO t VALUES (1)", "backfill-plan-c1", {"max_threads": 2})
+    assert driver.command.call_args.kwargs["settings"] == {
+        "async_insert": 0, "wait_for_async_insert": 1, "max_threads": 2,
+        "query_id": "backfill-plan-c1",
+    }
+    driver.server_settings = {
+        "async_insert": SimpleNamespace(readonly=False, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=True, value="0"),
+    }
+    with pytest.raises(RuntimeError, match="Setting wait_for_async_insert is fixed at 0"):
+        client.submit_once("INSERT INTO t VALUES (2)", "backfill-plan-c2")
+    assert driver.command.call_count == 1
 
 
 # #765 round 3: a backfill that stopped asks again at the transport, after
@@ -395,6 +513,7 @@ def test_submit_once_opens_its_driver_with_the_clients_tls_settings(
     def get_client(**kwargs: object) -> MagicMock:
         opened.append(kwargs)
         driver = MagicMock()
+        driver.server_settings = {}
         driver.command.return_value = None
         return driver
 
@@ -477,6 +596,7 @@ def test_submit_runs_on_its_own_driver_without_a_session(
 
     def fake_get_client(**kwargs: object) -> MagicMock:
         driver = MagicMock()
+        driver.server_settings = {}
         drivers.append((driver, kwargs))
         return driver
 
@@ -534,6 +654,7 @@ def test_every_driver_waits_without_a_timeout_as_ts(
 
     def fake_get_client(**kwargs: object) -> MagicMock:
         driver = MagicMock()
+        driver.server_settings = {}
         driver.timeout = Timeout(connect=10, read=300)
         driver._progress_interval = driver_interval
         drivers.append((driver, kwargs))
@@ -576,6 +697,7 @@ def test_submit_driver_still_opening_at_close_sends_nothing(
 
     def fake_get_client(**kwargs: object) -> MagicMock:
         driver = MagicMock()
+        driver.server_settings = {}
         drivers.append(driver)
         if kwargs.get("autogenerate_session_id") is False:
             opening.set()

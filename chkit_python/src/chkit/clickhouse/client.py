@@ -58,6 +58,11 @@ QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
 # TS's PROGRESS_SETTINGS (``@chkit/clickhouse``): a progress header every 30 s.
 PROGRESS_INTERVAL_MS = "30000"
 
+# TS's DURABLE_INSERT_SETTINGS: a write is stored when it returns. No
+# asynchronous INSERT, and one that a table's own async_insert setting still
+# makes asynchronous waits for its flush (#790).
+_DURABLE_INSERT_SETTINGS: dict[str, Any] = {"async_insert": 0, "wait_for_async_insert": 1}
+
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
 # integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
 # uses the same patterns.
@@ -257,13 +262,34 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
-    def _write_settings(self) -> dict[str, Any]:
-        """No asynchronous INSERT, as TS sends with every write, so a write is
-        stored when it returns. A user that cannot change the setting
-        (readonly = 1) cannot write either, so it is left out there, where
-        clickhouse-connect would refuse it before the server's own error."""
-        setting = self._client.server_settings.get("async_insert")
-        return {"async_insert": 0} if setting is not None and not setting.readonly else {}
+    def _write_settings(self, driver: Any = None) -> dict[str, Any]:
+        """No asynchronous INSERT, and one that a table's own async_insert
+        setting still makes asynchronous waits for its flush, as TS sends with
+        every write, so a write is stored when it returns (#790). A setting the
+        user cannot change (readonly = 1, or a constraint) is left out when it
+        already has that value, where clickhouse-connect would refuse it before
+        the server's own error. Fixed at another value, the write is refused, as
+        the server refuses TS's. A readonly = 1 user gets the server's own
+        error, which refuses its writes. Read from ``driver``, the one that
+        sends the write (the main one by default)."""
+        server_settings = (driver or self._client).server_settings
+        mode = server_settings.get("readonly")
+        if mode is not None and str(mode.value) == "1":
+            return {}
+        settings: dict[str, Any] = {}
+        for name, value in _DURABLE_INSERT_SETTINGS.items():
+            setting = server_settings.get(name)
+            if setting is None:
+                continue
+            if not setting.readonly:
+                settings[name] = value
+            elif str(setting.value) != str(value):
+                msg = (
+                    f"Setting {name} is fixed at {setting.value} for this ClickHouse user, "
+                    f"and chkit writes need {name} = {value} to be stored when they return."
+                )
+                raise RuntimeError(msg)
+        return settings
 
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
@@ -287,6 +313,8 @@ class ClickHouseClient:
         settings: dict[str, Any] | None = None,
     ) -> None:
         """Persist an id before each physical send; never replay an ambiguous send."""
+        # Refused before an id is recorded, as execute is (#790).
+        settings = {**self._write_settings(), **(settings or {})}
         check()
         query_id = before_attempt()
         check()
@@ -311,8 +339,7 @@ class ClickHouseClient:
             self._client.command(
                 statement,
                 settings={
-                    "wait_end_of_query": 1, "async_insert": 0,
-                    **(settings or {}), "query_id": query_id,
+                    "wait_end_of_query": 1, **(settings or {}), "query_id": query_id,
                 },
                 use_database=use_database,
             )
@@ -427,9 +454,12 @@ class ClickHouseClient:
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
         driver = self._submit_driver()
+        # Stored when it finishes, as execute sends: an asynchronous INSERT
+        # would finish while its rows are still buffered (#790).
+        sent = {**self._write_settings(driver), **(settings or {}), "query_id": qid}
         _SUBMIT_SEND.before_send = before_send
         try:
-            driver.command(statement, settings={**(settings or {}), "query_id": qid})
+            driver.command(statement, settings=sent)
         finally:
             _SUBMIT_SEND.before_send = None
         return qid
@@ -453,13 +483,15 @@ class ClickHouseClient:
         ``SendNotAdmittedError`` is raised. ``prepare_submit_once`` opens
         that driver ahead of the send."""
         driver = self.prepare_submit_once()
+        # Stored when it finishes, as submit sends (#790); refused before the send.
+        sent = {**self._write_settings(driver), **(settings or {}), "query_id": query_id}
         pool = driver.http
         with self._submit_client_lock:
             self._send_once_inflight[id(pool)] = self._send_once_inflight.get(id(pool), 0) + 1
         send = _Send(SEND_ADMISSION.get())
         token = _CURRENT_SEND.set(send)
         try:
-            driver.command(statement, settings={**(settings or {}), "query_id": query_id})
+            driver.command(statement, settings=sent)
         except SendNotAdmittedError:
             raise
         except Exception as error:
