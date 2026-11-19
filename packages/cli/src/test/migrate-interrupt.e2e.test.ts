@@ -90,7 +90,7 @@ describe('migrate on SIGINT', () => {
     const fixture = await createFixture('sigint_sync', [...SYNC_LOAD, ...ASYNC_LOAD])
     try {
       const run = migrate(fixture)
-      await waitForOperations(fixture, (ops) => ops[0]?.status === 'started')
+      await waitForSyncLoadRunning(fixture)
       run.kill('SIGINT')
       const result = await run.result
 
@@ -109,7 +109,7 @@ describe('migrate on SIGINT', () => {
     const fixture = await createFixture('sigint_twice', SYNC_LOAD)
     try {
       const run = migrate(fixture)
-      await waitForOperations(fixture, (ops) => ops[0]?.status === 'started')
+      await waitForSyncLoadRunning(fixture)
       run.kill('SIGINT')
       await new Promise((resolve) => setTimeout(resolve, 200))
       const sentAt = Date.now()
@@ -173,11 +173,14 @@ function heldBeforeSubmitScript(fixture: Fixture): string {
   return `
     import { setTimeout as sleep } from 'node:timers/promises'
     import { applyAsyncStatement, ATTEMPT_RECORD_MARKER } from ${JSON.stringify(join(SRC, 'commands/migrate/async-apply.ts'))}
-    import { withInterrupt } from ${JSON.stringify(join(SRC, 'commands/migrate/interrupt.ts'))}
+    import { assertNotInterrupted, withInterrupt } from ${JSON.stringify(join(SRC, 'commands/migrate/interrupt.ts'))}
+    import { guardExecutor } from ${JSON.stringify(join(SRC, 'commands/migrate/lock.ts'))}
     import { createJournalStore } from ${JSON.stringify(join(SRC, 'runtime/journal-store.ts'))}
     import { createLiveExecutor, getLiveEnv } from ${JSON.stringify(CLICKHOUSE_TESTKIT)}
 
-    const db = createLiveExecutor(getLiveEnv())
+    const controller = new AbortController()
+    // As migrate guards its executor: after a SIGINT only cleanup is sent.
+    const db = guardExecutor(createLiveExecutor(getLiveEnv()), () => assertNotInterrupted(controller.signal))
     const store = createJournalStore(db)
     // Holds the run once the attempt is recorded as one that may be sent.
     const journalStore = new Proxy(store, {
@@ -192,7 +195,6 @@ function heldBeforeSubmitScript(fixture: Fixture): string {
         }
       },
     })
-    const controller = new AbortController()
     await withInterrupt(controller, {}, () => applyAsyncStatement({
       db,
       journalStore,
@@ -285,6 +287,19 @@ async function waitForOperations(fixture: Fixture, ready: (ops: Operation[]) => 
   const ops = await pollUntil(() => readOperations(fixture), ready, { intervalMs: 100, timeoutMs: 60_000 })
   if (!ready(ops)) throw new Error(`journal never showed the expected operations: ${JSON.stringify(ops)}`)
   return ops[0] as Operation
+}
+
+/** Waits until the server runs the sync load, so a SIGINT comes after it was sent. */
+async function waitForSyncLoadRunning(fixture: Fixture): Promise<void> {
+  const query =
+    "SELECT toString(count()) AS n FROM system.processes WHERE query LIKE '%number + 1000%' " +
+    `AND current_database = '${fixture.database}' AND query NOT LIKE '%system.processes%'`
+  const running = await pollUntil(
+    () => fixture.executor.query<{ n: string }>(query),
+    (rows) => rows[0]?.n === '1',
+    { intervalMs: 50, timeoutMs: 60_000 },
+  )
+  if (running[0]?.n !== '1') throw new Error('the sync load never ran')
 }
 
 /** Claims of the migrate lock not released. */

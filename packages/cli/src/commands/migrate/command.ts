@@ -33,7 +33,7 @@ import { findPendingNonSelectBarriers } from './barrier.js'
 import { scanDestructive } from './destructive.js'
 import { findEmptyMigrations } from './empty.js'
 import { emptyMigrationsError, journalChangedError, MigrateError, nonSelectBarrierError } from './errors.js'
-import { withInterrupt, type InterruptLock } from './interrupt.js'
+import { assertNotInterrupted, withInterrupt, type InterruptLock } from './interrupt.js'
 import { acquireMigrateLock, guardExecutor, migrateLockDisabled, type LockTarget, type MigrateLock } from './lock.js'
 import {
   emitAbandonJson,
@@ -253,7 +253,11 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const initialIdentity = cancelQueries ? await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) : undefined
   const recoveryCluster = initialIdentity?.cluster
   if (initialIdentity && !recoveryCluster) throw new MigrateError('migrate_cancellation_failed', 'Explicit recovery requires an attested cluster.')
-  const db = guardExecutor(rawDb, () => heldLock?.assertHeld())
+  const interrupt = new AbortController()
+  const db = guardExecutor(rawDb, () => {
+    heldLock?.assertHeld()
+    assertNotInterrupted(interrupt.signal)
+  })
   const journalStore = createJournalStore(db, config.clickhouse?.cluster, initialIdentity && recoveryCluster
     ? { cluster: recoveryCluster, replicas: initialIdentity.serverUUIDs.length } : undefined)
   const breakLock = f['--break-lock']
@@ -264,7 +268,6 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     if (target === null || (queryTrackingDisabled() && !cancelQueries)) return
     await assertCancellationClear(rawDb, target, allowedClaim, identity)
   }
-  const interrupt = new AbortController()
   const withLock: WithLock = async (fn, options = {}) => {
     const lock: InterruptLock = {}
     return await withInterrupt(interrupt, lock, () => withLockHeld(fn, options, lock))
@@ -275,6 +278,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       const target = await journalStore.lockTarget()
       if (abandon === undefined) await checkRecoveryClear(target)
       const result = await fn()
+      interrupt.signal.throwIfAborted()
       if (abandon !== undefined && target !== null && !queryTrackingDisabled()) await abandonRecovery(rawDb, target, abandon)
       return result
     }
@@ -333,11 +337,16 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
       interruptLock.claim = lock.claimId
       try {
         if (abandon === undefined) await checkRecoveryClear(target, cancellation?.claim, cancellation?.identity)
+        // The recovery steps' requests go through rawDb, past the guard.
+        interrupt.signal.throwIfAborted()
         const recovery = cancellation ? await cancelPredecessor(rawDb, target, cancellation, lock) : undefined
-        completeRecovery = recovery ? async () => { await finishRecovery(rawDb, target, recovery, lock); completeRecovery = undefined } : undefined
-        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, ...(cancellation && recovery ? { recovery: { targets: [...recovery.obligations, ...cancellation.extra].map((item) => item.target), sources: [...recovery.obligations, ...cancellation.extra].flatMap((item) => item.source ? [item.source] : []), statements: [...recovery.obligations, ...cancellation.extra], afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
+        completeRecovery = recovery ? async () => { interrupt.signal.throwIfAborted(); await finishRecovery(rawDb, target, recovery, lock); completeRecovery = undefined } : undefined
+        // The tracker sends through rawDb; it checks this before each request.
+        const trackerLock: MigrateLock = { claimId: lock.claimId, assertHeld: () => { lock.assertHeld(); assertNotInterrupted(interrupt.signal) }, release: () => lock.release() }
+        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock: trackerLock, ...(cancellation && recovery ? { recovery: { targets: [...recovery.obligations, ...cancellation.extra].map((item) => item.target), sources: [...recovery.obligations, ...cancellation.extra].flatMap((item) => item.source ? [item.source] : []), statements: [...recovery.obligations, ...cancellation.extra], afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
         const result = await fn()
         await completeRecovery?.()
+        interrupt.signal.throwIfAborted()
         if (abandon !== undefined && !queryTrackingDisabled()) await abandonRecovery(rawDb, target, abandon, lock)
         return result
       } catch (error) {
@@ -350,7 +359,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
         queryTracker = undefined
         completeRecovery = undefined
         await lock.release()
-        interruptLock.released = true
+        interruptLock.released = !lock.releaseFailed
       }
     } finally {
       await heartbeatDb?.close()

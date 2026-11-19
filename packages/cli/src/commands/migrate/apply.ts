@@ -52,6 +52,7 @@ import {
   statementSplitChangedError,
   type PendingNonSelectBarrier,
 } from './errors.js'
+import { asCleanup } from './interrupt.js'
 import {
   assertCompletedStatement,
   hasStatementProgress,
@@ -497,14 +498,18 @@ export async function applyMigration(input: {
         } else await db.command(statement, settings)
       }
     } catch (error) {
-      const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
-      await journalStore.writeMigrationState(
-        upsertOperation(
-          stateOnError,
-          syncOperationState(i, identity, 'failed', errorMessage(error)),
-          Date.now,
-        ),
-      )
+      // Cleanup: an interrupted run records the outcome it saw (#816).
+      await asCleanup(async () => {
+        const stateOnError = (await journalStore.readMigrationState(file)) ?? baseState
+        await journalStore.writeMigrationState(
+          upsertOperation(
+            stateOnError,
+            syncOperationState(i, identity, 'failed', errorMessage(error)),
+            Date.now,
+          ),
+        )
+      })
+      if (error === input.signal?.reason) throw error
       throw statementError({ file, index: i, total: statements.length, statement, error })
     }
     // Mark completed as soon as the statement has executed — BEFORE waiting for
@@ -514,14 +519,17 @@ export async function applyMigration(input: {
     // Until its wait passes, the record carries PROPAGATION_WAIT_PENDING, so a
     // re-run waits for it again before the next statement (#513).
     const waits = hasPropagationWait(operation)
-    const stateAfter = (await journalStore.readMigrationState(file)) ?? baseState
-    await journalStore.writeMigrationState(
-      upsertOperation(
-        stateAfter,
-        syncOperationState(i, identity, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
-        Date.now,
-      ),
-    )
+    const stateAfter = await asCleanup(async () => {
+      const state = (await journalStore.readMigrationState(file)) ?? baseState
+      await journalStore.writeMigrationState(
+        upsertOperation(
+          state,
+          syncOperationState(i, identity, 'completed', waits ? PROPAGATION_WAIT_PENDING : ''),
+          Date.now,
+        ),
+      )
+      return state
+    })
     if (waits) {
       await completePropagation({
         db,

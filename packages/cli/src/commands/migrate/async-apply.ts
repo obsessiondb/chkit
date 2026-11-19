@@ -13,6 +13,7 @@ import {
 import { rejectionRunsNothing } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import { inProgressChecksumMismatchError, MigrateError } from './errors.js'
+import { asCleanup } from './interrupt.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
 import type { QueryTracker } from './query-intents.js'
 
@@ -289,6 +290,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // Re-read so we have the row's actual stored applied_at (matters for
     // subsequent ReplacingMergeTree writes during polling).
     stateAfterStart = await journalStore.readMigrationState(migrationName)
+    input.signal?.throwIfAborted()
     await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
     // Ctrl-C before the submit: provably not sent.
     input.signal?.throwIfAborted()
@@ -296,7 +298,8 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // Nothing was sent: put the record back to prepared, so a re-run runs
     // it again without an abandon (#767).
     try {
-      await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
+      // Cleanup: an interrupted run sends it too (#816).
+      await asCleanup(() => journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now)))
     } catch (revertError) {
       throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
     }
@@ -412,9 +415,11 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   let unknownPolls = 0
   const signal = input.signal
   // Ctrl-C ends the wait at once.
+  let onAbort: (() => void) | undefined
   const interrupted = signal ? new Promise<void>((resolve) => {
+    onAbort = resolve
     if (signal.aborted) resolve()
-    else signal.addEventListener('abort', () => resolve(), { once: true })
+    else signal.addEventListener('abort', onAbort, { once: true })
   }) : undefined
   const stopIfInterrupted = () => {
     if (!signal?.aborted) return
@@ -445,6 +450,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         )
         continue
       }
+      stopIfInterrupted()
       const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
 
       // A submit error (a gateway 524, a lost response) says nothing about
@@ -546,6 +552,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       )
     }
   } finally {
+    if (onAbort) signal?.removeEventListener('abort', onAbort)
     if (submitPromiseGuarded && !submitAbandoned) {
       await submitPromiseGuarded.catch(() => {})
     }
