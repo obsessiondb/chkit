@@ -1232,17 +1232,14 @@ def _lambda_parameters(tokens: list[SQLToken], arrow: int) -> tuple[set[str], in
 def _lambda_reads(sql: str, columns: set[str]) -> list[str]:
     """The columns the lambdas in ``sql`` name where ``_dotted_names`` skips them (#768).
 
-    Each lambda's parameter list and body, read by the rules of
-    ``_dotted_names``. ClickHouse's ALTER check for cyclic defaults (code 174)
-    reads a lambda's parameters as columns, even one its body never uses (#799).
+    ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
+    parameters as columns, even one its body never uses, and a use with
+    ``.name`` parts as the longest leading part that is a column: ``w -> w.a``
+    reads the column ``w.a`` or ``w``, never ``a`` (#799).
     """
     tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
     found: list[str] = []
-
-    def read(start: int, stop: int) -> None:
-        if start < stop:
-            found.extend(_dotted_names(sql[tokens[start].start : tokens[stop - 1].end], columns))
-
+    count = len(tokens)
     for i, token in enumerate(tokens):
         following = tokens[i + 1] if i + 1 < len(tokens) else None
         if following is None or token.text != "-" or following.text != ">":
@@ -1252,8 +1249,24 @@ def _lambda_reads(sql: str, columns: set[str]) -> list[str]:
         params = _lambda_parameters(tokens, i)
         if params is None:
             continue
-        read(params[1], i)
-        read(i + 2, _group_end(tokens, i + 2))
+        names = params[0]
+        found.extend(name for name in sorted(names) if name in columns)
+        end = _group_end(tokens, i + 2)
+        j = i + 2
+        while j < end:
+            name = identifier_name(tokens[j])
+            if name is not None and name in names and tokens[j - 1].text != ".":
+                run = [name]
+                while j + 2 < count and tokens[j + 1].text == ".":
+                    part = identifier_name(tokens[j + 2])
+                    if part is None:
+                        break
+                    run.append(part)
+                    j += 2
+                column = _longest_column_prefix(run, columns)
+                if column is not None:
+                    found.append(column)
+            j += 1
     return found
 
 

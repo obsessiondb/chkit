@@ -853,6 +853,43 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 
+  test('a lambda parameter use reads the dotted column it names (#799)', () => {
+    expect(
+      sqls(
+        [
+          t([
+            { name: 'w.z', type: 'UInt64' },
+            { name: 'b', type: 'UInt64', default: { expression: 'arraySum(arrayMap(w -> w.z, [tuple(1)::Tuple(z UInt64)]))' } },
+          ]),
+        ],
+        [t([{ name: 'w.z', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64' }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `w.z` UInt64 DEFAULT b;',
+    ])
+  })
+
+  // ALTER's cycle check reads `w.a` as the column `w.a` or `w`, never `a`, so
+  // the new `b` no longer reads `a` and its MODIFY releases the cycle (#799).
+  test('a lambda parameter use does not read the column named by its last part (#799)', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'b' } },
+            { name: 'b', type: 'UInt64', default: { expression: 'arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]))' } },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT arraySum(arrayMap(w -> w.a, [tuple(1)::Tuple(a UInt64)]));',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+    ])
+  })
+
   test('a CAST type named like a column is not a read', () => {
     expect(
       sqls(
