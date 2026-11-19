@@ -40,7 +40,11 @@ from chkit.cli.commands.migrate_errors import (
     recorded_statements_changed_error,
     statement_split_changed_error,
 )
-from chkit.cli.commands.migrate_interrupt import deferred_interrupt, interruptible
+from chkit.cli.commands.migrate_interrupt import (
+    deferred_interrupt,
+    interruptible,
+    raise_if_interrupted,
+)
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
@@ -402,6 +406,7 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         "forward", statement, input_.settings,
                     )
                 else:
+                    raise_if_interrupted()
                     input_.client.execute(statement, settings=input_.settings)
             except Exception as error:
                 state_on_error = journal_store.read_migration_state(file) or base_state
@@ -618,12 +623,15 @@ def _run_before_retry(
     replica the guard reads yet, and exchanging again would swap the tables back.
     """
     if operation_type == "exchange_tables":
-        wait_for_exchange(client, statement, cluster=cluster)
+        # Reads only: a SIGINT stops its polls at once (#816).
+        with interruptible():
+            wait_for_exchange(client, statement, cluster=cluster)
     attempt = "failed" if status == "failed" else "was interrupted"
     log(f"  {operation_type}: an earlier attempt {attempt} — running before-retry SQL")
     if query_tracker is not None and query_context is not None:
         query_tracker.command(query_context, "compensation", before_retry, settings)
     else:
+        raise_if_interrupted()
         client.execute(before_retry, settings=settings)
 
 

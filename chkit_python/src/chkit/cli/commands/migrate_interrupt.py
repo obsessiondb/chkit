@@ -63,27 +63,31 @@ def raise_if_interrupted() -> None:
 def deferred_interrupt() -> Iterator[None]:
     """A first SIGINT waits for this block (a sync statement and its record)."""
     _state.deferring += 1
+    error: Exception | None = None
+    stopped = False
     try:
         yield
-    except Exception as error:
+    except Exception as raised:
+        error = raised
+        raise
+    except BaseException:
+        stopped = True
+        raise
+    finally:
         _state.deferring -= 1
-        if _state.pending and _state.deferring == 0:
+        if _state.pending and _state.deferring == 0 and not stopped:
             _state.pending = False
             raise KeyboardInterrupt from error
-        raise
-    else:
-        _state.deferring -= 1
-        if _state.pending and _state.deferring == 0:
-            _state.pending = False
-            raise KeyboardInterrupt
 
 
 @contextmanager
 def interruptible() -> Iterator[None]:
     """Inside a deferred block, a step a SIGINT stops at once (a barrier's polls)."""
-    raise_if_interrupted()
-    saved, _state.deferring = _state.deferring, 0
+    saved = _state.deferring
     try:
+        _state.deferring = 0
+        # Also a SIGINT that came while deferral was still on.
+        raise_if_interrupted()
         yield
     except KeyboardInterrupt as error:
         _state.pending = True
@@ -104,12 +108,12 @@ def with_interrupt(lock: InterruptLock, body: Callable[[], _T]) -> _T:
         with exit_lock:
             if done:
                 return
-            with suppress(BaseException):
-                sys.stderr.write(
-                    f"migrate: {why}, exiting at once. {_lock_line(lock, exiting_now=True)}\n"
-                )
-                sys.stderr.flush()
-            os._exit(130)
+        message = f"migrate: {why}, exiting at once. {_lock_line(lock, exiting_now=True)}\n"
+        # A blocked or closed stderr never keeps the process alive.
+        writer = threading.Thread(target=_write_stderr, args=(message,), daemon=True)
+        writer.start()
+        writer.join(timeout=1.0)
+        os._exit(130)
 
     def on_signal(_signum: int, _frame: FrameType | None) -> None:
         nonlocal timer
@@ -155,6 +159,12 @@ def with_interrupt(lock: InterruptLock, body: Callable[[], _T]) -> _T:
                     f"{_lock_line(lock, exiting_now=False)}{detail}\n"
                 )
                 sys.stderr.flush()
+
+
+def _write_stderr(message: str) -> None:
+    with suppress(BaseException):
+        sys.stderr.write(message)
+        sys.stderr.flush()
 
 
 def _detail(error: BaseException | None) -> str:

@@ -94,6 +94,39 @@ def test_an_interruptible_step_stops_at_once_and_reads_as_refused() -> None:
     assert steps == ["recorded failed"]
 
 
+def test_a_base_exception_in_a_deferred_block_does_not_leave_deferral_on() -> None:
+    def stop() -> None:
+        with deferred_interrupt():
+            raise SystemExit(2)
+
+    with pytest.raises(SystemExit):
+        with_interrupt(InterruptLock(), stop)
+
+    def body() -> None:
+        _sigint()
+
+    with pytest.raises(KeyboardInterrupt):
+        with_interrupt(InterruptLock(), body)
+
+
+def test_an_interruptible_step_refuses_a_sigint_that_came_while_deferred() -> None:
+    steps: list[str] = []
+
+    def body() -> None:
+        with deferred_interrupt():
+            _sigint()
+            try:
+                with interruptible():
+                    steps.append("polled")
+            except MigrateInterrupted:
+                steps.append("recorded failed")
+
+    with pytest.raises(KeyboardInterrupt):
+        with_interrupt(InterruptLock(), body)
+
+    assert steps == ["recorded failed"]
+
+
 def test_without_a_sigint_nothing_changes() -> None:
     def body() -> str:
         with deferred_interrupt():
