@@ -1,7 +1,7 @@
 import { LOCK_TIMINGS } from './lock.js'
 
 /** How long a first Ctrl-C waits for the run to stop before it exits anyway. */
-export const INTERRUPT_WAIT_MS = 30_000
+const INTERRUPT_WAIT_MS = 30_000
 
 // Cleanup steps running now: a stop's own writes, which an interrupted run
 // still sends.
