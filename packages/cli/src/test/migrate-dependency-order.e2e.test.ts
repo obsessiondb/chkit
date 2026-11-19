@@ -664,6 +664,31 @@ describe('@chkit/cli migrate orders the column statements of a table (#745, #746
   }, 120_000)
 })
 
+// Each change below fails on ClickHouse 26.3 in key order with code 43:
+// ClickHouse checks every expression of the table against a column's new
+// type, and a new expression against its current type.
+describe('@chkit/cli migrate orders a column type change against the expressions that read it (#814)', () => {
+  test('a type change runs after the MODIFY whose new DEFAULT stops reading the column', async () => {
+    await migrateColumnChange({
+      label: 'typerelease',
+      before: "{ name: 'a', type: 'String' }, { name: 'b', type: 'UInt64', default: { expression: 'length(a)' } }",
+      after: "{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: '0' } }",
+      order: ['MODIFY COLUMN `b` UInt64 DEFAULT 0;', 'MODIFY COLUMN `a` UInt64;'],
+      columns: ['a', 'b', 'id'],
+    })
+  }, 120_000)
+
+  test('an ADD whose DEFAULT reads the column runs after its type change', async () => {
+    await migrateColumnChange({
+      label: 'typeprovide',
+      before: "{ name: 'z', type: 'String' }",
+      after: "{ name: 'b', type: 'UInt64', default: { expression: 'z + 1' } }, { name: 'z', type: 'UInt64' }",
+      order: ['MODIFY COLUMN `z` UInt64;', 'ADD COLUMN IF NOT EXISTS `b` UInt64 DEFAULT z + 1;'],
+      columns: ['b', 'id', 'z'],
+    })
+  }, 120_000)
+})
+
 // Each change below fails on ClickHouse 26.3 in the order of the #759 plan:
 // `Cyclic alias detected` when a MODIFY reads back a column whose old DEFAULT
 // still reads it, `Missing columns` when a DROP COLUMN runs while the table

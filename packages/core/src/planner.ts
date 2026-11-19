@@ -878,6 +878,8 @@ export function columnRenameKey(rename: ColumnRename): string {
  *   since ClickHouse refuses to drop a column something still reads. A RENAME
  *   away from X needs no such wait: ClickHouse rewrites the expressions and
  *   the TTL that read X to the new name;
+ * - a MODIFY that changes the type of X runs after the statements that stop
+ *   reading X, and before those that start reading it (`addTypeChangeOrder`, #814);
  * - a MODIFY whose new expression would close a cycle with an old expression
  *   runs after the MODIFY that removes that old read (`cycleReleases`);
  * - statements of the same column keep their order.
@@ -940,6 +942,7 @@ export function orderColumnStatements(
     found.delete(index)
     return [...found].map(String)
   })
+  addTypeChangeOrder(prerequisites, statements, operations, modifies, definitions, renames, { reads, oldReads, ttlReads, oldTtlReads })
 
   const ordered = orderByDependencies(
     statements.map((op, index) => ({ op, index })),
@@ -993,6 +996,218 @@ function cycleReleases(
     }
   }
   return [...released]
+}
+
+/**
+ * Adds the prerequisites that order the MODIFY changing the type of a column
+ * X against the statements whose expressions read X (#814). ClickHouse checks
+ * every expression of the table against the new type, and a new expression
+ * against the current one (code 43): `MODIFY COLUMN a UInt64` fails while
+ * `b DEFAULT length(a)` stands, and `b DEFAULT a + 1` fails while `a` is
+ * still a String. So the MODIFY of X runs after the ADD, MODIFY or DROP of
+ * every column, and the TTL change, whose old expression reads X and whose
+ * new one doesn't, and before every statement whose new expression reads X
+ * and whose old one doesn't. They can't tell which types an expression
+ * accepts, so the rest keeps the order of the sort without them (`base`): a
+ * statement whose old and new expressions both read X keeps its side of the
+ * MODIFY of X (no order helps when both need their own type of X), and the
+ * type changes keep their order among themselves (a third expression can read
+ * two of them). A prerequisite that would close a cycle is left out, and
+ * those the base order satisfies go in first, so a conflict keeps that order.
+ * None are added when the base order already satisfies them all, when their
+ * order moves a statement past an operation of `operations` that is not a
+ * column statement, changes the order of the ADD and DROP COLUMNs among
+ * themselves or of the type changes, or closes a cycle of column expressions
+ * at some statement (`closesExpressionCycle`), when an operation key names two
+ * objects, or when a table has a RENAME COLUMN in `renames`.
+ */
+function addTypeChangeOrder(
+  prerequisites: string[][],
+  statements: MigrationOperation[],
+  operations: MigrationOperation[],
+  modifies: ReadonlyMap<string, number[]>,
+  definitions: ColumnStatementDefinitions,
+  renames: readonly ColumnRename[],
+  graphs: { reads: DependencyGraph; oldReads: DependencyGraph; ttlReads: DependencyGraph; oldTtlReads: DependencyGraph }
+): void {
+  const changes = new Map<string, number>()
+  // The type changes of each table, in key order.
+  const tables = typeChangedColumns(definitions, renames).map((keys) =>
+    keys.flatMap((key) => {
+      const change = modifies.get(key)?.at(-1)
+      if (change !== undefined) changes.set(key, change)
+      return change ?? []
+    })
+  )
+  if (changes.size === 0 || hasAmbiguousKey(definitions, renames)) return
+  // [statement, prerequisite] pairs, and the [statement, MODIFY] pairs that read X before and after.
+  const edges: Array<[number, number]> = []
+  const kept: Array<[number, number]> = []
+  statements.forEach((op, index) => {
+    if (op.type === 'alter_table_rename_column') return
+    const ttl = op.type === 'alter_table_modify_ttl'
+    const before = (ttl ? graphs.oldTtlReads : graphs.oldReads).get(op.key) ?? new Set<string>()
+    const after = (ttl ? graphs.ttlReads : graphs.reads).get(op.key) ?? new Set<string>()
+    for (const read of new Set([...before, ...after])) {
+      const change = changes.get(read)
+      if (change === undefined) continue
+      if (before.has(read) && after.has(read)) kept.push([index, change])
+      else edges.push(before.has(read) ? [change, index] : [index, change])
+    }
+  })
+  const sortAll = () =>
+    orderByDependencies(prerequisites.map((_, index) => index), String, (key) => prerequisites[Number(key)] ?? [])
+  const base = sortAll()
+  const position = new Map(base.map((index, at) => [index, at]))
+  const at = (index: number) => position.get(index) ?? 0
+  const satisfied = (edge: [number, number]) => at(edge[1]) < at(edge[0])
+  if (edges.every(satisfied)) return
+  const lengths = prerequisites.map((before) => before.length)
+  // The base order satisfies these, so they close no cycle.
+  for (const [one, other] of kept) {
+    const [first, second] = at(one) < at(other) ? [one, other] : [other, one]
+    if (first !== second) prerequisites[second]?.push(String(first))
+  }
+  // Waits on `target` through prerequisites, searched without recursion.
+  const waitsOn = (from: number, target: number): boolean => {
+    const seen = new Set([from])
+    const pending = [from]
+    for (let index = pending.pop(); index !== undefined; index = pending.pop()) {
+      if (index === target) return true
+      for (const other of prerequisites[index] ?? []) {
+        if (!seen.has(Number(other))) {
+          seen.add(Number(other))
+          pending.push(Number(other))
+        }
+      }
+    }
+    return false
+  }
+  // A prerequisite that comes first in `sorted`, a topological order of the
+  // prerequisites so far, closes no cycle and keeps that order valid. A sort
+  // with a cycle is no such order.
+  const topological = (list: number[]): Map<number, number> | undefined => {
+    const at = new Map(list.map((index, at) => [index, at]))
+    const valid = prerequisites.every((before, index) => before.every((other) => (at.get(Number(other)) ?? 0) < (at.get(index) ?? 0)))
+    return valid ? at : undefined
+  }
+  let sorted = topological(base)
+  const add = ([index, other]: [number, number]) => {
+    const certain = sorted !== undefined && (sorted.get(other) ?? 0) < (sorted.get(index) ?? 0)
+    if (!certain && waitsOn(other, index)) return
+    prerequisites[index]?.push(String(other))
+    if (!certain) sorted = undefined
+  }
+  edges.sort((a, b) => Number(satisfied(b)) - Number(satisfied(a)) || a[0] - b[0] || a[1] - b[1])
+  for (const edge of edges) add(edge)
+  // Last, each table's type changes keep their base order where the edges allow.
+  sorted = topological(sortAll())
+  for (const table of tables) {
+    const changed = [...table].sort((a, b) => at(a) - at(b))
+    for (let i = 1; i < changed.length; i += 1) add([changed[i] ?? 0, changed[i - 1] ?? 0])
+  }
+  const order = sortAll()
+  // An ADD COLUMN appends the column, a DROP can remove the column an ADD
+  // replaces (the last physical one, or `k.x` before `k`), and a third
+  // expression can read two changed columns: so the ADDs and DROPs, and the
+  // type changes, keep their order.
+  const types = new Set(changes.values())
+  const addOrDrop = (index: number) =>
+    statements[index]?.type === 'alter_table_add_column' || statements[index]?.type === 'alter_table_drop_column'
+  const fixed = (list: number[]) =>
+    [list.filter(addOrDrop).join(), list.filter((index) => types.has(index)).join()].join(';')
+  // The statements fill the column statement slots of `operations` in order:
+  // each must stay in the run of slots between the same other operations.
+  const runs: number[] = []
+  let run = 0
+  let previousIsColumn = false
+  for (const op of operations) {
+    if (isColumnStatement(op)) runs.push(run)
+    else if (previousIsColumn) run += 1
+    previousIsColumn = isColumnStatement(op)
+  }
+  const moved = order.some((index, slot) => runs[slot] !== runs[at(index)])
+  if (moved || fixed(order) !== fixed(base) || closesExpressionCycle(order, statements, graphs)) {
+    prerequisites.forEach((before, index) => {
+      before.length = lengths[index] ?? before.length
+    })
+  }
+}
+
+/** Whether an operation key of `definitions` or `renames` names two columns, TTLs or renames. */
+function hasAmbiguousKey(definitions: ColumnStatementDefinitions, renames: readonly ColumnRename[]): boolean {
+  const owners = new Map<string, string>()
+  const claimed = (key: string, owner: string) => {
+    if ((owners.get(key) ?? owner) !== owner) return true
+    owners.set(key, owner)
+    return false
+  }
+  for (const def of [...definitions.previous, ...definitions.next]) {
+    if (def.kind !== 'table') continue
+    if (claimed(`table:${def.database}.${def.name}:ttl`, JSON.stringify([def.database, def.name]))) return true
+    for (const column of def.columns) {
+      const key = columnKey({ database: def.database, table: def.name }, column.name)
+      if (claimed(key, JSON.stringify([def.database, def.name, column.name]))) return true
+    }
+  }
+  return renames.some((rename) =>
+    claimed(columnRenameKey(rename), JSON.stringify(['rename', rename.database, rename.table, rename.from, rename.to]))
+  )
+}
+
+/**
+ * Whether running the column statements in `order` gives some column an
+ * expression that reads itself through the others at that point, which
+ * ClickHouse rejects (`Cyclic alias detected`). It starts from the old
+ * expressions, takes a column's new expression at its last statement and
+ * drops a column at its DROP. A REMOVE before the last statement is not
+ * replayed, so this sees more reads than ClickHouse, never fewer.
+ */
+function closesExpressionCycle(
+  order: number[],
+  statements: MigrationOperation[],
+  graphs: { reads: DependencyGraph; oldReads: DependencyGraph }
+): boolean {
+  const current = new Map<string, ReadonlySet<string>>(graphs.oldReads)
+  for (const index of order) {
+    const op = statements[index]
+    if (op === undefined) continue
+    if (op.type === 'alter_table_drop_column') current.delete(op.key)
+    if (op.type !== 'alter_table_add_column' && op.type !== 'alter_table_modify_column') continue
+    if (statements[index + 1]?.key === op.key) continue
+    current.set(op.key, graphs.reads.get(op.key) ?? new Set<string>())
+    const seen = new Set<string>()
+    const pending = [...(current.get(op.key) ?? [])]
+    for (let column = pending.pop(); column !== undefined; column = pending.pop()) {
+      if (column === op.key) return true
+      if (seen.has(column)) continue
+      seen.add(column)
+      pending.push(...(current.get(column) ?? []))
+    }
+  }
+  return false
+}
+
+/** Keys of the columns whose type `definitions` changes, per table with no rename in `renames`. */
+function typeChangedColumns(definitions: ColumnStatementDefinitions, renames: readonly ColumnRename[]): string[][] {
+  const tableId = (database: string, name: string) => JSON.stringify([database, name])
+  const renamed = new Set(renames.map((rename) => tableId(rename.database, rename.table)))
+  const previous = new Map<string, TableDefinition>()
+  for (const def of definitions.previous) if (def.kind === 'table') previous.set(tableId(def.database, def.name), def)
+  const changed: string[][] = []
+  for (const def of definitions.next) {
+    if (def.kind !== 'table' || renamed.has(tableId(def.database, def.name))) continue
+    const keys: string[] = []
+    changed.push(keys)
+    const oldColumns = new Map((previous.get(tableId(def.database, def.name))?.columns ?? []).map((column) => [column.name, column]))
+    for (const column of def.columns) {
+      const oldColumn = oldColumns.get(column.name)
+      if (oldColumn !== undefined && columnTypeFingerprint(oldColumn) !== columnTypeFingerprint(column)) {
+        keys.push(columnKey({ database: def.database, table: def.name }, column.name))
+      }
+    }
+  }
+  return changed
 }
 
 function columnKey(table: { database: string; table: string }, column: string): string {
