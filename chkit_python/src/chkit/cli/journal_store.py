@@ -952,7 +952,7 @@ class JournalStore:
         ``covered`` is false when that read cannot be shown to cover every
         copy: a replicated journal with a replica the read did not reach, or
         with replicas it cannot name, or a journal that is not replicated on a
-        target with several replicas.
+        target with several replicas or without a declared cluster (#802).
         """
         self._ensure_table(create=False)
         if self._database_missing or self._table_missing:
@@ -963,6 +963,14 @@ class JournalStore:
             f"AND name = '{self._table}'"
         ).rows
         replicated = not rows or bool(re.match(r"^(Replicated|Shared)", str(rows[0]["engine"])))
+        # A journal that is not replicated is one copy only on a single server,
+        # and only a declared cluster can show that (#802): behind a load
+        # balancer each server lists itself alone in its own clusters, so a
+        # cluster chkit guesses proves nothing about the others.
+        override = self._fanout_override
+        declared_cluster = override.cluster if override is not None else self._cluster
+        if not replicated and declared_cluster is None:
+            return EveryCopyRead(covered=False, op=None)
         fingerprints = (
             f"toJSONString({_FINGERPRINTS_COLUMN})" if self._fingerprint_column else "'[]'"
         )
@@ -994,8 +1002,7 @@ class JournalStore:
             else "SELECT toString(serverUUID()) AS replica, toJSONString([toString(serverUUID())]) "
             f"AS members, {columns} FROM {latest}"
         )
-        override = self._fanout_override
-        cluster = override.cluster if override is not None else (self._cluster or "default")
+        cluster = declared_cluster if declared_cluster is not None else "default"
         # Every server of the cluster answers, or the read fails: an
         # unavailable one is never skipped, and no limit cuts the reply short.
         copies = self._client.query(
