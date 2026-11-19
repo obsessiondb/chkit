@@ -1561,6 +1561,9 @@ class _ClosedCycle:
 
 _NO_CYCLE = _ClosedCycle([], lambda _read: False)
 
+# The landing of a column ``_land`` is still following.
+_ON_PATH = -2
+
 
 class _DefaultReplay:
     """The replay of one table, from its ``initial`` (old) expressions.
@@ -1644,7 +1647,8 @@ class _DefaultReplay:
         ``column`` itself, or, when no statement changes it and it reads one
         column, where that read lands. Those reads never change, so the answer
         is kept. Each link it follows the first time uses one unit; the caller
-        checks the budget.
+        checks the budget. A cycle among those reads (an old schema ClickHouse
+        refuses) uses up the work, so the table keeps its sorted order.
         """
         path: list[int] = []
         at = column
@@ -1653,11 +1657,17 @@ class _DefaultReplay:
             if known >= 0:
                 at = known
                 break
+            if known == _ON_PATH:
+                for link in path:
+                    self._landing[link] = -1
+                self._left = -1
+                return at
             reads = self._reads[at]
             if not self._fixed[at] or reads is None or len(reads) != 1 or self._left < 0:
                 self._landing[at] = at
                 break
             path.append(at)
+            self._landing[at] = _ON_PATH
             self._left -= 1
             at = reads[0]
         for link in path:
@@ -1716,12 +1726,16 @@ class _DefaultReplay:
                 columns.append(column)
             # The columns this read reaches (``seen``), walked depth first; one
             # is on the cycle (``inside``) when one of its reads lands on the cycle.
+            # A column still on the walk is marked ``-mark``: meeting it again
+            # means the state holds a cycle (an old schema ClickHouse refuses),
+            # so the table keeps its sorted order.
             start = self._land(read)
             if self._left < 0:
                 return None
             if seen[start] == mark:
                 continue
             seen[start] = mark
+            inside[start] = -mark
             stack, position, on_cycle = [start], [0], [False]
             while stack:
                 top = len(stack) - 1
@@ -1736,14 +1750,19 @@ class _DefaultReplay:
                         return None
                     if seen[reached] != mark:
                         seen[reached] = mark
+                        inside[reached] = -mark
                         stack.append(reached)
                         position.append(0)
                         on_cycle.append(False)
                     elif inside[reached] == mark:
                         on_cycle[top] = True
+                    elif inside[reached] == -mark:
+                        self._left = -1
+                        return None
                     continue
                 stack.pop()
                 position.pop()
+                inside[at] = 0
                 if not on_cycle.pop():
                     continue
                 inside[at] = mark

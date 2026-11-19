@@ -1684,6 +1684,27 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     expect(cycleRepairWork.units).toBe(6011)
   })
 
+  // An old schema whose defaults read each other in a cycle (ClickHouse
+  // refuses one) cannot be replayed, so the table keeps its sorted order: a
+  // cycle among unchanged single reads (`c`, `d`) and one the walk meets
+  // again (`b`, `z`).
+  test.each<[string, ColumnDefinition[], ColumnDefinition[], string[]]>([
+    [
+      'unchanged columns',
+      [u('a'), u('b', 'c + z'), u('c', 'd'), u('d', 'c'), u('z', 'a')],
+      [u('a', 'b'), u('b', 'id'), u('c', 'd'), u('d', 'c'), u('z', 'id')],
+      ['t.a', 't.b', 't.z'],
+    ],
+    [
+      'changed columns',
+      [u('a'), u('b', 'z'), u('c', 'a'), u('z', 'b + c')],
+      [u('a', 'z'), u('b', 'p'), u('c', 'id'), u('p', 'id'), u('z', 'id')],
+      ['t.a', 't.c', 't.p', 't.b', 't.z'],
+    ],
+  ])('keeps the sorted order when the old defaults of %s read each other in a cycle', (_, before, after, order) => {
+    expect(orderOf([t(before)], [t(after)])).toEqual(order)
+  })
+
   // The unit of `date_add`, `dateDiff` and the like, a bare NOT and a bare
   // SELECT are not reads even when a column has that name, so these tables
   // keep their sorted order: the ALIAS `b` runs after `a` changes to String.

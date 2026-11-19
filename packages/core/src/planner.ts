@@ -1601,7 +1601,9 @@ function defaultReplay(
   // The column a walk that reads `column` lands on: `column` itself, or,
   // when no statement changes it and it reads one column, where that read
   // lands. Those reads never change, so the answer is kept. Each link it
-  // follows the first time uses one unit; the caller checks the budget.
+  // follows the first time uses one unit; the caller checks the budget. A
+  // cycle among those reads (an old schema ClickHouse refuses) uses up the
+  // work, so the table keeps its sorted order.
   const land = (column: number): number => {
     const path: number[] = []
     let at = column
@@ -1611,12 +1613,18 @@ function defaultReplay(
         at = known
         break
       }
+      if (known === -2) {
+        for (const link of path) landing[link] = -1
+        left = -1
+        return at
+      }
       const next = reads[at]
       if (!fixed[at] || next?.length !== 1 || left < 0) {
         landing[at] = at
         break
       }
       path.push(at)
+      landing[at] = -2
       left -= 1
       at = next[0] ?? at
     }
@@ -1694,10 +1702,14 @@ function defaultReplay(
         }
         // The columns this read reaches (`seen`), walked depth first; one is
         // on the cycle (`inside`) when one of its reads lands on the cycle.
+        // A column still on the walk is marked `-mark`: meeting it again means
+        // the state holds a cycle (an old schema ClickHouse refuses), so the
+        // table keeps its sorted order.
         const start = land(read)
         if (left < 0) return undefined
         if (seen[start] === mark) continue
         seen[start] = mark
+        inside[start] = -mark
         const stack = [start]
         const position = [0]
         const onCycle = [false]
@@ -1712,14 +1724,20 @@ function defaultReplay(
             if (left < 0) return undefined
             if (seen[reached] !== mark) {
               seen[reached] = mark
+              inside[reached] = -mark
               stack.push(reached)
               position.push(0)
               onCycle.push(false)
             } else if (inside[reached] === mark) onCycle[top] = true
+            else if (inside[reached] === -mark) {
+              left = -1
+              return undefined
+            }
             continue
           }
           stack.pop()
           position.pop()
+          inside[at] = 0
           if (!onCycle.pop()) continue
           inside[at] = mark
           columns.push(names[at] ?? '')

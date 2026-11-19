@@ -1674,6 +1674,32 @@ def test_repairs_cycles_whose_breakers_wait_for_one_long_chain_of_statements() -
 
 
 @pytest.mark.parametrize(
+    ("before", "after", "order"),
+    [
+        (
+            [_u("a"), _u("b", "c + z"), _u("c", "d"), _u("d", "c"), _u("z", "a")],
+            [_u("a", "b"), _u("b", "id"), _u("c", "d"), _u("d", "c"), _u("z", "id")],
+            ["t.a", "t.b", "t.z"],
+        ),
+        (
+            [_u("a"), _u("b", "z"), _u("c", "a"), _u("z", "b + c")],
+            [_u("a", "z"), _u("b", "p"), _u("c", "id"), _u("p", "id"), _u("z", "id")],
+            ["t.a", "t.c", "t.p", "t.b", "t.z"],
+        ),
+    ],
+    ids=["unchanged columns", "changed columns"],
+)
+def test_keeps_the_sorted_order_when_the_old_defaults_read_each_other_in_a_cycle(
+    before: list[dict[str, Any]], after: list[dict[str, Any]], order: list[str]
+) -> None:
+    # An old schema whose defaults read each other in a cycle (ClickHouse
+    # refuses one) cannot be replayed, so the table keeps its sorted order: a
+    # cycle among unchanged single reads (``c``, ``d``) and one the walk meets
+    # again (``b``, ``z``).
+    assert _order_of([_t(before)], [_t(after)]) == order
+
+
+@pytest.mark.parametrize(
     ("expression", "name"),
     [
         ("toString(date_add(day, if(true, 1, 0), toDateTime(id)))", "day"),
