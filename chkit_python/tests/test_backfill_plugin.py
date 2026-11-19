@@ -17,8 +17,10 @@ from unittest.mock import MagicMock
 import pytest
 
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import (
     ChxResolvedCheckConfig,
+    ChxResolvedClickHouseConfig,
     ChxResolvedConfig,
     ChxResolvedSafetyConfig,
 )
@@ -37,6 +39,7 @@ from chkit_plugin_backfill import (
     ensure_environment_match,
     parse_byte_size,
 )
+from chkit_plugin_backfill import plugin as backfill_plugin_module
 from chkit_plugin_backfill.options import (
     PlanOptions,
     RunOptions,
@@ -453,6 +456,54 @@ def test_backfill_plugin_factory_shape() -> None:
         "doctor",
         "list",
     }
+
+
+def test_plan_turns_parallel_replicas_off_under_the_name_every_version_accepts(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    # enable_parallel_replicas is only an alias from 24.10 on; older servers reject it
+    # with UNKNOWN_SETTING, so every planning query would fail there.
+    sent: list[Any] = []
+
+    def fake_build_backfill_plan(**kwargs: Any) -> Any:
+        sent.append(kwargs["query_settings"])
+        msg = "stop after capturing the settings"
+        raise BackfillConfigError(msg)
+
+    monkeypatch.setattr(
+        backfill_plugin_module, "build_backfill_plan", fake_build_backfill_plan
+    )
+    # The faked planner sends nothing, so no server is needed.
+    monkeypatch.setattr(
+        ClickHouseClient,
+        "connect",
+        classmethod(lambda _cls, _config: MagicMock()),
+    )
+    config = _cfg(tmp_path).model_copy(
+        update={
+            "clickhouse": ChxResolvedClickHouseConfig(
+                url="http://127.0.0.1:1",
+                username="default",
+                password="",
+                database="app",
+                secure=False,
+            )
+        }
+    )
+    plugin = backfill()
+    assert plugin.commands is not None
+    cmd = next(c for c in plugin.commands if c.name == "plan")
+    msgs: list[Any] = []
+    code = cmd.run(
+        _make_command_context(
+            config=config,
+            tmp_path=tmp_path,
+            flags={"--target": "app.events"},
+            msgs=msgs,
+        )
+    )
+    assert code == 2, msgs
+    assert sent == [{"allow_experimental_parallel_reading_from_replicas": 0}]
 
 
 def test_submit_without_backend_prints_managed_backend_error(tmp_path: Path) -> None:
