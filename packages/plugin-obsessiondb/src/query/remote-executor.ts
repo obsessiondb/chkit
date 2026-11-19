@@ -52,6 +52,44 @@ function toApiSettings(
 	return Object.keys(out).length > 0 ? out : undefined
 }
 
+// A write is stored when it returns: no asynchronous INSERT, and one that a
+// table's own async_insert setting still makes asynchronous waits for its flush
+// (#804), as a direct connection sends (#790).
+const DURABLE_INSERT_SETTINGS = { async_insert: 0, wait_for_async_insert: 1 } as const
+
+interface SettingRow {
+	name: string
+	value: string
+	readonly: string
+}
+
+const SETTING_ROWS_SQL =
+	"SELECT name, value, toString(readonly) AS readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')"
+
+/**
+ * The durable-insert settings the user's profile lets a write send. A setting
+ * the user cannot change (a constraint) is left out when it already has that
+ * value, as ClickHouse rejects any change of it, also on DDL. Fixed at another
+ * value, the write is refused. A readonly = 1 user gets the server's own error,
+ * which refuses its writes. chkit-py: `_durable_insert_settings`.
+ */
+function durableInsertSettings(rows: readonly SettingRow[]): ClickHouseSettings {
+	const byName = new Map(rows.map((row) => [row.name, row]))
+	if (byName.get('readonly')?.value === '1') return {}
+	const out: ClickHouseSettings = {}
+	for (const [name, value] of Object.entries(DURABLE_INSERT_SETTINGS)) {
+		const row = byName.get(name)
+		if (!row) continue
+		if (row.readonly === '0') out[name] = value
+		else if (row.value !== String(value)) {
+			throw new Error(
+				`Setting ${name} is fixed at ${row.value} for this ClickHouse user, and chkit writes need ${name} = ${value} to be stored when they return.`,
+			)
+		}
+	}
+	return out
+}
+
 /** `promise`, or the signal's reason once it aborts; the promise itself runs on. */
 function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
 	if (!signal) return promise
@@ -125,27 +163,21 @@ export function createRemoteExecutor(deps: {
 	const { credentials, serviceSlug } = deps
 	const client = createApiClient(credentials)
 
-	// Whether the service profile locks async_insert (a constraint, or
-	// readonly = 1), looked up once per executor. A failed lookup is not cached.
-	let asyncInsertLocked: Promise<boolean> | undefined
-	function asyncInsertLockedOnce(): Promise<boolean> {
-		asyncInsertLocked ??= executor
-			.query<{ readonly: string }>("SELECT toString(readonly) AS readonly FROM system.settings WHERE name = 'async_insert'")
-			.then(([row]) => row !== undefined && row.readonly !== '0')
-			.catch((error: unknown) => {
-				asyncInsertLocked = undefined
-				throw error
-			})
-		return asyncInsertLocked
+	// The service user's durable-insert settings, looked up once per executor.
+	// A failed lookup is not cached.
+	let settingRows: Promise<SettingRow[]> | undefined
+	function settingRowsOnce(): Promise<SettingRow[]> {
+		settingRows ??= executor.query<SettingRow>(SETTING_ROWS_SQL).catch((error: unknown) => {
+			settingRows = undefined
+			throw error
+		})
+		return settingRows
 	}
 
 	// Sent with writes (command, insert, submit) under the caller's settings, as
-	// chkit-py's direct connection sends: an INSERT with inline data is no
-	// asynchronous insert, which a service profile with wait_for_async_insert = 0
-	// would finish while its rows are still buffered. A profile that locks the
-	// setting rejects any change of it, also on DDL, so it is left out there.
-	async function writeSettings(settings?: ClickHouseSettings): Promise<ClickHouseSettings | undefined> {
-		return (await asyncInsertLockedOnce()) ? settings : { async_insert: 0, ...settings }
+	// a direct connection sends.
+	async function writeSettings(settings?: ClickHouseSettings): Promise<ClickHouseSettings> {
+		return { ...durableInsertSettings(await settingRowsOnce()), ...settings }
 	}
 
 	const executor: ClickHouseExecutor = {

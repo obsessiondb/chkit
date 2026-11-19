@@ -28,8 +28,9 @@ const SLOW_ROWS = 20
 const MIGRATION_CHECKSUM = 'c1'
 
 describe('async migrate through the real ObsessionDB workbench API', () => {
-  // Every write sends async_insert = 0 in the request's settings (#803), so the
-  // API must hand them to ClickHouse. Two values, so a profile default can't pass.
+  // Every write sends async_insert = 0 and wait_for_async_insert = 1 in the
+  // request's settings (#804), so the API must hand them to ClickHouse. Two
+  // values, so a profile default can't pass.
   test('the API forwards query settings to ClickHouse', async () => {
     const remote = await connect()
     const read = async (value: number) =>

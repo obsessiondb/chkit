@@ -107,7 +107,7 @@ describe('createRemoteExecutor submit', () => {
 			expect(await remote.submit('INSERT INTO t SELECT 1', 'qid-1')).toBe('qid-1')
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0 } },
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0, wait_for_async_insert: 1 } },
 			])
 		} finally {
 			workbench.stop()
@@ -122,7 +122,7 @@ describe('createRemoteExecutor submit', () => {
 			await remote.submit('INSERT INTO t SELECT 1', 'qid-1', { log_comment: 'x' })
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0, log_comment: 'x' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0, wait_for_async_insert: 1, log_comment: 'x' } },
 			])
 		} finally {
 			workbench.stop()
@@ -157,7 +157,7 @@ describe('createRemoteExecutor submit', () => {
 			releaseLookup()
 			expect(await other).toBe('qid-other')
 			expect(queries).toEqual([
-				"SELECT toString(readonly) AS readonly FROM system.settings WHERE name = 'async_insert'",
+				"SELECT name, value, toString(readonly) AS readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')",
 				'INSERT INTO t VALUES (2)',
 			])
 		} finally {
@@ -173,7 +173,7 @@ describe('createRemoteExecutor submit', () => {
 
 			await remote.submit('INSERT INTO t SELECT 1')
 
-			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', settings: { async_insert: 0 } }])
+			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', settings: { async_insert: 0, wait_for_async_insert: 1 } }])
 		} finally {
 			workbench.stop()
 		}
@@ -181,7 +181,7 @@ describe('createRemoteExecutor submit', () => {
 })
 
 // migrate --setting (#321) reaches ClickHouse through command()'s settings.
-// Every write also sends async_insert = 0 under them, as a direct connection does.
+// Every write also sends async_insert = 0 and wait_for_async_insert = 1 under them, as a direct connection does.
 describe('createRemoteExecutor command', () => {
 	test('forwards per-statement settings to the API', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
@@ -192,15 +192,15 @@ describe('createRemoteExecutor command', () => {
 			await remote.command('DROP TABLE u')
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { async_insert: 0, max_table_size_to_drop: '0' } },
-				{ serviceSlug: 'test', query: 'DROP TABLE u', settings: { async_insert: 0 } },
+				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { async_insert: 0, wait_for_async_insert: 1, max_table_size_to_drop: '0' } },
+				{ serviceSlug: 'test', query: 'DROP TABLE u', settings: { async_insert: 0, wait_for_async_insert: 1 } },
 			])
 		} finally {
 			workbench.stop()
 		}
 	})
 
-	test('sends insert() rows with async_insert = 0 under the caller\'s settings', async () => {
+	test('sends insert() rows with the durable-insert settings under the caller\'s', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {
 			const remote = connect(workbench.url)
@@ -209,7 +209,7 @@ describe('createRemoteExecutor command', () => {
 			await remote.insert({ table: 'db.t', values: [{ id: 2 }], settings: { async_insert: 1, wait_for_async_insert: 1 } })
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'INSERT INTO db.t (id) VALUES (1)', settings: { async_insert: 0, insert_deduplication_token: 'tok' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO db.t (id) VALUES (1)', settings: { async_insert: 0, wait_for_async_insert: 1, insert_deduplication_token: 'tok' } },
 				{ serviceSlug: 'test', query: 'INSERT INTO db.t (id) VALUES (2)', settings: { async_insert: 1, wait_for_async_insert: 1 } },
 			])
 		} finally {
@@ -217,9 +217,9 @@ describe('createRemoteExecutor command', () => {
 		}
 	})
 
-	// A profile that locks async_insert rejects any change of it, also on DDL.
-	test('sends only the caller\'s settings when the profile locks async_insert, looked up once', async () => {
-		const workbench = startScriptedWorkbench({ replicas: 1, asyncInsertReadonly: '1' })
+	// A profile that locks a setting rejects any change of it, also on DDL.
+	test('leaves out the settings the profile locks at the durable value, looked up once', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: [['async_insert', '0', '1'], ['wait_for_async_insert', '1', '1']] })
 		try {
 			const remote = connect(workbench.url)
 
@@ -240,8 +240,37 @@ describe('createRemoteExecutor command', () => {
 		}
 	})
 
-	test('sends no write when the async_insert lookup fails, and looks it up again next time', async () => {
-		const workbench = startScriptedWorkbench({ replicas: 1, asyncInsertReadonly: { error: 'Code: 497. ACCESS_DENIED' } })
+	test('refuses a write when the profile fixes a durable-insert setting at another value', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: [['async_insert', '1', '1'], ['wait_for_async_insert', '1', '0']] })
+		try {
+			const remote = connect(workbench.url)
+
+			await expect(remote.command('CREATE TABLE t (id UInt64) ENGINE = MergeTree ORDER BY id')).rejects.toThrow(
+				'Setting async_insert is fixed at 1 for this ClickHouse user, and chkit writes need async_insert = 0 to be stored when they return.',
+			)
+			await expect(remote.submit('INSERT INTO t VALUES (1)', 'qid-refused')).rejects.toThrow('Setting async_insert is fixed at 1')
+
+			expect(workbench.inputs).toEqual([])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends a readonly = 1 user\'s write without settings, for the server to refuse', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: [['readonly', '1', '0'], ['async_insert', '1', '1'], ['wait_for_async_insert', '0', '1']] })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.command('DROP TABLE t')
+
+			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'DROP TABLE t' }])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends no write when the settings lookup fails, and looks it up again next time', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, settingRows: { error: 'Code: 497. ACCESS_DENIED' } })
 		try {
 			const remote = connect(workbench.url)
 
@@ -273,22 +302,22 @@ describe('createRemoteExecutor cancellation transport', () => {
 			expect(events).toEqual(['check', 'intent', 'check'])
 			expect(workbench.inputs).toEqual([{
 				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-1',
-				settings: { async_insert: 1, log_comment: 'kept' },
+				settings: { async_insert: 1, wait_for_async_insert: 1, log_comment: 'kept' },
 			}])
 		} finally {
 			workbench.stop()
 		}
 	})
 
-	// Like the native path, a tracked write sends async_insert = 0 under the
-	// caller's settings; recovery forces it over them (#733 review G).
-	test('sends a tracked write with async_insert = 0 under the caller\'s settings', async () => {
+	// Like the native path, a tracked write sends the durable-insert settings under the
+	// caller's settings; recovery forces async_insert = 0 over them (#733 review G).
+	test('sends a tracked write with the durable-insert settings under the caller\'s settings', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {
 			const remote = connect(workbench.url)
 			await remote.commandTracked('INSERT INTO t SELECT 1', () => {}, async () => 'tracked-sync')
 			expect(workbench.inputs).toEqual([{
-				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync', settings: { async_insert: 0 },
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync', settings: { async_insert: 0, wait_for_async_insert: 1 },
 			}])
 		} finally {
 			workbench.stop()
@@ -569,8 +598,8 @@ function startScriptedWorkbench(script: {
 	truncated?: boolean
 	tables?: { meta: string[]; data: string[][] }
 	queryLog?: { meta: string[]; data: string[][] }
-	/** system.settings `readonly` of async_insert; an error object fails the lookup. */
-	asyncInsertReadonly?: '0' | '1' | { error: string }
+	/** system.settings rows (name, value, readonly) of the writes' lookup; an error object fails it. */
+	settingRows?: string[][] | { error: string }
 }) {
 	const queries: string[] = []
 	const inputs: Array<Record<string, unknown>> = []
@@ -584,11 +613,11 @@ function startScriptedWorkbench(script: {
 			}
 			if (input.query.includes('FROM system.settings')) {
 				settingsLookups.push(input.query)
-				const readonly = script.asyncInsertReadonly ?? '0'
+				const rows = script.settingRows ?? [['readonly', '0', '0'], ['async_insert', '1', '0'], ['wait_for_async_insert', '0', '0']]
 				return Response.json({
-					json: typeof readonly === 'string'
-						? { data: [[readonly]], meta: [{ name: 'readonly', type: 'String' }], rows: 1 }
-						: { data: [], meta: [], rows: 0, error: readonly.error },
+					json: Array.isArray(rows)
+						? { data: rows, meta: ['name', 'value', 'readonly'].map((name) => ({ name, type: 'String' })), rows: rows.length }
+						: { data: [], meta: [], rows: 0, error: rows.error },
 				})
 			}
 			inputs.push(input)

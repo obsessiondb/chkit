@@ -232,10 +232,12 @@ def test_normalize_query_json_result_wraps_envelope() -> None:
 
 
 def _add_async_insert_lookup(httpx_mock: HTTPXMock) -> None:
-    """Answer a write's async_insert lookup (#803): the profile doesn't lock it."""
+    """Answer a write's settings lookup (#804): the profile locks none."""
+    rows = [["readonly", "0", "0"], ["async_insert", "1", "0"], ["wait_for_async_insert", "0", "0"]]
+    meta = [{"name": name, "type": "String"} for name in ("name", "value", "readonly")]
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
-        json={"data": [["0"]], "meta": [{"name": "readonly", "type": "String"}], "rows": 1},
+        json={"data": rows, "meta": meta, "rows": len(rows)},
     )
 
 
@@ -295,7 +297,7 @@ def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> 
     assert json.loads(request.content)["json"] == {
         "serviceSlug": SVC,
         "query": "ALTER TABLE x ADD COLUMN y UInt64",
-        "settings": {"async_insert": 0},
+        "settings": {"async_insert": 0, "wait_for_async_insert": 1},
         "queryId": "my-qid",
     }
 

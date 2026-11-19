@@ -45,9 +45,9 @@ _MIGRATION_CHECKSUM = "c1"
 
 
 def test_the_api_forwards_query_settings_to_clickhouse() -> None:
-    """Every write sends async_insert = 0 in the request's settings (#803), so
-    the API must hand them to ClickHouse. Two values, so a profile default
-    can't pass."""
+    """Every write sends async_insert = 0 and wait_for_async_insert = 1 in the
+    request's settings (#804), so the API must hand them to ClickHouse. Two
+    values, so a profile default can't pass."""
     remote = _connect()
 
     def read(value: int) -> str:

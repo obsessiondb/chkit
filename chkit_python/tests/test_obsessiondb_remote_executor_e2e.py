@@ -656,34 +656,107 @@ def test_no_write_is_an_asynchronous_insert_under_a_fire_and_forget_profile(
 
 
 @pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
-def test_writes_run_under_a_profile_that_locks_async_insert(
+def test_a_write_into_a_table_that_turns_on_async_inserts_waits_for_the_flush(
     live_env: LiveEnv, live: ClickHouseClient
 ) -> None:
-    """A profile that locks async_insert rejects any change of it
-    (SETTING_CONSTRAINT_VIOLATION), also on DDL, so writes leave it out there.
-    Port of the TS test in ``remote-executor.e2e.test.ts``."""
-    prefix = create_prefix("remote_locked_async_py")
+    """A table's own async_insert setting makes an INSERT asynchronous even
+    with async_insert = 0 in the query; it is stored when it returns only
+    because it waits for the flush (#790). Port of the TS test."""
+    prefix = create_prefix("remote_write_settings_table_py")
     user = f"{prefix}user"
-    password = "Pw-remote-locked-async"
+    password = "Pw-remote-write-settings"
     name = f"{prefix}t"
     table = f"{quote_ident(live_env.clickhouse_database)}.{quote_ident(name)}"
     try:
         live.execute(
+            f"CREATE TABLE {table} (id UInt64) ENGINE = MergeTree ORDER BY id "
+            "SETTINGS async_insert = 1"
+        )
+        wait_for_table(live, live_env.clickhouse_database, name)
+        live.execute(
             f"CREATE USER {quote_ident(user)} IDENTIFIED BY '{password}' SETTINGS "
+            "wait_for_async_insert = 0, async_insert_use_adaptive_busy_timeout = 0, "
+            "async_insert_busy_timeout_max_ms = 3000"
+        )
+        live.execute(f"GRANT SELECT, INSERT ON {table} TO {quote_ident(user)}")
+        as_user = replace(live_env, clickhouse_user=user, clickhouse_password=password)
+
+        def count() -> str:
+            return str(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"])
+
+        counts: list[str] = []
+        for remote in _serve_remote(as_user):
+            remote.execute(f"INSERT INTO {table} VALUES (1)")
+            counts.append(count())
+            remote.submit(f"INSERT INTO {table} VALUES (2)", str(uuid.uuid4()))
+            counts.append(count())
+        assert counts == ["1", "2"]
+    finally:
+        live.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
+        live.execute(f"DROP TABLE IF EXISTS {table} SYNC")
+
+
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
+def test_writes_run_under_a_profile_that_locks_the_durable_settings_and_stop_otherwise(
+    live_env: LiveEnv, live: ClickHouseClient
+) -> None:
+    """A profile that locks a setting rejects any change of it
+    (SETTING_CONSTRAINT_VIOLATION), also on DDL: writes leave out a setting
+    locked at the durable value, and are refused when it is fixed elsewhere.
+    Port of the TS test in ``remote-executor.e2e.test.ts``."""
+    prefix = create_prefix("remote_locked_async_py")
+    durable = f"{prefix}durable"
+    fixed_on = f"{prefix}fixed_on"
+    password = "Pw-remote-locked-async"
+    database = live_env.clickhouse_database
+    name = f"{prefix}t"
+    refused_name = f"{prefix}refused"
+    table = f"{quote_ident(database)}.{quote_ident(name)}"
+    try:
+        live.execute(
+            f"CREATE USER {quote_ident(durable)} IDENTIFIED BY '{password}' SETTINGS "
+            "async_insert = 0 CONST, wait_for_async_insert = 1 CONST"
+        )
+        live.execute(
+            f"CREATE USER {quote_ident(fixed_on)} IDENTIFIED BY '{password}' SETTINGS "
             "async_insert = 1 CONST, wait_for_async_insert = 1"
         )
-        live.execute(f"GRANT CREATE TABLE, INSERT, SELECT ON {table} TO {quote_ident(user)}")
-        as_user = replace(live_env, clickhouse_user=user, clickhouse_password=password)
-        for remote in _serve_remote(as_user):
+        for user in (durable, fixed_on):
+            live.execute(
+                f"GRANT CREATE TABLE, INSERT, SELECT ON {quote_ident(database)}.* "
+                f"TO {quote_ident(user)}"
+            )
+        for remote in _serve_remote(
+            replace(live_env, clickhouse_user=durable, clickhouse_password=password)
+        ):
             remote.execute(f"CREATE TABLE {table} (id UInt64) ENGINE = MergeTree ORDER BY id")
-            wait_for_table(live, live_env.clickhouse_database, name)
-            remote.insert(f"{live_env.clickhouse_database}.{name}", [{"id": 1}])
+            wait_for_table(live, database, name)
+            remote.insert(f"{database}.{name}", [{"id": 1}])
             remote.execute_tracked(
                 f"INSERT INTO {table} VALUES (2)", lambda: None, lambda: str(uuid.uuid4())
             )
             remote.submit(f"INSERT INTO {table} VALUES (3)", str(uuid.uuid4()))
-        # wait_for_async_insert = 1: each insert returned once flushed.
         assert live.query(f"SELECT toString(count()) AS n FROM {table}").rows == [{"n": "3"}]
+
+        for refused in _serve_remote(
+            replace(live_env, clickhouse_user=fixed_on, clickhouse_password=password)
+        ):
+            with pytest.raises(RuntimeError) as info:
+                refused.execute(
+                    f"CREATE TABLE {quote_ident(database)}.{quote_ident(refused_name)} "
+                    "(id UInt64) ENGINE = MergeTree ORDER BY id"
+                )
+        assert str(info.value) == (
+            "Setting async_insert is fixed at 1 for this ClickHouse user, and chkit "
+            "writes need async_insert = 0 to be stored when they return."
+        )
+        assert live.query(
+            "SELECT toString(count()) AS n FROM system.tables "
+            f"WHERE database = '{database}' AND name = '{refused_name}'"
+        ).rows == [{"n": "0"}]
     finally:
-        live.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
+        live.execute(f"DROP USER IF EXISTS {quote_ident(durable)}, {quote_ident(fixed_on)}")
         live.execute(f"DROP TABLE IF EXISTS {table} SYNC")
+        live.execute(
+            f"DROP TABLE IF EXISTS {quote_ident(database)}.{quote_ident(refused_name)} SYNC"
+        )
