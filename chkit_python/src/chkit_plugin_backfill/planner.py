@@ -16,6 +16,7 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
+from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS, PINNED_INSERT_SETTINGS_SQL
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -106,6 +107,76 @@ def _detect_backfill_strategy(
     except Exception:
         # Schema load failed, fall back to direct copy.
         return _BackfillStrategy(mvs=[])
+
+
+def assert_pinned_insert_settings_accepted(*, plan_id: str, query: PlannerQuery) -> None:
+    """Fail before anything is submitted when the server would refuse the
+    settings every chunk INSERT runs with (``PINNED_INSERT_SETTINGS``): a user
+    with ``readonly = 1``, or a settings constraint on one of them."""
+    try:
+        query(f"SELECT 1 SETTINGS {PINNED_INSERT_SETTINGS_SQL}", None)
+    except Exception as error:
+        msg = (
+            f"Backfill plan {plan_id}: the server refused the settings every chunk INSERT "
+            f"runs with ({PINNED_INSERT_SETTINGS_SQL}): {error}. Nothing was submitted. Use a "
+            "user allowed to set them (not readonly = 1, and no settings constraint on them)."
+        )
+        raise BackfillConfigError(msg) from error
+
+
+def read_pinned_setting_aliases(query: PlannerQuery) -> dict[str, str]:
+    """The server's other names of the pinned settings, from
+    ``system.settings.alias_for``. A server without that column, or a read
+    that fails, gives none: ``PINNED_SETTING_ALIASES`` still applies."""
+    names = ", ".join(f"'{name}'" for name in PINNED_INSERT_SETTINGS)
+    try:
+        rows = query(
+            f"SELECT name, alias_for FROM system.settings WHERE alias_for IN ({names})", None
+        )
+    except Exception:
+        return {}
+    return {
+        str(row["name"]): str(row["alias_for"])
+        for row in rows
+        if row.get("name") and row.get("alias_for")
+    }
+
+
+def unprovable_target_failures(
+    *, database: str, table: str, query: PlannerQuery
+) -> str | None:
+    """Why no failure of the backfill target can be proven, when none can
+    (#765): an INSERT SELECT into a Distributed table can run on its shards
+    (parallel_distributed_insert_select, 2 by default in ClickHouse 26.3), and
+    the initial query's written_rows then does not count the rows they wrote.
+    A target whose engine cannot be read counts as one."""
+
+    def quote(value: str) -> str:
+        return "'" + value.replace("\\", "\\\\").replace("'", "\\'") + "'"
+
+    target = f"{database}.{table}"
+    engine: str | None
+    try:
+        rows = query(
+            "SELECT engine FROM system.tables "
+            f"WHERE database = {quote(database)} AND name = {quote(table)}",
+            None,
+        )
+        engine = (str(rows[0].get("engine") or "") if rows else "") or None
+    except Exception:
+        engine = None
+    if engine is not None and engine != "Distributed":
+        return None
+    shards = (
+        "whose shards can write the rows of an INSERT SELECT without system.query_log "
+        "counting them in its written_rows"
+    )
+    if engine == "Distributed":
+        return f"its target {target} is a Distributed table, {shards}"
+    return (
+        f"the engine of its target {target} could not be read, and a Distributed table, "
+        f"{shards}, cannot be ruled out"
+    )
 
 
 def assert_backfill_target_safe(

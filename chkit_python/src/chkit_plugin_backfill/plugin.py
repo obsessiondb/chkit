@@ -10,6 +10,8 @@ plugin).
 from __future__ import annotations
 
 import threading
+import uuid
+from dataclasses import dataclass
 from typing import Any
 
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus
@@ -23,9 +25,17 @@ from chkit.plugins import (
     ChxPluginCommandContext,
     ChxPluginManifest,
 )
-from chkit_plugin_backfill.async_backfill import execute_backfill
+from chkit_plugin_backfill.async_backfill import (
+    CHECKPOINT_VERSION,
+    execute_backfill,
+    run_interruptible,
+)
 from chkit_plugin_backfill.check import evaluate_backfill_check
-from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
+from chkit_plugin_backfill.chunking.sql import (
+    assert_insert_settings_keep_pinned,
+    build_chunk_execution_sql,
+    unpinned_insert_settings,
+)
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
 from chkit_plugin_backfill.errors import BackfillConfigError
@@ -56,14 +66,18 @@ from chkit_plugin_backfill.payload import (
 )
 from chkit_plugin_backfill.planner import (
     assert_backfill_target_safe,
+    assert_pinned_insert_settings_accepted,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
+    read_pinned_setting_aliases,
+    unprovable_target_failures,
 )
 from chkit_plugin_backfill.queries import (
     cancel_backfill_run,
     get_backfill_doctor_report,
     get_backfill_status,
 )
+from chkit_plugin_backfill.run_lock import StopFlag, run_lock_path, with_run_lock
 from chkit_plugin_backfill.state import (
     backfill_paths,
     ensure_environment_match,
@@ -74,6 +88,8 @@ from chkit_plugin_backfill.state import (
     write_json,
 )
 from chkit_plugin_backfill.types import (
+    BackfillPathSet,
+    BackfillPlanState,
     BackfillProgress,
     BackfillRunState,
 )
@@ -149,12 +165,24 @@ class _ThreadLocalExecutor:
         return client
 
     def submit(self, statement: str, query_id: str | None = None) -> str:
-        return self._client().submit(statement, query_id)
+        # One physical send per attempt id (#765): the driver would resend a
+        # request whose connection was reset, and run the chunk twice.
+        return self._client().submit_once(statement, query_id or str(uuid.uuid4()))
 
-    def query_status(
-        self, query_id: str, *, after_time: str | None = None
-    ) -> QueryStatus:
-        return self._client().query_status(query_id, after_time=after_time)
+    #: Its ``submit_once`` is ``ClickHouseClient.submit_once`` (#765).
+    transport_admission = True
+
+    def prepare_submit_once(self) -> object:
+        """Open this thread's client and its ``submit_once`` driver."""
+        return self._client().prepare_submit_once()
+
+    def submit_once(self, statement: str, query_id: str) -> str:
+        """``ClickHouseClient.submit_once``: one send, and the backfill's
+        ``SEND_ADMISSION`` asked at the transport."""
+        return self._client().submit_once(statement, query_id)
+
+    def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
+        return self._client().query_status(query_id, running_only=running_only)
 
     def query(self, statement: str) -> object:
         return self._client().query(statement)
@@ -187,7 +215,7 @@ def _require_clickhouse(
     return clickhouse
 
 
-def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
+def _run_backfill(
     *,
     plan_id: str,
     force_environment: bool,
@@ -199,8 +227,7 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
     clickhouse: ChxResolvedClickHouseConfig,
     print_fn: Any,
     json_mode: bool,
-    resume_from: BackfillProgress | None = None,
-    replay_failed: bool = False,
+    resume: _ResumeRequest | None = None,
     insert_settings: dict[str, str | int | float | bool] | None = None,
 ) -> int:
     plan, _plan_path, resolved_state_dir = read_plan(
@@ -210,18 +237,90 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
         state_dir=state_dir,
     )
 
+    paths = backfill_paths(resolved_state_dir, plan.plan_id)
+
+    # The lock is held from before the checkpoint is read until the run ends,
+    # so two runs or resumes never submit one chunk under two query ids, and
+    # released on SIGINT or SIGTERM once no chunk can write the checkpoint (#765).
+    return with_run_lock(
+        run_lock_path(paths.runs_dir, plan.plan_id),
+        plan.plan_id,
+        lambda stop: _run_backfill_locked(
+            plan=plan,
+            paths=paths,
+            force_environment=force_environment,
+            concurrency=concurrency,
+            poll_interval_ms=poll_interval_ms,
+            clickhouse=clickhouse,
+            print_fn=print_fn,
+            json_mode=json_mode,
+            resume=resume,
+            insert_settings=insert_settings,
+            stop=stop,
+        ),
+    )
+
+
+@dataclass(frozen=True)
+class _ResumeRequest:
+    replay_failed: bool
+    accept_unknown: bool
+
+
+def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
+    *,
+    plan: BackfillPlanState,
+    paths: BackfillPathSet,
+    force_environment: bool,
+    concurrency: int,
+    poll_interval_ms: int,
+    clickhouse: ChxResolvedClickHouseConfig,
+    print_fn: Any,
+    json_mode: bool,
+    resume: _ResumeRequest | None,
+    insert_settings: dict[str, str | int | float | bool] | None,
+    stop: StopFlag,
+) -> int:
+    # insertSettings that would undo the INSERT's pinned settings are refused
+    # before anything is read or submitted.
+    assert_insert_settings_keep_pinned(insert_settings)
+    # Check for existing run state
+    existing_run = read_run(paths.run_path)
+
+    if resume is not None:
+        if existing_run is None:
+            msg = (
+                f"Run state not found for plan {plan.plan_id}. "
+                "Start with backfill run before resume."
+            )
+            raise BackfillConfigError(msg)
+        if existing_run.status == "completed":
+            if json_mode:
+                print_fn(
+                    {
+                        "ok": True,
+                        "noop": True,
+                        "planId": plan.plan_id,
+                        "status": "completed",
+                        "message": "Run already completed. Nothing to resume.",
+                    }
+                )
+            else:
+                print_fn(
+                    f"Backfill {plan.plan_id}: already completed. Nothing to resume."
+                )
+            return 0
+    resume_from = (
+        existing_run.progress if resume is not None and existing_run is not None else None
+    )
+
     ensure_environment_match(
         plan=plan,
         clickhouse=_clickhouse_dict(clickhouse),
         force_environment=force_environment,
     )
 
-    paths = backfill_paths(resolved_state_dir, plan.plan_id)
-
-    # Check for existing run state
-    existing_run = read_run(paths.run_path)
-
-    if existing_run is not None and resume_from is None:
+    if existing_run is not None and resume is None:
         # `run` command (no resume_from) must not silently continue an existing
         # run. Users should use `backfill resume` instead.
         status = existing_run.status
@@ -244,8 +343,32 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
 
     try:
         database, table = plan.target.split(".")
-        insertable_columns = assert_backfill_target_safe(
-            database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+        # A metadata read that hangs must not keep an interrupted run, and its lock.
+        insertable_columns = run_interruptible(
+            lambda: assert_backfill_target_safe(
+                database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+            ),
+            stop,
+            plan.plan_id,
+        )
+        aliases = run_interruptible(
+            lambda: read_pinned_setting_aliases(db.query_rows), stop, plan.plan_id
+        )
+        assert_insert_settings_keep_pinned(insert_settings, aliases)
+        insert_settings = unpinned_insert_settings(insert_settings, aliases)
+        run_interruptible(
+            lambda: assert_pinned_insert_settings_accepted(
+                plan_id=plan.plan_id, query=db.query_rows
+            ),
+            stop,
+            plan.plan_id,
+        )
+        unprovable_failures = run_interruptible(
+            lambda: unprovable_target_failures(
+                database=database, table=table, query=db.query_rows
+            ),
+            stop,
+            plan.plan_id,
         )
         assert_replay_columns_still_insertable(
             plan_id=plan.plan_id,
@@ -262,6 +385,13 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
             ),
             updated_at=now_iso(),
             progress=resume_from if resume_from is not None else {},
+            # A resume keeps the format it read until execute_backfill reports
+            # progress, which is always in this release's format.
+            checkpoint_version=(
+                existing_run.checkpoint_version
+                if resume is not None and existing_run is not None
+                else CHECKPOINT_VERSION
+            ),
         )
 
         write_json(paths.run_path, run_state)
@@ -292,6 +422,7 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
 
         def on_progress(progress: BackfillProgress) -> None:
             run_state.progress = progress
+            run_state.checkpoint_version = CHECKPOINT_VERSION
             run_state.updated_at = now_iso()
             write_json(paths.run_path, run_state)
 
@@ -304,10 +435,24 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
             concurrency=concurrency,
             poll_interval_ms=poll_interval_ms,
             resume_from=resume_from,
-            replay_failed=replay_failed,
+            checkpoint_version=(
+                existing_run.checkpoint_version if existing_run is not None else None
+            ),
+            stop=stop,
+            replay_failed=resume.replay_failed if resume is not None else False,
+            accept_unknown=resume.accept_unknown if resume is not None else False,
             on_progress=on_progress,
+            unprovable_failures=unprovable_failures,
         )
 
+        # A run is completed only when every chunk is done (#765).
+        if result.failed == 0 and result.completed != result.total:
+            msg = (
+                f"Backfill plan {plan.plan_id}: {result.total - result.completed} of "
+                f"{result.total} chunks did not run, so the run is not marked completed. "
+                "Resume it."
+            )
+            raise RuntimeError(msg)
         run_state.status = "failed" if result.failed > 0 else "completed"
         run_state.completed_at = now_iso()
         run_state.updated_at = now_iso()
@@ -356,7 +501,10 @@ def _run_backfill(  # noqa: PLR0915 — mirrors TS runBackfill
 
         return 1 if result.failed > 0 else 0
     finally:
-        db.close()
+        # After an interrupt the process exits once the lock is released: a
+        # close that waits for a running INSERT would hold it until it ends.
+        if not stop.is_set():
+            db.close()
 
 
 def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS factory
@@ -512,37 +660,6 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
         assert isinstance(opts, ResumeOptions)
         clickhouse = _require_clickhouse(ctx, "execution")
 
-        _plan, _plan_path, resolved_state_dir = read_plan(
-            plan_id=opts.plan_id,
-            config_path=ctx.config_path,
-            config=ctx.config,
-            state_dir=opts.state_dir,
-        )
-        paths = backfill_paths(resolved_state_dir, opts.plan_id)
-        existing_run = read_run(paths.run_path)
-        if existing_run is None:
-            msg = (
-                f"Run state not found for plan {opts.plan_id}. "
-                "Start with backfill run before resume."
-            )
-            raise BackfillConfigError(msg)
-        if existing_run.status == "completed":
-            if ctx.json_mode:
-                ctx.print(
-                    {
-                        "ok": True,
-                        "noop": True,
-                        "planId": opts.plan_id,
-                        "status": "completed",
-                        "message": "Run already completed. Nothing to resume.",
-                    }
-                )
-            else:
-                ctx.print(
-                    f"Backfill {opts.plan_id}: already completed. Nothing to resume."
-                )
-            return 0
-
         return _run_backfill(
             insert_settings=plugin_options.insert_settings,
             plan_id=opts.plan_id,
@@ -550,8 +667,9 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
             concurrency=opts.concurrency,
             poll_interval_ms=opts.poll_interval_ms,
             state_dir=opts.state_dir,
-            resume_from=existing_run.progress,
-            replay_failed=opts.replay_failed,
+            resume=_ResumeRequest(
+                replay_failed=opts.replay_failed, accept_unknown=opts.accept_unknown
+            ),
             config_path=ctx.config_path,
             config=ctx.config,
             clickhouse=clickhouse,

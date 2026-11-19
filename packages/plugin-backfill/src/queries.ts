@@ -1,6 +1,7 @@
 import type { ResolvedChxConfig } from '@chkit/core'
 
 import { BackfillConfigError } from './errors.js'
+import { runLockPath, withRunLock } from './run-lock.js'
 import {
   backfillPaths,
   nowIso,
@@ -64,6 +65,16 @@ export async function cancelBackfillRun(input: {
     stateDir: input.stateDir,
   })
   const paths = backfillPaths(stateDir, plan.planId)
+  // Under the plan's lock, so cancel never replaces a checkpoint a running
+  // run or resume is writing, which could drop a replay's query id (#765). A
+  // running run holds the lock: cancel fails, and Ctrl-C stops that run.
+  return withRunLock(runLockPath(paths.runsDir, plan.planId), plan.planId, () => cancelLocked(plan, paths), { command: 'cancel' })
+}
+
+async function cancelLocked(
+  plan: Awaited<ReturnType<typeof readPlan>>['plan'],
+  paths: ReturnType<typeof backfillPaths>,
+): Promise<BackfillStatusSummary> {
   const run = await readRun(paths.runPath)
 
   if (!run) {
