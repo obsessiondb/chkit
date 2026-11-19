@@ -1059,6 +1059,8 @@ def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
         ("toUInt64(toDateTime(0) + interval end day)", ["end", "interval"]),
         ("case global in (1, 2)", ["case"]),
         ("case regexp 'x'", ["case"]),
+        ("arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))", ["end"]),
+        ("length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ["end", "interval"]),
     ],
 )
 def test_reads_keep_keyword_named_columns_where_an_operand_is_expected(

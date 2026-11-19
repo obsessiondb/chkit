@@ -1229,10 +1229,10 @@ const OTHER_OPERATORS: ReadonlySet<string> = new Set(['global', 'regexp'])
  * with that WHEN; a word in `INFIX_KEYWORDS` right after a complete operand;
  * and the name after such an AS (`toUInt64(x AS c)`), which ClickHouse does
  * not read as the column. A complete operand ends on a number, a string, a
- * closing bracket, a literal word, END, a name `skipped` holds, the unit
- * after `extract(`, or a column read where an operand was expected that is
- * not named like a word in `PREFIX_KEYWORDS`. After any other name the next
- * word keeps its read.
+ * closing bracket, a literal word, END, the unit of `extract(unit FROM …)`,
+ * or a name `skipped` holds or a column read where an operand was expected,
+ * when the name is not like a word in `PREFIX_KEYWORDS`. After any other
+ * name the next word keeps its read.
  */
 function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped: ReadonlySet<number>): Set<number> {
   const keywords = new Set<number>()
@@ -1247,7 +1247,8 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
       if (token.text === ')' || token.text === ']' || token.text === '}') state = 'ended'
       else if (token.text !== '.') state = 'operand'
     } else if (name === undefined) state = 'unknown'
-    else if (skipped.has(i)) state = 'ended'
+    // A lambda parameter or a cast type, unless it is named like a prefix keyword.
+    else if (skipped.has(i)) state = PREFIX_KEYWORDS.has(word ?? '') ? 'unknown' : 'ended'
     // A part of a dotted name, or a function call.
     else if (tokens[i - 1]?.text === '.' || tokens[i + 1]?.text === '.' || tokens[i + 1]?.text === '(') continue
     else if (word !== undefined && LITERAL_WORDS.has(word)) {
@@ -1274,7 +1275,7 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
         keywords.add(i)
         state = 'ended'
       }
-    } else if (tokens[i - 1]?.text === '(' && bare(i - 2) === 'extract') state = 'ended'
+    } else if (tokens[i - 1]?.text === '(' && bare(i - 2) === 'extract' && bare(i + 1) === 'from') state = 'ended'
     else state = state === 'operand' && columns.has(name) && !PREFIX_KEYWORDS.has(word ?? '') ? 'ended' : 'unknown'
   }
   return keywords

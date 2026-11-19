@@ -1290,10 +1290,10 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
     in ``_INFIX_KEYWORDS`` right after a complete operand; and the name after
     such an AS (``toUInt64(x AS c)``), which ClickHouse does not read as the
     column. A complete operand ends on a number, a string, a closing bracket,
-    a literal word, END, a name ``skipped`` holds, the unit after
-    ``extract(``, or a column read where an operand was expected that is not
-    named like a word in ``_PREFIX_KEYWORDS``. After any other name the next
-    word keeps its read.
+    a literal word, END, the unit of ``extract(unit FROM …)``, or a name
+    ``skipped`` holds or a column read where an operand was expected, when
+    the name is not like a word in ``_PREFIX_KEYWORDS``. After any other name
+    the next word keeps its read.
     """
     keywords: set[int] = set()
     count = len(tokens)
@@ -1320,7 +1320,8 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
         elif name is None:
             state = "unknown"
         elif i in skipped:
-            state = "ended"
+            # A lambda parameter or a cast type, unless it is named like a prefix keyword.
+            state = "unknown" if word in _PREFIX_KEYWORDS else "ended"
         elif text_at(i - 1) == "." or text_at(i + 1) in (".", "("):
             # A part of a dotted name, or a function call.
             pass
@@ -1351,7 +1352,7 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
                 i += 1
                 keywords.add(i)
                 state = "ended"
-        elif text_at(i - 1) == "(" and bare(i - 2) == "extract":
+        elif text_at(i - 1) == "(" and bare(i - 2) == "extract" and bare(i + 1) == "from":
             state = "ended"
         else:
             ended = state == "operand" and name in columns and word not in _PREFIX_KEYWORDS

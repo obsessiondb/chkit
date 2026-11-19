@@ -1201,6 +1201,8 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ['toUInt64(toDateTime(0) + interval end day)', ['end', 'interval']],
     ['case global in (1, 2)', ['case']],
     ["case regexp 'x'", ['case']],
+    ['arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))', ['end']],
+    ["length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ['end', 'interval']],
   ])('column: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
   })
