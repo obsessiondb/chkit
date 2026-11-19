@@ -523,7 +523,13 @@ function formatBound(value: string, sortKey: SortKey): string {
     return `unhex('${Buffer.from(value, 'latin1').toString('hex')}')`
   }
 
-  return quoteSqlString(value)
+  // A bare string literal is converted to the column type, but the analyzer also
+  // treats it as the same constant as an equal `_partition_id` literal: from
+  // `_partition_id = '3' AND id >= '3' AND id < '133334'` it derives
+  // `_partition_id < '133334'`, a string comparison that is false, and the
+  // filter matches nothing (chkit#826). A typed constant keeps the conversion
+  // and never equals the String partition id.
+  return `CAST(${quoteSqlString(value)}, ${quoteSqlString(sortKey.type)})`
 }
 
 /** Build the `>= from` / `< to` conditions for a single range on `sortKey`. */

@@ -2,6 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import {
   buildChunkExecutionSql,
+  buildWhereClauseFromChunk,
   extractSourceTableRef,
   findTopLevelKeywords,
   injectSortKeyFilter,
@@ -349,11 +350,33 @@ describe('buildChunkExecutionSql cutover_copy', () => {
       'SELECT `id`, `ts`',
       'FROM db.events__cutover_1_snapshot',
       "WHERE _partition_id = 'all'",
-      "  AND id >= '100'",
-      "  AND id < '200'",
-      "  AND toDate(ts) >= '5'",
-      "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= '100' AND id < '200')",
+      "  AND id >= CAST('100', 'UInt64')",
+      "  AND id < CAST('200', 'UInt64')",
+      "  AND toDate(ts) >= CAST('5', 'Date')",
+      "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= CAST('100', 'UInt64') AND id < CAST('200', 'UInt64'))",
       `SETTINGS async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT}`,
+    ])
+  })
+})
+
+describe('buildWhereClauseFromChunk numeric bounds', () => {
+  // chkit#826: a bare '3' equal to the partition id made ClickHouse derive a
+  // string comparison on _partition_id and match no row.
+  test('renders numeric bounds as constants of the sort key type', () => {
+    const where = buildWhereClauseFromChunk(
+      { partitionId: '3', ranges: [{ dimensionIndex: 0, from: '3', to: '133334' }, { dimensionIndex: 1, from: '-1.5' }] },
+      {
+        sortKeys: [
+          { name: 'id', type: 'UInt64', category: 'numeric', boundaryEncoding: 'literal' },
+          { name: 'amount', type: 'Decimal(18, 4)', category: 'numeric', boundaryEncoding: 'literal' },
+        ],
+      },
+    )
+    expect(where.split('\n')).toEqual([
+      "_partition_id = '3'",
+      "  AND id >= CAST('3', 'UInt64')",
+      "  AND id < CAST('133334', 'UInt64')",
+      "  AND amount >= CAST('-1.5', 'Decimal(18, 4)')",
     ])
   })
 })
