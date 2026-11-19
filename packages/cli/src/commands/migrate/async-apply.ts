@@ -51,6 +51,23 @@ const QUERY_LOG_FLUSH_RECHECKS = 5
 // the run reads every replica once more, then stops without an outcome (#767).
 const MAX_UNKNOWN_POLLS = 20
 const QUERY_LOG_FLUSH_RECHECK_INTERVAL_MS = 2_000
+// An async statement is journaled complete at its QueryFinish (#812). An
+// ALTER's mutation finishes once queued unless the query waits for it on every
+// replica, and ON CLUSTER DDL once queued when its wait is off (a timeout of 0)
+// or a mode finishes despite a host that timed out or failed. These make the
+// query wait for the work, and fail when it does not complete. They go after
+// --setting values; a SETTINGS clause in the statement still wins. A SELECT
+// or an INSERT queues no such work and is sent without them, so a profile that
+// fixes one of them does not reject a load.
+export const ASYNC_COMPLETION_SETTINGS: ClickHouseSettings = {
+  mutations_sync: '2',
+  distributed_ddl_task_timeout: '-1',
+  distributed_ddl_output_mode: 'throw',
+}
+
+export function asyncSubmitSettings(sql: string, settings: ClickHouseSettings | undefined): ClickHouseSettings | undefined {
+  return rejectionRunsNothing(sql) ? settings : { ...settings, ...ASYNC_COMPLETION_SETTINGS }
+}
 
 function describeError(error: unknown): string {
   return error instanceof Error ? error.message : String(error)
@@ -300,7 +317,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // Aborted when the run stops without an outcome, so a request not sent yet
   // never starts after the run released the migrate lock (#767).
   const submitAbort = new AbortController()
-  const submitPromise = db.submit(sql, attemptQueryId, settings, { signal: submitAbort.signal })
+  const submitPromise = db.submit(sql, attemptQueryId, asyncSubmitSettings(sql, settings), { signal: submitAbort.signal })
 
   return await pollUntilTerminal({
     rejectionRunsNothing: rejectionRunsNothing(sql),
