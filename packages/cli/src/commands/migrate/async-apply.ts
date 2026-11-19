@@ -13,6 +13,7 @@ import {
 import { rejectionRunsNothing } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import { inProgressChecksumMismatchError, MigrateError } from './errors.js'
+import { asCleanup } from './interrupt.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
 import type { QueryTracker } from './query-intents.js'
 
@@ -73,6 +74,8 @@ export interface AsyncApplyInput {
   queryTracker?: QueryTracker
   /** The run holds no migrate lock because the target database did not exist (#767). */
   locklessBootstrap?: boolean
+  /** Aborted by Ctrl-C: nothing more is sent, and polling stops. */
+  signal?: AbortSignal
   log: (line: string) => void
   pollIntervalMs?: number
   sleep?: (ms: number) => Promise<void>
@@ -169,6 +172,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
       // now gone. We only observe its eventual completion.
       submitPromise: null,
       startedAt: priorOpState.startedAt,
+      signal: input.signal,
     })
   }
 
@@ -208,6 +212,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   // (priorOpState.status === 'completed' was already returned above.)
   // Every attempt's id is random and its own, recorded before its submit
   // (#701, #767).
+  input.signal?.throwIfAborted()
   const attemptQueryId = randomUUID()
   // An attempt that was never sent ran nothing: it is submitted again without
   // the before-retry SQL, which runs only after a rejection or an abandon.
@@ -285,12 +290,16 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     // Re-read so we have the row's actual stored applied_at (matters for
     // subsequent ReplacingMergeTree writes during polling).
     stateAfterStart = await journalStore.readMigrationState(migrationName)
+    input.signal?.throwIfAborted()
     await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
+    // Ctrl-C before the submit: provably not sent.
+    input.signal?.throwIfAborted()
   } catch (error) {
     // Nothing was sent: put the record back to prepared, so a re-run runs
     // it again without an abandon (#767).
     try {
-      await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
+      // Cleanup: an interrupted run sends it too (#816).
+      await asCleanup(() => journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now)))
     } catch (revertError) {
       throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
     }
@@ -322,6 +331,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     submitPromise,
     abortSubmit: () => submitAbort.abort(),
     startedAt,
+    signal: input.signal,
   })
 }
 
@@ -348,6 +358,8 @@ interface PollUntilTerminalInput {
   startedAt: string
   /** Whether an ExceptionBeforeStart of the statement shows it applied nothing (#767). */
   rejectionRunsNothing: boolean
+  /** Ctrl-C: polling stops, and the record stays as it is. */
+  signal?: AbortSignal
 }
 
 async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncApplyResult> {
@@ -401,14 +413,29 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   // Polls in a row that found the query neither running nor in query_log,
   // however polling started (#767).
   let unknownPolls = 0
+  const signal = input.signal
+  // Ctrl-C ends the wait at once.
+  let onAbort: (() => void) | undefined
+  const interrupted = signal ? new Promise<void>((resolve) => {
+    onAbort = resolve
+    if (signal.aborted) resolve()
+    else signal.addEventListener('abort', onAbort, { once: true })
+  }) : undefined
+  const stopIfInterrupted = () => {
+    if (!signal?.aborted) return
+    abandonSubmit()
+    throw new Error(`Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}, query_id ${queryId}) was submitted, and the run was interrupted (SIGINT) before its outcome: the query keeps running on the server, its record stays, and a re-run attaches to it or reads its outcome.`)
+  }
   try {
     for (;;) {
-      await sleep(pollIntervalMs)
+      await (interrupted ? Promise.race([sleep(pollIntervalMs), interrupted]) : sleep(pollIntervalMs))
+      stopIfInterrupted()
       let status: QueryStatus
       try {
         status = await db.queryStatus(queryId, { afterTime: pollAfterTime, includeBeforeStart: true })
         transientPollErrors = 0
       } catch (pollError) {
+        stopIfInterrupted()
         // The poll request itself failed (e.g. HTTP 524 gateway timeout). The async
         // query is very likely still running server-side, so don't abort the migration —
         // keep polling up to a bounded budget. A re-run re-attaches by the id the journal records.
@@ -423,6 +450,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
         )
         continue
       }
+      stopIfInterrupted()
       const elapsedSec = Math.floor((now() - pollStartedAt) / 1000)
 
       // A submit error (a gateway 524, a lost response) says nothing about
@@ -524,6 +552,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       )
     }
   } finally {
+    if (onAbort) signal?.removeEventListener('abort', onAbort)
     if (submitPromiseGuarded && !submitAbandoned) {
       await submitPromiseGuarded.catch(() => {})
     }
