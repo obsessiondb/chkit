@@ -916,8 +916,8 @@ def order_column_statements(
     a table's statements never move past another table's (they share no
     edge). ``renames`` names the columns of each RENAME COLUMN in ``operations``.
     """
-    reads, new_tokens = _default_reads_and_tokens(next_)
-    old_reads, old_tokens = _default_reads_and_tokens(previous)
+    reads = _column_default_reads(next_)
+    old_reads = _column_default_reads(previous)
     ttl_reads = _table_ttl_reads(next_)
     old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
@@ -977,8 +977,6 @@ def order_column_statements(
             previous=previous,
             next_=next_,
             renames=renames,
-            old_tokens=old_tokens,
-            new_tokens=new_tokens,
         )
     )
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
@@ -1003,8 +1001,6 @@ def _repaired_order(  # noqa: PLR0915
     previous: Sequence[SchemaDefinition],
     next_: Sequence[SchemaDefinition],
     renames: Sequence[ColumnRenameSuggestion],
-    old_tokens: dict[str, list[SQLToken]],
-    new_tokens: dict[str, list[SQLToken]],
 ) -> list[int]:
     """The sorted order, with the temporary default cycles it closes broken where reads are certain.
 
@@ -1050,8 +1046,8 @@ def _repaired_order(  # noqa: PLR0915
     )
     if not active:
         return sorted_order
-    old_plain, old_uncertain = _plain_facts(previous, active, old_tokens)
-    new_plain, new_uncertain = _plain_facts(next_, active, new_tokens)
+    old_plain, old_uncertain = _plain_facts(previous, active)
+    new_plain, new_uncertain = _plain_facts(next_, active)
     for table in old_uncertain | new_uncertain:
         active.pop(table, None)
     # Per table: the columns that may close a cycle, the size of its replay
@@ -1213,6 +1209,9 @@ def _break_closed_cycles(  # noqa: PLR0915
     heapq.heapify(ready)
     while ready:
         _, group = heapq.heappop(ready)
+        # A group is looked at again each time a breaker blocks it.
+        if not replay.spend(len(groups[group])):
+            return None
         undo: list[tuple[str, list[str] | None]] = []
         blocked = False
         for target in groups[group]:
@@ -1839,9 +1838,11 @@ def _plain_reads(tokens: list[SQLToken], columns: set[str]) -> list[str] | None:
                 # A quoted ``true``, ``false``, ``inf``, ``nan`` or ``infinity``
                 # reads its column when ClickHouse creates the table or computes
                 # the default, but ALTER's cycle check reads it as a literal.
-                # Only ``null`` reads its column in both.
+                # ClickHouse stores a quoted ``not`` followed by an operand as
+                # NOT, so its check sees no read either. Only ``null`` reads its
+                # column in both.
                 lower = name.lower()
-                if lower != "null" and lower in _LITERAL_WORDS:
+                if lower == "not" or (lower != "null" and lower in _LITERAL_WORDS):
                     return None
                 reads.append(name)
                 operand = False
@@ -2067,24 +2068,11 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
     A name followed by ``(`` is a function call, not a column, and neither are
     the names ``_not_column_names`` finds.
     """
-    return _default_reads_and_tokens(definitions)[0]
-
-
-def _default_reads_and_tokens(
-    definitions: Sequence[SchemaDefinition],
-) -> tuple[dict[str, set[str]], dict[str, list[SQLToken]]]:
-    """``_column_default_reads``, with the tokens (no trivia) of each expression.
-
-    The tokens are by ``_table_id``, NUL and column name, so the cycle repair
-    does not tokenize them again.
-    """
     graph: dict[str, set[str]] = {}
-    tokens: dict[str, list[SQLToken]] = {}
     for definition in definitions:
         if not isinstance(definition, TableDefinition):
             continue
         prefix = f"table:{definition.database}.{definition.name}:column:"
-        table = _table_id(definition.database, definition.name)
         names = {column.name for column in definition.columns}
         for column in definition.columns:
             if column.default is None:
@@ -2092,26 +2080,22 @@ def _default_reads_and_tokens(
             parsed = parse_column_default(column.default)
             if parsed.kind != "expression":
                 continue
-            expression = [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)]
-            tokens[f"{table}\x00{column.name}"] = expression
             read: set[str] = set()
-            for name in _names_read(expression, names):
+            for name in _dotted_names(parsed.sql, names):
                 if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
-    return graph, tokens
+    return graph
 
 
 def _plain_facts(
-    definitions: Sequence[SchemaDefinition],
-    tables: dict[str, None],
-    tokens: dict[str, list[SQLToken]],
+    definitions: Sequence[SchemaDefinition], tables: dict[str, None]
 ) -> tuple[dict[str, dict[str, set[str]]], set[str]]:
     """For the ``tables``: ``_table_id`` to ``_column_id`` to the ``_column_id`` values it reads.
 
     The reads are ``_plain_reads``; the second value is the tables with an
-    expression that is not plain. ``tokens`` are the expressions' tokens from
-    ``_default_reads_and_tokens``.
+    expression that is not plain. Only the ``tables`` are tokenized, and no
+    tokens are kept.
     """
     plain: dict[str, dict[str, set[str]]] = {}
     uncertain: set[str] = set()
@@ -2124,11 +2108,14 @@ def _plain_facts(
         table_plain = plain.setdefault(table, {})
         names = {column.name for column in definition.columns}
         for column in definition.columns:
-            # Only the columns with an expression have tokens.
-            expression = tokens.get(f"{table}\x00{column.name}")
-            if expression is None:
+            if column.default is None:
                 continue
-            certain = _plain_reads(expression, names)
+            parsed = parse_column_default(column.default)
+            if parsed.kind != "expression":
+                continue
+            certain = _plain_reads(
+                [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)], names
+            )
             if certain is None:
                 uncertain.add(table)
                 continue

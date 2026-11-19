@@ -895,10 +895,8 @@ export function orderColumnStatements(
   definitions: ColumnStatementDefinitions,
   renames: readonly ColumnRename[]
 ): MigrationOperation[] {
-  const facts = defaultReadsAndTokens(definitions.next)
-  const oldFacts = defaultReadsAndTokens(definitions.previous)
-  const reads = facts.reads
-  const oldReads = oldFacts.reads
+  const reads = columnDefaultReads(definitions.next)
+  const oldReads = columnDefaultReads(definitions.previous)
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
@@ -947,7 +945,7 @@ export function orderColumnStatements(
     return [...found]
   })
 
-  const ordered = repairedOrder(prerequisites, statements, definitions, renames, oldFacts.tokens, facts.tokens)
+  const ordered = repairedOrder(prerequisites, statements, definitions, renames)
   let next = 0
   return operations.map((op) => (isColumnStatement(op) ? (statements[ordered[next++] ?? -1] ?? op) : op))
 }
@@ -976,9 +974,7 @@ function repairedOrder(
   prerequisites: number[][],
   statements: MigrationOperation[],
   definitions: ColumnStatementDefinitions,
-  renames: readonly ColumnRename[],
-  oldTokens: ReadonlyMap<string, SQLToken[]>,
-  newTokens: ReadonlyMap<string, SQLToken[]>
+  renames: readonly ColumnRename[]
 ): number[] {
   cycleRepairWork.units = 0
   // Every search below walks prerequisites in index order, so the work it
@@ -1013,8 +1009,8 @@ function repairedOrder(
     if (column !== undefined && !excluded.has(column.table)) active.add(column.table)
   }
   if (active.size === 0) return sorted
-  const oldPlain = plainFacts(definitions.previous, active, oldTokens)
-  const newPlain = plainFacts(definitions.next, active, newTokens)
+  const oldPlain = plainFacts(definitions.previous, active)
+  const newPlain = plainFacts(definitions.next, active)
   for (const table of [...oldPlain.uncertain, ...newPlain.uncertain]) active.delete(table)
   // Per table: the columns that may close a cycle, the size of its replay
   // (those columns and all their reads) and its old expressions.
@@ -1178,6 +1174,8 @@ function breakClosedCycles(
   for (let first = heapPop(ready); first !== undefined; first = heapPop(ready)) {
     const group = groupAt.get(first) ?? 0
     const members = groups[group] ?? []
+    // A group is looked at again each time a breaker blocks it.
+    if (!replay.spend(members.length)) return undefined
     const undo: Array<[string, readonly string[] | undefined]> = []
     let blocked = false
     for (const target of members) {
@@ -1769,9 +1767,11 @@ function plainReads(tokens: SQLToken[], columns: ReadonlySet<string>): string[] 
         if (name === undefined || !columns.has(name)) return undefined
         // A quoted `true`, `false`, `inf`, `nan` or `infinity` reads its column
         // when ClickHouse creates the table or computes the default, but ALTER's
-        // cycle check reads it as a literal. Only `null` reads its column in both.
+        // cycle check reads it as a literal. ClickHouse stores a quoted `not`
+        // followed by an operand as NOT, so its check sees no read either. Only
+        // `null` reads its column in both.
         const lower = name.toLowerCase()
-        if (lower !== 'null' && LITERAL_WORDS.has(lower)) return undefined
+        if (lower === 'not' || (lower !== 'null' && LITERAL_WORDS.has(lower))) return undefined
         reads.push(name)
         operand = false
       } else if (text === '(') frames.push('group')
@@ -1956,47 +1956,33 @@ function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): str
  * call, not a column, and neither are the names `notColumnNames` finds.
  */
 export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
-  return defaultReadsAndTokens(definitions).reads
-}
-
-/**
- * `columnDefaultReads`, with the tokens (no trivia) of each expression by
- * its `tableId`, NUL and column name, so the cycle repair does not
- * tokenize them again.
- */
-function defaultReadsAndTokens(definitions: SchemaDefinition[]): { reads: DependencyGraph; tokens: Map<string, SQLToken[]> } {
   const graph = new Map<string, Set<string>>()
-  const tokens = new Map<string, SQLToken[]>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
     const keyOf = (name: string) => columnKey({ database: def.database, table: def.name }, name)
-    const table = tableId(def.database, def.name)
     const names = new Set(def.columns.map((column) => column.name))
     for (const column of def.columns) {
       if (column.default === undefined) continue
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
-      const expression = tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token))
-      tokens.set(`${table}\u0000${column.name}`, expression)
       const read = new Set<string>()
-      for (const name of namesRead(expression, names)) {
+      for (const name of dottedNames(parsed.sql, names)) {
         if (name !== column.name) read.add(keyOf(name))
       }
       graph.set(keyOf(column.name), read)
     }
   }
-  return { reads: graph, tokens }
+  return graph
 }
 
 /**
  * For the `tables`: `tableId` → `columnId` → the `columnId`s its expression
  * reads (`plainReads`), and the tables with an expression that is not plain.
- * `tokens` are the expressions' tokens from `defaultReadsAndTokens`.
+ * Only the `tables` are tokenized, and no tokens are kept.
  */
 function plainFacts(
   definitions: SchemaDefinition[],
-  tables: ReadonlySet<string>,
-  tokens: ReadonlyMap<string, SQLToken[]>
+  tables: ReadonlySet<string>
 ): { plain: Map<string, Map<string, Set<string>>>; uncertain: Set<string> } {
   const plain = new Map<string, Map<string, Set<string>>>()
   const uncertain = new Set<string>()
@@ -2008,10 +1994,13 @@ function plainFacts(
     plain.set(table, tablePlain)
     const names = new Set(def.columns.map((column) => column.name))
     for (const column of def.columns) {
-      // Only the columns with an expression have tokens.
-      const expression = tokens.get(`${table}\u0000${column.name}`)
-      if (expression === undefined) continue
-      const certain = plainReads(expression, names)
+      if (column.default === undefined) continue
+      const parsed = parseColumnDefault(column.default)
+      if (parsed.kind !== 'expression') continue
+      const certain = plainReads(
+        tokenizeSQL(parsed.sql).filter((token) => !isTrivia(token)),
+        names
+      )
       if (certain === undefined) {
         uncertain.add(table)
         continue

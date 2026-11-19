@@ -1799,13 +1799,16 @@ def test_query_words_and_unit_calls_keep_the_sorted_order(
         ("Inf", _FALLBACK),
         ("nan", _FALLBACK),
         ("infinity", _FALLBACK),
+        ("not", _FALLBACK),
+        ("NoT", _FALLBACK),
         ("null", _REPAIRED),
     ],
 )
 def test_a_quoted_literal_word_keeps_the_sorted_order(name: str, order: list[str]) -> None:
     # ALTER's cycle check reads a quoted `true`, `false`, `inf`, `nan` or
-    # `infinity` as a literal, so an expression with one keeps the sorted
-    # order; a quoted `null` reads its column.
+    # `infinity` as a literal, and ClickHouse stores a quoted `not` before an
+    # operand as NOT, so an expression with one keeps the sorted order; a
+    # quoted `null` reads its column.
     extra = [_u(name), _u("extra", f"toUInt64(`{name}`)")]
     assert _order_of(
         [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]
@@ -1820,6 +1823,15 @@ def test_a_quoted_true_is_no_read_of_a_column_with_that_name() -> None:
         [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _text("true", "c")])],
         [_t([_u("a", "toUInt64(`true`)"), _u("b", "a + 1"), _text("c", "'x'"), _text("true", "'y'")])],
     ) == ["t.a", "t.b", "t.c", "t.true"]
+
+
+def test_a_quoted_not_is_no_read_of_a_column_with_that_name() -> None:
+    # ClickHouse stores `` `not` + 1 `` as `NOT 1`, so `a` does not read the
+    # column `not` and the table keeps its sorted order.
+    assert _order_of(
+        [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _u("not", "length(c)")])],
+        [_t([_u("a", "`not` + 1"), _u("b", "a + 1"), _text("c", "'x'"), _u("not", "5")])],
+    ) == ["t.a", "t.b", "t.c", "t.not"]
 
 
 def test_charges_the_reads_a_modify_keeps() -> None:
@@ -1876,17 +1888,17 @@ def _chain_and_fan_in() -> tuple[_Schema, _Schema]:
 
 # The work and the plan at the edge of the work budget, the same as in the TS
 # tests (planner-dependency-order.test.ts). Nine cycles through one long chain
-# of unchanged defaults: with 87 links the table is repaired, with 88 it runs
+# of unchanged defaults: with 85 links the table is repaired, with 86 it runs
 # out of work and keeps the sorted order.
 _BUDGET_EDGE: dict[str, tuple[tuple[_Schema, _Schema], int, str, str]] = {
     "nine cycles through 449 links": (
         _nine_cycles(449), 12368, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
     ),
-    "nine cycles through 87 links": (
-        _nine_cycles(87), 3673, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+    "nine cycles through 85 links": (
+        _nine_cycles(85), 3632, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
     ),
-    "nine cycles through 88 links": (
-        _nine_cycles(88), 3704, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
+    "nine cycles through 86 links": (
+        _nine_cycles(86), 3656, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
     ),
     "a chain and a fan-in": (
         _chain_and_fan_in(), 1816, "m", "f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36"

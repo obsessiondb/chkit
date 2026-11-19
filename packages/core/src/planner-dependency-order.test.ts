@@ -1745,14 +1745,17 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   })
 
   // ALTER's cycle check reads a quoted `true`, `false`, `inf`, `nan` or
-  // `infinity` as a literal, so an expression with one keeps the sorted
-  // order; a quoted `null` reads its column.
+  // `infinity` as a literal, and ClickHouse stores a quoted `not` before an
+  // operand as NOT, so an expression with one keeps the sorted order; a
+  // quoted `null` reads its column.
   test.each<[string, string[]]>([
     ['true', ['t.a', 't.b', 't.c']],
     ['FALSE', ['t.a', 't.b', 't.c']],
     ['Inf', ['t.a', 't.b', 't.c']],
     ['nan', ['t.a', 't.b', 't.c']],
     ['infinity', ['t.a', 't.b', 't.c']],
+    ['not', ['t.a', 't.b', 't.c']],
+    ['NoT', ['t.a', 't.b', 't.c']],
     ['null', ['t.b', 't.a', 't.c']],
   ])('with a quoted %s in an unchanged DEFAULT, the MODIFYs run in the order %p', (name, order) => {
     const extra = [u(name), u('extra', `toUInt64(\`${name}\`)`)]
@@ -1769,6 +1772,17 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
         [t([u('a', 'toUInt64(`true`)'), u('b', 'a + 1'), text('c', "'x'"), text('true', "'y'")])]
       )
     ).toEqual(['t.a', 't.b', 't.c', 't.true'])
+  })
+
+  // ClickHouse stores `` `not` + 1 `` as `NOT 1`, so `a` does not read the
+  // column `not` and the table keeps its sorted order.
+  test('a quoted not is no read of a column with that name', () => {
+    expect(
+      orderOf(
+        [t([{ name: 'a', type: 'String' }, u('b'), text('c', 'a'), u('not', 'length(c)')])],
+        [t([u('a', '`not` + 1'), u('b', 'a + 1'), text('c', "'x'"), u('not', '5')])]
+      )
+    ).toEqual(['t.a', 't.b', 't.c', 't.not'])
   })
 
   // Every read the replay looks at uses work, also the reads a change keeps.
@@ -1793,8 +1807,8 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
 
   // The work and the plan at the edge of the work budget, the same in
   // chkit-py under every hash seed (test_planner_dependency_order.py). Nine
-  // cycles through one long chain of unchanged defaults: with 87 links the
-  // table is repaired, with 88 it runs out of work and keeps the sorted order.
+  // cycles through one long chain of unchanged defaults: with 85 links the
+  // table is repaired, with 86 it runs out of work and keeps the sorted order.
   const nineCycles = (chain: number): [ColumnDefinition[], ColumnDefinition[]] => {
     const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
     const k = Array.from({ length: 9 }, (_, i) => i)
@@ -1820,8 +1834,8 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   }
   test.each<[string, () => [ColumnDefinition[], ColumnDefinition[]], number, string, string]>([
     ['nine cycles through 449 links', () => nineCycles(449), 12368, 'a', '5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd'],
-    ['nine cycles through 87 links', () => nineCycles(87), 3673, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
-    ['nine cycles through 88 links', () => nineCycles(88), 3704, 'a', '5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd'],
+    ['nine cycles through 85 links', () => nineCycles(85), 3632, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
+    ['nine cycles through 86 links', () => nineCycles(86), 3656, 'a', '5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd'],
     ['a chain and a fan-in', chainAndFanIn, 1816, 'm', 'f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36'],
   ])('plans %s with the same work and SQL as chkit-py', (_, columns, units, first, digest) => {
     const [before, after] = columns()
