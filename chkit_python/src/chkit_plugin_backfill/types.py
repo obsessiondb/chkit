@@ -107,6 +107,16 @@ class BackfillChunkProgress(BaseModel):
     elapsed_ms: int | None = Field(default=None, alias="elapsedMs")
     duration_ms: int | None = Field(default=None, alias="durationMs")
     error: str | None = None
+    # Set on an attempt this release recorded: it is sent once under its query
+    # id (#765). Older releases could send one id twice (a resume resubmitted
+    # the chunk's id, and the driver resent a reset request), so a failure row
+    # of an attempt without it proves nothing.
+    single_send: bool | None = Field(default=None, alias="singleSend")
+    # A secondary query this attempt ran on another replica or shard, once any
+    # read saw one (#765). It stays recorded: the query can leave
+    # system.processes before its query_log row is visible, and such an
+    # attempt's failure never proves a safe replay.
+    secondary_query_id: str | None = Field(default=None, alias="secondaryQueryId")
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 
@@ -124,6 +134,9 @@ class BackfillRunState(BaseModel):
     completed_at: str | None = Field(default=None, alias="completedAt")
     last_error: str | None = Field(default=None, alias="lastError")
     progress: dict[str, BackfillChunkProgress] = Field(default_factory=dict)
+    # CHECKPOINT_VERSION of the format ``progress`` is in; unset when an older
+    # release wrote it (#765).
+    checkpoint_version: int | None = Field(default=None, alias="checkpointVersion")
 
     model_config = ConfigDict(frozen=False, extra="ignore", populate_by_name=True)
 

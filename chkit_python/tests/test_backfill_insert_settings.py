@@ -19,10 +19,18 @@ import pytest
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.core.model import ChxResolvedClickHouseConfig
-from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
+from chkit_plugin_backfill.chunking.sql import (
+    PINNED_INSERT_SETTINGS_SQL as _PINNED_INSERT,
+)
+from chkit_plugin_backfill.chunking.sql import (
+    assert_insert_settings_keep_pinned,
+    build_chunk_execution_sql,
+    unpinned_insert_settings,
+)
 from chkit_plugin_backfill.chunking.types import Chunk, TableProfile
+from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import PluginConfig
-from chkit_plugin_backfill.planner import BuildBackfillPlanOutput
+from chkit_plugin_backfill.planner import BuildBackfillPlanOutput, read_pinned_setting_aliases
 from chkit_plugin_backfill.plugin import backfill
 from chkit_plugin_obsessiondb import backfill_submit as backfill_submit_module
 from chkit_plugin_obsessiondb.backfill_submit import (
@@ -82,9 +90,9 @@ def test_without_insert_settings_the_clause_is_unchanged() -> None:
     )
 
     assert _settings_line(with_token) == (
-        f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok'"
+        f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok', {_PINNED_INSERT}"
     )
-    assert _settings_line(without_token) == f"SETTINGS async_insert=0, {PINNED}"
+    assert _settings_line(without_token) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
 
 
 def test_insert_settings_are_appended_to_the_single_settings_clause_in_order() -> None:
@@ -110,7 +118,7 @@ def test_insert_settings_are_appended_to_the_single_settings_clause_in_order() -
         f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok', "
         "max_insert_threads=4, min_insert_block_size_rows=1000000, "
         "log_comment='it\\'s chkit', insert_deduplicate=true, "
-        "max_partitions_per_insert_block=0, ratio=0.5, whole_float=2"
+        f"max_partitions_per_insert_block=0, ratio=0.5, whole_float=2, {_PINNED_INSERT}"
     )
 
 
@@ -124,8 +132,107 @@ def test_insert_settings_without_a_token() -> None:
     )
 
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, insert_deduplicate=false"
+        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, insert_deduplicate=false, "
+        f"{_PINNED_INSERT}"
     )
+
+
+# Opus delta review: insertSettings that set a pinned setting, or an alias of
+# one, to another value are refused; with the pinned value they are dropped,
+# so the setting appears once, pinned.
+def test_insert_settings_with_the_pinned_value_are_dropped() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p",
+        chunk=_chunk(),
+        target="app.events",
+        table=TABLE,
+        insert_settings={
+            "enable_parallel_replicas": 0,
+            "allow_experimental_parallel_reading_from_replicas": False,
+            "log_queries": True,
+            "log_queries_min_type": "query_start",
+            "max_insert_threads": 2,
+        },
+    )
+
+    assert _settings_line(sql) == (
+        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, {_PINNED_INSERT}"
+    )
+
+
+@pytest.mark.parametrize(
+    ("settings", "named"),
+    [
+        ({"log_queries": False}, "log_queries=false"),
+        ({"parallel_distributed_insert_select": 2}, "parallel_distributed_insert_select=2"),
+        ({"log_queries_min_type": "QUERY_FINISH"}, "log_queries_min_type='QUERY_FINISH'"),
+        ({"log_queries_min_query_duration_ms": 1000}, "log_queries_min_query_duration_ms=1000"),
+        (
+            {"allow_experimental_parallel_reading_from_replicas": 1},
+            "allow_experimental_parallel_reading_from_replicas=1",
+        ),
+        (
+            {"enable_parallel_replicas": 1},
+            "enable_parallel_replicas=1 (an alias of "
+            "allow_experimental_parallel_reading_from_replicas)",
+        ),
+    ],
+)
+def test_insert_settings_that_change_a_pinned_setting_are_refused(
+    settings: dict[str, str | int | bool], named: str
+) -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            insert_settings=settings,
+        )
+
+    assert str(raised.value) == (
+        f"insertSettings sets {named}, which every backfill chunk INSERT pins "
+        f"({_PINNED_INSERT}): with another value, its failure cannot be proven from "
+        "system.query_log, and a replay could write its rows twice. Remove them from "
+        "insertSettings."
+    )
+
+
+def test_an_alias_the_server_lists_is_checked_and_dropped_too() -> None:
+    aliases = {"log_queries_alias": "log_queries"}
+    with pytest.raises(BackfillConfigError) as raised:
+        assert_insert_settings_keep_pinned({"log_queries_alias": 0}, aliases)
+    assert "insertSettings sets log_queries_alias=0 (an alias of log_queries)" in str(
+        raised.value
+    )
+
+    kept = {"log_queries_alias": 1, "max_insert_threads": 4}
+    assert_insert_settings_keep_pinned(kept, aliases)
+    assert unpinned_insert_settings(kept, aliases) == {"max_insert_threads": 4}
+
+
+def test_the_server_aliases_come_from_system_settings_alias_for() -> None:
+    reads: list[str] = []
+
+    def query(sql: str, _settings: object = None) -> list[dict[str, object]]:
+        reads.append(sql)
+        return [{"name": "enable_parallel_replicas", "alias_for": "allow_experimental_parallel_reading_from_replicas"}]
+
+    aliases = read_pinned_setting_aliases(query)
+
+    assert aliases == {"enable_parallel_replicas": "allow_experimental_parallel_reading_from_replicas"}
+    assert reads == [
+        "SELECT name, alias_for FROM system.settings WHERE alias_for IN ("
+        "'allow_experimental_parallel_reading_from_replicas', "
+        "'parallel_distributed_insert_select', 'log_queries', 'log_queries_min_type', "
+        "'log_queries_min_query_duration_ms')"
+    ]
+
+
+def test_a_server_without_alias_for_falls_back_to_the_static_aliases() -> None:
+    def query(_sql: str, _settings: object = None) -> list[dict[str, object]]:
+        raise RuntimeError("Missing columns: 'alias_for'")
+
+    assert read_pinned_setting_aliases(query) == {}
+    with pytest.raises(BackfillConfigError):
+        assert_insert_settings_keep_pinned({"enable_parallel_replicas": 1}, {})
 
 
 def test_insert_settings_apply_to_the_mv_replay_union_insert() -> None:
@@ -140,7 +247,7 @@ def test_insert_settings_apply_to_the_mv_replay_union_insert() -> None:
 
     assert sql.count("SETTINGS") == 1
     assert "UNION ALL" in sql
-    assert sql.endswith(f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=8")
+    assert sql.endswith(f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=8, {_PINNED_INSERT}")
 
 
 # ---------- plugin options ----------
@@ -170,7 +277,7 @@ def test_build_submit_tasks_renders_the_insert_settings() -> None:
 
     for task in tasks:
         assert task.sql.count("SETTINGS") == 1
-        assert task.sql.endswith(", max_insert_threads=4")
+        assert task.sql.endswith(f", max_insert_threads=4, {_PINNED_INSERT}")
 
 
 def test_handle_submit_uses_the_backfill_plugin_insert_settings(
@@ -213,7 +320,9 @@ def test_handle_submit_uses_the_backfill_plugin_insert_settings(
 
     assert code == 0
     [call] = submitted
-    assert all(task.sql.endswith(", max_insert_threads=6") for task in call["tasks"])
+    assert all(
+        task.sql.endswith(f", max_insert_threads=6, {_PINNED_INSERT}") for task in call["tasks"]
+    )
 
 
 # ---------- live ClickHouse ----------
@@ -264,7 +373,7 @@ def test_insert_with_insert_settings_runs_on_clickhouse() -> None:
             idempotency_token=f"{prefix}-token",
             # enable_parallel_replicas=0: ObsessionDB enables parallel replicas by
             # default, and the `_partition_id` filter can then miss freshly
-            # inserted parts. Exactly the kind of setting insertSettings is for.
+            # inserted parts. It matches the INSERT's pin, so it is dropped.
             insert_settings={
                 "enable_parallel_replicas": 0,
                 "max_insert_threads": 2,
@@ -301,3 +410,64 @@ def _poll_count(
             return count
         time.sleep(0.25)
     return count
+
+
+# Final check: a key that is not a setting name could smuggle a setting past
+# the pinned-settings filter, and a value must never close its quote.
+@pytest.mark.parametrize(
+    "key",
+    [" parallel_distributed_insert_select", "max_threads=1, parallel_distributed_insert_select"],
+)
+def test_an_insert_settings_key_that_is_not_a_setting_name_is_refused(key: str) -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            insert_settings={key: 2},
+        )
+
+    assert str(raised.value) == (
+        f"insertSettings has a key that is not a setting name: {key!r}. A setting name is "
+        "letters, digits and underscores, not starting with a digit."
+    )
+
+
+_INJECTION = "x\\', parallel_distributed_insert_select=2, log_comment='y"
+
+
+def test_a_value_cannot_close_its_quote() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={"log_comment": _INJECTION},
+    )
+
+    assert _settings_line(sql) == (
+        f"SETTINGS async_insert=0, {PINNED}, "
+        "log_comment='x\\\\\\', parallel_distributed_insert_select=2, log_comment=\\'y', "
+        f"{_PINNED_INSERT}"
+    )
+
+
+def test_clickhouse_reads_a_quote_breaking_value_as_one_string() -> None:
+    env = resolve_live_env()
+    config = ChxResolvedClickHouseConfig(
+        url=env.clickhouse_url,
+        username=env.clickhouse_user,
+        password=env.clickhouse_password,
+        database=env.clickhouse_database,
+        secure=env.clickhouse_url.startswith("https"),
+    )
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={"log_comment": _INJECTION},
+    )
+    settings = _settings_line(sql).removeprefix("SETTINGS ")
+    client = ClickHouseClient.connect(config)
+    try:
+        rows = client.query(
+            "SELECT getSetting('log_comment') AS comment, "
+            f"getSetting('parallel_distributed_insert_select') AS pdis SETTINGS {settings}"
+        ).rows
+    finally:
+        client.close()
+
+    assert rows == [{"comment": _INJECTION, "pdis": 0}]

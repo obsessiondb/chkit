@@ -7,6 +7,8 @@ tooling) needs, re-exported from one module.
 from __future__ import annotations
 
 from chkit_plugin_backfill.async_backfill import (
+    CHECKPOINT_VERSION,
+    BackfillInterruptedError,
     BackfillResult,
     execute_backfill,
     sync_progress,
@@ -66,9 +68,11 @@ from chkit_plugin_backfill.types import (
 )
 
 __all__ = [
+    "CHECKPOINT_VERSION",
     "CHKIT_BACKFILL_LOGGER_CATEGORY",
     "CHKIT_LOGGER_CATEGORY",
     "BackfillChunkState",
+    "BackfillInterruptedError",
     "BackfillPlanState",
     "BackfillProgress",
     "BackfillResult",

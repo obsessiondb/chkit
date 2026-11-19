@@ -22,6 +22,7 @@ from chkit_plugin_backfill.chunking.types import (
     TableProfile,
 )
 from chkit_plugin_backfill.chunking.utils.binary_string import latin1_bytes
+from chkit_plugin_backfill.errors import BackfillConfigError
 
 # Top-level clause keywords, in the order they may legally follow a
 # projection. `inject_where_condition` uses this both to detect an existing
@@ -70,6 +71,101 @@ def _js_trim(value: str) -> str:
 
 
 # ── Chunk execution SQL ──────────────────────────────────────────────────────
+
+
+#: Settings every chunk INSERT runs with, in its own SETTINGS so they win over
+#: profile defaults (#765, TS ``PINNED_INSERT_SETTINGS``). The INSERT never runs
+#: as secondary queries on other replicas or shards (parallel replicas, a
+#: Distributed INSERT SELECT), whose writes its own written_rows may not count
+#: and whose query_log rows can flush late, and it is always logged, its start
+#: included: a resume proves a failure from that log alone.
+PINNED_INSERT_SETTINGS: dict[str, str] = {
+    "allow_experimental_parallel_reading_from_replicas": "0",
+    "parallel_distributed_insert_select": "0",
+    "log_queries": "1",
+    "log_queries_min_type": "'QUERY_START'",
+    "log_queries_min_query_duration_ms": "0",
+}
+
+PINNED_INSERT_SETTINGS_SQL = ", ".join(
+    f"{name}={value}" for name, value in PINNED_INSERT_SETTINGS.items()
+)
+
+
+#: Other names of the pinned settings (``system.settings.alias_for``), for a
+#: server that does not list them: ``enable_parallel_replicas`` is an alias of
+#: ``allow_experimental_parallel_reading_from_replicas`` from 24.10 on.
+PINNED_SETTING_ALIASES: dict[str, str] = {
+    "enable_parallel_replicas": "allow_experimental_parallel_reading_from_replicas",
+}
+
+
+# A setting name; any other key could smuggle text into the SETTINGS clause.
+_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
+def _pinned_name(key: str, aliases: Mapping[str, str] | None) -> str | None:
+    """The pinned setting ``key`` names, itself or through an alias."""
+    if key in PINNED_INSERT_SETTINGS:
+        return key
+    name = {**PINNED_SETTING_ALIASES, **(aliases or {})}.get(key)
+    return name if name in PINNED_INSERT_SETTINGS else None
+
+
+def _same_value(value: str | int | float | bool, pinned: str) -> bool:
+    def normal(text: str) -> str:
+        bare = text.strip("'").lower()
+        return {"true": "1", "false": "0"}.get(bare, bare)
+
+    return normal(_render_insert_setting_value(value)) == normal(pinned)
+
+
+def assert_insert_settings_keep_pinned(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+    aliases: Mapping[str, str] | None = None,
+) -> None:
+    """Refuse ``insertSettings`` that set a pinned setting
+    (``PINNED_INSERT_SETTINGS``), or an alias of one, to another value: the
+    chunk INSERT must not run as secondary queries, and must be logged. One
+    with the pinned value is dropped (``unpinned_insert_settings``).
+    ``aliases`` adds the server's own (``system.settings.alias_for``) to
+    ``PINNED_SETTING_ALIASES``."""
+    invalid = [key for key in insert_settings or {} if not _SETTING_NAME.fullmatch(key)]
+    if invalid:
+        names = ", ".join(repr(key) for key in invalid)
+        msg = (
+            f"insertSettings has a key that is not a setting name: {names}. A setting name "
+            "is letters, digits and underscores, not starting with a digit."
+        )
+        raise BackfillConfigError(msg)
+    conflicts = []
+    for key, value in (insert_settings or {}).items():
+        name = _pinned_name(key, aliases)
+        if name is None or _same_value(value, PINNED_INSERT_SETTINGS[name]):
+            continue
+        rendered = f"{key}={_render_insert_setting_value(value)}"
+        conflicts.append(rendered if name == key else f"{rendered} (an alias of {name})")
+    if conflicts:
+        msg = (
+            f"insertSettings sets {', '.join(conflicts)}, which every backfill chunk INSERT "
+            f"pins ({PINNED_INSERT_SETTINGS_SQL}): with another value, its failure cannot be "
+            "proven from system.query_log, and a replay could write its rows twice. Remove "
+            "them from insertSettings."
+        )
+        raise BackfillConfigError(msg)
+
+
+def unpinned_insert_settings(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+    aliases: Mapping[str, str] | None = None,
+) -> dict[str, str | int | float | bool]:
+    """``insert_settings`` without the pinned settings and their aliases: a
+    pinned one appears once in the INSERT's SETTINGS, with its pinned value."""
+    return {
+        key: value
+        for key, value in (insert_settings or {}).items()
+        if _pinned_name(key, aliases) is None
+    }
 
 
 def build_chunk_execution_sql(
@@ -174,8 +270,10 @@ def _build_cutover_chunk_sql(
         "insert_deduplicate=0",
         "select_sequential_consistency=1",
     ]
-    for setting, value in (insert_settings or {}).items():
+    assert_insert_settings_keep_pinned(insert_settings)
+    for setting, value in unpinned_insert_settings(insert_settings).items():
         parts.append(f"{setting}={_render_insert_setting_value(value)}")
+    parts.append(PINNED_INSERT_SETTINGS_SQL)
     lines = [
         header,
         f"INSERT INTO {target} ({columns})",
@@ -638,16 +736,19 @@ def _build_settings_clause(
     # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,
     # min_insert_block_size_rows). Rendered into the single SETTINGS clause because
     # ClickHouse rejects a second SETTINGS clause on INSERT ... SELECT.
-    for key, value in (insert_settings or {}).items():
+    assert_insert_settings_keep_pinned(insert_settings)
+    for key, value in unpinned_insert_settings(insert_settings).items():
         parts.append(f"{key}={_render_insert_setting_value(value)}")
+    parts.append(PINNED_INSERT_SETTINGS_SQL)
     return f"SETTINGS {', '.join(parts)}"
 
 
 def _render_insert_setting_value(value: str | int | float | bool) -> str:
-    """JS template rendering: strings single-quoted (``'`` escaped as ``\\'``),
-    booleans as ``true``/``false``, numbers via ``String(number)``."""
+    """JS template rendering: strings single-quoted (``\\`` escaped as
+    ``\\\\`` and ``'`` as ``\\'``, so a value cannot close its quote), booleans
+    as ``true``/``false``, numbers via ``String(number)``."""
     if isinstance(value, str):
-        escaped = value.replace("'", "\\'")
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
         return f"'{escaped}'"
     if isinstance(value, bool):
         return "true" if value else "false"

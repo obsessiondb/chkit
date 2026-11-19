@@ -23,6 +23,7 @@ from chkit_plugin_backfill import sdk
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import (
     PLAN_FLAG_MAP,
+    RESUME_FLAG_MAP,
     RUN_FLAG_MAP,
     CheckOptions,
     PlanOptions,
@@ -175,6 +176,19 @@ def test_resume_options_extends_run_options_with_replay_failed() -> None:
     assert opts.force_environment is False
     assert opts.concurrency == 3
     assert opts.poll_interval_ms == 5000
+    assert opts.replay_failed is False
+    assert opts.accept_unknown is False
+
+
+def test_accept_unknown_flag_sets_accept_unknown() -> None:
+    flag_options = _options_from_flags(
+        {"--plan-id": "abc123def456789a", "--accept-unknown": True}, RESUME_FLAG_MAP
+    )
+    opts = ResumeOptions.model_validate(
+        _with_factory_defaults(set(ResumeOptions.model_fields), PluginConfig(), flag_options)
+    )
+
+    assert opts.accept_unknown is True
     assert opts.replay_failed is False
 
 
