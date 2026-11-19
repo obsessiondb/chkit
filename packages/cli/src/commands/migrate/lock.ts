@@ -132,6 +132,12 @@ export function migrateLockDisabled(): boolean {
   return value === 'off' || value === '0' || value === 'false'
 }
 
+/** Whether CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK lets a run with the lock off submit async statements (#810). */
+export function asyncWithoutLockAccepted(): boolean {
+  const value = process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK?.trim().toLowerCase()
+  return value === '1' || value === 'true' || value === 'on'
+}
+
 function escapeSqlString(value: string): string {
   return value.replace(/\\/g, '\\\\').replace(/'/g, "\\'")
 }

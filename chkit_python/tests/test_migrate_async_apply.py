@@ -2253,6 +2253,39 @@ def test_a_run_without_the_migrate_lock_stops_before_an_async_statement() -> Non
     assert journal.writes == []
 
 
+def test_a_run_with_the_lock_off_stops_before_an_async_statement(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#810: a run with CHKIT_MIGRATE_LOCK=off holds no lock either, so it
+    stops the same way unless CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK accepts the risk."""
+    monkeypatch.setenv("CHKIT_MIGRATE_LOCK", "off")
+    monkeypatch.delenv("CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK", raising=False)
+    client = _ScriptedClient(statuses=[QueryStatus(status="unknown")], strict=True)
+    journal = _FakeJournalStore()
+    with pytest.raises(MigrateError) as info:
+        apply_async_statement(_input(client=client, journal=journal))
+    assert info.value.code == "async_needs_lock"
+    assert "CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1" in info.value.message
+    assert client.submitted == []
+    assert journal.writes == []
+
+
+def test_async_without_lock_submits_with_the_lock_off(monkeypatch: pytest.MonkeyPatch) -> None:
+    """#810: CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 accepts the risk."""
+    monkeypatch.setenv("CHKIT_MIGRATE_LOCK", "off")
+    monkeypatch.setenv("CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK", "1")
+    client = _ScriptedClient(
+        statuses=[
+            QueryStatus(status="unknown"),
+            QueryStatus(status="finished", written_rows=1, duration_ms=10),
+        ],
+        strict=True,
+    )
+    result = apply_async_statement(_input(client=client, journal=_FakeJournalStore()))
+    assert result.kind == "completed"
+    assert len(client.submitted) == 1
+
+
 class _LaggingJournal(_FakeJournalStore):
     """Its server read-back misses the record until ``lag`` is cleared."""
 

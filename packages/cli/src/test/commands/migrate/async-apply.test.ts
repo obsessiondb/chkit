@@ -1,4 +1,4 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, test } from 'bun:test'
 
 import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus, QueryStatusOptions } from '@chkit/clickhouse'
 
@@ -994,6 +994,45 @@ describe('applyAsyncStatement', () => {
     ).rejects.toMatchObject({ code: 'async_needs_lock', message: expect.stringContaining('Run chkit migrate --apply again') })
     expect(fake.submitCalls).toEqual([])
     expect(writes).toEqual([])
+  })
+
+  // #810: a run with CHKIT_MIGRATE_LOCK=off holds no lock either, so it stops
+  // the same way unless CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK accepts the risk.
+  describe('with CHKIT_MIGRATE_LOCK=off', () => {
+    const saved = { lock: process.env.CHKIT_MIGRATE_LOCK, accept: process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK }
+    const restore = (name: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
+    afterEach(() => {
+      restore('CHKIT_MIGRATE_LOCK', saved.lock)
+      restore('CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK', saved.accept)
+    })
+
+    test('a run stops before an async statement with async_needs_lock', async () => {
+      process.env.CHKIT_MIGRATE_LOCK = 'off'
+      delete process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK
+      const fake = createFakeExecutor([{ status: 'unknown' }])
+      const { store, writes } = createFakeJournalStore(null)
+
+      await expect(
+        applyAsyncStatement({ ...BASE_INPUT, db: fake.db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+      ).rejects.toMatchObject({ code: 'async_needs_lock', message: expect.stringContaining('CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1') })
+      expect(fake.submitCalls).toEqual([])
+      expect(writes).toEqual([])
+    })
+
+    test('CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 submits the statement', async () => {
+      process.env.CHKIT_MIGRATE_LOCK = 'off'
+      process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK = '1'
+      const fake = createFakeExecutor([{ status: 'unknown' }, { status: 'finished', writtenRows: 1, durationMs: 10 }])
+      const { store } = createFakeJournalStore(null)
+
+      const result = await applyAsyncStatement({ ...BASE_INPUT, db: fake.db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW })
+
+      expect(result.kind).toBe('completed')
+      expect(fake.submitCalls).toHaveLength(1)
+    })
   })
 
   // #767 (round 2): an attached attempt that disappears from system.processes
