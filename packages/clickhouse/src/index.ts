@@ -22,6 +22,16 @@ import { getLogger } from '@logtape/logtape'
 import { parseJsonResult } from './exact-json.js'
 import { allReplicas, resolveReplicaFanout } from './replicas.js'
 import {
+	acquireSendSlot,
+	createAdmissionAgent,
+	createSendQueue,
+	isSendNotAdmitted,
+	recordingAdmission,
+	sendNotAdmittedError,
+	urlConnectionOptions,
+	type SubmitAdmission,
+} from './send-admission.js'
+import {
 	parseConstraintsFromCreateTableQuery,
 	parseEngineFromCreateTableQuery,
 	parseOrderByFromCreateTableQuery,
@@ -66,6 +76,9 @@ export interface QueryStatusOptions {
 export interface SubmitOptions {
 	/** Aborts the request, also one not sent yet (#767). */
 	signal?: AbortSignal
+	/** Asked as the request is created, so a stopped caller knows no send of it starts
+	 *  afterwards (#765). Only honoured by an executor with `submitSendsOnce`. */
+	admission?: SubmitAdmission
 }
 
 export type { ClickHouseSettings }
@@ -211,8 +224,15 @@ export interface ClickHouseExecutor {
 	 *  @param sql - The SQL to execute
 	 *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
 	 *  @param settings - Optional ClickHouse settings sent with the query.
+	 *  @param options - `signal` aborts the request (#767); `admission` is asked as the request is
+	 *    created (see `SubmitAdmission`), only honoured by an executor with `submitSendsOnce`.
 	 *  @returns The query_id assigned to this query. */
 	submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string>
+
+	/** Set when `submit` sends its request once, never resending it under the same query id,
+	 *  and asks `options.admission` as the request is created (#765). Backfill proves a failure only
+	 *  for an attempt sent this way. */
+	readonly submitSendsOnce?: boolean
 
 	/** Check the status of a previously submitted query.
 	 *  Checks system.processes first (running?), then system.query_log (finished/failed?).
@@ -316,6 +336,7 @@ type ClickHouseClient = ReturnType<typeof createClient>
 type ClickHouseConfig = NonNullable<ChxConfig['clickhouse']>
 type ClickHouseClientOptions = {
 	keepAlive?: boolean
+	httpAgent?: import('node:http').Agent
 	compression?: {
 		request?: boolean
 		response?: boolean
@@ -762,7 +783,9 @@ export {
 	waitForTableAbsent,
 	waitForView,
 } from './ddl-propagation.js'
-export { allReplicas, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaFanout } from './replicas.js'
+export { isSendNotAdmitted, SEND_CONNECT_TIMEOUT_MS, sendNotAdmittedError, type SubmitAdmission } from './send-admission.js'
+export { STRICT_READ_SETTINGS } from './replicas.js'
+export { allReplicas, probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow, stringLiteral, type ReplicaAccess, type ReplicaFanout } from './replicas.js'
 export { type AsyncInsertGuardOptions, type QualifiedTable, assertNoFireAndForgetAsyncInserts } from './async-insert-guard.js'
 export { type InsertBarrierOptions, waitForInsertBarrier } from './insert-barrier.js'
 export { assertServerIndexGranularity } from './index-granularity.js'
@@ -890,6 +913,7 @@ export function createStatelessClickHouseClient(
 		log: SILENT_CLIENT_LOG,
 		...(options.compression ? { compression: options.compression } : {}),
 		...(options.keepAlive !== undefined ? { keep_alive: { enabled: options.keepAlive } } : {}),
+		...(options.httpAgent ? { http_agent: options.httpAgent, set_basic_auth_header: true } : {}),
 	})
 }
 
@@ -922,13 +946,19 @@ export function createSessionClickHouseClient(
 export function createExecutorWithClient(
 	config: ClickHouseConfig,
 	client: ClickHouseClient,
-	options: { createCompressedClient?: () => ClickHouseClient } = {},
+	options: { createCompressedClient?: () => ClickHouseClient; sendConnectTimeoutMs?: number } = {},
 ): ClickHouseExecutor {
 	const profiler = getLogger(['chkit', 'profiling'])
 
 	const fireAndForgetClient = createStatelessClickHouseClient(config, {
 		wait_end_of_query: 0,
 	})
+	// Submits with an admission go through their own client, whose agent asks
+	// the admission as each request is created.
+	const admissions = new Map<string, SubmitAdmission>()
+	let admissionClient: ClickHouseClient | undefined
+	let sendQueue: ReturnType<typeof createSendQueue> | undefined
+	const admittedIds = new Set<string>()
 	let compressedClient: ClickHouseClient | undefined
 	let controlClient: ClickHouseClient | undefined
 
@@ -1193,25 +1223,67 @@ export function createExecutorWithClient(
 				wrapConnectionError(error, config.url, config.username)
 			}
 		},
-		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string> {
+		submitSendsOnce: true,
+		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings, submitOptions?: SubmitOptions): Promise<string> {
+			const admission = submitOptions?.admission
 			const id = queryId ?? crypto.randomUUID()
 			// A query_id in the settings would put a second query_id on the URL, and
 			// the server could run the query under an id queryStatus() never sees (#353).
 			const { query_id: _ignored, ...clickhouseSettings } = settings ?? {}
+			let target = fireAndForgetClient
+			const recorded = admission ? recordingAdmission(admission) : undefined
+			let releaseSlot: (() => void) | undefined
+			// One admission per in-flight query id, from the queue on: a second
+			// submit of the same id would share the first one's record.
+			if (recorded && admittedIds.has(id)) {
+				throw new Error(`A submit with query id ${id} is already in flight on this executor.`)
+			}
+			if (recorded) admittedIds.add(id)
+			if (recorded && admission) {
+				admissionClient ??= createStatelessClickHouseClient(
+					config,
+					{ wait_end_of_query: 0 },
+					{ httpAgent: createAdmissionAgent(config.url, admissions, options.sendConnectTimeoutMs) },
+				)
+				sendQueue ??= createSendQueue(urlConnectionOptions(config.url).maxOpenConnections)
+				target = admissionClient
+				// Waits for a connection slot here, not in the agent: a stop
+				// refuses a waiting submit before it reaches the agent.
+				try {
+					releaseSlot = await acquireSendSlot(sendQueue, admission.signal)
+				} catch (error) {
+					admittedIds.delete(id)
+					throw error
+				}
+				admissions.set(id, recorded.admission)
+			}
 			try {
-				await fireAndForgetClient.command({
+				// The slot was granted a turn ago: a stop since then refuses the
+				// submit here, in the turn that would call the driver.
+				if (admission?.signal?.aborted) throw sendNotAdmittedError()
+				await target.command({
 					query: sql,
 					query_id: id,
 					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
-					...(options?.signal ? { abort_signal: options.signal } : {}),
+					...(submitOptions?.signal ? { abort_signal: submitOptions.signal } : {}),
 				})
 			} catch (error) {
+				// A refused request was never written, whatever the driver says.
+				if (recorded?.refused() || isSendNotAdmitted(error)) throw sendNotAdmittedError()
 				// The client sends each request once (#767), so a failure before
-				// its first byte proves the query was never sent (#800).
-				if (failedBeforeSending(error)) {
+				// its first byte proves the query was never sent (#800). A submit
+				// with an admission has its own proof (#765), as chkit-py's
+				// submit_once does: it is left as it was.
+				if (!admission && failedBeforeSending(error)) {
 					throw new SubmitNotSentError(formatConnectionError(error, config.url, config.username) ?? String(error), { cause: error })
 				}
 				wrapConnectionError(error, config.url, config.username)
+			} finally {
+				if (admission) {
+					admissions.delete(id)
+					admittedIds.delete(id)
+				}
+				releaseSlot?.()
 			}
 			return id
 		},
@@ -1302,6 +1374,7 @@ SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 			await Promise.all([
 				client.close(),
 				fireAndForgetClient.close(),
+				admissionClient?.close(),
 				compressedClient?.close(),
 				controlClient?.close(),
 			])
@@ -1383,11 +1456,13 @@ export function createClickHouseExecutor(
 
 export function createStatelessClickHouseExecutor(
 	config: ClickHouseConfig,
+	options: { sendConnectTimeoutMs?: number } = {},
 ): ClickHouseExecutor {
 	return createExecutorWithClient(
 		config,
 		createStatelessClickHouseClient(config),
 		{
+			...options,
 			createCompressedClient: () =>
 				createStatelessClickHouseClient(config, DEFAULT_CLICKHOUSE_SETTINGS, {
 					compression: { request: true },

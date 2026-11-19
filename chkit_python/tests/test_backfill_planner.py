@@ -28,8 +28,10 @@ from chkit_plugin_backfill.options import PlanOptions
 from chkit_plugin_backfill.planner import (
     BuildBackfillPlanOutput,
     assert_backfill_target_safe,
+    assert_pinned_insert_settings_accepted,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
+    unprovable_target_failures,
 )
 from chkit_plugin_backfill.state import (
     backfill_paths,
@@ -807,4 +809,80 @@ def test_run_refuses_a_plan_whose_columns_the_target_no_longer_takes() -> None:
         check(["id"])
     assert_replay_columns_still_insertable(
         plan_id="p1", target="app.t", target_columns=None, insertable_columns=[]
+    )
+
+
+# Opus critic, parallel_distributed_insert_select: a failure of an INSERT into
+# a Distributed table is never proven, nor one whose target engine is unknown.
+_SHARDS = (
+    "whose shards can write the rows of an INSERT SELECT without system.query_log "
+    "counting them in its written_rows"
+)
+
+
+def _engine_is(rows: list[dict[str, object]] | Exception) -> PlannerQuery:
+    def query(sql: str, _settings: QuerySettings | None = None) -> list[dict[str, object]]:
+        assert sql == "SELECT engine FROM system.tables WHERE database = 'app' AND name = 'events'"
+        if isinstance(rows, Exception):
+            raise rows
+        return rows
+
+    return query
+
+
+def test_a_merge_tree_target_can_prove_its_failures() -> None:
+    query = _engine_is([{"engine": "SharedMergeTree"}])
+    assert unprovable_target_failures(database="app", table="events", query=query) is None
+
+
+def test_a_distributed_target_cannot_prove_its_failures() -> None:
+    query = _engine_is([{"engine": "Distributed"}])
+    assert unprovable_target_failures(database="app", table="events", query=query) == (
+        f"its target app.events is a Distributed table, {_SHARDS}"
+    )
+
+
+@pytest.mark.parametrize("rows", [[], RuntimeError("ACCESS_DENIED")])
+def test_a_target_whose_engine_cannot_be_read_cannot_either(
+    rows: list[dict[str, object]] | Exception,
+) -> None:
+    query = _engine_is(rows)
+    assert unprovable_target_failures(database="app", table="events", query=query) == (
+        f"the engine of its target app.events could not be read, and a Distributed table, "
+        f"{_SHARDS}, cannot be ruled out"
+    )
+
+
+# Opus delta review: a server that refuses the INSERT's pinned settings
+# (readonly = 1, a settings constraint) fails the run before it submits.
+_PINNED_SQL = (
+    "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, "
+    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+)
+
+
+def test_the_pinned_settings_check_reads_select_1_with_them() -> None:
+    reads: list[str] = []
+
+    def query(sql: str, _settings: QuerySettings | None = None) -> list[dict[str, object]]:
+        reads.append(sql)
+        return []
+
+    assert_pinned_insert_settings_accepted(plan_id="p1", query=query)
+
+    assert reads == [f"SELECT 1 SETTINGS {_PINNED_SQL}"]
+
+
+def test_a_refused_pinned_setting_fails_before_anything_is_submitted() -> None:
+    def query(_sql: str, _settings: QuerySettings | None = None) -> list[dict[str, object]]:
+        raise RuntimeError("Cannot modify 'log_queries' setting in readonly mode")
+
+    with pytest.raises(BackfillConfigError) as raised:
+        assert_pinned_insert_settings_accepted(plan_id="p1", query=query)
+
+    assert str(raised.value) == (
+        f"Backfill plan p1: the server refused the settings every chunk INSERT runs with "
+        f"({_PINNED_SQL}): Cannot modify 'log_queries' setting in readonly mode. Nothing was "
+        "submitted. Use a user allowed to set them (not readonly = 1, and no settings "
+        "constraint on them)."
     )

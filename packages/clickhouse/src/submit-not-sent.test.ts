@@ -47,6 +47,21 @@ describe('submit that never sent its request (#800)', () => {
     expect((error as Error).message).toBe(`Could not connect to ClickHouse at http://127.0.0.1:${port} (connection refused)`)
   })
 
+  // A submit with an admission (backfill, #765) has its own proof, as
+  // chkit-py's submit_once does: its errors stay as they were.
+  test('a refused connect of a submit with an admission keeps its error', async () => {
+    const port = await closedPort()
+    const executor = createStatelessClickHouseExecutor({ url: `http://127.0.0.1:${port}`, username: 'default', password: '', database: 'default' })
+    const error = await executor.submit('INSERT INTO t SELECT 1', 'r800-admitted', undefined, { admission: { admit: () => true } }).then(
+      () => {
+        throw new Error('the submit succeeded')
+      },
+      (caught: unknown) => caught,
+    )
+    expect(isSubmitNotSentError(error)).toBe(false)
+    expect((error as Error).message).toBe(`Could not connect to ClickHouse at http://127.0.0.1:${port} (connection refused)`)
+  })
+
   test('a host that does not resolve is never sent', async () => {
     const error = await submitTo('http://chkit-r800.invalid:8123')
     expect(isSubmitNotSentError(error)).toBe(true)
