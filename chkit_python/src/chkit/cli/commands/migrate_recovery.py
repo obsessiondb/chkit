@@ -359,10 +359,11 @@ def rebase_in_progress_state(
     Completed statements stay recorded (--retry verified them). A failed or
     started statement stays only if the same operation still sits at its
     index, so a retry keeps its ``-- before-retry:`` compensation and query
-    id; any other record is dropped. An async attempt that --retry matched
-    with the marker a release before #831 recorded stays too. Any other record
-    stays only under the statement's own marker, whose ``-- before-retry:``
-    SQL a retry runs (#831).
+    id; any other record is dropped. A record under the marker a release
+    before #831 gave the statement stays too when it is an attempt of this
+    statement: an async attempt --retry matched, or one the journal recorded
+    with the statement's SQL. Another statement's record never passes on its
+    compensation (#831).
     """
 
     def keep(op: OperationState) -> bool:
@@ -373,10 +374,10 @@ def rebase_in_progress_state(
         current = identities[op.operation_index]
         if _same_identity(current, op):
             return True
-        return (
-            _is_bound_to_position(op)
-            and current.legacy is not None
-            and _same_identity(current.legacy, op)
+        if current.legacy is None or not _same_identity(current.legacy, op):
+            return False
+        return _is_bound_to_position(op) or (
+            op.fingerprint != "" and op.fingerprint == current.fingerprint
         )
 
     return state.model_copy(

@@ -1,5 +1,7 @@
 import { describe, expect, test } from 'bun:test'
 
+import { statementFingerprint } from '@chkit/core'
+
 import {
   emptyMigrationsError,
   inProgressChecksumMismatchError,
@@ -518,6 +520,35 @@ describe('records written with the markers paired by order (#831)', () => {
     }
     const rebased = rebaseInProgressState(state, { checksum: 'new', identities: fileIdentities(sql), appliedAt: 'T' })
     expect(rebased.operations).toEqual([])
+  })
+
+  test('a failed attempt of the same SQL under the old pairing stays recorded, so its statement gets its before-retry', () => {
+    const sql = [
+      'SELECT 0;',
+      '-- operation: load_table_data key=table:db.a risk=caution',
+      '-- before-retry: TRUNCATE TABLE db.a',
+      'INSERT INTO db.a SELECT number FROM numbers(10);',
+      '-- edited',
+    ].join('\n')
+    const fingerprints = extractExecutableStatements(sql).map(statementFingerprint)
+    const failed = { ...op(1, 'failed', { type: 'sql_statement', key: 'statement:1' }), fingerprint: fingerprints[1] ?? '' }
+    const state: MigrationRowState = {
+      name: 'm.sql',
+      appliedAt: '2026-09-29 00:11:11.000',
+      checksum: 'old',
+      chkitVersion: '0.2.0-test',
+      migrationCompleted: false,
+      operations: [op(0, 'completed', LOAD), failed],
+    }
+    const identities = statementIdentities(extractStatementOperations(sql), fingerprints, extractMigrationOperationSummaries(sql))
+    expect(verifyRetryEdit(state.operations, identities)).toMatchObject({ ok: true, resumeIndex: 1 })
+    expect(rebaseInProgressState(state, { checksum: 'new', identities, appliedAt: 'T' }).operations).toEqual([
+      op(0, 'completed', LOAD),
+      failed,
+    ])
+    // A record of other SQL is another statement's attempt.
+    const other = { ...failed, fingerprint: 'other' }
+    expect(rebaseInProgressState({ ...state, operations: [other] }, { checksum: 'new', identities, appliedAt: 'T' }).operations).toEqual([])
   })
 
   test('a started async attempt recorded under the old pairing stays recorded on the re-key', () => {

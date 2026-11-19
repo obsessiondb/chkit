@@ -503,6 +503,38 @@ def test_rebase_drops_a_failed_record_only_the_order_pairing_matches() -> None:
     assert rebased.operations == []
 
 
+def test_rebase_keeps_a_failed_attempt_of_the_same_sql_under_the_order_pairing() -> None:
+    sql = "\n".join(
+        [
+            "SELECT 0;",
+            "-- operation: load_table_data key=table:db.a risk=caution",
+            "-- before-retry: TRUNCATE TABLE db.a",
+            "INSERT INTO db.a SELECT number FROM numbers(10);",
+            "-- edited",
+        ]
+    )
+    fingerprints = [statement_fingerprint(s) for s in extract_executable_statements(sql)]
+    failed = op(1, "failed").model_copy(update={"fingerprint": fingerprints[1]})
+    state = in_progress([op(0, "completed", LOAD), failed], checksum="old")
+    identities = statement_identities(
+        extract_statement_operations(sql), fingerprints, extract_migration_operation_summaries(sql)
+    )
+    check = verify_retry_edit(state.operations, identities)
+    assert isinstance(check, RetryEditOk)
+    assert check.resume_index == 1
+    rebased = rebase_in_progress_state(state, checksum="new", identities=identities, applied_at="T")
+    assert rebased.operations == [op(0, "completed", LOAD), failed]
+    # A record of other SQL is another statement's attempt.
+    other = failed.model_copy(update={"fingerprint": "other"})
+    rebased_other = rebase_in_progress_state(
+        state.model_copy(update={"operations": [other]}),
+        checksum="new",
+        identities=identities,
+        applied_at="T",
+    )
+    assert rebased_other.operations == []
+
+
 def test_rebase_keeps_a_started_attempt_recorded_under_the_order_pairing() -> None:
     state = in_progress([op(0, "started", LOAD, query_id="q-0")], checksum="old")
     rebased = rebase_in_progress_state(

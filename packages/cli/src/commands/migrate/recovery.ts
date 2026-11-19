@@ -259,9 +259,10 @@ export function retryMismatchError(
  * recorded (--retry verified them). A failed or started statement stays only
  * if the same operation still sits at its index, so a retry keeps its
  * `-- before-retry:` compensation and query id; any other record is dropped.
- * An async attempt that --retry matched with the marker a release before #831
- * recorded stays too. Any other record stays only under the statement's own
- * marker, whose `-- before-retry:` SQL a retry runs (#831).
+ * A record under the marker a release before #831 gave the statement stays
+ * too when it is an attempt of this statement: an async attempt --retry
+ * matched, or one the journal recorded with the statement's SQL. Another
+ * statement's record never passes on its compensation (#831).
  */
 export function rebaseInProgressState(
   state: MigrationRowState,
@@ -272,7 +273,8 @@ export function rebaseInProgressState(
     const current = input.identities[op.operationIndex]
     if (current === undefined) return false
     if (sameMarker(current, markerOf(op))) return true
-    return isBoundToPosition(op) && current.legacy !== undefined && sameMarker(current.legacy, markerOf(op))
+    if (current.legacy === undefined || !sameMarker(current.legacy, markerOf(op))) return false
+    return isBoundToPosition(op) || (op.fingerprint !== '' && op.fingerprint === current.fingerprint)
   })
   return { ...state, checksum: input.checksum, appliedAt: input.appliedAt, operations }
 }
