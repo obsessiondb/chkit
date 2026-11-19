@@ -1774,7 +1774,9 @@ describe('an interrupt while an admitted send never hands off', () => {
     const error = await run.then(() => undefined, (rejection: unknown) => rejection)
     const elapsed = Date.now() - started
     // The socket chkit opened is gone: nothing of the request is written later.
-    await new Promise((resolve) => setTimeout(resolve, 50))
+    // (The server sees the close a moment later, slower under load.)
+    const deadline = Date.now() + 2_000
+    while (closed.length < connections.length && Date.now() < deadline) await new Promise((resolve) => setTimeout(resolve, 10))
     const closedByClient = closed.length
     for (const socket of connections) socket.destroy()
     server.close()
@@ -2183,4 +2185,132 @@ describe('written rows are a maximum', () => {
     expect(saved).toMatchObject({ writtenRows: 5 })
     expect(submits).toEqual([])
   })
+})
+
+// Codex round 11: every successful observation is merged and saved before
+// the next read or wait, whatever comes next: a log read that fails after
+// system.processes answered, a later read of the resume's sync that fails,
+// and a QueryFinish that reports fewer rows.
+describe('every observation is saved before the next read', () => {
+  const id = (chunk: string) => `backfill-${PLAN_ID}-${chunk}`
+  const processRow = (queryId: string, written: string, initial = 1, of = queryId) => ({ query_id: queryId, initial_query_id: of, is_initial_query: initial, read_rows: '0', read_bytes: '0', written_rows: written, written_bytes: '0', elapsed: 1 })
+  const logRow = (type: string, written: string) => ({ query_id: id('c1'), is_initial_query: 1, type, written_rows: written, written_bytes: '0', query_duration_ms: '1', exception: type === 'QueryFinish' ? '' : 'transient' })
+
+  function scripted(snapshot: (read: number) => { processes: object[] | Error; log: object[] | Error }) {
+    const submits: string[] = []
+    let reads = 0
+    const executor = createMockExecutor(new Map())
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      if (sql.includes('now64')) return [{ now_ms: String(Date.now()) }] as T[]
+      if (sql.includes('system.one')) return [{ replicas: '1' }] as T[]
+      if (sql.includes('system.processes')) {
+        const rows = snapshot(++reads).processes
+        if (rows instanceof Error) throw rows
+        return rows as T[]
+      }
+      if (sql.includes('system.query_log')) {
+        const rows = snapshot(reads).log
+        if (rows instanceof Error) throw rows
+        return rows as T[]
+      }
+      return [] as T[]
+    }
+    executor.submit = async (_sql, queryId) => {
+      submits.push(queryId ?? '')
+      return queryId ?? ''
+    }
+    return { executor, submits }
+  }
+
+  async function resume(executor: ClickHouseExecutor, resumeFrom: BackfillProgress) {
+    const reports: BackfillProgress[] = []
+    const error = await executeBackfill({
+      executor,
+      planId: PLAN_ID,
+      chunks: Object.keys(resumeFrom).map((chunk) => ({ id: chunk })),
+      buildQuery: () => 'INSERT INTO t SELECT 1',
+      resumeFrom,
+      checkpointVersion: CHECKPOINT_VERSION,
+      replayFailed: true,
+      pollIntervalMs: 1,
+      outcomeRecheckAttempts: 2,
+      outcomeRecheckIntervalMs: 5,
+      onProgress: (progress) => { reports.push(progress) },
+    }).then(() => undefined, (rejection: unknown) => rejection as Error)
+    return { error, reports }
+  }
+
+  test('a poll whose log read fails still saves the rows its process showed', async () => {
+    const { executor, submits } = scripted((read) => {
+      if (read === 1) return { processes: [processRow(id('c1'), '0')], log: [] }
+      if (read === 2) return { processes: [processRow(id('c1'), '5')], log: new Error('query_log timed out') }
+      return { processes: [], log: [logRow('ExceptionWhileProcessing', '0')] }
+    })
+
+    const { error, reports } = await resume(executor, { c1: { status: 'submitted', queryId: id('c1'), singleSend: true } })
+
+    expect(error?.message).toContain(`chunk c1 (query_id ${id('c1')}): it failed after writing 5 rows, which a replay would write again.`)
+    expect(reports.at(-1)?.c1).toMatchObject({ writtenRows: 5 })
+    expect(reports.at(-1)?.c1?.status).not.toBe('failed')
+    expect(submits).toEqual([])
+  })
+
+  test('the sync of a resume saves a whole read before a later read fails', async () => {
+    const { executor } = scripted((read) => read === 1
+      ? { processes: [processRow(id('c1'), '5'), processRow('secondary-1', '0', 0, id('c1'))], log: [] }
+      : { processes: new Error('replica unavailable'), log: [] })
+
+    const { error, reports } = await resume(executor, {
+      c1: { status: 'submitted', queryId: id('c1'), singleSend: true },
+      // Recorded, and with no outcome yet: the sync reads it again.
+      c2: { status: 'pending', queryId: id('c2'), singleSend: true },
+    })
+
+    expect(error?.message).toContain('could not check which chunks are still running on the server (replica unavailable)')
+    expect(reports.at(-1)?.c1).toMatchObject({ writtenRows: 5, secondaryQueryId: 'secondary-1' })
+  })
+
+  test('a QueryFinish with fewer rows does not lower the saved maximum', async () => {
+    const { executor } = scripted(() => ({ processes: [], log: [logRow('QueryFinish', '0')] }))
+
+    const { error, reports } = await resume(executor, { c1: { status: 'running', queryId: id('c1'), singleSend: true, writtenRows: 5 } })
+
+    expect(error).toBeUndefined()
+    expect(reports.at(-1)?.c1).toMatchObject({ status: 'done', writtenRows: 5 })
+  })
+})
+
+// Round 11: a save the resume's sync makes is a checkpoint write like any
+// other: an interrupt waits for it within its bound, or keeps the lock.
+test('an interrupt during a hung save of the resume’s sync keeps the lock', async () => {
+  const id = `backfill-${PLAN_ID}-c1`
+  const executor = createMockExecutor(new Map())
+  executor.query = async <T>(sql: string): Promise<T[]> => {
+    if (sql.includes('system.one')) return [{ replicas: '1' }] as T[]
+    if (sql.includes('system.processes')) return [{ query_id: id, is_initial_query: 1, read_rows: '0', read_bytes: '0', written_rows: '5', written_bytes: '0', elapsed: 1 }] as T[]
+    return [] as T[]
+  }
+  const controller = new AbortController()
+  let writing = false
+  const run = executeBackfill({
+    executor,
+    planId: PLAN_ID,
+    chunks: [{ id: 'c1' }],
+    buildQuery: () => 'INSERT INTO t SELECT 1',
+    resumeFrom: { c1: { status: 'submitted', queryId: id, singleSend: true } },
+    checkpointVersion: CHECKPOINT_VERSION,
+    signal: controller.signal,
+    handoffTimeoutMs: 200,
+    onProgress: () => {
+      writing = true
+      return new Promise<void>(() => undefined)
+    },
+  })
+  while (!writing) await new Promise((resolve) => setTimeout(resolve, 5))
+
+  controller.abort()
+  const error = await run.then(() => undefined, (rejection: unknown) => rejection)
+
+  expect(error).toBeInstanceOf(BackfillInterruptedError)
+  expect(error).toMatchObject({ keepLock: true })
 })

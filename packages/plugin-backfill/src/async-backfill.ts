@@ -158,7 +158,7 @@ function runningState(state: BackfillChunkState, row: RunningRow): { state: Back
     readBytes: Number(row.read_bytes),
     // Written rows are evidence against a failure proof (#765): never lower
     // than what the checkpoint or an earlier read already saw.
-    writtenRows: Math.max(state.writtenRows ?? 0, rowCount(row.written_rows) ?? 0),
+    writtenRows: raisedWrittenRows(state, rowCount(row.written_rows)),
     writtenBytes: Number(row.written_bytes),
     elapsedMs: Math.round(Number(row.elapsed) * 1000),
   }
@@ -272,34 +272,57 @@ async function reconcileProgress(
   planId: string,
   chunks: Array<{ id: string }>,
   progress: BackfillProgress,
-  options: EvidenceReads & { attempts: number; intervalMs: number; signal?: AbortSignal },
+  options: EvidenceReads & {
+    attempts: number
+    intervalMs: number
+    signal?: AbortSignal
+    /** Saves the progress whenever a read changed it, before the next read
+     *  or wait: what a read saw outlives a later read that fails. */
+    persist?: (progress: BackfillProgress) => Promise<void>
+  },
 ): Promise<{ progress: BackfillProgress; unknown: UnknownAttempt[] }> {
   let chunkIds = chunksToSync(chunks, progress)
   if (chunkIds.length === 0) return { progress, unknown: [] }
   const reads = { cluster: options.cluster, unprovableFailures: options.unprovableFailures }
-  let evidence = await readChunkQueries(executor, planId, { prefix: `backfill-${planId}-` }, reads)
   let current = progress
+  let persisted = progress
+  const save = async () => {
+    if (current === persisted) return
+    persisted = current
+    await options.persist?.(current)
+  }
+  // A read that fails after system.processes answered still adds what it
+  // saw, saved, then the resume stops.
+  const read = async (scope: Parameters<typeof readChunkQueries>[2]) => {
+    try {
+      return await readChunkQueries(executor, planId, scope, reads)
+    } catch (error) {
+      const seen = partialEvidence(error)
+      if (seen) {
+        current = observedProgress(planId, chunkIds, current, seen)
+        await save()
+      }
+      throw error
+    }
+  }
+  let evidence = await read({ prefix: `backfill-${planId}-` })
   let unknown: UnknownAttempt[] = []
   for (let round = 0; ; round++) {
     const final = round >= options.attempts
     const pass = applyEvidence(planId, chunkIds, current, evidence, final)
     current = pass.progress
     unknown = [...unknown, ...pass.unknown]
+    await save()
     if (pass.waiting.length === 0) return { progress: current, unknown }
     chunkIds = pass.waiting
     await sleep(options.intervalMs)
     if (options.signal?.aborted) throw interruptedError(planId)
     const states = chunkIds.map((id) => getChunk(current, id))
     const last = round + 1 >= options.attempts
-    evidence = await readChunkQueries(
-      executor,
-      planId,
-      {
-        ids: chunkIds.map((id, index) => attemptQueryId(planId, id, states[index] as BackfillChunkState)),
-        after: last ? undefined : earliestBound(states),
-      },
-      reads,
-    )
+    evidence = await read({
+      ids: chunkIds.map((id, index) => attemptQueryId(planId, id, states[index] as BackfillChunkState)),
+      after: last ? undefined : earliestBound(states),
+    })
   }
 }
 
@@ -469,9 +492,18 @@ function notedState(planId: string, chunkId: string, state: BackfillChunkState, 
   const secondary = secondaryQueryOf(queryId, evidence)
   if (secondary !== undefined && state.secondaryQueryId === undefined) next = { ...next, secondaryQueryId: secondary }
   const running = evidence.running.get(queryId)
-  const written = Math.max(ownWrittenRows(queryId, evidence), running ? rowCount(running.written_rows) ?? 0 : 0)
-  if (written > (state.writtenRows ?? 0)) next = { ...next, writtenRows: written }
+  const written = raisedWrittenRows(state, Math.max(ownWrittenRows(queryId, evidence), running ? rowCount(running.written_rows) ?? 0 : 0))
+  if (written !== (state.writtenRows ?? 0)) next = { ...next, writtenRows: written }
   return next
+}
+
+/**
+ * The attempt's written rows after a read that reports `count` (#765): the
+ * maximum of every count seen, never lower. Every write of `writtenRows`
+ * goes through it.
+ */
+function raisedWrittenRows(state: BackfillChunkState, count: number | undefined): number {
+  return Math.max(state.writtenRows ?? 0, count ?? 0)
 }
 
 /**
@@ -500,13 +532,11 @@ function applyEvidence(
   evidence: ChunkEvidence,
   final: boolean,
 ): { progress: BackfillProgress; waiting: string[]; unknown: UnknownAttempt[] } {
-  let updated = progress
+  let updated = observedProgress(planId, chunkIds, progress, evidence)
   const waiting: string[] = []
   const unknown: UnknownAttempt[] = []
   for (const chunkId of chunkIds) {
-    const saved = getChunk(updated, chunkId)
-    const current = notedState(planId, chunkId, saved, evidence)
-    if (current !== saved) updated = updateChunk(updated, chunkId, current)
+    const current = getChunk(updated, chunkId)
     const queryId = attemptQueryId(planId, chunkId, current)
     const outcome = classifyAttempt(planId, chunkId, current, evidence, final)
     if (outcome.kind === 'running') {
@@ -533,7 +563,7 @@ function settledState(
       status: 'done',
       queryId,
       finishedAt: new Date().toISOString(),
-      writtenRows: Number(outcome.row.written_rows),
+      writtenRows: raisedWrittenRows(current, rowCount(outcome.row.written_rows)),
       writtenBytes: Number(outcome.row.written_bytes),
       durationMs: Number(outcome.row.query_duration_ms),
     }
@@ -580,6 +610,42 @@ interface ChunkEvidence {
   partial?: string
   /** Why no failure of this target can be proven (see `unprovableFailures`). */
   unprovable?: string
+}
+
+/**
+ * A read that failed after system.processes answered: the rows it got, which
+ * are evidence against a proof but never a proof.
+ */
+class PartialEvidenceError extends Error {
+  readonly evidence: ChunkEvidence
+
+  constructor(cause: unknown, evidence: ChunkEvidence) {
+    super(errorMessage(cause), { cause })
+    this.evidence = evidence
+  }
+}
+
+/** The evidence a failed read still got, if any (see `PartialEvidenceError`). */
+function partialEvidence(error: unknown): ChunkEvidence | undefined {
+  if (error instanceof PartialEvidenceError) return error.evidence
+  if (error instanceof Error && error.cause instanceof PartialEvidenceError) return error.cause.evidence
+  return undefined
+}
+
+/**
+ * `progress` with every observation of `evidence` merged into the attempts
+ * of `chunkIds` (see `notedState`), whether the read was whole or partial.
+ * The one place a read's evidence enters the progress; callers save the
+ * result before their next read or wait.
+ */
+function observedProgress(planId: string, chunkIds: string[], progress: BackfillProgress, evidence: ChunkEvidence): BackfillProgress {
+  let updated = progress
+  for (const chunkId of chunkIds) {
+    const saved = getChunk(updated, chunkId)
+    const noted = notedState(planId, chunkId, saved, evidence)
+    if (noted !== saved) updated = updateChunk(updated, chunkId, noted)
+  }
+  return updated
 }
 
 /** Where chunk evidence is read, and what it can prove. */
@@ -661,15 +727,27 @@ async function readEvidence(
   const runningRows = await executor.query<RunningRow>(
     `SELECT query_id, initial_query_id, is_initial_query, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE ${ownOrSecondary} SETTINGS ${STRICT_READ_SETTINGS}`
   )
-  const logRows = await executor.query<ChunkLogRow>(
-    `SELECT query_id, initial_query_id, is_initial_query, type, written_rows, written_bytes, query_duration_ms, exception
+  const secondary = (row: { is_initial_query?: number | string }) => row.is_initial_query !== undefined && Number(row.is_initial_query) === 0
+  let logRows: ChunkLogRow[]
+  try {
+    logRows = await executor.query<ChunkLogRow>(
+      `SELECT query_id, initial_query_id, is_initial_query, type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${from('query_log')}
 WHERE ${ownOrSecondary}
   AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart', 'ExceptionWhileProcessing')${pruning}
 ORDER BY event_time DESC
 SETTINGS ${STRICT_READ_SETTINGS}`
-  )
-  const secondary = (row: { is_initial_query?: number | string }) => row.is_initial_query !== undefined && Number(row.is_initial_query) === 0
+    )
+  } catch (error) {
+    // What system.processes showed is still evidence (written rows, a
+    // secondary query); it is never a proof (see `observedProgress`).
+    throw new PartialEvidenceError(error, {
+      running: new Map(runningRows.filter((row) => !secondary(row)).map((row) => [row.query_id, row])),
+      logRows: [],
+      secondaryRunning: runningRows.filter(secondary),
+      secondaryLog: [],
+    })
+  }
   return {
     running: new Map(runningRows.filter((row) => !secondary(row)).map((row) => [row.query_id, row])),
     logRows: logRows.filter((row) => !secondary(row)),
@@ -825,6 +903,15 @@ async function pollChunk(
       noted = notedState(planId, chunkId, state, evidence)
       outcome = classifyAttempt(planId, chunkId, noted, evidence, final)
     } catch (error) {
+      // A partial read adds what it saw (saved), never a proof.
+      const seen = partialEvidence(error)
+      if (seen) {
+        const observed = notedState(planId, chunkId, state, seen)
+        if (observed !== state) {
+          state = observed
+          await onChanged(state)
+        }
+      }
       errors++
       if (errors >= limits.maxPollErrors) {
         return { chunkId, queryId, reason: `lost contact with the server after ${errors} consecutive poll errors (${errorMessage(error)})` }
@@ -904,15 +991,32 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   // and its lock, waiting: an abort stops waiting for it.
   const interruptible = <T>(work: Promise<T>) => untilAborted(work, signal, () => interruptedError(planId))
   if (resumeFrom) {
-    const reconciled = await interruptible(reconcileProgress(executor, planId, chunks, progress, {
-      cluster,
-      unprovableFailures,
-      attempts: outcomeRecheckAttempts,
-      intervalMs: outcomeRecheckIntervalMs,
-      signal,
-    }))
-    progress = reconciled.progress
-    unknown = reconciled.unknown
+    // The resume's sync saves what each read saw before its next read or
+    // wait. An interrupt starts no such save, and waits for the one under
+    // way as for any checkpoint write: a write still under way keeps the lock.
+    let syncWrite: Promise<void> = Promise.resolve()
+    const persist = (next: BackfillProgress) => {
+      if (signal?.aborted) return Promise.resolve()
+      syncWrite = Promise.resolve(onProgress?.(next))
+      return syncWrite
+    }
+    try {
+      const reconciled = await interruptible(reconcileProgress(executor, planId, chunks, progress, {
+        cluster,
+        unprovableFailures,
+        attempts: outcomeRecheckAttempts,
+        intervalMs: outcomeRecheckIntervalMs,
+        signal,
+        persist,
+      }))
+      progress = reconciled.progress
+      unknown = reconciled.unknown
+    } catch (error) {
+      if (error instanceof BackfillInterruptedError && !(await endsWithin(syncWrite, handoffTimeoutMs))) {
+        throw interruptedError(planId, { abandoned: [], alive: [], writeHung: true })
+      }
+      throw error
+    }
   }
   if (signal?.aborted) throw interruptedError(planId)
 
