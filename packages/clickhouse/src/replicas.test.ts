@@ -2,7 +2,7 @@ import { describe, expect, test } from 'bun:test'
 
 import { waitForDDLPropagation } from './ddl-propagation.js'
 import type { ClickHouseExecutor } from './index.js'
-import { resolveReplicaFanout } from './replicas.js'
+import { probeReplicaAccess, resolveReplicaFanout, resolveReplicaFanoutOrThrow } from './replicas.js'
 
 const FAST = { pollIntervalMs: 1 }
 
@@ -47,6 +47,54 @@ describe('resolveReplicaFanout', () => {
 
     expect(await resolveReplicaFanout(db, 'prod')).toEqual({ cluster: 'prod', replicas: 2 })
     expect(queries[0]).toContain("clusterAllReplicas('prod', system.one)")
+  })
+})
+
+function failingExecutor(error: Error): ClickHouseExecutor {
+  return {
+    async query(): Promise<never> {
+      throw error
+    },
+  } as unknown as ClickHouseExecutor
+}
+
+describe('probeReplicaAccess (#765)', () => {
+  test('reads every replica strictly and fans out even to one host', async () => {
+    const queries: string[] = []
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        queries.push(sql)
+        return [{ replicas: '1' }] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+
+    expect(await probeReplicaAccess(db)).toEqual({ kind: 'fanout', fanout: { cluster: 'default', replicas: 1 } })
+    expect(queries[0]).toContain("FROM clusterAllReplicas('default', system.one) SETTINGS skip_unavailable_shards = 0")
+  })
+
+  test('reports a denied or missing cluster, or an empty result, as partial', async () => {
+    const denied = Object.assign(new Error('Code: 497. DB::Exception: Not enough privileges. (ACCESS_DENIED)'), { code: '497' })
+    const missing = new Error("Requested cluster 'default' not found. (CLUSTER_DOESNT_EXIST)")
+    const empty = { async query<T>(): Promise<T[]> { return [] as T[] } } as unknown as ClickHouseExecutor
+
+    expect(await probeReplicaAccess(failingExecutor(denied))).toEqual({ kind: 'partial', reason: `the user may not read every replica (${denied.message})` })
+    expect(await probeReplicaAccess(failingExecutor(missing))).toEqual({ kind: 'partial', reason: 'the cluster default does not exist, so not every replica can be read' })
+    expect(await probeReplicaAccess(empty)).toEqual({ kind: 'partial', reason: 'the replica probe of cluster default returned no replica count' })
+    // The lenient and strict fan-out helpers keep their single-replica fallback.
+    expect(await resolveReplicaFanoutOrThrow(failingExecutor(denied))).toBeUndefined()
+  })
+
+  // Two replicas, one unavailable: a probe that skipped it would count one
+  // host and pass for a single-node target.
+  test('rejects when a replica does not answer, instead of counting the ones that do', async () => {
+    const db = {
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('skip_unavailable_shards = 0')) throw new Error('Code: 279. DB::NetException: All connection tries failed. (ALL_CONNECTION_TRIES_FAILED)')
+        return [{ replicas: '1' }] as T[]
+      },
+    } as unknown as ClickHouseExecutor
+
+    await expect(probeReplicaAccess(db)).rejects.toThrow('ALL_CONNECTION_TRIES_FAILED')
   })
 })
 

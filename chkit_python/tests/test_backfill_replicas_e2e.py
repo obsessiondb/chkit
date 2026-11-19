@@ -137,5 +137,5 @@ class _RecordingExecutor:
         self.submitted.append(query_id or statement)
         return self._inner.submit(statement, query_id=query_id)
 
-    def query_status(self, query_id: str, *, after_time: str | None = None) -> QueryStatus:
-        return self._inner.query_status(query_id, after_time=after_time)
+    def query_status(self, query_id: str, *, running_only: bool = False) -> QueryStatus:
+        return self._inner.query_status(query_id, running_only=running_only)
