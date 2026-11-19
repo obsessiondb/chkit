@@ -1719,8 +1719,9 @@ _BINARY_OPERATORS = frozenset(["+", "-", "*", "/", "%", "=", "<", ">"])
 _PAIRED_OPERATORS = frozenset(["<=", ">=", "!=", "<>", "==", "||"])
 # Bare words ClickHouse reads as literals (any case), whatever the columns.
 _LITERAL_WORDS = frozenset(["false", "inf", "infinity", "nan", "null", "true"])
-# Bare words that are not function names even before ``(``.
-_NOT_FUNCTIONS = frozenset(["exists", "lambda", "select", "with"])
+# Bare words that are not function names even before ``(``. ClickHouse 26.8
+# reads ``(values(c))`` as a subquery over SQL-standard VALUES.
+_NOT_FUNCTIONS = frozenset(["exists", "lambda", "select", "values", "with"])
 # Keywords of ClickHouse's expression grammar (operators, literals and the
 # words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
 # bare one may not read a column of that name, so its expression is not

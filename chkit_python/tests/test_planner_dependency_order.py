@@ -1785,6 +1785,7 @@ _REPAIRED = ["t.b", "t.a", "t.c"]
             id="a call to left with a left column",
         ),
         pytest.param([_u("offset"), _u("extra", "id offset")], _FALLBACK, id="a query word after an operand"),
+        pytest.param([_u("extra", "toUInt64((values(id)))")], _FALLBACK, id="a call to values"),
         pytest.param([_u("APPLY"), _u("extra", "toUInt64(`APPLY`)")], _REPAIRED, id="a quoted APPLY"),
         pytest.param(
             [_u("extra", "length(eXTrAcT('abc', 'a'))")], _FALLBACK, id="eXTrAcT with string arguments"
@@ -1817,8 +1818,8 @@ def test_query_words_and_unit_calls_keep_the_sorted_order(
     # A call to a function whose arguments can be units or keywords (in any
     # case, with any arguments) keeps the sorted order. A bare query or join
     # word reads its column and a call to one is a function, as ClickHouse 26.3
-    # parses them, so both keep the repair; such a word after an operand does
-    # not. A quoted name is a column read, and other calls, in any case, keep
+    # parses them, so both keep the repair; such a word after an operand, and
+    # a call to `values` (a VALUES subquery on 26.8), do not. A quoted name is a column read, and other calls, in any case, keep
     # the repair.
     assert _order_of(
         [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]

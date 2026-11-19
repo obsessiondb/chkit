@@ -1727,8 +1727,8 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   // A call to a function whose arguments can be units or keywords (in any
   // case, with any arguments) keeps the sorted order. A bare query or join
   // word reads its column and a call to one is a function, as ClickHouse 26.3
-  // parses them, so both keep the repair; such a word after an operand does
-  // not. A quoted name is a column read, and other calls, in any case, keep
+  // parses them, so both keep the repair; such a word after an operand, and
+  // a call to `values` (a VALUES subquery on 26.8), do not. A quoted name is a column read, and other calls, in any case, keep
   // the repair.
   test.each<[string, ColumnDefinition[], string[]]>([
     ['a bare APPLY', [u('APPLY'), u('extra', 'toUInt64(APPLY)')], ['t.b', 't.a', 't.c']],
@@ -1742,6 +1742,7 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     ['a call to format', [u('extra', "length(format('{}-{}', toString(id), 'x'))")], ['t.b', 't.a', 't.c']],
     ['a call to left with a left column', [u('left'), u('extra', 'toUInt64(left(toString(left), 1))')], ['t.b', 't.a', 't.c']],
     ['a query word after an operand', [u('offset'), u('extra', 'id offset')], ['t.a', 't.b', 't.c']],
+    ['a call to values', [u('extra', 'toUInt64((values(id)))')], ['t.a', 't.b', 't.c']],
     ['a quoted APPLY', [u('APPLY'), u('extra', 'toUInt64(`APPLY`)')], ['t.b', 't.a', 't.c']],
     ['eXTrAcT with string arguments', [u('extra', "length(eXTrAcT('abc', 'a'))")], ['t.a', 't.b', 't.c']],
     ['dateDiff with a string unit', [u('extra', "toUInt64(dateDiff('day', toDateTime(id), toDateTime(id)))")], ['t.a', 't.b', 't.c']],

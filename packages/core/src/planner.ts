@@ -1678,8 +1678,9 @@ const BINARY_OPERATORS: ReadonlySet<string> = new Set(['+', '-', '*', '/', '%', 
 const PAIRED_OPERATORS: ReadonlySet<string> = new Set(['<=', '>=', '!=', '<>', '==', '||'])
 // Bare words ClickHouse reads as literals (any case), whatever the columns.
 const LITERAL_WORDS: ReadonlySet<string> = new Set(['false', 'inf', 'infinity', 'nan', 'null', 'true'])
-// Bare words that are not function names even before `(`.
-const NOT_FUNCTIONS: ReadonlySet<string> = new Set(['exists', 'lambda', 'select', 'with'])
+// Bare words that are not function names even before `(`. ClickHouse 26.8
+// reads `(values(c))` as a subquery over SQL-standard VALUES.
+const NOT_FUNCTIONS: ReadonlySet<string> = new Set(['exists', 'lambda', 'select', 'values', 'with'])
 // Keywords of ClickHouse's expression grammar (operators, literals and the
 // words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
 // bare one may not read a column of that name, so its expression is not
