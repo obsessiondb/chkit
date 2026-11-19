@@ -27,6 +27,12 @@ export interface StatementIdentity extends StatementMarker {
    * cannot be checked yet, because a plugin's onBeforeApply may still rewrite it.
    */
   fingerprint: string | undefined
+  /**
+   * The marker releases before #831 gave the statement, when it differs: they
+   * paired the n-th marker of the file with the n-th statement. A record they
+   * wrote names that marker, and still matches the statement.
+   */
+  legacy?: { type: string; key: string }
 }
 
 export interface OperationMismatch {
@@ -105,7 +111,7 @@ export function normalizeMigrationName(raw: string, flag: '--retry' | '--abandon
 
 /** The (type, key) the journal records for statement `index`; apply and --retry share it. */
 export function statementIdentity(
-  operations: readonly MigrationOperationSummary[],
+  operations: ReadonlyArray<MigrationOperationSummary | undefined>,
   index: number,
 ): StatementMarker {
   const operation = operations[index]
@@ -114,12 +120,24 @@ export function statementIdentity(
     : { type: operation.type, key: operation.key, marked: true }
 }
 
-/** One identity per statement; `fingerprints` has one entry per statement. */
+/**
+ * One identity per statement; `fingerprints` has one entry per statement.
+ * `operations` has the marker of each statement (`extractStatementOperations`),
+ * `legacyOperations` the file's markers in order, as releases before #831
+ * paired them (`extractMigrationOperationSummaries`).
+ */
 export function statementIdentities(
-  operations: readonly MigrationOperationSummary[],
+  operations: ReadonlyArray<MigrationOperationSummary | undefined>,
   fingerprints: ReadonlyArray<string | undefined>,
+  legacyOperations: readonly MigrationOperationSummary[],
 ): StatementIdentity[] {
-  return fingerprints.map((fingerprint, index) => ({ ...statementIdentity(operations, index), fingerprint }))
+  return fingerprints.map((fingerprint, index) => {
+    const identity = statementIdentity(operations, index)
+    const legacy = statementIdentity(legacyOperations, index)
+    return sameMarker(identity, legacy)
+      ? { ...identity, fingerprint }
+      : { ...identity, fingerprint, legacy: { type: legacy.type, key: legacy.key } }
+  })
 }
 
 /**
@@ -142,14 +160,14 @@ export function verifyRetryEdit(
   let positionOnlyCompleted = 0
   for (const op of bound) {
     const current = identities[op.operationIndex]
-    if (current === undefined || !sameMarker(current, markerOf(op)) || !sameSql(current, op)) {
+    if (current === undefined || !matchesMarker(current, markerOf(op)) || !sameSql(current, op)) {
       mismatches.push({
         statement: op.operationIndex + 1,
         status: op.status,
         queryId: op.queryId,
         recorded: markerOf(op),
         current: current === undefined ? null : { type: current.type, key: current.key },
-        sqlChanged: current !== undefined && sameMarker(current, markerOf(op)),
+        sqlChanged: current !== undefined && matchesMarker(current, markerOf(op)),
       })
       continue
     }
@@ -233,7 +251,7 @@ export function rebaseInProgressState(
   const operations = state.operations.filter((op) => {
     if (op.status === 'completed') return true
     const current = input.identities[op.operationIndex]
-    return current !== undefined && sameMarker(current, markerOf(op))
+    return current !== undefined && matchesMarker(current, markerOf(op))
   })
   return { ...state, checksum: input.checksum, appliedAt: input.appliedAt, operations }
 }
@@ -334,7 +352,7 @@ function findSharedMarkerMismatches(
       .filter((op) => sameMarker(markerOf(op), marker))
       .sort((a, b) => a.operationIndex - b.operationIndex)
       .map((op) => ({ statement: op.operationIndex + 1, status: op.status }))
-    const currentCount = identities.filter((identity) => sameMarker(identity, marker)).length
+    const currentCount = identities.filter((identity) => matchesMarker(identity, marker)).length
     return currentCount < recorded.length ? [{ ...marker, recorded, currentCount }] : []
   })
 }
@@ -356,6 +374,11 @@ function markerOf(op: OperationState): { type: string; key: string } {
 
 function sameMarker(a: { type: string; key: string }, b: { type: string; key: string }): boolean {
   return a.type === b.type && a.key === b.key
+}
+
+// The statement's marker, or the one a release before #831 recorded for it.
+function matchesMarker(identity: StatementIdentity, recorded: { type: string; key: string }): boolean {
+  return sameMarker(identity, recorded) || (identity.legacy !== undefined && sameMarker(identity.legacy, recorded))
 }
 
 /** `['1', '2', '3']` → `1, 2 and 3`. */

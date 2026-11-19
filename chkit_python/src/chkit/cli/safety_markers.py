@@ -32,7 +32,10 @@ from dataclasses import dataclass
 from typing import Literal
 
 from chkit.core.sql_lexer import SQLToken, is_trivia, tokenize_sql
-from chkit.core.sql_splitter import extract_executable_statements
+from chkit.core.sql_splitter import (
+    extract_executable_statements,
+    extract_executable_statements_with_comments,
+)
 
 __all__ = [
     "DestructiveOperationMarker",
@@ -44,6 +47,7 @@ __all__ = [
     "collect_unmarked_destructive_statements",
     "extract_executable_statements",
     "extract_migration_operation_summaries",
+    "extract_statement_operations",
     "find_non_select_barriers",
     "is_select_statement",
     "migration_contains_danger_operation",
@@ -203,6 +207,41 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
     return summaries
 
 
+def extract_statement_operations(sql: str) -> list[MigrationOperationSummary | None]:
+    """The ``-- operation:`` marker of each statement of ``sql`` (#831).
+
+    One entry per statement of ``extract_executable_statements(sql)``, None
+    for a statement without one. A marker belongs to the statement after it,
+    so a statement without a marker leaves the markers of the others where
+    they are. Where several markers come before one statement, as when a
+    statement above it was commented out, the last one counts; a marker after
+    the last statement, or one that does not parse, marks nothing. The
+    marker's ``-- before-retry:`` line follows it in the same run of comment
+    lines.
+    """
+    return [
+        _statement_operation(statement.comment_blocks)
+        for statement in extract_executable_statements_with_comments(sql)
+    ]
+
+
+def _statement_operation(comment_blocks: list[list[str]]) -> MigrationOperationSummary | None:
+    for block in reversed(comment_blocks):
+        at = next(
+            (i for i in range(len(block) - 1, -1, -1) if block[i].startswith("-- operation:")),
+            None,
+        )
+        if at is None:
+            continue
+        before_retry: str | None = None
+        line = next((x for x in block[at + 1 :] if x.startswith(_BEFORE_RETRY_PREFIX)), None)
+        if line is not None:
+            value = _strip_trailing_semicolon(line[len(_BEFORE_RETRY_PREFIX) :].strip())
+            before_retry = value or None
+        return _parse_operation_line(re.sub(r"^-- operation:\s*", "", block[at]), before_retry)
+    return None
+
+
 @dataclass(frozen=True, slots=True)
 class NonSelectBarrier:
     # 0-based position among the statements.
@@ -213,10 +252,11 @@ class NonSelectBarrier:
 
 
 def find_non_select_barriers(
-    statements: Sequence[str], operations: Sequence[MigrationOperationSummary]
+    statements: Sequence[str], operations: Sequence[MigrationOperationSummary | None]
 ) -> list[NonSelectBarrier]:
-    """The statements marked ``mode=barrier`` that are not a SELECT (#634); the
-    n-th operation marker belongs to the n-th statement.
+    """The statements marked ``mode=barrier`` that are not a SELECT (#634);
+    ``operations`` has the marker of each statement, as
+    ``extract_statement_operations`` returns them.
 
     The barrier read runs its statement as a query, once and then every
     second, and nothing waits for a change it makes to reach the other
@@ -470,16 +510,16 @@ def _extract_object_key(statement: str) -> str:
 def scan_destructive_sql_statements(sql: str) -> list[ScannedDestructiveStatement]:
     """Defense-in-depth scan: flag destructive SQL with no matching planner marker.
 
-    Generated migrations emit exactly one ``-- operation:`` marker per
-    statement, in order (the 1:1 invariant relied on by apply). A
-    marker-covered position is trusted to the planner's risk
-    classification. Only marker-less positions are flagged.
+    Generated migrations emit an ``-- operation:`` marker before each
+    statement. A marker-covered statement is trusted to the planner's risk
+    classification. Only statements without a marker of their own are
+    flagged (#831), anywhere in the file.
     """
     statements = extract_executable_statements(sql)
-    operations = extract_migration_operation_summaries(sql)
+    operations = extract_statement_operations(sql)
     found: list[ScannedDestructiveStatement] = []
     for i, statement in enumerate(statements):
-        if i < len(operations):
+        if operations[i] is not None:
             continue
         type_ = _classify_destructive_statement(statement)
         if type_ is not None:

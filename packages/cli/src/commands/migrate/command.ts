@@ -63,7 +63,7 @@ import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
 import { parseSettingFlags } from './settings.js'
-import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
+import { extractExecutableStatements, extractStatementOperations } from '../../runtime/safety-markers.js'
 import { createQueryTracker, queryTrackingDisabled, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
 import { abandonRecovery, assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
 
@@ -301,7 +301,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
           const state = await journalStore.readMigrationState(file)
           if (state?.operations.some((op) => op.status !== 'completed' && op.queryId !== '')) throw new MigrateError('migrate_cancellation_failed', `Explicit recovery cannot attach the historical async attempt in ${file}. Finish async recovery before using --cancel-lock-queries.`)
           const sql = await readFile(join(migrationsDir, file), 'utf8')
-          const summaries = extractMigrationOperationSummaries(sql)
+          const summaries = extractStatementOperations(sql)
           for (const [statementIndex, forwardSQL] of extractExecutableStatements(sql).entries()) {
             const operation = summaries[statementIndex]
             if (operation && operation.mode !== 'sync') throw new MigrateError('migrate_cancellation_failed', 'Explicit recovery requires a fully synchronous selected migration plan.')

@@ -34,6 +34,10 @@ class StatementIdentity:
     # The ``statement_fingerprint`` of the statement; None when its SQL cannot
     # be checked yet, because a plugin's on_before_apply may still rewrite it.
     fingerprint: str | None = None
+    # The marker releases before #831 gave the statement, when it differs:
+    # they paired the n-th marker of the file with the n-th statement. A record
+    # they wrote names that marker, and still matches the statement.
+    legacy: tuple[str, str] | None = None
 
 
 class Marker(BaseModel):
@@ -144,26 +148,39 @@ def normalize_migration_name(raw: str, flag: str) -> str:
 
 
 def statement_identity(
-    operations: Sequence[MigrationOperationSummary], index: int
+    operations: Sequence[MigrationOperationSummary | None], index: int
 ) -> StatementIdentity:
     """The (type, key) the journal records for statement ``index``."""
-    if index >= len(operations):
+    operation = operations[index] if index < len(operations) else None
+    if operation is None:
         return StatementIdentity(type="sql_statement", key=f"statement:{index}", marked=False)
-    operation = operations[index]
     return StatementIdentity(type=operation.type, key=operation.key, marked=True)
 
 
 def statement_identities(
-    operations: Sequence[MigrationOperationSummary],
+    operations: Sequence[MigrationOperationSummary | None],
     fingerprints: Sequence[str | None],
+    legacy_operations: Sequence[MigrationOperationSummary],
 ) -> list[StatementIdentity]:
-    """One identity per statement; ``fingerprints`` has one entry per statement."""
+    """One identity per statement; ``fingerprints`` has one entry per statement.
+
+    ``operations`` has the marker of each statement
+    (``extract_statement_operations``), ``legacy_operations`` the file's
+    markers in order, as releases before #831 paired them
+    (``extract_migration_operation_summaries``).
+    """
     out: list[StatementIdentity] = []
     for index, fingerprint in enumerate(fingerprints):
         marker = statement_identity(operations, index)
+        legacy = statement_identity(legacy_operations, index)
+        differs = (legacy.type, legacy.key) != (marker.type, marker.key)
         out.append(
             StatementIdentity(
-                type=marker.type, key=marker.key, marked=marker.marked, fingerprint=fingerprint
+                type=marker.type,
+                key=marker.key,
+                marked=marker.marked,
+                fingerprint=fingerprint,
+                legacy=(legacy.type, legacy.key) if differs else None,
             )
         )
     return out
@@ -464,9 +481,7 @@ def _find_shared_marker_mismatches(
             if _marker_of(op) == marker
         ]
         current_count = sum(
-            1
-            for identity in identities
-            if identity.type == marker.type and identity.key == marker.key
+            1 for identity in identities if _matches_marker(identity, marker.type, marker.key)
         )
         if current_count < len(recorded):
             out.append(
@@ -486,7 +501,12 @@ def _is_bound_to_position(op: OperationState) -> bool:
 
 
 def _same_identity(identity: StatementIdentity, op: OperationState) -> bool:
-    return identity.type == op.operation_type and identity.key == op.operation_key
+    return _matches_marker(identity, op.operation_type, op.operation_key)
+
+
+def _matches_marker(identity: StatementIdentity, type_: str, key: str) -> bool:
+    """The statement's marker, or the one a release before #831 recorded for it."""
+    return (identity.type, identity.key) == (type_, key) or identity.legacy == (type_, key)
 
 
 def _same_sql(identity: StatementIdentity, op: OperationState) -> bool:

@@ -1,0 +1,142 @@
+{
+  "description": "The -- operation: marker of each statement (#831), shared by packages/cli/src/test/runtime/safety-markers.test.ts and chkit_python/tests/test_safety_markers.py. `operations` has one entry per executable statement, null where the statement has no marker; `legacy` is what releases before #831 read: the n-th marker of the file for the n-th statement.",
+  "cases": [
+    {
+      "name": "a generated migration: every statement has its marker",
+      "sql": "-- chkit-migration-format: v1\n-- generated-at: 2026-11-19T00:00:00.000Z\n-- operation-count: 3\n-- risk-summary: safe=1, caution=2, danger=0\n\n-- operation: create_table key=table:app.t risk=safe\nCREATE TABLE IF NOT EXISTS app.t (\n  id UInt64 -- the id\n) ENGINE = MergeTree ORDER BY id;\n\n-- operation: load_table_data key=table:app.t risk=caution mode=async\n-- before-retry: TRUNCATE TABLE app.t\n-- Warning: loads every row again\nINSERT INTO app.t SELECT number FROM numbers(10);\n\n-- operation: alter_table_modify_column key=table:app.t:column:id risk=caution\n-- Warning: does not rewrite stored values\nALTER TABLE app.t MODIFY COLUMN id UInt64 DEFAULT 1;\n",
+      "operations": [
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null },
+        { "type": "load_table_data", "key": "table:app.t", "risk": "caution", "mode": "async", "beforeRetry": "TRUNCATE TABLE app.t" },
+        { "type": "alter_table_modify_column", "key": "table:app.t:column:id", "risk": "caution", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": "same"
+    },
+    {
+      "name": "an unmarked statement before an async load keeps its own place",
+      "sql": "CREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n-- operation: load_table_data key=table:app.t risk=caution mode=async\n-- before-retry: TRUNCATE TABLE app.t\nINSERT INTO app.t SELECT number FROM numbers(10);\n",
+      "operations": [
+        null,
+        { "type": "load_table_data", "key": "table:app.t", "risk": "caution", "mode": "async", "beforeRetry": "TRUNCATE TABLE app.t" }
+      ],
+      "legacy": [
+        { "type": "load_table_data", "key": "table:app.t", "risk": "caution", "mode": "async", "beforeRetry": "TRUNCATE TABLE app.t" },
+        null
+      ]
+    },
+    {
+      "name": "an unmarked statement between marked ones",
+      "sql": "-- operation: create_table key=table:app.a risk=safe\nCREATE TABLE app.a (id UInt64) ENGINE = MergeTree ORDER BY id;\nDROP TABLE app.old;\n-- operation: create_table key=table:app.b risk=safe\nCREATE TABLE app.b (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+      "operations": [
+        { "type": "create_table", "key": "table:app.a", "risk": "safe", "mode": "sync", "beforeRetry": null },
+        null,
+        { "type": "create_table", "key": "table:app.b", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": [
+        { "type": "create_table", "key": "table:app.a", "risk": "safe", "mode": "sync", "beforeRetry": null },
+        { "type": "create_table", "key": "table:app.b", "risk": "safe", "mode": "sync", "beforeRetry": null },
+        null
+      ]
+    },
+    {
+      "name": "the marker of a commented-out statement marks nothing",
+      "sql": "-- operation: drop_table key=table:app.old risk=danger\n-- DROP TABLE app.old;\n-- operation: create_table key=table:app.t risk=safe\nCREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+      "operations": [
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": [
+        { "type": "drop_table", "key": "table:app.old", "risk": "danger", "mode": "sync", "beforeRetry": null }
+      ]
+    },
+    {
+      "name": "a marker after the last statement marks nothing",
+      "sql": "-- operation: create_table key=table:app.t risk=safe\nCREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n-- operation: drop_table key=table:app.t risk=danger\n",
+      "operations": [
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": "same"
+    },
+    {
+      "name": "a marker that does not parse leaves its statement unmarked",
+      "sql": "-- operation: create_table risk=safe\nCREATE TABLE app.a (id UInt64) ENGINE = MergeTree ORDER BY id;\n-- operation: create_table key=table:app.b risk=safe\nCREATE TABLE app.b (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+      "operations": [
+        null,
+        { "type": "create_table", "key": "table:app.b", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": [
+        { "type": "create_table", "key": "table:app.b", "risk": "safe", "mode": "sync", "beforeRetry": null },
+        null
+      ]
+    },
+    {
+      "name": "a blank line between the marker and its statement",
+      "sql": "-- operation: create_table key=table:app.t risk=safe\n\nCREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+      "operations": [
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": "same"
+    },
+    {
+      "name": "a before-retry line after the statement belongs to no marker",
+      "sql": "-- operation: load_table_data key=table:app.t risk=caution mode=async\nINSERT INTO app.t SELECT 1;\n-- before-retry: TRUNCATE TABLE app.t\nSELECT 1;\n",
+      "operations": [
+        { "type": "load_table_data", "key": "table:app.t", "risk": "caution", "mode": "async", "beforeRetry": null },
+        null
+      ],
+      "legacy": "same"
+    },
+    {
+      "name": "a before-retry line without a marker",
+      "sql": "-- before-retry: TRUNCATE TABLE app.t\nINSERT INTO app.t SELECT 1;\n",
+      "operations": [null],
+      "legacy": "same"
+    },
+    {
+      "name": "a before-retry line after a block comment belongs to no marker",
+      "sql": "-- operation: load_table_data key=table:app.t risk=caution mode=async\n/* note */\n-- before-retry: TRUNCATE TABLE app.t\nINSERT INTO app.t SELECT 1;\n",
+      "operations": [
+        { "type": "load_table_data", "key": "table:app.t", "risk": "caution", "mode": "async", "beforeRetry": null }
+      ],
+      "legacy": "same"
+    },
+    {
+      "name": "a marker inside a block comment or a string is text",
+      "sql": "/*\n-- operation: drop_table key=table:app.old risk=danger\n*/\nSELECT 1;\nSELECT '\n-- operation: drop_table key=table:app.old risk=danger\n';\n-- operation: create_table key=table:app.t risk=safe\nCREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+      "operations": [
+        null,
+        null,
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": [
+        { "type": "drop_table", "key": "table:app.old", "risk": "danger", "mode": "sync", "beforeRetry": null },
+        { "type": "drop_table", "key": "table:app.old", "risk": "danger", "mode": "sync", "beforeRetry": null },
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ]
+    },
+    {
+      "name": "a marker after SQL on its line is not a marker",
+      "sql": "SELECT 1; -- operation: create_table key=table:app.t risk=safe\nSELECT 2;\n",
+      "operations": [null, null],
+      "legacy": "same"
+    },
+    {
+      "name": "a marker before a statement made only of a comment marks the next statement",
+      "sql": "-- operation: create_table key=table:app.t risk=safe\n/* only a comment */;\nCREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+      "operations": [
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": "same"
+    },
+    {
+      "name": "the last statement without a semicolon",
+      "sql": "SELECT 1;\n-- operation: create_table key=table:app.t risk=safe\nCREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id\n-- operation: drop_table key=table:app.t risk=danger\n",
+      "operations": [
+        null,
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": [
+        { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null },
+        { "type": "drop_table", "key": "table:app.t", "risk": "danger", "mode": "sync", "beforeRetry": null }
+      ]
+    }
+  ]
+}

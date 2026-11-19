@@ -1,11 +1,14 @@
 import { describe, expect, test } from 'bun:test'
 
+import fixture from '../../../../../test/fixtures/statement-operations.json'
 import {
   collectDestructiveOperationMarkers,
   collectUnmarkedDestructiveStatements,
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  extractStatementOperations,
   findNonSelectBarriers,
+  type MigrationOperationSummary,
   isSelectStatement,
   rejectionRunsNothing,
   migrationContainsDestructiveSql,
@@ -477,4 +480,39 @@ describe('rejectionRunsNothing', () => {
       expect(rejectionRunsNothing(statement)).toBe(false)
     })
   }
+})
+
+// test/fixtures/statement-operations.json is shared with chkit-py
+// (tests/test_safety_markers.py): both ports pair the same marker with each statement.
+describe('extractStatementOperations (#831)', () => {
+  const fields = (op: MigrationOperationSummary | undefined) =>
+    op === undefined ? null : { type: op.type, key: op.key, risk: op.risk, mode: op.mode, beforeRetry: op.beforeRetry }
+  for (const { name, sql, operations, legacy } of fixture.cases) {
+    test(name, () => {
+      const statements = extractExecutableStatements(sql)
+      expect(extractStatementOperations(sql).map(fields)).toEqual(operations)
+      expect(operations).toHaveLength(statements.length)
+      // What a release before #831 paired with each statement.
+      const ordered = extractMigrationOperationSummaries(sql)
+      expect(statements.map((_, index) => fields(ordered[index]))).toEqual(legacy === 'same' ? operations : legacy)
+    })
+  }
+
+  test('an unmarked DROP TABLE before a marked statement still needs --allow-destructive', () => {
+    const sql = [
+      'DROP TABLE app.old;',
+      '-- operation: create_table key=table:app.t risk=safe',
+      'CREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;',
+    ].join('\n')
+    expect(scanDestructiveSqlStatements(sql)).toEqual([{ type: 'drop_table', statement: 'DROP TABLE app.old;' }])
+  })
+
+  test('a barrier after an unmarked statement is checked at its own statement', () => {
+    const sql = [
+      'INSERT INTO app.t VALUES (1);',
+      '-- operation: insert_barrier key=table:app.t risk=safe mode=barrier',
+      'SELECT 1 AS query_id;',
+    ].join('\n')
+    expect(findNonSelectBarriers(extractExecutableStatements(sql), extractStatementOperations(sql))).toEqual([])
+  })
 })
