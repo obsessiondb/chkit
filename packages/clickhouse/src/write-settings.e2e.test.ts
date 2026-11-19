@@ -33,6 +33,9 @@ describe('@chkit/clickhouse write settings e2e (#767)', () => {
         // The insert API too; chkit-py sends the same (#767, round 4).
         await executor.insert({ table: `${env.clickhouseDatabase}.${prefix}t`, values: [{ id: 2, marker }] })
         expect(await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)).toEqual([{ n: '2' }])
+        // And submit, which async migrate statements go through (#790).
+        await executor.submit(`INSERT INTO ${table} VALUES (3, '${marker}')`)
+        expect(await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)).toEqual([{ n: '3' }])
       } finally {
         await executor.close()
       }

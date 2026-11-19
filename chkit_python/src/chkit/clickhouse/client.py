@@ -393,7 +393,12 @@ class ClickHouseClient:
         driver = self._submit_driver()
         _SUBMIT_SEND.before_send = before_send
         try:
-            driver.command(statement, settings={**(settings or {}), "query_id": qid})
+            # No asynchronous INSERT, as execute sends: the server would
+            # finish it while its rows are still buffered (#790).
+            driver.command(
+                statement,
+                settings={**self._write_settings(), **(settings or {}), "query_id": qid},
+            )
         finally:
             _SUBMIT_SEND.before_send = None
         return qid

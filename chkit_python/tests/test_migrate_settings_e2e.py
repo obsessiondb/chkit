@@ -77,6 +77,21 @@ def test_parse_setting_flags() -> None:
         assert "secret" not in str(error.value)
 
 
+def test_parse_setting_flags_allows_async_insert_only_off() -> None:
+    # #790: migrate cannot tell a buffered asynchronous INSERT from a stored one.
+    assert parse_setting_flags(["async_insert=0", " async_insert = FALSE "]) == {
+        "async_insert": "FALSE"
+    }
+    for value in ["1", "true", "True", "2", ""]:
+        with pytest.raises(MigrateError) as error:
+            parse_setting_flags([f"max_threads=1,async_insert={value}"])
+        assert error.value.code == "invalid_usage"
+        assert str(error.value) == (
+            f"--setting async_insert={value} is not allowed: migrate would record an "
+            "asynchronous INSERT as applied while its rows may still be buffered. Nothing ran."
+        )
+
+
 def test_migrate_sends_settings_with_every_statement(
     live: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:

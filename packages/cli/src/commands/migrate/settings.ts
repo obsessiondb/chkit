@@ -21,6 +21,16 @@ const RESERVED_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /**
+ * migrate journals a statement as completed when the server finishes it. An
+ * asynchronous INSERT finishes before its rows leave the buffer (with
+ * wait_for_async_insert = 0, from the profile or another --setting), so
+ * --setting async_insert may only turn it off (#790).
+ */
+function turnsOnAsyncInsert(name: string, value: string): boolean {
+  return name === 'async_insert' && value !== '0' && value.toLowerCase() !== 'false'
+}
+
+/**
  * Parse `--setting name=value` flags into ClickHouse query settings, e.g.
  * `max_table_size_to_drop=0` to drop a table over the server's size limit (#321).
  * Returns undefined when no setting was passed.
@@ -43,7 +53,14 @@ export function parseSettingFlags(values: readonly string[] | undefined): ClickH
         `--setting ${name} is not allowed: ${name} is a ClickHouse HTTP parameter, not a query setting.`,
       )
     }
-    settings[name] = entry.slice(eq + 1).trim()
+    const value = entry.slice(eq + 1).trim()
+    if (turnsOnAsyncInsert(name, value)) {
+      throw new MigrateError(
+        'invalid_usage',
+        `--setting async_insert=${value} is not allowed: migrate would record an asynchronous INSERT as applied while its rows may still be buffered. Nothing ran.`,
+      )
+    }
+    settings[name] = value
   }
   return settings
 }

@@ -1168,7 +1168,9 @@ export function createExecutorWithClient(
 				await fireAndForgetClient.command({
 					query: sql,
 					query_id: id,
-					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
+					// No asynchronous INSERT, as with command: the server would finish
+					// it while its rows are still buffered (#790).
+					clickhouse_settings: { async_insert: 0, ...clickhouseSettings },
 					...(options?.signal ? { abort_signal: options.signal } : {}),
 				})
 			} catch (error) {

@@ -28,6 +28,14 @@ _RESERVED_NAMES = frozenset({
 })
 
 
+def _turns_on_async_insert(name: str, value: str) -> bool:
+    """migrate journals a statement as completed when the server finishes it.
+    An asynchronous INSERT finishes before its rows leave the buffer (with
+    ``wait_for_async_insert = 0``, from the profile or another ``--setting``),
+    so ``--setting async_insert`` may only turn it off (#790)."""
+    return name == "async_insert" and value != "0" and value.lower() != "false"
+
+
 def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
     """Parse ``--setting name=value`` flags into ClickHouse query settings,
     e.g. ``max_table_size_to_drop=0`` to drop a table over the server's size
@@ -57,5 +65,13 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
                 "parameter, not a query setting."
             )
             raise MigrateError("invalid_usage", msg)
-        settings[name] = js_trim(value)
+        value = js_trim(value)
+        if _turns_on_async_insert(name, value):
+            msg = (
+                f"--setting async_insert={value} is not allowed: migrate would record an "
+                "asynchronous INSERT as applied while its rows may still be buffered. "
+                "Nothing ran."
+            )
+            raise MigrateError("invalid_usage", msg)
+        settings[name] = value
     return settings

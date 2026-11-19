@@ -65,8 +65,12 @@ def test_a_statement_is_no_asynchronous_insert_under_a_fire_and_forget_profile(
             # The insert API too, as TS's insert sends (#767, round 4).
             client.insert(f"{prefix}t", [{"id": 2}], database=env.clickhouse_database)
             after_insert = client.query(f"SELECT toString(count()) AS n FROM {table}").rows
+            # And submit, which async migrate statements go through (#790).
+            client.submit(f"INSERT INTO {table} VALUES (3)")
+            after_submit = client.query(f"SELECT toString(count()) AS n FROM {table}").rows
         assert after_execute == [{"n": "1"}]
         assert after_insert == [{"n": "2"}]
+        assert after_submit == [{"n": "3"}]
     finally:
         admin.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
         admin.execute(f"DROP TABLE IF EXISTS {table} SYNC")

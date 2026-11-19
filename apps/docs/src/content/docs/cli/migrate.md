@@ -81,6 +81,8 @@ The settings go with every statement a migration runs: synchronous statements, s
 
 `--setting` takes query settings only. It rejects the ClickHouse HTTP parameters `query`, `database`, `query_id`, `session_id`, `session_check`, `session_timeout`, `user` and `password` with a usage error before anything runs: they would change the database, credentials, query text or query ID that chkit tracks. Set the database and credentials in [`clickhouse`](/configuration/overview/) config instead.
 
+Over the ClickHouse HTTP interface, every migration statement, synchronous or `mode=async`, runs with `async_insert = 0`, whatever the user's settings profile says: an asynchronous `INSERT` finishes while its rows may still be buffered, and chkit would record it as applied before they are stored. For the same reason `--setting async_insert` accepts only `0` or `false`, and any other value is a usage error before anything runs ([#790](https://github.com/obsessiondb/chkit/issues/790)). An `async_insert` setting written in the statement's own `SETTINGS` clause still applies.
+
 ### Server index granularity
 
 Before it checks checksums or applies anything, `migrate` (except `--abandon`) fails when the server's MergeTree `index_granularity` default is not [`clickhouse.indexGranularity`](/configuration/overview/#mergetree-index-granularity-clickhouseindexgranularity) (8192 by default). The message names the value to set. When the server cannot be asked, the check is skipped.

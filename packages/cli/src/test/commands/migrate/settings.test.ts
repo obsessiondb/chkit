@@ -32,4 +32,13 @@ describe('migrate --setting parsing (#321)', () => {
       )
     }
   })
+
+  test('async_insert may only be turned off (#790)', () => {
+    expect(parseSettingFlags(['async_insert=0', ' async_insert = FALSE '])).toEqual({ async_insert: 'FALSE' })
+    for (const value of ['1', 'true', 'True', '2', '']) {
+      expect(() => parseSettingFlags(['max_threads=1', `async_insert=${value}`])).toThrow(
+        `--setting async_insert=${value} is not allowed: migrate would record an asynchronous INSERT as applied while its rows may still be buffered. Nothing ran.`,
+      )
+    }
+  })
 })
