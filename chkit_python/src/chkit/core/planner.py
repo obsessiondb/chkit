@@ -1001,8 +1001,9 @@ def _cycle_releases(
     the columns on such cycles (#789). Beyond work linear in the reads, it
     searches those columns once for each old read that a P drops, and once
     more for each such read and P when the first search finds a K: a deep
-    chain of defaults costs no more than a short one unless many of its
-    columns drop reads on one cycle. Memory stays linear in the reads.
+    chain of defaults costs no more than a short one, unless many dropped
+    reads lead into the same long part of a cycle. Beyond the result, memory
+    stays linear in the reads.
     """
     cyclic = _on_cycles(reads, old_reads)
     # Column -> the columns that lead to it, the first step from K excluded.
@@ -1029,7 +1030,7 @@ def _cycle_releases(
         return reads.get(column, set()) & old_reads.get(column, set())
 
     # Dropped read -> the breakers that drop it. Each closure is searched,
-    # used and let go, so the memory stays linear in the reads.
+    # used and let go, so the searches need memory linear in the reads.
     dropped_by: dict[str, list[str]] = {}
     for breaker in sorted(modified):
         if breaker not in cyclic:

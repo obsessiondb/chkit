@@ -970,8 +970,9 @@ export function orderColumnStatements(
  * the columns on such cycles (#789). Beyond work linear in the reads, it
  * searches those columns once for each old read that a P drops, and once
  * more for each such read and P when the first search finds a K: a deep
- * chain of defaults costs no more than a short one unless many of its
- * columns drop reads on one cycle. Memory stays linear in the reads.
+ * chain of defaults costs no more than a short one, unless many dropped
+ * reads lead into the same long part of a cycle. Beyond the result, memory
+ * stays linear in the reads.
  */
 function cycleReleases(
   reads: DependencyGraph,
@@ -1009,7 +1010,7 @@ function cycleReleases(
   const stableReads = (column: string) =>
     [...(reads.get(column) ?? [])].filter((read) => oldReads.get(column)?.has(read))
   // Dropped read → the breakers that drop it. Each closure is searched,
-  // used and let go, so the memory stays linear in the reads.
+  // used and let go, so the searches need memory linear in the reads.
   const droppedBy = new Map<string, string[]>()
   for (const breaker of [...modified].sort(compareCodePoints)) {
     if (!cyclic.has(breaker)) continue
