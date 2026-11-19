@@ -1257,8 +1257,10 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
     } else if (name === undefined) state = 'unknown'
     // A lambda parameter or a cast type, unless it is named like a keyword.
     else if (skipped.has(i)) state = isKeywordWord(word) ? 'unknown' : 'ended'
-    // A part of a dotted name, or a function call.
-    else if (tokens[i - 1]?.text === '.' || tokens[i + 1]?.text === '.' || tokens[i + 1]?.text === '(') continue
+    // A function call: the `(` after it expects an operand.
+    else if (tokens[i + 1]?.text === '(') continue
+    // A part of a dotted name, which may or may not be a complete operand.
+    else if (tokens[i - 1]?.text === '.' || tokens[i + 1]?.text === '.') state = 'unknown'
     else if (word !== undefined && LITERAL_WORDS.has(word)) {
       keywords.add(i)
       state = 'ended'

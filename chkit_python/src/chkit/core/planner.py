@@ -1331,9 +1331,12 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
         elif i in skipped:
             # A lambda parameter or a cast type, unless it is named like a keyword.
             state = "unknown" if word in _KEYWORD_WORDS else "ended"
-        elif text_at(i - 1) == "." or text_at(i + 1) in (".", "("):
-            # A part of a dotted name, or a function call.
+        elif text_at(i + 1) == "(":
+            # A function call: the ``(`` after it expects an operand.
             pass
+        elif text_at(i - 1) == "." or text_at(i + 1) == ".":
+            # A part of a dotted name, which may or may not be a complete operand.
+            state = "unknown"
         elif word is not None and word in _LITERAL_WORDS:
             keywords.add(i)
             state = "ended"

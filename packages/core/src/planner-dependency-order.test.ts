@@ -1205,6 +1205,7 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ["length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ['end', 'interval']],
     ['arraySum(arrayMap(and -> 1 and end, [1]))', ['end']],
     ["arraySum(arrayMap(both -> both not like end, ['x']))", ['end', 'like']],
+    ['toUInt8(t.x and end)', ['and', 'end', 'x']],
     ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
   ])('column: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
