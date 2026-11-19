@@ -40,7 +40,7 @@ from chkit.cli.commands.migrate_errors import (
     recorded_statements_changed_error,
     statement_split_changed_error,
 )
-from chkit.cli.commands.migrate_interrupt import deferred_interrupt
+from chkit.cli.commands.migrate_interrupt import deferred_interrupt, interruptible
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
@@ -339,23 +339,25 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             and operation.before_retry
             and resolved != "unsent"
         ):
-            try:
-                _run_before_retry(
-                    input_.client,
-                    operation.type,
-                    statement,
-                    operation.before_retry,
-                    cluster=cluster,
-                    settings=input_.settings,
-                    log=input_.log,
-                    status=prior_attempt.status,
-                    query_tracker=input_.query_tracker,
-                    query_context=QueryContext(file, index, statement, operation.before_retry),
-                )
-            except Exception as error:
-                raise statement_error(
-                    file=file, index=index, total=total, statement=statement, error=error
-                ) from error
+            # A first Ctrl-C lets compensation under way finish (#816).
+            with deferred_interrupt():
+                try:
+                    _run_before_retry(
+                        input_.client,
+                        operation.type,
+                        statement,
+                        operation.before_retry,
+                        cluster=cluster,
+                        settings=input_.settings,
+                        log=input_.log,
+                        status=prior_attempt.status,
+                        query_tracker=input_.query_tracker,
+                        query_context=QueryContext(file, index, statement, operation.before_retry),
+                    )
+                except Exception as error:
+                    raise statement_error(
+                        file=file, index=index, total=total, statement=statement, error=error
+                    ) from error
         swapped = (
             _swapped_tables(operation.type, operation.key, statement)
             if operation is not None
@@ -382,13 +384,15 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         with deferred_interrupt():
             try:
                 if operation is not None and operation.mode == "barrier":
-                    wait_for_insert_barrier(
-                        input_.client,
-                        statement,
-                        cluster=cluster,
-                        settings=input_.settings,
-                        log=input_.log,
-                    )
+                    # Reads only: a SIGINT stops its polls at once.
+                    with interruptible():
+                        wait_for_insert_barrier(
+                            input_.client,
+                            statement,
+                            cluster=cluster,
+                            settings=input_.settings,
+                            log=input_.log,
+                        )
                 elif input_.query_tracker is not None:
                     input_.query_tracker.command(
                         QueryContext(

@@ -11,6 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError
+from chkit.cli.commands.migrate_interrupt import raise_if_interrupted
 from chkit.core.identifier import quote_identifier
 from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_lexer import SQLToken, identifier_name, is_trivia, tokenize_sql
@@ -135,7 +136,12 @@ class QueryTracker:
 
         # Recovery reloads synchronously on both transports; ordinary runs keep their settings.
         sent = {**(settings or {}), "async_insert": 0} if self._recovery else settings
-        self._client.execute_tracked(sql, self._lock.assert_held, before, sent)
+        def check() -> None:
+            # Before the send only: once it ran, its outcome is recorded (#816).
+            self._lock.assert_held()
+            raise_if_interrupted()
+
+        self._client.execute_tracked(sql, check, before, sent)
         self._lock.assert_held()
         if phase == "compensation" and self._recovery:
             if physical_target is None:

@@ -2,7 +2,8 @@
 
 A first SIGINT stops the run with ``KeyboardInterrupt``. While a sync statement
 runs (``deferred_interrupt``), it is deferred: the statement finishes and its
-outcome is recorded first. Once the run has ended, its migrate lock released,
+outcome is recorded first; a request not sent yet is refused
+(``raise_if_interrupted``). Once the run has ended, its migrate lock released,
 the process exits with 130. When the run does not end within
 ``INTERRUPT_WAIT_SECONDS``, or on a second SIGINT, it exits at once and the lock
 claim stays in place: a request of the run may still be in flight.
@@ -15,7 +16,7 @@ import signal
 import sys
 import threading
 from collections.abc import Callable, Iterator
-from contextlib import contextmanager
+from contextlib import contextmanager, suppress
 from dataclasses import dataclass
 from types import FrameType
 from typing import TypeVar
@@ -27,6 +28,13 @@ INTERRUPT_WAIT_SECONDS = 30.0
 _T = TypeVar("_T")
 
 
+class MigrateInterrupted(Exception):  # noqa: N818 - named as the TS abort reason
+    """A request refused, unsent, after a first SIGINT; recorded like a failure."""
+
+    def __init__(self) -> None:
+        super().__init__("The run was interrupted (SIGINT).")
+
+
 @dataclass
 class InterruptLock:
     """The migrate lock as the interrupted run reports it; ``with_lock`` keeps it current."""
@@ -36,6 +44,7 @@ class InterruptLock:
 
 
 class _State:
+    depth = 0
     received = False
     pending = False
     deferring = 0
@@ -44,29 +53,63 @@ class _State:
 _state = _State()
 
 
+def raise_if_interrupted() -> None:
+    """Refuses a request not sent yet once a first SIGINT came."""
+    if _state.received:
+        raise MigrateInterrupted
+
+
 @contextmanager
 def deferred_interrupt() -> Iterator[None]:
     """A first SIGINT waits for this block (a sync statement and its record)."""
     _state.deferring += 1
     try:
         yield
-    finally:
+    except Exception as error:
+        _state.deferring -= 1
+        if _state.pending and _state.deferring == 0:
+            _state.pending = False
+            raise KeyboardInterrupt from error
+        raise
+    else:
         _state.deferring -= 1
         if _state.pending and _state.deferring == 0:
             _state.pending = False
             raise KeyboardInterrupt
 
 
+@contextmanager
+def interruptible() -> Iterator[None]:
+    """Inside a deferred block, a step a SIGINT stops at once (a barrier's polls)."""
+    raise_if_interrupted()
+    saved, _state.deferring = _state.deferring, 0
+    try:
+        yield
+    except KeyboardInterrupt as error:
+        _state.pending = True
+        raise MigrateInterrupted from error
+    finally:
+        _state.deferring = saved
+
+
 def with_interrupt(lock: InterruptLock, body: Callable[[], _T]) -> _T:
-    """Runs ``body`` with the SIGINT handler (main thread only)."""
-    if threading.current_thread() is not threading.main_thread():
+    """Runs ``body`` with the SIGINT handler (main thread, outermost call only)."""
+    if _state.depth > 0 or threading.current_thread() is not threading.main_thread():
         return body()
     timer: threading.Timer | None = None
+    exit_lock = threading.RLock()
+    done = False
 
     def exit_now(why: str) -> None:
-        sys.stderr.write(f"migrate: {why}, exiting at once. {_lock_line(lock, exiting_now=True)}\n")
-        sys.stderr.flush()
-        os._exit(130)
+        with exit_lock:
+            if done:
+                return
+            with suppress(BaseException):
+                sys.stderr.write(
+                    f"migrate: {why}, exiting at once. {_lock_line(lock, exiting_now=True)}\n"
+                )
+                sys.stderr.flush()
+            os._exit(130)
 
     def on_signal(_signum: int, _frame: FrameType | None) -> None:
         nonlocal timer
@@ -86,20 +129,43 @@ def with_interrupt(lock: InterruptLock, body: Callable[[], _T]) -> _T:
         raise KeyboardInterrupt
 
     previous = signal.signal(signal.SIGINT, on_signal)
+    _state.depth += 1
+    stop_error: BaseException | None = None
     try:
         return body()
+    except BaseException as error:
+        stop_error = error
+        if _state.received and not isinstance(error, KeyboardInterrupt):
+            raise KeyboardInterrupt from error
+        raise
     finally:
+        _state.depth -= 1
         signal.signal(signal.SIGINT, previous)
+        with exit_lock:
+            done = True
         if timer is not None:
             timer.cancel()
         if _state.received:
             _state.received = False
             _state.pending = False
-            sys.stderr.write(
-                "migrate: interrupted (SIGINT). No new statement was started. "
-                f"{_lock_line(lock, exiting_now=False)}\n"
-            )
-            sys.stderr.flush()
+            detail = _detail(stop_error)
+            with suppress(BaseException):
+                sys.stderr.write(
+                    "migrate: interrupted (SIGINT). No new statement was started. "
+                    f"{_lock_line(lock, exiting_now=False)}{detail}\n"
+                )
+                sys.stderr.flush()
+
+
+def _detail(error: BaseException | None) -> str:
+    """A stop's own error, as TS prints it; not the interrupt itself."""
+    cause = error.__cause__ if isinstance(error, KeyboardInterrupt) else error
+    seen = cause
+    while seen is not None:
+        if isinstance(seen, (KeyboardInterrupt, MigrateInterrupted)):
+            return ""
+        seen = seen.__cause__
+    return f"\n{cause}" if cause is not None else ""
 
 
 def _lock_line(lock: InterruptLock, *, exiting_now: bool) -> str:
