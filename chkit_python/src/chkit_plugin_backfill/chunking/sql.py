@@ -80,7 +80,7 @@ def _js_trim(value: str) -> str:
 #: and whose query_log rows can flush late, and it is always logged, its start
 #: included: a resume proves a failure from that log alone.
 PINNED_INSERT_SETTINGS: dict[str, str] = {
-    "enable_parallel_replicas": "0",
+    "allow_experimental_parallel_reading_from_replicas": "0",
     "parallel_distributed_insert_select": "0",
     "log_queries": "1",
     "log_queries_min_type": "'QUERY_START'",
@@ -92,26 +92,35 @@ PINNED_INSERT_SETTINGS_SQL = ", ".join(
 )
 
 
+#: Other names of the pinned settings (``system.settings.alias_for``), for a
+#: server that does not list them: ``enable_parallel_replicas`` is an alias of
+#: ``allow_experimental_parallel_reading_from_replicas`` from 25.3 on.
+PINNED_SETTING_ALIASES: dict[str, str] = {
+    "enable_parallel_replicas": "allow_experimental_parallel_reading_from_replicas",
+}
+
+
 def assert_insert_settings_keep_pinned(
     insert_settings: Mapping[str, str | int | float | bool] | None,
+    aliases: Mapping[str, str] | None = None,
 ) -> None:
-    """Refuse ``insert_settings`` that set a pinned setting to another value
-    (``PINNED_INSERT_SETTINGS``): the chunk INSERT must not run as secondary
-    queries, and must be logged."""
-    def normal(value: str) -> str:
-        bare = value.strip("'").lower()
-        return {"true": "1", "false": "0"}.get(bare, bare)
-
-    conflicts = [
-        f"{key}={_render_insert_setting_value(value)}"
-        for key, value in (insert_settings or {}).items()
-        if key in PINNED_INSERT_SETTINGS
-        and normal(_render_insert_setting_value(value)) != normal(PINNED_INSERT_SETTINGS[key])
-    ]
+    """Refuse ``insertSettings`` that name a pinned setting
+    (``PINNED_INSERT_SETTINGS``), or an alias of one, whatever the value:
+    which of two settings in one SETTINGS clause wins differs per setting,
+    and the chunk INSERT must not run as secondary queries, and must be
+    logged. ``aliases`` adds the server's own (``system.settings.alias_for``)
+    to ``PINNED_SETTING_ALIASES``."""
+    known = {**PINNED_SETTING_ALIASES, **(aliases or {})}
+    conflicts = []
+    for key in insert_settings or {}:
+        if key in PINNED_INSERT_SETTINGS:
+            conflicts.append(key)
+        elif known.get(key) in PINNED_INSERT_SETTINGS:
+            conflicts.append(f"{key} (an alias of {known[key]})")
     if conflicts:
         msg = (
             f"insertSettings sets {', '.join(conflicts)}, which every backfill chunk INSERT "
-            f"runs with as {PINNED_INSERT_SETTINGS_SQL}: with those, its failure cannot be "
+            f"pins ({PINNED_INSERT_SETTINGS_SQL}): with another value, its failure cannot be "
             "proven from system.query_log, and a replay could write its rows twice. Remove "
             "them from insertSettings."
         )

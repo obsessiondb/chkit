@@ -43,7 +43,7 @@ const ASTERISK_SETTINGS = 'asterisk_include_materialized_columns=0, asterisk_inc
  * failure from that log alone.
  */
 export const PINNED_INSERT_SETTINGS = {
-  enable_parallel_replicas: '0',
+  allow_experimental_parallel_reading_from_replicas: '0',
   parallel_distributed_insert_select: '0',
   log_queries: '1',
   log_queries_min_type: "'QUERY_START'",

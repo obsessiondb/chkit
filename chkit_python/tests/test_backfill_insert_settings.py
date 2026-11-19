@@ -22,11 +22,14 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 from chkit_plugin_backfill.chunking.sql import (
     PINNED_INSERT_SETTINGS_SQL as _PINNED_INSERT,
 )
-from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
+from chkit_plugin_backfill.chunking.sql import (
+    assert_insert_settings_keep_pinned,
+    build_chunk_execution_sql,
+)
 from chkit_plugin_backfill.chunking.types import Chunk, TableProfile
 from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import PluginConfig
-from chkit_plugin_backfill.planner import BuildBackfillPlanOutput
+from chkit_plugin_backfill.planner import BuildBackfillPlanOutput, read_pinned_setting_aliases
 from chkit_plugin_backfill.plugin import backfill
 from chkit_plugin_obsessiondb import backfill_submit as backfill_submit_module
 from chkit_plugin_obsessiondb.backfill_submit import (
@@ -133,44 +136,79 @@ def test_insert_settings_without_a_token() -> None:
     )
 
 
-# Opus delta review: insertSettings that keep a pinned setting are folded into
-# the pinned one; one that changes it is refused.
-def test_insert_settings_that_keep_a_pinned_setting_are_not_repeated() -> None:
-    sql = build_chunk_execution_sql(
-        plan_id="p",
-        chunk=_chunk(),
-        target="app.events",
-        table=TABLE,
-        insert_settings={"log_queries": True, "enable_parallel_replicas": 0},
-    )
-
-    assert _settings_line(sql) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
-
-
+# Opus delta review: insertSettings that name a pinned setting, or an alias of
+# one, are refused whatever the value: which of two settings in one SETTINGS
+# clause wins differs per setting.
 @pytest.mark.parametrize(
-    ("setting", "value", "rendered"),
+    ("settings", "named"),
     [
-        ("enable_parallel_replicas", 1, "enable_parallel_replicas=1"),
-        ("parallel_distributed_insert_select", 2, "parallel_distributed_insert_select=2"),
-        ("log_queries", False, "log_queries=false"),
-        ("log_queries_min_type", "QUERY_FINISH", "log_queries_min_type='QUERY_FINISH'"),
-        ("log_queries_min_query_duration_ms", 1000, "log_queries_min_query_duration_ms=1000"),
+        ({"log_queries": True}, "log_queries"),
+        ({"parallel_distributed_insert_select": 2}, "parallel_distributed_insert_select"),
+        ({"log_queries_min_type": "QUERY_FINISH"}, "log_queries_min_type"),
+        ({"log_queries_min_query_duration_ms": 0}, "log_queries_min_query_duration_ms"),
+        (
+            {"allow_experimental_parallel_reading_from_replicas": 1},
+            "allow_experimental_parallel_reading_from_replicas",
+        ),
+        (
+            {"enable_parallel_replicas": 1},
+            "enable_parallel_replicas (an alias of "
+            "allow_experimental_parallel_reading_from_replicas)",
+        ),
     ],
 )
-def test_insert_settings_that_change_a_pinned_setting_are_refused(
-    setting: str, value: str | int | bool, rendered: str
+def test_insert_settings_that_name_a_pinned_setting_are_refused(
+    settings: dict[str, str | int | bool], named: str
 ) -> None:
     with pytest.raises(BackfillConfigError) as raised:
         build_chunk_execution_sql(
             plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
-            insert_settings={setting: value},
+            insert_settings=settings,
         )
 
     assert str(raised.value) == (
-        f"insertSettings sets {rendered}, which every backfill chunk INSERT runs with as "
-        f"{_PINNED_INSERT}: with those, its failure cannot be proven from system.query_log, "
-        "and a replay could write its rows twice. Remove them from insertSettings."
+        f"insertSettings sets {named}, which every backfill chunk INSERT pins "
+        f"({_PINNED_INSERT}): with another value, its failure cannot be proven from "
+        "system.query_log, and a replay could write its rows twice. Remove them from "
+        "insertSettings."
     )
+
+
+def test_an_alias_the_server_lists_is_refused_too() -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        assert_insert_settings_keep_pinned(
+            {"log_queries_alias": 0, "max_insert_threads": 4},
+            {"log_queries_alias": "log_queries"},
+        )
+
+    assert "insertSettings sets log_queries_alias (an alias of log_queries)" in str(raised.value)
+
+
+def test_the_server_aliases_come_from_system_settings_alias_for() -> None:
+    reads: list[str] = []
+
+    def query(sql: str, _settings: object = None) -> list[dict[str, object]]:
+        reads.append(sql)
+        return [{"name": "enable_parallel_replicas", "alias_for": "allow_experimental_parallel_reading_from_replicas"}]
+
+    aliases = read_pinned_setting_aliases(query)
+
+    assert aliases == {"enable_parallel_replicas": "allow_experimental_parallel_reading_from_replicas"}
+    assert reads == [
+        "SELECT name, alias_for FROM system.settings WHERE alias_for IN ("
+        "'allow_experimental_parallel_reading_from_replicas', "
+        "'parallel_distributed_insert_select', 'log_queries', 'log_queries_min_type', "
+        "'log_queries_min_query_duration_ms')"
+    ]
+
+
+def test_a_server_without_alias_for_falls_back_to_the_static_aliases() -> None:
+    def query(_sql: str, _settings: object = None) -> list[dict[str, object]]:
+        raise RuntimeError("Missing columns: 'alias_for'")
+
+    assert read_pinned_setting_aliases(query) == {}
+    with pytest.raises(BackfillConfigError):
+        assert_insert_settings_keep_pinned({"enable_parallel_replicas": 0}, {})
 
 
 def test_insert_settings_apply_to_the_mv_replay_union_insert() -> None:
@@ -309,11 +347,9 @@ def test_insert_with_insert_settings_runs_on_clickhouse() -> None:
             source_target=source,
             table=table,
             idempotency_token=f"{prefix}-token",
-            # enable_parallel_replicas=0: ObsessionDB enables parallel replicas by
-            # default, and the `_partition_id` filter can then miss freshly
-            # inserted parts. Exactly the kind of setting insertSettings is for.
+            # Parallel replicas (on by default on ObsessionDB) are off through the
+            # INSERT's pinned settings, which insertSettings may not name.
             insert_settings={
-                "enable_parallel_replicas": 0,
                 "max_insert_threads": 2,
                 "min_insert_block_size_rows": 100,
                 "log_comment": "chkit's backfill",

@@ -68,6 +68,7 @@ from chkit_plugin_backfill.planner import (
     assert_pinned_insert_settings_accepted,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
+    read_pinned_setting_aliases,
     unprovable_target_failures,
 )
 from chkit_plugin_backfill.queries import (
@@ -349,6 +350,10 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             stop,
             plan.plan_id,
         )
+        aliases = run_interruptible(
+            lambda: read_pinned_setting_aliases(db.query_rows), stop, plan.plan_id
+        )
+        assert_insert_settings_keep_pinned(insert_settings, aliases)
         run_interruptible(
             lambda: assert_pinned_insert_settings_accepted(
                 plan_id=plan.plan_id, query=db.query_rows

@@ -16,7 +16,7 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
-from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS_SQL
+from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS, PINNED_INSERT_SETTINGS_SQL
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -122,6 +122,24 @@ def assert_pinned_insert_settings_accepted(*, plan_id: str, query: PlannerQuery)
             "user allowed to set them (not readonly = 1, and no settings constraint on them)."
         )
         raise BackfillConfigError(msg) from error
+
+
+def read_pinned_setting_aliases(query: PlannerQuery) -> dict[str, str]:
+    """The server's other names of the pinned settings, from
+    ``system.settings.alias_for``. A server without that column, or a read
+    that fails, gives none: ``PINNED_SETTING_ALIASES`` still applies."""
+    names = ", ".join(f"'{name}'" for name in PINNED_INSERT_SETTINGS)
+    try:
+        rows = query(
+            f"SELECT name, alias_for FROM system.settings WHERE alias_for IN ({names})", None
+        )
+    except Exception:
+        return {}
+    return {
+        str(row["name"]): str(row["alias_for"])
+        for row in rows
+        if row.get("name") and row.get("alias_for")
+    }
 
 
 def unprovable_target_failures(
