@@ -26,10 +26,12 @@ import httpx
 import pytest
 
 from chkit.cli.commands.migrate_async_apply import (
+    ATTEMPT_RECORD_MARKER,
     AsyncApplyInput,
     apply_async_statement,
     make_deterministic_query_id,
 )
+from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.journal_store import MigrationRowState, OperationState
 from chkit.clickhouse.client import ClickHouseClient, QueryStatus
 from chkit.clickhouse.ddl_propagation import wait_for_table
@@ -261,6 +263,11 @@ class _MemoryJournal:
     def read_migration_state(self, _name: str) -> MigrationRowState | None:
         return self.state
 
+    def read_stored_operation(self, _name: str, index: int) -> OperationState | None:
+        if self.state is None:
+            return None
+        return next((op for op in self.state.operations if op.operation_index == index), None)
+
     def write_migration_state(self, state: MigrationRowState) -> None:
         self.writes.append(state)
         self.state = state
@@ -314,7 +321,7 @@ def test_async_submission_completes_and_rerun_skips(
     )
     try:
         assert apply_async_statement(statement).kind == "completed"
-        assert journal.statuses() == ["started", "completed"]
+        assert journal.statuses() == ["started", "started", "completed"]
         assert apply_async_statement(statement).kind == "skipped"
         rows = _poll_until(
             lambda: int(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"]),
@@ -343,7 +350,7 @@ def test_first_submission_completes_without_query_log(
     )
     try:
         assert apply_async_statement(statement).kind == "completed"
-        assert journal.statuses() == ["started", "completed"]
+        assert journal.statuses() == ["started", "started", "completed"]
         rows = _poll_until(
             lambda: int(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"]),
             lambda n: n >= 3,
@@ -353,12 +360,39 @@ def test_first_submission_completes_without_query_log(
         live.execute(f"DROP TABLE IF EXISTS {table}")
 
 
+def test_a_statement_the_server_rejects_is_recorded_failed_from_its_query_log_entry(
+    live_env: LiveEnv, remote: RemoteClickHouseClient, live: ClickHouseClient
+) -> None:
+    """#767: a statement the server rejects before it starts has no
+    QueryFinish; query_log records its ExceptionBeforeStart under the
+    attempt's id, which is the failure that lets a re-run run it again."""
+    prefix = create_prefix("py_remote_rejected")
+    name = f"{prefix}dst"
+    table = _create_table(live, live_env.clickhouse_database, name)
+    journal = _MemoryJournal(None)
+    statement = _statement(
+        client=remote,
+        journal=journal,
+        migration_name=f"20990101000000_{prefix}rejected.sql",
+        operation_key=f"table:{live_env.clickhouse_database}.{name}",
+        # A syntax error: the server rejects it before it starts.
+        sql=f"INSERT INTO {table} SELEC number FROM numbers(3)",
+    )
+    try:
+        with pytest.raises(RuntimeError, match="SYNTAX_ERROR"):
+            apply_async_statement(statement)
+        assert journal.statuses() == ["started", "started", "failed"]
+    finally:
+        live.execute(f"DROP TABLE IF EXISTS {table}")
+
+
 class _RecordingRemote:
-    """Delegates to the remote client and records each ``after_time``."""
+    """Delegates to the remote client and records each status call."""
 
     def __init__(self, inner: RemoteClickHouseClient) -> None:
         self._inner = inner
         self.after_times: list[str | None] = []
+        self.status_ids: list[str] = []
 
     def query(self, statement: str) -> Any:
         return self._inner.query(statement)
@@ -371,6 +405,8 @@ class _RecordingRemote:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Any = None,
     ) -> str:
         return self._inner.submit(statement, query_id=query_id, settings=settings)
 
@@ -381,8 +417,10 @@ class _RecordingRemote:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         self.after_times.append(after_time)
+        self.status_ids.append(query_id)
         return self._inner.query_status(
             query_id,
             after_time=after_time,
@@ -391,17 +429,60 @@ class _RecordingRemote:
         )
 
 
-def test_attach_counts_only_query_log_entries_of_attached_attempt(
+def _started_journal(
+    migration_name: str,
+    query_id: str,
+    operation_key: str,
+    *,
+    started_at: str = "2026-10-02 00:00:00.000",
+    fenced: bool = False,
+) -> _MemoryJournal:
+    """What a run that lost its connection while the statement ran leaves
+    behind: by default, a record an earlier release wrote."""
+    started = OperationState.model_validate(
+        {
+            "operationIndex": 0,
+            "operationKey": operation_key,
+            "operationType": "load_table_data",
+            "queryId": query_id,
+            "status": "started",
+            "startedAt": started_at,
+            "finishedAt": None,
+            "lastError": ATTEMPT_RECORD_MARKER if fenced else "",
+            "fingerprint": "",
+            "attemptFenced": fenced,
+        }
+    )
+    return _MemoryJournal(
+        MigrationRowState.model_validate(
+            {
+                "name": migration_name,
+                "appliedAt": "1970-01-01 00:00:00.000",
+                "checksum": _MIGRATION_CHECKSUM,
+                "chkitVersion": "",
+                "migrationCompleted": False,
+                "operations": [started],
+            }
+        )
+    )
+
+
+def test_an_attach_polls_only_the_id_its_fenced_record_names(
     live_env: LiveEnv, remote: RemoteClickHouseClient, live: ClickHouseClient
 ) -> None:
-    """A re-run attaches to a still-running attempt; an earlier attempt finished."""
+    """A re-run attaches to a still-running attempt. An earlier attempt
+    finished before under the id earlier releases gave a first attempt. The
+    attached attempt's id is its own, recorded fenced before its submit
+    (#767), so its polls read that id only and the earlier QueryFinish never
+    counts."""
     prefix = create_prefix("py_remote_attach")
     name = f"{prefix}dst"
     table = _create_table(live, live_env.clickhouse_database, name)
     migration_name = f"20990101000000_{prefix}attach.sql"
-    query_id = make_deterministic_query_id(
+    earlier_id = make_deterministic_query_id(
         live_env.clickhouse_database, "_chkit_migrations", migration_name, 0
     )
+    attached_id = str(uuid.uuid4())
     operation_key = f"table:{live_env.clickhouse_database}.{name}"
     attached_outcome: list[str] = []
 
@@ -411,7 +492,7 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
                 f"INSERT INTO {table} SELECT number + throwIf(number = 12, "
                 "'attached attempt failed') + sleepEachRow(0.5) FROM numbers(20) "
                 "SETTINGS max_block_size = 1",
-                query_id=query_id,
+                query_id=attached_id,
             )
             attached_outcome.append("finished")
         except Exception as error:
@@ -419,52 +500,27 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
 
     worker = threading.Thread(target=run_attached)
     try:
-        remote.submit(f"INSERT INTO {table} SELECT number FROM numbers(2)", query_id=query_id)
-        earlier_ended_ms = _read_server_now_ms(live)
+        remote.submit(f"INSERT INTO {table} SELECT number FROM numbers(2)", query_id=earlier_id)
         earlier = _poll_until(
-            lambda: remote.query_status(query_id),
+            lambda: remote.query_status(earlier_id),
             lambda status: status.status == "finished",
         )
         assert earlier.status == "finished"
-        # Start the attached attempt well past the bound's 2 s margin.
-        _poll_until(
-            lambda: _read_server_now_ms(live),
-            lambda now_ms: now_ms >= earlier_ended_ms + 3_000,
-            interval=0.1,
-        )
+        attached_start_ms = _read_server_now_ms(live)
         # Fails after about 6 s: one row per block, 0.5 s per row.
         worker.start()
         _poll_until(
-            lambda: remote.query_status(query_id),
+            lambda: remote.query_status(attached_id),
             lambda status: status.status == "running",
             interval=0.1,
         )
 
         recording = _RecordingRemote(remote)
-        started = OperationState.model_validate(
-            {
-                "operationIndex": 0,
-                "operationKey": operation_key,
-                "operationType": "load_table_data",
-                "queryId": query_id,
-                "status": "started",
-                "startedAt": "2026-10-02 00:00:00.000",
-                "finishedAt": None,
-                "lastError": "",
-                "fingerprint": "",
-            }
-        )
-        journal = _MemoryJournal(
-            MigrationRowState.model_validate(
-                {
-                    "name": migration_name,
-                    "appliedAt": "1970-01-01 00:00:00.000",
-                    "checksum": _MIGRATION_CHECKSUM,
-                    "chkitVersion": "",
-                    "migrationCompleted": False,
-                    "operations": [started],
-                }
-            )
+        started_at = datetime.fromtimestamp(attached_start_ms / 1000, tz=UTC).strftime(
+            "%Y-%m-%dT%H:%M:%S.%f"
+        )[:-3]
+        journal = _started_journal(
+            migration_name, attached_id, operation_key, started_at=started_at, fenced=True
         )
         lines: list[str] = []
         statement = _statement(
@@ -476,26 +532,70 @@ def test_attach_counts_only_query_log_entries_of_attached_attempt(
             sql="SELECT 1",
             log=lines.append,
         )
-        with pytest.raises(RuntimeError, match="attached attempt failed"):
+        # It failed while it ran (#767): a re-run stops until a reconcile.
+        with pytest.raises(MigrateError, match="attached attempt failed") as info:
             apply_async_statement(statement)
+        assert info.value.code == "async_outcome_unknown"
         assert any("attaching to in-flight query" in line for line in lines)
-        # The attach journals the attempt started (#672), then its failure.
-        assert journal.statuses() == ["started", "failed"]
+        # The attach writes nothing, and a failure while it ran (#767) writes
+        # nothing either: the fenced started record keeps the attempt.
+        assert journal.statuses() == []
         worker.join(timeout=60)
         assert "attached attempt failed" in attached_outcome[0]
 
-        # The in-flight check looks for any running query with the id: the
-        # record has no marker of this release, so query_log is not read (#672).
-        # Every poll after it counts only queries that started after the
-        # earlier attempt had ended.
-        in_flight_check, *polls = recording.after_times
-        assert in_flight_check is None
-        assert polls
-        assert len(set(polls)) == 1
-        assert polls[0] is not None
-        bound_ms = datetime.fromisoformat(polls[0]).timestamp() * 1000
-        assert bound_ms > earlier_ended_ms
+        # Every check and poll reads the attached attempt's id, from an hour
+        # before its recorded start, which only lets query_log prune.
+        assert len(recording.status_ids) > 1
+        assert set(recording.status_ids) == {attached_id}
+        assert set(recording.after_times) == {_iso(attached_start_ms - 3_600_000)}
     finally:
         if worker.is_alive():
             worker.join(timeout=60)
+        live.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+def test_a_running_attempt_under_a_record_an_earlier_release_wrote_stops_the_run(
+    live_env: LiveEnv, remote: RemoteClickHouseClient, live: ClickHouseClient
+) -> None:
+    """#767: a record an earlier release wrote names an id that earlier
+    attempts may share, so chkit cannot tell the running attempt's outcome
+    from query_log once it ends. The run stops instead of attaching."""
+    prefix = create_prefix("py_remote_legacy")
+    name = f"{prefix}dst"
+    table = _create_table(live, live_env.clickhouse_database, name)
+    migration_name = f"20990101000000_{prefix}legacy.sql"
+    legacy_id = make_deterministic_query_id(
+        live_env.clickhouse_database, "_chkit_migrations", migration_name, 0
+    )
+    operation_key = f"table:{live_env.clickhouse_database}.{name}"
+    # About 5 s: one row per block, 0.5 s per row.
+    worker = threading.Thread(
+        target=lambda: remote.submit(
+            f"INSERT INTO {table} SELECT number + sleepEachRow(0.5) FROM numbers(10) "
+            "SETTINGS max_block_size = 1",
+            query_id=legacy_id,
+        )
+    )
+    try:
+        worker.start()
+        _poll_until(
+            lambda: remote.query_status(legacy_id),
+            lambda status: status.status == "running",
+            interval=0.1,
+        )
+        journal = _started_journal(migration_name, legacy_id, operation_key)
+        statement = _statement(
+            client=remote,
+            journal=journal,
+            migration_name=migration_name,
+            operation_key=operation_key,
+            sql="SELECT 1",
+        )
+        with pytest.raises(MigrateError) as info:
+            apply_async_statement(statement)
+        assert info.value.code == "async_outcome_unknown"
+        assert f"query_id {legacy_id}) is still running on the server" in info.value.message
+        assert journal.statuses() == []
+    finally:
+        worker.join(timeout=60)
         live.execute(f"DROP TABLE IF EXISTS {table}")

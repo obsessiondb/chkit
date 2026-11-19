@@ -261,6 +261,41 @@ def is_select_statement(statement: str) -> bool:
     return True
 
 
+def rejection_runs_nothing(statement: str) -> bool:
+    """Whether an ``ExceptionBeforeStart`` of the statement shows it applied nothing (#767).
+
+    Only a SELECT and an INSERT build their whole pipeline first: other
+    statements can apply effects before that, such as an ALTER's mutation,
+    which keeps running when the statement waiting for it is killed, or a
+    mutation that applied to some partitions before one failed. Anything not
+    certainly a SELECT or an INSERT (``INSERT INTO ...``, ``WITH ... INSERT
+    INTO``) counts as one that may have applied effects; ``PARALLEL WITH``
+    runs several statements.
+    """
+    if is_select_statement(statement):
+        return True
+    tokens = [token for token in tokenize_sql(statement) if not is_trivia(token)]
+
+    def word(index: int) -> str | None:
+        return _keyword(tokens[index]) if index < len(tokens) else None
+
+    first = word(0)
+    insert = first == "INSERT" and word(1) == "INTO"
+    depth = 0
+    for index, token in enumerate(tokens):
+        if _is_punctuation(token, "("):
+            depth += 1
+        elif _is_punctuation(token, ")"):
+            depth -= 1
+        elif depth == 0:
+            pair = (word(index), word(index + 1))
+            if pair == ("PARALLEL", "WITH"):
+                return False
+            if first == "WITH" and pair == ("INSERT", "INTO"):
+                insert = True
+    return insert
+
+
 def _is_other_statement_keyword(token: SQLToken, following: SQLToken | None) -> bool:
     pair = (_keyword(token), _keyword(following) if following is not None else None)
     return pair in (("INSERT", "INTO"), ("PARALLEL", "WITH"))

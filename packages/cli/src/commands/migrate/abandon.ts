@@ -21,7 +21,7 @@ export interface AbandonReport {
   operations: ReportedOperation[]
 }
 
-export type ReportedOperation = Omit<OperationState, 'fingerprint'>
+export type ReportedOperation = Omit<OperationState, 'fingerprint' | 'attemptFenced'>
 
 const OPERATION_STATUSES: readonly OperationStatus[] = ['completed', 'failed', 'started']
 
@@ -63,7 +63,7 @@ export async function abandonMigrationState(
 export function abandonReport(state: MigrationRowState): AbandonReport {
   const operations = [...state.operations]
     .sort((a, b) => a.operationIndex - b.operationIndex)
-    .map(({ fingerprint: _fingerprint, ...op }) => op)
+    .map(({ fingerprint: _fingerprint, attemptFenced: _attemptFenced, ...op }) => op)
   return {
     migration: state.name,
     checksum: state.checksum,

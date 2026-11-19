@@ -12,6 +12,7 @@ chkit.cli.main``) instead of ``CliRunner``. Runs against the server in
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -249,11 +250,19 @@ def test_a_run_never_takes_the_other_databases_failure_and_the_failed_run_retrie
     assert _count_events(fixture, "prod") == _ROWS
     assert failed.exit_code == 1, _diagnostic("staging", failed)
     assert "failure in this database" in failed.stdout
-    _wait_for_statuses(fixture, "staging", "failed")
+    # It failed while it ran, so some of its rows may have landed (#767): the
+    # run stops until the operator reconciles and abandons.
+    assert json.loads(failed.stdout)["error"]["code"] == "async_outcome_unknown"
+    # Nothing is written, so the fenced started record keeps the attempt.
+    _wait_for_statuses(fixture, "staging", "started")
+    again = _migrate(fixture, "staging")
+    assert again.exit_code == 1, _diagnostic("staging re-run", again)
+    assert json.loads(again.stdout)["error"]["code"] == "async_outcome_unknown"
 
-    # The retry finds its own failed attempt: it runs the before-retry SQL
-    # and loads once.
+    # After the abandon, the retry runs the before-retry SQL and loads once.
     fixture.client.execute(f"TRUNCATE TABLE {staging_db}.fail_marker")
+    abandoned = _migrate(fixture, "staging", ("--abandon", fixture.migration))
+    assert abandoned.exit_code == 0, _diagnostic("staging abandon", abandoned)
     retried = _migrate(fixture, "staging")
     assert retried.exit_code == 0, _diagnostic("staging retry", retried)
     assert "load_table_data: running before-retry SQL" in retried.stderr

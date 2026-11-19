@@ -153,6 +153,34 @@ export function isSelectStatement(statement: string): boolean {
   return true
 }
 
+/**
+ * Whether a rejection the server records before the statement starts
+ * (`ExceptionBeforeStart`) shows that it applied nothing (#767). Only a
+ * SELECT and an INSERT build their whole pipeline first: other statements
+ * can apply effects before that, such as an ALTER's mutation, which keeps
+ * running when the statement waiting for it is killed, or a mutation that
+ * applied to some partitions before one failed. Anything not certainly a
+ * SELECT or an INSERT (`INSERT INTO ...`, `WITH ... INSERT INTO`) counts as
+ * one that may have applied effects; `PARALLEL WITH` runs several statements.
+ */
+export function rejectionRunsNothing(statement: string): boolean {
+  if (isSelectStatement(statement)) return true
+  const tokens = tokenizeSQL(statement).filter((token) => !isTrivia(token))
+  const first = keyword(tokens[0])
+  let insert = first === 'INSERT' && keyword(tokens[1]) === 'INTO'
+  let depth = 0
+  for (const [index, token] of tokens.entries()) {
+    if (isPunctuation(token, '(')) depth++
+    else if (isPunctuation(token, ')')) depth--
+    else if (depth === 0) {
+      const pair = `${keyword(token)} ${keyword(tokens[index + 1])}`
+      if (pair === 'PARALLEL WITH') return false
+      if (first === 'WITH' && pair === 'INSERT INTO') insert = true
+    }
+  }
+  return insert
+}
+
 function isOtherStatementKeyword(token: SQLToken, next: SQLToken | undefined): boolean {
   const pair = `${keyword(token)} ${keyword(next)}`
   return pair === 'INSERT INTO' || pair === 'PARALLEL WITH'

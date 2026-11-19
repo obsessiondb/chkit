@@ -14,7 +14,7 @@ import re
 import threading
 import uuid
 from collections.abc import Callable
-from typing import Any, Literal, NoReturn, Self
+from typing import Any, Literal, NoReturn, Self, TypeVar
 from urllib.parse import unquote, urlparse
 
 import clickhouse_connect  # type: ignore[import-untyped]
@@ -23,7 +23,9 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
     DatabaseError,
 )
 from pydantic import BaseModel, ConfigDict
-from urllib3 import Timeout
+from urllib3 import HTTPConnectionPool, HTTPSConnectionPool, Timeout
+from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.exceptions import HTTPError
 
 from chkit.clickhouse.control import (
     STRICT_CONTROL_SETTINGS,
@@ -109,6 +111,8 @@ class QueryStatus(BaseModel):
     elapsed_ms: int | None = None
     duration_ms: int | None = None
     error: str | None = None
+    # A failure the server logged before the query started (ExceptionBeforeStart).
+    before_start: bool = False
 
 
 class ClickHouseClient:
@@ -217,10 +221,19 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
+    def _write_settings(self) -> dict[str, Any]:
+        """No asynchronous INSERT, as TS sends with every write, so a write is
+        stored when it returns. A user that cannot change the setting
+        (readonly = 1) cannot write either, so it is left out there, where
+        clickhouse-connect would refuse it before the server's own error."""
+        setting = self._client.server_settings.get("async_insert")
+        return {"async_insert": 0} if setting is not None and not setting.readonly else {}
+
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
     ) -> None:
         """Check ownership before each command attempt, including an internal retry."""
+        settings = {**self._write_settings(), **(settings or {})}
         check()
         try:
             self._client.command(statement, settings=settings)
@@ -350,8 +363,15 @@ class ClickHouseClient:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Callable[[], None] | None = None,
     ) -> str:
         """Send a query that ``query_status`` follows. Returns its query_id.
+
+        ``before_send`` is the caller's guard (#767): called before the
+        request starts and, through ``commit``, once its connection is open and
+        before its first bytes are written. Either raises to stop a request
+        the caller gave up on.
 
         Used by ``chkit migrate --apply`` for long-running ``ALTER`` /
         ``OPTIMIZE`` statements: the server starts processing immediately
@@ -370,9 +390,12 @@ class ClickHouseClient:
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
-        self._submit_driver().command(
-            statement, settings={**(settings or {}), "query_id": qid}
-        )
+        driver = self._submit_driver()
+        _SUBMIT_SEND.before_send = before_send
+        try:
+            driver.command(statement, settings={**(settings or {}), "query_id": qid})
+        finally:
+            _SUBMIT_SEND.before_send = None
         return qid
 
     def _submit_driver(self) -> Any:
@@ -381,6 +404,18 @@ class ClickHouseClient:
         if submit_client is None and not self._closed:
             # Opened outside the lock, so close() does not wait for it.
             opened = self._open_driver(self._config, autogenerate_session_id=False)
+            # One physical send per submit: the id is journaled for this
+            # attempt alone, so the driver must not send it again (#767). A
+            # submit the caller gave up on is not sent once it has connected,
+            # and connecting is bounded, so the caller can tell a late send
+            # is excluded.
+            opened.timeout = Timeout(connect=SUBMIT_CONNECT_TIMEOUT_SECONDS, read=None)
+            opened.http.pool_classes_by_scheme = {
+                "http": _GuardedHTTPConnectionPool,
+                "https": _GuardedHTTPSConnectionPool,
+            }
+            opened.http.clear()
+            opened.http = _NoReplayPool(opened.http)
             with self._submit_client_lock:
                 if self._submit_client is None and not self._closed:
                     self._submit_client = opened
@@ -418,7 +453,10 @@ class ClickHouseClient:
         elif cols is None:
             msg = "insert() requires column_names when values is a list of lists."
             raise ValueError(msg)
-        self._client.insert(table, rows, column_names=cols, database=database)
+        # No asynchronous INSERT, as TS's insert sends (#767).
+        self._client.insert(
+            table, rows, column_names=cols, database=database, settings=self._write_settings()
+        )
 
 
     def query_status(
@@ -428,8 +466,14 @@ class ClickHouseClient:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         """Check whether a previously-submitted query is running / finished / failed.
+
+        ``include_before_start`` counts an ExceptionBeforeStart entry (a
+        statement the server rejected) as the query's failure, for an id that
+        names one attempt alone (#767): a reused id can find an earlier
+        attempt's entry.
 
         Polls ``system.processes`` first (running?), then falls back to
         ``system.query_log`` for the terminal state. The query runs on the
@@ -472,33 +516,29 @@ class ClickHouseClient:
         # event_date prunes query_log's partitions: the entry is logged no earlier
         # than the query started. A day of slack covers a session time zone other
         # than the server's; toDate32, as a Date before 1970 wraps around.
+        types = (
+            "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+            if include_before_start
+            else "'QueryFinish', 'ExceptionWhileProcessing'"
+        )
+        # With ExceptionBeforeStart, every entry of the id is read: a rejected
+        # duplicate delivery logs one early, which must not hide the
+        # QueryFinish of the attempt that ran (#767).
         log_sql = (
-            "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
+            "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
+            "exception_code, toString(serverUUID()) AS server, "
+            "toString(event_time_microseconds) AS event_at "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}' "
-            "AND type IN ('QueryFinish', 'ExceptionWhileProcessing') "
+            f"AND type IN ({types}) "
             "AND is_initial_query = 1 "
             f"AND query_start_time >= parseDateTimeBestEffort('{after}') "
             f"AND event_date >= toDate32(parseDateTimeBestEffort('{after}')) - 1 "
-            "ORDER BY event_time DESC LIMIT 1"
+            "ORDER BY event_time DESC"
+            f"{'' if include_before_start else ' LIMIT 1'}"
         )
         log = self.query(log_sql, settings=read_settings)
-        if not log.rows:
-            return QueryStatus(status="unknown")
-
-        row = log.rows[0]
-        if str(row.get("type")) == "QueryFinish":
-            return QueryStatus(
-                status="finished",
-                written_rows=_safe_int(row.get("written_rows")),
-                written_bytes=_safe_int(row.get("written_bytes")),
-                duration_ms=_safe_int(row.get("query_duration_ms")),
-            )
-        return QueryStatus(
-            status="failed",
-            duration_ms=_safe_int(row.get("query_duration_ms")),
-            error=str(row.get("exception") or "") or None,
-        )
+        return query_log_outcome(log.rows)
 
     def list_databases(self) -> list[str]:
         result = self.query("SHOW DATABASES")
@@ -553,6 +593,184 @@ class _SingleAttemptPool:
             raise RuntimeError(msg)
         self._sent = True
         return self._pool.request(*args, **{**kwargs, "retries": False})
+
+
+# QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING: a second delivery of the id, rejected
+# while the first runs. It says nothing about that first one.
+_SAME_ID_RUNNING = 216
+
+
+def query_log_outcome(rows: list[dict[str, Any]]) -> QueryStatus:
+    """The outcome query_log records for a query id, from its entries newest first (#767).
+
+    A QueryFinish, then an ExceptionWhileProcessing, outranks an
+    ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
+    that rejection is never the query's own failure. Two terminal entries (a
+    redelivered request that ran twice) leave the outcome unknown: one of them
+    may have applied part of its writes.
+    """
+    # Each entry once per server: one node the cluster lists twice is not a
+    # second run.
+    entries = {
+        (row.get("server"), row.get("type"), row.get("event_at"), row.get("exception"))
+        for row in rows
+        if not _is_same_id_running(row)
+    }
+    if len(entries) > 1:
+        return QueryStatus(status="unknown")
+    finished = next((row for row in rows if str(row.get("type")) == "QueryFinish"), None)
+    if finished is not None:
+        return QueryStatus(
+            status="finished",
+            written_rows=_safe_int(finished.get("written_rows")),
+            written_bytes=_safe_int(finished.get("written_bytes")),
+            duration_ms=_safe_int(finished.get("query_duration_ms")),
+        )
+    failed = next(
+        (row for row in rows if str(row.get("type")) == "ExceptionWhileProcessing"), None
+    ) or next(
+        (
+            row
+            for row in rows
+            if str(row.get("type")) == "ExceptionBeforeStart" and not _is_same_id_running(row)
+        ),
+        None,
+    )
+    if failed is None:
+        return QueryStatus(status="unknown")
+    return QueryStatus(
+        status="failed",
+        duration_ms=_safe_int(failed.get("query_duration_ms")),
+        error=str(failed.get("exception") or "") or None,
+        before_start=str(failed.get("type")) == "ExceptionBeforeStart",
+    )
+
+
+def _is_same_id_running(row: dict[str, Any]) -> bool:
+    return _safe_int(row.get("exception_code")) == _SAME_ID_RUNNING or (
+        "QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING" in str(row.get("exception") or "")
+    )
+
+
+# The check a submit runs right before its request is sent, per thread: the
+# submit driver is shared by concurrent submits (#767).
+_SUBMIT_SEND = threading.local()
+
+_T = TypeVar("_T")
+
+
+class _NoReplayPool:
+    """Never replay a sent request, for clients whose requests run concurrently.
+
+    clickhouse-connect sends a request again when the server reset the
+    connection, even with ``query_retries=0``, and urllib3 has a retry budget
+    of its own. A replayed async submit could run its statement twice under
+    one journaled id (#767). The reset is raised as an error the driver does
+    not retry, so the poller decides the outcome from the server's record.
+    """
+
+    def __init__(self, pool: Any) -> None:
+        self._pool = pool
+
+    def __getattr__(self, name: str) -> Any:
+        return getattr(self._pool, name)
+
+    def request(self, *args: Any, **kwargs: Any) -> Any:
+        # The submitting thread's guard, before the request starts (#767).
+        before_send = getattr(_SUBMIT_SEND, "before_send", None)
+        if before_send is not None:
+            before_send()
+        try:
+            return self._pool.request(*args, **{**kwargs, "retries": False})
+        except HTTPError as error:
+            if isinstance(error.__context__, ConnectionResetError):
+                msg = f"The connection was reset after the request was sent ({error})"
+                raise ConnectionError(msg) from error
+            raise
+
+
+# How long a submit may take to connect (#767): a submit the caller gave up
+# on is excluded from sending once it connected or failed to, so this bounds
+# how long the caller waits to know.
+SUBMIT_CONNECT_TIMEOUT_SECONDS = 10.0
+# How long writing a submit's request may take (#767): the run that gave up
+# on the submit keeps its migrate lock until the write completed or failed.
+SUBMIT_WRITE_TIMEOUT_SECONDS = 30.0
+
+
+def guard_begin_write(guard: Any) -> None:
+    """Start writing a request under the submit's guard (#767).
+
+    A guard with ``begin_write`` refuses once the run gave up on the submit,
+    and from here on holds the run's give-up until ``guard_end_write``: a
+    request is either written whole (or its write failed) before the run
+    stops, or never started.
+    """
+    begin = getattr(guard, "begin_write", None)
+    if begin is not None:
+        begin()
+
+
+def guard_end_write(guard: Any) -> None:
+    end = getattr(guard, "end_write", None)
+    if end is not None:
+        end()
+
+
+class _GuardedSend:
+    """The submitting thread's guard on writing each request.
+
+    The connection is opened first (connection setup is not sending); the
+    request's first ``send`` starts the guarded write, under the write
+    timeout, and it ends once ``request`` returned or failed.
+    """
+
+    _guard: Any = None
+    _writing: Any = None
+    _timeout_before: Any = None
+
+    def request(self, *args: Any, **kwargs: Any) -> None:
+        self._guard = getattr(_SUBMIT_SEND, "before_send", None)
+        try:
+            super().request(*args, **kwargs)  # type: ignore[misc]
+        finally:
+            self._guard = None
+            writing, self._writing = self._writing, None
+            if writing is not None:
+                if self.sock is not None:  # type: ignore[attr-defined]
+                    self.sock.settimeout(self._timeout_before)  # type: ignore[attr-defined]
+                guard_end_write(writing)
+
+    def send(self, data: Any) -> None:
+        guard, self._guard = self._guard, None
+        if guard is not None:
+            if self.sock is None:  # type: ignore[attr-defined]
+                self.connect()  # type: ignore[attr-defined]
+            try:
+                guard_begin_write(guard)
+            except BaseException:
+                self.close()  # type: ignore[attr-defined]
+                raise
+            self._writing = guard
+            self._timeout_before = self.sock.gettimeout()  # type: ignore[attr-defined]
+            self.sock.settimeout(SUBMIT_WRITE_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+        super().send(data)  # type: ignore[misc]
+
+
+class _GuardedHTTPConnection(_GuardedSend, HTTPConnection):
+    pass
+
+
+class _GuardedHTTPSConnection(_GuardedSend, HTTPSConnection):
+    pass
+
+
+class _GuardedHTTPConnectionPool(HTTPConnectionPool):
+    ConnectionCls = _GuardedHTTPConnection
+
+
+class _GuardedHTTPSConnectionPool(HTTPSConnectionPool):
+    ConnectionCls = _GuardedHTTPSConnection
 
 
 def _use_ts_timeouts(client: Any) -> None:
