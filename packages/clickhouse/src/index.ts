@@ -673,6 +673,40 @@ export function wrapConnectionError(error: unknown, url: string, username?: stri
 	throw error
 }
 
+/**
+ * A submit that provably never sent its request (#800): its TCP connect was
+ * refused, or its host name did not resolve. The server never saw the query.
+ */
+export class SubmitNotSentError extends Error {
+	readonly submitNotSent = true
+	constructor(message: string, options?: ErrorOptions) {
+		super(message, options)
+		this.name = 'SubmitNotSentError'
+	}
+}
+
+export function isSubmitNotSentError(error: unknown): boolean {
+	return error instanceof Error && (error as { submitNotSent?: unknown }).submitNotSent === true
+}
+
+/**
+ * Whether a request failed before it wrote a byte (#800). Only the socket's
+ * own connect failing with ECONNREFUSED, or the host lookup failing, shows
+ * that: a request is written only once its socket connected, and a socket
+ * reused from the pool neither looks up nor connects. A reset, a timeout or
+ * an HTTP response may follow a request the server read.
+ */
+export function failedBeforeSending(error: unknown): boolean {
+	if (!(error instanceof Error)) return false
+	// Node's connect to every address of a host (autoSelectFamily).
+	if (error instanceof AggregateError) {
+		return error.errors.length > 0 && error.errors.every(failedBeforeSending)
+	}
+	const { code, syscall } = error as NodeJS.ErrnoException
+	if (syscall === 'getaddrinfo') return true
+	return code === 'ECONNREFUSED' && syscall === 'connect'
+}
+
 export function isUnknownDatabaseError(error: unknown): boolean {
 	if (!(error instanceof Error)) return false
 	if (!('code' in error)) return false
@@ -1236,6 +1270,13 @@ export function createExecutorWithClient(
 			} catch (error) {
 				// A refused request was never written, whatever the driver says.
 				if (recorded?.refused() || isSendNotAdmitted(error)) throw sendNotAdmittedError()
+				// The client sends each request once (#767), so a failure before
+				// its first byte proves the query was never sent (#800). A submit
+				// with an admission has its own proof (#765), as chkit-py's
+				// submit_once does: it is left as it was.
+				if (!admission && failedBeforeSending(error)) {
+					throw new SubmitNotSentError(formatConnectionError(error, config.url, config.username) ?? String(error), { cause: error })
+				}
 				wrapConnectionError(error, config.url, config.username)
 			} finally {
 				if (admission) {

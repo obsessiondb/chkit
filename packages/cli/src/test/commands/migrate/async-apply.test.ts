@@ -1,6 +1,6 @@
 import { describe, expect, test } from 'bun:test'
 
-import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus, QueryStatusOptions } from '@chkit/clickhouse'
+import { type ClickHouseExecutor, type ClickHouseSettings, type QueryStatus, type QueryStatusOptions, SubmitNotSentError } from '@chkit/clickhouse'
 
 import {
   applyAsyncStatement,
@@ -720,6 +720,8 @@ describe('applyAsyncStatement', () => {
   // through a query_log flush, then stops with async_outcome_unknown.
   for (const [label, failSubmit] of [
     ['a submit that fails after a poll found the query running', () => new Error('error code: 524')],
+    // #800: only the executor's proof counts, never an error's text.
+    ['a submit whose error only names a refused connection', () => new Error('Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)')],
     ['an acknowledged submit', undefined],
   ] as const) {
     test(`${label} stops with async_outcome_unknown after the unknown-poll budget`, async () => {
@@ -744,7 +746,7 @@ describe('applyAsyncStatement', () => {
         now: FIXED_NOW,
       })
 
-      const tail = failSubmit ? ', and the submit request failed (error code: 524)' : ''
+      const tail = failSubmit ? `, and the submit request failed (${failSubmit().message})` : ''
       await expect(run).rejects.toMatchObject({
         code: 'async_outcome_unknown',
         message: expect.stringContaining(`chkit cannot tell whether it finished: polling found it neither running nor in system.query_log 20× in a row${tail}. Nothing was submitted`),
@@ -756,6 +758,84 @@ describe('applyAsyncStatement', () => {
       expect(writes.map((state) => state.operations[0]?.status)).toEqual(['started', 'started'])
     })
   }
+
+  // #800: a submit the executor proved was never sent (a refused connect, a
+  // failed host lookup) ran nothing. The run puts the attempt back to
+  // prepared and stops before its first poll, instead of polling ~2 min.
+  test('a submit that never reached the server goes back to prepared and stops at once', async () => {
+    const notSent = new SubmitNotSentError('Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)')
+    const { db, statusCalls, submitCalls, commandCalls } = createFakeExecutor([{ status: 'unknown' }], { failSubmit: () => notSent })
+    const { store, writes } = createFakeJournalStore(null)
+
+    const error = await applyAsyncStatement({ ...BASE_INPUT, db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }).catch((caught: unknown) => caught)
+
+    expect(error).toMatchObject({
+      message: `Async migration step load_table_data (query_id ${submittedQueryId(submitCalls)}) was not sent: the submit request never reached ClickHouse (Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)), so it was not submitted. Re-run \`chkit migrate --apply\`: an attempt that was never sent runs again.`,
+      cause: notSent,
+    })
+    expect(submitCalls).toHaveLength(1)
+    // The in-flight check before the submit, and no poll.
+    expect(statusCalls).toHaveLength(1)
+    expect(commandCalls).toEqual([])
+    expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PREPARED_RECORD_MARKER, ATTEMPT_RECORD_MARKER, PREPARED_RECORD_MARKER])
+    expect(writes[2]?.operations[0]?.queryId).toBe(submittedQueryId(submitCalls))
+  })
+
+  // #800: a poll that found the query proves it was sent, whatever the
+  // submit's error claims: the run keeps the started record.
+  test('a not-sent submit error after a poll found the query running keeps the started record', async () => {
+    const fake = createFakeExecutor([
+      { status: 'unknown' },
+      { status: 'running', writtenRows: 9, writtenBytes: 72 },
+      ...Array.from({ length: 20 + 6 }, () => ({ status: 'unknown' as const })),
+    ])
+    let reject: (error: Error) => void = () => {}
+    const db = {
+      ...fake.db,
+      submit: () => new Promise((_resolve, rejectSubmit) => {
+        reject = rejectSubmit
+      }),
+      queryStatus: async (queryId: string, opts?: QueryStatusOptions) => {
+        const status = await fake.db.queryStatus(queryId, opts)
+        if (status.status === 'running') reject(new SubmitNotSentError('Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)'))
+        return status
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, writes } = createFakeJournalStore(null)
+
+    await expect(
+      applyAsyncStatement({ ...BASE_INPUT, db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW }),
+    ).rejects.toMatchObject({ code: 'async_outcome_unknown', message: expect.stringContaining('20× in a row, and the submit request failed (Could not connect') })
+    expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PREPARED_RECORD_MARKER, ATTEMPT_RECORD_MARKER])
+  })
+
+  // #800: the final check of every replica that finds the query counts too.
+  test('a not-sent submit error after the final check found the query running keeps the started record', async () => {
+    const fake = createFakeExecutor([
+      { status: 'unknown' },
+      ...Array.from({ length: 20 }, () => ({ status: 'unknown' as const })),
+      { status: 'running', writtenRows: 9, writtenBytes: 72 },
+      { status: 'finished', writtenRows: 16, writtenBytes: 128, durationMs: 8000 },
+    ])
+    let reject: (error: Error) => void = () => {}
+    const db = {
+      ...fake.db,
+      submit: () => new Promise((_resolve, rejectSubmit) => {
+        reject = rejectSubmit
+      }),
+      queryStatus: async (queryId: string, opts?: QueryStatusOptions) => {
+        const status = await fake.db.queryStatus(queryId, opts)
+        if (opts?.everyReplica === true) reject(new SubmitNotSentError('Could not connect to ClickHouse at http://127.0.0.1:1 (connection refused)'))
+        return status
+      },
+    } as unknown as ClickHouseExecutor
+    const { store, writes } = createFakeJournalStore(null)
+
+    const result = await applyAsyncStatement({ ...BASE_INPUT, db, journalStore: store, log: () => {}, sleep: NO_SLEEP, now: FIXED_NOW })
+
+    expect(result.kind).toBe('completed')
+    expect(writes.map((state) => state.operations[0]?.lastError)).toEqual([PREPARED_RECORD_MARKER, ATTEMPT_RECORD_MARKER, ''])
+  })
 
   // #767 (round 3): a submit request that never settles (a proxy holding the
   // socket open) does not keep the run, and its migrate lock, waiting after
@@ -1702,6 +1782,28 @@ describe('applyAsyncStatement re-run of a started step', () => {
     expect(second.submitCalls[0]?.queryId).not.toBe(preparedId)
     // #767 (round 4): an attempt that was never sent wrote nothing, so its
     // re-run runs no before-retry SQL.
+    expect(second.commandCalls).toEqual([])
+  })
+
+  // #800: a submit that never reached the server leaves the attempt prepared,
+  // so the next run submits it once, without an abandon or its before-retry SQL.
+  test('a submit that never reached the server is submitted again by the next run', async () => {
+    const first = clockedExecutor([{ status: 'unknown' }], {
+      failSubmit: () => new SubmitNotSentError('Could not connect to ClickHouse at http://chkit.invalid:8123 (host not found)'),
+    })
+    const { store } = createFakeJournalStore(null)
+    await expect(
+      applyAsyncStatement({ ...input, db: first.db, journalStore: store, sleep: first.sleep }),
+    ).rejects.toThrow(/was not sent: the submit request never reached ClickHouse/)
+    const notSentId = first.submitCalls[0]?.queryId
+
+    const second = clockedExecutor([...NO_ENTRY_CHECKS, { status: 'finished', writtenRows: 16, durationMs: 8000 }])
+    const result = await applyAsyncStatement({ ...input, db: second.db, journalStore: store, sleep: second.sleep })
+
+    expect(result.kind).toBe('completed')
+    expect(second.statusCalls.slice(0, 6).every((call) => call.queryId === notSentId && call.everyReplica === true)).toBe(true)
+    expect(second.submitCalls).toHaveLength(1)
+    expect(second.submitCalls[0]?.queryId).not.toBe(notSentId)
     expect(second.commandCalls).toEqual([])
   })
 

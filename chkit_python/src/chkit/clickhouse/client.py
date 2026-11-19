@@ -426,10 +426,21 @@ class ClickHouseClient:
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
-        driver = self._submit_driver()
         _SUBMIT_SEND.before_send = before_send
+        _SUBMIT_SEND.wrote = False
         try:
+            # Opening the driver sends the statement nothing.
+            driver = self._submit_driver()
             driver.command(statement, settings={**(settings or {}), "query_id": qid})
+        except Exception as error:
+            # The driver sends each request once (#767), so a failure before
+            # its first byte proves the query was never sent (#800).
+            if not _SUBMIT_SEND.wrote and failed_before_sending(error):
+                message = format_connection_error(
+                    error, self._config.url, self._config.username
+                ) or str(error)
+                raise SubmitNotSentError(message) from error
+            raise
         finally:
             _SUBMIT_SEND.before_send = None
         return qid
@@ -1053,8 +1064,40 @@ def _is_same_id_running(row: dict[str, Any]) -> bool:
 
 
 # The check a submit runs right before its request is sent, per thread: the
-# submit driver is shared by concurrent submits (#767).
+# submit driver is shared by concurrent submits (#767). ``wrote`` is set once
+# the submit wrote a byte of a request (#800).
 _SUBMIT_SEND = threading.local()
+
+
+class SubmitNotSentError(RuntimeError):
+    """A submit that provably never sent its request (#800): its TCP connect was
+    refused, or its host name did not resolve. The server never saw the query."""
+
+
+def failed_before_sending(error: BaseException) -> bool:
+    """Whether a request failed before it wrote a byte (#800).
+
+    Only the connection's own connect failing with ECONNREFUSED, or the host
+    lookup failing, shows that: urllib3 raises them as a ``NewConnectionError``
+    while it opens the connection, before the request is written. A reset, a
+    timeout or an HTTP response may follow a request the server read. The
+    caller also checks that the submit wrote no byte (``_SUBMIT_SEND.wrote``).
+    """
+    seen: set[int] = set()
+    pending: list[BaseException | None] = [error]
+    while pending:
+        current = pending.pop()
+        if current is None or id(current) in seen:
+            continue
+        seen.add(id(current))
+        if isinstance(current, NameResolutionError):
+            return True
+        if isinstance(current, NewConnectionError) and isinstance(
+            current.__cause__, ConnectionRefusedError
+        ):
+            return True
+        pending += [current.__cause__, current.__context__]
+    return False
 
 _T = TypeVar("_T")
 
@@ -1143,9 +1186,10 @@ class _GuardedSend:
 
     def send(self, data: Any) -> None:
         guard, self._guard = self._guard, None
+        # Connected before any write, so a refused connect writes nothing (#800).
+        if self.sock is None:  # type: ignore[attr-defined]
+            self.connect()  # type: ignore[attr-defined]
         if guard is not None:
-            if self.sock is None:  # type: ignore[attr-defined]
-                self.connect()  # type: ignore[attr-defined]
             try:
                 guard_begin_write(guard)
             except BaseException:
@@ -1154,6 +1198,8 @@ class _GuardedSend:
             self._writing = guard
             self._timeout_before = self.sock.gettimeout()  # type: ignore[attr-defined]
             self.sock.settimeout(SUBMIT_WRITE_TIMEOUT_SECONDS)  # type: ignore[attr-defined]
+        # Every write of a request, a proxy's CONNECT included (#800).
+        _SUBMIT_SEND.wrote = True
         super().send(data)  # type: ignore[misc]
 
 
