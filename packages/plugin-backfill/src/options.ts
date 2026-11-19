@@ -137,6 +137,7 @@ export type RunOptions = z.infer<typeof RunSchema>
 
 export const ResumeSchema = RunSchema.extend({
   replayFailed: z.boolean().default(false),
+  acceptUnknown: z.boolean().default(false),
 })
 export type ResumeOptions = z.infer<typeof ResumeSchema>
 
@@ -185,6 +186,7 @@ export const RESUME_FLAGS = defineFlags([
   { name: '--concurrency', type: 'string', description: 'Max concurrent async queries', placeholder: '<n>' },
   { name: '--poll-interval', type: 'string', description: 'Polling interval in ms', placeholder: '<ms>' },
   { name: '--replay-failed', type: 'boolean', description: 'Re-execute failed chunks' },
+  { name: '--accept-unknown', type: 'boolean', description: 'Replay chunks whose last attempt has an unknown outcome (can write their rows twice)' },
 ] as const)
 
 export const PLAN_ID_FLAGS = defineFlags([
@@ -233,6 +235,7 @@ export const RESUME_FLAG_MAP: FlagMapping = {
   '--concurrency': { key: 'concurrency', coerce: (v) => coercePositiveInt(v, '--concurrency') },
   '--poll-interval': { key: 'pollIntervalMs', coerce: (v) => coercePositiveInt(v, '--poll-interval') },
   '--replay-failed': { key: 'replayFailed' },
+  '--accept-unknown': { key: 'acceptUnknown' },
 }
 
 export const PLAN_ID_FLAG_MAP: FlagMapping = {
