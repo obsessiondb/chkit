@@ -41,10 +41,19 @@ const ASTERISK_SETTINGS = 'asterisk_include_materialized_columns=0, asterisk_inc
  * writes its own written_rows may not count and whose query_log rows can
  * flush late, and it is always logged, its start included: a resume proves a
  * failure from that log alone.
+ *
+ * An INSERT into a Distributed table (the target, or a materialized view's)
+ * also returns only once its rows reached the shards (#821): by default it
+ * returns once they are queued on the initiator, and the chunk would be done
+ * before they are delivered. This one is pinned for delivery, not for proof:
+ * writing to a remote shard runs a secondary query there, so the failure of
+ * such a chunk is never proven, as for any Distributed target
+ * (`unprovableTargetFailures`).
  */
 export const PINNED_INSERT_SETTINGS = {
   allow_experimental_parallel_reading_from_replicas: '0',
   parallel_distributed_insert_select: '0',
+  distributed_foreground_insert: '1',
   log_queries: '1',
   log_queries_min_type: "'QUERY_START'",
   log_queries_min_query_duration_ms: '0',

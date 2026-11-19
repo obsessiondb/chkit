@@ -176,6 +176,12 @@ def test_insert_settings_with_the_pinned_value_are_dropped() -> None:
             "enable_parallel_replicas=1 (an alias of "
             "allow_experimental_parallel_reading_from_replicas)",
         ),
+        # #821: a chunk into a Distributed table is done only once delivered.
+        ({"distributed_foreground_insert": 0}, "distributed_foreground_insert=0"),
+        (
+            {"insert_distributed_sync": False},
+            "insert_distributed_sync=false (an alias of distributed_foreground_insert)",
+        ),
     ],
 )
 def test_insert_settings_that_change_a_pinned_setting_are_refused(
@@ -190,8 +196,8 @@ def test_insert_settings_that_change_a_pinned_setting_are_refused(
     assert str(raised.value) == (
         f"insertSettings sets {named}, which every backfill chunk INSERT pins "
         f"({_PINNED_INSERT}): with another value, its failure cannot be proven from "
-        "system.query_log, and a replay could write its rows twice. Remove them from "
-        "insertSettings."
+        "system.query_log, and a replay could write its rows twice, or it is done before "
+        "its rows reach a Distributed table's shards. Remove them from insertSettings."
     )
 
 
@@ -221,7 +227,8 @@ def test_the_server_aliases_come_from_system_settings_alias_for() -> None:
     assert reads == [
         "SELECT name, alias_for FROM system.settings WHERE alias_for IN ("
         "'allow_experimental_parallel_reading_from_replicas', "
-        "'parallel_distributed_insert_select', 'log_queries', 'log_queries_min_type', "
+        "'parallel_distributed_insert_select', 'distributed_foreground_insert', "
+        "'log_queries', 'log_queries_min_type', "
         "'log_queries_min_query_duration_ms')"
     ]
 

@@ -12,7 +12,7 @@ import type { Chunk } from './types.js'
 
 // Opus delta review: every chunk INSERT runs without secondary queries, and
 // fully logged, whatever the profile says (#765).
-const PINNED_INSERT = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+const PINNED_INSERT = "allow_experimental_parallel_reading_from_replicas=0, parallel_distributed_insert_select=0, distributed_foreground_insert=1, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
 
 describe('findTopLevelKeywords', () => {
   test('finds keywords at the top level in ascending position order', () => {

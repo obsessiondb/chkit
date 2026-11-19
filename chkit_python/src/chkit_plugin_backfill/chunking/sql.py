@@ -79,9 +79,18 @@ def _js_trim(value: str) -> str:
 #: Distributed INSERT SELECT), whose writes its own written_rows may not count
 #: and whose query_log rows can flush late, and it is always logged, its start
 #: included: a resume proves a failure from that log alone.
+#:
+#: An INSERT into a Distributed table (the target, or a materialized view's)
+#: also returns only once its rows reached the shards (#821): by default it
+#: returns once they are queued on the initiator, and the chunk would be done
+#: before they are delivered. This one is pinned for delivery, not for proof:
+#: writing to a remote shard runs a secondary query there, so the failure of
+#: such a chunk is never proven, as for any Distributed target
+#: (``unprovable_target_failures``).
 PINNED_INSERT_SETTINGS: dict[str, str] = {
     "allow_experimental_parallel_reading_from_replicas": "0",
     "parallel_distributed_insert_select": "0",
+    "distributed_foreground_insert": "1",
     "log_queries": "1",
     "log_queries_min_type": "'QUERY_START'",
     "log_queries_min_query_duration_ms": "0",
@@ -94,9 +103,11 @@ PINNED_INSERT_SETTINGS_SQL = ", ".join(
 
 #: Other names of the pinned settings (``system.settings.alias_for``), for a
 #: server that does not list them: ``enable_parallel_replicas`` is an alias of
-#: ``allow_experimental_parallel_reading_from_replicas`` from 24.10 on.
+#: ``allow_experimental_parallel_reading_from_replicas`` from 24.10 on, and
+#: ``insert_distributed_sync`` one of ``distributed_foreground_insert``.
 PINNED_SETTING_ALIASES: dict[str, str] = {
     "enable_parallel_replicas": "allow_experimental_parallel_reading_from_replicas",
+    "insert_distributed_sync": "distributed_foreground_insert",
 }
 
 
@@ -149,8 +160,9 @@ def assert_insert_settings_keep_pinned(
         msg = (
             f"insertSettings sets {', '.join(conflicts)}, which every backfill chunk INSERT "
             f"pins ({PINNED_INSERT_SETTINGS_SQL}): with another value, its failure cannot be "
-            "proven from system.query_log, and a replay could write its rows twice. Remove "
-            "them from insertSettings."
+            "proven from system.query_log, and a replay could write its rows twice, or it "
+            "is done before its rows reach a Distributed table's shards. Remove them from "
+            "insertSettings."
         )
         raise BackfillConfigError(msg)
 
