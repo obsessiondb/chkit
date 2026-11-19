@@ -8,6 +8,8 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
+
 from chkit import SQLExpression, table
 from chkit.cli.commands.generate_plan_pipeline import (
     apply_explicit_dictionary_renames,
@@ -466,7 +468,7 @@ def test_ttl_change_keeps_its_order_with_a_table_rename() -> None:
     ]
 
 
-# ---------- a cycle breaker runs first only in tables without a column rename (#775) ----------
+# ---------- a cycle breaker runs first in tables with a column rename (#775, #827) ----------
 
 
 def _named(name: str, columns: list[dict[str, Any]]) -> TableDefinition:
@@ -487,9 +489,9 @@ def _u(name: str, expression: str | None = None) -> dict[str, Any]:
     return column
 
 
-def test_cycle_breaker_runs_first_only_in_the_table_without_a_column_rename() -> None:
-    # The cycle repair does not model RENAME COLUMN, so a table with a column
-    # rename keeps the sorted order; another table in the plan is still repaired.
+def test_cycle_breaker_runs_first_with_a_column_rename_in_one_of_two_tables() -> None:
+    # ClickHouse rewrites every expression that reads a renamed column to its
+    # new name, so a column rename keeps the column on the repair's graph.
     before = [_u("a"), _u("b", "c"), _u("c", "a")]
     after = [_u("a", "b"), _u("b", "id"), _u("c", "id")]
     assert _renamed(
@@ -498,11 +500,56 @@ def test_cycle_breaker_runs_first_only_in_the_table_without_a_column_rename() ->
         "x",
         "y",
     ) == [
-        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
         "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
         "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
         "ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;",
         "ALTER TABLE app.v MODIFY COLUMN `b` UInt64 DEFAULT id;",
         "ALTER TABLE app.v MODIFY COLUMN `a` UInt64 DEFAULT b;",
         "ALTER TABLE app.v MODIFY COLUMN `c` UInt64 DEFAULT id;",
+    ]
+
+
+def test_cycle_breaker_runs_first_with_the_renamed_column_on_the_cycle() -> None:
+    # `a DEFAULT b` closes a -> b -> x (renamed y) -> a until `b` changes.
+    assert _renamed(
+        [_named("t", [_u("a"), _u("b", "x"), _u("x", "a")])],
+        [_named("t", [_u("a", "b"), _u("b", "id"), _u("y", "a")])],
+        "x",
+        "y",
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;",
+    ]
+
+
+def test_a_modify_that_only_follows_the_rename_does_not_break_the_cycle() -> None:
+    # `b DEFAULT x` -> `b DEFAULT y` reads the same column, so `c` breaks the cycle.
+    assert _renamed(
+        [_named("t", [_u("a"), _u("b", "x"), _u("x", "c"), _u("c", "a")])],
+        [_named("t", [_u("a", "b"), _u("b", "y"), _u("y", "c"), _u("c", "id")])],
+        "x",
+        "y",
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT y;",
+    ]
+
+
+# ClickHouse 26.3 rewrites a read of a column renamed to `true` as the literal
+# and one renamed to `not` as the operator, so those keep the sorted order.
+@pytest.mark.parametrize("to", ["TRUE", "Not"])
+def test_a_rename_to_a_literal_word_keeps_the_sorted_order(to: str) -> None:
+    assert _renamed(
+        [_named("t", [_u("a"), _u("b", "x"), _u("x", "a")])],
+        [_named("t", [_u("a", "b"), _u("b", "id"), _u(to, "a")])],
+        "x",
+        to,
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;",
+        f"ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `{to}`;",
     ]

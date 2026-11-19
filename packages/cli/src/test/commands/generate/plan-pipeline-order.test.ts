@@ -438,9 +438,9 @@ describe('plan-pipeline keeps a table TTL change between the columns it reads an
   })
 })
 
-// The cycle repair does not model RENAME COLUMN, so a table with a column
-// rename keeps the sorted order; another table in the plan is still repaired.
-describe('plan-pipeline runs a cycle breaker first only in tables without a column rename (#775)', () => {
+// ClickHouse rewrites every expression that reads a renamed column to its new
+// name, so a column rename keeps the column on the cycle repair's graph (#827).
+describe('plan-pipeline runs a cycle breaker first in tables with a column rename (#775, #827)', () => {
   const t = (name: string, columns: ColumnDefinition[]) =>
     table({
       database: 'app',
@@ -455,21 +455,22 @@ describe('plan-pipeline runs a cycle breaker first only in tables without a colu
     type: 'UInt64',
     ...(expression === undefined ? {} : { default: { expression } }),
   })
+  const renamed = (previous: SchemaDefinition[], next: SchemaDefinition[], from: string, to: string) => {
+    const planned = planDiff(previous, next)
+    const plan = applySelectedRenameSuggestions(
+      planned,
+      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from, to, source: 'cli' }]),
+      { previous, next }
+    )
+    return plan.operations.map((operation) => operation.sql)
+  }
   const before = [u('a'), u('b', 'c'), u('c', 'a')]
   const after = [u('a', 'b'), u('b', 'id'), u('c', 'id')]
 
   test('with a column rename in one of two tables', () => {
-    const previous = [t('t', [...before, u('x')]), t('v', before)]
-    const next = [t('t', [...after, u('y')]), t('v', after)]
-    const planned = planDiff(previous, next)
-    const plan = applySelectedRenameSuggestions(
-      planned,
-      buildExplicitColumnRenameSuggestions(planned, [{ database: 'app', table: 't', from: 'x', to: 'y', source: 'cli' }]),
-      { previous, next }
-    )
-    expect(plan.operations.map((operation) => operation.sql)).toEqual([
-      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+    expect(renamed([t('t', [...before, u('x')]), t('v', before)], [t('t', [...after, u('y')]), t('v', after)], 'x', 'y')).toEqual([
       'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
       'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
       'ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;',
       'ALTER TABLE app.v MODIFY COLUMN `b` UInt64 DEFAULT id;',
@@ -477,6 +478,44 @@ describe('plan-pipeline runs a cycle breaker first only in tables without a colu
       'ALTER TABLE app.v MODIFY COLUMN `c` UInt64 DEFAULT id;',
     ])
   })
+
+  test('with the renamed column on the cycle', () => {
+    // `a DEFAULT b` closes a → b → x (renamed y) → a until `b` changes.
+    expect(renamed([t('t', [u('a'), u('b', 'x'), u('x', 'a')])], [t('t', [u('a', 'b'), u('b', 'id'), u('y', 'a')])], 'x', 'y')).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;',
+    ])
+  })
+
+  test('a MODIFY that only follows the rename does not break the cycle', () => {
+    // `b DEFAULT x` → `b DEFAULT y` reads the same column, so `c` breaks the cycle.
+    expect(
+      renamed(
+        [t('t', [u('a'), u('b', 'x'), u('x', 'c'), u('c', 'a')])],
+        [t('t', [u('a', 'b'), u('b', 'y'), u('y', 'c'), u('c', 'id')])],
+        'x',
+        'y'
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `c` UInt64 DEFAULT id;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+      'ALTER TABLE app.t RENAME COLUMN IF EXISTS `x` TO `y`;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT y;',
+    ])
+  })
+
+  // ClickHouse 26.3 rewrites a read of a column renamed to `true` as the
+  // literal and one renamed to `not` as the operator, so those keep the order.
+  for (const to of ['TRUE', 'Not']) {
+    test(`with a rename to ${to}, the table keeps the sorted order`, () => {
+      expect(renamed([t('t', [u('a'), u('b', 'x'), u('x', 'a')])], [t('t', [u('a', 'b'), u('b', 'id'), u(to, 'a')])], 'x', to)).toEqual([
+        'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+        'ALTER TABLE app.t MODIFY COLUMN `b` UInt64 DEFAULT id;',
+        `ALTER TABLE app.t RENAME COLUMN IF EXISTS \`x\` TO \`${to}\`;`,
+      ])
+    })
+  }
 })
 
 describe('plan-pipeline quotes the database it creates for a cross-database rename (#490)', () => {

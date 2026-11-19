@@ -1007,9 +1007,11 @@ def _repaired_order(  # noqa: PLR0915
     #775. Each table is replayed on its own, with its own work budget, and
     gives only edges that make a closing statement wait for a breaker
     (``_break_closed_cycles``); one more sort with those edges gives the
-    order. A table is left out, and keeps its sorted order, when it has a
-    RENAME COLUMN in ``renames`` (the replay does not rename), when one of its
-    expressions is not plain (``_plain_reads``), when a statement's key could
+    order. A RENAME COLUMN keeps its column on the graph under the new name
+    (``_renamed_columns``). A table is left out, and keeps its sorted order,
+    when a rename in ``renames`` is one ``_renamed_columns`` does not model,
+    when one of its expressions is not plain (``_plain_reads``), when a
+    statement's key could
     be one of its columns or another table's, when a prerequisite links its
     statements to another table's (keys of two tables can be the same), when
     no statement can break its cycle, or when its replay runs out of work.
@@ -1026,8 +1028,8 @@ def _repaired_order(  # noqa: PLR0915
     )
     columns, ambiguous = _statement_columns(statements, previous, next_)
     excluded = set(ambiguous)
-    for rename in renames:
-        excluded.add(_table_id(rename.database, rename.table))
+    renamed_ids, renamed_excluded = _renamed_columns(renames, previous, next_)
+    excluded |= renamed_excluded
     # Statements connected through prerequisites. A connection to another
     # table's statement, or to a statement of no known table, leaves the
     # tables out: the repair must not move a statement of a table that keeps
@@ -1048,6 +1050,7 @@ def _repaired_order(  # noqa: PLR0915
         return sorted_order
     old_plain, old_uncertain = _plain_facts(previous, active)
     new_plain, new_uncertain = _plain_facts(next_, active)
+    old_plain = {table: _renamed_graph(graph, renamed_ids) for table, graph in old_plain.items()}
     for table in old_uncertain | new_uncertain:
         active.pop(table, None)
     # Per table: the columns that may close a cycle, the size of its replay
@@ -1120,6 +1123,78 @@ def _repaired_order(  # noqa: PLR0915
     for target, breaker in added:
         extended[target].append(breaker)
     return _group_order(extended, groups, group_of)
+
+
+def _renamed_columns(
+    renames: Sequence[ColumnRenameSuggestion],
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
+) -> tuple[dict[str, str], set[str]]:
+    """How the cycle repair sees the ``renames`` (#827).
+
+    ClickHouse rewrites every DEFAULT, MATERIALIZED and ALIAS expression that
+    reads a renamed column to its new name, so a RENAME COLUMN releases the
+    old name and provides the new one, and the column keeps its reads and
+    readers. The first value maps each old ``_column_id`` to the new one,
+    which the old expressions are read with. A rename that this does not
+    model leaves its table out (the second value): one whose old name is
+    still a column after the plan or whose new name was one before it, a
+    name in two renames of the table, a name with a ``.`` (ClickHouse renames
+    nested columns differently), or a keyword or literal word (in any case:
+    ClickHouse 26.3 rewrites a read of a column renamed to ``true`` as the
+    literal ``true``, and one renamed to ``not`` as the operator).
+    """
+
+    def names(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+        return {
+            _table_id(definition.database, definition.name): {
+                column.name for column in definition.columns
+            }
+            for definition in definitions
+            if isinstance(definition, TableDefinition)
+        }
+
+    def modelled(name: str) -> bool:
+        lower = name.lower()
+        return "." not in name and lower not in _LITERAL_WORDS and lower not in _EXPRESSION_KEYWORDS
+
+    before = names(previous)
+    after = names(next_)
+    ids: dict[str, str] = {}
+    excluded: set[str] = set()
+    seen: dict[str, set[str]] = {}
+    for rename in renames:
+        table = _table_id(rename.database, rename.table)
+        used = seen.setdefault(table, set())
+        old_names = before.get(table)
+        new_names = after.get(table)
+        clean = (
+            modelled(rename.from_)
+            and modelled(rename.to)
+            and old_names is not None
+            and new_names is not None
+            and rename.from_ in old_names
+            and rename.to not in old_names
+            and rename.to in new_names
+            and rename.from_ not in new_names
+            and rename.from_ not in used
+            and rename.to not in used
+        )
+        used.update((rename.from_, rename.to))
+        if not clean:
+            excluded.add(table)
+        ids[f"{table}\x00{rename.from_}"] = f"{table}\x00{rename.to}"
+    return ids, excluded
+
+
+def _renamed_graph(graph: dict[str, set[str]], ids: dict[str, str]) -> dict[str, set[str]]:
+    """``graph`` with the columns ``ids`` renames under their new names."""
+    if not ids:
+        return graph
+    return {
+        ids.get(column, column): {ids.get(read, read) for read in reads}
+        for column, reads in graph.items()
+    }
 
 
 def _group_order(

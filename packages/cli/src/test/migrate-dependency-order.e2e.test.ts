@@ -777,4 +777,19 @@ describe('@chkit/cli migrate runs a breaker before the MODIFY that closes a temp
       columns: ['a', 'b', 'c', 'id'],
     })
   }, 120_000)
+
+  // ClickHouse rewrites the expressions that read a renamed column, so the
+  // rename keeps `x` (now `y`) on the cycle a → b → x → a (#827).
+  test('a MODIFY COLUMN runs after its breaker when a column on the cycle is renamed', async () => {
+    await migrateColumnChange({
+      label: 'breakrename',
+      before:
+        "{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'x' } }, { name: 'x', type: 'UInt64', default: { expression: 'a' } }",
+      after:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64', default: { expression: 'id' } }, { name: 'y', type: 'UInt64', default: { expression: 'a' } }",
+      rename: 'x=y',
+      order: ['MODIFY COLUMN `b` UInt64 DEFAULT id;', 'MODIFY COLUMN `a` UInt64 DEFAULT b;', 'RENAME COLUMN IF EXISTS `x` TO `y`;'],
+      columns: ['a', 'b', 'id', 'y'],
+    })
+  }, 120_000)
 })
