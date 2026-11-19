@@ -2863,3 +2863,32 @@ def test_ctrl_c_while_a_failed_run_waits_for_its_submit_cancels_the_submit(
     client.write.set()
     assert client.done.wait(timeout=5)
     assert client.sent == []
+
+
+def test_a_second_abandon_does_not_wait_for_the_connect_again(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A run that gave the submit up already does not wait out the connect
+    timeout a second time when its stop unwinds (#793)."""
+    # The connect wait is the timeout plus a 5 s margin: 0.5 s here.
+    monkeypatch.setattr(migrate_async_apply, "SUBMIT_CONNECT_TIMEOUT_SECONDS", -4.5)
+    release = threading.Event()
+
+    def submit(before_send: Any) -> None:
+        before_send()
+        release.wait(timeout=30)
+        before_send.begin_write()
+
+    submission = migrate_async_apply._Submission(submit)
+    submission.start()
+    try:
+        deadline = time.monotonic() + 5
+        while submission._state != "connecting" and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert submission.abandon() is False
+        began = time.monotonic()
+        assert submission.abandon_unsent() is False
+        assert time.monotonic() - began < 0.25
+    finally:
+        release.set()
+    assert submission.wait() is not None

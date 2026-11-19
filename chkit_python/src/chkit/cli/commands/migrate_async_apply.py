@@ -263,6 +263,8 @@ class _Submission:
         self._state = "idle"
         # Whether a write of the request was let through.
         self._written = False
+        # What a completed abandon returned, so a later one does not wait again.
+        self._excluded: bool | None = None
         # A daemon, so an interrupted run exits while the request is open;
         # the query keeps running and a re-run attaches to it.
         self._thread = threading.Thread(
@@ -324,14 +326,19 @@ class _Submission:
         writes: it is waited for up to the connect timeout and a margin. A
         request whose bytes are being written keeps the run, and its migrate
         lock, until its write completed or failed, however long that takes;
-        the transport's write timeout bounds it.
+        the transport's write timeout bounds it. Once it returned, a later
+        call returns the same answer at once (#793); an interrupted one waits
+        again.
         """
         with self._cond:
             self._cancelled = True
+            if self._excluded is not None:
+                return self._excluded
             excluded = self._cond.wait_for(
                 lambda: self._state != "connecting", SUBMIT_CONNECT_TIMEOUT_SECONDS + 5
             )
             self._cond.wait_for(lambda: self._state != "writing")
+            self._excluded = excluded
             return excluded
 
     def abandon_unsent(self) -> bool:
