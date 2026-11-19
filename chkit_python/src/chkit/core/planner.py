@@ -1272,10 +1272,10 @@ _INFIX_KEYWORDS = frozenset(
 _PREFIX_KEYWORDS = frozenset(
     {
         "all", "any", "array", "asc", "ascending", "both", "by", "case", "cast", "columns", "date",
-        "delete", "desc", "descending", "disk", "distinct", "escape", "except", "exists", "extract",
-        "global", "interval", "lambda", "leading", "not", "over", "partition", "position",
-        "recompress", "regexp", "select", "set", "substring", "timestamp", "to", "trailing", "trim",
-        "volume", "where", "with",
+        "delete", "desc", "descending", "disk", "distinct", "escape", "except", "exists",
+        "extract", "global", "group", "interval", "lambda", "leading", "not", "over", "partition",
+        "position", "recompress", "regexp", "select", "set", "substring", "timestamp", "to",
+        "trailing", "trim", "volume", "where", "with",
     }
 )  # fmt: skip
 # Word operators besides ``_INFIX_KEYWORDS`` (``x GLOBAL IN (…)``, ``s REGEXP 'a'``).
@@ -1287,28 +1287,33 @@ _EXTRACT_UNITS = frozenset(
         "month", "quarter", "year",
     }
 )  # fmt: skip
-# A skipped name or a column read named like one of these may be that keyword.
+# A word after CASE named like one of these may be that keyword.
 _KEYWORD_WORDS = _PREFIX_KEYWORDS | _INFIX_KEYWORDS | _OTHER_OPERATORS | _LITERAL_WORDS
 
 
-def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int]) -> set[int]:
+def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
+    tokens: list[SQLToken], columns: set[str], skipped: set[int]
+) -> set[int]:
     """Indices of the single bare names in ``tokens`` (trivia removed) that are keywords (#805).
 
-    They read no column of that name: the words in ``_LITERAL_WORDS`` and NOT
-    anywhere; CASE when WHEN or an operand follows it, with that WHEN; a word
+    They read no column of that name: the words in ``_LITERAL_WORDS`` and NOT,
+    except before a single ``=``; CASE when WHEN or an operand follows it, with that WHEN; a word
     in ``_INFIX_KEYWORDS`` right after a complete operand; and the name after
     such an AS (``toUInt64(x AS c)``), which ClickHouse does not read as the
     column. A complete operand ends on a number, a string, a closing bracket,
-    a literal word, END, the unit of ``extract(unit FROM …)``, a column read
-    where an operand was expected that is not named like a word in
-    ``_PREFIX_KEYWORDS``, or a name ``skipped`` holds that is not named like a
-    keyword. After any other name the next word keeps its read.
+    a literal word, END, the unit of ``extract(unit FROM …)``, or a column
+    read where an operand was expected that is not named like a word in
+    ``_PREFIX_KEYWORDS``. After any other name the next word keeps its read:
+    when the position is unclear, the read stays.
     """
     keywords: set[int] = set()
     count = len(tokens)
 
     def text_at(i: int) -> str | None:
         return tokens[i].text if 0 <= i < count else None
+
+    def assigned(i: int) -> bool:
+        return text_at(i + 1) == "=" and text_at(i + 2) != "="
 
     def bare(i: int) -> str | None:
         return tokens[i].text.lower() if 0 <= i < count and tokens[i].kind == "identifier" else None
@@ -1329,18 +1334,19 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
         elif name is None:
             state = "unknown"
         elif i in skipped:
-            # A lambda parameter or a cast type, unless it is named like a keyword.
-            state = "unknown" if word in _KEYWORD_WORDS else "ended"
+            # A lambda parameter or a cast type: the reads around it keep main's rules.
+            state = "unknown"
         elif text_at(i + 1) == "(":
             # A function call: the ``(`` after it expects an operand.
             pass
         elif text_at(i - 1) == "." or text_at(i + 1) == ".":
             # A part of a dotted name, which may or may not be a complete operand.
             state = "unknown"
-        elif word is not None and word in _LITERAL_WORDS:
+        # A word before a single ``=`` may be the column a TTL's ``SET col = …`` assigns.
+        elif word is not None and word in _LITERAL_WORDS and not assigned(i):
             keywords.add(i)
             state = "ended"
-        elif word == "not":
+        elif word == "not" and not assigned(i):
             # NOT keeps the state: unary NOT expects an operand, as before it, and
             # after an operand it starts ``NOT IN``, ``NOT LIKE`` or ``NOT BETWEEN``.
             keywords.add(i)
@@ -1378,7 +1384,11 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
 
 
 def _case_follows(following: SQLToken | None) -> bool:
-    """Whether ``following`` makes the CASE before it the keyword: WHEN or an operand start."""
+    """Whether ``following`` makes the CASE before it the keyword.
+
+    That is WHEN, or the start of an operand that is not named like a keyword
+    (``case TO DISK 'd'`` in a TTL reads the column ``case``).
+    """
     if following is None:
         return False
     if following.kind in ("number", "string", "quoted_identifier"):
@@ -1386,9 +1396,7 @@ def _case_follows(following: SQLToken | None) -> bool:
     if following.kind != "identifier":
         return False
     word = following.text.lower()
-    return word == "when" or (
-        word not in _INFIX_KEYWORDS and word not in _OTHER_OPERATORS and word != "not"
-    )
+    return word == "when" or word not in _KEYWORD_WORDS
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:

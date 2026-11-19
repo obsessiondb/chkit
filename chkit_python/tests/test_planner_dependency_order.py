@@ -1027,7 +1027,6 @@ def _keyword_reads_of(expression: str) -> list[str]:
         ("toUInt64(x as c)", ["x"]),
         ("toUInt64(x AS `c`)", ["x"]),
         ("(x + 1 as c) * 2", ["x"]),
-        ("arraySum(arrayMap(i -> i is null, [x]))", ["x"]),
     ],
 )
 def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
@@ -1064,6 +1063,9 @@ def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
         ("arraySum(arrayMap(and -> 1 and end, [1]))", ["end"]),
         ("arraySum(arrayMap(both -> both not like end, ['x']))", ["end", "like"]),
         ("toUInt8(t.x and end)", ["and", "end", "x"]),
+        # Unclear positions keep the read: after a lambda parameter, and before a single `=`.
+        ("arraySum(arrayMap(i -> i is null, [x]))", ["is", "x"]),
+        ("toUInt8(null = 1)", ["null"]),
         ("length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ["from", "interval"]),
     ],
 )
@@ -1083,6 +1085,30 @@ def test_drops_a_column_after_the_dropped_column_that_reads_it_when_a_case_names
     ) == [
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `end`;",
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;",
+    ]
+
+
+@pytest.mark.parametrize(
+    ("column", "before", "after"),
+    [
+        ("case", "case TO DISK 'default'", "ts TO DISK 'default'"),
+        ("case", "case DELETE", "ts DELETE"),
+        ("null", "ts GROUP BY id SET null = max(x)", "ts GROUP BY id SET x = max(x)"),
+    ],
+)
+def test_a_ttl_that_reads_a_keyword_named_column_changes_before_it_is_dropped(
+    column: str, before: str, after: str
+) -> None:
+    columns: list[dict[str, Any]] = [
+        {"name": "ts", "type": "DateTime"},
+        {"name": "x", "type": "UInt64"},
+    ]
+    assert _sqls(
+        [_t([*columns, {"name": column, "type": "DateTime"}], ttl=before)],
+        [_t(columns, ttl=after)],
+    ) == [
+        f"ALTER TABLE app.t MODIFY TTL {after};",
+        f"ALTER TABLE app.t DROP COLUMN IF EXISTS `{column}`;",
     ]
 
 

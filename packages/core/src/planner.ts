@@ -1215,7 +1215,7 @@ const INFIX_KEYWORDS: ReadonlySet<string> = new Set([
 // may be that keyword, so the word after it keeps its read.
 const PREFIX_KEYWORDS: ReadonlySet<string> = new Set([
   'all', 'any', 'array', 'asc', 'ascending', 'both', 'by', 'case', 'cast', 'columns', 'date', 'delete', 'desc',
-  'descending', 'disk', 'distinct', 'escape', 'except', 'exists', 'extract', 'global', 'interval', 'lambda',
+  'descending', 'disk', 'distinct', 'escape', 'except', 'exists', 'extract', 'global', 'group', 'interval', 'lambda',
   'leading', 'not', 'over', 'partition', 'position', 'recompress', 'regexp', 'select', 'set', 'substring',
   'timestamp', 'to', 'trailing', 'trim', 'volume', 'where', 'with',
 ])
@@ -1225,7 +1225,7 @@ const OTHER_OPERATORS: ReadonlySet<string> = new Set(['global', 'regexp'])
 const EXTRACT_UNITS: ReadonlySet<string> = new Set([
   'nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year',
 ])
-// A skipped name or a column read named like one of these may be that keyword.
+// A word after CASE named like one of these may be that keyword.
 const isKeywordWord = (word: string | undefined) =>
   word !== undefined &&
   (PREFIX_KEYWORDS.has(word) || INFIX_KEYWORDS.has(word) || OTHER_OPERATORS.has(word) || LITERAL_WORDS.has(word))
@@ -1233,18 +1233,19 @@ const isKeywordWord = (word: string | undefined) =>
 /**
  * Indices of the single bare names in `tokens` (trivia removed) that are
  * keywords, not reads of a column with that name (#805): the words in
- * `LITERAL_WORDS` and NOT anywhere; CASE when WHEN or an operand follows it,
- * with that WHEN; a word in `INFIX_KEYWORDS` right after a complete operand;
- * and the name after such an AS (`toUInt64(x AS c)`), which ClickHouse does
- * not read as the column. A complete operand ends on a number, a string, a
+ * `LITERAL_WORDS` and NOT, except before a single `=`; CASE when WHEN or an
+ * operand follows it, with that WHEN; a word in `INFIX_KEYWORDS` right after
+ * a complete operand; and the name after such an AS (`toUInt64(x AS c)`),
+ * which ClickHouse does not read as the column. A complete operand ends on a number, a string, a
  * closing bracket, a literal word, END, the unit of `extract(unit FROM …)`,
- * a column read where an operand was expected that is not named like a word
- * in `PREFIX_KEYWORDS`, or a name `skipped` holds that is not named like a
- * keyword. After any other name the next word keeps its read.
+ * or a column read where an operand was expected that is not named like a
+ * word in `PREFIX_KEYWORDS`. After any other name the next word keeps its
+ * read: when the position is unclear, the read stays.
  */
 function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped: ReadonlySet<number>): Set<number> {
   const keywords = new Set<number>()
   const bare = (i: number) => (tokens[i]?.kind === 'identifier' ? tokens[i]!.text.toLowerCase() : undefined)
+  const assigned = (i: number) => tokens[i + 1]?.text === '=' && tokens[i + 2]?.text !== '='
   let state: 'operand' | 'ended' | 'unknown' = 'operand'
   for (let i = 0; i < tokens.length; i += 1) {
     const token = tokens[i]!
@@ -1255,16 +1256,17 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
       if (token.text === ')' || token.text === ']' || token.text === '}') state = 'ended'
       else if (token.text !== '.') state = 'operand'
     } else if (name === undefined) state = 'unknown'
-    // A lambda parameter or a cast type, unless it is named like a keyword.
-    else if (skipped.has(i)) state = isKeywordWord(word) ? 'unknown' : 'ended'
+    // A lambda parameter or a cast type: the reads around it keep main's rules.
+    else if (skipped.has(i)) state = 'unknown'
     // A function call: the `(` after it expects an operand.
     else if (tokens[i + 1]?.text === '(') continue
     // A part of a dotted name, which may or may not be a complete operand.
     else if (tokens[i - 1]?.text === '.' || tokens[i + 1]?.text === '.') state = 'unknown'
-    else if (word !== undefined && LITERAL_WORDS.has(word)) {
+    // A word before a single `=` may be the column a TTL's `SET col = …` assigns.
+    else if (word !== undefined && LITERAL_WORDS.has(word) && !assigned(i)) {
       keywords.add(i)
       state = 'ended'
-    } else if (word === 'not') {
+    } else if (word === 'not' && !assigned(i)) {
       // NOT keeps the state: unary NOT expects an operand, as before it, and
       // after an operand it starts `NOT IN`, `NOT LIKE` or `NOT BETWEEN`.
       keywords.add(i)
@@ -1292,11 +1294,15 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
   return keywords
 }
 
-/** Whether `next` makes the CASE before it the keyword: WHEN, or the start of an operand. */
+/**
+ * Whether `next` makes the CASE before it the keyword: WHEN, or the start of
+ * an operand that is not named like a keyword (`case TO DISK 'd'` in a TTL
+ * reads the column `case`).
+ */
 function caseFollows(next: SQLToken | undefined): boolean {
   if (next === undefined) return false
   if (next.kind === 'number' || next.kind === 'string' || next.kind === 'quoted_identifier') return true
   if (next.kind !== 'identifier') return false
   const word = next.text.toLowerCase()
-  return word === 'when' || (!INFIX_KEYWORDS.has(word) && !OTHER_OPERATORS.has(word) && word !== 'not')
+  return word === 'when' || !isKeywordWord(word)
 }

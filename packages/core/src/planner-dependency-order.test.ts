@@ -1173,7 +1173,6 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ['toUInt64(x as c)', ['x']],
     ['toUInt64(x AS `c`)', ['x']],
     ['(x + 1 as c) * 2', ['x']],
-    ['arraySum(arrayMap(i -> i is null, [x]))', ['x']],
   ])('keyword: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
   })
@@ -1206,6 +1205,9 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ['arraySum(arrayMap(and -> 1 and end, [1]))', ['end']],
     ["arraySum(arrayMap(both -> both not like end, ['x']))", ['end', 'like']],
     ['toUInt8(t.x and end)', ['and', 'end', 'x']],
+    // Unclear positions keep the read: after a lambda parameter, and before a single `=`.
+    ['arraySum(arrayMap(i -> i is null, [x]))', ['is', 'x']],
+    ['toUInt8(null = 1)', ['null']],
     ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
   ])('column: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
@@ -1220,6 +1222,24 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     expect(objectOps([before], [appTable('t')])).toEqual([
       'alter_table_drop_column table:app.t:column:end',
       'alter_table_drop_column table:app.t:column:a',
+    ])
+  })
+
+  test.each<[string, string, string]>([
+    ['case', "case TO DISK 'default'", "ts TO DISK 'default'"],
+    ['case', 'case DELETE', 'ts DELETE'],
+    ['null', 'ts GROUP BY id SET null = max(x)', 'ts GROUP BY id SET x = max(x)'],
+  ])('a TTL that reads the column %s changes before it is dropped: %s', (column, before, after) => {
+    const columns: ColumnDefinition[] = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'DateTime' },
+      { name: 'x', type: 'UInt64' },
+    ]
+    const withTtl = (extra: ColumnDefinition[], ttl: string) =>
+      table({ database: 'app', name: 't', columns: [...columns, ...extra], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'], ttl })
+    expect(objectOps([withTtl([{ name: column, type: 'DateTime' }], before)], [withTtl([], after)])).toEqual([
+      'alter_table_modify_ttl table:app.t:ttl',
+      `alter_table_drop_column table:app.t:column:${column}`,
     ])
   })
 
