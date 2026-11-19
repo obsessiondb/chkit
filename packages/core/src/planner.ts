@@ -891,15 +891,15 @@ export function orderColumnStatements(
   definitions: ColumnStatementDefinitions,
   renames: readonly ColumnRename[]
 ): MigrationOperation[] {
-  const reads = columnDefaultReads(definitions.next, columnId)
-  const oldReads = columnDefaultReads(definitions.previous, columnId)
+  const reads = columnDefaultReads(definitions.next, columnObjectId)
+  const oldReads = columnDefaultReads(definitions.previous, columnObjectId)
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
-  const renamedTo = new Map(renames.map((rename) => [renameId(rename), columnId(rename.database, rename.table, rename.to)]))
+  const renamedTo = new Map(renames.map((rename) => [renameObjectId(rename), columnObjectId(rename.database, rename.table, rename.to)]))
   const statements = operations
     .filter(isColumnStatement)
     .sort((a, b) => compareCodePoints(a.key, b.key))
-  const ids = statementIds(statements, definitions, renames)
+  const ids = statementObjectIds(statements, definitions, renames)
   // The statements of one object (`ids`) are next to each other in key order.
   const lastOf = new Map<string, number>()
   const previousOf = ids.map((id, index) => {
@@ -1013,15 +1013,15 @@ function columnKey(table: { database: string; table: string }, column: string): 
 // Ids of the objects the column statements change. Unlike operation keys,
 // two objects never share one: table `t:column:x` and column `x:column:a` of
 // `t` give the same key (#801).
-function columnId(database: string, table: string, column: string): string {
+function columnObjectId(database: string, table: string, column: string): string {
   return JSON.stringify(['column', database, table, column])
 }
 
-function ttlId(database: string, table: string): string {
+function ttlObjectId(database: string, table: string): string {
   return JSON.stringify(['ttl', database, table])
 }
 
-function renameId(rename: ColumnRename): string {
+function renameObjectId(rename: ColumnRename): string {
   return JSON.stringify(['rename', rename.database, rename.table, rename.from, rename.to])
 }
 
@@ -1033,7 +1033,7 @@ function renameId(rename: ColumnRename): string {
  * is. A statement that is still not one object's keeps its key as its id,
  * so it reads and provides nothing.
  */
-function statementIds(
+function statementObjectIds(
   statements: MigrationOperation[],
   definitions: ColumnStatementDefinitions,
   renames: readonly ColumnRename[]
@@ -1052,15 +1052,15 @@ function statementIds(
     const matches = (sql: string) => sql.startsWith(prefix)
     for (const column of def.columns) {
       add('column', columnKey({ database: def.database, table: def.name }, column.name), {
-        id: columnId(def.database, def.name, column.name),
+        id: columnObjectId(def.database, def.name, column.name),
         matches,
       })
     }
-    add('ttl', `table:${def.database}.${def.name}:ttl`, { id: ttlId(def.database, def.name), matches })
+    add('ttl', `table:${def.database}.${def.name}:ttl`, { id: ttlObjectId(def.database, def.name), matches })
   }
   for (const rename of renames) {
     const sql = `ALTER TABLE ${renderQualifiedName(rename.database, rename.table)} RENAME COLUMN IF EXISTS ${quoteIdentifier(rename.from)} TO ${quoteIdentifier(rename.to)};`
-    add('rename', columnRenameKey(rename), { id: renameId(rename), matches: (other) => other === sql })
+    add('rename', columnRenameKey(rename), { id: renameObjectId(rename), matches: (other) => other === sql })
   }
   const kindOf = (op: MigrationOperation) =>
     op.type === 'alter_table_modify_ttl' ? 'ttl' : op.type === 'alter_table_rename_column' ? 'rename' : 'column'
@@ -1162,8 +1162,8 @@ function tableTtlReads(definitions: SchemaDefinition[]): DependencyGraph {
   for (const def of definitions) {
     if (def.kind !== 'table' || def.ttl === undefined) continue
     const names = new Set(def.columns.map((column) => column.name))
-    const read = new Set(dottedNames(def.ttl, names).map((name) => columnId(def.database, def.name, name)))
-    graph.set(ttlId(def.database, def.name), read)
+    const read = new Set(dottedNames(def.ttl, names).map((name) => columnObjectId(def.database, def.name, name)))
+    graph.set(ttlObjectId(def.database, def.name), read)
   }
   return graph
 }

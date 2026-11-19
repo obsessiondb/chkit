@@ -911,16 +911,16 @@ def order_column_statements(
     a table's statements never move past another table's (they share no
     edge). ``renames`` names the columns of each RENAME COLUMN in ``operations``.
     """
-    reads = _column_default_reads(next_, _column_id)
-    old_reads = _column_default_reads(previous, _column_id)
+    reads = _column_default_reads(next_, _column_object_id)
+    old_reads = _column_default_reads(previous, _column_object_id)
     ttl_reads = _table_ttl_reads(next_)
     old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
-        _rename_id(rename): _column_id(rename.database, rename.table, rename.to)
+        _rename_object_id(rename): _column_object_id(rename.database, rename.table, rename.to)
         for rename in renames
     }
     statements = sorted((op for op in operations if is_column_statement(op)), key=lambda op: op.key)
-    ids = _statement_ids(statements, previous, next_, renames)
+    ids = _statement_object_ids(statements, previous, next_, renames)
     # The statements of one object (``ids``) are next to each other in key order.
     last_of: dict[str, int] = {}
     previous_of: list[int | None] = []
@@ -1038,19 +1038,19 @@ def _column_key(database: str, table: str, column: str) -> str:
 # Ids of the objects the column statements change. Unlike operation keys,
 # two objects never share one: table ``t:column:x`` and column ``x:column:a``
 # of ``t`` give the same key (#801).
-def _column_id(database: str, table: str, column: str) -> str:
+def _column_object_id(database: str, table: str, column: str) -> str:
     return json.dumps(["column", database, table, column])
 
 
-def _ttl_id(database: str, table: str) -> str:
+def _ttl_object_id(database: str, table: str) -> str:
     return json.dumps(["ttl", database, table])
 
 
-def _rename_id(rename: ColumnRenameSuggestion) -> str:
+def _rename_object_id(rename: ColumnRenameSuggestion) -> str:
     return json.dumps(["rename", rename.database, rename.table, rename.from_, rename.to])
 
 
-def _statement_ids(
+def _statement_object_ids(
     statements: Sequence[MigrationOperation],
     previous: Sequence[SchemaDefinition],
     next_: Sequence[SchemaDefinition],
@@ -1081,13 +1081,13 @@ def _statement_ids(
             add(
                 "column",
                 _column_key(definition.database, definition.name, column.name),
-                _column_id(definition.database, definition.name, column.name),
+                _column_object_id(definition.database, definition.name, column.name),
                 starts,
             )
         add(
             "ttl",
             f"table:{definition.database}.{definition.name}:ttl",
-            _ttl_id(definition.database, definition.name),
+            _ttl_object_id(definition.database, definition.name),
             starts,
         )
     for rename in renames:
@@ -1100,7 +1100,7 @@ def _statement_ids(
         def equals(other: str, sql: str = sql) -> bool:
             return other == sql
 
-        add("rename", column_rename_key(rename), _rename_id(rename), equals)
+        add("rename", column_rename_key(rename), _rename_object_id(rename), equals)
 
     def kind_of(op: MigrationOperation) -> str:
         if op.type == "alter_table_modify_ttl":
@@ -1219,8 +1219,8 @@ def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[s
         if not isinstance(definition, TableDefinition) or definition.ttl is None:
             continue
         names = {column.name for column in definition.columns}
-        graph[_ttl_id(definition.database, definition.name)] = {
-            _column_id(definition.database, definition.name, name)
+        graph[_ttl_object_id(definition.database, definition.name)] = {
+            _column_object_id(definition.database, definition.name, name)
             for name in _dotted_names(definition.ttl, names)
         }
     return graph
