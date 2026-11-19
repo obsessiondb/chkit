@@ -62,7 +62,7 @@ import {
 import { resolveRecoveryTargets } from './recovery.js'
 import { resolveRetry, type RetryResolution } from './retry.js'
 import { filterPendingByScope } from './scope.js'
-import { parseSettingFlags } from './settings.js'
+import { assertInsertSettingsChangeable, parseSettingFlags } from './settings.js'
 import { extractExecutableStatements, extractMigrationOperationSummaries } from '../../runtime/safety-markers.js'
 import { createQueryTracker, queryTrackingDisabled, type QueryContext, type QueryIdentity, type QueryTracker } from './query-intents.js'
 import { abandonRecovery, assertCancellationClear, assertCancellationUnfinished, cancelPredecessor, freshRecoveryExecutor, finishRecovery, expandRecoveryPlan, markCancellationPending, settleCompensation, prepareCancellation, resolveQueryIdentity } from './cancellation.js'
@@ -239,6 +239,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   if (!pluginContext.hasExecutor) {
     throw new Error('clickhouse config is required for migrate (journal is stored in ClickHouse)')
   }
+  if (executeRequested) await assertInsertSettingsChangeable(pluginContext.executor)
   // Every request of the run, journal writes included, first checks that
   // the run still holds the migrate lock, once it took it (#716).
   let heldLock: MigrateLock | undefined

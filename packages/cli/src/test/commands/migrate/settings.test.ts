@@ -1,6 +1,8 @@
 import { describe, expect, test } from 'bun:test'
 
-import { parseSettingFlags } from '../../../commands/migrate/settings.js'
+import type { ClickHouseExecutor } from '@chkit/clickhouse'
+
+import { assertInsertSettingsChangeable, parseSettingFlags } from '../../../commands/migrate/settings.js'
 
 describe('migrate --setting parsing (#321)', () => {
   test('no --setting yields no settings', () => {
@@ -47,4 +49,31 @@ describe('migrate --setting parsing (#321)', () => {
       )
     }
   })
+})
+
+describe('migrate refuses a user whose insert settings are fixed (#790)', () => {
+  const executor = (rows: Array<{ name: string; value: string; readonly: number }>) =>
+    ({ query: async () => rows }) as unknown as ClickHouseExecutor
+  const changeable = [
+    { name: 'readonly', value: '0', readonly: 0 },
+    { name: 'async_insert', value: '1', readonly: 0 },
+    { name: 'wait_for_async_insert', value: '0', readonly: 0 },
+  ]
+
+  test('changeable settings, settings already at chkit\'s values, or a readonly = 1 user pass', async () => {
+    await assertInsertSettingsChangeable(executor(changeable))
+    await assertInsertSettingsChangeable(executor([{ name: 'async_insert', value: '0', readonly: 1 }, { name: 'wait_for_async_insert', value: '1', readonly: 1 }]))
+    await assertInsertSettingsChangeable(executor([{ name: 'readonly', value: '1', readonly: 1 }, { name: 'async_insert', value: '1', readonly: 1 }]))
+    await assertInsertSettingsChangeable({ query: async () => { throw new Error('denied') } } as unknown as ClickHouseExecutor)
+  })
+
+  for (const [name, value, durable] of [['async_insert', '1', '0'], ['wait_for_async_insert', '0', '1']] as const) {
+    test(`${name} fixed at ${value} is refused with insert_settings_fixed`, async () => {
+      const rows = changeable.map((row) => (row.name === name ? { name, value, readonly: 1 } : row))
+      await expect(assertInsertSettingsChangeable(executor(rows))).rejects.toMatchObject({
+        code: 'insert_settings_fixed',
+        message: `Setting ${name} is fixed at ${value} for this ClickHouse user, and chkit migrate needs ${name} = ${durable} so that a statement it records as applied is stored. Nothing ran.`,
+      })
+    })
+  }
 })

@@ -1,4 +1,4 @@
-import type { ClickHouseSettings } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings } from '@chkit/clickhouse'
 
 import { MigrateError } from './errors.js'
 
@@ -74,4 +74,32 @@ export function parseSettingFlags(values: readonly string[] | undefined): ClickH
     settings[name] = value
   }
   return settings
+}
+
+/**
+ * Refuses an applying run, before anything is sent, for a user whose settings
+ * constraints fix async_insert or wait_for_async_insert at another value than
+ * chkit sends: its writes could not be made to be stored when they return
+ * (#790). A readonly = 1 user is left to the server's own refusal of its
+ * writes. When the settings cannot be read, the writes still fail closed.
+ */
+export async function assertInsertSettingsChangeable(db: ClickHouseExecutor): Promise<void> {
+  let rows: Array<{ name: string; value: unknown; readonly: unknown }>
+  try {
+    rows = await db.query("SELECT name, value, readonly FROM system.settings WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')")
+  } catch {
+    return
+  }
+  const byName = new Map(rows.map((row) => [row.name, row]))
+  if (String(byName.get('readonly')?.value) === '1') return
+  for (const [name, durable] of DURABLE_INSERT_SETTINGS) {
+    const row = byName.get(name)
+    if (row && String(row.readonly) !== '0' && String(row.value) !== durable.value) {
+      throw new MigrateError('insert_settings_fixed', insertSettingsFixedMessage(name, String(row.value), durable.value))
+    }
+  }
+}
+
+export function insertSettingsFixedMessage(name: string, value: string, durable: string): string {
+  return `Setting ${name} is fixed at ${value} for this ClickHouse user, and chkit migrate needs ${name} = ${durable} so that a statement it records as applied is stored. Nothing ran.`
 }

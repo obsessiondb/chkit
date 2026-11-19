@@ -7,9 +7,13 @@ from __future__ import annotations
 
 import re
 from collections.abc import Sequence
+from typing import TYPE_CHECKING
 
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.core.sql_lexer import js_trim
+
+if TYPE_CHECKING:
+    from chkit.clickhouse.client import ClickHouseClient
 
 _SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
 
@@ -90,3 +94,36 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
             raise MigrateError("invalid_usage", msg)
         settings[name] = durable
     return settings
+
+
+def assert_insert_settings_changeable(client: ClickHouseClient) -> None:
+    """Refuse an applying run, before anything is sent, for a user whose
+    settings constraints fix ``async_insert`` or ``wait_for_async_insert`` at
+    another value than chkit sends: its writes could not be made to be stored
+    when they return (#790). A ``readonly = 1`` user is left to the server's
+    own refusal of its writes. When the settings cannot be read, the writes
+    still fail closed. TS ``assertInsertSettingsChangeable``."""
+    try:
+        rows = client.query(
+            "SELECT name, value, readonly FROM system.settings "
+            "WHERE name IN ('readonly', 'async_insert', 'wait_for_async_insert')"
+        ).rows
+    except Exception:  # As TS: an unreadable table leaves the writes to fail closed.
+        return
+    by_name = {str(row["name"]): row for row in rows}
+    mode = by_name.get("readonly")
+    if mode is not None and str(mode["value"]) == "1":
+        return
+    for name, (durable, _spellings) in _DURABLE_INSERT_SETTINGS.items():
+        row = by_name.get(name)
+        if row is not None and str(row["readonly"]) != "0" and str(row["value"]) != durable:
+            msg = insert_settings_fixed_message(name, str(row["value"]), durable)
+            raise MigrateError("insert_settings_fixed", msg)
+
+
+def insert_settings_fixed_message(name: str, value: str, durable: str) -> str:
+    return (
+        f"Setting {name} is fixed at {value} for this ClickHouse user, and chkit migrate "
+        f"needs {name} = {durable} so that a statement it records as applied is stored. "
+        "Nothing ran."
+    )

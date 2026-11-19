@@ -103,7 +103,10 @@ from chkit.cli.commands.migrate_retry import (
     retry_payload,
 )
 from chkit.cli.commands.migrate_scope import filter_pending_by_scope
-from chkit.cli.commands.migrate_settings import parse_setting_flags
+from chkit.cli.commands.migrate_settings import (
+    assert_insert_settings_changeable,
+    parse_setting_flags,
+)
 from chkit.cli.config_loader import load_config
 from chkit.cli.help import TABLE_FLAG_HELP
 from chkit.cli.hook_flags import passed_flags
@@ -434,6 +437,8 @@ def _run(
         raise MigrateError("migration_not_found", msg)
 
     with open_client(executor, config.clickhouse) as configured_client:
+        if execute_requested:
+            assert_insert_settings_changeable(configured_client)
         raw_client = (
             FreshRecoveryClient(configured_client) if cancel_lock_queries else configured_client
         )
