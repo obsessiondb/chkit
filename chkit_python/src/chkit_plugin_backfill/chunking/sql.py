@@ -100,6 +100,10 @@ PINNED_SETTING_ALIASES: dict[str, str] = {
 }
 
 
+# A setting name; any other key could smuggle text into the SETTINGS clause.
+_SETTING_NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_]*")
+
+
 def _pinned_name(key: str, aliases: Mapping[str, str] | None) -> str | None:
     """The pinned setting ``key`` names, itself or through an alias."""
     if key in PINNED_INSERT_SETTINGS:
@@ -126,6 +130,14 @@ def assert_insert_settings_keep_pinned(
     with the pinned value is dropped (``unpinned_insert_settings``).
     ``aliases`` adds the server's own (``system.settings.alias_for``) to
     ``PINNED_SETTING_ALIASES``."""
+    invalid = [key for key in insert_settings or {} if not _SETTING_NAME.fullmatch(key)]
+    if invalid:
+        names = ", ".join(repr(key) for key in invalid)
+        msg = (
+            f"insertSettings has a key that is not a setting name: {names}. A setting name "
+            "is letters, digits and underscores, not starting with a digit."
+        )
+        raise BackfillConfigError(msg)
     conflicts = []
     for key, value in (insert_settings or {}).items():
         name = _pinned_name(key, aliases)
@@ -732,10 +744,11 @@ def _build_settings_clause(
 
 
 def _render_insert_setting_value(value: str | int | float | bool) -> str:
-    """JS template rendering: strings single-quoted (``'`` escaped as ``\\'``),
-    booleans as ``true``/``false``, numbers via ``String(number)``."""
+    """JS template rendering: strings single-quoted (``\\`` escaped as
+    ``\\\\`` and ``'`` as ``\\'``, so a value cannot close its quote), booleans
+    as ``true``/``false``, numbers via ``String(number)``."""
     if isinstance(value, str):
-        escaped = value.replace("'", "\\'")
+        escaped = value.replace("\\", "\\\\").replace("'", "\\'")
         return f"'{escaped}'"
     if isinstance(value, bool):
         return "true" if value else "false"

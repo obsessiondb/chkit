@@ -410,3 +410,64 @@ def _poll_count(
             return count
         time.sleep(0.25)
     return count
+
+
+# Final check: a key that is not a setting name could smuggle a setting past
+# the pinned-settings filter, and a value must never close its quote.
+@pytest.mark.parametrize(
+    "key",
+    [" parallel_distributed_insert_select", "max_threads=1, parallel_distributed_insert_select"],
+)
+def test_an_insert_settings_key_that_is_not_a_setting_name_is_refused(key: str) -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            insert_settings={key: 2},
+        )
+
+    assert str(raised.value) == (
+        f"insertSettings has a key that is not a setting name: {key!r}. A setting name is "
+        "letters, digits and underscores, not starting with a digit."
+    )
+
+
+_INJECTION = "x\\', parallel_distributed_insert_select=2, log_comment='y"
+
+
+def test_a_value_cannot_close_its_quote() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={"log_comment": _INJECTION},
+    )
+
+    assert _settings_line(sql) == (
+        f"SETTINGS async_insert=0, {PINNED}, "
+        "log_comment='x\\\\\\', parallel_distributed_insert_select=2, log_comment=\\'y', "
+        f"{_PINNED_INSERT}"
+    )
+
+
+def test_clickhouse_reads_a_quote_breaking_value_as_one_string() -> None:
+    env = resolve_live_env()
+    config = ChxResolvedClickHouseConfig(
+        url=env.clickhouse_url,
+        username=env.clickhouse_user,
+        password=env.clickhouse_password,
+        database=env.clickhouse_database,
+        secure=env.clickhouse_url.startswith("https"),
+    )
+    sql = build_chunk_execution_sql(
+        plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+        insert_settings={"log_comment": _INJECTION},
+    )
+    settings = _settings_line(sql).removeprefix("SETTINGS ")
+    client = ClickHouseClient.connect(config)
+    try:
+        rows = client.query(
+            "SELECT getSetting('log_comment') AS comment, "
+            f"getSetting('parallel_distributed_insert_select') AS pdis SETTINGS {settings}"
+        ).rows
+    finally:
+        client.close()
+
+    assert rows == [{"comment": _INJECTION, "pdis": 0}]
