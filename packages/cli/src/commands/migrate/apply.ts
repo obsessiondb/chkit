@@ -285,6 +285,7 @@ export async function applyMigration(input: {
   const operationSummaries = extractMigrationOperationSummaries(sql)
   debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
 
+  input.signal?.throwIfAborted()
   const statements = await pluginRuntime.runOnBeforeApply({
     command: 'migrate',
     config,

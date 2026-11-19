@@ -7,6 +7,7 @@ import { describe, expect, test } from 'bun:test'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import { ATTEMPT_RECORD_MARKER, PREPARED_RECORD_MARKER } from '../commands/migrate/async-apply.js'
+import { QUERY_INTENT_PREFIX } from '../commands/migrate/query-intents.js'
 import {
   type CliResult,
   createJournalTableName,
@@ -28,6 +29,8 @@ import {
 const TIMEOUT_MS = 180_000
 const ROWS = 16
 const SRC = resolve(import.meta.dir, '..')
+// The declared cluster: the local stack's one-node `cluster`, or ObsessionDB's `default`.
+const CLUSTER = process.env.CHKIT_E2E_TARGET === 'obsessiondb' ? 'default' : 'cluster'
 const CLICKHOUSE_TESTKIT = resolve(import.meta.dir, '../../../clickhouse/src/e2e-testkit.ts')
 
 /** An async load of about 4 s, at 0.25 s per row. */
@@ -86,8 +89,10 @@ describe('migrate on SIGINT', () => {
     }
   }, TIMEOUT_MS)
 
+  // With a cluster, the statement runs through query tracking, which records
+  // the outcome of a statement sent before the SIGINT.
   test('a SIGINT during a sync statement lets it finish, starts no next statement, and releases the lock', async () => {
-    const fixture = await createFixture('sigint_sync', [...SYNC_LOAD, ...ASYNC_LOAD])
+    const fixture = await createFixture('sigint_sync', [...SYNC_LOAD, ...ASYNC_LOAD], { cluster: CLUSTER })
     try {
       const run = migrate(fixture)
       await waitForSyncLoadRunning(fixture)
@@ -100,6 +105,7 @@ describe('migrate on SIGINT', () => {
       // The sync statement completed; the async one was never attempted.
       expect((await readOperations(fixture)).map((op) => op.status)).toEqual(['completed'])
       expect(await countEvents(fixture)).toBe(12)
+      expect(await countQueryIntents(fixture)).toBe(1)
     } finally {
       await dropFixture(fixture)
     }
@@ -128,67 +134,108 @@ describe('migrate on SIGINT', () => {
   }, TIMEOUT_MS)
 
   // The window between the attempt's record and its submit is too short to
-  // hit through the CLI: the child holds the run there, with a real SIGINT
-  // handler, journal and server.
+  // hit through the CLI: a child holds the run there, with a real SIGINT
+  // handler, guarded executor, journal and server.
   test('a SIGINT before the submit puts the attempt back to prepared and sends nothing', async () => {
     const fixture = await createFixture('sigint_prepared', ASYNC_LOAD)
     try {
-      const script = join(fixture.dir, 'held-before-submit.ts')
-      await writeFile(script, heldBeforeSubmitScript(fixture), 'utf8')
-      const child = Bun.spawn(['bun', script], {
-        cwd: fixture.dir,
-        env: { ...process.env, CHKIT_JOURNAL_TABLE: fixture.journalTable, CLICKHOUSE_DB: fixture.database, CLICKHOUSE_URL: getLiveEnv().clickhouseUrl, CLICKHOUSE_PASSWORD: getLiveEnv().clickhousePassword, CLICKHOUSE_USER: getLiveEnv().clickhouseUser },
-        stdout: 'pipe',
-        stderr: 'pipe',
-        timeout: 60_000,
-        killSignal: 'SIGKILL',
-      })
-      const reader = child.stdout.getReader()
-      let stdout = ''
-      while (!stdout.includes('ready')) {
-        const chunk = await reader.read()
-        if (chunk.done) break
-        stdout += new TextDecoder().decode(chunk.value)
-      }
-      expect(stdout).toContain('ready')
-      child.kill('SIGINT')
-      const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+      const run = await runHeldAfterWrite(fixture, ATTEMPT_RECORD_MARKER)
 
-      expect(exitCode, stderr).toBe(130)
-      expect(stderr).toContain('migrate: interrupted (SIGINT). No new statement was started.')
-      const [op] = await readOperations(fixture)
-      expect(op?.marker).toBe(PREPARED_RECORD_MARKER)
-      // Sent nothing: no replica runs or logged the attempt.
-      await fixture.executor.command('SYSTEM FLUSH LOGS')
-      const status = await fixture.executor.queryStatus(op?.queryId ?? '', { everyReplica: true })
-      expect(status.status).toBe('unknown')
-      expect(await countEvents(fixture)).toBe(0)
+      expect(run.exitCode, run.stderr).toBe(130)
+      expect(run.stderr).toContain('migrate: interrupted (SIGINT). No new statement was started.')
+      // The revert is cleanup: it is sent after the SIGINT.
+      expect(run.writesAfterSignal).toEqual([PREPARED_RECORD_MARKER])
+      await expectNothingSent(fixture)
+    } finally {
+      await dropFixture(fixture)
+    }
+  }, TIMEOUT_MS)
+
+  test('after a SIGINT the run sends no request but cleanup', async () => {
+    const fixture = await createFixture('sigint_refused', ASYNC_LOAD)
+    try {
+      // Held after the prepared write: the attempt write that would follow is refused.
+      const run = await runHeldAfterWrite(fixture, PREPARED_RECORD_MARKER)
+
+      expect(run.exitCode, run.stderr).toBe(130)
+      expect(run.writesAfterSignal).toEqual([])
+      await expectNothingSent(fixture)
     } finally {
       await dropFixture(fixture)
     }
   }, TIMEOUT_MS)
 })
 
-function heldBeforeSubmitScript(fixture: Fixture): string {
+/** The attempt is recorded prepared, and no replica runs or logged it. */
+async function expectNothingSent(fixture: Fixture): Promise<void> {
+  const [op] = await readOperations(fixture)
+  expect(op?.marker).toBe(PREPARED_RECORD_MARKER)
+  await fixture.executor.command('SYSTEM FLUSH LOGS')
+  const status = await fixture.executor.queryStatus(op?.queryId ?? '', { everyReplica: true })
+  expect(status.status).toBe('unknown')
+  expect(await countEvents(fixture)).toBe(0)
+}
+
+/**
+ * Runs the fixture's async statement in a child that holds the run for 1 s
+ * after its journal write with `holdAfter`, sends it SIGINT then, and returns
+ * the record markers the child wrote after the SIGINT.
+ */
+async function runHeldAfterWrite(fixture: Fixture, holdAfter: string): Promise<{ exitCode: number; stderr: string; writesAfterSignal: string[] }> {
+  const script = join(fixture.dir, 'held.ts')
+  await writeFile(script, heldScript(fixture, holdAfter), 'utf8')
+  const env = getLiveEnv()
+  const child = Bun.spawn(['bun', script], {
+    cwd: fixture.dir,
+    env: { ...process.env, CHKIT_JOURNAL_TABLE: fixture.journalTable, CLICKHOUSE_DB: fixture.database, CLICKHOUSE_URL: env.clickhouseUrl, CLICKHOUSE_PASSWORD: env.clickhousePassword, CLICKHOUSE_USER: env.clickhouseUser },
+    stdout: 'pipe',
+    stderr: 'pipe',
+    timeout: 60_000,
+    killSignal: 'SIGKILL',
+  })
+  const reader = child.stdout.getReader()
+  const decoder = new TextDecoder()
+  let stdout = ''
+  while (!stdout.includes('ready\n')) {
+    const chunk = await reader.read()
+    if (chunk.done) throw new Error(`the child never got ready: ${stdout}`)
+    stdout += decoder.decode(chunk.value)
+  }
+  child.kill('SIGINT')
+  for (;;) {
+    const chunk = await reader.read()
+    if (chunk.done) break
+    stdout += decoder.decode(chunk.value)
+  }
+  const [exitCode, stderr] = await Promise.all([child.exited, new Response(child.stderr).text()])
+  const afterSignal = stdout.slice(stdout.indexOf('ready\n') + 'ready\n'.length)
+  const writesAfterSignal = afterSignal.split('\n').filter((line) => line.startsWith('wrote ')).map((line) => line.slice('wrote '.length))
+  return { exitCode, stderr, writesAfterSignal }
+}
+
+function heldScript(fixture: Fixture, holdAfter: string): string {
   return `
     import { setTimeout as sleep } from 'node:timers/promises'
-    import { applyAsyncStatement, ATTEMPT_RECORD_MARKER } from ${JSON.stringify(join(SRC, 'commands/migrate/async-apply.ts'))}
+    import { applyAsyncStatement } from ${JSON.stringify(join(SRC, 'commands/migrate/async-apply.ts'))}
     import { assertNotInterrupted, withInterrupt } from ${JSON.stringify(join(SRC, 'commands/migrate/interrupt.ts'))}
     import { guardExecutor } from ${JSON.stringify(join(SRC, 'commands/migrate/lock.ts'))}
     import { createJournalStore } from ${JSON.stringify(join(SRC, 'runtime/journal-store.ts'))}
     import { createLiveExecutor, getLiveEnv } from ${JSON.stringify(CLICKHOUSE_TESTKIT)}
 
     const controller = new AbortController()
-    // As migrate guards its executor: after a SIGINT only cleanup is sent.
+    // As migrate guards its executor.
     const db = guardExecutor(createLiveExecutor(getLiveEnv()), () => assertNotInterrupted(controller.signal))
     const store = createJournalStore(db)
-    // Holds the run once the attempt is recorded as one that may be sent.
+    let held = false
     const journalStore = new Proxy(store, {
       get(target, property, receiver) {
         if (property !== 'writeMigrationState') return Reflect.get(target, property, receiver)
         return async (state) => {
           await target.writeMigrationState(state)
-          if (state.operations.some((op) => op.lastError === ATTEMPT_RECORD_MARKER)) {
+          const marker = state.operations[0]?.lastError
+          if (held) console.log('wrote ' + marker)
+          if (!held && marker === ${JSON.stringify(holdAfter)}) {
+            held = true
             console.log('ready')
             await sleep(1_000)
           }
@@ -213,7 +260,7 @@ function heldBeforeSubmitScript(fixture: Fixture): string {
   `
 }
 
-async function createFixture(label: string, statements: string[]): Promise<Fixture> {
+async function createFixture(label: string, statements: string[], { cluster }: { cluster?: string } = {}): Promise<Fixture> {
   const env = getLiveEnv()
   const prefix = createPrefix(label)
   const dir = await mkdtemp(join(tmpdir(), `chkit-${label}-e2e-`))
@@ -236,6 +283,7 @@ async function createFixture(label: string, statements: string[]): Promise<Fixtu
       // The password reaches the CLI through its environment, not the file.
       `    password: process.env.CHKIT_E2E_PASSWORD,\n` +
       `    database: '${database}',\n` +
+      (cluster ? `    cluster: '${cluster}',\n` : '') +
       `  },\n}\n`,
     'utf8',
   )
@@ -250,6 +298,16 @@ async function createFixture(label: string, statements: string[]): Promise<Fixtu
   await fixture.executor.command(`CREATE DATABASE ${quoteIdent(database)}`)
   await fixture.executor.command(`CREATE TABLE ${quoteIdent(database)}.events (id UInt64) ENGINE = MergeTree ORDER BY id`)
   await waitForTable(fixture.executor, database, 'events')
+  if (cluster) {
+    // A cluster journal is created ON CLUSTER with a replicated engine; the
+    // local stack has no Keeper, so the journal exists before the first run.
+    await fixture.executor.command(
+      `CREATE TABLE ${quoteIdent(database)}.${quoteIdent(fixture.journalTable)} (name String, applied_at DateTime64(3, 'UTC'), checksum String, ` +
+        "chkit_version String, migration_completed Bool DEFAULT true, operations Array(Tuple(operation_index Int32, operation_key String, operation_type String, query_id String, status LowCardinality(String), started_at DateTime64(3, 'UTC'), finished_at Nullable(DateTime64(3, 'UTC')), last_error String)) DEFAULT [], " +
+        'operation_fingerprints Array(String) DEFAULT []) ENGINE = ReplacingMergeTree(applied_at) ORDER BY (name)',
+    )
+    await waitForTable(fixture.executor, database, fixture.journalTable)
+  }
   return fixture
 }
 
@@ -310,6 +368,14 @@ async function heldClaims(fixture: Fixture): Promise<string[]> {
       "HAVING max(applied_at) < toDateTime64('2299-01-01 00:00:00', 3, 'UTC') SETTINGS select_sequential_consistency = 1",
   )
   return rows.map((row) => row.claim)
+}
+
+async function countQueryIntents(fixture: Fixture): Promise<number> {
+  const [row] = await fixture.executor.query<{ n: string }>(
+    `SELECT toString(uniqExact(name)) AS n FROM ${quoteIdent(fixture.database)}.${quoteIdent(fixture.journalTable)} ` +
+      `WHERE startsWith(name, '${QUERY_INTENT_PREFIX}') SETTINGS select_sequential_consistency = 1`,
+  )
+  return Number(row?.n)
 }
 
 async function countEvents(fixture: Fixture): Promise<number> {

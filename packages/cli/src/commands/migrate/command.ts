@@ -341,9 +341,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
         interrupt.signal.throwIfAborted()
         const recovery = cancellation ? await cancelPredecessor(rawDb, target, cancellation, lock) : undefined
         completeRecovery = recovery ? async () => { interrupt.signal.throwIfAborted(); await finishRecovery(rawDb, target, recovery, lock); completeRecovery = undefined } : undefined
-        // The tracker sends through rawDb; it checks this before each request.
-        const trackerLock: MigrateLock = { claimId: lock.claimId, assertHeld: () => { lock.assertHeld(); assertNotInterrupted(interrupt.signal) }, release: () => lock.release() }
-        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock: trackerLock, ...(cancellation && recovery ? { recovery: { targets: [...recovery.obligations, ...cancellation.extra].map((item) => item.target), sources: [...recovery.obligations, ...cancellation.extra].flatMap((item) => item.source ? [item.source] : []), statements: [...recovery.obligations, ...cancellation.extra], afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
+        queryTracker = trackedIdentity ? createQueryTracker({ db: rawDb, target, identity: trackedIdentity, lock, signal: interrupt.signal, ...(cancellation && recovery ? { recovery: { targets: [...recovery.obligations, ...cancellation.extra].map((item) => item.target), sources: [...recovery.obligations, ...cancellation.extra].flatMap((item) => item.source ? [item.source] : []), statements: [...recovery.obligations, ...cancellation.extra], afterCompensation: (table) => settleCompensation(rawDb, target, cancellation, table, lock) } } : {}), log }) : undefined
         const result = await fn()
         await completeRecovery?.()
         interrupt.signal.throwIfAborted()
