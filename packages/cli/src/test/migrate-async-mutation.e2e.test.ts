@@ -20,10 +20,11 @@ import {
   waitForTable,
 } from './e2e-testkit.js'
 
-// An async statement is journaled complete at its QueryFinish. Without
-// mutations_sync an ALTER ... UPDATE finishes once its mutation is queued, so
-// the next statement read the table before the mutation ran, and a mutation
-// that failed was journaled complete.
+// #812: an async statement is journaled complete at its QueryFinish. Without
+// mutations_sync an ALTER ... UPDATE finishes once its mutation is queued (a
+// lightweight DELETE likewise without lightweight_deletes_sync), so the next
+// statement read the table before the mutation ran, and a mutation that
+// failed was journaled complete.
 
 const TIMEOUT_MS = 180_000
 
@@ -36,16 +37,25 @@ interface Fixture {
   executor: ClickHouseExecutor
 }
 
-describe('async ALTER UPDATE without mutations_sync', () => {
-  test(
-    'the next statement runs only once the mutation is done',
-    async () => {
-      const fixture = await createFixture('mutwait', 'v = v + 1')
+describe('async mutations', () => {
+  test.each([
+    { name: 'an ALTER UPDATE', label: 'mutwait', statement: 'ALTER TABLE t UPDATE v = v + 1 WHERE 1', args: [], sum: 10 },
+    {
+      name: 'a lightweight DELETE run with lightweight_deletes_sync = 0',
+      label: 'lwdwait',
+      statement: 'DELETE FROM t WHERE k = 4',
+      args: ['--setting', 'lightweight_deletes_sync=0'],
+      sum: 4,
+    },
+  ])(
+    'the next statement runs only once the mutation of $name is done',
+    async ({ label, statement, args, sum }) => {
+      const fixture = await createFixture(label, statement)
       const db = quoteIdent(fixture.database)
       try {
         // The mutation stays queued until merges start again.
         await fixture.executor.command(`SYSTEM STOP MERGES ${db}.t`)
-        const run = migrate(fixture)
+        const run = migrate(fixture, args)
         const queryId = await waitForStartedQueryId(fixture)
         await pollUntil(
           () => fixture.executor.queryStatus(queryId, { everyReplica: true }),
@@ -65,7 +75,7 @@ describe('async ALTER UPDATE without mutations_sync', () => {
         const result = await run.result
         expect(result.exitCode, formatTestDiagnostic('migrate', result)).toBe(0)
         const seen = await fixture.executor.query<{ s: number | string }>(`SELECT s FROM ${db}.seen`)
-        expect(seen.map((row) => Number(row.s))).toEqual([5])
+        expect(seen.map((row) => Number(row.s))).toEqual([sum])
       } finally {
         await dropFixture(fixture)
       }
@@ -76,7 +86,7 @@ describe('async ALTER UPDATE without mutations_sync', () => {
   test(
     'a failed mutation is not journaled complete',
     async () => {
-      const fixture = await createFixture('mutfail', "v = v + throwIf(k = 4, 'mutation failure')")
+      const fixture = await createFixture('mutfail', "ALTER TABLE t UPDATE v = v + throwIf(k = 4, 'mutation failure') WHERE 1")
       try {
         const result = await migrate(fixture).result
         expect(result.exitCode, formatTestDiagnostic('migrate', result)).toBe(1)
@@ -91,7 +101,7 @@ describe('async ALTER UPDATE without mutations_sync', () => {
   )
 })
 
-async function createFixture(label: string, assignment: string): Promise<Fixture> {
+async function createFixture(label: string, statement: string): Promise<Fixture> {
   const env = getLiveEnv()
   const prefix = createPrefix(label)
   const dir = await mkdtemp(join(tmpdir(), `chkit-${label}-e2e-`))
@@ -103,7 +113,7 @@ async function createFixture(label: string, assignment: string): Promise<Fixture
     join(migrationsDir, migration),
     [
       '-- operation: alter_table_update key=table:t risk=caution mode=async',
-      `ALTER TABLE t UPDATE ${assignment} WHERE 1;`,
+      `${statement};`,
       '',
       '-- operation: load_table_data key=table:seen risk=caution',
       'INSERT INTO seen SELECT sum(v) FROM t;',
@@ -134,7 +144,7 @@ async function createFixture(label: string, assignment: string): Promise<Fixture
   await executor.command(`CREATE TABLE ${db}.seen (s UInt64) ENGINE = MergeTree ORDER BY s`)
   await waitForTable(executor, database, 't')
   await waitForTable(executor, database, 'seen')
-  await executor.command(`INSERT INTO ${db}.t SELECT number, 0 FROM numbers(5)`)
+  await executor.command(`INSERT INTO ${db}.t SELECT number, 1 FROM numbers(5)`)
   return { dir, config, database, journalTable: createJournalTableName(label), migration, executor }
 }
 
@@ -145,10 +155,10 @@ async function dropFixture(fixture: Fixture): Promise<void> {
   await rm(fixture.dir, { recursive: true, force: true })
 }
 
-function migrate(fixture: Fixture): { result: Promise<CliResult>; kill: () => void } {
+function migrate(fixture: Fixture, args: string[] = []): { result: Promise<CliResult>; kill: () => void } {
   return startCli(
     fixture.dir,
-    ['migrate', '--config', fixture.config, '--execute', '--json'],
+    ['migrate', '--config', fixture.config, '--execute', '--json', ...args],
     { CHKIT_JOURNAL_TABLE: fixture.journalTable, CHKIT_E2E_PASSWORD: getLiveEnv().clickhousePassword, CI: '1' },
   )
 }

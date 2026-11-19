@@ -98,16 +98,19 @@ QUERY_LOG_FLUSH_RECHECKS = 5
 # the run reads every replica once more, then stops without an outcome (#767).
 MAX_UNKNOWN_POLLS = 20
 QUERY_LOG_FLUSH_RECHECK_INTERVAL_SECONDS = 2.0
-# An async statement is journaled complete at its QueryFinish (#812). An
-# ALTER's mutation finishes once queued unless the query waits for it on every
-# replica, and ON CLUSTER DDL once queued when its wait is off (a timeout of 0)
-# or a mode finishes despite a host that timed out or failed. These make the
-# query wait for the work, and fail when it does not complete. They go after
-# --setting values; a SETTINGS clause in the statement still wins. A SELECT
-# or an INSERT queues no such work and is sent without them, so a profile that
-# fixes one of them does not reject a load.
+# An async statement is journaled complete at its QueryFinish (#812). A
+# mutation (ALTER ... UPDATE/DELETE, a lightweight DELETE) and a replicated
+# ALTER, OPTIMIZE or TRUNCATE finish once queued unless the query waits for
+# them on every replica, and ON CLUSTER DDL once queued when its wait is off
+# (a timeout of 0) or a mode finishes despite a host that timed out or
+# failed. These make the query wait for the work, and fail when it does not
+# complete. They go after --setting values; a SETTINGS clause in the
+# statement still wins. A SELECT or an INSERT queues no such work and is sent
+# without them, so a profile that fixes one of them does not reject a load.
 ASYNC_COMPLETION_SETTINGS: dict[str, str] = {
     "mutations_sync": "2",
+    "lightweight_deletes_sync": "2",
+    "alter_sync": "2",
     "distributed_ddl_task_timeout": "-1",
     "distributed_ddl_output_mode": "throw",
 }
@@ -118,6 +121,8 @@ def async_submit_settings(sql: str, settings: dict[str, str] | None) -> dict[str
     if rejection_runs_nothing(sql):
         return settings
     return {**(settings or {}), **ASYNC_COMPLETION_SETTINGS}
+
+
 # ClickHouse's ACCESS_DENIED (497) for system.query_log, as the native client
 # and the ObsessionDB console relay it.
 _QUERY_LOG_ACCESS_DENIED = re.compile(

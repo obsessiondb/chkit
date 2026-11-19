@@ -12,6 +12,8 @@ from chkit.cli.commands.migrate_async_apply import async_submit_settings
 
 _WAITS = {
     "mutations_sync": "2",
+    "lightweight_deletes_sync": "2",
+    "alter_sync": "2",
     "distributed_ddl_task_timeout": "-1",
     "distributed_ddl_output_mode": "throw",
 }
@@ -28,7 +30,12 @@ _WAITS = {
     ],
 )
 def test_waits_for_the_work_over_the_setting_values(sql: str) -> None:
-    settings = {"mutations_sync": "0", "distributed_ddl_task_timeout": "0", "max_threads": "4"}
+    settings = {
+        "mutations_sync": "0",
+        "lightweight_deletes_sync": "0",
+        "alter_sync": "0",
+        "max_threads": "4",
+    }
     assert async_submit_settings(sql, settings) == {**_WAITS, "max_threads": "4"}
     assert async_submit_settings(sql, None) == _WAITS
 

@@ -1,10 +1,11 @@
-"""Async ALTER UPDATE without mutations_sync (#812).
+"""Async mutations (#812).
 
 Port of ``packages/cli/src/test/migrate-async-mutation.e2e.test.ts``. An async
 statement is journaled complete at its QueryFinish. Without mutations_sync an
-ALTER ... UPDATE finishes once its mutation is queued, so the next statement
-read the table before the mutation ran, and a mutation that failed was
-journaled complete.
+ALTER ... UPDATE finishes once its mutation is queued (a lightweight DELETE
+likewise without lightweight_deletes_sync), so the next statement read the
+table before the mutation ran, and a mutation that failed was journaled
+complete.
 """
 
 from __future__ import annotations
@@ -53,7 +54,7 @@ class Fixture:
     client: ClickHouseClient
 
 
-def _setup(label: str, assignment: str) -> Fixture:
+def _setup(label: str, statement: str) -> Fixture:
     env = resolve_live_env()
     prefix = create_prefix(label)
     dir_ = Path(tempfile.mkdtemp(prefix=f"chkit-{label}-e2e-"))
@@ -62,7 +63,7 @@ def _setup(label: str, assignment: str) -> Fixture:
     (dir_ / "chkit/migrations").mkdir(parents=True)
     (dir_ / "chkit/migrations" / migration).write_text(
         "-- operation: alter_table_update key=table:t risk=caution mode=async\n"
-        f"ALTER TABLE t UPDATE {assignment} WHERE 1;\n"
+        f"{statement};\n"
         "\n"
         "-- operation: load_table_data key=table:seen risk=caution\n"
         "INSERT INTO seen SELECT sum(v) FROM t;\n",
@@ -106,7 +107,7 @@ config = define_config(
     client.execute(f"CREATE TABLE {db}.seen (s UInt64) ENGINE = MergeTree ORDER BY s")
     wait_for_table_on_every_replica(client, database, "t")
     wait_for_table_on_every_replica(client, database, "seen")
-    client.execute(f"INSERT INTO {db}.t SELECT number, 0 FROM numbers(5)")
+    client.execute(f"INSERT INTO {db}.t SELECT number, 1 FROM numbers(5)")
     return Fixture(
         dir=dir_,
         database=database,
@@ -125,24 +126,17 @@ def _teardown(fixture: Fixture) -> None:
 
 
 @pytest.fixture
-def waiting() -> Iterator[Fixture]:
-    fixture = _setup("py_mutwait", "v = v + 1")
-    try:
-        yield fixture
-    finally:
-        _teardown(fixture)
-
-
-@pytest.fixture
 def failing() -> Iterator[Fixture]:
-    fixture = _setup("py_mutfail", "v = v + throwIf(k = 4, 'mutation failure')")
+    fixture = _setup(
+        "py_mutfail", "ALTER TABLE t UPDATE v = v + throwIf(k = 4, 'mutation failure') WHERE 1"
+    )
     try:
         yield fixture
     finally:
         _teardown(fixture)
 
 
-def _start(fixture: Fixture) -> subprocess.Popen[str]:
+def _start(fixture: Fixture, args: tuple[str, ...] = ()) -> subprocess.Popen[str]:
     return subprocess.Popen(
         [
             sys.executable,
@@ -153,6 +147,7 @@ def _start(fixture: Fixture) -> subprocess.Popen[str]:
             str(fixture.dir / "chkit.config.py"),
             "--execute",
             "--json",
+            *args,
         ],
         cwd=fixture.dir,
         env={
@@ -202,40 +197,61 @@ def _statuses_during(fixture: Fixture, duration: float) -> list[str]:
     return seen
 
 
-def test_the_next_statement_runs_only_once_the_mutation_is_done(waiting: Fixture) -> None:
+@pytest.mark.parametrize(
+    ("label", "statement", "args", "expected"),
+    [
+        ("py_mutwait", "ALTER TABLE t UPDATE v = v + 1 WHERE 1", (), 10),
+        # A lightweight DELETE run with lightweight_deletes_sync = 0.
+        ("py_lwdwait", "DELETE FROM t WHERE k = 4", ("--setting", "lightweight_deletes_sync=0"), 4),
+    ],
+    ids=["alter-update", "lightweight-delete"],
+)
+def test_the_next_statement_runs_only_once_the_mutation_is_done(
+    label: str, statement: str, args: tuple[str, ...], expected: int
+) -> None:
+    waiting = _setup(label, statement)
     db = quote_ident(waiting.database)
-    # The mutation stays queued until merges start again.
-    waiting.client.execute(f"SYSTEM STOP MERGES {db}.t")
-    process = _start(waiting)
-    rows = poll_until(
-        lambda: _journal(waiting),
-        lambda rows: bool(rows) and rows[0]["status"] == "started" and rows[0]["queryId"] != "",
-        timeout=60.0,
-        interval=0.2,
-    )
-    query_id = str(rows[0]["queryId"])
-    status = poll_until(
-        lambda: waiting.client.query_status(query_id, every_replica=True),
-        lambda found: found.status == "running",
-        timeout=30.0,
-        interval=0.1,
-    )
-    assert status.status == "running"
-    poll_until(
-        lambda: waiting.client.query(
-            "SELECT 1 FROM system.mutations WHERE database = "
-            f"'{waiting.database}' AND table = 't' AND NOT is_done"
-        ).rows,
-        lambda rows: len(rows) == 1,
-    )
-    # Polls run every 5 s: across two of them, the statement stays started.
-    assert _statuses_during(waiting, 11.0) == ["started"]
-    waiting.client.execute(f"SYSTEM START MERGES {db}.t")
+    process: subprocess.Popen[str] | None = None
+    try:
+        # The mutation stays queued until merges start again.
+        waiting.client.execute(f"SYSTEM STOP MERGES {db}.t")
+        process = _start(waiting, args)
+        rows = poll_until(
+            lambda: _journal(waiting),
+            lambda rows: bool(rows) and rows[0]["status"] == "started" and rows[0]["queryId"] != "",
+            timeout=60.0,
+            interval=0.2,
+        )
+        query_id = str(rows[0]["queryId"])
+        status = poll_until(
+            lambda: waiting.client.query_status(query_id, every_replica=True),
+            lambda found: found.status == "running",
+            timeout=30.0,
+            interval=0.1,
+        )
+        assert status.status == "running"
+        poll_until(
+            lambda: (
+                waiting.client.query(
+                    "SELECT 1 FROM system.mutations WHERE database = "
+                    f"'{waiting.database}' AND table = 't' AND NOT is_done"
+                ).rows
+            ),
+            lambda rows: len(rows) == 1,
+        )
+        # Polls run every 5 s: across two of them, the statement stays started.
+        assert _statuses_during(waiting, 11.0) == ["started"]
+        waiting.client.execute(f"SYSTEM START MERGES {db}.t")
 
-    result = _wait(process)
-    assert result.exit_code == 0, _diagnostic("migrate", result)
-    seen = waiting.client.query(f"SELECT s FROM {db}.seen").rows
-    assert [int(row["s"]) for row in seen] == [5]
+        result = _wait(process)
+        assert result.exit_code == 0, _diagnostic("migrate", result)
+        seen = waiting.client.query(f"SELECT s FROM {db}.seen").rows
+        assert [int(row["s"]) for row in seen] == [expected]
+    finally:
+        if process is not None and process.poll() is None:
+            process.kill()
+            process.wait()
+        _teardown(waiting)
 
 
 def test_a_failed_mutation_is_not_journaled_complete(failing: Fixture) -> None:
