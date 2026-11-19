@@ -64,8 +64,8 @@ describe('@chkit/plugin-backfill plugin surface', () => {
     ])
   })
 
-  test('plan turns parallel replicas off under the setting name ClickHouse 24.x accepts', async () => {
-    // enable_parallel_replicas is only an alias from 25.3 on; 24.x rejects it
+  test('plan turns parallel replicas off under the setting name every ClickHouse version accepts', async () => {
+    // enable_parallel_replicas is only an alias from 24.10 on; older servers reject it
     // with UNKNOWN_SETTING, so every planning query would fail there.
     const sent: unknown[] = []
     spyOn(planner, 'buildBackfillPlan').mockImplementation(async (input) => {

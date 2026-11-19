@@ -261,7 +261,7 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                 // aggregate results (count, GROUP BY). Disable for planning queries
                 // until ObsessionDB handles it at the profile level. Under the name
                 // every ClickHouse version accepts: enable_parallel_replicas is only
-                // an alias of it from 25.3 on, and 24.x rejects it.
+                // an alias of it from 24.10 on, and older servers reject it.
                 querySettings: { allow_experimental_parallel_reading_from_replicas: 0 },
               })
 

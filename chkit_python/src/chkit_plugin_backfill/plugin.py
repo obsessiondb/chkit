@@ -430,8 +430,8 @@ def create_backfill_plugin(  # noqa: PLR0915 — command table, mirrors TS facto
                 # inflates aggregate results (count, GROUP BY). Disable for
                 # planning queries until ObsessionDB handles it at the profile
                 # level. Under the name every ClickHouse version accepts:
-                # enable_parallel_replicas is only an alias of it from 25.3 on,
-                # and 24.x rejects it.
+                # enable_parallel_replicas is only an alias of it from 24.10 on,
+                # and older servers reject it.
                 query_settings={
                     "allow_experimental_parallel_reading_from_replicas": 0
                 },

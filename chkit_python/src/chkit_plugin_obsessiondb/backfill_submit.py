@@ -339,7 +339,7 @@ def _prepare_new_plan(
         # ObsessionDB enables parallel replicas by default, which inflates
         # aggregate results used for chunk sizing. Disable for planning, under
         # the name every ClickHouse version accepts (enable_parallel_replicas
-        # is only an alias of it from 25.3 on).
+        # is only an alias of it from 24.10 on).
         query_settings={"allow_experimental_parallel_reading_from_replicas": 0},
     )
     return _PreparedSubmission(

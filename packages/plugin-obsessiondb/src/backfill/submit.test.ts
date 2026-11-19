@@ -281,7 +281,7 @@ describe('handleSubmit', () => {
 		expect(result).toEqual({ handled: true, exitCode: 0 })
 		expect(buildPlan.mock.calls[0]?.[0].opts.stateDir).toBe('state/backfill')
 		// The name every ClickHouse version accepts; enable_parallel_replicas is
-		// only an alias from 25.3 on.
+		// only an alias from 24.10 on.
 		expect(buildPlan.mock.calls[0]?.[0].querySettings).toEqual({
 			allow_experimental_parallel_reading_from_replicas: 0,
 		})

@@ -375,7 +375,7 @@ def test_handle_submit_plans_under_the_parallel_replicas_name_every_version_acce
     )
 
     assert code == 0
-    # enable_parallel_replicas is only an alias from 25.3 on.
+    # enable_parallel_replicas is only an alias from 24.10 on.
     assert sent == [{"allow_experimental_parallel_reading_from_replicas": 0}]
 
 

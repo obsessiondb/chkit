@@ -458,10 +458,10 @@ def test_backfill_plugin_factory_shape() -> None:
     }
 
 
-def test_plan_turns_parallel_replicas_off_under_the_name_clickhouse_24_accepts(
+def test_plan_turns_parallel_replicas_off_under_the_name_every_version_accepts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    # enable_parallel_replicas is only an alias from 25.3 on; 24.x rejects it
+    # enable_parallel_replicas is only an alias from 24.10 on; older servers reject it
     # with UNKNOWN_SETTING, so every planning query would fail there.
     sent: list[Any] = []
 
