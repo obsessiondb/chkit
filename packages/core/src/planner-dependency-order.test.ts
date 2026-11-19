@@ -1137,13 +1137,13 @@ describe('planDiff orders MODIFY read releases and table TTL changes (#769)', ()
 // Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
 // column it reads is refused (#805).
 describe('columnDefaultReads skips keywords and alias names (#805)', () => {
-  const columns = ['and', 'as', 'c', 'case', 'else', 'end', 'from', 'id', 'interval', 'is', 'like', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
-  const readsOf = (expression: string) => {
+  const columns = ['and', 'as', 'c', 'else', 'end', 'from', 'id', 'interval', 'is', 'like', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
+  const readsOf = (expression: string, extra: string[] = []) => {
     const definition = table({
       database: 'app',
       name: 't',
       columns: [
-        ...columns.map((name) => ({ name, type: 'UInt64' })),
+        ...[...columns, ...extra].map((name) => ({ name, type: 'UInt64' })),
         { name: 'v', type: 'UInt64', default: { expression } },
       ],
       engine: 'MergeTree()',
@@ -1180,8 +1180,6 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
   test.each<[string, string[]]>([
     ['end + 1', ['end']],
     ['toUInt64(when)', ['when']],
-    ['case', ['case']],
-    ['case + 1', ['case']],
     ['is + 1', ['is']],
     ['x and and', ['and', 'x']],
     ['toUInt64(as)', ['as']],
@@ -1189,7 +1187,6 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ['case when x = 1 then end else 3 end', ['end', 'x']],
     ['case when x = 1 then then else else end', ['else', 'then', 'x']],
     ['case when x = 1 then 2 else 3 end + end', ['end', 'x']],
-    ['case when case = 1 then 2 end', ['case']],
     ['toUInt64(substring(toString(s) from from))', ['from', 's']],
     ['ifNull(`null`, 1)', ['null']],
     ['toUInt64(`true`)', ['true']],
@@ -1198,8 +1195,6 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ['(x + 1 as c) * c', ['c', 'x']],
     // A column named like a prefix keyword may be that keyword: the name after it is still read.
     ['toUInt64(toDateTime(0) + interval end day)', ['end', 'interval']],
-    ['case global in (1, 2)', ['case']],
-    ["case regexp 'x'", ['case']],
     ['arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))', ['end']],
     ["length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ['end', 'interval']],
     ['arraySum(arrayMap(and -> 1 and end, [1]))', ['end']],
@@ -1208,13 +1203,28 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     // Unclear positions keep the read: after a lambda parameter, and before a single `=`.
     ['arraySum(arrayMap(i -> i is null, [x]))', ['is', 'x']],
     ['toUInt8(null = 1)', ['null']],
+    ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
+  ])('column: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  // With a column named `case`, a bare `case` keeps its read: ClickHouse reads
+  // the column wherever CASE does not parse (`INTERVAL case DAY`, `case when`
+  // with the alias `when`), and chkit does not tell the two apart.
+  test.each<[string, string[]]>([
+    ['case', ['case']],
+    ['case + 1', ['case']],
+    ['case when case = 1 then 2 end', ['case', 'when']],
+    ['case global in (1, 2)', ['case']],
+    ["case regexp 'x'", ['case']],
     ['toUInt64(toDateTime(0) + interval case day)', ['case', 'interval']],
     ['length(substring(case c, 1))', ['c', 'case']],
     ['length(substring(case when, 1))', ['case', 'when']],
     ['toUInt64(toDateTime(0) + interval case when day)', ['case', 'interval', 'when']],
-    ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
-  ])('column: %s reads %p', (expression, expected) => {
-    expect(readsOf(expression)).toEqual(expected)
+    ['case when x = 1 then 2 else 3 end', ['case', 'when', 'x']],
+    ['length(substring(case when from then))', ['case', 'from', 'then', 'when']],
+  ])('column case: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression, ['case'])).toEqual(expected)
   })
 
   test('a DROP COLUMN runs after the dropped column that reads it when a CASE names that column', () => {

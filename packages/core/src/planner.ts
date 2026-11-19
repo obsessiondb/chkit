@@ -1219,28 +1219,23 @@ const PREFIX_KEYWORDS: ReadonlySet<string> = new Set([
   'leading', 'not', 'over', 'partition', 'position', 'recompress', 'regexp', 'select', 'set', 'substring',
   'timestamp', 'to', 'trailing', 'trim', 'volume', 'where', 'with',
 ])
-// Word operators besides `INFIX_KEYWORDS` (`x GLOBAL IN (…)`, `s REGEXP 'a'`).
-const OTHER_OPERATORS: ReadonlySet<string> = new Set(['global', 'regexp'])
 // The units of `extract(unit FROM …)`.
 const EXTRACT_UNITS: ReadonlySet<string> = new Set([
   'nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year',
 ])
-// A word after CASE named like one of these may be that keyword.
-const isKeywordWord = (word: string | undefined) =>
-  word !== undefined &&
-  (PREFIX_KEYWORDS.has(word) || INFIX_KEYWORDS.has(word) || OTHER_OPERATORS.has(word) || LITERAL_WORDS.has(word))
 
 /**
  * Indices of the single bare names in `tokens` (trivia removed) that are
  * keywords, not reads of a column with that name (#805): the words in
- * `LITERAL_WORDS` and NOT, except before a single `=`; CASE when WHEN or an
- * operand follows it, with that WHEN; a word in `INFIX_KEYWORDS` right after
- * a complete operand; and the name after such an AS (`toUInt64(x AS c)`),
- * which ClickHouse does not read as the column. A complete operand ends on a number, a string, a
- * closing bracket, a literal word, END, the unit of `extract(unit FROM …)`,
- * or a column read where an operand was expected that is not named like a
- * word in `PREFIX_KEYWORDS`. After any other name the next word keeps its
- * read: when the position is unclear, the read stays.
+ * `LITERAL_WORDS` and NOT, except before a single `=`; CASE when no column
+ * has that name, with a WHEN right after it; a word in `INFIX_KEYWORDS`
+ * right after a complete operand; and the name after such an AS
+ * (`toUInt64(x AS c)`), which ClickHouse does not read as the column. A
+ * complete operand ends on a number, a string, a closing bracket, a literal
+ * word, END, the unit of `extract(unit FROM …)`, or a column read where an
+ * operand was expected that is not named like a word in `PREFIX_KEYWORDS`.
+ * After any other name the next word keeps its read: when the position is
+ * unclear, the read stays.
  */
 function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped: ReadonlySet<number>): Set<number> {
   const keywords = new Set<number>()
@@ -1270,7 +1265,8 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
       // NOT keeps the state: unary NOT expects an operand, as before it, and
       // after an operand it starts `NOT IN`, `NOT LIKE` or `NOT BETWEEN`.
       keywords.add(i)
-    } else if (word === 'case' && caseFollows(tokens, i)) {
+    } else if (word === 'case' && !columns.has(token.text)) {
+      // Without a column of that name, a CASE that parses is the keyword.
       keywords.add(i)
       if (bare(i + 1) === 'when') {
         i += 1
@@ -1292,38 +1288,4 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
     else state = state === 'operand' && columns.has(name) && !PREFIX_KEYWORDS.has(word ?? '') ? 'ended' : 'unknown'
   }
   return keywords
-}
-
-/**
- * Whether the CASE at `at` is the keyword: WHEN follows it, or one operand
- * token and then WHEN (`CASE x WHEN`), and a THEN follows at the same depth
- * before any `,` or closing bracket. Otherwise it may read the column `case`
- * (`INTERVAL case DAY`, `case TO DISK 'd'` in a TTL, `substring(case when, 1)`
- * with the alias `when`), and keeps the read.
- */
-function caseFollows(tokens: SQLToken[], at: number): boolean {
-  const isWord = (token: SQLToken | undefined, word: string) =>
-    token?.kind === 'identifier' && token.text.toLowerCase() === word
-  const next = tokens[at + 1]
-  if (next === undefined) return false
-  if (!isWord(next, 'when')) {
-    if (!isWord(tokens[at + 2], 'when')) return false
-    const operand =
-      next.kind === 'number' ||
-      next.kind === 'string' ||
-      next.kind === 'quoted_identifier' ||
-      (next.kind === 'identifier' && !isKeywordWord(next.text.toLowerCase()))
-    if (!operand) return false
-  }
-  let depth = 0
-  for (let j = at + 1; j < tokens.length; j += 1) {
-    const text = tokens[j]!.text
-    if (text === '(' || text === '[' || text === '{') depth += 1
-    else if (text === ')' || text === ']' || text === '}') {
-      if (depth === 0) return false
-      depth -= 1
-    } else if (depth === 0 && text === ',') return false
-    else if (depth === 0 && isWord(tokens[j], 'then')) return true
-  }
-  return false
 }

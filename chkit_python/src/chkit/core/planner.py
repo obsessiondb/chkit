@@ -1278,8 +1278,6 @@ _PREFIX_KEYWORDS = frozenset(
         "trailing", "trim", "volume", "where", "with",
     }
 )  # fmt: skip
-# Word operators besides ``_INFIX_KEYWORDS`` (``x GLOBAL IN (…)``, ``s REGEXP 'a'``).
-_OTHER_OPERATORS = frozenset({"global", "regexp"})
 # The units of ``extract(unit FROM …)``.
 _EXTRACT_UNITS = frozenset(
     {
@@ -1287,8 +1285,6 @@ _EXTRACT_UNITS = frozenset(
         "month", "quarter", "year",
     }
 )  # fmt: skip
-# A word after CASE named like one of these may be that keyword.
-_KEYWORD_WORDS = _PREFIX_KEYWORDS | _INFIX_KEYWORDS | _OTHER_OPERATORS | _LITERAL_WORDS
 
 
 def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
@@ -1297,14 +1293,15 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
     """Indices of the single bare names in ``tokens`` (trivia removed) that are keywords (#805).
 
     They read no column of that name: the words in ``_LITERAL_WORDS`` and NOT,
-    except before a single ``=``; CASE when WHEN or an operand follows it, with that WHEN; a word
-    in ``_INFIX_KEYWORDS`` right after a complete operand; and the name after
-    such an AS (``toUInt64(x AS c)``), which ClickHouse does not read as the
-    column. A complete operand ends on a number, a string, a closing bracket,
-    a literal word, END, the unit of ``extract(unit FROM …)``, or a column
-    read where an operand was expected that is not named like a word in
-    ``_PREFIX_KEYWORDS``. After any other name the next word keeps its read:
-    when the position is unclear, the read stays.
+    except before a single ``=``; CASE when no column has that name, with a
+    WHEN right after it; a word in ``_INFIX_KEYWORDS`` right after a complete
+    operand; and the name after such an AS (``toUInt64(x AS c)``), which
+    ClickHouse does not read as the column. A complete operand ends on a
+    number, a string, a closing bracket, a literal word, END, the unit of
+    ``extract(unit FROM …)``, or a column read where an operand was expected
+    that is not named like a word in ``_PREFIX_KEYWORDS``. After any other
+    name the next word keeps its read: when the position is unclear, the read
+    stays.
     """
     keywords: set[int] = set()
     count = len(tokens)
@@ -1350,7 +1347,8 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
             # NOT keeps the state: unary NOT expects an operand, as before it, and
             # after an operand it starts ``NOT IN``, ``NOT LIKE`` or ``NOT BETWEEN``.
             keywords.add(i)
-        elif word == "case" and _case_follows(tokens, i):
+        elif word == "case" and token.text not in columns:
+            # Without a column of that name, a CASE that parses is the keyword.
             keywords.add(i)
             if bare(i + 1) == "when":
                 i += 1
@@ -1381,47 +1379,6 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
             state = "ended" if ended else "unknown"
         i += 1
     return keywords
-
-
-def _case_follows(tokens: list[SQLToken], at: int) -> bool:
-    """Whether the CASE at ``at`` is the keyword.
-
-    That is when WHEN follows it, or one operand token and then WHEN (``CASE x
-    WHEN``), and a THEN follows at the same depth before any ``,`` or closing
-    bracket. Otherwise it may read the column ``case`` (``INTERVAL case DAY``,
-    ``case TO DISK 'd'`` in a TTL, ``substring(case when, 1)`` with the alias
-    ``when``), and keeps the read.
-    """
-
-    def is_word(i: int, word: str) -> bool:
-        token = tokens[i] if i < len(tokens) else None
-        return token is not None and token.kind == "identifier" and token.text.lower() == word
-
-    if at + 1 >= len(tokens):
-        return False
-    if not is_word(at + 1, "when"):
-        if not is_word(at + 2, "when"):
-            return False
-        following = tokens[at + 1]
-        operand = following.kind in ("number", "string", "quoted_identifier") or (
-            following.kind == "identifier" and following.text.lower() not in _KEYWORD_WORDS
-        )
-        if not operand:
-            return False
-    depth = 0
-    for j in range(at + 1, len(tokens)):
-        text = tokens[j].text
-        if text in ("(", "[", "{"):
-            depth += 1
-        elif text in (")", "]", "}"):
-            if depth == 0:
-                return False
-            depth -= 1
-        elif depth == 0 and text == ",":
-            return False
-        elif depth == 0 and is_word(j, "then"):
-            return True
-    return False
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:
