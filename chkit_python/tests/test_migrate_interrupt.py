@@ -10,8 +10,8 @@ import pytest
 from chkit.cli.commands.migrate_interrupt import (
     InterruptLock,
     MigrateInterrupted,
+    as_cleanup,
     deferred_interrupt,
-    interruptible,
     raise_if_interrupted,
     with_interrupt,
 )
@@ -76,22 +76,22 @@ def test_a_nested_call_does_not_swallow_the_interrupt() -> None:
         with_interrupt(InterruptLock(), body)
 
 
-def test_an_interruptible_step_stops_at_once_and_reads_as_refused() -> None:
+def test_after_a_sigint_only_cleanup_requests_are_let_through() -> None:
     steps: list[str] = []
 
     def body() -> None:
         with deferred_interrupt():
-            try:
-                with interruptible():
-                    _sigint()
-                    steps.append("polled again")
-            except MigrateInterrupted:
-                steps.append("recorded failed")
+            _sigint()
+            with pytest.raises(MigrateInterrupted):
+                raise_if_interrupted()
+            with as_cleanup():
+                raise_if_interrupted()
+                steps.append("outcome recorded")
 
     with pytest.raises(KeyboardInterrupt):
         with_interrupt(InterruptLock(), body)
 
-    assert steps == ["recorded failed"]
+    assert steps == ["outcome recorded"]
 
 
 def test_a_base_exception_in_a_deferred_block_does_not_leave_deferral_on() -> None:
@@ -107,24 +107,6 @@ def test_a_base_exception_in_a_deferred_block_does_not_leave_deferral_on() -> No
 
     with pytest.raises(KeyboardInterrupt):
         with_interrupt(InterruptLock(), body)
-
-
-def test_an_interruptible_step_refuses_a_sigint_that_came_while_deferred() -> None:
-    steps: list[str] = []
-
-    def body() -> None:
-        with deferred_interrupt():
-            _sigint()
-            try:
-                with interruptible():
-                    steps.append("polled")
-            except MigrateInterrupted:
-                steps.append("recorded failed")
-
-    with pytest.raises(KeyboardInterrupt):
-        with_interrupt(InterruptLock(), body)
-
-    assert steps == ["recorded failed"]
 
 
 def test_without_a_sigint_nothing_changes() -> None:

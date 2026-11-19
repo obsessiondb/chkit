@@ -40,11 +40,7 @@ from chkit.cli.commands.migrate_errors import (
     recorded_statements_changed_error,
     statement_split_changed_error,
 )
-from chkit.cli.commands.migrate_interrupt import (
-    deferred_interrupt,
-    interruptible,
-    raise_if_interrupted,
-)
+from chkit.cli.commands.migrate_interrupt import as_cleanup, deferred_interrupt
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     RetryEditMismatch,
@@ -388,15 +384,13 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
         with deferred_interrupt():
             try:
                 if operation is not None and operation.mode == "barrier":
-                    # Reads only: a SIGINT stops its polls at once.
-                    with interruptible():
-                        wait_for_insert_barrier(
-                            input_.client,
-                            statement,
-                            cluster=cluster,
-                            settings=input_.settings,
-                            log=input_.log,
-                        )
+                    wait_for_insert_barrier(
+                        input_.client,
+                        statement,
+                        cluster=cluster,
+                        settings=input_.settings,
+                        log=input_.log,
+                    )
                 elif input_.query_tracker is not None:
                     input_.query_tracker.command(
                         QueryContext(
@@ -406,23 +400,23 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
                         "forward", statement, input_.settings,
                     )
                 else:
-                    raise_if_interrupted()
                     input_.client.execute(statement, settings=input_.settings)
             except Exception as error:
-                state_on_error = journal_store.read_migration_state(file) or base_state
-                journal_store.write_migration_state(
-                    upsert_operation(
-                        state_on_error,
-                        _sync_operation_state(
-                            index,
-                            identity,
-                            fingerprint,
-                            "failed",
-                            clickhouse_error_message(error),
-                        ),
-                        iso_without_zone(datetime.now(tz=UTC)),
+                with as_cleanup():
+                    state_on_error = journal_store.read_migration_state(file) or base_state
+                    journal_store.write_migration_state(
+                        upsert_operation(
+                            state_on_error,
+                            _sync_operation_state(
+                                index,
+                                identity,
+                                fingerprint,
+                                "failed",
+                                clickhouse_error_message(error),
+                            ),
+                            iso_without_zone(datetime.now(tz=UTC)),
+                        )
                     )
-                )
                 raise statement_error(
                     file=file, index=index, total=total, statement=statement, error=error
                 ) from error
@@ -432,20 +426,21 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             # passes, the record carries PROPAGATION_WAIT_PENDING, so a re-run
             # waits for it again before the next statement (#513).
             waits = _has_propagation_wait(operation)
-            state_after = journal_store.read_migration_state(file) or base_state
-            journal_store.write_migration_state(
-                upsert_operation(
-                    state_after,
-                    _sync_operation_state(
-                        index,
-                        identity,
-                        fingerprint,
-                        "completed",
-                        PROPAGATION_WAIT_PENDING if waits else "",
-                    ),
-                    iso_without_zone(datetime.now(tz=UTC)),
+            with as_cleanup():
+                state_after = journal_store.read_migration_state(file) or base_state
+                journal_store.write_migration_state(
+                    upsert_operation(
+                        state_after,
+                        _sync_operation_state(
+                            index,
+                            identity,
+                            fingerprint,
+                            "completed",
+                            PROPAGATION_WAIT_PENDING if waits else "",
+                        ),
+                        iso_without_zone(datetime.now(tz=UTC)),
+                    )
                 )
-            )
         if waits:
             _complete_propagation(
                 input_,
@@ -623,15 +618,12 @@ def _run_before_retry(
     replica the guard reads yet, and exchanging again would swap the tables back.
     """
     if operation_type == "exchange_tables":
-        # Reads only: a SIGINT stops its polls at once (#816).
-        with interruptible():
-            wait_for_exchange(client, statement, cluster=cluster)
+        wait_for_exchange(client, statement, cluster=cluster)
     attempt = "failed" if status == "failed" else "was interrupted"
     log(f"  {operation_type}: an earlier attempt {attempt} — running before-retry SQL")
     if query_tracker is not None and query_context is not None:
         query_tracker.command(query_context, "compensation", before_retry, settings)
     else:
-        raise_if_interrupted()
         client.execute(before_retry, settings=settings)
 
 

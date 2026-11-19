@@ -44,6 +44,7 @@ from typing import Literal, TypeVar
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError, in_progress_checksum_mismatch_error
+from chkit.cli.commands.migrate_interrupt import as_cleanup
 from chkit.cli.commands.migrate_query_intents import QueryContext, QueryTracker
 from chkit.cli.commands.migrate_recovery import (
     assert_completed_statement,
@@ -567,9 +568,10 @@ def _record_attempt(
 
     def back_to_prepared(error: BaseException) -> None:
         # Not sent: put the record back to prepared, so a re-run runs it
-        # again without an abandon (#767). Ctrl-C included.
+        # again without an abandon (#767). Ctrl-C included: it is cleanup (#816).
         try:
-            write_attempt(PREPARED_RECORD_MARKER)
+            with as_cleanup():
+                write_attempt(PREPARED_RECORD_MARKER)
         except Exception as revert_error:
             raise RuntimeError(
                 _not_reverted_message(error, revert_error, input_.migration_name)

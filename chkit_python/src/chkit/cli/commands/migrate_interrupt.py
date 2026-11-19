@@ -2,11 +2,12 @@
 
 A first SIGINT stops the run with ``KeyboardInterrupt``. While a sync statement
 runs (``deferred_interrupt``), it is deferred: the statement finishes and its
-outcome is recorded first; a request not sent yet is refused
-(``raise_if_interrupted``). Once the run has ended, its migrate lock released,
-the process exits with 130. When the run does not end within
-``INTERRUPT_WAIT_SECONDS``, or on a second SIGINT, it exits at once and the lock
-claim stays in place: a request of the run may still be in flight.
+outcome is recorded first (``as_cleanup``); every other request is refused
+(``raise_if_interrupted``, which the guarded client calls before each one).
+Once the run has ended, its migrate lock released, the process exits with 130.
+When the run does not end within ``INTERRUPT_WAIT_SECONDS``, or on a second
+SIGINT, it exits at once and the lock claim stays in place: a request of the
+run may still be in flight.
 """
 
 from __future__ import annotations
@@ -48,14 +49,15 @@ class _State:
     received = False
     pending = False
     deferring = 0
+    cleanups = 0
 
 
 _state = _State()
 
 
 def raise_if_interrupted() -> None:
-    """Refuses a request not sent yet once a first SIGINT came."""
-    if _state.received:
+    """Refuses a request not sent yet once a first SIGINT came, unless it is cleanup's."""
+    if _state.received and _state.cleanups == 0:
         raise MigrateInterrupted
 
 
@@ -81,19 +83,13 @@ def deferred_interrupt() -> Iterator[None]:
 
 
 @contextmanager
-def interruptible() -> Iterator[None]:
-    """Inside a deferred block, a step a SIGINT stops at once (a barrier's polls)."""
-    saved = _state.deferring
+def as_cleanup() -> Iterator[None]:
+    """A stop's own writes (a record of an outcome, a revert to prepared), sent after a SIGINT."""
+    _state.cleanups += 1
     try:
-        _state.deferring = 0
-        # Also a SIGINT that came while deferral was still on.
-        raise_if_interrupted()
         yield
-    except KeyboardInterrupt as error:
-        _state.pending = True
-        raise MigrateInterrupted from error
     finally:
-        _state.deferring = saved
+        _state.cleanups -= 1
 
 
 def with_interrupt(lock: InterruptLock, body: Callable[[], _T]) -> _T:
@@ -109,10 +105,7 @@ def with_interrupt(lock: InterruptLock, body: Callable[[], _T]) -> _T:
             if done:
                 return
         message = f"migrate: {why}, exiting at once. {_lock_line(lock, exiting_now=True)}\n"
-        # A blocked or closed stderr never keeps the process alive.
-        writer = threading.Thread(target=_write_stderr, args=(message,), daemon=True)
-        writer.start()
-        writer.join(timeout=1.0)
+        _write_bounded(message)
         os._exit(130)
 
     def on_signal(_signum: int, _frame: FrameType | None) -> None:
@@ -152,13 +145,17 @@ def with_interrupt(lock: InterruptLock, body: Callable[[], _T]) -> _T:
         if _state.received:
             _state.received = False
             _state.pending = False
-            detail = _detail(stop_error)
-            with suppress(BaseException):
-                sys.stderr.write(
-                    "migrate: interrupted (SIGINT). No new statement was started. "
-                    f"{_lock_line(lock, exiting_now=False)}{detail}\n"
-                )
-                sys.stderr.flush()
+            _write_bounded(
+                "migrate: interrupted (SIGINT). No new statement was started. "
+                f"{_lock_line(lock, exiting_now=False)}{_detail(stop_error)}\n"
+            )
+
+
+def _write_bounded(message: str) -> None:
+    """A blocked or closed stderr never keeps the process alive."""
+    writer = threading.Thread(target=_write_stderr, args=(message,), daemon=True)
+    writer.start()
+    writer.join(timeout=1.0)
 
 
 def _write_stderr(message: str) -> None:

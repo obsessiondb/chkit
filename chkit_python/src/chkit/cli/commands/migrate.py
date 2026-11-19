@@ -67,7 +67,11 @@ from chkit.cli.commands.migrate_errors import (
     journal_changed_error,
     non_select_barrier_error,
 )
-from chkit.cli.commands.migrate_interrupt import InterruptLock, with_interrupt
+from chkit.cli.commands.migrate_interrupt import (
+    InterruptLock,
+    raise_if_interrupted,
+    with_interrupt,
+)
 from chkit.cli.commands.migrate_lock import (
     GuardedClient,
     LockTarget,
@@ -952,6 +956,8 @@ class _LockHolder:
     def check(self) -> None:
         if self.lock is not None:
             self.lock.assert_held()
+        # After a first Ctrl-C, only cleanup's requests are sent (#816).
+        raise_if_interrupted()
 
 
 class _MigrateLockRunner(WithLock):
