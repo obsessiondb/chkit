@@ -1346,7 +1346,7 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
 
 
 def _case_follows(following: SQLToken | None) -> bool:
-    """Whether ``following`` makes the CASE before it the keyword: WHEN, or the start of an operand."""
+    """Whether ``following`` makes the CASE before it the keyword: WHEN or an operand start."""
     if following is None:
         return False
     if following.kind in ("number", "string", "quoted_identifier"):

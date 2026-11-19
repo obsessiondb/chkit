@@ -980,6 +980,102 @@ def test_keeps_the_other_statements_other_tables_and_same_column_statements_in_p
     ]
 
 
+# ---------- the column reads skip keywords and alias names (#805) ----------
+# Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
+# column it reads is refused.
+
+
+_KEYWORD_COLUMNS = [
+    "and", "as", "c", "case", "else", "end", "from", "id", "is", "nan", "not", "null", "NULL", "s",
+    "then", "true", "ts", "when", "x",
+]  # fmt: skip
+
+
+def _keyword_reads_of(expression: str) -> list[str]:
+    columns: list[dict[str, object]] = [{"name": name, "type": "UInt64"} for name in _KEYWORD_COLUMNS]
+    columns.append({"name": "v", "type": "UInt64", "default": _expr(expression)})
+    definition = table(
+        database="app",
+        name="t",
+        columns=list(columns),
+        engine="MergeTree()",
+        primary_key=["id"],
+        order_by=["id"],
+    )
+    reads = _column_default_reads([definition]).get("table:app.t:column:v", set())
+    return sorted(key[len("table:app.t:column:"):] for key in reads)
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("case when x = 1 then 2 else 3 end", ["x"]),
+        ("case x when 1 then 2 end", ["x"]),
+        ("CASE x WHEN 1 THEN 2 END + 0", ["x"]),
+        ("if(x is null, 1, 2)", ["x"]),
+        ("if(x is not null, 1, 2)", ["x"]),
+        ("not x", ["x"]),
+        ("toUInt64(not (x = 1))", ["x"]),
+        ("x not in (1, 2)", ["x"]),
+        ("ifNull(null, 1) + ifNull(NULL, 1)", []),
+        ("if(true, 1, 2) + toUInt64(isNaN(nan))", []),
+        ("length(substring(toString(s) from 1 for 2))", ["s"]),
+        ("toUInt64(extract(day from ts))", ["ts"]),
+        ("length(trim(both ' ' from toString(s)))", ["s"]),
+        ("x and 1", ["x"]),
+        ("x between 1 and 2", ["x"]),
+        ("toUInt64(x as c)", ["x"]),
+        ("toUInt64(x AS `c`)", ["x"]),
+        ("(x + 1 as c) * 2", ["x"]),
+        ("arraySum(arrayMap(i -> i is null, [x]))", ["x"]),
+    ],
+)
+def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
+    assert _keyword_reads_of(expression) == expected
+
+
+@pytest.mark.parametrize(
+    ("expression", "expected"),
+    [
+        ("end + 1", ["end"]),
+        ("toUInt64(when)", ["when"]),
+        ("case", ["case"]),
+        ("case + 1", ["case"]),
+        ("is + 1", ["is"]),
+        ("x and and", ["and", "x"]),
+        ("toUInt64(as)", ["as"]),
+        ("case when end = 1 then 2 end", ["end"]),
+        ("case when x = 1 then end else 3 end", ["end", "x"]),
+        ("case when x = 1 then then else else end", ["else", "then", "x"]),
+        ("case when x = 1 then 2 else 3 end + end", ["end", "x"]),
+        ("case when case = 1 then 2 end", ["case"]),
+        ("toUInt64(substring(toString(s) from from))", ["from", "s"]),
+        ("ifNull(`null`, 1)", ["null"]),
+        ("toUInt64(`true`)", ["true"]),
+        ("toUInt64(`not`)", ["not"]),
+        ("toUInt64(c as c)", ["c"]),
+        ("(x + 1 as c) * c", ["c", "x"]),
+    ],
+)
+def test_reads_keep_keyword_named_columns_where_an_operand_is_expected(
+    expression: str, expected: list[str]
+) -> None:
+    assert _keyword_reads_of(expression) == expected
+
+
+def test_drops_a_column_after_the_dropped_column_that_reads_it_when_a_case_names_that_column() -> None:
+    assert _sqls(
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("case when id = 1 then 2 else 3 end")},
+            {"name": "end", "type": "UInt64", "default": _expr("a + 1")},
+        ])],
+        [_t([])],
+    ) == [
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `end`;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;",
+    ]
+
+
 # ---------- MODIFY read releases and table TTL changes (#769) ----------
 
 
@@ -1123,102 +1219,6 @@ def test_a_ttl_change_that_reads_no_changed_column_keeps_its_slot() -> None:
         "ALTER TABLE app.t ADD COLUMN IF NOT EXISTS `a` UInt64;",
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `x`;",
         "ALTER TABLE app.t MODIFY TTL ts + INTERVAL 2 DAY;",
-    ]
-
-
-# ---------- the column reads skip keywords and alias names (#805) ----------
-# Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
-# column it reads is refused.
-
-
-_KEYWORD_COLUMNS = [
-    "and", "as", "c", "case", "else", "end", "from", "id", "is", "nan", "not", "null", "NULL", "s",
-    "then", "true", "ts", "when", "x",
-]  # fmt: skip
-
-
-def _keyword_reads_of(expression: str) -> list[str]:
-    columns: list[dict[str, object]] = [{"name": name, "type": "UInt64"} for name in _KEYWORD_COLUMNS]
-    columns.append({"name": "v", "type": "UInt64", "default": _expr(expression)})
-    definition = table(
-        database="app",
-        name="t",
-        columns=list(columns),
-        engine="MergeTree()",
-        primary_key=["id"],
-        order_by=["id"],
-    )
-    reads = _column_default_reads([definition]).get("table:app.t:column:v", set())
-    return sorted(key[len("table:app.t:column:"):] for key in reads)
-
-
-@pytest.mark.parametrize(
-    ("expression", "expected"),
-    [
-        ("case when x = 1 then 2 else 3 end", ["x"]),
-        ("case x when 1 then 2 end", ["x"]),
-        ("CASE x WHEN 1 THEN 2 END + 0", ["x"]),
-        ("if(x is null, 1, 2)", ["x"]),
-        ("if(x is not null, 1, 2)", ["x"]),
-        ("not x", ["x"]),
-        ("toUInt64(not (x = 1))", ["x"]),
-        ("x not in (1, 2)", ["x"]),
-        ("ifNull(null, 1) + ifNull(NULL, 1)", []),
-        ("if(true, 1, 2) + toUInt64(isNaN(nan))", []),
-        ("length(substring(toString(s) from 1 for 2))", ["s"]),
-        ("toUInt64(extract(day from ts))", ["ts"]),
-        ("length(trim(both ' ' from toString(s)))", ["s"]),
-        ("x and 1", ["x"]),
-        ("x between 1 and 2", ["x"]),
-        ("toUInt64(x as c)", ["x"]),
-        ("toUInt64(x AS `c`)", ["x"]),
-        ("(x + 1 as c) * 2", ["x"]),
-        ("arraySum(arrayMap(i -> i is null, [x]))", ["x"]),
-    ],
-)
-def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
-    assert _keyword_reads_of(expression) == expected
-
-
-@pytest.mark.parametrize(
-    ("expression", "expected"),
-    [
-        ("end + 1", ["end"]),
-        ("toUInt64(when)", ["when"]),
-        ("case", ["case"]),
-        ("case + 1", ["case"]),
-        ("is + 1", ["is"]),
-        ("x and and", ["and", "x"]),
-        ("toUInt64(as)", ["as"]),
-        ("case when end = 1 then 2 end", ["end"]),
-        ("case when x = 1 then end else 3 end", ["end", "x"]),
-        ("case when x = 1 then then else else end", ["else", "then", "x"]),
-        ("case when x = 1 then 2 else 3 end + end", ["end", "x"]),
-        ("case when case = 1 then 2 end", ["case"]),
-        ("toUInt64(substring(toString(s) from from))", ["from", "s"]),
-        ("ifNull(`null`, 1)", ["null"]),
-        ("toUInt64(`true`)", ["true"]),
-        ("toUInt64(`not`)", ["not"]),
-        ("toUInt64(c as c)", ["c"]),
-        ("(x + 1 as c) * c", ["c", "x"]),
-    ],
-)
-def test_reads_keep_keyword_named_columns_where_an_operand_is_expected(
-    expression: str, expected: list[str]
-) -> None:
-    assert _keyword_reads_of(expression) == expected
-
-
-def test_drops_a_column_after_the_dropped_column_that_reads_it_when_a_case_names_that_column() -> None:
-    assert _sqls(
-        [_t([
-            {"name": "a", "type": "UInt64", "default": _expr("case when id = 1 then 2 else 3 end")},
-            {"name": "end", "type": "UInt64", "default": _expr("a + 1")},
-        ])],
-        [_t([])],
-    ) == [
-        "ALTER TABLE app.t DROP COLUMN IF EXISTS `end`;",
-        "ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;",
     ]
 
 
