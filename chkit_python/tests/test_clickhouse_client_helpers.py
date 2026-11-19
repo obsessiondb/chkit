@@ -194,11 +194,16 @@ def test_tracked_execute_applies_the_same_durable_settings_check_as_execute() ->
     value is refused before an id is recorded or anything is sent."""
     client, fake = _stub_client()
     recorded: list[str] = []
+
+    def record() -> str:
+        recorded.append("id")
+        return "id"
+
     fake.server_settings = {
         "async_insert": SimpleNamespace(readonly=True, value="0"),
         "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
     }
-    client.execute_tracked("INSERT INTO t VALUES (1)", lambda: None, lambda: recorded.append("id") or "id")
+    client.execute_tracked("INSERT INTO t VALUES (1)", lambda: None, record)
     assert fake.command.call_args.kwargs["settings"] == {
         "wait_end_of_query": 1, "wait_for_async_insert": 1, "query_id": "id",
     }
@@ -207,7 +212,7 @@ def test_tracked_execute_applies_the_same_durable_settings_check_as_execute() ->
         "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
     }
     with pytest.raises(RuntimeError, match="Setting async_insert is fixed at 1"):
-        client.execute_tracked("INSERT INTO t VALUES (2)", lambda: None, lambda: recorded.append("id") or "id")
+        client.execute_tracked("INSERT INTO t VALUES (2)", lambda: None, record)
     assert recorded == ["id"]
     assert fake.command.call_count == 1
 
