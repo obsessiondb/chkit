@@ -1,8 +1,10 @@
-import { describe, expect, test } from 'bun:test'
+import { afterEach, describe, expect, mock, spyOn, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 
 import { resolveConfig } from '@chkit/core'
 
+import { BackfillConfigError } from './errors.js'
+import * as planner from './planner.js'
 import * as sdk from './sdk.js'
 import * as root from './index.js'
 import { backfill, createBackfillPlugin } from './plugin.js'
@@ -14,6 +16,10 @@ const pluginBackfillPackage = JSON.parse(
 }
 
 describe('@chkit/plugin-backfill plugin surface', () => {
+  afterEach(() => {
+    mock.restore()
+  })
+
   test('exposes commands and typed registration helper', () => {
     const plugin = createBackfillPlugin()
     const registration = backfill({ maxParallelChunks: 4 })
@@ -56,6 +62,31 @@ describe('@chkit/plugin-backfill plugin surface', () => {
         'log in and select a service (`chkit obsessiondb login`, then `chkit obsessiondb service select`). ' +
         'Inspect a local run with `chkit plugin backfill status --plan-id <id>`.',
     ])
+  })
+
+  test('plan turns parallel replicas off under the setting name ClickHouse 24.x accepts', async () => {
+    // enable_parallel_replicas is only an alias from 25.3 on; 24.x rejects it
+    // with UNKNOWN_SETTING, so every planning query would fail there.
+    const sent: unknown[] = []
+    spyOn(planner, 'buildBackfillPlan').mockImplementation(async (input) => {
+      sent.push(input.querySettings)
+      throw new BackfillConfigError('stop after capturing the settings')
+    })
+    const plan = createBackfillPlugin().commands.find((command) => command.name === 'plan')
+
+    const exitCode = await plan?.run({
+      args: [],
+      flags: {},
+      jsonMode: true,
+      options: { target: 'app.events' },
+      rawOptions: {},
+      config: resolveConfig({ schema: './schema.ts', clickhouse: { url: 'http://127.0.0.1:1', database: 'app' } }),
+      configPath: '/project/clickhouse.config.ts',
+      print: () => {},
+    })
+
+    expect(exitCode).toBe(2)
+    expect(sent).toEqual([{ allow_experimental_parallel_reading_from_replicas: 0 }])
   })
 
   test('createBackfillPlugin carries factory options into runtime schemas', () => {

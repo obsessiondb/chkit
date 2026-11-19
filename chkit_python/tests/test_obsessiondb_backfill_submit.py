@@ -350,6 +350,35 @@ def test_handle_submit_success_submits_tasks_and_prints_console_url(
     assert f"{BASE}/svc-1/jobs/job-9" in message
 
 
+def test_handle_submit_plans_under_the_parallel_replicas_name_every_version_accepts(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+) -> None:
+    submitted: list[dict[str, Any]] = []
+    _patch_submit_pipeline(monkeypatch, submitted)
+    sent: list[Any] = []
+
+    def fake_build_backfill_plan(**kwargs: Any) -> BuildBackfillPlanOutput:
+        sent.append(kwargs["query_settings"])
+        return BuildBackfillPlanOutput(
+            plan=make_plan(), plan_path="/state/plans/abcdef0123456789.json"
+        )
+
+    monkeypatch.setattr(
+        backfill_submit_module, "build_backfill_plan", fake_build_backfill_plan
+    )
+
+    code = handle_submit(
+        _submit_context(
+            flags={"--target": "app.events"}, msgs=[], config_dir=tmp_path
+        )
+    )
+
+    assert code == 0
+    # enable_parallel_replicas is only an alias from 25.3 on.
+    assert sent == [{"allow_experimental_parallel_reading_from_replicas": 0}]
+
+
 def test_handle_submit_success_json_mode_emits_envelope(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,

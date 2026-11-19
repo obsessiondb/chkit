@@ -259,8 +259,10 @@ export function createBackfillPlugin(options: PluginConfig = {}): BackfillPlugin
                 },
                 // ObsessionDB enables parallel replicas by default, which inflates
                 // aggregate results (count, GROUP BY). Disable for planning queries
-                // until ObsessionDB handles it at the profile level.
-                querySettings: { enable_parallel_replicas: 0 },
+                // until ObsessionDB handles it at the profile level. Under the name
+                // every ClickHouse version accepts: enable_parallel_replicas is only
+                // an alias of it from 25.3 on, and 24.x rejects it.
+                querySettings: { allow_experimental_parallel_reading_from_replicas: 0 },
               })
 
               const payload = planPayload(output)

@@ -258,8 +258,10 @@ async function prepareNewPlan(context: SubmitContext): Promise<PreparedSubmissio
 		clickhouseQuery: <T>(sql: string, settings?: Record<string, string | number | boolean | undefined>) =>
 			executor.query<T>(sql, settings as ClickHouseSettings | undefined),
 		// ObsessionDB enables parallel replicas by default, which inflates
-		// aggregate results used for chunk sizing. Disable for planning.
-		querySettings: { enable_parallel_replicas: 0 },
+		// aggregate results used for chunk sizing. Disable for planning, under
+		// the name every ClickHouse version accepts (enable_parallel_replicas is
+		// only an alias of it from 25.3 on).
+		querySettings: { allow_experimental_parallel_reading_from_replicas: 0 },
 	})
 
 	return { plan, title, concurrency, stateDir: opts.stateDir }
