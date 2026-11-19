@@ -1764,8 +1764,13 @@ def test_a_resume_whose_strict_probe_meets_an_unavailable_replica_submits_nothin
 # Round 3 item 3: chunk B waits on its pre-send checkpoint while chunk A's
 # outcome turns out unknown. B must not be sent, and keeps its state.
 def test_a_chunk_whose_pre_send_checkpoint_finishes_after_the_dispatch_stopped_is_not_sent() -> None:
+    b_writing = threading.Event()
+
     class PartialA(SubmitRecordingExecutor):
         def _rows(self, statement: str) -> list[dict[str, object]]:
+            # A's polls classify A only once B's pre-send write is under way.
+            if "system.query_log" in statement:
+                b_writing.wait(5)
             rows = super()._rows(statement)
             return [{**row, "written_rows": "7"} if "type" in row else row for row in rows]
 
@@ -1780,6 +1785,7 @@ def test_a_chunk_whose_pre_send_checkpoint_finishes_after_the_dispatch_stopped_i
         # Hold B's pre-send write while A's polls classify A.
         if progress["c2"].query_id is not None and not held:
             held.append(True)
+            b_writing.set()
             time.sleep(0.2)
 
     with pytest.raises(RuntimeError, match=rf"chunk c1 \(query_id backfill-{PLAN_ID}-c1\): it failed after writing 7 rows"):
