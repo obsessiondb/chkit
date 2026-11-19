@@ -1117,34 +1117,6 @@ def _column_default_reads(
     return graph
 
 
-def _lambda_reads(sql: str, columns: set[str]) -> list[str]:
-    """The columns the lambdas in ``sql`` name where ``_dotted_names`` skips them (#768).
-
-    Each lambda's parameter list and body, read by the rules of
-    ``_dotted_names``. ClickHouse's ALTER check for cyclic defaults (code 174)
-    reads a lambda's parameters as columns, even one its body never uses (#799).
-    """
-    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
-    found: list[str] = []
-
-    def read(start: int, stop: int) -> None:
-        if start < stop:
-            found.extend(_dotted_names(sql[tokens[start].start : tokens[stop - 1].end], columns))
-
-    for i, token in enumerate(tokens):
-        following = tokens[i + 1] if i + 1 < len(tokens) else None
-        if following is None or token.text != "-" or following.text != ">":
-            continue
-        if token.end != following.start:
-            continue
-        params = _lambda_parameters(tokens, i)
-        if params is None:
-            continue
-        read(params[1], i)
-        read(i + 2, _group_end(tokens, i + 2))
-    return found
-
-
 def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
     """Table TTL operation key to the keys of the table's columns the TTL names.
 
@@ -1255,6 +1227,34 @@ def _lambda_parameters(tokens: list[SQLToken], arrow: int) -> tuple[set[str], in
             return None
         j -= 2
     return None
+
+
+def _lambda_reads(sql: str, columns: set[str]) -> list[str]:
+    """The columns the lambdas in ``sql`` name where ``_dotted_names`` skips them (#768).
+
+    Each lambda's parameter list and body, read by the rules of
+    ``_dotted_names``. ClickHouse's ALTER check for cyclic defaults (code 174)
+    reads a lambda's parameters as columns, even one its body never uses (#799).
+    """
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    found: list[str] = []
+
+    def read(start: int, stop: int) -> None:
+        if start < stop:
+            found.extend(_dotted_names(sql[tokens[start].start : tokens[stop - 1].end], columns))
+
+    for i, token in enumerate(tokens):
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if following is None or token.text != "-" or following.text != ">":
+            continue
+        if token.end != following.start:
+            continue
+        params = _lambda_parameters(tokens, i)
+        if params is None:
+            continue
+        read(params[1], i)
+        read(i + 2, _group_end(tokens, i + 2))
+    return found
 
 
 def _group_end(tokens: list[SQLToken], start: int) -> int:

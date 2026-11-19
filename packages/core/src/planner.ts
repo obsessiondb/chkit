@@ -1081,29 +1081,6 @@ export function columnDefaultReads(definitions: SchemaDefinition[], lambdas = fa
 }
 
 /**
- * The columns the lambdas in `sql` name where `dottedNames` skips them (#768):
- * each lambda's parameter list and body, read by the rules of `dottedNames`.
- * ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
- * parameters as columns, even one its body never uses (#799).
- */
-function lambdaReads(sql: string, columns: ReadonlySet<string>): string[] {
-  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
-  const found: string[] = []
-  const read = (from: number, to: number) => {
-    if (from < to) found.push(...dottedNames(sql.slice(tokens[from]!.start, tokens[to - 1]!.end), columns))
-  }
-  tokens.forEach((token, i) => {
-    const next = tokens[i + 1]
-    if (token.text !== '-' || next?.text !== '>' || token.end !== next.start) return
-    const params = lambdaParameters(tokens, i)
-    if (params === undefined) return
-    read(params.from, i)
-    read(i + 2, groupEnd(tokens, i + 2))
-  })
-  return found
-}
-
-/**
  * Table TTL operation key → keys of the table's columns the TTL names, read
  * with the same rules as a column's default expression (`dottedNames`).
  */
@@ -1196,6 +1173,29 @@ function lambdaParameters(tokens: SQLToken[], arrow: number): { names: Set<strin
     if (separator !== ',') return undefined
   }
   return undefined
+}
+
+/**
+ * The columns the lambdas in `sql` name where `dottedNames` skips them (#768):
+ * each lambda's parameter list and body, read by the rules of `dottedNames`.
+ * ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
+ * parameters as columns, even one its body never uses (#799).
+ */
+function lambdaReads(sql: string, columns: ReadonlySet<string>): string[] {
+  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  const found: string[] = []
+  const read = (from: number, to: number) => {
+    if (from < to) found.push(...dottedNames(sql.slice(tokens[from]!.start, tokens[to - 1]!.end), columns))
+  }
+  tokens.forEach((token, i) => {
+    const next = tokens[i + 1]
+    if (token.text !== '-' || next?.text !== '>' || token.end !== next.start) return
+    const params = lambdaParameters(tokens, i)
+    if (params === undefined) return
+    read(params.from, i)
+    read(i + 2, groupEnd(tokens, i + 2))
+  })
+  return found
 }
 
 /** Index of the first `,` or unmatched closing bracket at the depth of `from`, or the end. */
