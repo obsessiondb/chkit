@@ -250,6 +250,9 @@ class _Submission:
     up on it (``abandon``) refuses both, and waits until a send that started
     connecting was stopped, or one writing was written or failed: the request
     is written before the run stops, or never started.
+
+    It is created before its thread starts (``start``), so a run stopped while
+    the thread starts can already give it up (#793).
     """
 
     def __init__(self, submit: Callable[[_Submission], object]) -> None:
@@ -258,11 +261,15 @@ class _Submission:
         self._cancelled = False
         # idle, connecting, writing, sent, done
         self._state = "idle"
+        # Whether a write of the request was let through.
+        self._written = False
         # A daemon, so an interrupted run exits while the request is open;
         # the query keeps running and a re-run attaches to it.
         self._thread = threading.Thread(
             target=self._run, args=(submit,), name=SUBMIT_THREAD_NAME, daemon=True
         )
+
+    def start(self) -> None:
         self._thread.start()
 
     def _run(self, submit: Callable[[_Submission], object]) -> None:
@@ -289,6 +296,7 @@ class _Submission:
                 msg = "The run stopped without an outcome; the submit was not sent"
                 raise RuntimeError(msg)
             self._state = "writing"
+            self._written = True
 
     def end_write(self) -> None:
         """The request is written, or its write failed."""
@@ -325,6 +333,12 @@ class _Submission:
             )
             self._cond.wait_for(lambda: self._state != "writing")
             return excluded
+
+    def abandon_unsent(self) -> bool:
+        """Give up on the request; return whether it was, and will be, never written."""
+        excluded = self.abandon()
+        with self._cond:
+            return excluded and not self._written
 
     @property
     def abandoned(self) -> bool:
@@ -484,30 +498,66 @@ def apply_async_statement(input_: AsyncApplyInput) -> AsyncApplyResult:  # noqa:
                 ),
                 attempt_query_id,
             )
+        poll_after_time = _query_log_lower_bound(server_now_ms)
+        # Polling decides the outcome, as in TS: the submit error is raised only
+        # when the server never saw the query, so it is not logged here (#561).
+        submission = _Submission(
+            lambda before_send: client.submit(
+                input_.sql,
+                query_id=attempt_query_id,
+                settings=input_.settings,
+                before_send=before_send,
+            )
+        )
     except BaseException as error:
         back_to_prepared(error)
         raise
-    poll_after_time = _query_log_lower_bound(server_now_ms)
-    # Polling decides the outcome, as in TS: the submit error is raised only
-    # when the server never saw the query, so it is not logged here (#561).
-    submission = _Submission(
-        lambda before_send: client.submit(
-            input_.sql,
-            query_id=attempt_query_id,
-            settings=input_.settings,
-            before_send=before_send,
-        )
-    )
 
-    return _poll_until_terminal(
-        input_=input_,
+    return _start_and_poll(
+        input_,
+        submission,
+        back_to_prepared,
         migration_state=state_after_start,
         query_id=attempt_query_id,
         poll_after_time=poll_after_time,
-        submission=submission,
         started_at=started_at,
-        fingerprint=input_.fingerprint,
     )
+
+
+def _start_and_poll(
+    input_: AsyncApplyInput,
+    submission: _Submission,
+    back_to_prepared: Callable[[BaseException], None],
+    *,
+    migration_state: MigrationRowState | None,
+    query_id: str,
+    poll_after_time: str,
+    started_at: str,
+) -> AsyncApplyResult:
+    """Start the submit and poll until terminal.
+
+    From the thread's start on, every stop, Ctrl-C included, gives the submit
+    up before the migrate lock is released (#793). A stop before polling
+    whose request was never written puts the record back to prepared; once
+    polling started, the fenced record stays, as in TS.
+    """
+    polling = False
+    try:
+        submission.start()
+        polling = True
+        return _poll_until_terminal(
+            input_=input_,
+            migration_state=migration_state,
+            query_id=query_id,
+            poll_after_time=poll_after_time,
+            submission=submission,
+            started_at=started_at,
+            fingerprint=input_.fingerprint,
+        )
+    except BaseException as error:
+        if submission.abandon_unsent() and not polling:
+            back_to_prepared(error)
+        raise
 
 
 def _assert_lock_held(input_: AsyncApplyInput) -> None:
