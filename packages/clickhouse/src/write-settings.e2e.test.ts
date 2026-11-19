@@ -45,4 +45,35 @@ describe('@chkit/clickhouse write settings e2e (#767)', () => {
       await admin.close()
     }
   }, 120_000)
+
+  // #790: a table's own async_insert setting makes an INSERT asynchronous even
+  // with async_insert = 0 in the query; it is stored when it returns only
+  // because it waits for the flush.
+  test.skipIf(onObsessionDB)('a write into a table that turns on async inserts waits for the flush', async () => {
+    const env = getLiveEnv()
+    const admin = createLiveExecutor(env)
+    const prefix = createPrefix('write_settings_table')
+    const user = `${prefix}user`
+    const password = 'Pw-790-write-settings'
+    const table = `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(`${prefix}t`)}`
+    try {
+      await admin.command(`CREATE TABLE ${table} (id UInt64) ENGINE = MergeTree ORDER BY id SETTINGS async_insert = 1`)
+      await waitForTable(admin, env.clickhouseDatabase, `${prefix}t`)
+      await admin.command(`CREATE USER ${quoteIdent(user)} IDENTIFIED BY '${password}' SETTINGS wait_for_async_insert = 0, async_insert_use_adaptive_busy_timeout = 0, async_insert_busy_timeout_max_ms = 3000`)
+      await admin.command(`GRANT SELECT, INSERT ON ${table} TO ${quoteIdent(user)}`)
+      const executor = createClickHouseExecutor({ url: env.clickhouseUrl, username: user, password, database: env.clickhouseDatabase })
+      try {
+        await executor.command(`INSERT INTO ${table} VALUES (1)`)
+        expect(await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)).toEqual([{ n: '1' }])
+        await executor.submit(`INSERT INTO ${table} VALUES (2)`)
+        expect(await executor.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)).toEqual([{ n: '2' }])
+      } finally {
+        await executor.close()
+      }
+    } finally {
+      await admin.command(`DROP USER IF EXISTS ${quoteIdent(user)}`)
+      await admin.command(`DROP TABLE IF EXISTS ${table} SYNC`)
+      await admin.close()
+    }
+  }, 120_000)
 })

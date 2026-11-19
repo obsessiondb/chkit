@@ -125,16 +125,22 @@ def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
     (#767). A caller's setting still wins, and a user that cannot change the
     setting gets the server's own error."""
     client, fake = _stub_client()
-    fake.server_settings = {"async_insert": SimpleNamespace(readonly=False, value="1")}
+    changeable = SimpleNamespace(readonly=False, value="1")
+    constrained = SimpleNamespace(readonly=True, value="1")
+    fake.server_settings = {"async_insert": changeable, "wait_for_async_insert": changeable}
 
     client.execute("INSERT INTO t VALUES (1)")
     client.execute("INSERT INTO t VALUES (1)", settings={"async_insert": 1, "max_threads": 2})
-    fake.server_settings = {"async_insert": SimpleNamespace(readonly=True, value="1")}
+    # A constraint that fixes async_insert alone still leaves the flush waited for (#790).
+    fake.server_settings = {"async_insert": constrained, "wait_for_async_insert": changeable}
     client.execute("INSERT INTO t VALUES (2)")
+    fake.server_settings = {"async_insert": constrained, "wait_for_async_insert": constrained}
+    client.execute("INSERT INTO t VALUES (3)")
 
     assert [call.kwargs["settings"] for call in fake.command.call_args_list] == [
-        {"async_insert": 0},
-        {"async_insert": 1, "max_threads": 2},
+        {"async_insert": 0, "wait_for_async_insert": 1},
+        {"async_insert": 1, "wait_for_async_insert": 1, "max_threads": 2},
+        {"wait_for_async_insert": 1},
         {},
     ]
 
@@ -165,8 +171,10 @@ def test_tracked_execute_records_a_fresh_id_for_the_database_fallback() -> None:
 
     assert events == ["check", "first", "check", "check", "fallback", "check"]
     assert [call.kwargs["settings"] for call in fake.command.call_args_list] == [
-        {"wait_end_of_query": 1, "async_insert": 0, "max_threads": 2, "query_id": "first"},
-        {"wait_end_of_query": 1, "async_insert": 0, "max_threads": 2, "query_id": "fallback"},
+        {"wait_end_of_query": 1, "async_insert": 0, "wait_for_async_insert": 1, "max_threads": 2,
+         "query_id": "first"},
+        {"wait_end_of_query": 1, "async_insert": 0, "wait_for_async_insert": 1, "max_threads": 2,
+         "query_id": "fallback"},
     ]
     assert [call.kwargs["use_database"] for call in fake.command.call_args_list] == [True, False]
 

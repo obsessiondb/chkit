@@ -28,12 +28,26 @@ _RESERVED_NAMES = frozenset({
 })
 
 
-def _turns_on_async_insert(name: str, value: str) -> bool:
-    """migrate journals a statement as completed when the server finishes it.
-    An asynchronous INSERT finishes before its rows leave the buffer (with
-    ``wait_for_async_insert = 0``, from the profile or another ``--setting``),
-    so ``--setting async_insert`` may only turn it off (#790)."""
-    return name == "async_insert" and value != "0" and value.lower() != "false"
+# migrate journals a statement as completed when the server finishes it, and
+# an asynchronous INSERT finishes before its rows leave the buffer unless it
+# waits for the flush. chkit sends ``async_insert = 0`` and
+# ``wait_for_async_insert = 1`` with every statement, so ``--setting`` may only
+# repeat them, as 0 or 1, and may not name a settings profile that would apply
+# over them (#790).
+_DURABLE_INSERT_SETTINGS: dict[str, tuple[str, tuple[str, ...]]] = {
+    "async_insert": ("0", ("0", "false")),
+    "wait_for_async_insert": ("1", ("1", "true")),
+}
+
+
+def _durable_insert_value(name: str, value: str) -> str | None:
+    if name == "profile":
+        return None
+    durable = _DURABLE_INSERT_SETTINGS.get(name)
+    if durable is None:
+        return value
+    stored, spellings = durable
+    return stored if value.lower() in spellings else None
 
 
 def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
@@ -65,13 +79,14 @@ def parse_setting_flags(values: Sequence[str] | None) -> dict[str, str] | None:
                 "parameter, not a query setting."
             )
             raise MigrateError("invalid_usage", msg)
-        value = js_trim(value)
-        if _turns_on_async_insert(name, value):
+        raw = js_trim(value)
+        durable = _durable_insert_value(name, raw)
+        if durable is None:
             msg = (
-                f"--setting async_insert={value} is not allowed: migrate would record an "
+                f"--setting {name}={raw} is not allowed: migrate would record an "
                 "asynchronous INSERT as applied while its rows may still be buffered. "
                 "Nothing ran."
             )
             raise MigrateError("invalid_usage", msg)
-        settings[name] = value
+        settings[name] = durable
     return settings

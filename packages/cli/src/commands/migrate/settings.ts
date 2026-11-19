@@ -21,13 +21,23 @@ const RESERVED_NAMES: ReadonlySet<string> = new Set([
 ])
 
 /**
- * migrate journals a statement as completed when the server finishes it. An
- * asynchronous INSERT finishes before its rows leave the buffer (with
- * wait_for_async_insert = 0, from the profile or another --setting), so
- * --setting async_insert may only turn it off (#790).
+ * migrate journals a statement as completed when the server finishes it, and
+ * an asynchronous INSERT finishes before its rows leave the buffer unless it
+ * waits for the flush. chkit sends async_insert = 0 and
+ * wait_for_async_insert = 1 with every statement, so --setting may only repeat
+ * them, as 0 or 1, and may not name a settings profile that would apply over
+ * them (#790).
  */
-function turnsOnAsyncInsert(name: string, value: string): boolean {
-  return name === 'async_insert' && value !== '0' && value.toLowerCase() !== 'false'
+const DURABLE_INSERT_SETTINGS: ReadonlyMap<string, { value: string; spellings: readonly string[] }> = new Map([
+  ['async_insert', { value: '0', spellings: ['0', 'false'] }],
+  ['wait_for_async_insert', { value: '1', spellings: ['1', 'true'] }],
+])
+
+function durableInsertValue(name: string, value: string): string | undefined {
+  if (name === 'profile') return undefined
+  const durable = DURABLE_INSERT_SETTINGS.get(name)
+  if (!durable) return value
+  return durable.spellings.includes(value.toLowerCase()) ? durable.value : undefined
 }
 
 /**
@@ -53,11 +63,12 @@ export function parseSettingFlags(values: readonly string[] | undefined): ClickH
         `--setting ${name} is not allowed: ${name} is a ClickHouse HTTP parameter, not a query setting.`,
       )
     }
-    const value = entry.slice(eq + 1).trim()
-    if (turnsOnAsyncInsert(name, value)) {
+    const raw = entry.slice(eq + 1).trim()
+    const value = durableInsertValue(name, raw)
+    if (value === undefined) {
       throw new MigrateError(
         'invalid_usage',
-        `--setting async_insert=${value} is not allowed: migrate would record an asynchronous INSERT as applied while its rows may still be buffered. Nothing ran.`,
+        `--setting ${name}=${raw} is not allowed: migrate would record an asynchronous INSERT as applied while its rows may still be buffered. Nothing ran.`,
       )
     }
     settings[name] = value

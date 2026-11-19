@@ -47,6 +47,11 @@ QueryStatusKind = Literal["running", "finished", "failed", "unknown"]
 # TS's PROGRESS_SETTINGS (``@chkit/clickhouse``): a progress header every 30 s.
 PROGRESS_INTERVAL_MS = "30000"
 
+# TS's DURABLE_INSERT_SETTINGS: a write is stored when it returns. No
+# asynchronous INSERT, and one that a table's own async_insert setting still
+# makes asynchronous waits for its flush (#790).
+_DURABLE_INSERT_SETTINGS: dict[str, Any] = {"async_insert": 0, "wait_for_async_insert": 1}
+
 # Column types whose JSON numbers a float cannot hold exactly: 64-bit and wider
 # integers and Decimals. The TS port (``@chkit/clickhouse``, ``exact-json.ts``)
 # uses the same patterns.
@@ -222,12 +227,17 @@ class ClickHouseClient:
         self.execute_guarded(statement, lambda: None, settings)
 
     def _write_settings(self) -> dict[str, Any]:
-        """No asynchronous INSERT, as TS sends with every write, so a write is
-        stored when it returns. A user that cannot change the setting
-        (readonly = 1) cannot write either, so it is left out there, where
+        """No asynchronous INSERT, and one that a table's own async_insert
+        setting still makes asynchronous waits for its flush, as TS sends with
+        every write, so a write is stored when it returns (#790). A setting the
+        user cannot change (readonly = 1, or a constraint) is left out, where
         clickhouse-connect would refuse it before the server's own error."""
-        setting = self._client.server_settings.get("async_insert")
-        return {"async_insert": 0} if setting is not None and not setting.readonly else {}
+        settings: dict[str, Any] = {}
+        for name, value in _DURABLE_INSERT_SETTINGS.items():
+            setting = self._client.server_settings.get(name)
+            if setting is not None and not setting.readonly:
+                settings[name] = value
+        return settings
 
     def execute_guarded(
         self, statement: str, check: Callable[[], None], settings: dict[str, Any] | None = None
@@ -275,7 +285,7 @@ class ClickHouseClient:
             self._client.command(
                 statement,
                 settings={
-                    "wait_end_of_query": 1, "async_insert": 0,
+                    "wait_end_of_query": 1, **_DURABLE_INSERT_SETTINGS,
                     **(settings or {}), "query_id": query_id,
                 },
                 use_database=use_database,
@@ -393,8 +403,8 @@ class ClickHouseClient:
         driver = self._submit_driver()
         _SUBMIT_SEND.before_send = before_send
         try:
-            # No asynchronous INSERT, as execute sends: the server would
-            # finish it while its rows are still buffered (#790).
+            # Stored when it finishes, as execute sends: an asynchronous
+            # INSERT would finish while its rows are still buffered (#790).
             driver.command(
                 statement,
                 settings={**self._write_settings(), **(settings or {}), "query_id": qid},

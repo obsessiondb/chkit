@@ -426,8 +426,8 @@ SETTINGS index_granularity = 8192;`
       ['query', read],
       ['query', readWithSettings],
       ['queryJson', read],
-      ['command', { async_insert: 0, ...progress, max_threads: 1 }],
-      ['insert', { async_insert: 0, ...progress }],
+      ['command', { async_insert: 0, wait_for_async_insert: 1, ...progress, max_threads: 1 }],
+      ['insert', { async_insert: 0, wait_for_async_insert: 1, ...progress }],
     ])
     await executor.close()
   })

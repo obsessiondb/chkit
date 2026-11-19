@@ -77,20 +77,25 @@ def test_parse_setting_flags() -> None:
         assert "secret" not in str(error.value)
 
 
-def test_parse_setting_flags_allows_async_insert_only_off() -> None:
+def test_parse_setting_flags_keeps_async_inserts_off_and_waited_for() -> None:
     # #790: migrate cannot tell a buffered asynchronous INSERT from a stored one.
     assert parse_setting_flags(["async_insert=0", " async_insert = FALSE "]) == {
-        "async_insert": "FALSE"
+        "async_insert": "0"
     }
-    for value in ["1", "true", "True", "2", ""]:
+    assert parse_setting_flags(["wait_for_async_insert=True"]) == {"wait_for_async_insert": "1"}
+    refused = [
+        *(f"async_insert={value}" for value in ["1", "true", "True", "2", ""]),
+        *(f"wait_for_async_insert={value}" for value in ["0", "false", ""]),
+        "profile=bulk",
+    ]
+    for entry in refused:
         with pytest.raises(MigrateError) as error:
-            parse_setting_flags([f"max_threads=1,async_insert={value}"])
+            parse_setting_flags([f"max_threads=1,{entry}"])
         assert error.value.code == "invalid_usage"
         assert str(error.value) == (
-            f"--setting async_insert={value} is not allowed: migrate would record an "
+            f"--setting {entry} is not allowed: migrate would record an "
             "asynchronous INSERT as applied while its rows may still be buffered. Nothing ran."
         )
-
 
 def test_migrate_sends_settings_with_every_statement(
     live: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
