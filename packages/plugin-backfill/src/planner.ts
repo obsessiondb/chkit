@@ -4,6 +4,7 @@ import { parseCutoverMetadata, type CutoverMetadata, type MaterializedViewDefini
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
+import { PINNED_INSERT_SETTINGS_SQL } from './chunking/sql.js'
 import { generateChunkPlan } from './chunking/planner.js'
 import { findMvsForTarget, resolveMvReplaySource } from './detect.js'
 import { BackfillConfigError } from './errors.js'
@@ -110,6 +111,54 @@ export async function assertBackfillTargetSafe(input: {
     throw new BackfillConfigError(`Automatic backfill cannot reconstruct EPHEMERAL inputs; copying ${target} recomputes MATERIALIZED column(s) ${materialized.join(', ')}, which may read EPHEMERAL column(s) ${ephemeral.join(', ')}. Use an explicit INSERT with an input column mapping.`)
   }
   return rows.filter((column) => ['', 'DEFAULT'].includes(column.default_kind)).map((column) => column.name)
+}
+
+/**
+ * Fail before anything is submitted when the server would refuse the
+ * settings every chunk INSERT runs with (`PINNED_INSERT_SETTINGS`): a user
+ * with `readonly = 1`, or a settings constraint on one of them.
+ */
+export async function assertPinnedInsertSettingsAccepted(input: {
+  planId: string
+  query: ClickHouseQuery
+}): Promise<void> {
+  try {
+    await input.query(`SELECT 1 SETTINGS ${PINNED_INSERT_SETTINGS_SQL}`)
+  } catch (error) {
+    throw new BackfillConfigError(
+      `Backfill plan ${input.planId}: the server refused the settings every chunk INSERT runs with (${PINNED_INSERT_SETTINGS_SQL}): ${error instanceof Error ? error.message : String(error)}. Nothing was submitted. Use a user allowed to set them (not readonly = 1, and no settings constraint on them).`,
+    )
+  }
+}
+
+/**
+ * Why no failure of the backfill target can be proven, when none can (#765):
+ * an INSERT SELECT into a Distributed table can run on its shards
+ * (parallel_distributed_insert_select, 2 by default in ClickHouse 26.3), and
+ * the initial query's written_rows then does not count the rows they wrote.
+ * A target whose engine cannot be read counts as one.
+ */
+export async function unprovableTargetFailures(input: {
+  database: string
+  table: string
+  query: ClickHouseQuery
+}): Promise<string | undefined> {
+  const quote = (value: string) => `'${value.replaceAll('\\', '\\\\').replaceAll("'", "\\'")}'`
+  const target = `${input.database}.${input.table}`
+  let engine: string | undefined
+  try {
+    const rows = await input.query<{ engine: string }>(
+      `SELECT engine FROM system.tables WHERE database = ${quote(input.database)} AND name = ${quote(input.table)}`,
+    )
+    engine = rows[0]?.engine || undefined
+  } catch {
+    engine = undefined
+  }
+  if (engine !== undefined && engine !== 'Distributed') return undefined
+  const shards = 'whose shards can write the rows of an INSERT SELECT without system.query_log counting them in its written_rows'
+  return engine === 'Distributed'
+    ? `its target ${target} is a Distributed table, ${shards}`
+    : `the engine of its target ${target} could not be read, and a Distributed table, ${shards}, cannot be ruled out`
 }
 
 export async function buildBackfillPlan(input: {

@@ -30,6 +30,7 @@ const executor = {
   queryJson: record('queryJson', Promise.resolve({ data: [], meta: [], rows: 0 })),
   insert: record('insert', Promise.resolve()),
   submit: record('submit', Promise.resolve('qid')),
+  submitSendsOnce: true,
   queryStatus: record('queryStatus', Promise.resolve({ status: 'finished' })),
   listSchemaObjects: record('listSchemaObjects', Promise.resolve([])),
   listTableDetails: record('listTableDetails', Promise.resolve([])),
@@ -56,7 +57,7 @@ held = false
 const guardError = await guarded.command('blocked').then(() => null, error => error.message)
 await wrapped.close()
 
-console.log('RESULT ' + JSON.stringify({ wrapped: wrapped !== executor, calls, guardError }))
+console.log('RESULT ' + JSON.stringify({ wrapped: wrapped !== executor, sendsOnce: wrapped.submitSendsOnce, calls, guardError }))
 `
 
 describe('wrapExecutorWithDebug', () => {
@@ -72,6 +73,7 @@ describe('wrapExecutorWithDebug', () => {
     expect(line).toBeDefined()
     expect(JSON.parse(String(line).slice('RESULT '.length))).toEqual({
       wrapped: true,
+      sendsOnce: true,
       guardError: 'lock lost',
       calls: [
         ['command', 'C', { s_command: 1 }],
