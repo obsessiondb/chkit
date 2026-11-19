@@ -986,7 +986,7 @@ def test_keeps_the_other_statements_other_tables_and_same_column_statements_in_p
 
 
 _KEYWORD_COLUMNS = [
-    "and", "as", "c", "case", "else", "end", "from", "id", "interval", "is", "nan", "not", "null",
+    "and", "as", "c", "case", "else", "end", "from", "id", "interval", "is", "like", "nan", "not", "null",
     "NULL", "s", "then", "true", "ts", "when", "x",
 ]  # fmt: skip
 
@@ -1062,6 +1062,7 @@ def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
         ("arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))", ["end"]),
         ("length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ["end", "interval"]),
         ("arraySum(arrayMap(and -> 1 and end, [1]))", ["end"]),
+        ("arraySum(arrayMap(both -> both not like end, ['x']))", ["end", "like"]),
         ("length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ["from", "interval"]),
     ],
 )

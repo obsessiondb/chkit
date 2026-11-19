@@ -1137,7 +1137,7 @@ describe('planDiff orders MODIFY read releases and table TTL changes (#769)', ()
 // Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
 // column it reads is refused (#805).
 describe('columnDefaultReads skips keywords and alias names (#805)', () => {
-  const columns = ['and', 'as', 'c', 'case', 'else', 'end', 'from', 'id', 'interval', 'is', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
+  const columns = ['and', 'as', 'c', 'case', 'else', 'end', 'from', 'id', 'interval', 'is', 'like', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
   const readsOf = (expression: string) => {
     const definition = table({
       database: 'app',
@@ -1204,6 +1204,7 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ['arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))', ['end']],
     ["length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ['end', 'interval']],
     ['arraySum(arrayMap(and -> 1 and end, [1]))', ['end']],
+    ["arraySum(arrayMap(both -> both not like end, ['x']))", ['end', 'like']],
     ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
   ])('column: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)

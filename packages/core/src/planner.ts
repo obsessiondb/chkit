@@ -1263,9 +1263,9 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
       keywords.add(i)
       state = 'ended'
     } else if (word === 'not') {
-      // After an operand, NOT starts `NOT IN`, `NOT LIKE` or `NOT BETWEEN`.
+      // NOT keeps the state: unary NOT expects an operand, as before it, and
+      // after an operand it starts `NOT IN`, `NOT LIKE` or `NOT BETWEEN`.
       keywords.add(i)
-      if (state !== 'ended') state = 'operand'
     } else if (word === 'case' && caseFollows(tokens[i + 1])) {
       keywords.add(i)
       if (bare(i + 1) === 'when') {
