@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import json
 import os
 import subprocess
@@ -1726,7 +1727,7 @@ def test_a_prerequisite_between_two_tables_keeps_both_in_their_sorted_order() ->
     # plan is main's.
     interval = _u("k", "toUInt64(toDateTime(id) + INTERVAL 1 day)")
     previous = [
-        _t([_u("x:column:a"), _u("y", "z"), _u("z", "x:column:a")], "t"),
+        _t([_u("x:column:a"), _u("y", "z"), _u("z", "`x:column:a`")], "t"),
         _t([_u("b", "1"), interval], "t:column:x"),
     ]
     next_ = [
@@ -1740,6 +1741,199 @@ def test_a_prerequisite_between_two_tables_keeps_both_in_their_sorted_order() ->
         "ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;",
         "ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;",
     ]
+
+
+_FALLBACK = ["t.a", "t.b", "t.c"]
+_REPAIRED = ["t.b", "t.a", "t.c"]
+
+
+@pytest.mark.parametrize(
+    ("extra", "order"),
+    [
+        pytest.param([_u("APPLY"), _u("extra", "toUInt64(APPLY)")], _FALLBACK, id="a bare APPLY"),
+        pytest.param([_u("join"), _u("extra", "toUInt64(join)")], _FALLBACK, id="a bare JOIN"),
+        pytest.param([_u("placing"), _u("extra", "toUInt64(placing)")], _FALLBACK, id="a bare PLACING"),
+        pytest.param([_u("APPLY"), _u("extra", "toUInt64(`APPLY`)")], _REPAIRED, id="a quoted APPLY"),
+        pytest.param(
+            [_u("extra", "length(eXTrAcT('abc', 'a'))")], _FALLBACK, id="eXTrAcT with string arguments"
+        ),
+        pytest.param(
+            [_u("extra", "toUInt64(dateDiff('day', toDateTime(id), toDateTime(id)))")],
+            _FALLBACK,
+            id="dateDiff with a string unit",
+        ),
+        pytest.param(
+            [_u("extra", "abs(plus(1, DATEDIFF('day', toDateTime(id), toDateTime(id))))")],
+            _FALLBACK,
+            id="a nested DATEDIFF",
+        ),
+        pytest.param(
+            [_u("extra", "toUInt64(date_part('day', toDateTime(id)))")], _FALLBACK, id="date_part"
+        ),
+        pytest.param(
+            [_u("extract"), _u("extra", "toUInt64(`extract`)")], _REPAIRED, id="a quoted extract column"
+        ),
+        pytest.param([_u("extra", "LENGTH(toString(id))")], _REPAIRED, id="a mixed-case LENGTH"),
+        pytest.param(
+            [_u("extra", "toUInt64(position('abc', 'b'))")], _REPAIRED, id="a call to position"
+        ),
+    ],
+)
+def test_query_words_and_unit_calls_keep_the_sorted_order(
+    extra: list[dict[str, Any]], order: list[str]
+) -> None:
+    # A bare query or join word, and a call to a function whose arguments can
+    # be units or keywords (in any case, with any arguments), keep the sorted
+    # order. A quoted name is a column read, and other calls, in any case,
+    # keep the repair.
+    assert _order_of(
+        [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]
+    ) == order
+
+
+@pytest.mark.parametrize(
+    ("name", "order"),
+    [
+        ("true", _FALLBACK),
+        ("FALSE", _FALLBACK),
+        ("Inf", _FALLBACK),
+        ("nan", _FALLBACK),
+        ("infinity", _FALLBACK),
+        ("null", _REPAIRED),
+    ],
+)
+def test_a_quoted_literal_word_keeps_the_sorted_order(name: str, order: list[str]) -> None:
+    # ALTER's cycle check reads a quoted `true`, `false`, `inf`, `nan` or
+    # `infinity` as a literal, so an expression with one keeps the sorted
+    # order; a quoted `null` reads its column.
+    extra = [_u(name), _u("extra", f"toUInt64(`{name}`)")]
+    assert _order_of(
+        [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]
+    ) == order
+
+
+def test_a_quoted_true_is_no_read_of_a_column_with_that_name() -> None:
+    # `toUInt64(`true`)` reads no column, so `a` does not read the column
+    # `true`: the table keeps its sorted order, where `b DEFAULT a + 1` runs
+    # after `a` changes to UInt64.
+    assert _order_of(
+        [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _text("true", "c")])],
+        [_t([_u("a", "toUInt64(`true`)"), _u("b", "a + 1"), _text("c", "'x'"), _text("true", "'y'")])],
+    ) == ["t.a", "t.b", "t.c", "t.true"]
+
+
+def test_charges_the_reads_a_modify_keeps() -> None:
+    # Every read the replay looks at uses work, also the reads a change keeps.
+    def work(width: int) -> int:
+        p = [f"p{i:05d}" for i in range(width)]
+        total = " + ".join(p)
+        columns = [_u(name) for name in p]
+        assert _order_of(
+            [_t([_u("a", total), _u("b", "a"), *columns])],
+            [_t([_u("a", f"{total} + b"), _u("b", "id"), *columns])],
+        ) == ["t.b", "t.a"]
+        return _cycle_repair_work.units
+
+    narrow = work(1)
+    assert work(4096) > narrow + 4096
+
+
+def test_charges_the_reads_a_replayed_modify_removes() -> None:
+    w = [_u(f"w{i:03d}") for i in range(256)]
+    total = " + ".join(column["name"] for column in w)
+    plan_diff([_t([_u("b", f"z + {total}"), _u("z"), *w])], [_t([_u("b", "1"), _u("z", "b"), *w])])
+    assert _cycle_repair_work.units > 256
+
+
+_Schema = list[list[Any]]
+
+
+def _nine_cycles(chain: int) -> tuple[_Schema, _Schema]:
+    k = range(9)
+    links = [[f"kc{i:03d}", f"kc{i + 1:03d}" if i + 1 < chain else "kz"] for i in range(chain)]
+    total = " + ".join(f"ka{i:03d}" for i in k)
+    return (
+        [["a", "toUInt64(false)"], ["b", "c"], ["c", "a"], ["d", "b"], ["null", "a"], ["false", "b"],
+         *[[f"ka{i:03d}", None] for i in k], *[[f"kb{i:03d}", "kc000"] for i in k], ["j", None],
+         *links, ["kz", f"{total} + id + j"]],
+        [["a", "b"], ["b", "ifNull(null, 0) + d"], ["c", "id"], ["d", "id"], ["null", "a"], ["false", "b"],
+         *[[f"ka{i:03d}", f"kb{i:03d}"] for i in k], *[[f"kb{i:03d}", "id"] for i in k], ["j", None],
+         *links, ["kz", "id"]],
+    )
+
+
+def _chain_and_fan_in() -> tuple[_Schema, _Schema]:
+    p = [[f"p{i:03d}", f"p{i + 1:03d}" if i + 1 < 315 else None] for i in range(315)]
+    y = [f"y_b{i:03d}" for i in range(20)]
+    return (
+        [["m", "x"], ["null", "toUInt64(true)"], ["true", "x"], ["x", "z"], ["z", "`null`"], ["q", None],
+         ["p", "p000"], *p, *[[name, "y_c"] for name in y], ["y_c", "y_a"], ["y_a", None]],
+        [["m", "id"], ["null", "x"], ["true", "x"], ["x", "ifNull(null, p + q + m)"], ["z", "id"],
+         ["q", None], ["p", "p000"], *p, *[[name, "id"] for name in y], ["y_c", "id"],
+         ["y_a", " + ".join(y)]],
+    )
+
+
+# The work and the plan at the edge of the work budget, the same as in the TS
+# tests (planner-dependency-order.test.ts). Nine cycles through one long chain
+# of unchanged defaults: with 87 links the table is repaired, with 88 it runs
+# out of work and keeps the sorted order.
+_BUDGET_EDGE: dict[str, tuple[tuple[_Schema, _Schema], int, str, str]] = {
+    "nine cycles through 449 links": (
+        _nine_cycles(449), 12368, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
+    ),
+    "nine cycles through 87 links": (
+        _nine_cycles(87), 3673, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+    ),
+    "nine cycles through 88 links": (
+        _nine_cycles(88), 3704, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
+    ),
+    "a chain and a fan-in": (
+        _chain_and_fan_in(), 1816, "m", "f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36"
+    ),
+}
+
+
+@pytest.mark.parametrize("label", list(_BUDGET_EDGE))
+def test_plans_the_budget_edge_with_the_same_work_and_sql_as_ts_under_every_hash_seed(label: str) -> None:
+    script = (
+        "import hashlib, json, sys\n"
+        "from chkit.core.model import table\n"
+        "from chkit.core.planner import _cycle_repair_work, plan_diff\n"
+        "def t(columns):\n"
+        "    return table(database='app', name='t', columns=[{'name': 'id', 'type': 'UInt64'}] + [\n"
+        "        {'name': n, 'type': 'UInt64', **({} if e is None else {'default': {'expression': e}})}\n"
+        "        for n, e in columns], engine='MergeTree()', primary_key=['id'], order_by=['id'])\n"
+        "before, after = json.loads(sys.stdin.read())\n"
+        "sql = [op.sql for op in plan_diff([t(before)], [t(after)]).operations]\n"
+        "print(json.dumps([_cycle_repair_work.units, sql[0],\n"
+        "    hashlib.sha256('\\n'.join(sql).encode()).hexdigest()]))\n"
+    )
+    columns, units, first, digest = _BUDGET_EDGE[label]
+    for seed in ("0", "1", "2", "5", "37"):
+        result = subprocess.run(
+            [sys.executable, "-c", script],
+            input=json.dumps(columns),
+            capture_output=True,
+            text=True,
+            check=True,
+            env={**os.environ, "PYTHONHASHSEED": seed},
+        )
+        found_units, found_first, found_digest = json.loads(result.stdout)
+        assert found_units == units, seed
+        assert found_first.startswith(f"ALTER TABLE app.t MODIFY COLUMN `{first}` "), seed
+        assert found_digest == digest, seed
+    # And in this interpreter.
+    before, after = columns
+    sql = [
+        op.sql
+        for op in plan_diff(
+            [_t([_u(name, expression) for name, expression in before])],
+            [_t([_u(name, expression) for name, expression in after])],
+        ).operations
+    ]
+    assert _cycle_repair_work.units == units
+    assert hashlib.sha256("\n".join(sql).encode()).hexdigest() == digest
 
 
 # ---------- the column reads skip lambda parameters and CAST types (#768) ----------

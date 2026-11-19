@@ -1713,7 +1713,7 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   // plan is main's.
   test('a prerequisite between two tables keeps both in their sorted order', () => {
     const interval = u('k', 'toUInt64(toDateTime(id) + INTERVAL 1 day)')
-    const previous = [named('t', [u('x:column:a'), u('y', 'z'), u('z', 'x:column:a')]), named('t:column:x', [u('b', '1'), interval])]
+    const previous = [named('t', [u('x:column:a'), u('y', 'z'), u('z', '`x:column:a`')]), named('t:column:x', [u('b', '1'), interval])]
     const next = [named('t', [u('x:column:a', 'y'), u('y', 'id'), u('z', 'id')]), named('t:column:x', [u('a'), u('b', 'id'), interval])]
     expect(planDiff(previous, next).operations.map((op) => op.sql)).toEqual([
       'ALTER TABLE app.t MODIFY COLUMN `x:column:a` UInt64 DEFAULT y;',
@@ -1722,5 +1722,112 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
       'ALTER TABLE app.t MODIFY COLUMN `y` UInt64 DEFAULT id;',
       'ALTER TABLE app.t MODIFY COLUMN `z` UInt64 DEFAULT id;',
     ])
+  })
+
+  // A bare query or join word, and a call to a function whose arguments can
+  // be units or keywords (in any case, with any arguments), keep the sorted
+  // order. A quoted name is a column read, and other calls, in any case,
+  // keep the repair.
+  test.each<[string, ColumnDefinition[], string[]]>([
+    ['a bare APPLY', [u('APPLY'), u('extra', 'toUInt64(APPLY)')], ['t.a', 't.b', 't.c']],
+    ['a bare JOIN', [u('join'), u('extra', 'toUInt64(join)')], ['t.a', 't.b', 't.c']],
+    ['a bare PLACING', [u('placing'), u('extra', 'toUInt64(placing)')], ['t.a', 't.b', 't.c']],
+    ['a quoted APPLY', [u('APPLY'), u('extra', 'toUInt64(`APPLY`)')], ['t.b', 't.a', 't.c']],
+    ['eXTrAcT with string arguments', [u('extra', "length(eXTrAcT('abc', 'a'))")], ['t.a', 't.b', 't.c']],
+    ['dateDiff with a string unit', [u('extra', "toUInt64(dateDiff('day', toDateTime(id), toDateTime(id)))")], ['t.a', 't.b', 't.c']],
+    ['a nested DATEDIFF', [u('extra', "abs(plus(1, DATEDIFF('day', toDateTime(id), toDateTime(id))))")], ['t.a', 't.b', 't.c']],
+    ['date_part', [u('extra', "toUInt64(date_part('day', toDateTime(id)))")], ['t.a', 't.b', 't.c']],
+    ['a quoted extract column', [u('extract'), u('extra', 'toUInt64(`extract`)')], ['t.b', 't.a', 't.c']],
+    ['a mixed-case LENGTH', [u('extra', 'LENGTH(toString(id))')], ['t.b', 't.a', 't.c']],
+    ['a call to position', [u('extra', "toUInt64(position('abc', 'b'))")], ['t.b', 't.a', 't.c']],
+  ])('with %s in an unchanged DEFAULT, the MODIFYs run in the order %p', (_, extra, order) => {
+    expect(orderOf([t([...cycleBefore, ...extra])], [t([...cycleAfter, ...extra])])).toEqual(order)
+  })
+
+  // ALTER's cycle check reads a quoted `true`, `false`, `inf`, `nan` or
+  // `infinity` as a literal, so an expression with one keeps the sorted
+  // order; a quoted `null` reads its column.
+  test.each<[string, string[]]>([
+    ['true', ['t.a', 't.b', 't.c']],
+    ['FALSE', ['t.a', 't.b', 't.c']],
+    ['Inf', ['t.a', 't.b', 't.c']],
+    ['nan', ['t.a', 't.b', 't.c']],
+    ['infinity', ['t.a', 't.b', 't.c']],
+    ['null', ['t.b', 't.a', 't.c']],
+  ])('with a quoted %s in an unchanged DEFAULT, the MODIFYs run in the order %p', (name, order) => {
+    const extra = [u(name), u('extra', `toUInt64(\`${name}\`)`)]
+    expect(orderOf([t([...cycleBefore, ...extra])], [t([...cycleAfter, ...extra])])).toEqual(order)
+  })
+
+  // `toUInt64(`true`)` reads no column, so `a` does not read the column
+  // `true`: the table keeps its sorted order, where `b DEFAULT a + 1` runs
+  // after `a` changes to UInt64.
+  test('a quoted true is no read of a column with that name', () => {
+    expect(
+      orderOf(
+        [t([{ name: 'a', type: 'String' }, u('b'), text('c', 'a'), text('true', 'c')])],
+        [t([u('a', 'toUInt64(`true`)'), u('b', 'a + 1'), text('c', "'x'"), text('true', "'y'")])]
+      )
+    ).toEqual(['t.a', 't.b', 't.c', 't.true'])
+  })
+
+  // Every read the replay looks at uses work, also the reads a change keeps.
+  test('charges the reads a MODIFY keeps', () => {
+    const work = (width: number) => {
+      const p = Array.from({ length: width }, (_, i) => `p${String(i).padStart(5, '0')}`)
+      const sum = p.join(' + ')
+      const columns = p.map((name) => u(name))
+      expect(orderOf([t([u('a', sum), u('b', 'a'), ...columns])], [t([u('a', `${sum} + b`), u('b', 'id'), ...columns])])).toEqual(['t.b', 't.a'])
+      return cycleRepairWork.units
+    }
+    const narrow = work(1)
+    expect(work(4096)).toBeGreaterThan(narrow + 4096)
+  })
+
+  test('charges the reads a replayed MODIFY removes', () => {
+    const w = Array.from({ length: 256 }, (_, i) => u(`w${String(i).padStart(3, '0')}`))
+    const sum = w.map((column) => column.name).join(' + ')
+    planDiff([t([u('b', `z + ${sum}`), u('z'), ...w])], [t([u('b', '1'), u('z', 'b'), ...w])])
+    expect(cycleRepairWork.units).toBeGreaterThan(256)
+  })
+
+  // The work and the plan at the edge of the work budget, the same in
+  // chkit-py under every hash seed (test_planner_dependency_order.py). Nine
+  // cycles through one long chain of unchanged defaults: with 87 links the
+  // table is repaired, with 88 it runs out of work and keeps the sorted order.
+  const nineCycles = (chain: number): [ColumnDefinition[], ColumnDefinition[]] => {
+    const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
+    const k = Array.from({ length: 9 }, (_, i) => i)
+    const links = Array.from({ length: chain }, (_, i) => u(pad('kc', i), i + 1 < chain ? pad('kc', i + 1) : 'kz'))
+    const sum = k.map((i) => pad('ka', i)).join(' + ')
+    return [
+      [u('a', 'toUInt64(false)'), u('b', 'c'), u('c', 'a'), u('d', 'b'), u('null', 'a'), u('false', 'b'),
+        ...k.map((i) => u(pad('ka', i))), ...k.map((i) => u(pad('kb', i), 'kc000')), u('j'), ...links, u('kz', `${sum} + id + j`)],
+      [u('a', 'b'), u('b', 'ifNull(null, 0) + d'), u('c', 'id'), u('d', 'id'), u('null', 'a'), u('false', 'b'),
+        ...k.map((i) => u(pad('ka', i), pad('kb', i))), ...k.map((i) => u(pad('kb', i), 'id')), u('j'), ...links, u('kz', 'id')],
+    ]
+  }
+  const chainAndFanIn = (): [ColumnDefinition[], ColumnDefinition[]] => {
+    const pad = (p: string, i: number) => p + String(i).padStart(3, '0')
+    const p = Array.from({ length: 315 }, (_, i) => u(pad('p', i), i + 1 < 315 ? pad('p', i + 1) : undefined))
+    const y = Array.from({ length: 20 }, (_, i) => pad('y_b', i))
+    return [
+      [u('m', 'x'), u('null', 'toUInt64(true)'), u('true', 'x'), u('x', 'z'), u('z', '`null`'), u('q'), u('p', 'p000'), ...p,
+        ...y.map((name) => u(name, 'y_c')), u('y_c', 'y_a'), u('y_a')],
+      [u('m', 'id'), u('null', 'x'), u('true', 'x'), u('x', 'ifNull(null, p + q + m)'), u('z', 'id'), u('q'), u('p', 'p000'), ...p,
+        ...y.map((name) => u(name, 'id')), u('y_c', 'id'), u('y_a', y.join(' + '))],
+    ]
+  }
+  test.each<[string, () => [ColumnDefinition[], ColumnDefinition[]], number, string, string]>([
+    ['nine cycles through 449 links', () => nineCycles(449), 12368, 'a', '5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd'],
+    ['nine cycles through 87 links', () => nineCycles(87), 3673, 'c', '7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a'],
+    ['nine cycles through 88 links', () => nineCycles(88), 3704, 'a', '5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd'],
+    ['a chain and a fan-in', chainAndFanIn, 1816, 'm', 'f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36'],
+  ])('plans %s with the same work and SQL as chkit-py', (_, columns, units, first, digest) => {
+    const [before, after] = columns()
+    const sql = planDiff([t(before)], [t(after)]).operations.map((op) => op.sql)
+    expect(cycleRepairWork.units).toBe(units)
+    expect(sql[0]).toStartWith(`ALTER TABLE app.t MODIFY COLUMN \`${first}\` `)
+    expect(new Bun.CryptoHasher('sha256').update(sql.join('\n')).digest('hex')).toBe(digest)
   })
 })

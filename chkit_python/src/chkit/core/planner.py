@@ -916,8 +916,8 @@ def order_column_statements(
     a table's statements never move past another table's (they share no
     edge). ``renames`` names the columns of each RENAME COLUMN in ``operations``.
     """
-    reads = _column_default_reads(next_)
-    old_reads = _column_default_reads(previous)
+    reads, new_tokens = _default_reads_and_tokens(next_)
+    old_reads, old_tokens = _default_reads_and_tokens(previous)
     ttl_reads = _table_ttl_reads(next_)
     old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
@@ -977,6 +977,8 @@ def order_column_statements(
             previous=previous,
             next_=next_,
             renames=renames,
+            old_tokens=old_tokens,
+            new_tokens=new_tokens,
         )
     )
     return [statements[next(ordered)] if is_column_statement(op) else op for op in operations]
@@ -1001,6 +1003,8 @@ def _repaired_order(  # noqa: PLR0915
     previous: Sequence[SchemaDefinition],
     next_: Sequence[SchemaDefinition],
     renames: Sequence[ColumnRenameSuggestion],
+    old_tokens: dict[str, list[SQLToken]],
+    new_tokens: dict[str, list[SQLToken]],
 ) -> list[int]:
     """The sorted order, with the temporary default cycles it closes broken where reads are certain.
 
@@ -1016,6 +1020,9 @@ def _repaired_order(  # noqa: PLR0915
     Only the columns that ``_cycle_candidates`` finds take part.
     """
     _cycle_repair_work.units = 0
+    # Every search below walks prerequisites in index order, so the work it
+    # does, and where the budget ends, is the same in both ports.
+    prerequisites = [sorted(before) for before in prerequisites]
     sorted_order = order_by_dependencies(
         list(range(len(statements))),
         str,
@@ -1043,8 +1050,8 @@ def _repaired_order(  # noqa: PLR0915
     )
     if not active:
         return sorted_order
-    old_plain, old_uncertain = _plain_facts(previous, active)
-    new_plain, new_uncertain = _plain_facts(next_, active)
+    old_plain, old_uncertain = _plain_facts(previous, active, old_tokens)
+    new_plain, new_uncertain = _plain_facts(next_, active, new_tokens)
     for table in old_uncertain | new_uncertain:
         active.pop(table, None)
     # Per table: the columns that may close a cycle, the size of its replay
@@ -1224,6 +1231,8 @@ def _break_closed_cycles(  # noqa: PLR0915
                     for j in changing.get(other, ())
                     if j not in placed and group_of[j] != group
                 )
+                if not replay.spend(len(cycle) + len(candidates)):
+                    return None
                 breaker: int | None = None
                 for j in candidates:
                     if not any(
@@ -1243,6 +1252,8 @@ def _break_closed_cycles(  # noqa: PLR0915
                     return None
                 for undone, reads in reversed(undo):
                     replay.assign(undone, reads)
+                if replay.exhausted():
+                    return None
                 added.append((target, breaker))
                 extra.setdefault(target, []).append(breaker)
                 wait(target, breaker)
@@ -1254,6 +1265,8 @@ def _break_closed_cycles(  # noqa: PLR0915
                 replay.assign(column, None)
             if change is not None:
                 replay.assign(column, change)
+            if replay.exhausted():
+                return None
         if blocked:
             continue
         placed.update(groups[group])
@@ -1482,8 +1495,8 @@ class _DefaultReplay:
     either side runs out. Columns are numbered in the order the replay first
     meets them (each set in code point order); reads are kept in that order
     and readers in the order they were added, so every search does the same
-    work in both ports. Each column a search looks at uses one unit of the
-    ``budget``.
+    work in both ports. Each read a search, an update or a copy looks at uses
+    one unit of the ``budget``.
     """
 
     def __init__(self, initial: list[tuple[str, set[str]]], budget: int) -> None:
@@ -1501,10 +1514,14 @@ class _DefaultReplay:
             self.assign(column, reads)
         self._budget = budget
 
-    def spend(self) -> bool:
-        """Use one unit of work; False once the work has run out."""
-        self._left -= 1
+    def spend(self, units: int = 1) -> bool:
+        """Use ``units`` of work; False once the work has run out."""
+        self._left -= units
         return self._left >= 0
+
+    def exhausted(self) -> bool:
+        """Whether the work has run out."""
+        return self._left < 0
 
     def used(self) -> int:
         """The units of work used so far."""
@@ -1526,7 +1543,9 @@ class _DefaultReplay:
 
     def _numbered(self, columns: Iterable[str]) -> list[int]:
         # Columns are numbered in code point order within each set, so both ports number them alike.
-        return sorted(self._of(column) for column in sorted(columns))
+        ordered = sorted(columns)
+        self._left -= len(ordered)
+        return sorted(self._of(column) for column in ordered)
 
     def reads(self, column: str) -> list[str] | None:
         """The columns ``column`` reads."""
@@ -1534,12 +1553,16 @@ class _DefaultReplay:
         if number is None:
             return None
         reads = self._reads[number]
+        self._left -= len(reads or ())
         return None if reads is None else [self._names[read] for read in reads]
 
     def assign(self, column: str, reads: Iterable[str] | None) -> None:
         """Give ``column`` the ``reads`` (none removes it); they must close no cycle."""
+        # Every read a step looks at uses one unit of the budget.
         number = self._of(column)
-        for read in self._reads[number] or ():
+        old = self._reads[number] or ()
+        self._left -= len(old)
+        for read in old:
             self._readers[read].pop(number, None)
         numbered = None if reads is None else self._numbered(reads)
         self._reads[number] = numbered
@@ -1554,9 +1577,13 @@ class _DefaultReplay:
         """
         target = self._of(column)
         current = set(self._reads[target] or ())
+        self._left -= len(current)
         cycle: set[str] = set()
         down, inside = self._down, self._inside
-        for read in self._numbered(reads):
+        numbered = self._numbered(reads)
+        if self._left < 0:
+            return None
+        for read in numbered:
             if read in current:
                 continue
             hit = self._reaches(read, target)
@@ -1696,9 +1723,10 @@ _LITERAL_WORDS = frozenset(["false", "inf", "infinity", "nan", "null", "true"])
 # Bare words that are not function names even before ``(``.
 _NOT_FUNCTIONS = frozenset(["exists", "lambda", "select", "with"])
 # Keywords of ClickHouse's expression grammar (operators, literals and the
-# words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
-# bare one may not read a column of that name, so its expression is not
-# plain. Only a quoted name reads such a column.
+# words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries, joins and
+# windows): a bare one may not read a column of that name, so its expression
+# is not plain, and neither is a call to one outside ``_KEYWORD_FUNCTIONS``. A
+# quoted name reads such a column.
 _EXPRESSION_KEYWORDS = frozenset(
     [
         "all", "and", "any", "array", "as", "asc", "ascending", "between", "both", "by",
@@ -1709,15 +1737,28 @@ _EXPRESSION_KEYWORDS = frozenset(
         "over", "partition", "position", "preceding", "range", "regexp", "replace",
         "respect", "row", "rows", "select", "substring", "then", "ties", "timestamp",
         "trailing", "trim", "unbounded", "when", "where", "window", "with", "within",
+        # Query clauses and joins.
+        "anti", "apply", "asof", "cross", "cube", "fill", "final", "format", "full", "group",
+        "grouping", "having", "inner", "interpolate", "intersect", "into", "join", "left",
+        "limit", "natural", "offset", "on", "outer", "paste", "placing", "prewhere", "qualify",
+        "right", "rollup", "sample", "semi", "sets", "settings", "step", "totals", "union",
+        "using", "values",
     ]
 )
-# Functions whose bare-name arguments are units or keywords, not reads
-# (``date_add(day, 1, ts)``, ``dateDiff(hour, a, b)``).
+# Keywords that are also ordinary functions when called: their special forms
+# (``substring(s FROM 1)``, ``trim(BOTH ...)``) put keywords inside, which are
+# not plain anyway.
+_KEYWORD_FUNCTIONS = frozenset(
+    ["array", "ilike", "like", "mod", "not", "position", "range", "replace", "substring", "trim"]
+)
+# Functions whose arguments can be units or keywords (``date_add(day, 1, ts)``,
+# ``dateDiff(hour, a, b)``, ``EXTRACT(day FROM ts)``): a call to one, in any
+# case and with any arguments, is not plain.
 _SPECIAL_ARGUMENT_FUNCTIONS = frozenset(
     [
-        "date_add", "date_diff", "date_sub", "dateadd", "datediff", "datesub", "extract",
-        "timestamp_add", "timestamp_diff", "timestamp_sub", "timestampadd", "timestampdiff",
-        "timestampsub",
+        "date_add", "date_diff", "date_part", "date_sub", "date_trunc", "dateadd", "datediff",
+        "datepart", "datesub", "datetrunc", "extract", "timestamp_add", "timestamp_diff",
+        "timestamp_sub", "timestampadd", "timestampdiff", "timestampsub",
     ]
 )
 # Deeper types than this are not parsed: the expression is not plain.
@@ -1728,7 +1769,8 @@ def _plain_reads(tokens: list[SQLToken], columns: set[str]) -> list[str] | None:
     """The columns an expression reads when its reads are certain (#775), or None.
 
     It must be built only from ``columns``, function calls (a bare name
-    followed by ``(``), number and string literals (with ``x'…'`` and
+    followed by ``(``, other than ``_SPECIAL_ARGUMENT_FUNCTIONS``), number and
+    string literals (with ``x'…'`` and
     ``b'…'``, and the bare words NULL, TRUE, FALSE, inf, nan and infinity,
     which never read a column), unary ``-``, ``+`` and NOT, binary operators
     (AND and OR as well, unless a column has that name), parentheses, commas
@@ -1737,7 +1779,8 @@ def _plain_reads(tokens: list[SQLToken], columns: set[str]) -> list[str] | None:
     name, two operands in a row (``date '2024-01-01'``, ``INTERVAL 1 day``,
     ``x alias``), ``.``, brackets, a lambda, a subquery or any other AS, is
     not, and its table keeps its sorted order. A quoted name only reads a
-    column. ``tokens`` have no trivia.
+    column, and a quoted literal word other than ``null`` is not plain.
+    ``tokens`` have no trivia.
     """
     count = len(tokens)
     reads: list[str] = []
@@ -1771,25 +1814,34 @@ def _plain_reads(tokens: list[SQLToken], columns: set[str]) -> list[str] | None:
             elif word is not None and word in _LITERAL_WORDS:
                 operand = False
             elif word is not None and text_at(i + 1) == "(":
-                if word in _NOT_FUNCTIONS:
+                if word in _NOT_FUNCTIONS or word in _SPECIAL_ARGUMENT_FUNCTIONS:
+                    return None
+                if (
+                    word in _EXPRESSION_KEYWORDS
+                    and word != "cast"
+                    and word not in _KEYWORD_FUNCTIONS
+                ):
                     return None
                 i += 1
                 if text_at(i + 1) == ")":
                     i += 1
                     operand = False
-                elif word == "cast":
-                    frames.append("cast")
                 else:
-                    frames.append("special" if word in _SPECIAL_ARGUMENT_FUNCTIONS else "call")
+                    frames.append("cast" if word == "cast" else "call")
             elif word == "not" and text not in columns:
                 pass  # Unary NOT; the operand follows.
-            elif word is not None and (
-                word in _EXPRESSION_KEYWORDS or (frames and frames[-1] == "special")
-            ):
+            elif word is not None and word in _EXPRESSION_KEYWORDS:
                 return None
             elif token.kind in ("identifier", "quoted_identifier"):
                 name = identifier_name(token)
                 if name is None or name not in columns:
+                    return None
+                # A quoted ``true``, ``false``, ``inf``, ``nan`` or ``infinity``
+                # reads its column when ClickHouse creates the table or computes
+                # the default, but ALTER's cycle check reads it as a literal.
+                # Only ``null`` reads its column in both.
+                lower = name.lower()
+                if lower != "null" and lower in _LITERAL_WORDS:
                     return None
                 reads.append(name)
                 operand = False
@@ -1806,8 +1858,7 @@ def _plain_reads(tokens: list[SQLToken], columns: set[str]) -> list[str] | None:
         elif text == ",":
             if not frames or frames[-1] == "group":
                 return None
-            if frames[-1] == "cast":
-                frames[-1] = "call"
+            frames[-1] = "call"
             operand = True
         elif word == "as" and frames and frames[-1] == "cast":
             end = _parse_type(tokens, i + 1)
@@ -2016,11 +2067,24 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
     A name followed by ``(`` is a function call, not a column, and neither are
     the names ``_not_column_names`` finds.
     """
+    return _default_reads_and_tokens(definitions)[0]
+
+
+def _default_reads_and_tokens(
+    definitions: Sequence[SchemaDefinition],
+) -> tuple[dict[str, set[str]], dict[str, list[SQLToken]]]:
+    """``_column_default_reads``, with the tokens (no trivia) of each expression.
+
+    The tokens are by ``_table_id``, NUL and column name, so the cycle repair
+    does not tokenize them again.
+    """
     graph: dict[str, set[str]] = {}
+    tokens: dict[str, list[SQLToken]] = {}
     for definition in definitions:
         if not isinstance(definition, TableDefinition):
             continue
         prefix = f"table:{definition.database}.{definition.name}:column:"
+        table = _table_id(definition.database, definition.name)
         names = {column.name for column in definition.columns}
         for column in definition.columns:
             if column.default is None:
@@ -2028,21 +2092,26 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             parsed = parse_column_default(column.default)
             if parsed.kind != "expression":
                 continue
+            expression = [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)]
+            tokens[f"{table}\x00{column.name}"] = expression
             read: set[str] = set()
-            for name in _dotted_names(parsed.sql, names):
+            for name in _names_read(expression, names):
                 if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
-    return graph
+    return graph, tokens
 
 
 def _plain_facts(
-    definitions: Sequence[SchemaDefinition], tables: dict[str, None]
+    definitions: Sequence[SchemaDefinition],
+    tables: dict[str, None],
+    tokens: dict[str, list[SQLToken]],
 ) -> tuple[dict[str, dict[str, set[str]]], set[str]]:
     """For the ``tables``: ``_table_id`` to ``_column_id`` to the ``_column_id`` values it reads.
 
     The reads are ``_plain_reads``; the second value is the tables with an
-    expression that is not plain.
+    expression that is not plain. ``tokens`` are the expressions' tokens from
+    ``_default_reads_and_tokens``.
     """
     plain: dict[str, dict[str, set[str]]] = {}
     uncertain: set[str] = set()
@@ -2055,14 +2124,11 @@ def _plain_facts(
         table_plain = plain.setdefault(table, {})
         names = {column.name for column in definition.columns}
         for column in definition.columns:
-            if column.default is None:
+            # Only the columns with an expression have tokens.
+            expression = tokens.get(f"{table}\x00{column.name}")
+            if expression is None:
                 continue
-            parsed = parse_column_default(column.default)
-            if parsed.kind != "expression":
-                continue
-            certain = _plain_reads(
-                [token for token in tokenize_sql(parsed.sql) if not is_trivia(token)], names
-            )
+            certain = _plain_reads(expression, names)
             if certain is None:
                 uncertain.add(table)
                 continue
