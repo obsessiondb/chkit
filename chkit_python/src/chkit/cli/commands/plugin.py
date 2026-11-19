@@ -13,6 +13,7 @@ from __future__ import annotations
 
 import contextlib
 import sys
+import threading
 from collections.abc import Callable, Iterator
 from pathlib import Path
 from typing import Annotated, Any, NoReturn, cast
@@ -46,7 +47,7 @@ from chkit.core.flags import (
     expand_short_flags,
     parse_flags,
 )
-from chkit.core.model import ChxConfigEnv, ChxResolvedConfig
+from chkit.core.model import ChxConfigEnv, ChxResolvedClickHouseConfig, ChxResolvedConfig
 from chkit.plugins import (
     ChxGetContextInput,
     ChxOnConfigLoadedContext,
@@ -420,6 +421,61 @@ def dispatch_plugin_command(  # noqa: PLR0912, PLR0915
             raise typer.Exit(code=exit_code)
 
 
+class _LazyClickHouseClient:
+    """A :class:`ClickHouseClient` for the ``clickhouse`` block that connects
+    when a command first calls one of its methods. Reading its configuration,
+    looking a method up or closing it sends nothing; once closed it does not
+    connect again."""
+
+    def __init__(self, config: ChxResolvedClickHouseConfig) -> None:
+        self._config = config
+        self._client: ClickHouseClient | None = None
+        self._closed = False
+        self._lock = threading.Lock()
+
+    @property
+    def database(self) -> str:
+        return self._config.database
+
+    @property
+    def query_control_cluster(self) -> str | None:
+        return self._config.cluster
+
+    def _connected(self) -> ClickHouseClient:
+        with self._lock:
+            if self._closed:
+                msg = "The ClickHouse client is closed."
+                raise RuntimeError(msg)
+            if self._client is None:
+                self._client = ClickHouseClient.connect(self._config)
+            return self._client
+
+    def __getattr__(self, name: str) -> Any:
+        # Only the client's public methods; anything else (a private name, or
+        # a dunder `copy` looks up) is missing, as on an object without it.
+        method = getattr(ClickHouseClient, name, None) if not name.startswith("_") else None
+        if not callable(method):
+            raise AttributeError(name)
+
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return getattr(self._connected(), name)(*args, **kwargs)
+
+        return call
+
+    def __enter__(self) -> _LazyClickHouseClient:
+        return self
+
+    def __exit__(self, *_exc: object) -> None:
+        self.close()
+
+    def close(self) -> None:
+        with self._lock:
+            self._closed = True
+            client, self._client = self._client, None
+        if client is not None:
+            client.close()
+
+
 def _run_command(
     runtime: PluginRuntime,
     config: ChxResolvedConfig,
@@ -432,20 +488,16 @@ def _run_command(
     flags: ParsedFlags,
     table_scope: TableScope,
 ) -> int:
-    # Connect opportunistically — some plugin commands don't need a DB
-    # (codegen, backfill status, ...). Mirroring TS, an unreachable
-    # ClickHouse must not block those: fall back to a null context and let
-    # commands that genuinely need an executor report it themselves.
+    # As TS createClickHouseExecutor, the default executor connects on first
+    # use: a command that sends no SQL (codegen, or one a plugin's get_context
+    # gives its own executor) never connects to the `clickhouse` block, and
+    # one that does gets the connection error.
     plugin_context = null_plugin_context()
     cm = None
     if config.clickhouse is not None:
-        try:
-            cm = ClickHouseClient.connect(config.clickhouse)
-        except Exception:
-            cm = None
+        cm = _LazyClickHouseClient(config.clickhouse)
+        plugin_context = make_plugin_context(cast("ClickHouseClient", cm))
     try:
-        if cm is not None:
-            plugin_context = make_plugin_context(cm)
         ctx = ChxPluginCommandContext(
             plugin_name=plugin_name,
             config=config,
