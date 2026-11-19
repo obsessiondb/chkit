@@ -144,6 +144,12 @@ def test_migrate_apply_creates_a_missing_database(
         assert chkit_json("migrate", "--apply", exit_code=1)["error"]["code"] == (
             "async_needs_lock"
         )
+        # #810: with the lock turned off the run holds none either.
+        monkeypatch.setenv("CHKIT_MIGRATE_LOCK", "off")
+        assert chkit_json("migrate", "--apply", exit_code=1)["error"]["code"] == (
+            "async_needs_lock"
+        )
+        monkeypatch.delenv("CHKIT_MIGRATE_LOCK")
         applied = chkit_json("migrate", "--apply")
         assert [entry["name"] for entry in applied["applied"]] == [migration.name]
 

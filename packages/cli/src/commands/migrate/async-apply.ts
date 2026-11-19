@@ -13,6 +13,7 @@ import {
 import { rejectionRunsNothing } from '../../runtime/safety-markers.js'
 import { CLI_VERSION } from '../../runtime/version.js'
 import { inProgressChecksumMismatchError, MigrateError } from './errors.js'
+import { asyncWithoutLockAccepted, migrateLockDisabled } from './lock.js'
 import { assertCompletedStatement, hasStatementProgress } from './recovery.js'
 import type { QueryTracker } from './query-intents.js'
 
@@ -197,6 +198,14 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     throw new MigrateError(
       'async_needs_lock',
       `Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}) was not submitted: this run holds no migrate lock, because the target database did not exist when it started, and two runs without the lock could both submit it. The statements before it are recorded. Run chkit migrate --apply again: the database exists now, so that run takes the migrate lock and submits the statement.`,
+    )
+  }
+  // The same holds for a run with the lock turned off, unless the user
+  // accepts the risk (#810).
+  if (migrateLockDisabled() && !asyncWithoutLockAccepted()) {
+    throw new MigrateError(
+      'async_needs_lock',
+      `Async migration step ${operationType} (statement ${statementIndex + 1} of ${migrationName}) was not submitted: CHKIT_MIGRATE_LOCK is off, so this run holds no migrate lock, and two runs without the lock could both submit it. The statements before it are recorded. Unset CHKIT_MIGRATE_LOCK and run chkit migrate --apply again to submit it under the lock. When the lock cannot work on this target (migrate_lock_unverifiable) and no other migrate runs against it, set CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK=1 to submit it without the lock.`,
     )
   }
 

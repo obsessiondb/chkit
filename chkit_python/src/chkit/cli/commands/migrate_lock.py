@@ -140,6 +140,13 @@ def migrate_lock_disabled() -> bool:
     return value in ("off", "0", "false")
 
 
+def async_without_lock_accepted() -> bool:
+    """Whether CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK lets a run with the lock off
+    submit async statements (#810)."""
+    value = (os.environ.get("CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK") or "").strip().lower()
+    return value in ("1", "true", "on")
+
+
 def _escape(value: str) -> str:
     return value.replace("\\", "\\\\").replace("'", "\\'")
 
@@ -746,6 +753,7 @@ __all__ = [
     "LockTimings",
     "MigrateLock",
     "acquire_migrate_lock",
+    "async_without_lock_accepted",
     "claim_insert_sql",
     "claims_select_sql",
     "migrate_lock_disabled",
