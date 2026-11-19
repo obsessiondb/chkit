@@ -11,7 +11,7 @@ import {
 } from '@chkit/clickhouse/e2e-testkit'
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
-import { executeBackfill, type BackfillProgress, type BackfillResult } from './async-backfill.js'
+import { CHECKPOINT_VERSION, executeBackfill, type BackfillProgress, type BackfillResult } from './async-backfill.js'
 import { analyzeAndChunk } from './chunking/analyze.js'
 import { buildChunkExecutionSql } from './chunking/sql.js'
 import type { ChunkPlan, PlannerQuery } from './chunking/types.js'
@@ -312,6 +312,8 @@ describe('e2e: executeBackfill against a live cluster', () => {
       concurrency: 3,
       pollIntervalMs: 1500,
       resumeFrom,
+      // Progress this release saved: a chunk it does not list never ran.
+      checkpointVersion: CHECKPOINT_VERSION,
     })
 
     expect(result.failed).toBe(0)
@@ -351,7 +353,7 @@ describe('e2e: executeBackfill against a live cluster', () => {
       ),
     }
 
-    const result = await executeBackfill({
+    const replay = (acceptUnknown: boolean) => executeBackfill({
       executor: runExecutor,
       planId: `${plan.planId}-replay`,
       chunks: plan.chunks,
@@ -360,11 +362,219 @@ describe('e2e: executeBackfill against a live cluster', () => {
       pollIntervalMs: 1500,
       resumeFrom,
       replayFailed: true,
+      acceptUnknown,
     })
+
+    // #765: the checkpoint says failed, but the server has no row of the
+    // chunk, so nothing proves it did not write its rows: no replay.
+    await expect(replay(false)).rejects.toThrow(
+      `the outcome of the last attempt is unknown for chunk ${failedId} (query_id backfill-${plan.planId}-replay-${failedId}): it is not running on any replica and system.query_log has no outcome for it.`,
+    )
+    expect(await readTargetRows()).toBe(partial)
+
+    const result = await replay(true)
 
     expect(result.failed).toBe(0)
     expect(result.completed).toBe(plan.chunks.length)
     const targetRows = await settledTargetRows()
     expect(targetRows).toBe(SOURCE_ROWS)
+  }, 240_000)
+
+  // #765: a replay started right after the failure used to reuse the failed
+  // attempt's query id, so polling read that attempt's ExceptionWhileProcessing
+  // row in the query_log flush gap and marked the finished replay failed.
+  test('a replay started right after a chunk failed ends done', async () => {
+    await truncateTarget()
+    await waitUntilSourceVisible()
+
+    const chunkIds = plan.chunks.map((chunk) => chunk.id)
+    const failedId = chunkIds[0]
+    if (!failedId) throw new Error('plan produced no chunks')
+    const succeededIds = chunkIds.slice(1)
+    for (const id of succeededIds) {
+      await ddl.command(sqlForChunk(id))
+    }
+
+    const planId = `${plan.planId}-quick-replay`
+    const firstId = `backfill-${planId}-${failedId}`
+    // The first attempt fails while it runs, which query_log records as
+    // ExceptionWhileProcessing, the row a KILL QUERY also leaves. The submit
+    // fails with it (the server resets the started response), so the run
+    // stops before it records the outcome, like the run in #765. Its id is
+    // saved before the send, sent once.
+    const firstRun: BackfillProgress[] = []
+    await expect(
+      executeBackfill({
+        executor: runExecutor,
+        planId,
+        chunks: [{ id: failedId }],
+        buildQuery: () => 'SELECT throwIf(number = 3, \'chunk failed\') FROM numbers(10) SETTINGS max_block_size = 1',
+        pollIntervalMs: 100,
+        onProgress: (progress) => { firstRun.push(progress) },
+      }),
+    ).rejects.toThrow()
+    const logged = await pollUntil(
+      () => runExecutor.queryStatus(firstId),
+      (status) => status.status === 'failed',
+    )
+    expect(logged.status).toBe('failed')
+
+    // Replay at once: the failure is seconds old.
+    const resumeFrom: BackfillProgress = {
+      ...firstRun.at(-1),
+      ...Object.fromEntries(succeededIds.map((id) => [id, { status: 'done' as const }])),
+    }
+    expect(resumeFrom[failedId]).toEqual({ status: 'pending', queryId: firstId, singleSend: true })
+    const replay = await executeBackfill({
+      executor: runExecutor,
+      planId,
+      chunks: plan.chunks,
+      buildQuery: ({ id }) => sqlForChunk(id),
+      pollIntervalMs: 100,
+      resumeFrom,
+      checkpointVersion: CHECKPOINT_VERSION,
+      replayFailed: true,
+    })
+
+    expect(replay.progress[failedId]?.status).toBe('done')
+    expect(replay.progress[failedId]?.queryId).not.toBe(firstId)
+    expect(replay.failed).toBe(0)
+    expect(await settledTargetRows()).toBe(SOURCE_ROWS)
+  }, 240_000)
+
+  // #765: a run that dies while a replay's INSERT runs leaves the chunk
+  // pending under the replay's id. A resume right after the INSERT committed
+  // must find its outcome, not run the chunk a second time.
+  test('a resume right after a replay committed records it done without running it again', async () => {
+    await truncateTarget()
+    await waitUntilSourceVisible()
+
+    const chunkIds = plan.chunks.map((chunk) => chunk.id)
+    const replayedId = chunkIds[0]
+    if (!replayedId) throw new Error('plan produced no chunks')
+    const succeededIds = chunkIds.slice(1)
+    for (const id of succeededIds) {
+      await ddl.command(sqlForChunk(id))
+    }
+
+    const planId = `${plan.planId}-committed-replay`
+    const replayId = `backfill-${planId}-${replayedId}-committed`
+    await runExecutor.submit(sqlForChunk(replayedId), replayId)
+
+    const submits: string[] = []
+    const resumed = await executeBackfill({
+      executor: {
+        ...runExecutor,
+        submit: async (sql, id) => {
+          submits.push(id ?? sql)
+          return runExecutor.submit(sql, id)
+        },
+      },
+      planId,
+      chunks: plan.chunks,
+      buildQuery: ({ id }) => sqlForChunk(id),
+      pollIntervalMs: 100,
+      resumeFrom: {
+        [replayedId]: { status: 'pending', queryId: replayId, submittedAt: new Date(Date.now() - 60 * 60_000).toISOString() },
+        ...Object.fromEntries(succeededIds.map((id) => [id, { status: 'done' as const }])),
+      },
+    })
+
+    expect(submits).toEqual([])
+    expect(resumed.progress[replayedId]).toMatchObject({ status: 'done', queryId: replayId })
+    expect(await settledTargetRows()).toBe(SOURCE_ROWS)
+  }, 240_000)
+
+  // #765: a recorded attempt that left no row in query_log (log_queries = 0
+  // here; a slow or disabled log does the same) may have written its rows.
+  // The resume stops; --accept-unknown replays it under a new id.
+  test('a resume stops on a recorded attempt query_log has no row of, and --accept-unknown replays it', async () => {
+    await truncateTarget()
+    await waitUntilSourceVisible()
+
+    const chunkIds = plan.chunks.map((chunk) => chunk.id)
+    const recordedId = chunkIds[0]
+    if (!recordedId) throw new Error('plan produced no chunks')
+    const succeededIds = chunkIds.slice(1)
+    for (const id of succeededIds) {
+      await ddl.command(sqlForChunk(id))
+    }
+
+    const planId = `${plan.planId}-unlogged`
+    const attemptId = `backfill-${planId}-${recordedId}-unlogged`
+    await runExecutor.submit('SELECT 1 SETTINGS log_queries = 0', attemptId)
+
+    const submits: string[] = []
+    const resume = (acceptUnknown: boolean) => executeBackfill({
+      executor: {
+        ...runExecutor,
+        submit: async (sql, id) => {
+          submits.push(id ?? sql)
+          return runExecutor.submit(sql, id)
+        },
+      },
+      planId,
+      chunks: plan.chunks,
+      buildQuery: ({ id }) => sqlForChunk(id),
+      pollIntervalMs: 100,
+      acceptUnknown,
+      resumeFrom: {
+        [recordedId]: { status: 'pending', queryId: attemptId, submittedAt: new Date(Date.now() - 60 * 60_000).toISOString() },
+        ...Object.fromEntries(succeededIds.map((id) => [id, { status: 'done' as const }])),
+      },
+    })
+
+    await expect(resume(false)).rejects.toThrow(
+      `the outcome of the last attempt is unknown for chunk ${recordedId} (query_id ${attemptId}): it is not running on any replica and system.query_log has no outcome for it.`,
+    )
+    expect(submits).toEqual([])
+
+    const accepted = await resume(true)
+
+    expect(submits).toHaveLength(1)
+    expect(submits[0]).not.toBe(attemptId)
+    expect(accepted.progress[recordedId]).toMatchObject({ status: 'done', queryId: submits[0] })
+    expect(await settledTargetRows()).toBe(SOURCE_ROWS)
+  }, 240_000)
+
+  // #765 round 2: a chunk that fails after a block committed leaves those
+  // rows in the target; --replay-failed must not write them again.
+  test('a chunk that failed after writing rows is not replayed by --replay-failed', async () => {
+    await truncateTarget()
+
+    const chunkId = plan.chunks[0]?.id
+    if (!chunkId) throw new Error('plan produced no chunks')
+    const planId = `${plan.planId}-late-failure`
+    const lateFailure = `INSERT INTO ${targetFqn} (id, bucket, payload) SELECT number, 0, 'x' FROM numbers(100000) WHERE throwIf(number = 50000, 'late block') = 0 SETTINGS max_block_size = 1000, max_insert_block_size = 1000, min_insert_block_size_rows = 1000, min_insert_block_size_bytes = 0, max_threads = 1, insert_deduplicate = 0`
+    const saved: BackfillProgress[] = []
+    await expect(
+      executeBackfill({
+        executor: runExecutor,
+        planId,
+        chunks: [{ id: chunkId }],
+        buildQuery: () => lateFailure,
+        pollIntervalMs: 100,
+        onProgress: (progress) => { saved.push(progress) },
+      }),
+    ).rejects.toThrow('late block')
+    const written = await pollUntil(readTargetRows, (rows) => rows > 0)
+    expect(written).toBeGreaterThan(0)
+    expect(written).toBeLessThan(100000)
+
+    const submits: string[] = []
+    await expect(
+      executeBackfill({
+        executor: { ...runExecutor, submit: async (sql, id) => { submits.push(id ?? sql); return runExecutor.submit(sql, id) } },
+        planId,
+        chunks: [{ id: chunkId }],
+        buildQuery: () => lateFailure,
+        pollIntervalMs: 100,
+        resumeFrom: saved.at(-1),
+        checkpointVersion: CHECKPOINT_VERSION,
+        replayFailed: true,
+      }),
+    ).rejects.toThrow(`the outcome of the last attempt is unknown for chunk ${chunkId} (query_id backfill-${planId}-${chunkId}): it failed after writing`)
+    expect(submits).toEqual([])
+    expect(await readTargetRows()).toBe(written)
   }, 240_000)
 })
