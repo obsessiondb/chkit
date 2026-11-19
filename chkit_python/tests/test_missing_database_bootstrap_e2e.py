@@ -70,7 +70,7 @@ def _assert_async_load_journaled(live: ClickHouseClient, database: str, journal_
     assert count.rows[0]["n"] == "3"
 
 
-def test_migrate_apply_creates_a_missing_database(
+def test_migrate_apply_creates_a_missing_database(  # noqa: PLR0915
     live: ClickHouseClient, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     env = resolve_live_env()

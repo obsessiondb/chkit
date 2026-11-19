@@ -999,13 +999,19 @@ describe('applyAsyncStatement', () => {
   // #810: a run with CHKIT_MIGRATE_LOCK=off holds no lock either, so it stops
   // the same way unless CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK accepts the risk.
   describe('with CHKIT_MIGRATE_LOCK=off', () => {
+    const saved = { lock: process.env.CHKIT_MIGRATE_LOCK, accept: process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK }
+    const restore = (name: string, value: string | undefined) => {
+      if (value === undefined) delete process.env[name]
+      else process.env[name] = value
+    }
     afterEach(() => {
-      delete process.env.CHKIT_MIGRATE_LOCK
-      delete process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK
+      restore('CHKIT_MIGRATE_LOCK', saved.lock)
+      restore('CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK', saved.accept)
     })
 
     test('a run stops before an async statement with async_needs_lock', async () => {
       process.env.CHKIT_MIGRATE_LOCK = 'off'
+      delete process.env.CHKIT_MIGRATE_ASYNC_WITHOUT_LOCK
       const fake = createFakeExecutor([{ status: 'unknown' }])
       const { store, writes } = createFakeJournalStore(null)
 
