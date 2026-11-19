@@ -1,0 +1,269 @@
+---
+title: We love how Tinybird lets you build features. So chkit does it too
+description: "Tinybird made an analytics feature three files: a datasource, a pipe and an endpoint. chkit gives you the same workflow on any ClickHouse, and converts your Tinybird project."
+date: 2026-11-19
+authors: obsessiondb
+excerpt: "Tinybird made an analytics feature three files: a datasource, a pipe and an endpoint. Here is the same workflow in chkit, on any ClickHouse, and how to convert a Tinybird project."
+tags:
+  - clickhouse
+  - tinybird
+---
+
+import { Tabs, TabItem } from '@astrojs/starlight/components'
+
+Product engineers who have used Tinybird rarely mention ClickHouse® when they talk about what they liked. You hear about how a feature got built. A "top pages" widget for a customer dashboard is three files: a datasource for the raw events, a pipe that rolls them up, and an endpoint that answers the widget's question with a couple of params. They live in the repository next to the app, go through code review, and ship with one command. A team can build one in an afternoon.
+
+We think it is one of the best workflows analytics tooling has produced in the last few years, and we wanted it everywhere. Not only on one platform: on any ClickHouse, including the one you already run.
+
+So we made sure chkit can do the same. This post shows what we ported from Tinybird, how one feature looks end to end in chkit, where the two differ, and, if you are moving a Tinybird project to chkit, how to convert it.
+
+## What Tinybird got right
+
+That simplicity comes from a few deliberate design decisions:
+
+1. **Few primitives.** Datasources hold data. Pipes transform it, either on insert (materialized) or on a schedule (copy). Endpoints read it. That is the whole vocabulary, and most analytics features fit into it.
+2. **The definition is the deployment.** Since Tinybird Forward, you never write `CREATE TABLE` and then a separate migration to change it. You edit the datafile and run `tb deploy`; the platform works out what changes.
+3. **The query is the API.** An endpoint declares its params with types and defaults, and the product code calls it like a function over HTTP.
+
+None of these need a specific vendor. They are a way of working, and they map one to one onto ClickHouse objects. That is the part we brought to chkit.
+
+## The same primitives, on any ClickHouse
+
+| Tinybird | chkit |
+|----------|-------|
+| Datasource | `table()` |
+| Materialized pipe | `materializedView({ to, as })` |
+| Copy pipe with a schedule | `materializedView({ to, as, refresh })` |
+| Endpoint with typed params | [`` query`…` ``](/schema/queries/) with `p` params |
+| `tb deploy` | `chkit generate` + `chkit migrate --apply` |
+
+Everything on the right is TypeScript or Python in your repository (typed queries are TypeScript only for now), and everything it creates is a plain ClickHouse object: a table, a materialized view, a refreshable materialized view, a SELECT. It runs against ObsessionDB, ClickHouse Cloud, Altinity, your own servers, or a Docker container on your laptop.
+
+## One feature, end to end
+
+Here is that "top pages" widget. Customers see their most visited pages over a date range.
+
+**The datasource.** Raw pageviews, sorted the way the dashboard reads them. Switch the tabs to see the same object as a Tinybird Forward datafile:
+
+<Tabs syncKey="tinybird-chkit">
+<TabItem label="chkit">
+
+```ts title="src/db/schema/pageviews.ts"
+import { materializedView, table } from '@chkit/core'
+
+export const pageviews = table({
+  database: 'analytics',
+  name: 'pageviews',
+  engine: 'MergeTree',
+  columns: [
+    { name: 'site_id', type: 'LowCardinality(String)' },
+    { name: 'path', type: 'String' },
+    { name: 'ts', type: 'DateTime' },
+  ],
+  orderBy: ['site_id', 'ts'],
+  partitionBy: 'toYYYYMM(ts)',
+  ttl: 'ts + INTERVAL 13 MONTH',
+})
+```
+
+</TabItem>
+<TabItem label="Tinybird Forward">
+
+```txt title="datasources/pageviews.datasource"
+SCHEMA >
+    `site_id` LowCardinality(String) `json:$.site_id`,
+    `path` String `json:$.path`,
+    `ts` DateTime `json:$.ts`
+
+ENGINE "MergeTree"
+ENGINE_SORTING_KEY "site_id, ts"
+ENGINE_PARTITION_KEY "toYYYYMM(ts)"
+ENGINE_TTL "ts + INTERVAL 13 MONTH"
+```
+
+</TabItem>
+</Tabs>
+
+The `json:$.…` paths tell Tinybird's Events API where to find each column in the incoming JSON. They are ingestion, not schema, so chkit has no equivalent: you insert the rows yourself (more on that below).
+
+**The pipe.** A materialized view that keeps a daily count per page as rows arrive, so the dashboard reads thousands of rows instead of millions:
+
+<Tabs syncKey="tinybird-chkit">
+<TabItem label="chkit">
+
+```ts
+export const dailyPageviews = table({
+  database: 'analytics',
+  name: 'daily_pageviews',
+  engine: 'SummingMergeTree',
+  columns: [
+    { name: 'site_id', type: 'LowCardinality(String)' },
+    { name: 'day', type: 'Date' },
+    { name: 'path', type: 'String' },
+    { name: 'views', type: 'UInt64' },
+  ],
+  orderBy: ['site_id', 'day', 'path'],
+})
+
+export const dailyPageviewsMv = materializedView({
+  database: 'analytics',
+  name: 'daily_pageviews_mv',
+  to: { database: 'analytics', name: 'daily_pageviews' },
+  as: `
+    SELECT site_id, toDate(ts) AS day, path, count() AS views
+    FROM analytics.pageviews
+    GROUP BY site_id, day, path
+  `,
+})
+```
+
+</TabItem>
+<TabItem label="Tinybird Forward">
+
+```txt title="datasources/daily_pageviews.datasource"
+SCHEMA >
+    `site_id` LowCardinality(String),
+    `day` Date,
+    `path` String,
+    `views` UInt64
+
+ENGINE "SummingMergeTree"
+ENGINE_SORTING_KEY "site_id, day, path"
+```
+
+```txt title="materializations/daily_pageviews_mv.pipe"
+NODE daily_pageviews_node
+SQL >
+    SELECT site_id, toDate(ts) AS day, path, count() AS views
+    FROM pageviews
+    GROUP BY site_id, day, path
+
+TYPE materialized
+DATASOURCE daily_pageviews
+```
+
+</TabItem>
+</Tabs>
+
+If the rollup should run on a schedule instead, the way a copy pipe does, add `refresh: { every: '1 HOUR' }`. ClickHouse then runs it as a refreshable materialized view.
+
+**The deploy.** chkit diffs the schema against what is already applied and writes the SQL for you:
+
+```sh
+chkit generate --name top_pages
+chkit migrate --apply
+```
+
+The migration is a reviewable SQL file in `chkit/migrations/`. If you change the TTL next month, `chkit generate` writes the `ALTER`. If you change the sorting key, it warns you before anything runs that this means a drop and recreate, and blocks it until you approve it. `chkit check` in CI fails the build if production has drifted from the code.
+
+**The endpoint.** A typed query. The params are declared inline, with their ClickHouse types and defaults:
+
+<Tabs syncKey="tinybird-chkit">
+<TabItem label="chkit">
+
+```ts title="src/db/queries/top-pages.ts"
+import { p } from '@chkit/core'
+import { query } from '../client'
+import { dailyPageviews } from '../schema/pageviews'
+
+export const topPages = query({ name: 'top_pages' })`
+  SELECT path, sum(views) AS views
+  FROM ${dailyPageviews}
+  WHERE site_id = ${p.string('site_id')}
+    AND day BETWEEN ${p.date('start_date')} AND ${p.date('end_date')}
+  GROUP BY path
+  ORDER BY views DESC
+  LIMIT ${p.uint32('limit').default(10)}
+`
+```
+
+</TabItem>
+<TabItem label="Tinybird Forward">
+
+```txt title="endpoints/top_pages.pipe"
+NODE endpoint
+SQL >
+    %
+    SELECT path, sum(views) AS views
+    FROM daily_pageviews
+    WHERE site_id = {{ String(site_id, required=True) }}
+      AND day BETWEEN {{ Date(start_date, required=True) }} AND {{ Date(end_date, required=True) }}
+    GROUP BY path
+    ORDER BY views DESC
+    LIMIT {{ UInt32(limit, 10) }}
+
+TYPE endpoint
+```
+
+</TabItem>
+</Tabs>
+
+The params become ClickHouse query parameters, never string concatenation, and every value is validated against its type before the query is sent. The query also tags itself in `system.query_log` with its name and version, so you can find every run of `top_pages` and see what it costs.
+
+**Serving it.** This is the one step that looks different. chkit does not host an API: your app is the API, so the query is a function you call from a route you already have:
+
+```ts title="app/api/top-pages/route.ts"
+import { topPages } from '@/db/queries/top-pages'
+import { getSession } from '@/auth'
+
+export async function POST(req: Request) {
+  const session = await getSession(req)
+  const input = topPages.params.safeParse({
+    ...(await req.json()),
+    site_id: session.siteId,
+  })
+  if (!input.success) return Response.json(input.error.issues, { status: 400 })
+  return Response.json(await topPages(input.data))
+}
+```
+
+The tenant comes from your session, not from the request body, and the rows come back typed. The whole feature is four files, one migration and one route.
+
+## Where the two differ
+
+chkit brings the workflow, not the platform. Some things Tinybird does for you are yours to do with chkit, and you should know which before you choose:
+
+- **Hosting the endpoints.** Tinybird serves endpoints over HTTP and handles tokens and rate limits. With chkit the query runs inside your app, so auth, caching and rate limits are your app's. For most product teams that is one fewer service and one fewer set of credentials. For a public API with no backend of your own, it is extra work.
+- **Ingestion.** Tinybird has an Events API and managed connectors. chkit manages the schema, not the data path: you insert with the ClickHouse client, use ClickHouse's Kafka engine, or pull from application APIs with [chkit Sync](/sync/).
+- **Templated endpoints.** Tinybird pipes can branch with `{% if %}`. A chkit query is a TypeScript value, so you branch in TypeScript and compose queries as subqueries instead.
+- **Branches and preview environments.** chkit has no zero-copy branches. You get a reviewable migration per change, a drift gate in CI, and any ClickHouse you point it at, including a local one.
+- **TypeScript only, for queries.** The schema toolkit also exists in Python (chkit-py), but typed queries are TypeScript today.
+- **Beta.** As we said in [our launch post](/blog/olap-deserves-better-tooling/), chkit runs our own production workloads, but small breaking changes are still possible before 1.0.
+
+## Moving off Tinybird? Bring the project with you
+
+If you have built features this way already, you should not have to rewrite them. `@chkit/plugin-tinybird` reads a Tinybird Forward project folder and writes the chkit schema that creates the same objects on plain ClickHouse:
+
+```sh
+bun add -d chkit @chkit/core @chkit/plugin-tinybird
+chkit plugin tinybird import --project ./tinybird --database analytics --report ./tinybird-import.json
+chkit generate --name import_tinybird
+chkit migrate --apply
+```
+
+- Datasources become `table()` definitions, with engine parameters, sorting, partition and primary keys, TTL, settings and skip indexes.
+- Materialized pipes become materialized views, with multi-node pipes resolved into the single SELECT Tinybird sends to ClickHouse.
+- Copy pipes become refreshable materialized views, with the cron schedule translated to `REFRESH EVERY … OFFSET …` when ClickHouse fires at the same instants.
+- Endpoints become typed queries, with each param keeping its type and default.
+
+We check the translation object by object against what Tinybird itself creates on Tinybird Local: the stored `CREATE` statements, the SQL each copy runs and when, and the SQL each endpoint renders with and without its params.
+
+It also tells you what it cannot do. Templated endpoints, ingestion, tokens, sinks, `ENGINE_SAMPLING_KEY` and on-demand copies are not translated, and every one is listed with the reason, in the output, the JSON report and the head of the generated file. The import reads only local files: it never calls Tinybird and never changes your workspace. If you use a coding agent, the `chkit-tinybird` skill walks it through the whole move, including the parts that need you.
+
+We have done this move by hand before. When we took [Osmosis's real-time data API](https://obsessiondb.com/blog/migrate-from-tinybird-to-obsessiondb-osmosis) off Tinybird, its schema became 63 tables, 43 materialized views and 23 endpoint queries in chkit, written one by one. The plugin now does that first pass for you, and leaves you the parts that need a decision.
+
+## The rule we took from Tinybird
+
+The simplicity comes from the primitives, not the platform: a place for data, a transformation, a typed question, all in code, deployed by diff. As long as you keep those four, you can build an analytics feature in an afternoon on any ClickHouse you like.
+
+That is the standard we hold chkit to. If building a feature with chkit takes noticeably longer than it did on Tinybird, we consider that a bug, and we would like to hear about it.
+
+```sh
+bun create chkit@latest
+```
+
+Start with [getting started](/getting-started/), or read the [Tinybird plugin docs](/plugins/tinybird/) for the full translation rules. The source is on [GitHub](https://github.com/obsessiondb/chkit), MIT licensed. And if you want managed ClickHouse to point it at, that is what we do at [ObsessionDB](https://obsessiondb.com).
+
+---
+
+*ClickHouse® is a registered trademark of ClickHouse, Inc. Tinybird is a trademark of its respective owner; chkit is not affiliated with or endorsed by Tinybird.*
