@@ -578,6 +578,13 @@ describe('orderByDependencies', () => {
   test('ignores prerequisites that are not in the list', () => {
     expect(orderByDependencies(['a', 'b'], (x) => x, () => ['zzz'])).toEqual(['a', 'b'])
   })
+
+  test('keeps a 50,000-item dependency cycle in input order without overflowing the stack', () => {
+    // Item i needs i+1 and the last item needs 0: the search walks all 50,000 before it returns.
+    const n = 50_000
+    const items = Array.from({ length: n }, (_, i) => i)
+    expect(orderByDependencies(items, String, (key) => [String((Number(key) + 1) % n)])).toEqual(items)
+  })
 })
 
 describe('planDiff orders ADD COLUMNs by the columns their expressions read (#681)', () => {
@@ -758,6 +765,18 @@ describe('planDiff orders the column statements of a table by the columns they r
         [t([])]
       )
     ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;'])
+  })
+
+  test('drops a 3,000-column ALIAS chain from the last column to the first', () => {
+    const n = 3000
+    const columns: ColumnDefinition[] = Array.from({ length: n }, (_, i) =>
+      i === 0
+        ? { name: 'c0', type: 'UInt64' }
+        : { name: `c${i}`, type: 'UInt64', defaultKind: 'ALIAS', default: { expression: `c${i - 1} + 1` } }
+    )
+    expect(sqls([t(columns)], [t([])])).toEqual(
+      Array.from({ length: n }, (_, i) => `ALTER TABLE app.t DROP COLUMN IF EXISTS \`c${n - 1 - i}\`;`)
+    )
   })
 
   test('drops a dotted column after the MODIFY of the column whose old expression reads it unquoted', () => {
