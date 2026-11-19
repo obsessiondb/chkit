@@ -578,6 +578,15 @@ describe('orderByDependencies', () => {
   test('ignores prerequisites that are not in the list', () => {
     expect(orderByDependencies(['a', 'b'], (x) => x, () => ['zzz'])).toEqual(['a', 'b'])
   })
+
+  test('orders a 50,000-deep prerequisite chain without overflowing the stack', () => {
+    // Item 0 needs n-1, which needs n-2, … down to 1.
+    const n = 50_000
+    const items = Array.from({ length: n }, (_, i) => i)
+    const prerequisite = (i: number) => (i === 0 ? n - 1 : i - 1)
+    const ordered = orderByDependencies(items, String, (key) => (key === '1' ? [] : [String(prerequisite(Number(key)))]))
+    expect(ordered).toEqual([...items.slice(1), 0])
+  })
 })
 
 describe('planDiff orders ADD COLUMNs by the columns their expressions read (#681)', () => {
@@ -758,6 +767,18 @@ describe('planDiff orders the column statements of a table by the columns they r
         [t([])]
       )
     ).toEqual(['ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;', 'ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;'])
+  })
+
+  test('drops a 3,000-column ALIAS chain from the last column to the first', () => {
+    const n = 3000
+    const columns: ColumnDefinition[] = Array.from({ length: n }, (_, i) =>
+      i === 0
+        ? { name: 'c0', type: 'UInt64' }
+        : { name: `c${i}`, type: 'UInt64', defaultKind: 'ALIAS', default: { expression: `c${i - 1} + 1` } }
+    )
+    expect(sqls([t(columns)], [t([])])).toEqual(
+      Array.from({ length: n }, (_, i) => `ALTER TABLE app.t DROP COLUMN IF EXISTS \`c${n - 1 - i}\`;`)
+    )
   })
 
   test('drops a dotted column after the MODIFY of the column whose old expression reads it unquoted', () => {

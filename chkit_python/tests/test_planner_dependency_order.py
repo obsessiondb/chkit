@@ -667,6 +667,18 @@ def test_order_ignores_prerequisites_not_in_the_list() -> None:
     assert order_by_dependencies(["a", "b"], lambda x: x, lambda _: ["zzz"]) == ["a", "b"]
 
 
+def test_order_handles_a_50000_deep_prerequisite_chain_without_recursion_error() -> None:
+    # Item 0 needs n-1, which needs n-2, ... down to 1.
+    n = 50_000
+    items = list(range(n))
+
+    def prerequisites(key: str) -> list[str]:
+        i = int(key)
+        return [] if i == 1 else [str(n - 1 if i == 0 else i - 1)]
+
+    assert order_by_dependencies(items, str, prerequisites) == [*items[1:], 0]
+
+
 # ---------- ADD COLUMN order by the columns an expression reads (#681) ----------
 
 
@@ -820,6 +832,17 @@ def test_drops_a_column_after_the_dropped_column_whose_expression_reads_it() -> 
     ) == [
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `b`;",
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;",
+    ]
+
+
+def test_drops_a_3000_column_alias_chain_from_the_last_column_to_the_first() -> None:
+    n = 3000
+    columns: list[dict[str, Any]] = [{"name": "c0", "type": "UInt64"}] + [
+        {"name": f"c{i}", "type": "UInt64", "default_kind": "ALIAS", "default": _expr(f"c{i - 1} + 1")}
+        for i in range(1, n)
+    ]
+    assert _sqls([_t(columns)], [_t([])]) == [
+        f"ALTER TABLE app.t DROP COLUMN IF EXISTS `c{i}`;" for i in reversed(range(n))
     ]
 
 
