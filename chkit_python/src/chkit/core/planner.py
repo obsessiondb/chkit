@@ -1034,11 +1034,13 @@ def _dotted_names(sql: str, columns: set[str]) -> list[str]:
     ``t.col`` and ``db.t.col`` read ``col`` (#748). A tuple element by position
     ends the run: ``t.1.a`` reads ``t``. A run followed by ``(`` is a function
     call, not a column, and a run that starts on a name ``_not_column_names``
-    skips reads nothing, so ``a -> a.x`` reads no ``a.x`` (#768).
+    skips reads nothing, so ``a -> a.x`` reads no ``a.x`` (#768). Nor does a
+    keyword ``_keyword_names`` finds (#805).
     """
     tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
     skipped = _not_column_names(tokens)
     found: list[str] = []
+    keywords = _keyword_names(tokens, columns, skipped)
     i = 0
     while i < len(tokens):
         first = i
@@ -1066,7 +1068,7 @@ def _dotted_names(sql: str, columns: set[str]) -> list[str]:
                 i += 1
         if not run:
             i += 1
-        if (i < len(tokens) and tokens[i].text == "(") or first in skipped:
+        if (i < len(tokens) and tokens[i].text == "(") or first in skipped or first in keywords:
             continue
         for start in range(len(run)):
             match = _longest_column_prefix(run[start:], columns)
@@ -1250,6 +1252,107 @@ def _closing_paren(tokens: list[SQLToken], open_: int) -> int:
             if depth == 0:
                 return j
     return len(tokens)
+
+
+# Bare words ClickHouse reads as literals (any case), even when a column has
+# that name (#805). A quoted ``null`` reads its column.
+_LITERAL_WORDS = frozenset({"false", "inf", "infinity", "nan", "null", "true"})
+# Keywords that follow an operand (``x IS NULL``, ``CASE x WHEN 1 THEN 2 END``,
+# ``substring(s FROM 1 FOR 2)``, ``x AS y``). ClickHouse reads a column of that
+# name where an operand is expected (``end + 1``, ``THEN end``, ``x AND end``).
+_INFIX_KEYWORDS = frozenset(
+    {
+        "and", "as", "between", "div", "else", "end", "for", "from", "ilike", "in", "is", "like",
+        "mod", "or", "then", "when",
+    }
+)  # fmt: skip
+
+
+def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int]) -> set[int]:
+    """Indices of the single bare names in ``tokens`` (trivia removed) that are keywords (#805).
+
+    They read no column of that name: the words in ``_LITERAL_WORDS`` and NOT
+    anywhere; CASE when WHEN or an operand follows it, with that WHEN; a word
+    in ``_INFIX_KEYWORDS`` right after a complete operand; and the name after
+    such an AS (``toUInt64(x AS c)``), which ClickHouse does not read as the
+    column. A complete operand ends on a number, a string, a closing bracket,
+    a literal word, END, a name ``skipped`` holds, the unit after
+    ``extract(``, or a column read where an operand was expected. After any
+    other name the next word keeps its read.
+    """
+    keywords: set[int] = set()
+    count = len(tokens)
+
+    def text_at(i: int) -> str | None:
+        return tokens[i].text if 0 <= i < count else None
+
+    def bare(i: int) -> str | None:
+        return tokens[i].text.lower() if 0 <= i < count and tokens[i].kind == "identifier" else None
+
+    state = "operand"
+    i = 0
+    while i < count:
+        token = tokens[i]
+        word = bare(i)
+        name = identifier_name(token)
+        if token.kind in ("number", "string"):
+            state = "ended"
+        elif token.kind == "punctuation":
+            if token.text in (")", "]", "}"):
+                state = "ended"
+            elif token.text != ".":
+                state = "operand"
+        elif name is None:
+            state = "unknown"
+        elif i in skipped:
+            state = "ended"
+        elif text_at(i - 1) == "." or text_at(i + 1) in (".", "("):
+            # A part of a dotted name, or a function call.
+            pass
+        elif word is not None and word in _LITERAL_WORDS:
+            keywords.add(i)
+            state = "ended"
+        elif word == "not":
+            keywords.add(i)
+            state = "operand"
+        elif word == "case" and _case_follows(tokens[i + 1] if i + 1 < count else None):
+            keywords.add(i)
+            if bare(i + 1) == "when":
+                i += 1
+                keywords.add(i)
+            state = "operand"
+        elif word is not None and word in _INFIX_KEYWORDS and state == "ended":
+            keywords.add(i)
+            state = "ended" if word == "end" else "operand"
+            after = text_at(i + 2)
+            if (
+                word == "as"
+                and i + 1 < count
+                and identifier_name(tokens[i + 1]) is not None
+                and i + 1 not in skipped
+                and after not in (".", "(")
+            ):
+                i += 1
+                keywords.add(i)
+                state = "ended"
+        elif text_at(i - 1) == "(" and bare(i - 2) == "extract":
+            state = "ended"
+        else:
+            state = "ended" if state == "operand" and name in columns else "unknown"
+        i += 1
+    return keywords
+
+
+def _case_follows(following: SQLToken | None) -> bool:
+    """Whether ``following`` makes the CASE before it the keyword: WHEN, or the start of an operand."""
+    if following is None:
+        return False
+    if following.kind in ("number", "string", "quoted_identifier"):
+        return True
+    if following.kind != "identifier":
+        return False
+    word = following.text.lower()
+    return word == "when" or (word not in _INFIX_KEYWORDS and word != "not")
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:

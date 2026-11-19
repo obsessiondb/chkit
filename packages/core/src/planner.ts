@@ -1008,12 +1008,14 @@ function columnKey(table: { database: string; table: string }, column: string): 
  * `db.t.col` read `col` (#748). A tuple element by position ends the run:
  * `t.1.a` reads `t`. A run followed by `(` is a function call, not a column,
  * and a run that starts on a name `notColumnNames` skips reads nothing, so
- * `a -> a.x` reads no `a.x` (#768).
+ * `a -> a.x` reads no `a.x` (#768). Nor does a keyword `keywordNames` finds
+ * (#805).
  */
 function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
   const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
   const skipped = notColumnNames(tokens)
   const found: string[] = []
+  const keywords = keywordNames(tokens, columns, skipped)
   let i = 0
   while (i < tokens.length) {
     const first = i
@@ -1031,7 +1033,7 @@ function dottedNames(sql: string, columns: ReadonlySet<string>): string[] {
       if (name !== undefined) i += 1
     }
     if (run.length === 0) i += 1
-    if (tokens[i]?.text === '(' || skipped.has(first)) continue
+    if (tokens[i]?.text === '(' || skipped.has(first) || keywords.has(first)) continue
     for (let start = 0; start < run.length; start += 1) {
       const name = longestColumnPrefix(run.slice(start), columns)
       if (name === undefined) continue
@@ -1196,4 +1198,80 @@ function closingParen(tokens: SQLToken[], open: number): number {
     }
   }
   return tokens.length
+}
+
+// Bare words ClickHouse reads as literals (any case), even when a column has
+// that name (#805). A quoted `` `null` `` reads its column.
+const LITERAL_WORDS: ReadonlySet<string> = new Set(['false', 'inf', 'infinity', 'nan', 'null', 'true'])
+// Keywords that follow an operand (`x IS NULL`, `CASE x WHEN 1 THEN 2 END`,
+// `substring(s FROM 1 FOR 2)`, `x AS y`). ClickHouse reads a column of that
+// name where an operand is expected (`end + 1`, `THEN end`, `x AND end`).
+const INFIX_KEYWORDS: ReadonlySet<string> = new Set([
+  'and', 'as', 'between', 'div', 'else', 'end', 'for', 'from', 'ilike', 'in', 'is', 'like', 'mod', 'or', 'then',
+  'when',
+])
+
+/**
+ * Indices of the single bare names in `tokens` (trivia removed) that are
+ * keywords, not reads of a column with that name (#805): the words in
+ * `LITERAL_WORDS` and NOT anywhere; CASE when WHEN or an operand follows it,
+ * with that WHEN; a word in `INFIX_KEYWORDS` right after a complete operand;
+ * and the name after such an AS (`toUInt64(x AS c)`), which ClickHouse does
+ * not read as the column. A complete operand ends on a number, a string, a
+ * closing bracket, a literal word, END, a name `skipped` holds, the unit
+ * after `extract(`, or a column read where an operand was expected. After
+ * any other name the next word keeps its read.
+ */
+function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped: ReadonlySet<number>): Set<number> {
+  const keywords = new Set<number>()
+  const bare = (i: number) => (tokens[i]?.kind === 'identifier' ? tokens[i]!.text.toLowerCase() : undefined)
+  let state: 'operand' | 'ended' | 'unknown' = 'operand'
+  for (let i = 0; i < tokens.length; i += 1) {
+    const token = tokens[i]!
+    const word = bare(i)
+    const name = identifierName(token)
+    if (token.kind === 'number' || token.kind === 'string') state = 'ended'
+    else if (token.kind === 'punctuation') {
+      if (token.text === ')' || token.text === ']' || token.text === '}') state = 'ended'
+      else if (token.text !== '.') state = 'operand'
+    } else if (name === undefined) state = 'unknown'
+    else if (skipped.has(i)) state = 'ended'
+    // A part of a dotted name, or a function call.
+    else if (tokens[i - 1]?.text === '.' || tokens[i + 1]?.text === '.' || tokens[i + 1]?.text === '(') continue
+    else if (word !== undefined && LITERAL_WORDS.has(word)) {
+      keywords.add(i)
+      state = 'ended'
+    } else if (word === 'not') {
+      keywords.add(i)
+      state = 'operand'
+    } else if (word === 'case' && caseFollows(tokens[i + 1])) {
+      keywords.add(i)
+      if (bare(i + 1) === 'when') {
+        i += 1
+        keywords.add(i)
+      }
+      state = 'operand'
+    } else if (word !== undefined && INFIX_KEYWORDS.has(word) && state === 'ended') {
+      keywords.add(i)
+      state = word === 'end' ? 'ended' : 'operand'
+      const alias = tokens[i + 1]
+      const after = tokens[i + 2]?.text
+      if (word === 'as' && alias !== undefined && identifierName(alias) !== undefined && !skipped.has(i + 1) && after !== '.' && after !== '(') {
+        i += 1
+        keywords.add(i)
+        state = 'ended'
+      }
+    } else if (tokens[i - 1]?.text === '(' && bare(i - 2) === 'extract') state = 'ended'
+    else state = state === 'operand' && columns.has(name) ? 'ended' : 'unknown'
+  }
+  return keywords
+}
+
+/** Whether `next` makes the CASE before it the keyword: WHEN, or the start of an operand. */
+function caseFollows(next: SQLToken | undefined): boolean {
+  if (next === undefined) return false
+  if (next.kind === 'number' || next.kind === 'string' || next.kind === 'quoted_identifier') return true
+  if (next.kind !== 'identifier') return false
+  const word = next.text.toLowerCase()
+  return word === 'when' || (!INFIX_KEYWORDS.has(word) && word !== 'not')
 }
