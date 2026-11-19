@@ -77,6 +77,8 @@ def run(  # noqa: PLR0912, PLR0915, PLR0917
         typer.Option(
             "--live",
             help="No-op, kept for existing scripts: check always reads the live server",
+            # TS has no --live, so the help leaves it out, as TS does (#776).
+            hidden=True,
         ),
     ] = False,
     output_json: Annotated[
