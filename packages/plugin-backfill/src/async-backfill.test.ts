@@ -2,7 +2,7 @@ import { afterAll, beforeAll, describe, expect, test } from 'bun:test'
 import { readFileSync } from 'node:fs'
 import http from 'node:http'
 import { createServer, type AddressInfo, type Socket } from 'node:net'
-import { createStatelessClickHouseExecutor, sendNotAdmittedError, type ClickHouseExecutor, type QueryStatus, type SubmitAdmission } from '@chkit/clickhouse'
+import { createStatelessClickHouseExecutor, sendNotAdmittedError, type ClickHouseExecutor, type QueryStatus, type SubmitOptions } from '@chkit/clickhouse'
 import { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, syncProgress, type BackfillProgress } from './async-backfill.js'
 
 const PLAN_ID = 'test-plan'
@@ -75,7 +75,8 @@ function createMockExecutor(statuses: Map<string, QueryStatus[]>): ClickHouseExe
     async listTableDetails() { return [] },
     // Sends once, and asks the admission as the request is created.
     submitSendsOnce: true,
-    async submit(_sql: string, queryId?: string, _settings?: unknown, admission?: SubmitAdmission): Promise<string> {
+    async submit(_sql: string, queryId?: string, _settings?: unknown, submitOptions?: SubmitOptions): Promise<string> {
+      const admission = submitOptions?.admission
       if (admission && !admission.admit()) throw sendNotAdmittedError()
       admission?.handedOff?.()
       return queryId ?? crypto.randomUUID()
@@ -711,7 +712,8 @@ function createSimulatedServer(options: {
   }
 
   const executor = createMockExecutor(new Map())
-  executor.submit = async (_sql, queryId, _settings, admission) => {
+  executor.submit = async (_sql, queryId, _settings, submitOptions) => {
+    const admission = submitOptions?.admission
     if (admission && !admission.admit()) throw sendNotAdmittedError()
       admission?.handedOff?.()
     const id = queryId ?? crypto.randomUUID()
@@ -1269,7 +1271,8 @@ describe('executeBackfill replays under a query id of their own (#765)', () => {
     const submits: string[] = []
     let release: () => void = () => undefined
     const executor = createMockExecutor(new Map([[`backfill-${PLAN_ID}-c1`, [{ status: 'finished', writtenRows: 1, writtenBytes: 1, durationMs: 1 }]]]))
-    executor.submit = (_sql, queryId, _settings, admission) => {
+    executor.submit = (_sql, queryId, _settings, submitOptions) => {
+      const admission = submitOptions?.admission
       // The request is created, then the run is interrupted.
       if (admission && !admission.admit()) return Promise.reject(sendNotAdmittedError())
       admission?.handedOff?.()

@@ -1080,10 +1080,12 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
         // it ended without getting there): only then can no part of it start
         // after an interrupt returned.
         await executor.submit(sql, queryId, undefined, {
-          admit: () => mayStart(),
-          handedOff: settle,
-          signal: dispatchStopped.signal,
-          abandon: sendsAbandoned.signal,
+          admission: {
+            admit: () => mayStart(),
+            handedOff: settle,
+            signal: dispatchStopped.signal,
+            abandon: sendsAbandoned.signal,
+          },
         })
       } else {
         // Nothing proves when another executor's request starts, so its

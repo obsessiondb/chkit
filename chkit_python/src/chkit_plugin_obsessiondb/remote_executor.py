@@ -34,6 +34,7 @@ from chkit.clickhouse.client import (
     ClickHouseJsonQueryResult,
     QueryResult,
     QueryStatus,
+    query_log_outcome,
 )
 from chkit.clickhouse.control import (
     STRICT_CONTROL_SETTINGS,
@@ -237,7 +238,14 @@ class RemoteClickHouseClient:
         statement: str,
         query_id: str | None = None,
         settings: dict[str, Any] | None = None,
+        *,
+        before_send: Callable[[], None] | None = None,
     ) -> str:
+        # Never start a request after the caller gave up on it, and stop one
+        # still connecting before its first bytes (#767), as the native driver
+        # does. QUERY_TIMEOUT bounds the connect (10 s).
+        if before_send is not None:
+            before_send()
         # The API takes the id as a top-level field and ignores a query_id
         # setting, which would leave the query under a random id.
         result = workbench_query_execute(
@@ -246,6 +254,7 @@ class RemoteClickHouseClient:
             query=statement,
             settings=_coerce_wire_settings(settings),
             query_id=query_id,
+            guard=before_send,
         )
         _raise_if_error(result)
         return query_id or result.query_id or "submitted"
@@ -296,6 +305,7 @@ class RemoteClickHouseClient:
         after_time: str | None = None,
         every_replica: bool = False,
         running_only: bool = False,
+        include_before_start: bool = False,
     ) -> QueryStatus:
         """Mirror of :meth:`ClickHouseClient.query_status`, proxied via workbench."""
         # after_time bounds the query's start, as in the native client. A
@@ -337,30 +347,27 @@ class RemoteClickHouseClient:
             )
         if running_only:
             return QueryStatus(status="unknown")
+        types = (
+            "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+            if include_before_start
+            else "'QueryFinish', 'ExceptionWhileProcessing'"
+        )
+        # With ExceptionBeforeStart, every entry of the id is read: a rejected
+        # duplicate delivery logs one early, which must not hide the
+        # QueryFinish of the attempt that ran (#767).
         log = self.query(
-            "SELECT type, written_rows, written_bytes, query_duration_ms, exception "
+            "SELECT type, written_rows, written_bytes, query_duration_ms, exception, "
+            "exception_code, toString(serverUUID()) AS server, "
+            "toString(event_time_microseconds) AS event_at "
             f"FROM {source('system.query_log')} "
             f"WHERE user = currentUser() AND query_id = '{query_id}'"
-            "  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')"
+            f"  AND type IN ({types})"
             f"{after_filter}"
-            " ORDER BY event_time DESC LIMIT 1"
+            " ORDER BY event_time DESC"
+            f"{'' if include_before_start else ' LIMIT 1'}"
             f"{read_settings}"
         )
-        if not log.rows:
-            return QueryStatus(status="unknown")
-        row = log.rows[0]
-        if str(row.get("type")) == "QueryFinish":
-            return QueryStatus(
-                status="finished",
-                written_rows=_safe_int(row.get("written_rows")),
-                written_bytes=_safe_int(row.get("written_bytes")),
-                duration_ms=_safe_int(row.get("query_duration_ms")),
-            )
-        return QueryStatus(
-            status="failed",
-            duration_ms=_safe_int(row.get("query_duration_ms")),
-            error=str(row.get("exception") or "") or None,
-        )
+        return query_log_outcome(log.rows)
 
 
 def _render_sql_literal(value: Any) -> str:

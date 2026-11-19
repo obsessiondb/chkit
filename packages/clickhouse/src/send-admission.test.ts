@@ -60,7 +60,7 @@ describe('submit with an admission (#765)', () => {
   test('sends the request once the admission admits it', async () => {
     const db = executor()
 
-    await db.submit('INSERT INTO t SELECT 1', 'admitted-1', undefined, { admit: () => true })
+    await db.submit('INSERT INTO t SELECT 1', 'admitted-1', undefined, { admission: { admit: () => true } })
 
     expect(received).toContain('admitted-1')
     expect(db.submitSendsOnce).toBe(true)
@@ -70,7 +70,7 @@ describe('submit with an admission (#765)', () => {
   test('sends nothing, and rejects, when the admission refuses', async () => {
     const db = executor()
 
-    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-1', undefined, { admit: () => false }).catch((e: unknown) => e)
+    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-1', undefined, { admission: { admit: () => false } }).catch((e: unknown) => e)
 
     expect(isSendNotAdmitted(error)).toBe(true)
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -85,12 +85,12 @@ describe('submit with an admission (#765)', () => {
     let stopped = false
     let asked = 0
 
-    const sending = db.submit('INSERT INTO t SELECT 1', 'stopped-in-gap-1', undefined, {
+    const sending = db.submit('INSERT INTO t SELECT 1', 'stopped-in-gap-1', undefined, { admission: {
       admit: () => {
         asked++
         return !stopped
       },
-    })
+    } })
     expect(asked).toBe(0)
     stopped = true
     const error = await sending.catch((e: unknown) => e)
@@ -133,7 +133,7 @@ describe('a refused submit stays refused', () => {
   test('against an endpoint that refuses connections (a cold socket)', async () => {
     const db = executor(`http://127.0.0.1:${await closedPort()}`)
 
-    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-cold-1', undefined, { admit: () => false }).catch((e: unknown) => e)
+    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-cold-1', undefined, { admission: { admit: () => false } }).catch((e: unknown) => e)
 
     expect(isSendNotAdmitted(error)).toBe(true)
     await db.close()
@@ -141,9 +141,9 @@ describe('a refused submit stays refused', () => {
 
   test('on a reused keep-alive socket', async () => {
     const db = executor()
-    await db.submit('INSERT INTO t SELECT 1', 'warm-1', undefined, { admit: () => true })
+    await db.submit('INSERT INTO t SELECT 1', 'warm-1', undefined, { admission: { admit: () => true } })
 
-    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-warm-1', undefined, { admit: () => false }).catch((e: unknown) => e)
+    const error = await db.submit('INSERT INTO t SELECT 1', 'refused-warm-1', undefined, { admission: { admit: () => false } }).catch((e: unknown) => e)
 
     expect(isSendNotAdmitted(error)).toBe(true)
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -156,7 +156,7 @@ describe('a refused submit stays refused', () => {
     answerAfterMs = 100
     peakInFlight = 0
 
-    await Promise.all([1, 2, 3].map((n) => db.submit('INSERT INTO t SELECT 1', `capped-${n}`, undefined, { admit: () => true })))
+    await Promise.all([1, 2, 3].map((n) => db.submit('INSERT INTO t SELECT 1', `capped-${n}`, undefined, { admission: { admit: () => true } })))
 
     answerAfterMs = 0
     expect(received).toEqual(expect.arrayContaining(['capped-1', 'capped-2', 'capped-3']))
@@ -172,7 +172,7 @@ describe('a refused submit stays refused', () => {
       const { createStatelessClickHouseExecutor, isSendNotAdmitted } = await import(${JSON.stringify(dist)})
       const { urlConnectionOptions } = await import(${JSON.stringify(agentModule)})
       const db = createStatelessClickHouseExecutor({ url: 'http://127.0.0.1:${await closedPort()}', username: 'default', password: '', database: 'default' })
-      const error = await db.submit('INSERT INTO t SELECT 1', 'refused-node-1', undefined, { admit: () => false }).catch((e) => e)
+      const error = await db.submit('INSERT INTO t SELECT 1', 'refused-node-1', undefined, { admission: { admit: () => false } }).catch((e) => e)
       await db.close()
       const options = urlConnectionOptions('https://h/?max_open_connections=1.5&keep_alive_enabled=0')
       console.log(JSON.stringify({ refused: isSendNotAdmitted(error), options }))
@@ -253,7 +253,7 @@ describe('acquireSendSlot at the grant-versus-abort boundary', () => {
     const stop = new AbortController()
 
     // An SDK admission that always admits: the aborted signal still wins.
-    const sending = db.submit('INSERT INTO t SELECT 1', 'aborted-at-creation-1', undefined, { admit: () => true, signal: stop.signal })
+    const sending = db.submit('INSERT INTO t SELECT 1', 'aborted-at-creation-1', undefined, { admission: { admit: () => true, signal: stop.signal } })
     stop.abort()
     const error = await sending.catch((e: unknown) => e)
 
@@ -271,13 +271,13 @@ describe('a stop at the last moment before the request', () => {
     const db = executor()
     const stop = new AbortController()
 
-    const error = await db.submit('INSERT INTO t SELECT 1', 'aborted-by-admit-1', undefined, {
+    const error = await db.submit('INSERT INTO t SELECT 1', 'aborted-by-admit-1', undefined, { admission: {
       admit: () => {
         stop.abort()
         return true
       },
       signal: stop.signal,
-    }).catch((e: unknown) => e)
+    } }).catch((e: unknown) => e)
 
     expect(isSendNotAdmitted(error)).toBe(true)
     await new Promise((resolve) => setTimeout(resolve, 50))
@@ -291,7 +291,7 @@ describe('a stop at the last moment before the request', () => {
     const commandProto = Object.getPrototypeOf(createClient({ url })) as { command: (...args: unknown[]) => unknown }
     const command = spyOn(commandProto, 'command')
     answerAfterMs = 100
-    const first = db.submit('INSERT INTO t SELECT 1', 'slot-holder-1', undefined, { admit: () => true })
+    const first = db.submit('INSERT INTO t SELECT 1', 'slot-holder-1', undefined, { admission: { admit: () => true } })
     // A signal that reads as aborted from its third read on: the queue's own
     // check, the check after the grant, then the check before the driver.
     let reads = 0
@@ -306,7 +306,7 @@ describe('a stop at the last moment before the request', () => {
     await new Promise((resolve) => setTimeout(resolve, 20))
     const callsBefore = command.mock.calls.length
 
-    const queued = await db.submit('INSERT INTO t SELECT 1', 'stopped-after-grant-1', undefined, { admit: () => true, signal }).catch((e: unknown) => e)
+    const queued = await db.submit('INSERT INTO t SELECT 1', 'stopped-after-grant-1', undefined, { admission: { admit: () => true, signal } }).catch((e: unknown) => e)
     await first
     answerAfterMs = 0
 
@@ -325,9 +325,9 @@ describe('admission per request and the written handoff', () => {
   test('a second submit of a query id in flight on the executor is rejected', async () => {
     const db = executor()
     answerAfterMs = 100
-    const first = db.submit('INSERT INTO t SELECT 1', 'same-id-1', undefined, { admit: () => true })
+    const first = db.submit('INSERT INTO t SELECT 1', 'same-id-1', undefined, { admission: { admit: () => true } })
 
-    const second = await db.submit('INSERT INTO t SELECT 1', 'same-id-1', undefined, { admit: () => true }).catch((e: unknown) => e)
+    const second = await db.submit('INSERT INTO t SELECT 1', 'same-id-1', undefined, { admission: { admit: () => true } }).catch((e: unknown) => e)
     await first
     answerAfterMs = 0
 
@@ -353,19 +353,19 @@ describe('admission per request and the written handoff', () => {
   test('hands off after the admitted request is written, and after a failed connection', async () => {
     const events: string[] = []
     const db = executor()
-    await db.submit('INSERT INTO t SELECT 1', 'handoff-1', undefined, {
+    await db.submit('INSERT INTO t SELECT 1', 'handoff-1', undefined, { admission: {
       admit: () => {
         events.push('admit')
         return true
       },
       handedOff: () => events.push('handed off'),
-    })
+    } })
     expect(events).toEqual(['admit', 'handed off'])
     await db.close()
 
     const cold = executor(`http://127.0.0.1:${await closedPort()}`)
     let handedOff = 0
-    await cold.submit('INSERT INTO t SELECT 1', 'handoff-cold-1', undefined, { admit: () => true, handedOff: () => { handedOff++ } }).catch(() => undefined)
+    await cold.submit('INSERT INTO t SELECT 1', 'handoff-cold-1', undefined, { admission: { admit: () => true, handedOff: () => { handedOff++ } } }).catch(() => undefined)
     expect(handedOff).toBe(1)
     await cold.close()
   })

@@ -1,4 +1,4 @@
-import type { ClickHouseExecutor, ClickHouseSettings, QueryControlOptions, QueryStatusOptions } from '@chkit/clickhouse'
+import type { ClickHouseExecutor, ClickHouseSettings, QueryControlOptions, QueryStatusOptions, SubmitOptions } from '@chkit/clickhouse'
 
 import { debug, isDebugEnabled } from '../debug.js'
 
@@ -40,6 +40,8 @@ export function wrapExecutorWithDebug(
   const queryControl = executor.queryControl?.bind(executor)
 
   return {
+    // Backfill proves a failed chunk only through an executor that sends once (#765).
+    ...(executor.submitSendsOnce ? { submitSendsOnce: true } : {}),
     ...(executor.queryControlCluster ? { queryControlCluster: executor.queryControlCluster } : {}),
     ...(systemTableSource ? { systemTableSource } : {}),
     ...(openConcurrent ? { openConcurrent: () => wrapExecutorWithDebug(openConcurrent()) } : {}),
@@ -90,12 +92,12 @@ export function wrapExecutorWithDebug(
       )
       return trace('insert', null, () => executor.insert(params))
     },
-    submit(sql: string, queryId?: string, settings?: ClickHouseSettings): Promise<string> {
+    submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string> {
       debug(
         'clickhouse',
         `submit${queryId ? ` (id: ${queryId})` : ''}: ${truncate(sql)}`,
       )
-      return trace('submit', (id) => `id: ${id}`, () => executor.submit(sql, queryId, settings))
+      return trace('submit', (id) => `id: ${id}`, () => executor.submit(sql, queryId, settings, options))
     },
     queryStatus(queryId: string, options?: QueryStatusOptions) {
       debug('clickhouse', `queryStatus for ${queryId}`)

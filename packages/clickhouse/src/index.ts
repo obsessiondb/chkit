@@ -57,12 +57,28 @@ export interface QueryStatus {
 	elapsedMs?: number
 	durationMs?: number
 	error?: string
+	/** A failure the server logged before the query started (ExceptionBeforeStart). */
+	beforeStart?: boolean
 }
 
 export interface QueryStatusOptions {
 	afterTime?: string
 	everyReplica?: boolean
 	runningOnly?: boolean
+	/**
+	 * Count an ExceptionBeforeStart entry (a statement the server rejected) as
+	 * the query's failure. Only for an id that names one attempt alone (#767):
+	 * a reused id can find an earlier attempt's entry.
+	 */
+	includeBeforeStart?: boolean
+}
+
+export interface SubmitOptions {
+	/** Aborts the request, also one not sent yet (#767). */
+	signal?: AbortSignal
+	/** Asked as the request is created, so a stopped caller knows no send of it starts
+	 *  afterwards (#765). Only honoured by an executor with `submitSendsOnce`. */
+	admission?: SubmitAdmission
 }
 
 export type { ClickHouseSettings }
@@ -100,6 +116,61 @@ export interface ClickHouseJsonQueryResult<
 export type ObservableSystemTable = 'processes' | 'query_log'
 
 /** Control proofs require fresh, complete results rather than cached or truncated data. */
+/** One `system.query_log` entry of a query id, newest first. */
+export interface QueryLogRow {
+	type: string
+	written_rows: number | string
+	written_bytes: number | string
+	query_duration_ms: number | string
+	exception: string
+	exception_code?: number | string
+	/** The server that logged it: a fan-out that lists a node twice returns its entries twice. */
+	server?: string
+	event_at?: string
+}
+
+// QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING: a second delivery of the id, rejected
+// while the first runs. It says nothing about that first one.
+const SAME_ID_RUNNING = 216
+
+/**
+ * The outcome query_log records for a query id, from its entries newest
+ * first (#767). A QueryFinish, then an ExceptionWhileProcessing, outranks an
+ * ExceptionBeforeStart, which a rejected duplicate delivery logs early; and
+ * that rejection is never the query's own failure. Two terminal entries (a
+ * redelivered request that ran twice) leave the outcome unknown: one of them
+ * may have applied part of its writes.
+ */
+export function queryLogOutcome(rows: readonly QueryLogRow[]): QueryStatus {
+	// Each entry once per server: one node the cluster lists twice is not a
+	// second run.
+	const entries = new Set(rows.filter((row) => !isSameIdRunning(row)).map((row) => `${row.server}|${row.type}|${row.event_at}|${row.exception}`))
+	if (entries.size > 1) return { status: 'unknown' }
+	const finished = rows.find((row) => row.type === 'QueryFinish')
+	if (finished) {
+		return {
+			status: 'finished',
+			writtenRows: Number(finished.written_rows),
+			writtenBytes: Number(finished.written_bytes),
+			durationMs: Number(finished.query_duration_ms),
+		}
+	}
+	const failed =
+		rows.find((row) => row.type === 'ExceptionWhileProcessing') ??
+		rows.find((row) => row.type === 'ExceptionBeforeStart' && !isSameIdRunning(row))
+	if (!failed) return { status: 'unknown' }
+	return {
+		status: 'failed',
+		durationMs: Number(failed.query_duration_ms),
+		error: failed.exception,
+		...(failed.type === 'ExceptionBeforeStart' ? { beforeStart: true } : {}),
+	}
+}
+
+function isSameIdRunning(row: QueryLogRow): boolean {
+	return Number(row.exception_code) === SAME_ID_RUNNING || /QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING/.test(row.exception)
+}
+
 export const STRICT_CONTROL_SETTINGS: ClickHouseSettings = {
 	use_query_cache: 0,
 	enable_reads_from_query_cache: 0,
@@ -153,13 +224,13 @@ export interface ClickHouseExecutor {
 	 *  @param sql - The SQL to execute
 	 *  @param queryId - Optional deterministic query_id (useful for resumability). Auto-generated if omitted.
 	 *  @param settings - Optional ClickHouse settings sent with the query.
-	 *  @param admission - Asked as the request is created (see `SubmitAdmission`); only honoured
-	 *    by an executor with `submitSendsOnce`.
+	 *  @param options - `signal` aborts the request (#767); `admission` is asked as the request is
+	 *    created (see `SubmitAdmission`), only honoured by an executor with `submitSendsOnce`.
 	 *  @returns The query_id assigned to this query. */
-	submit(sql: string, queryId?: string, settings?: ClickHouseSettings, admission?: SubmitAdmission): Promise<string>
+	submit(sql: string, queryId?: string, settings?: ClickHouseSettings, options?: SubmitOptions): Promise<string>
 
 	/** Set when `submit` sends its request once, never resending it under the same query id,
-	 *  and asks `admission` as the request is created (#765). Backfill proves a failure only
+	 *  and asks `options.admission` as the request is created (#765). Backfill proves a failure only
 	 *  for an attempt sent this way. */
 	readonly submitSendsOnce?: boolean
 
@@ -1119,7 +1190,8 @@ export function createExecutorWithClient(
 			}
 		},
 		submitSendsOnce: true,
-		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings, admission?: SubmitAdmission): Promise<string> {
+		async submit(sql: string, queryId?: string, settings?: ClickHouseSettings, submitOptions?: SubmitOptions): Promise<string> {
+			const admission = submitOptions?.admission
 			const id = queryId ?? crypto.randomUUID()
 			// A query_id in the settings would put a second query_id on the URL, and
 			// the server could run the query under an id queryStatus() never sees (#353).
@@ -1159,6 +1231,7 @@ export function createExecutorWithClient(
 					query: sql,
 					query_id: id,
 					...(settings ? { clickhouse_settings: clickhouseSettings } : {}),
+					...(submitOptions?.signal ? { abort_signal: submitOptions.signal } : {}),
 				})
 			} catch (error) {
 				// A refused request was never written, whatever the driver says.
@@ -1225,52 +1298,33 @@ export function createExecutorWithClient(
 				// event_date prunes query_log's partitions: the entry is logged no earlier
 				// than the query started. A day of slack covers a session time zone other
 				// than the server's; toDate32, as a Date before 1970 wraps around.
+				// A query the server rejected before it started (a syntax error, an
+				// unknown table) is logged as ExceptionBeforeStart: its failure, as
+				// the server recorded it under the id, for a caller whose id names
+				// one attempt alone (#767).
+				const types = options?.includeBeforeStart
+					? "'QueryFinish', 'ExceptionWhileProcessing', 'ExceptionBeforeStart'"
+					: "'QueryFinish', 'ExceptionWhileProcessing'"
 				const queryLogFrom = from('query_log')
+				// With ExceptionBeforeStart, every entry of the id is read: a
+				// rejected duplicate delivery logs one early, which must not hide
+				// the QueryFinish of the attempt that ran (#767).
 				const log = await client.query({
-					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception
+					query: `SELECT type, written_rows, written_bytes, query_duration_ms, exception, exception_code, toString(serverUUID()) AS server, toString(event_time_microseconds) AS event_at
 FROM ${queryLogFrom}
 WHERE user = currentUser()
   AND query_id = {qid:String}
-  AND type IN ('QueryFinish', 'ExceptionWhileProcessing')
+  AND type IN (${types})
   AND is_initial_query = 1
   AND query_start_time >= parseDateTimeBestEffort({after:String})
   AND event_date >= toDate32(parseDateTimeBestEffort({after:String})) - 1
 ORDER BY event_time DESC
-LIMIT 1
+${options?.includeBeforeStart ? '' : 'LIMIT 1'}
 SETTINGS skip_unavailable_shards = ${skipUnavailable}`,
 					query_params: { qid: queryId, after: afterTime },
 					format: 'JSONEachRow',
 				})
-				const logRows = parseJsonEachRow<{
-					type: string
-					written_rows: number | string
-					written_bytes: number | string
-					query_duration_ms: number | string
-					exception: string
-				}>(await log.text())
-
-				if (logRows.length === 0) {
-					return { status: 'unknown' }
-				}
-
-				const [row] = logRows
-				if (!row) {
-					return { status: 'unknown' }
-				}
-				if (row.type === 'QueryFinish') {
-					return {
-						status: 'finished',
-						writtenRows: Number(row.written_rows),
-						writtenBytes: Number(row.written_bytes),
-						durationMs: Number(row.query_duration_ms),
-					}
-				}
-
-				return {
-					status: 'failed',
-					durationMs: Number(row.query_duration_ms),
-					error: row.exception,
-				}
+				return queryLogOutcome(parseJsonEachRow<QueryLogRow>(await log.text()))
 			} catch (error) {
 				wrapConnectionError(error, config.url, config.username)
 			}

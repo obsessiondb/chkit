@@ -133,6 +133,8 @@ interface MigrateContext {
   /** Runs `fn` holding the migrate lock (#716). */
   withLock: WithLock
   queryTracker: () => QueryTracker | undefined
+  /** Whether this run applies without the migrate lock because the target database did not exist (#767). */
+  locklessBootstrap: () => boolean
   completeRecovery?: () => Promise<void>
   /** --cancel-lock-queries was passed. */
   cancelQueries: boolean
@@ -241,6 +243,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   // the run still holds the migrate lock, once it took it (#716).
   let heldLock: MigrateLock | undefined
   let queryTracker: QueryTracker | undefined
+  let locklessBootstrap = false
   let completeRecovery: (() => Promise<void>) | undefined
   const rawDb = cancelQueries ? freshRecoveryExecutor(pluginContext.executor) : pluginContext.executor
   const initialIdentity = cancelQueries ? await resolveQueryIdentity(rawDb, config.clickhouse?.cluster) : undefined
@@ -273,7 +276,12 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
         '⚠ The target database does not exist yet, so the journal cannot hold the migrate lock: this run takes none. ' +
           'Do not start another migrate against this target until it finishes.',
       )
-      return await fn()
+      locklessBootstrap = true
+      try {
+        return await fn()
+      } finally {
+        locklessBootstrap = false
+      }
     }
     const heartbeatDb = rawDb.openConcurrent?.()
     try {
@@ -390,6 +398,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
     cancelQueries,
     assertRecoveryClear: async () => { await checkRecoveryClear(await journalStore.lockTarget()) },
     queryTracker: () => queryTracker,
+    locklessBootstrap: () => locklessBootstrap,
     completeRecovery: async () => { await completeRecovery?.() },
   }
 }
@@ -677,6 +686,7 @@ async function applyPlan(ctx: MigrateContext, plan: PendingPlan): Promise<number
       file,
       settings,
       queryTracker: ctx.queryTracker(),
+      locklessBootstrap: ctx.locklessBootstrap(),
       retry: retry?.action === 'resume' && retry.migration === file ? retry : undefined,
       log,
     })
