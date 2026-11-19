@@ -362,6 +362,17 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "columns": ["id", "x"],
     },
     {
+        # #805: reading the CASE's `end` as the column `end` made the two DROPs
+        # a cycle, so `a` was dropped first: Cannot drop column `a`, because
+        # column `end` depends on it.
+        "label": "casekeyword",
+        "before": f"{{'name': 'a', 'type': 'UInt64', {_e('case when id = 1 then 2 else 3 end')}}}, "
+        f"{{'name': 'end', 'type': 'UInt64', {_e('a + 1')}}}",
+        "after": "{'name': 'x', 'type': 'UInt64'}",
+        "order": ["column:end", "column:a"],
+        "columns": ["id", "x"],
+    },
+    {
         # Passes on main too; it fails when the ADD and the RENAME move while
         # the MODIFY of `d` keeps its slot before the ADD of `c`.
         "label": "modaddrename",
