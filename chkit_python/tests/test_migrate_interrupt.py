@@ -64,6 +64,21 @@ def test_an_error_in_a_deferred_block_is_reported_with_the_interrupt(
     )
 
 
+def test_a_failed_cleanup_after_the_interrupt_is_reported(
+    capsys: pytest.CaptureFixture[str],
+) -> None:
+    def body() -> None:
+        try:
+            _sigint()
+        except KeyboardInterrupt as error:
+            raise RuntimeError("not put back to prepared") from error
+
+    with pytest.raises(KeyboardInterrupt):
+        with_interrupt(InterruptLock(), body)
+
+    assert capsys.readouterr().err.endswith("\nnot put back to prepared\n")
+
+
 def test_a_nested_call_does_not_swallow_the_interrupt() -> None:
     def inner() -> None:
         _sigint()

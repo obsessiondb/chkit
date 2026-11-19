@@ -167,9 +167,10 @@ def _write_stderr(message: str) -> None:
 def _detail(error: BaseException | None) -> str:
     """A stop's own error, as TS prints it; not the interrupt itself."""
     cause = error.__cause__ if isinstance(error, KeyboardInterrupt) else error
+    # The refusal itself, or a statement error wrapping it, as TS rethrows it.
     seen = cause
-    while seen is not None:
-        if isinstance(seen, (KeyboardInterrupt, MigrateInterrupted)):
+    while seen is not None and not isinstance(seen, KeyboardInterrupt):
+        if isinstance(seen, MigrateInterrupted):
             return ""
         seen = seen.__cause__
     return f"\n{cause}" if cause is not None else ""
