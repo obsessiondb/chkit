@@ -1,7 +1,7 @@
 import { createHash, randomUUID } from 'node:crypto'
 import { setTimeout as defaultSleep } from 'node:timers/promises'
 
-import type { ClickHouseExecutor, ClickHouseSettings, QueryStatus } from '@chkit/clickhouse'
+import { type ClickHouseExecutor, type ClickHouseSettings, isSubmitNotSentError, type QueryStatus } from '@chkit/clickhouse'
 
 import { debug } from '../../runtime/debug.js'
 import {
@@ -279,6 +279,15 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
   await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
   await assertAttemptStored({ ...stored, lastError: PREPARED_RECORD_MARKER })
   await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(ATTEMPT_RECORD_MARKER), now))
+  // Nothing was sent: put the record back to prepared, so a re-run runs it
+  // again without an abandon (#767).
+  const backToPrepared = async (error: unknown): Promise<void> => {
+    try {
+      await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
+    } catch (revertError) {
+      throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
+    }
+  }
   let stateAfterStart: MigrationRowState | null
   try {
     await assertAttemptStored({ ...stored, lastError: ATTEMPT_RECORD_MARKER })
@@ -287,13 +296,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     stateAfterStart = await journalStore.readMigrationState(migrationName)
     await input.queryTracker?.recordAsync({ migration: migrationName, statementIndex, forwardSQL: sql, beforeRetry }, attemptQueryId)
   } catch (error) {
-    // Nothing was sent: put the record back to prepared, so a re-run runs
-    // it again without an abandon (#767).
-    try {
-      await journalStore.writeMigrationState(upsertOperation(baseState, attemptRecord(PREPARED_RECORD_MARKER), now))
-    } catch (revertError) {
-      throw new Error(notRevertedMessage(error, revertError, migrationName), { cause: error })
-    }
+    await backToPrepared(error)
     throw error
   }
   const pollAfterTime = queryLogLowerBound(serverNowMs)
@@ -321,6 +324,7 @@ export async function applyAsyncStatement(input: AsyncApplyInput): Promise<Async
     now,
     submitPromise,
     abortSubmit: () => submitAbort.abort(),
+    backToPrepared,
     startedAt,
   })
 }
@@ -345,6 +349,8 @@ interface PollUntilTerminalInput {
   submitPromise: Promise<unknown> | null
   /** Gives up on the submit request: the run stops without waiting for it. */
   abortSubmit?: () => void
+  /** Puts the attempt's record back to prepared, for a submit that was never sent (#800). */
+  backToPrepared?: (error: unknown) => Promise<void>
   startedAt: string
   /** Whether an ExceptionBeforeStart of the statement shows it applied nothing (#767). */
   rejectionRunsNothing: boolean
@@ -401,9 +407,24 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
   // Polls in a row that found the query neither running nor in query_log,
   // however polling started (#767).
   let unknownPolls = 0
+  // Whether a poll found the query on the server: then its submit was sent,
+  // whatever its error says (#800).
+  let seenOnServer = false
   try {
     for (;;) {
       await sleep(pollIntervalMs)
+      // A submit the executor proved was never sent (a refused connect, a
+      // failed host lookup) ran nothing: the attempt goes back to prepared and
+      // the run stops, so a re-run submits it again without an abandon (#800).
+      if (submitError !== null && isSubmitNotSentError(submitError) && !seenOnServer && input.backToPrepared) {
+        const notSent: Error = submitError
+        abandonSubmit()
+        await input.backToPrepared(notSent)
+        throw new Error(
+          `Async migration step ${operationType} (query_id ${queryId}) was not sent: the submit request never reached ClickHouse (${describeError(notSent)}), so it was not submitted. Re-run \`chkit migrate --apply\`: an attempt that was never sent runs again.`,
+          { cause: notSent },
+        )
+      }
       let status: QueryStatus
       try {
         status = await db.queryStatus(queryId, { afterTime: pollAfterTime, includeBeforeStart: true })
@@ -431,6 +452,7 @@ async function pollUntilTerminal(input: PollUntilTerminalInput): Promise<AsyncAp
       // read once more, through a query_log flush, before the run stops with
       // the attempt still recorded as started.
       unknownPolls = status.status === 'unknown' ? unknownPolls + 1 : 0
+      if (status.status !== 'unknown') seenOnServer = true
       if (unknownPolls >= MAX_UNKNOWN_POLLS) {
         try {
           status = await finalOutcomeCheck({ db, queryId, operationType, pollAfterTime, sleep })
