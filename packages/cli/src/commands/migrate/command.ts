@@ -490,7 +490,7 @@ async function abandonUnderLock(ctx: AbandonContext, migration: string, state: M
  * records as completed again. Refuses while that attempt runs on any replica.
  * Without --apply it only previews. Runs before every other gate and applies nothing.
  */
-export async function runMarkOutcome(
+async function runMarkOutcome(
   ctx: Pick<MigrateContext, 'jsonMode' | 'executeRequested' | 'journalStore' | 'tableScope' | 'appliedNames' | 'db' | 'withLock' | 'files' | 'migrationsDir'>,
   target: MarkTarget,
 ): Promise<number> {
