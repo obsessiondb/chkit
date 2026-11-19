@@ -353,7 +353,7 @@ function stronglyConnectedComponents(edges: number[][]): number[][] {
       const { v } = frame
       const out = edges[v] ?? []
       if (frame.next < out.length) {
-        const w = out[frame.next] ?? 0
+        const w = out[frame.next] as number
         frame.next += 1
         if (!index.has(w)) {
           enter(w)

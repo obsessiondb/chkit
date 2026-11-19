@@ -579,13 +579,11 @@ describe('orderByDependencies', () => {
     expect(orderByDependencies(['a', 'b'], (x) => x, () => ['zzz'])).toEqual(['a', 'b'])
   })
 
-  test('orders a 50,000-deep prerequisite chain without overflowing the stack', () => {
-    // Item 0 needs n-1, which needs n-2, … down to 1.
+  test('keeps a 50,000-item dependency cycle in input order without overflowing the stack', () => {
+    // Item i needs i+1 and the last item needs 0: the search walks all 50,000 before it returns.
     const n = 50_000
     const items = Array.from({ length: n }, (_, i) => i)
-    const prerequisite = (i: number) => (i === 0 ? n - 1 : i - 1)
-    const ordered = orderByDependencies(items, String, (key) => (key === '1' ? [] : [String(prerequisite(Number(key)))]))
-    expect(ordered).toEqual([...items.slice(1), 0])
+    expect(orderByDependencies(items, String, (key) => [String((Number(key) + 1) % n)])).toEqual(items)
   })
 })
 

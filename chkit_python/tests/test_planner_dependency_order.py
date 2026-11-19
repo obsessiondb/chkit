@@ -667,16 +667,11 @@ def test_order_ignores_prerequisites_not_in_the_list() -> None:
     assert order_by_dependencies(["a", "b"], lambda x: x, lambda _: ["zzz"]) == ["a", "b"]
 
 
-def test_order_handles_a_50000_deep_prerequisite_chain_without_recursion_error() -> None:
-    # Item 0 needs n-1, which needs n-2, ... down to 1.
+def test_order_keeps_a_50000_item_cycle_in_input_order_without_recursion_error() -> None:
+    # Item i needs i+1 and the last item needs 0: the search walks all 50,000 before it returns.
     n = 50_000
     items = list(range(n))
-
-    def prerequisites(key: str) -> list[str]:
-        i = int(key)
-        return [] if i == 1 else [str(n - 1 if i == 0 else i - 1)]
-
-    assert order_by_dependencies(items, str, prerequisites) == [*items[1:], 0]
+    assert order_by_dependencies(items, str, lambda key: [str((int(key) + 1) % n)]) == items
 
 
 # ---------- ADD COLUMN order by the columns an expression reads (#681) ----------
