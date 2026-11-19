@@ -207,13 +207,15 @@ async function projectFallbackPlugins(
 ): Promise<ChxPluginRegistration[]> {
   const commandName = argv[0]
   const pluginName = commandName === 'plugin' ? forwardedPluginName(argv.slice(1)) : commandName
-  const registration = registrations
+  const matching = registrations
     .map(normalizePluginRegistration)
-    .find((entry) => entry.plugin?.manifest?.name === pluginName)
+    .filter((entry) => entry.plugin?.manifest?.name === pluginName)
   // chkit-py, which has no disabled plugins, prints the `obsessiondb` help
-  // also when the config lists no ObsessionDB plugin (#776).
-  if (commandName === 'obsessiondb' && wantsHelp && !registration?.enabled) return profileFallbackPlugins()
-  if (registration) return []
+  // also when the config lists no enabled ObsessionDB plugin (#776).
+  if (commandName === 'obsessiondb' && wantsHelp && !matching.some((entry) => entry.enabled)) {
+    return profileFallbackPlugins()
+  }
+  if (matching.length > 0) return []
   if (pluginName === 'pull') return pullFallbackPlugins()
   if (commandName === 'codegen' && wantsHelp) return codegenFallbackPlugins()
   return []

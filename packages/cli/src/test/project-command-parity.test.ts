@@ -225,7 +225,16 @@ describe('commands in a project match chkit-py (#776)', () => {
       imports: withObsessionDB.imports,
       list: '{ ...obsessiondb(), enabled: false }',
     })
+    // Guard: a disabled registration next to an enabled one adds no second plugin.
+    const both = await createProject({
+      imports: withObsessionDB.imports,
+      list: '{ ...obsessiondb(), enabled: false }, obsessiondb()',
+    })
     try {
+      for (const args of [['obsessiondb', '--help'], ['obsessiondb', 'login', '--help']]) {
+        const help = both.run(args)
+        expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+      }
       const message = 'ObsessionDB plugin is not configured. Add it to config.plugins first.'
       for (const args of [['obsessiondb'], ['obsessiondb', 'login']]) {
         const result = project.run(args)
@@ -241,6 +250,7 @@ describe('commands in a project match chkit-py (#776)', () => {
       }
     } finally {
       await project.cleanup()
+      await both.cleanup()
     }
   }, 60_000)
 
