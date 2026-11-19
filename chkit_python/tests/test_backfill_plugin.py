@@ -17,6 +17,7 @@ from unittest.mock import MagicMock
 import pytest
 
 from chkit.cli.table_scope import TableScope
+from chkit.clickhouse.client import ClickHouseClient
 from chkit.core.model import (
     ChxResolvedCheckConfig,
     ChxResolvedClickHouseConfig,
@@ -474,7 +475,7 @@ def test_plan_turns_parallel_replicas_off_under_the_name_clickhouse_24_accepts(
     )
     # The faked planner sends nothing, so no server is needed.
     monkeypatch.setattr(
-        backfill_plugin_module.ClickHouseClient,
+        ClickHouseClient,
         "connect",
         classmethod(lambda _cls, _config: MagicMock()),
     )
