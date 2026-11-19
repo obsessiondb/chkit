@@ -2,13 +2,16 @@
 
 from __future__ import annotations
 
+import json
 from functools import partial
 from pathlib import Path
 from typing import Any
 
 import pytest
 from pytest_httpx import HTTPXMock
+from typer.testing import CliRunner
 
+from chkit.cli.main import app
 from chkit.cli.plugin_runtime import (
     load_plugin_runtime,
     null_plugin_context,
@@ -575,6 +578,19 @@ def test_service_command_returns_1_when_no_subcommand(
     code = runtime.run_plugin_command("obsessiondb", "service", ctx)
     assert code == 1
     assert any("Usage" in str(m) for m in msgs)
+
+
+def test_service_with_no_subcommand_prints_one_usage_message(
+    isolated_home: Path, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """One line, so ``--json`` prints one JSON document, as in TS (#781)."""
+    monkeypatch.chdir(tmp_path)
+    message = "Usage: chkit plugin obsessiondb service <list|select|claim|alias> [args]"
+    text = CliRunner().invoke(app, ["obsessiondb", "service"])
+    assert (text.exit_code, text.stdout) == (1, f"{message}\n")
+    result = CliRunner().invoke(app, ["obsessiondb", "service", "--json"])
+    assert result.exit_code == 1
+    assert json.loads(result.stdout) == {"schemaVersion": 1, "message": message}
 
 
 def test_service_alias_set_and_list_round_trip(
