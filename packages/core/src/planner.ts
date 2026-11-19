@@ -967,9 +967,11 @@ export function orderColumnStatements(
  *
  * Such a K, P and every column between them lie on a cycle of old and new
  * reads, so the search starts from the old reads that P drops and keeps to
- * the columns on such cycles (#789). It does work linear in the reads, plus
- * two searches of those columns for each P that could release a K: a deep
- * chain of defaults costs no more than a short one.
+ * the columns on such cycles (#789). Beyond work linear in the reads, it
+ * searches those columns once for each old read that a P drops, and once
+ * more for each such read and P when the first search finds a K: a deep
+ * chain of defaults costs no more than a short one unless many of its
+ * columns drop reads on one cycle. Memory stays linear in the reads.
  */
 function cycleReleases(
   reads: DependencyGraph,
@@ -1006,18 +1008,23 @@ function cycleReleases(
   }
   const stableReads = (column: string) =>
     [...(reads.get(column) ?? [])].filter((read) => oldReads.get(column)?.has(read))
-  const leadingBack = new Map<string, Set<string>>()
-  const released = new Map<string, Set<string>>()
+  // Dropped read → the breakers that drop it. Each closure is searched,
+  // used and let go, so the memory stays linear in the reads.
+  const droppedBy = new Map<string, string[]>()
   for (const breaker of [...modified].sort(compareCodePoints)) {
     if (!cyclic.has(breaker)) continue
-    let leadsToBreaker: Set<string> | undefined
     for (const dropped of oldReads.get(breaker) ?? []) {
       if (reads.get(breaker)?.has(dropped) || !cyclic.has(dropped)) continue
-      let back = leadingBack.get(dropped)
-      if (back === undefined) {
-        back = closure(dropped, stableReads)
-        leadingBack.set(dropped, back)
-      }
+      const breakers = droppedBy.get(dropped)
+      if (breakers === undefined) droppedBy.set(dropped, [breaker])
+      else breakers.push(breaker)
+    }
+  }
+  const released = new Map<string, Set<string>>()
+  for (const [dropped, breakers] of droppedBy) {
+    const back = closure(dropped, stableReads)
+    for (const breaker of breakers) {
+      let leadsToBreaker: Set<string> | undefined
       for (const key of back) {
         if (key === breaker || !modified.has(key)) continue
         leadsToBreaker ??= closure(breaker, (column) => leadsFrom.get(column) ?? [])

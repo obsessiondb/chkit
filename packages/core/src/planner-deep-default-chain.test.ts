@@ -3,17 +3,17 @@ import { describe, expect, test } from 'bun:test'
 import { planDiff, table } from './index'
 
 // #789: ordering the MODIFY COLUMNs of a deep chain of defaults took time
-// quadratic in its length: 25 s and more here. Now it takes about a second.
-const depth = 3000
+// quadratic in its length: 20 s and more here. Now it takes a second or two.
+const depth = 8000
 const timeout = 10_000
 
-const chainTable = (expression: (index: number) => string, extra: string[] = []) =>
+const chainTable = (expression: (index: number) => string, extra: string[] = [], length = depth) =>
   table({
     database: 'app',
     name: 'chain',
     columns: [
       { name: 'id', type: 'UInt64' },
-      ...Array.from({ length: depth }, (_, index) => ({
+      ...Array.from({ length }, (_, index) => ({
         name: `c${index}`,
         type: 'UInt64',
         default: { expression: expression(index) },
@@ -24,7 +24,7 @@ const chainTable = (expression: (index: number) => string, extra: string[] = [])
     primaryKey: ['id'],
     orderBy: ['id'],
   })
-const next = (index: number) => (index + 1 < depth ? `c${index + 1}` : 'id')
+const next = (index: number, length = depth) => (index + 1 < length ? `c${index + 1}` : 'id')
 const modifyIndex = (sql: string[], column: string) =>
   sql.findIndex((statement) => statement.startsWith(`ALTER TABLE app.chain MODIFY COLUMN \`${column}\` `))
 
@@ -44,6 +44,29 @@ describe('deep chains of defaults', () => {
     },
     timeout
   )
+
+  test('a chain whose every column stops reading a column further down is ordered', () => {
+    // Each column stops reading the one after next; only the last column's
+    // MODIFY, which stops reading c0, must run before c0's.
+    const length = 1000
+    const before = chainTable(
+      (index) =>
+        index === 0
+          ? 'id'
+          : index === length - 1
+            ? 'c0'
+            : index === length - 2
+              ? `c${index + 1} + 0`
+              : `c${index + 1} + c${index + 2}`,
+      [],
+      length
+    )
+    const after = chainTable((index) => next(index, length), [], length)
+    const sql = planDiff([before], [after]).operations.map((op) => op.sql)
+    expect(sql).toHaveLength(length)
+    expect(modifyIndex(sql, `c${length - 1}`)).toBeGreaterThanOrEqual(0)
+    expect(modifyIndex(sql, `c${length - 1}`)).toBeLessThan(modifyIndex(sql, 'c0'))
+  })
 
   test(
     'a chain whose every column stops reading another column is ordered in linear time',

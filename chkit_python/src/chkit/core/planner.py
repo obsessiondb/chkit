@@ -998,9 +998,11 @@ def _cycle_releases(
 
     Such a K, P and every column between them lie on a cycle of old and new
     reads, so the search starts from the old reads that P drops and keeps to
-    the columns on such cycles (#789). It does work linear in the reads,
-    plus two searches of those columns for each P that could release a K: a
-    deep chain of defaults costs no more than a short one.
+    the columns on such cycles (#789). Beyond work linear in the reads, it
+    searches those columns once for each old read that a P drops, and once
+    more for each such read and P when the first search finds a K: a deep
+    chain of defaults costs no more than a short one unless many of its
+    columns drop reads on one cycle. Memory stays linear in the reads.
     """
     cyclic = _on_cycles(reads, old_reads)
     # Column -> the columns that lead to it, the first step from K excluded.
@@ -1026,18 +1028,20 @@ def _cycle_releases(
     def stable_reads(column: str) -> Iterable[str]:
         return reads.get(column, set()) & old_reads.get(column, set())
 
-    leading_back: dict[str, set[str]] = {}
-    released: dict[str, dict[str, None]] = {}
+    # Dropped read -> the breakers that drop it. Each closure is searched,
+    # used and let go, so the memory stays linear in the reads.
+    dropped_by: dict[str, list[str]] = {}
     for breaker in sorted(modified):
         if breaker not in cyclic:
             continue
-        leads_to_breaker: set[str] | None = None
         for dropped in old_reads.get(breaker, ()):
-            if dropped in reads.get(breaker, ()) or dropped not in cyclic:
-                continue
-            back = leading_back.get(dropped)
-            if back is None:
-                back = leading_back[dropped] = closure(dropped, stable_reads)
+            if dropped not in reads.get(breaker, ()) and dropped in cyclic:
+                dropped_by.setdefault(dropped, []).append(breaker)
+    released: dict[str, dict[str, None]] = {}
+    for dropped, breakers in dropped_by.items():
+        back = closure(dropped, stable_reads)
+        for breaker in breakers:
+            leads_to_breaker: set[str] | None = None
             for key in back:
                 if key == breaker or key not in modified:
                     continue
