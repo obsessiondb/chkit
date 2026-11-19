@@ -1061,6 +1061,8 @@ def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
         ("case regexp 'x'", ["case"]),
         ("arraySum(arrayMap(interval -> toUInt64(toDateTime(0) + interval end day), [1]))", ["end"]),
         ("length(extract(interval end day > interval 0 day ? 'a' : 'b', '.'))", ["end", "interval"]),
+        ("arraySum(arrayMap(and -> 1 and end, [1]))", ["end"]),
+        ("length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ["from", "interval"]),
     ],
 )
 def test_reads_keep_keyword_named_columns_where_an_operand_is_expected(

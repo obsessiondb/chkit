@@ -1221,6 +1221,14 @@ const PREFIX_KEYWORDS: ReadonlySet<string> = new Set([
 ])
 // Word operators besides `INFIX_KEYWORDS` (`x GLOBAL IN (…)`, `s REGEXP 'a'`).
 const OTHER_OPERATORS: ReadonlySet<string> = new Set(['global', 'regexp'])
+// The units of `extract(unit FROM …)`.
+const EXTRACT_UNITS: ReadonlySet<string> = new Set([
+  'nanosecond', 'microsecond', 'millisecond', 'second', 'minute', 'hour', 'day', 'week', 'month', 'quarter', 'year',
+])
+// A skipped name or a column read named like one of these may be that keyword.
+const isKeywordWord = (word: string | undefined) =>
+  word !== undefined &&
+  (PREFIX_KEYWORDS.has(word) || INFIX_KEYWORDS.has(word) || OTHER_OPERATORS.has(word) || LITERAL_WORDS.has(word))
 
 /**
  * Indices of the single bare names in `tokens` (trivia removed) that are
@@ -1230,9 +1238,9 @@ const OTHER_OPERATORS: ReadonlySet<string> = new Set(['global', 'regexp'])
  * and the name after such an AS (`toUInt64(x AS c)`), which ClickHouse does
  * not read as the column. A complete operand ends on a number, a string, a
  * closing bracket, a literal word, END, the unit of `extract(unit FROM …)`,
- * or a name `skipped` holds or a column read where an operand was expected,
- * when the name is not like a word in `PREFIX_KEYWORDS`. After any other
- * name the next word keeps its read.
+ * a column read where an operand was expected that is not named like a word
+ * in `PREFIX_KEYWORDS`, or a name `skipped` holds that is not named like a
+ * keyword. After any other name the next word keeps its read.
  */
 function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped: ReadonlySet<number>): Set<number> {
   const keywords = new Set<number>()
@@ -1247,8 +1255,8 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
       if (token.text === ')' || token.text === ']' || token.text === '}') state = 'ended'
       else if (token.text !== '.') state = 'operand'
     } else if (name === undefined) state = 'unknown'
-    // A lambda parameter or a cast type, unless it is named like a prefix keyword.
-    else if (skipped.has(i)) state = PREFIX_KEYWORDS.has(word ?? '') ? 'unknown' : 'ended'
+    // A lambda parameter or a cast type, unless it is named like a keyword.
+    else if (skipped.has(i)) state = isKeywordWord(word) ? 'unknown' : 'ended'
     // A part of a dotted name, or a function call.
     else if (tokens[i - 1]?.text === '.' || tokens[i + 1]?.text === '.' || tokens[i + 1]?.text === '(') continue
     else if (word !== undefined && LITERAL_WORDS.has(word)) {
@@ -1275,7 +1283,8 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
         keywords.add(i)
         state = 'ended'
       }
-    } else if (tokens[i - 1]?.text === '(' && bare(i - 2) === 'extract' && bare(i + 1) === 'from') state = 'ended'
+    } else if (tokens[i - 1]?.text === '(' && bare(i - 2) === 'extract' && EXTRACT_UNITS.has(word ?? '') && bare(i + 1) === 'from')
+      state = 'ended'
     else state = state === 'operand' && columns.has(name) && !PREFIX_KEYWORDS.has(word ?? '') ? 'ended' : 'unknown'
   }
   return keywords
