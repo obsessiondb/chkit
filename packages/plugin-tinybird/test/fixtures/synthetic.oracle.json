@@ -220,6 +220,16 @@
    ]
   },
   {
+   "kind": "endpoint",
+   "name": "user_overlap",
+   "renders": [
+    {
+     "params": {},
+     "sql": "WITH engaged_buyers AS\n    (\n        (\n            SELECT user_id\n            FROM\n            (\n                SELECT user_id\n                FROM events AS events\n                WHERE event_type = 'click'\n            ) AS clickers\n            UNION DISTINCT\n            SELECT user_id\n            FROM\n            (\n                SELECT user_id\n                FROM events AS events\n                WHERE event_type = 'add_to_cart'\n            ) AS carters\n        )\n        INTERSECT\n        SELECT user_id\n        FROM\n        (\n            SELECT user_id\n            FROM events AS events\n            WHERE event_type = 'purchase'\n        ) AS buyers\n    )\nSELECT\n    e.user_id,\n    count() AS hits,\n    (\n        SELECT countDistinct(user_id)\n        FROM\n        (\n            SELECT user_id\n            FROM events AS events\n            WHERE event_type = 'purchase'\n        ) AS buyers\n    ) AS all_buyers\nFROM engaged_buyers AS e,\n(\n    (\n        SELECT 1 AS one\n        FROM\n        (\n            SELECT user_id\n            FROM events AS events\n            WHERE event_type = 'click'\n        ) AS clickers\n    )\n    UNION ALL\n    SELECT 1 AS one\n    FROM\n    (\n        SELECT user_id\n        FROM events AS events\n        WHERE event_type = 'add_to_cart'\n    ) AS carters\n) AS u\nWHERE u.one = 1\nGROUP BY e.user_id"
+    }
+   ]
+  },
+  {
    "kind": "materialized",
    "name": "daily_amounts_mv",
    "node": "daily_amounts_node",
