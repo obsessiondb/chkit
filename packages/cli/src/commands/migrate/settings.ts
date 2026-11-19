@@ -103,6 +103,6 @@ export async function assertInsertSettingsChangeable(db: ClickHouseExecutor): Pr
   }
 }
 
-export function insertSettingsFixedMessage(name: string, value: string, durable: string): string {
+function insertSettingsFixedMessage(name: string, value: string, durable: string): string {
   return `Setting ${name} is fixed at ${value} for this ClickHouse user, and chkit migrate needs ${name} = ${durable} so that a statement it records as applied is stored. Nothing ran.`
 }
