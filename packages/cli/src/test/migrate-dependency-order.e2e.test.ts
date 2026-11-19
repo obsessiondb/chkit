@@ -622,6 +622,20 @@ describe('@chkit/cli migrate orders the column statements of a table (#745, #746
     })
   }, 120_000)
 
+  // Reading the CASE's `end` as the column `end` made the two DROPs a cycle,
+  // so `a` was dropped first: Cannot drop column `a`, because column `end`
+  // depends on it (#805).
+  test('a CASE keyword named like a column does not hold back the DROP of the column it names', async () => {
+    await migrateColumnChange({
+      label: 'casekeyword',
+      before:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'case when id = 1 then 2 else 3 end' } }, { name: 'end', type: 'UInt64', default: { expression: 'a + 1' } }",
+      after: "{ name: 'x', type: 'UInt64' }",
+      order: ['DROP COLUMN IF EXISTS `end`;', 'DROP COLUMN IF EXISTS `a`;'],
+      columns: ['id', 'x'],
+    })
+  }, 120_000)
+
   // Passes on main too; it fails when the ADD and the RENAME move while the
   // MODIFY of `d` keeps its slot before the ADD of `c`.
   test('a MODIFY COLUMN stays after the ADD COLUMN it reads when a rename runs too', async () => {

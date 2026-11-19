@@ -1313,8 +1313,10 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
             keywords.add(i)
             state = "ended"
         elif word == "not":
+            # After an operand, NOT starts ``NOT IN``, ``NOT LIKE`` or ``NOT BETWEEN``.
             keywords.add(i)
-            state = "operand"
+            if state != "ended":
+                state = "operand"
         elif word == "case" and _case_follows(tokens[i + 1] if i + 1 < count else None):
             keywords.add(i)
             if bare(i + 1) == "when":

@@ -1134,6 +1134,86 @@ describe('planDiff orders MODIFY read releases and table TTL changes (#769)', ()
   })
 })
 
+// Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
+// column it reads is refused (#805).
+describe('columnDefaultReads skips keywords and alias names (#805)', () => {
+  const columns = ['and', 'as', 'c', 'case', 'else', 'end', 'from', 'id', 'is', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
+  const readsOf = (expression: string) => {
+    const definition = table({
+      database: 'app',
+      name: 't',
+      columns: [
+        ...columns.map((name) => ({ name, type: 'UInt64' })),
+        { name: 'v', type: 'UInt64', default: { expression } },
+      ],
+      engine: 'MergeTree()',
+      primaryKey: ['id'],
+      orderBy: ['id'],
+    })
+    const reads = columnDefaultReads([definition]).get('table:app.t:column:v') ?? new Set<string>()
+    return [...reads].map((key) => key.slice('table:app.t:column:'.length)).sort()
+  }
+
+  test.each<[string, string[]]>([
+    ['case when x = 1 then 2 else 3 end', ['x']],
+    ['case x when 1 then 2 end', ['x']],
+    ['CASE x WHEN 1 THEN 2 END + 0', ['x']],
+    ['if(x is null, 1, 2)', ['x']],
+    ['if(x is not null, 1, 2)', ['x']],
+    ['not x', ['x']],
+    ['toUInt64(not (x = 1))', ['x']],
+    ['x not in (1, 2)', ['x']],
+    ['ifNull(null, 1) + ifNull(NULL, 1)', []],
+    ['if(true, 1, 2) + toUInt64(isNaN(nan))', []],
+    ['length(substring(toString(s) from 1 for 2))', ['s']],
+    ['toUInt64(extract(day from ts))', ['ts']],
+    ["length(trim(both ' ' from toString(s)))", ['s']],
+    ['x and 1', ['x']],
+    ['x between 1 and 2', ['x']],
+    ['toUInt64(x as c)', ['x']],
+    ['toUInt64(x AS `c`)', ['x']],
+    ['(x + 1 as c) * 2', ['x']],
+    ['arraySum(arrayMap(i -> i is null, [x]))', ['x']],
+  ])('keyword: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test.each<[string, string[]]>([
+    ['end + 1', ['end']],
+    ['toUInt64(when)', ['when']],
+    ['case', ['case']],
+    ['case + 1', ['case']],
+    ['is + 1', ['is']],
+    ['x and and', ['and', 'x']],
+    ['toUInt64(as)', ['as']],
+    ['case when end = 1 then 2 end', ['end']],
+    ['case when x = 1 then end else 3 end', ['end', 'x']],
+    ['case when x = 1 then then else else end', ['else', 'then', 'x']],
+    ['case when x = 1 then 2 else 3 end + end', ['end', 'x']],
+    ['case when case = 1 then 2 end', ['case']],
+    ['toUInt64(substring(toString(s) from from))', ['from', 's']],
+    ['ifNull(`null`, 1)', ['null']],
+    ['toUInt64(`true`)', ['true']],
+    ['toUInt64(`not`)', ['not']],
+    ['toUInt64(c as c)', ['c']],
+    ['(x + 1 as c) * c', ['c', 'x']],
+  ])('column: %s reads %p', (expression, expected) => {
+    expect(readsOf(expression)).toEqual(expected)
+  })
+
+  test('a DROP COLUMN runs after the dropped column that reads it when a CASE names that column', () => {
+    const before = appTable('t', [
+      { name: 'id', type: 'UInt64' },
+      { name: 'a', type: 'UInt64', default: { expression: 'case when id = 1 then 2 else 3 end' } },
+      { name: 'end', type: 'UInt64', default: { expression: 'a + 1' } },
+    ])
+    expect(objectOps([before], [appTable('t')])).toEqual([
+      'alter_table_drop_column table:app.t:column:end',
+      'alter_table_drop_column table:app.t:column:a',
+    ])
+  })
+})
+
 describe('columnDefaultReads skips lambda parameters and CAST types (#768)', () => {
   const columns = ['a', 'arr', 'c', 'id', 'n.x', 'threshold', 'UInt64', 'x', 'y']
   const readsOf = (expression: string) => {
