@@ -170,7 +170,7 @@ The flags act on the one async statement whose attempt has no known outcome. The
 
 - the attempt still runs on a replica (`async_outcome_unknown`): wait for it, or `KILL QUERY` it and check what it applied;
 - chkit can tell the outcome itself (`mark_refused`): run `migrate --apply`;
-- the server rejected the attempt before it started and the migration file does not have the statement's SQL, which tells whether that rejection ran nothing (`mark_refused`);
+- the server rejected the attempt before it started and the migration file does not have the statement's SQL, which tells whether that rejection ran nothing (`mark_refused`). The flags read the file as it is, before any plugin's `onBeforeApply` rewrite, so a statement a plugin rewrites is refused this way too: use `--abandon`;
 - more than one statement has no known outcome (`mark_refused`): use `--abandon`;
 - another chkit release recorded statements of the migration without their SQL fingerprints (`mark_refused`), so this release cannot check that they are the statements it splits the file into: use `--abandon`;
 - the journal has no in-progress state for the migration, or it is applied (as for `--abandon`).

@@ -54,7 +54,7 @@ export async function readStoppedStatement(
   // The journal writer stamps this release on the state, after which apply no
   // longer checks the positions another release recorded without fingerprints
   // against this release's split (#562), so such a state is not marked.
-  if (state.chkitVersion !== CLI_VERSION && state.operations.some((op) => op.status !== 'failed' && op.fingerprint === '')) {
+  if (state.chkitVersion !== CLI_VERSION && state.operations.some((op) => op.fingerprint === '')) {
     throw new MigrateError(
       'mark_refused',
       `Cannot ${flag} ${migration}: chkit ${state.chkitVersion} recorded its statements without their SQL fingerprints, so chkit cannot check that they are the statements this release splits the file into. Nothing was changed; reconcile every statement of ${migration} that already ran and run chkit migrate --apply --abandon ${migration}.`,

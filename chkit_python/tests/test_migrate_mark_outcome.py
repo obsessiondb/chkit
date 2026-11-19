@@ -158,6 +158,24 @@ def test_refuses_a_state_another_release_recorded_without_fingerprints() -> None
     assert client.calls == []
 
 
+def test_refuses_a_failed_record_another_release_wrote_without_a_fingerprint() -> None:
+    legacy = _op(1, query_id="q-1", status="failed", last_error="retried", fingerprint="")
+    state = _state([_op(0), legacy], chkit_version="0.1.0")
+    client = _Client(QueryStatus(status="unknown"))
+    with pytest.raises(MigrateError) as info:
+        read_stopped_statement(
+            cast(ClickHouseClient, client),
+            migration="m.sql",
+            applied_names=set(),
+            flag="mark-applied",
+            sql_by_fingerprint={},
+            journal_store=cast(JournalStore, _Store(state)),
+            log=lambda _line: None,
+        )
+    assert info.value.code == "mark_refused"
+    assert client.calls == []
+
+
 @pytest.mark.parametrize(
     ("outcome", "status", "last_error"),
     [

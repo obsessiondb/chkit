@@ -60,7 +60,7 @@ def read_stopped_statement(
     # longer checks the positions another release recorded without fingerprints
     # against this release's split (#562), so such a state is not marked.
     if state.chkit_version != __version__ and any(
-        op.status != "failed" and op.fingerprint == "" for op in state.operations
+        op.fingerprint == "" for op in state.operations
     ):
         raise MigrateError(
             "mark_refused",

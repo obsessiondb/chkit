@@ -123,6 +123,14 @@ describe('readStoppedStatement', () => {
     })
     expect(statusCalls).toEqual([])
   })
+
+  test('refuses a failed record another release wrote without a fingerprint, which a mark could make completed', async () => {
+    const legacy = op(1, { queryId: 'q-1', status: 'failed', lastError: 'retried', fingerprint: '' })
+    const { deps, statusCalls } = fakes(stateWith([op(0), legacy], '0.1.0'), { status: 'unknown' })
+
+    await expect(readStoppedStatement(input(INSERT), deps)).rejects.toMatchObject({ code: 'mark_refused' })
+    expect(statusCalls).toEqual([])
+  })
 })
 
 describe('markStoppedStatement', () => {
