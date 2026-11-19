@@ -1208,6 +1208,8 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     // Unclear positions keep the read: after a lambda parameter, and before a single `=`.
     ['arraySum(arrayMap(i -> i is null, [x]))', ['is', 'x']],
     ['toUInt8(null = 1)', ['null']],
+    ['toUInt64(toDateTime(0) + interval case day)', ['case', 'interval']],
+    ['length(substring(case c, 1))', ['c', 'case']],
     ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
   ])('column: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)

@@ -1350,7 +1350,7 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
             # NOT keeps the state: unary NOT expects an operand, as before it, and
             # after an operand it starts ``NOT IN``, ``NOT LIKE`` or ``NOT BETWEEN``.
             keywords.add(i)
-        elif word == "case" and _case_follows(tokens[i + 1] if i + 1 < count else None):
+        elif word == "case" and _case_follows(tokens, i):
             keywords.add(i)
             if bare(i + 1) == "when":
                 i += 1
@@ -1383,20 +1383,25 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
     return keywords
 
 
-def _case_follows(following: SQLToken | None) -> bool:
-    """Whether ``following`` makes the CASE before it the keyword.
+def _case_follows(tokens: list[SQLToken], at: int) -> bool:
+    """Whether the CASE at ``at`` is the keyword.
 
-    That is WHEN, or the start of an operand that is not named like a keyword
-    (``case TO DISK 'd'`` in a TTL reads the column ``case``).
+    That is when WHEN follows it, or one operand token and then WHEN (``CASE x
+    WHEN``). Otherwise it may read the column ``case`` (``INTERVAL case DAY``,
+    ``case TO DISK 'd'`` in a TTL), and keeps the read.
     """
-    if following is None:
+
+    def is_when(i: int) -> bool:
+        return i < len(tokens) and tokens[i].kind == "identifier" and tokens[i].text.lower() == "when"
+
+    if is_when(at + 1):
+        return True
+    if at + 1 >= len(tokens) or not is_when(at + 2):
         return False
+    following = tokens[at + 1]
     if following.kind in ("number", "string", "quoted_identifier"):
         return True
-    if following.kind != "identifier":
-        return False
-    word = following.text.lower()
-    return word == "when" or word not in _KEYWORD_WORDS
+    return following.kind == "identifier" and following.text.lower() not in _KEYWORD_WORDS
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:

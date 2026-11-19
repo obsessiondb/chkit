@@ -1270,7 +1270,7 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
       // NOT keeps the state: unary NOT expects an operand, as before it, and
       // after an operand it starts `NOT IN`, `NOT LIKE` or `NOT BETWEEN`.
       keywords.add(i)
-    } else if (word === 'case' && caseFollows(tokens[i + 1])) {
+    } else if (word === 'case' && caseFollows(tokens, i)) {
       keywords.add(i)
       if (bare(i + 1) === 'when') {
         i += 1
@@ -1295,14 +1295,15 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
 }
 
 /**
- * Whether `next` makes the CASE before it the keyword: WHEN, or the start of
- * an operand that is not named like a keyword (`case TO DISK 'd'` in a TTL
- * reads the column `case`).
+ * Whether the CASE at `at` is the keyword: WHEN follows it, or one operand
+ * token and then WHEN (`CASE x WHEN`). Otherwise it may read the column
+ * `case` (`INTERVAL case DAY`, `case TO DISK 'd'` in a TTL), and keeps the read.
  */
-function caseFollows(next: SQLToken | undefined): boolean {
-  if (next === undefined) return false
+function caseFollows(tokens: SQLToken[], at: number): boolean {
+  const isWhen = (token: SQLToken | undefined) => token?.kind === 'identifier' && token.text.toLowerCase() === 'when'
+  const next = tokens[at + 1]
+  if (isWhen(next)) return true
+  if (next === undefined || !isWhen(tokens[at + 2])) return false
   if (next.kind === 'number' || next.kind === 'string' || next.kind === 'quoted_identifier') return true
-  if (next.kind !== 'identifier') return false
-  const word = next.text.toLowerCase()
-  return word === 'when' || !isKeywordWord(word)
+  return next.kind === 'identifier' && !isKeywordWord(next.text.toLowerCase())
 }
