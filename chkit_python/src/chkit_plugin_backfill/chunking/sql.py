@@ -100,23 +100,39 @@ PINNED_SETTING_ALIASES: dict[str, str] = {
 }
 
 
+def _pinned_name(key: str, aliases: Mapping[str, str] | None) -> str | None:
+    """The pinned setting ``key`` names, itself or through an alias."""
+    if key in PINNED_INSERT_SETTINGS:
+        return key
+    name = {**PINNED_SETTING_ALIASES, **(aliases or {})}.get(key)
+    return name if name in PINNED_INSERT_SETTINGS else None
+
+
+def _same_value(value: str | int | float | bool, pinned: str) -> bool:
+    def normal(text: str) -> str:
+        bare = text.strip("'").lower()
+        return {"true": "1", "false": "0"}.get(bare, bare)
+
+    return normal(_render_insert_setting_value(value)) == normal(pinned)
+
+
 def assert_insert_settings_keep_pinned(
     insert_settings: Mapping[str, str | int | float | bool] | None,
     aliases: Mapping[str, str] | None = None,
 ) -> None:
-    """Refuse ``insertSettings`` that name a pinned setting
-    (``PINNED_INSERT_SETTINGS``), or an alias of one, whatever the value:
-    which of two settings in one SETTINGS clause wins differs per setting,
-    and the chunk INSERT must not run as secondary queries, and must be
-    logged. ``aliases`` adds the server's own (``system.settings.alias_for``)
-    to ``PINNED_SETTING_ALIASES``."""
-    known = {**PINNED_SETTING_ALIASES, **(aliases or {})}
+    """Refuse ``insertSettings`` that set a pinned setting
+    (``PINNED_INSERT_SETTINGS``), or an alias of one, to another value: the
+    chunk INSERT must not run as secondary queries, and must be logged. One
+    with the pinned value is dropped (``unpinned_insert_settings``).
+    ``aliases`` adds the server's own (``system.settings.alias_for``) to
+    ``PINNED_SETTING_ALIASES``."""
     conflicts = []
-    for key in insert_settings or {}:
-        if key in PINNED_INSERT_SETTINGS:
-            conflicts.append(key)
-        elif known.get(key) in PINNED_INSERT_SETTINGS:
-            conflicts.append(f"{key} (an alias of {known[key]})")
+    for key, value in (insert_settings or {}).items():
+        name = _pinned_name(key, aliases)
+        if name is None or _same_value(value, PINNED_INSERT_SETTINGS[name]):
+            continue
+        rendered = f"{key}={_render_insert_setting_value(value)}"
+        conflicts.append(rendered if name == key else f"{rendered} (an alias of {name})")
     if conflicts:
         msg = (
             f"insertSettings sets {', '.join(conflicts)}, which every backfill chunk INSERT "
@@ -127,14 +143,17 @@ def assert_insert_settings_keep_pinned(
         raise BackfillConfigError(msg)
 
 
-def _unpinned(
+def unpinned_insert_settings(
     insert_settings: Mapping[str, str | int | float | bool] | None,
-) -> list[tuple[str, str | int | float | bool]]:
-    return [
-        (key, value)
+    aliases: Mapping[str, str] | None = None,
+) -> dict[str, str | int | float | bool]:
+    """``insert_settings`` without the pinned settings and their aliases: a
+    pinned one appears once in the INSERT's SETTINGS, with its pinned value."""
+    return {
+        key: value
         for key, value in (insert_settings or {}).items()
-        if key not in PINNED_INSERT_SETTINGS
-    ]
+        if _pinned_name(key, aliases) is None
+    }
 
 
 def build_chunk_execution_sql(
@@ -240,7 +259,7 @@ def _build_cutover_chunk_sql(
         "select_sequential_consistency=1",
     ]
     assert_insert_settings_keep_pinned(insert_settings)
-    for setting, value in _unpinned(insert_settings):
+    for setting, value in unpinned_insert_settings(insert_settings).items():
         parts.append(f"{setting}={_render_insert_setting_value(value)}")
     parts.append(PINNED_INSERT_SETTINGS_SQL)
     lines = [
@@ -706,7 +725,7 @@ def _build_settings_clause(
     # min_insert_block_size_rows). Rendered into the single SETTINGS clause because
     # ClickHouse rejects a second SETTINGS clause on INSERT ... SELECT.
     assert_insert_settings_keep_pinned(insert_settings)
-    for key, value in _unpinned(insert_settings):
+    for key, value in unpinned_insert_settings(insert_settings).items():
         parts.append(f"{key}={_render_insert_setting_value(value)}")
     parts.append(PINNED_INSERT_SETTINGS_SQL)
     return f"SETTINGS {', '.join(parts)}"

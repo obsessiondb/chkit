@@ -34,6 +34,7 @@ from chkit_plugin_backfill.check import evaluate_backfill_check
 from chkit_plugin_backfill.chunking.sql import (
     assert_insert_settings_keep_pinned,
     build_chunk_execution_sql,
+    unpinned_insert_settings,
 )
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
@@ -354,6 +355,7 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
             lambda: read_pinned_setting_aliases(db.query_rows), stop, plan.plan_id
         )
         assert_insert_settings_keep_pinned(insert_settings, aliases)
+        insert_settings = unpinned_insert_settings(insert_settings, aliases)
         run_interruptible(
             lambda: assert_pinned_insert_settings_accepted(
                 plan_id=plan.plan_id, query=db.query_rows
