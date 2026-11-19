@@ -147,13 +147,19 @@ describe('createRemoteExecutor submit', () => {
 		try {
 			const remote = connect(`http://127.0.0.1:${server.port}`)
 			const controller = new AbortController()
+			const reason = new Error('run gave up')
 			const submitted = remote.submit('INSERT INTO t VALUES (1)', 'qid-stalled', undefined, { signal: controller.signal })
+			// A second submit waits on the same lookup and must not be cancelled with the first.
+			const other = remote.submit('INSERT INTO t VALUES (2)', 'qid-other')
 			while (queries.length === 0) await Bun.sleep(5)
-			controller.abort(new Error('run gave up'))
-			await expect(submitted).rejects.toThrow('run gave up')
+			controller.abort(reason)
+			expect(await submitted.catch((error: unknown) => error)).toBe(reason)
 			releaseLookup()
-			await Bun.sleep(50)
-			expect(queries).toEqual(["SELECT toString(readonly) AS readonly FROM system.settings WHERE name = 'async_insert'"])
+			expect(await other).toBe('qid-other')
+			expect(queries).toEqual([
+				"SELECT toString(readonly) AS readonly FROM system.settings WHERE name = 'async_insert'",
+				'INSERT INTO t VALUES (2)',
+			])
 		} finally {
 			releaseLookup()
 			server.stop(true)
