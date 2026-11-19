@@ -1727,21 +1727,22 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
   // A call to a function whose arguments can be units or keywords (in any
   // case, with any arguments) keeps the sorted order. A bare query or join
   // word reads its column and a call to one is a function, as ClickHouse 26.3
-  // parses them, so both keep the repair; such a word after an operand, and
-  // a call to `values` (a VALUES subquery on 26.8), do not. A quoted name is a column read, and other calls, in any case, keep
+  // parses them, so both keep the repair; such a word after an operand does
+  // not, nor does `values` (a VALUES subquery from 26.4). A quoted name is a column read, and other calls, in any case, keep
   // the repair.
   test.each<[string, ColumnDefinition[], string[]]>([
     ['a bare APPLY', [u('APPLY'), u('extra', 'toUInt64(APPLY)')], ['t.b', 't.a', 't.c']],
     ['a bare JOIN', [u('join'), u('extra', 'toUInt64(join)')], ['t.b', 't.a', 't.c']],
     ['a bare PLACING', [u('placing'), u('extra', 'toUInt64(placing)')], ['t.b', 't.a', 't.c']],
     ['bare left and RIGHT', [u('left'), u('RIGHT'), u('extra', 'left + RIGHT')], ['t.b', 't.a', 't.c']],
-    ['bare format and values', [u('format'), u('values'), u('extra', 'plus(format, -values)')], ['t.b', 't.a', 't.c']],
+    ['bare format and union', [u('format'), u('union'), u('extra', 'plus(format, -union)')], ['t.b', 't.a', 't.c']],
     ['bare offset, step and Final', [u('offset'), u('step'), u('Final'), u('extra', 'offset * step = Final')], ['t.b', 't.a', 't.c']],
     ['bare settings and sample', [u('settings'), u('sample'), u('extra', 'CAST(settings AS UInt64) + sample::UInt64')], ['t.b', 't.a', 't.c']],
     ['calls to left and RIGHT', [u('extra', 'toUInt64(left(toString(id), 1)) + toUInt64(RIGHT(toString(id), 1))')], ['t.b', 't.a', 't.c']],
     ['a call to format', [u('extra', "length(format('{}-{}', toString(id), 'x'))")], ['t.b', 't.a', 't.c']],
     ['a call to left with a left column', [u('left'), u('extra', 'toUInt64(left(toString(left), 1))')], ['t.b', 't.a', 't.c']],
     ['a query word after an operand', [u('offset'), u('extra', 'id offset')], ['t.a', 't.b', 't.c']],
+    ['a bare values', [u('values'), u('extra', '(values - (1))')], ['t.a', 't.b', 't.c']],
     ['a call to values', [u('extra', 'toUInt64((values(id)))')], ['t.a', 't.b', 't.c']],
     ['a quoted APPLY', [u('APPLY'), u('extra', 'toUInt64(`APPLY`)')], ['t.b', 't.a', 't.c']],
     ['eXTrAcT with string arguments', [u('extra', "length(eXTrAcT('abc', 'a'))")], ['t.a', 't.b', 't.c']],

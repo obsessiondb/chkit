@@ -1719,18 +1719,18 @@ _BINARY_OPERATORS = frozenset(["+", "-", "*", "/", "%", "=", "<", ">"])
 _PAIRED_OPERATORS = frozenset(["<=", ">=", "!=", "<>", "==", "||"])
 # Bare words ClickHouse reads as literals (any case), whatever the columns.
 _LITERAL_WORDS = frozenset(["false", "inf", "infinity", "nan", "null", "true"])
-# Bare words that are not function names even before ``(``. ClickHouse 26.8
-# reads ``(values(c))`` as a subquery over SQL-standard VALUES.
-_NOT_FUNCTIONS = frozenset(["exists", "lambda", "select", "values", "with"])
+# Bare words that are not function names even before ``(``.
+_NOT_FUNCTIONS = frozenset(["exists", "lambda", "select", "with"])
 # Keywords of ClickHouse's expression grammar (operators, literals and the
 # words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
 # bare one may not read a column of that name, so its expression is not
 # plain, and neither is a call to one outside ``_KEYWORD_FUNCTIONS``. A quoted
 # name reads such a column. Query clause and join words (``left``, ``right``,
-# ``format``, ``values``, ``offset``, ``settings``...) are not here: ClickHouse
-# 26.3 reads a bare one as its column and a call to one as a function, and
-# their clause uses (``... FORMAT JSON``, ``LIMIT 1 OFFSET 2``) follow an
-# operand, which is not plain anyway.
+# ``format``, ``offset``, ``settings``...) are not here: ClickHouse 26.3 reads a
+# bare one as its column and a call to one as a function, and their clause
+# uses (``... FORMAT JSON``, ``LIMIT 1 OFFSET 2``) follow an operand, which is
+# not plain anyway. ``values`` is: from 26.4, ``(values(c))`` is a subquery
+# over SQL-standard VALUES, and so is ``(values - 1)`` before 26.4.3.
 _EXPRESSION_KEYWORDS = frozenset(
     [
         "all", "and", "any", "array", "as", "asc", "ascending", "between", "both", "by",
@@ -1740,7 +1740,7 @@ _EXPRESSION_KEYWORDS = frozenset(
         "is", "lambda", "last", "leading", "like", "mod", "not", "nulls", "or", "order",
         "over", "partition", "position", "preceding", "range", "regexp", "replace",
         "respect", "row", "rows", "select", "substring", "then", "ties", "timestamp",
-        "trailing", "trim", "unbounded", "when", "where", "window", "with", "within",
+        "trailing", "trim", "unbounded", "values", "when", "where", "window", "with", "within",
     ]
 )
 # Keywords that are also ordinary functions when called: their special forms
