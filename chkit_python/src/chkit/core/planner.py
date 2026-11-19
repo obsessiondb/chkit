@@ -1341,13 +1341,12 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
         elif word is not None and word in _INFIX_KEYWORDS and state == "ended":
             keywords.add(i)
             state = "ended" if word == "end" else "operand"
-            after = text_at(i + 2)
             if (
                 word == "as"
                 and i + 1 < count
                 and identifier_name(tokens[i + 1]) is not None
                 and i + 1 not in skipped
-                and after not in (".", "(")
+                and text_at(i + 2) not in (".", "(")
             ):
                 i += 1
                 keywords.add(i)
@@ -1355,8 +1354,8 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
         elif text_at(i - 1) == "(" and bare(i - 2) == "extract":
             state = "ended"
         else:
-            prefix = word is not None and word in _PREFIX_KEYWORDS
-            state = "ended" if state == "operand" and name in columns and not prefix else "unknown"
+            ended = state == "operand" and name in columns and word not in _PREFIX_KEYWORDS
+            state = "ended" if ended else "unknown"
         i += 1
     return keywords
 
