@@ -7,6 +7,7 @@ import {
   extractMigrationOperationSummaries,
   findNonSelectBarriers,
   isSelectStatement,
+  rejectionRunsNothing,
   migrationContainsDestructiveSql,
   scanDestructiveSqlStatements,
 } from '../../runtime/safety-markers.js'
@@ -443,4 +444,37 @@ describe('findNonSelectBarriers (#634)', () => {
       'DROP TABLE default.b;\n'
     expect(findNonSelectBarriers(extractExecutableStatements(sql), extractMigrationOperationSummaries(sql))).toEqual([])
   })
+})
+
+// #767 (Opus review): only a SELECT or an INSERT applies nothing before its
+// pipeline starts; every other statement, and one that cannot be told, may.
+describe('rejectionRunsNothing', () => {
+  for (const statement of [
+    'SELECT 1',
+    '(SELECT 1)',
+    'WITH x AS (SELECT 1) SELECT * FROM x',
+    'INSERT INTO t SELECT * FROM s',
+    "INSERT INTO t VALUES (1, 'a')",
+    '-- a comment\ninsert into t select 1',
+    'WITH x AS (SELECT 1) INSERT INTO t SELECT * FROM x',
+  ]) {
+    test(`${JSON.stringify(statement)} runs nothing when rejected`, () => {
+      expect(rejectionRunsNothing(statement)).toBe(true)
+    })
+  }
+  for (const statement of [
+    'ALTER TABLE t UPDATE v = v + 100 WHERE 1',
+    'ALTER TABLE t DELETE WHERE 1',
+    'EXCHANGE TABLES a AND b',
+    'RENAME TABLE a TO b',
+    'OPTIMIZE TABLE t FINAL',
+    'CREATE TABLE t (x UInt8) ENGINE = MergeTree ORDER BY x',
+    'INSERT INTO t SELECT 1 PARALLEL WITH ALTER TABLE t DELETE WHERE 1',
+    'NOT VALID SQL',
+    '',
+  ]) {
+    test(`${JSON.stringify(statement)} may have applied effects`, () => {
+      expect(rejectionRunsNothing(statement)).toBe(false)
+    })
+  }
 })

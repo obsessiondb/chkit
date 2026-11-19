@@ -736,7 +736,9 @@ def run_stored_spelling_scenario(
 
 def _inject_failure(blocks: list[str], step: int) -> str:
     """Replace the SQL of operation ``step`` (0-based) with a statement that
-    fails, keeping its marker lines."""
+    fails, keeping its marker lines. The server rejects it before it starts
+    (an unknown identifier): an async step that fails while it runs may have
+    applied writes, so it is never retried without an abandon (#767)."""
     out: list[str] = []
     for index, block in enumerate(blocks):
         if index != step + 1:
@@ -744,6 +746,6 @@ def _inject_failure(blocks: list[str], step: int) -> str:
             continue
         comments = [line for line in block.split("\n") if line.startswith("--")]
         out.append(
-            "\n".join([*comments, f"SELECT throwIf(1, 'injected failure at statement {step + 1}');"])
+            "\n".join([*comments, f"SELECT `injected failure at statement {step + 1}`;"])
         )
     return "\n\n".join(out)

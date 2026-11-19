@@ -435,6 +435,28 @@ describe('rebaseInProgressState', () => {
   })
 })
 
+// #767 (Codex review of #770): a --retry re-key carries each started
+// record's fence as the journal returned it, so it never makes an unfenced
+// record trusted, nor drops the fence of one this release wrote.
+describe('rebaseInProgressState and the attempt fence (#767)', () => {
+  for (const fenced of [true, false]) {
+    test(`keeps a started async record ${fenced ? 'fenced' : 'unfenced'}`, () => {
+      const started = { ...op(0, 'started', LOAD, 'q-0'), ...(fenced ? { attemptFenced: true } : {}) }
+      const state: MigrationRowState = {
+        name: 'm.sql',
+        appliedAt: '2026-09-29 00:11:11.000',
+        checksum: 'old',
+        chkitVersion: '0.2.0-test',
+        migrationCompleted: false,
+        operations: [started],
+      }
+      const rebased = rebaseInProgressState(state, { checksum: 'new', identities: identities(LOAD), appliedAt: '2026-09-29T01:00:00.000' })
+      expect(rebased.operations).toEqual([started])
+      expect(rebased.operations[0]?.attemptFenced).toBe(fenced ? true : undefined)
+    })
+  }
+})
+
 describe('hasStatementProgress', () => {
   test('is true only when a statement completed or started', () => {
     const state = (operations: OperationState[]): MigrationRowState => ({

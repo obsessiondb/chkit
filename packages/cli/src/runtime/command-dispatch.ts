@@ -332,6 +332,11 @@ function parseForwardedInitFlags(
 	}
 }
 
+/** The plugin that `chkit plugin <name> ...` names, as `cmdPlugin` reads it. */
+export function forwardedPluginName(argsAfterCommand: string[]): string | undefined {
+	return routeForwardedArgs(forwarderFlags(argsAfterCommand).rest).pluginName
+}
+
 function forwarderFlags(argsAfterCommand: string[]): {
 	flags: ParsedFlags
 	rest: string[]
