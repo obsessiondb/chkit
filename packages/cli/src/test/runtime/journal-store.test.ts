@@ -1412,6 +1412,21 @@ describe('readOperationOnEveryCopy topology', () => {
     expect(reads).toHaveLength(0)
   })
 
+  test('a declared cluster is read as declared, even when empty', async () => {
+    const reads: string[] = []
+    const db = {
+      async command() {},
+      async query<T>(sql: string): Promise<T[]> {
+        if (sql.includes('SELECT engine FROM system.tables')) return [{ engine: 'ReplacingMergeTree' }] as T[]
+        if (sql.includes('currentDatabase() AS database')) return [{ database: 'db' }] as T[]
+        if (sql.includes('view(')) reads.push(sql)
+        return (sql.includes('view(') ? [copy(UUID_A)] : []) as T[]
+      },
+    } as unknown as ClickHouseExecutor
+    await createJournalStore(db, undefined, { cluster: '', replicas: 1 }).readOperationOnEveryCopy('m.sql', 0)
+    expect(reads[0]).toContain("clusterAllReplicas('', view(")
+  })
+
   test('a replicated journal read whose cells are strings: covered, with its record', async () => {
     const { store } = storeAnswering('ReplicatedReplacingMergeTree', () => [
       { ...copy('ch1'), members: '["ch1","ch2"]' },

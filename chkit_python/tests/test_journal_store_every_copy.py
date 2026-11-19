@@ -15,6 +15,7 @@ from chkit.cli.commands.migrate_async_apply import AsyncApplyInput, apply_async_
 from chkit.cli.commands.migrate_errors import MigrateError
 from chkit.cli.journal_store import EveryCopyRead, JournalStore, OperationState, every_copy_read
 from chkit.clickhouse.client import QueryStatus
+from chkit.clickhouse.replicas import ReplicaFanout
 
 
 def _row(replica: str, applied_at: str, members: list[str] | None = None) -> dict[str, Any]:
@@ -172,6 +173,16 @@ def test_not_replicated_without_a_declared_cluster_is_not_covered_and_reads_noth
     store, client = _store(lambda: [_copy(_UUID_A)], cluster=None)
     assert store.read_operation_on_every_copy("m.sql", 0) == EveryCopyRead(covered=False, op=None)
     assert client.reads == []
+
+
+def test_a_declared_cluster_is_read_as_declared_even_when_empty() -> None:
+    # As in TS: an empty cluster is declared, and names no server (#802).
+    client = _TopologyClient(lambda: [_copy(_UUID_A)])
+    override = ReplicaFanout(cluster="", replicas=1)
+    JournalStore(cast(Any, client), fanout_override=override).read_operation_on_every_copy(
+        "m.sql", 0
+    )
+    assert "clusterAllReplicas('', view(" in client.reads[0]
 
 
 def test_a_replicated_read_with_string_cells_is_covered_with_its_record() -> None:

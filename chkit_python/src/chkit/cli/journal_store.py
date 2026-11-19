@@ -1002,7 +1002,7 @@ class JournalStore:
             else "SELECT toString(serverUUID()) AS replica, toJSONString([toString(serverUUID())]) "
             f"AS members, {columns} FROM {latest}"
         )
-        cluster = declared_cluster or "default"
+        cluster = declared_cluster if declared_cluster is not None else "default"
         # Every server of the cluster answers, or the read fails: an
         # unavailable one is never skipped, and no limit cuts the reply short.
         copies = self._client.query(
