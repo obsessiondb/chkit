@@ -226,17 +226,19 @@ class ClickHouseClient:
         it, which lets the ``CREATE DATABASE`` of a first migration run."""
         self.execute_guarded(statement, lambda: None, settings)
 
-    def _write_settings(self) -> dict[str, Any]:
+    def _write_settings(self, driver: Any = None) -> dict[str, Any]:
         """No asynchronous INSERT, and one that a table's own async_insert
         setting still makes asynchronous waits for its flush, as TS sends with
         every write, so a write is stored when it returns (#790). A setting the
         user cannot change (readonly = 1, or a constraint) is left out when it
         already has that value, where clickhouse-connect would refuse it before
         the server's own error. Fixed at another value, the write is refused, as
-        the server refuses TS's."""
+        the server refuses TS's. Read from ``driver``, the one that sends the
+        write (the main one by default)."""
+        server_settings = (driver or self._client).server_settings
         settings: dict[str, Any] = {}
         for name, value in _DURABLE_INSERT_SETTINGS.items():
-            setting = self._client.server_settings.get(name)
+            setting = server_settings.get(name)
             if setting is None:
                 continue
             if not setting.readonly:
@@ -410,10 +412,10 @@ class ClickHouseClient:
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
+        driver = self._submit_driver()
         # Stored when it finishes, as execute sends: an asynchronous INSERT
         # would finish while its rows are still buffered (#790).
-        sent = {**self._write_settings(), **(settings or {}), "query_id": qid}
-        driver = self._submit_driver()
+        sent = {**self._write_settings(driver), **(settings or {}), "query_id": qid}
         _SUBMIT_SEND.before_send = before_send
         try:
             driver.command(statement, settings=sent)

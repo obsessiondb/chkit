@@ -155,9 +155,41 @@ def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
         }
         with pytest.raises(RuntimeError, match=f"Setting {name} is fixed at {fixed}"):
             client.execute("INSERT INTO t VALUES (3)")
-        with pytest.raises(RuntimeError, match=f"Setting {name} is fixed at {fixed}"):
-            client.submit("INSERT INTO t VALUES (3)")
     assert fake.command.call_count == 3
+
+
+def test_submit_reads_the_durable_settings_of_the_driver_it_sends_through(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """#790: submit sends through a driver of its own, whose settings snapshot
+    may differ from the main driver's; it is the sender's that decides."""
+    durable = {
+        "async_insert": SimpleNamespace(readonly=False, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=True, value="1"),
+    }
+    drivers: list[MagicMock] = []
+
+    def fake_get_client(**kwargs: object) -> MagicMock:
+        driver = MagicMock()
+        driver.server_settings = (
+            {**durable, "wait_for_async_insert": SimpleNamespace(readonly=True, value="0")}
+            if kwargs.get("autogenerate_session_id") is False
+            else durable
+        )
+        drivers.append(driver)
+        return driver
+
+    monkeypatch.setattr(clickhouse_connect, "get_client", fake_get_client)
+    client = ClickHouseClient.connect(
+        ChxResolvedClickHouseConfig(
+            url="http://localhost:8123", username="default", password="pw",
+            database="analytics", secure=False,
+        )
+    )
+    with pytest.raises(RuntimeError, match="Setting wait_for_async_insert is fixed at 0"):
+        client.submit("INSERT INTO t VALUES (1)", query_id="q1")
+    [_, submit_driver] = drivers
+    submit_driver.command.assert_not_called()
 
 
 def test_execute_reraises_other_database_errors_without_retry() -> None:
