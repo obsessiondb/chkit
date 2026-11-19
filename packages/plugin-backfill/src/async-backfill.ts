@@ -156,7 +156,9 @@ function runningState(state: BackfillChunkState, row: RunningRow): { state: Back
     status: 'running',
     readRows: Number(row.read_rows),
     readBytes: Number(row.read_bytes),
-    writtenRows: Number(row.written_rows),
+    // Written rows are evidence against a failure proof (#765): never lower
+    // than what the checkpoint or an earlier read already saw.
+    writtenRows: Math.max(state.writtenRows ?? 0, rowCount(row.written_rows) ?? 0),
     writtenBytes: Number(row.written_bytes),
     elapsedMs: Math.round(Number(row.elapsed) * 1000),
   }
@@ -457,8 +459,8 @@ function ownWrittenRows(queryId: string, evidence: ChunkEvidence): number {
 
 /**
  * `state` with what this read saw of the attempt that must outlive the read
- * (#765): the first secondary query of it, and the most rows any of its own
- * query_log rows say it wrote. The caller saves it, so a later read, or a
+ * (#765): the first secondary query of it, and the most rows it wrote, by its
+ * own query_log rows or its process. The written rows only ever grow. The caller saves it, so a later read, or a
  * resume after a restart, still knows once the evidence is gone.
  */
 function notedState(planId: string, chunkId: string, state: BackfillChunkState, evidence: ChunkEvidence): BackfillChunkState {
@@ -466,7 +468,8 @@ function notedState(planId: string, chunkId: string, state: BackfillChunkState, 
   let next = state
   const secondary = secondaryQueryOf(queryId, evidence)
   if (secondary !== undefined && state.secondaryQueryId === undefined) next = { ...next, secondaryQueryId: secondary }
-  const written = ownWrittenRows(queryId, evidence)
+  const running = evidence.running.get(queryId)
+  const written = Math.max(ownWrittenRows(queryId, evidence), running ? rowCount(running.written_rows) ?? 0 : 0)
   if (written > (state.writtenRows ?? 0)) next = { ...next, writtenRows: written }
   return next
 }

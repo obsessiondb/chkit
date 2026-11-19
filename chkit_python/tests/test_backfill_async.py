@@ -326,7 +326,8 @@ def test_reports_intermediate_metrics_while_running() -> None:
     assert running_snapshots[0]["c1"].read_rows == 100
     assert running_snapshots[0]["c1"].elapsed_ms == 1000
     assert running_snapshots[1]["c1"].read_rows == 500
-    assert running_snapshots[1]["c1"].written_rows == 50
+    # Written rows never go down: the scripted log already shows the finish.
+    assert (running_snapshots[1]["c1"].written_rows or 0) >= 50
     assert running_snapshots[1]["c1"].elapsed_ms == 3000
 
     # Final snapshot should be done
@@ -1763,8 +1764,13 @@ def test_a_resume_whose_strict_probe_meets_an_unavailable_replica_submits_nothin
 # Round 3 item 3: chunk B waits on its pre-send checkpoint while chunk A's
 # outcome turns out unknown. B must not be sent, and keeps its state.
 def test_a_chunk_whose_pre_send_checkpoint_finishes_after_the_dispatch_stopped_is_not_sent() -> None:
+    b_writing = threading.Event()
+
     class PartialA(SubmitRecordingExecutor):
         def _rows(self, statement: str) -> list[dict[str, object]]:
+            # A's polls classify A only once B's pre-send write is under way.
+            if "system.query_log" in statement:
+                b_writing.wait(5)
             rows = super()._rows(statement)
             return [{**row, "written_rows": "7"} if "type" in row else row for row in rows]
 
@@ -1779,6 +1785,7 @@ def test_a_chunk_whose_pre_send_checkpoint_finishes_after_the_dispatch_stopped_i
         # Hold B's pre-send write while A's polls classify A.
         if progress["c2"].query_id is not None and not held:
             held.append(True)
+            b_writing.set()
             time.sleep(0.2)
 
     with pytest.raises(RuntimeError, match=rf"chunk c1 \(query_id backfill-{PLAN_ID}-c1\): it failed after writing 7 rows"):
@@ -2956,3 +2963,51 @@ def test_a_slow_first_write_that_ends_in_time_releases_the_lock() -> None:
     assert isinstance(error, BackfillInterruptedError)
     assert error.keep_lock is False
     assert (writes, submits) == (1, [])
+
+
+# Codex round 10: written-row evidence only ever grows. A process snapshot with
+# fewer rows, read before query_log in the same poll, cannot lower it, and a
+# resume records what a running process wrote.
+_WROTE_5 = (
+    f"chunk c1 (query_id {_KEPT_ID}): it failed after writing 5 rows, which a replay "
+    "would write again."
+)
+
+
+def _kept_log_row(type_: str, written: str) -> dict[str, object]:
+    return _kept_failure_row(written, type=type_, exception="" if type_ == "QueryStart" else "x")
+
+
+def test_a_running_snapshot_with_0_rows_does_not_lower_5_rows_from_the_same_poll() -> None:
+    executor = _Snapshots(
+        lambda read: ([_kept_running(_KEPT_ID, 1, "0")], [_kept_log_row("QueryStart", "5")])
+        if read <= 2
+        else ([], [_kept_log_row("ExceptionWhileProcessing", "0")])
+    )
+
+    error, saved = _kept_resume(
+        executor, BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True)
+    )
+
+    assert _WROTE_5 in str(error)
+    assert saved is not None
+    assert saved.written_rows == 5
+    assert saved.status != "failed"
+    assert executor.submit_order == []
+
+
+def test_a_resume_records_the_rows_a_running_process_wrote() -> None:
+    executor = _Snapshots(
+        lambda read: ([_kept_running(_KEPT_ID, 1, "5")], [])
+        if read == 1
+        else ([], [_kept_log_row("ExceptionWhileProcessing", "0")])
+    )
+
+    error, saved = _kept_resume(
+        executor, BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True)
+    )
+
+    assert _WROTE_5 in str(error)
+    assert saved is not None
+    assert saved.written_rows == 5
+    assert executor.submit_order == []

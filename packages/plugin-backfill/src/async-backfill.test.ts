@@ -223,7 +223,8 @@ describe('executeBackfill', () => {
     expect(runningSnapshots[0].c1.readRows).toBe(100)
     expect(runningSnapshots[0].c1.elapsedMs).toBe(1000)
     expect(runningSnapshots[1].c1.readRows).toBe(500)
-    expect(runningSnapshots[1].c1.writtenRows).toBe(50)
+    // Written rows never go down: the scripted log already shows the finish.
+    expect(runningSnapshots[1].c1.writtenRows).toBeGreaterThanOrEqual(50)
     expect(runningSnapshots[1].c1.elapsedMs).toBe(3000)
 
     // Final snapshot should be done
@@ -2117,6 +2118,69 @@ describe('an interrupt during the first checkpoint write', () => {
     expect(error).toBeInstanceOf(BackfillInterruptedError)
     expect(error).toMatchObject({ keepLock: false })
     expect(writes).toBe(1)
+    expect(submits).toEqual([])
+  })
+})
+
+// Codex round 10: written-row evidence only ever grows. A process snapshot
+// with fewer rows, read before query_log in the same poll, cannot lower it,
+// and a resume records what a running process wrote.
+describe('written rows are a maximum', () => {
+  const id = `backfill-${PLAN_ID}-c1`
+  const WROTE_5 = `chunk c1 (query_id ${id}): it failed after writing 5 rows, which a replay would write again.`
+  const processRow = (written: string) => ({ query_id: id, is_initial_query: 1, read_rows: '0', read_bytes: '0', written_rows: written, written_bytes: '0', elapsed: 1 })
+  const logRow = (type: string, written: string) => ({ query_id: id, is_initial_query: 1, type, written_rows: written, written_bytes: '0', query_duration_ms: '1', exception: type === 'QueryStart' ? '' : 'transient' })
+
+  async function run(snapshot: (read: number) => { processes: object[]; log: object[] }) {
+    const submits: string[] = []
+    let reads = 0
+    const executor = createMockExecutor(new Map())
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      if (sql.includes('now64')) return [{ now_ms: String(Date.now()) }] as T[]
+      if (sql.includes('system.one')) return [{ replicas: '1' }] as T[]
+      if (sql.includes('system.processes')) return snapshot(++reads).processes as T[]
+      if (sql.includes('system.query_log')) return snapshot(reads).log as T[]
+      return [] as T[]
+    }
+    executor.submit = async (_sql, queryId) => {
+      submits.push(queryId ?? '')
+      return queryId ?? ''
+    }
+    const reports: BackfillProgress[] = []
+    const error = await executeBackfill({
+      executor,
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }],
+      buildQuery: () => 'INSERT INTO t SELECT 1',
+      resumeFrom: { c1: { status: 'submitted', queryId: id, singleSend: true } },
+      checkpointVersion: CHECKPOINT_VERSION,
+      replayFailed: true,
+      pollIntervalMs: 1,
+      outcomeRecheckAttempts: 2,
+      outcomeRecheckIntervalMs: 5,
+      onProgress: (progress) => { reports.push(progress) },
+    }).then(() => undefined, (rejection: unknown) => rejection as Error)
+    return { error, saved: reports.at(-1)?.c1, submits }
+  }
+
+  test('a running snapshot with 0 rows does not lower 5 rows its log showed in the same poll', async () => {
+    const { error, saved, submits } = await run((read) => read <= 2
+      ? { processes: [processRow('0')], log: [logRow('QueryStart', '5')] }
+      : { processes: [], log: [logRow('ExceptionWhileProcessing', '0')] })
+
+    expect(error?.message).toContain(WROTE_5)
+    expect(saved).toMatchObject({ writtenRows: 5 })
+    expect(saved?.status).not.toBe('failed')
+    expect(submits).toEqual([])
+  })
+
+  test('a resume records the rows a running process wrote', async () => {
+    const { error, saved, submits } = await run((read) => read === 1
+      ? { processes: [processRow('5')], log: [] }
+      : { processes: [], log: [logRow('ExceptionWhileProcessing', '0')] })
+
+    expect(error?.message).toContain(WROTE_5)
+    expect(saved).toMatchObject({ writtenRows: 5 })
     expect(submits).toEqual([])
   })
 })

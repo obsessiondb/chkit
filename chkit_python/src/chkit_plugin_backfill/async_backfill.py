@@ -136,7 +136,9 @@ def _running_state(
             "status": "running",
             "read_rows": _to_int(row.get("read_rows")),
             "read_bytes": _to_int(row.get("read_bytes")),
-            "written_rows": _to_int(row.get("written_rows")),
+            # Written rows are evidence against a failure proof (#765): never
+            # lower than what the checkpoint or an earlier read already saw.
+            "written_rows": max(state.written_rows or 0, _row_count(row.get("written_rows")) or 0),
             "written_bytes": _to_int(row.get("written_bytes")),
             "elapsed_ms": int(js_math_round(float(str(elapsed)) * 1000))
             if elapsed is not None
@@ -414,7 +416,8 @@ def _noted_state(
 ) -> BackfillChunkState:
     """``state`` with what this read saw of the attempt that must outlive the
     read (#765, TS ``notedState``): the first secondary query of it, and the
-    most rows any of its own query_log rows say it wrote. The caller saves
+    most rows it wrote, by its own query_log rows or its process. The written
+    rows only ever grow. The caller saves
     it, so a later read, or a resume after a restart, still knows once the
     evidence is gone."""
     query_id = _attempt_query_id(plan_id, chunk_id, state)
@@ -422,7 +425,11 @@ def _noted_state(
     secondary = _secondary_query_of(query_id, evidence)
     if secondary is not None and state.secondary_query_id is None:
         update["secondary_query_id"] = secondary
-    written = _own_written_rows(query_id, evidence)
+    running = evidence.running.get(query_id)
+    written = max(
+        _own_written_rows(query_id, evidence),
+        (_row_count(running.get("written_rows")) or 0) if running is not None else 0,
+    )
     if written > (state.written_rows or 0):
         update["written_rows"] = written
     return state.model_copy(update=update) if update else state
