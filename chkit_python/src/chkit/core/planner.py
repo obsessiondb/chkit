@@ -5,7 +5,7 @@ from __future__ import annotations
 import heapq
 import json
 import re
-from collections.abc import Iterable, Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -1099,7 +1099,13 @@ def _repaired_order(  # noqa: PLR0915
         scheduled = sorted(index for root in roots for index in connected[root])
         # The budget also covers the prerequisites the breaker checks walk.
         total = size.get(table, 0) + sum(len(prerequisites[index]) for index in scheduled)
-        replay = _DefaultReplay(initial.get(table, []), 8 * total + 1024)
+        # The columns whose reads the replay changes: the others keep their old reads throughout.
+        changed = {
+            ids[index] or ""
+            for index in members
+            if index in changes or statements[index].type == "alter_table_drop_column"
+        }
+        replay = _DefaultReplay(initial.get(table, []), 8 * total + 1024, changed)
         edges = _break_closed_cycles(
             scheduled,
             set(members),
@@ -1219,28 +1225,32 @@ def _break_closed_cycles(  # noqa: PLR0915
             if column is None or target not in replayed:
                 continue
             change = changes.get(target)
-            cycle = replay.closed_cycle(column, change) if change is not None else set()
+            cycle = replay.closed_cycle(column, change) if change is not None else _NO_CYCLE
             if cycle is None:
                 return None
-            if cycle:
+            if cycle.columns:
                 candidates = sorted(
                     j
-                    for other in cycle
+                    for other in cycle.columns
                     if other != column
                     for j in changing.get(other, ())
                     if j not in placed and group_of[j] != group
                 )
-                if not replay.spend(len(cycle) + len(candidates)):
+                if not replay.spend(len(cycle.columns) + len(candidates)):
                     return None
                 breaker: int | None = None
                 for j in candidates:
                     if not any(
-                        read in cycle and read not in changes[j]
+                        cycle.has(read) and read not in changes[j]
                         for read in replay.reads(columns[j] or "") or ()
                     ):
                         continue
                     waits = _waits_for(
-                        prerequisites, extra, j, target, placed=placed, replay=replay
+                        _WaitGraph(prerequisites, extra, dependents, groups, group_of),
+                        j,
+                        target,
+                        placed=placed,
+                        replay=replay,
                     )
                     if waits is None:
                         return None
@@ -1277,9 +1287,27 @@ def _break_closed_cycles(  # noqa: PLR0915
     return added
 
 
+class _WaitGraph:
+    """The statement graph ``_waits_for`` searches."""
+
+    def __init__(
+        self,
+        prerequisites: list[list[int]],
+        extra: dict[int, list[int]],
+        dependents: dict[int, list[int]],
+        groups: list[list[int]],
+        group_of: list[int],
+    ) -> None:
+        self.prerequisites = prerequisites
+        self.extra = extra
+        # The statements that wait for each one, across groups (``extra`` included).
+        self.dependents = dependents
+        self.groups = groups
+        self.group_of = group_of
+
+
 def _waits_for(
-    prerequisites: list[list[int]],
-    extra: dict[int, list[int]],
+    graph: _WaitGraph,
     start: int,
     target: int,
     *,
@@ -1289,23 +1317,55 @@ def _waits_for(
     """Whether statement ``start`` runs after ``target`` through ``prerequisites`` and ``extra``.
 
     None when ``replay`` runs out of work. A ``placed`` statement has run, so
-    it does not wait for ``target``, which has not. Each prerequisite it looks
-    at uses one unit of the replay's work.
+    it does not wait for ``target``, which has not. ``target`` is ready to
+    run, so every statement that waits for it is still to run. The search runs
+    from both ends, widening the smaller frontier (in turns on a tie): down
+    the prerequisites of ``start``, and up the statements that wait for
+    ``target``, where the members of a group wait for each other. Many
+    breakers can wait for one long chain of statements that does not reach
+    ``target``; the other end then stops it early. Each prerequisite,
+    dependent or group member it looks at uses one unit of the replay's work.
     """
-    seen = {start}
-    pending = [start]
-    while pending:
-        index = pending.pop()
-        for others in (prerequisites[index], extra.get(index, ())):
-            for other in others:
-                if not replay.spend():
-                    return None
-                if other == target:
-                    return True
-                if other in placed or other in seen:
-                    continue
-                seen.add(other)
-                pending.append(other)
+    down = {start}
+    up = {target}
+    up_groups: set[int] = set()
+    down_front, up_front = [start], [target]
+    widen_down = False
+    while down_front and up_front:
+        if len(down_front) == len(up_front):
+            widen_down = not widen_down
+        else:
+            widen_down = len(down_front) < len(up_front)
+        front: list[int] = []
+        if widen_down:
+            for index in down_front:
+                for others in (graph.prerequisites[index], graph.extra.get(index, ())):
+                    for other in others:
+                        if not replay.spend():
+                            return None
+                        if other in up:
+                            return True
+                        if other in placed or other in down:
+                            continue
+                        down.add(other)
+                        front.append(other)
+            down_front = front
+        else:
+            for index in up_front:
+                group = graph.group_of[index]
+                members = () if group in up_groups else graph.groups[group]
+                up_groups.add(group)
+                for others in (members, graph.dependents.get(index, ())):
+                    for other in others:
+                        if not replay.spend():
+                            return None
+                        if other in down:
+                            return True
+                        if other in up:
+                            continue
+                        up.add(other)
+                        front.append(other)
+            up_front = front
     return False
 
 
@@ -1485,6 +1545,26 @@ def _replay_changes(
     return changes
 
 
+class _ClosedCycle:
+    """A cycle ``closed_cycle`` found.
+
+    ``columns`` holds ``column`` and every column on the cycle that a
+    statement changes, among others; it leaves out the links of a chain of
+    unchanged columns that each read one column.
+    """
+
+    def __init__(self, columns: list[str], has: Callable[[str], bool]) -> None:
+        self.columns = columns
+        # Whether a read of a column of ``columns`` (other than ``column``) is on the cycle.
+        self.has = has
+
+
+_NO_CYCLE = _ClosedCycle([], lambda _read: False)
+
+# The landing of a column ``_land`` is still following.
+_ON_PATH = -2
+
+
 class _DefaultReplay:
     """The replay of one table, from its ``initial`` (old) expressions.
 
@@ -1496,18 +1576,30 @@ class _DefaultReplay:
     and readers in the order they were added, so every search does the same
     work in both ports. Each read a search, an update or a copy looks at uses
     one unit of the ``budget``.
+
+    Only the ``changed`` columns are assigned new reads; the others keep
+    their old reads. A walk down the reads skips a chain of unchanged columns
+    that each read one column (``_land``) and remembers where it ends, which
+    never changes. Many cycles can run through one long chain (#829); each
+    cycle then costs the columns around the chain, not its length.
     """
 
-    def __init__(self, initial: list[tuple[str, set[str]]], budget: int) -> None:
+    def __init__(self, initial: list[tuple[str, set[str]]], budget: int, changed: set[str]) -> None:
         self._number: dict[str, int] = {}
         self._names: list[str] = []
         self._reads: list[list[int] | None] = []
         self._readers: list[dict[int, None]] = []
+        self._changed = changed
+        self._fixed: list[bool] = []
+        # Where a walk that reads a column lands (``_land``), or -1 until it is known.
+        self._landing: list[int] = []
         # Marks with an epoch per search, instead of a set per search.
         self._down: list[int] = []
         self._up: list[int] = []
+        self._seen: list[int] = []
         self._inside: list[int] = []
         self._epoch = 0
+        self._gather = 0
         self._left = budget
         for column, reads in initial:
             self.assign(column, reads)
@@ -1535,8 +1627,11 @@ class _DefaultReplay:
         self._names.append(column)
         self._reads.append(None)
         self._readers.append({})
+        self._fixed.append(column not in self._changed)
+        self._landing.append(-1)
         self._down.append(0)
         self._up.append(0)
+        self._seen.append(0)
         self._inside.append(0)
         return number
 
@@ -1545,6 +1640,39 @@ class _DefaultReplay:
         ordered = sorted(columns)
         self._left -= len(ordered)
         return sorted(self._of(column) for column in ordered)
+
+    def _land(self, column: int) -> int:
+        """The column a walk that reads ``column`` lands on.
+
+        ``column`` itself, or, when no statement changes it and it reads one
+        column, where that read lands. Those reads never change, so the answer
+        is kept. Each link it follows the first time uses one unit; the caller
+        checks the budget. A cycle among those reads (an old schema ClickHouse
+        refuses) uses up the work, so the table keeps its sorted order.
+        """
+        path: list[int] = []
+        at = column
+        while True:
+            known = self._landing[at]
+            if known >= 0:
+                at = known
+                break
+            if known == _ON_PATH:
+                for link in path:
+                    self._landing[link] = -1
+                self._left = -1
+                return at
+            reads = self._reads[at]
+            if not self._fixed[at] or reads is None or len(reads) != 1 or self._left < 0:
+                self._landing[at] = at
+                break
+            path.append(at)
+            self._landing[at] = _ON_PATH
+            self._left -= 1
+            at = reads[0]
+        for link in path:
+            self._landing[link] = at
+        return at
 
     def reads(self, column: str) -> list[str] | None:
         """The columns ``column`` reads."""
@@ -1568,8 +1696,8 @@ class _DefaultReplay:
         for read in numbered or ():
             self._readers[read][number] = None
 
-    def closed_cycle(self, column: str, reads: set[str]) -> set[str] | None:
-        """The columns on a cycle through ``column`` that giving it ``reads`` would close.
+    def closed_cycle(self, column: str, reads: set[str]) -> _ClosedCycle | None:  # noqa: PLR0915
+        """The cycle through ``column`` that giving it ``reads`` would close, or none (no columns).
 
         It changes nothing, and returns None when the replay has used up its
         work.
@@ -1577,11 +1705,13 @@ class _DefaultReplay:
         target = self._of(column)
         current = set(self._reads[target] or ())
         self._left -= len(current)
-        cycle: set[str] = set()
-        down, inside = self._down, self._inside
         numbered = self._numbered(reads)
         if self._left < 0:
             return None
+        self._gather += 1
+        mark = self._gather
+        seen, inside = self._seen, self._inside
+        columns: list[str] = []
         for read in numbered:
             if read in current:
                 continue
@@ -1590,35 +1720,62 @@ class _DefaultReplay:
                 return None
             if not hit:
                 continue
-            # This read's cycle: the columns it reaches (``down``) that reach ``column``.
-            self._epoch += 1
-            epoch = self._epoch
-            below = [read]
-            down[read] = epoch
-            while below:
-                for other in self._reads[below.pop()] or ():
+            if not columns:
+                seen[target] = mark
+                inside[target] = mark
+                columns.append(column)
+            # The columns this read reaches (``seen``), walked depth first; one
+            # is on the cycle (``inside``) when one of its reads lands on the cycle.
+            # A column still on the walk is marked ``-mark``: meeting it again
+            # means the state holds a cycle (an old schema ClickHouse refuses),
+            # so the table keeps its sorted order.
+            start = self._land(read)
+            if self._left < 0:
+                return None
+            if seen[start] == mark:
+                continue
+            seen[start] = mark
+            inside[start] = -mark
+            stack, position, on_cycle = [start], [0], [False]
+            while stack:
+                top = len(stack) - 1
+                at = stack[top]
+                at_reads = self._reads[at] or ()
+                index = position[top]
+                if index < len(at_reads):
+                    position[top] = index + 1
                     self._left -= 1
+                    reached = self._land(at_reads[index])
                     if self._left < 0:
                         return None
-                    if other == target or down[other] == epoch:
-                        continue
-                    down[other] = epoch
-                    below.append(other)
-            down[target] = epoch
-            back = [target]
-            inside[target] = epoch
-            cycle.add(column)
-            while back:
-                for reader in self._readers[back.pop()]:
-                    self._left -= 1
-                    if self._left < 0:
+                    if seen[reached] != mark:
+                        seen[reached] = mark
+                        inside[reached] = -mark
+                        stack.append(reached)
+                        position.append(0)
+                        on_cycle.append(False)
+                    elif inside[reached] == mark:
+                        on_cycle[top] = True
+                    elif inside[reached] == -mark:
+                        self._left = -1
                         return None
-                    if down[reader] != epoch or inside[reader] == epoch:
-                        continue
-                    inside[reader] = epoch
-                    cycle.add(self._names[reader])
-                    back.append(reader)
-        return cycle
+                    continue
+                stack.pop()
+                position.pop()
+                inside[at] = 0
+                if not on_cycle.pop():
+                    continue
+                inside[at] = mark
+                columns.append(self._names[at])
+                if top > 0:
+                    on_cycle[top - 1] = True
+
+        def has(name: str) -> bool:
+            # A read of a column on the cycle is on it when it lands on the cycle.
+            number = self._number.get(name)
+            return number is not None and inside[self._land(number)] == mark
+
+        return _ClosedCycle(columns, has)
 
     def _reaches(self, start: int, goal: int) -> bool | None:
         """Whether ``start`` reaches ``goal`` through reads, or None when the work runs out."""
@@ -1638,8 +1795,9 @@ class _DefaultReplay:
             front: list[int] = []
             if widen_down:
                 for column in down_front:
-                    for reached in self._reads[column] or ():
+                    for read in self._reads[column] or ():
                         self._left -= 1
+                        reached = self._land(read)
                         if self._left < 0:
                             return None
                         if up[reached] == epoch:

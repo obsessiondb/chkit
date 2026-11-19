@@ -1661,6 +1661,44 @@ def test_repairs_cycles_whose_breakers_read_many_other_columns() -> None:
     assert _order_of(previous, next_)[:2] == ["t.b000", "t.a000"]
 
 
+def test_repairs_cycles_whose_breakers_wait_for_one_long_chain_of_statements() -> None:
+    # Every breaker ``b_i`` waits for the 128 changes of the ``p`` chain, which
+    # do not wait for ``a_i``. The search from ``a_i``'s end stops at once, so
+    # the checks do not walk the chain again for each cycle (#829).
+    previous, next_ = _shared_chain(512)
+    order = _order_of(previous, next_)
+    assert order[0] == "t.p0127"
+    for i in range(128):
+        assert order.index(f"t.b{i:04d}") < order.index(f"t.a{i:04d}")
+    assert _cycle_repair_work.units == 6011
+
+
+@pytest.mark.parametrize(
+    ("before", "after", "order"),
+    [
+        (
+            [_u("a"), _u("b", "c + z"), _u("c", "d"), _u("d", "c"), _u("z", "a")],
+            [_u("a", "b"), _u("b", "id"), _u("c", "d"), _u("d", "c"), _u("z", "id")],
+            ["t.a", "t.b", "t.z"],
+        ),
+        (
+            [_u("a"), _u("b", "z"), _u("c", "a"), _u("z", "b + c")],
+            [_u("a", "z"), _u("b", "p"), _u("c", "id"), _u("p", "id"), _u("z", "id")],
+            ["t.a", "t.c", "t.p", "t.b", "t.z"],
+        ),
+    ],
+    ids=["unchanged columns", "changed columns"],
+)
+def test_keeps_the_sorted_order_when_the_old_defaults_read_each_other_in_a_cycle(
+    before: list[dict[str, Any]], after: list[dict[str, Any]], order: list[str]
+) -> None:
+    # An old schema whose defaults read each other in a cycle (ClickHouse
+    # refuses one) cannot be replayed, so the table keeps its sorted order: a
+    # cycle among unchanged single reads (``c``, ``d``) and one the walk meets
+    # again (``b``, ``z``).
+    assert _order_of([_t(before)], [_t(after)]) == order
+
+
 @pytest.mark.parametrize(
     ("expression", "name"),
     [
@@ -1900,19 +1938,43 @@ def _chain_and_fan_in() -> tuple[_Schema, _Schema]:
     )
 
 
-# The work and the plan at the edge of the work budget, the same as in the TS
-# tests (planner-dependency-order.test.ts). Nine cycles through one long chain
-# of unchanged defaults: with 85 links the table is repaired, with 86 it runs
-# out of work and keeps the sorted order.
+def _fan_in(m: int) -> tuple[_Schema, _Schema]:
+    # ``m`` cycles ``a_i`` -> ``b_i`` -> ``c000`` -> ... -> ``c029`` -> ``z`` -> ``a_i``.
+    k = range(m)
+    links = [[f"c{i:03d}", f"c{i + 1:03d}" if i + 1 < 30 else "z"] for i in range(30)]
+    total = " + ".join(f"a{i:03d}" for i in k)
+    return (
+        [*[[f"a{i:03d}", None] for i in k], *[[f"b{i:03d}", "c000"] for i in k], *links,
+         ["z", f"{total} + id"]],
+        [*[[f"a{i:03d}", f"b{i:03d}"] for i in k], *[[f"b{i:03d}", "id"] for i in k], *links,
+         ["z", "id"]],
+    )
+
+
+# The work and the plan near the edge of the work budget, the same as in the
+# TS tests (planner-dependency-order.test.ts). Nine cycles through one long
+# chain of unchanged defaults are repaired whatever its length: the walks skip
+# the chain (#829). Cycles through one chain whose end reads every cycle's
+# column still cost the cycles squared: 50 are repaired, 60 run out of work and
+# keep the sorted order.
 _BUDGET_EDGE: dict[str, tuple[tuple[_Schema, _Schema], int, str, str]] = {
     "nine cycles through 449 links": (
-        _nine_cycles(449), 12368, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
+        _nine_cycles(449), 1292, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
     ),
     "nine cycles through 85 links": (
-        _nine_cycles(85), 3632, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+        _nine_cycles(85), 564, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
     ),
     "nine cycles through 86 links": (
-        _nine_cycles(86), 3656, "a", "5c58cc444894b01d886f233b2aaaec79d85b591ad579b526333465e37d8b8bcd"
+        _nine_cycles(86), 566, "c", "7ec17a4b49e8dcdf3beceb5adb5914cee3504df90dd047e9d72b95808538147a"
+    ),
+    "30 cycles through 30 links": (
+        _fan_in(30), 1807, "b000", "c9b8ec508f9b1e19693d8da1e7138fd8055abfd4a2ce8d638c8e7093d593879e"
+    ),
+    "50 cycles through 30 links": (
+        _fan_in(50), 3967, "b000", "734d0b6c25b51d293c74327216b4fea5a1c11fe13660488ec1f084c3bbfde145"
+    ),
+    "60 cycles through 30 links": (
+        _fan_in(60), 4648, "a000", "ee8a4528f50e4af7107b205dbfc26ae7b2dd7bd945d8654f3f2074c9603f2cad"
     ),
     "a chain and a fan-in": (
         _chain_and_fan_in(), 1816, "m", "f0ea844653d573b9fd93c11b98a1cf6f6e2f31d10c03d08aa9ee0572f4d8fd36"
