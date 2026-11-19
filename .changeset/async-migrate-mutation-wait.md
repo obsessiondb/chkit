@@ -2,4 +2,4 @@
 "chkit": patch
 ---
 
-`chkit migrate --apply` now records an async statement other than a SELECT or an INSERT as completed only once the server reports its work done: it is sent with `mutations_sync = 2`, `alter_sync = 2`, `distributed_ddl_task_timeout = -1` and `distributed_ddl_output_mode = 'throw'`, so an `ALTER ... UPDATE/DELETE` waits for its mutation on every replica and an `ON CLUSTER` statement for every host, and a mutation that fails stops the run with `async_outcome_unknown`.
+`chkit migrate --apply` records an async `ALTER ... UPDATE/DELETE`, `OPTIMIZE`, `TRUNCATE` or `ON CLUSTER` statement as completed only once its mutation or task has finished on every replica and host, instead of as soon as it was queued; a mutation that fails now stops the run with `async_outcome_unknown`.
