@@ -95,9 +95,7 @@ def ctx() -> Iterator[_Ctx]:
     # Chunks run as a user whose profile has parallel replicas on.
     executor = _ThreadLocalExecutor(
         _config(
-            dataclasses.replace(
-                LOCAL_STACK_ENV, clickhouse_user=user, clickhouse_password=PASSWORD
-            )
+            dataclasses.replace(LOCAL_STACK_ENV, clickhouse_user=user, clickhouse_password=PASSWORD)
         )
     )
 
@@ -123,15 +121,32 @@ def _count_rows(ctx: _Ctx, table: str) -> int:
     return int(str(rows[0]["rows"]))
 
 
-def _logged_queries(ctx: _Ctx, initial_query_id: str) -> list[dict[str, object]]:
-    """query_log rows of the queries ``initial_query_id`` started, its own
-    included, once both are flushed."""
-    ctx.admin.execute("SYSTEM FLUSH LOGS")
-    return ctx.admin.query(
-        "SELECT is_initial_query, type, toString(written_rows) AS written_rows "
-        f"FROM system.query_log WHERE initial_query_id = '{initial_query_id}' "
-        "AND type != 'QueryStart'"
-    ).rows
+def _settled_queries(ctx: _Ctx, initial_query_id: str) -> list[dict[str, object]]:
+    """The outcome rows of ``initial_query_id`` and of the secondary queries it
+    started, once none of them runs and query_log holds an outcome for each
+    one it shows started: a reply can come before its own QueryFinish is
+    logged, and a cancelled secondary can still be writing."""
+
+    def read() -> tuple[int, list[dict[str, object]]]:
+        ctx.admin.execute("SYSTEM FLUSH LOGS")
+        running = ctx.admin.query(
+            "SELECT toString(count()) AS running FROM system.processes "
+            f"WHERE initial_query_id = '{initial_query_id}'"
+        ).rows
+        rows = ctx.admin.query(
+            "SELECT query_id, is_initial_query, type, toString(written_rows) AS written_rows "
+            f"FROM system.query_log WHERE initial_query_id = '{initial_query_id}'"
+        ).rows
+        return int(str(running[0]["running"])), rows
+
+    def settled(value: tuple[int, list[dict[str, object]]]) -> bool:
+        running, rows = value
+        started = {row["query_id"] for row in rows if row["type"] == "QueryStart"}
+        ended = {row["query_id"] for row in rows if row["type"] != "QueryStart"}
+        return running == 0 and initial_query_id in ended and started <= ended
+
+    _, rows = poll_until(read, settled, timeout=30.0, interval=0.5)
+    return [row for row in rows if row["type"] != "QueryStart"]
 
 
 def _initial(rows: list[dict[str, object]]) -> dict[str, object]:
@@ -150,7 +165,7 @@ def test_the_chunk_insert_runs_no_secondary_query_under_a_profile_with_parallel_
     control = _create_target(ctx, "control")
     control_id = f"{ctx.prefix}control"
     ctx.executor.submit(f"INSERT INTO {control} SELECT * FROM {ctx.source}", control_id)
-    control_rows = _logged_queries(ctx, control_id)
+    control_rows = _settled_queries(ctx, control_id)
     assert len(_secondaries(control_rows)) > 0
     initial = _initial(control_rows)
     assert (initial["type"], initial["written_rows"]) == ("QueryFinish", "0")
@@ -191,7 +206,7 @@ def test_the_chunk_insert_runs_no_secondary_query_under_a_profile_with_parallel_
     chunk_rows = [
         row
         for chunk_id in chunks
-        for row in _logged_queries(ctx, f"backfill-{plan_id}-{chunk_id}")
+        for row in _settled_queries(ctx, f"backfill-{plan_id}-{chunk_id}")
     ]
     assert _secondaries(chunk_rows) == []
     assert sum(int(str(row["written_rows"])) for row in chunk_rows) == SOURCE_ROWS
@@ -204,8 +219,8 @@ def test_a_failed_attempt_that_ran_secondary_queries_is_not_replayed_by_replay_f
     plan_id = f"{ctx.prefix}failed"
     chunk_id = "c0"
     query_id = f"backfill-{plan_id}-{chunk_id}"
-    # Unpinned, so the profile spreads it over the replicas; it fails once a
-    # replica committed blocks, which the initial query does not count.
+    # Unpinned, so the profile spreads it over the replicas; it fails partway,
+    # after a replica may have committed blocks the initial query does not count.
     spread_failure = (
         f"INSERT INTO {target} SELECT id, payload FROM {ctx.source} "
         "WHERE throwIf(id = 190000, 'late block') = 0 "
@@ -223,8 +238,8 @@ def test_a_failed_attempt_that_ran_secondary_queries_is_not_replayed_by_replay_f
             poll_interval_ms=100,
             on_progress=saved.append,
         )
-    written = poll_until(lambda: _count_rows(ctx, target), lambda rows: rows > 0)
-    logged = _logged_queries(ctx, query_id)
+    logged = _settled_queries(ctx, query_id)
+    written = _count_rows(ctx, target)
     initial = _initial(logged)
     assert (initial["type"], initial["written_rows"]) == ("ExceptionWhileProcessing", "0")
     assert len(_secondaries(logged)) > 0

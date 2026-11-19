@@ -59,7 +59,7 @@ afterAll(async () => {
   await admin.command(`DROP USER IF EXISTS ${quoteIdent(user)}`)
   await admin.command(`DROP DATABASE IF EXISTS ${quoteIdent(database)} SYNC`)
   await admin.close()
-})
+}, 60_000)
 
 async function createTarget(name: string): Promise<string> {
   const target = `${quoteIdent(database)}.${quoteIdent(name)}`
@@ -72,13 +72,32 @@ async function countRows(table: string): Promise<number> {
   return Number(row?.rows)
 }
 
-/** query_log rows of the queries `initialQueryId` started, its own included, once both are flushed. */
-async function loggedQueries(initialQueryId: string): Promise<Array<{ is_initial_query: number; type: string; written_rows: string }>> {
-  await admin.command('SYSTEM FLUSH LOGS')
-  return admin.query(
-    `SELECT is_initial_query, type, toString(written_rows) AS written_rows FROM system.query_log
-     WHERE initial_query_id = '${initialQueryId}' AND type != 'QueryStart'`,
-  )
+interface LoggedQuery { query_id: string; is_initial_query: number; type: string; written_rows: string }
+
+/**
+ * The outcome rows of `initialQueryId` and of the secondary queries it
+ * started, once none of them runs and query_log holds an outcome for each
+ * one it shows started: a reply can come before its own QueryFinish is
+ * logged, and a cancelled secondary can still be writing.
+ */
+async function settledQueries(initialQueryId: string): Promise<LoggedQuery[]> {
+  const read = async () => {
+    await admin.command('SYSTEM FLUSH LOGS')
+    const [running] = await admin.query<{ running: string }>(
+      `SELECT toString(count()) AS running FROM system.processes WHERE initial_query_id = '${initialQueryId}'`,
+    )
+    const rows = await admin.query<LoggedQuery>(
+      `SELECT query_id, is_initial_query, type, toString(written_rows) AS written_rows FROM system.query_log
+       WHERE initial_query_id = '${initialQueryId}'`,
+    )
+    return { running: Number(running?.running), rows }
+  }
+  const settled = await pollUntil(read, ({ running, rows }) => {
+    const started = new Set(rows.filter((row) => row.type === 'QueryStart').map((row) => row.query_id))
+    const ended = new Set(rows.filter((row) => row.type !== 'QueryStart').map((row) => row.query_id))
+    return running === 0 && ended.has(initialQueryId) && [...started].every((id) => ended.has(id))
+  }, { timeoutMs: 30_000, intervalMs: 500 })
+  return settled.rows.filter((row) => row.type !== 'QueryStart')
 }
 
 describe('executeBackfill with parallel replicas into a ReplicatedMergeTree target (live)', () => {
@@ -88,7 +107,7 @@ describe('executeBackfill with parallel replicas into a ReplicatedMergeTree targ
     const control = await createTarget('control')
     const controlId = `${prefix}control`
     await executor.submit(`INSERT INTO ${control} SELECT * FROM ${source}`, controlId)
-    const controlRows = await loggedQueries(controlId)
+    const controlRows = await settledQueries(controlId)
     expect(controlRows.filter((row) => Number(row.is_initial_query) === 0).length).toBeGreaterThan(0)
     expect(controlRows.find((row) => Number(row.is_initial_query) === 1)).toMatchObject({ type: 'QueryFinish', written_rows: '0' })
     expect(await countRows(control)).toBe(SOURCE_ROWS)
@@ -107,7 +126,7 @@ describe('executeBackfill with parallel replicas into a ReplicatedMergeTree targ
     expect(result.failed).toBe(0)
     expect(result.completed).toBe(plan.chunks.length)
     expect(await countRows(target)).toBe(SOURCE_ROWS)
-    const chunkRows = (await Promise.all(plan.chunks.map((chunk) => loggedQueries(`backfill-${planId}-${chunk.id}`)))).flat()
+    const chunkRows = (await Promise.all(plan.chunks.map((chunk) => settledQueries(`backfill-${planId}-${chunk.id}`)))).flat()
     expect(chunkRows.filter((row) => Number(row.is_initial_query) === 0)).toEqual([])
     expect(chunkRows.reduce((sum, row) => sum + Number(row.written_rows), 0)).toBe(SOURCE_ROWS)
   }, 120_000)
@@ -117,8 +136,8 @@ describe('executeBackfill with parallel replicas into a ReplicatedMergeTree targ
     const planId = `${prefix}failed`
     const chunkId = 'c0'
     const queryId = `backfill-${planId}-${chunkId}`
-    // Unpinned, so the profile spreads it over the replicas; it fails once a
-    // replica committed blocks, which the initial query does not count.
+    // Unpinned, so the profile spreads it over the replicas; it fails partway,
+    // after a replica may have committed blocks the initial query does not count.
     const spreadFailure = `INSERT INTO ${target} SELECT id, payload FROM ${source} WHERE throwIf(id = 190000, 'late block') = 0 SETTINGS max_block_size = 1000, max_insert_block_size = 1000, min_insert_block_size_rows = 1000, min_insert_block_size_bytes = 0, insert_deduplicate = 0`
     const saved: BackfillProgress[] = []
     await expect(
@@ -131,8 +150,8 @@ describe('executeBackfill with parallel replicas into a ReplicatedMergeTree targ
         onProgress: (progress) => { saved.push(progress) },
       }),
     ).rejects.toThrow('late block')
-    const written = await pollUntil(() => countRows(target), (rows) => rows > 0)
-    const logged = await loggedQueries(queryId)
+    const logged = await settledQueries(queryId)
+    const written = await countRows(target)
     expect(logged.find((row) => Number(row.is_initial_query) === 1)).toMatchObject({ type: 'ExceptionWhileProcessing', written_rows: '0' })
     expect(logged.filter((row) => Number(row.is_initial_query) === 0).length).toBeGreaterThan(0)
     expect(saved.at(-1)?.[chunkId]).toMatchObject({ queryId, singleSend: true })
