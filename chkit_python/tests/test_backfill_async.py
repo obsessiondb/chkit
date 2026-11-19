@@ -2614,3 +2614,130 @@ def test_a_slow_checkpoint_write_that_ends_in_time_releases_the_lock() -> None:
     assert elapsed >= 0.08
     # No write starts after the interrupt returned.
     assert len(writes) == written
+
+
+# Opus re-review: with parallel replicas, the initiator's failure row says
+# written_rows = 0 while its secondary queries committed rows. A failure is
+# proof only when every secondary query of its id ended and wrote nothing.
+_SECONDARY_OF = f"backfill-{PLAN_ID}-c1"
+_INITIATOR_FAILURE: dict[str, object] = {
+    "query_id": _SECONDARY_OF,
+    "is_initial_query": 1,
+    "type": "ExceptionWhileProcessing",
+    "written_rows": "0",
+    "written_bytes": "0",
+    "query_duration_ms": "1",
+    "exception": "transient",
+}
+
+
+def _secondary(type_: str, written: object, query_id: str = "secondary-1") -> dict[str, object]:
+    return {
+        "query_id": query_id,
+        "initial_query_id": _SECONDARY_OF,
+        "is_initial_query": 0,
+        "type": type_,
+        "written_rows": written,
+        "written_bytes": "0",
+        "query_duration_ms": "1",
+        "exception": "",
+    }
+
+
+def _resume_with_secondaries(
+    log: list[dict[str, object]], running: list[dict[str, object]] | None = None
+) -> tuple[BaseException | None, list[str]]:
+    class Secondaries(SubmitRecordingExecutor):
+        def _rows(self, statement: str) -> list[dict[str, object]]:
+            if "now64" in statement:
+                return [{"now_ms": str(int(time.time() * 1000))}]
+            if "system.one" in statement:
+                return [{"replicas": 1}]
+            if "system.processes" in statement:
+                assert re.search(
+                    r"initial_user = currentUser\(\) AND initial_query_id (IN|LIKE) .* "
+                    r"AND is_initial_query = 0",
+                    statement,
+                )
+                return list(running or [])
+            if "system.query_log" in statement:
+                return [_INITIATOR_FAILURE, *log]
+            return []
+
+    executor = Secondaries({})
+    error: BaseException | None = None
+    try:
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+            resume_from={
+                "c1": BackfillChunkState(status="submitted", query_id=_SECONDARY_OF, single_send=True)
+            },
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=True,
+            poll_interval_ms=1,
+            outcome_recheck_attempts=1,
+            outcome_recheck_interval_ms=1,
+        )
+    except RuntimeError as raised:
+        error = raised
+    return error, executor.submit_order
+
+
+def _unknown_for(reason: str) -> str:
+    return f"chunk c1 (query_id {_SECONDARY_OF}): {reason}."
+
+
+def test_a_secondary_query_that_wrote_rows_makes_the_failure_unknown() -> None:
+    error, submits = _resume_with_secondaries([_secondary("ExceptionWhileProcessing", "581632")])
+
+    assert _unknown_for(
+        "its secondary query secondary-1 wrote 581632 rows, which a replay would write again"
+    ) in str(error)
+    assert submits == []
+
+
+def test_a_secondary_query_with_no_end_or_still_running_is_unknown_after_the_window() -> None:
+    pending = _unknown_for(
+        "its secondary query secondary-1 is still running, or system.query_log has no "
+        "outcome for it"
+    )
+    error, submits = _resume_with_secondaries([_secondary("QueryStart", "0")])
+    assert pending in str(error)
+    assert submits == []
+
+    running = {
+        "query_id": "secondary-1",
+        "initial_query_id": _SECONDARY_OF,
+        "is_initial_query": 0,
+        "read_rows": "0",
+        "read_bytes": "0",
+        "written_rows": "0",
+        "written_bytes": "0",
+        "elapsed": 1,
+    }
+    error, submits = _resume_with_secondaries([], [running])
+    assert pending in str(error)
+    assert submits == []
+
+
+def test_a_secondary_query_without_a_row_count_is_unknown() -> None:
+    error, submits = _resume_with_secondaries([_secondary("QueryFinish", None)])
+
+    assert _unknown_for(
+        "system.query_log does not say how many rows its secondary query secondary-1 wrote"
+    ) in str(error)
+    assert submits == []
+
+
+def test_secondary_queries_that_ended_without_writing_keep_the_proof() -> None:
+    error, submits = _resume_with_secondaries(
+        [_secondary("QueryStart", "0"), _secondary("ExceptionWhileProcessing", "0")]
+    )
+
+    # The replay's own reads find nothing, so its outcome is unknown; it was sent once.
+    assert len(submits) == 1
+    assert submits[0].startswith(f"{_SECONDARY_OF}-")
+    assert "secondary" not in str(error)

@@ -545,7 +545,7 @@ describe('a send whose TLS handshake never completes', () => {
       expect(code, `${stdout}\n${stderr}`).toBe(130)
       expect(elapsed).toBeLessThan(5_000)
       expect(existsSync(lockPath)).toBe(false)
-      expect(stderr).toContain(`Backfill plan ${PLAN_ID}: interrupted (SIGINT). No new chunk was submitted, and the lock is released; a chunk already submitted keeps running on the server, and a resume attaches to it. The send of chunk c1 did not reach the server in time and was abandoned: it may still have reached it, so its attempt stays recorded as one that may have run.`)
+      expect(stderr).toContain(`Backfill plan ${PLAN_ID}: interrupted (SIGINT). No new chunk was submitted, and the lock is released; a chunk already submitted keeps running on the server, and a resume attaches to it. The send of chunk c1 did not reach the server in time and was abandoned: it may still have reached it, so its attempt stays recorded as one that may have run. Unless system.query_log shows its outcome, a resume stops on it, and only --accept-unknown replays it.`)
       expect(lastCheckpoint(stdout)).toEqual({ status: 'pending', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true })
       await rm(join(runsDir, '..'), { recursive: true, force: true })
     }, 30_000)
@@ -561,7 +561,8 @@ describe('a send whose TLS handshake never completes', () => {
       close()
 
       expect(code, `${stdout}\n${stderr}`).not.toBe(0)
-      expect(stderr).toContain('could not connect and be written within 300 ms')
+      expect(stderr).toContain(`Backfill plan ${PLAN_ID}: the send of chunk c1 (query_id backfill-${PLAN_ID}-c1) failed: The request could not connect and be written within 300 ms`)
+      expect(stderr).toContain('so its attempt stays recorded as one that may have run. Unless system.query_log shows its outcome, a resume stops on it, and only --accept-unknown replays it.')
       expect(existsSync(lockPath)).toBe(false)
       expect(lastCheckpoint(stdout)).toEqual({ status: 'pending', queryId: `backfill-${PLAN_ID}-c1`, singleSend: true })
       await rm(join(runsDir, '..'), { recursive: true, force: true })

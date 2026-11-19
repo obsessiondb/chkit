@@ -359,7 +359,8 @@ const FAILURE_TYPES = new Set(['ExceptionBeforeStart', 'ExceptionWhileProcessing
  *   that proves a replay cannot write the chunk's rows twice. A failure
  *   after a written row is unknown at once: those rows stay, and a replay
  *   writes them again. So is any failure of a target whose failures cannot
- *   be proven (`unprovableFailures`). An attempt an older release recorded may have been
+ *   be proven (`unprovableFailures`), and one whose secondary queries (see
+ *   `secondaryWrites`) wrote a row or have not ended. An attempt an older release recorded may have been
  *   sent twice under its id, so its failure rows prove nothing, and a read
  *   that may have missed a replica cannot rule out a run or a QueryFinish
  *   on it.
@@ -390,6 +391,9 @@ function classifyAttempt(
   const failure = own.find((row) => FAILURE_TYPES.has(row.type))
   if (failure && state.singleSend === true && evidence.partial === undefined) {
     if (evidence.unprovable !== undefined) return { kind: 'unknown', reason: evidence.unprovable }
+    const shards = secondaryWrites(queryId, evidence)
+    if (shards.kind === 'unknown') return shards
+    if (shards.kind === 'pending') return final ? { kind: 'unknown', reason: shards.reason } : { kind: 'wait' }
     // Proof needs every row of the id to state, as a number, that it wrote
     // nothing, and no earlier poll of this attempt to have seen it write.
     const counts = own.map((row) => rowCount(row.written_rows))
@@ -412,6 +416,37 @@ function classifyAttempt(
     return { kind: 'unknown', reason: 'an older release may have sent it more than once under this query id, so the failure in system.query_log may not be its last send' }
   }
   return { kind: 'unknown', reason: 'it is not running on any replica and system.query_log has no outcome for it' }
+}
+
+/**
+ * What the secondary queries of an attempt (on other replicas or shards, by
+ * its `initial_query_id`) wrote. A failure proves a safe replay only when
+ * every one has ended and states, as a number, that it wrote nothing: with
+ * parallel replicas, the initiator's written_rows does not count what the
+ * replicas wrote. One still running, or with a start and no end, may still
+ * write; any written row stays, and a replay writes it again.
+ */
+function secondaryWrites(
+  queryId: string,
+  evidence: ChunkEvidence,
+): { kind: 'none' } | { kind: 'pending'; reason: string } | { kind: 'unknown'; reason: string } {
+  const log = (evidence.secondaryLog ?? []).filter((row) => row.initial_query_id === queryId)
+  const ended = log.filter((row) => row.type !== 'QueryStart')
+  for (const row of ended) {
+    const count = rowCount(row.written_rows)
+    if (count === undefined) {
+      return { kind: 'unknown', reason: `system.query_log does not say how many rows its secondary query ${row.query_id} wrote` }
+    }
+    if (count > 0) {
+      return { kind: 'unknown', reason: `its secondary query ${row.query_id} wrote ${count} rows, which a replay would write again` }
+    }
+  }
+  const running = (evidence.secondaryRunning ?? []).find((row) => row.initial_query_id === queryId)
+  const open = running?.query_id ?? log.find((row) => row.type === 'QueryStart' && !ended.some((end) => end.query_id === row.query_id))?.query_id
+  if (open !== undefined) {
+    return { kind: 'pending', reason: `its secondary query ${open} is still running, or system.query_log has no outcome for it` }
+  }
+  return { kind: 'none' }
 }
 
 /** A row count as query_log reports it: a whole number, or its digits. */
@@ -476,6 +511,8 @@ function settledState(
 
 interface RunningRow {
   query_id: string
+  initial_query_id?: string
+  is_initial_query?: number | string
   read_rows: number | string
   read_bytes: number | string
   written_rows: number | string
@@ -485,6 +522,8 @@ interface RunningRow {
 
 interface ChunkLogRow {
   query_id: string
+  initial_query_id?: string
+  is_initial_query?: number | string
   type: string
   written_rows: number | string | null
   written_bytes: number | string
@@ -495,6 +534,9 @@ interface ChunkLogRow {
 interface ChunkEvidence {
   running: Map<string, RunningRow>
   logRows: ChunkLogRow[]
+  /** The secondary queries the attempts started (by `initial_query_id`). */
+  secondaryRunning?: RunningRow[]
+  secondaryLog?: ChunkLogRow[]
   /** Why the reads may have missed a replica (see `probeReplicaAccess`). */
   partial?: string
   /** Why no failure of this target can be proven (see `unprovableFailures`). */
@@ -563,9 +605,14 @@ async function readEvidence(
   reads: EvidenceReads,
 ): Promise<ChunkEvidence> {
   const { cluster } = reads
-  const match = 'prefix' in scope
-    ? `query_id LIKE '${likePrefix(scope.prefix)}%'`
-    : `query_id IN (${scope.ids.map(stringLiteral).join(', ')})`
+  const matchOn = (column: string) => 'prefix' in scope
+    ? `${column} LIKE '${likePrefix(scope.prefix)}%'`
+    : `${column} IN (${scope.ids.map(stringLiteral).join(', ')})`
+  const match = matchOn('query_id')
+  // The attempts' own queries, and the secondary queries they started on
+  // other replicas or shards (parallel replicas, a Distributed INSERT
+  // SELECT): those write rows the initial query's written_rows may not count.
+  const ownOrSecondary = `((user = currentUser() AND ${match} AND is_initial_query = 1) OR (initial_user = currentUser() AND ${matchOn('initial_query_id')} AND is_initial_query = 0))`
   const pruning = 'after' in scope && scope.after
     ? `\n  AND event_date >= toDate32(parseDateTimeBestEffort(${stringLiteral(scope.after)})) - 1`
     : ''
@@ -573,21 +620,22 @@ async function readEvidence(
   const from = (table: 'processes' | 'query_log') =>
     access.kind === 'fanout' ? allReplicas(access.fanout, `system.${table}`) : `system.${table}`
   const runningRows = await executor.query<RunningRow>(
-    `SELECT query_id, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE user = currentUser() AND ${match} SETTINGS ${STRICT_READ_SETTINGS}`
+    `SELECT query_id, initial_query_id, is_initial_query, read_rows, read_bytes, written_rows, written_bytes, elapsed FROM ${from('processes')} WHERE ${ownOrSecondary} SETTINGS ${STRICT_READ_SETTINGS}`
   )
   const logRows = await executor.query<ChunkLogRow>(
-    `SELECT query_id, type, written_rows, written_bytes, query_duration_ms, exception
+    `SELECT query_id, initial_query_id, is_initial_query, type, written_rows, written_bytes, query_duration_ms, exception
 FROM ${from('query_log')}
-WHERE user = currentUser()
-  AND ${match}
-  AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart', 'ExceptionWhileProcessing')
-  AND is_initial_query = 1${pruning}
+WHERE ${ownOrSecondary}
+  AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart', 'ExceptionWhileProcessing')${pruning}
 ORDER BY event_time DESC
 SETTINGS ${STRICT_READ_SETTINGS}`
   )
+  const secondary = (row: { is_initial_query?: number | string }) => row.is_initial_query !== undefined && Number(row.is_initial_query) === 0
   return {
-    running: new Map(runningRows.map((row) => [row.query_id, row])),
-    logRows,
+    running: new Map(runningRows.filter((row) => !secondary(row)).map((row) => [row.query_id, row])),
+    logRows: logRows.filter((row) => !secondary(row)),
+    secondaryRunning: runningRows.filter(secondary),
+    secondaryLog: logRows.filter(secondary),
     ...(access.kind === 'partial' ? { partial: access.reason } : {}),
     ...(reads.unprovableFailures === undefined ? {} : { unprovable: reads.unprovableFailures }),
   }
@@ -657,12 +705,24 @@ function interruptedError(
   }
   const chunks = `chunk${sends.abandoned.length === 1 ? '' : 's'} ${sends.abandoned.join(', ')}`
   const note = sends.alive.length === 0
-    ? `The send of ${chunks} did not reach the server in time and was abandoned: it may still have reached it, so its attempt stays recorded as one that may have run.`
+    ? `The send of ${chunks} did not reach the server in time and was abandoned: it may still have reached it, so its attempt stays recorded as one that may have run. Unless system.query_log shows its outcome, a resume stops on it, and only --accept-unknown replays it.`
     : `The send of ${chunks} did not reach the server in time and could not be stopped (chunk${sends.alive.length === 1 ? '' : 's'} ${sends.alive.join(', ')}): it may still be sent while this process runs, so its attempt stays recorded as one that may have run and the plan's lock stays in place.`
   return new BackfillInterruptedError(message, {
     note: hung === undefined ? note : `${note} ${hung}`,
     keepLock: sends.alive.length > 0 || hung !== undefined,
   })
+}
+
+/**
+ * A send that failed (a connect timeout, a lost connection, an error the
+ * server returned): it may have reached the server, so its attempt stays
+ * recorded as one that may have run, and nothing attaches to it.
+ */
+function sendFailedError(planId: string, chunkId: string, queryId: string, error: unknown): Error {
+  return new Error(
+    `Backfill plan ${planId}: the send of chunk ${chunkId} (query_id ${queryId}) failed: ${errorMessage(error)} It may have reached the server, so its attempt stays recorded as one that may have run. Unless system.query_log shows its outcome, a resume stops on it, and only --accept-unknown replays it.`,
+    { cause: error },
+  )
 }
 
 /** Whether `work` settles within `ms` (at once when it already has). */
@@ -1046,7 +1106,7 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
         await executor.submit(sql, queryId)
       }
     } catch (error) {
-      if (!isSendNotAdmitted(error)) throw error
+      if (!isSendNotAdmitted(error)) throw sendFailedError(planId, chunk.id, queryId, error)
       await record(chunk.id, previous)
       return undefined
     } finally {

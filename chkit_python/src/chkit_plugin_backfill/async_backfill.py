@@ -20,7 +20,7 @@ import time
 import uuid
 from collections.abc import Callable
 from concurrent.futures import FIRST_COMPLETED, Future, ThreadPoolExecutor, wait
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime
 from threading import Lock
 from typing import Protocol, TypeAlias, TypeVar
@@ -365,6 +365,64 @@ class _ChunkEvidence:
     partial: str | None = None
     # Why no failure of this target can be proven (``unprovable_failures``).
     unprovable: str | None = None
+    # The secondary queries the attempts started (by ``initial_query_id``).
+    secondary_running: list[dict[str, object]] = field(default_factory=list)
+    secondary_log: list[dict[str, object]] = field(default_factory=list)
+
+
+def _is_secondary(row: dict[str, object]) -> bool:
+    value = row.get("is_initial_query")
+    return value is not None and str(value) in {"0", "False"}
+
+
+def _secondary_writes(query_id: str, evidence: _ChunkEvidence) -> _Outcome | None:
+    """What the secondary queries of an attempt (on other replicas or
+    shards, by its ``initial_query_id``) wrote (TS ``secondaryWrites``). A
+    failure proves a safe replay only when every one has ended and states, as
+    a number, that it wrote nothing: with parallel replicas, the initiator's
+    written_rows does not count what the replicas wrote. One still running,
+    or with a start and no end, may still write (``wait``, carrying its
+    reason); any written row stays, and a replay writes it again."""
+    log = [row for row in evidence.secondary_log if row.get("initial_query_id") == query_id]
+    ended = [row for row in log if row.get("type") != "QueryStart"]
+    for row in ended:
+        count = _row_count(row.get("written_rows"))
+        if count is None:
+            return _Outcome(
+                "unknown",
+                reason="system.query_log does not say how many rows its secondary query "
+                f"{row.get('query_id')} wrote",
+            )
+        if count > 0:
+            return _Outcome(
+                "unknown",
+                reason=f"its secondary query {row.get('query_id')} wrote {count} rows, "
+                "which a replay would write again",
+            )
+    running = next(
+        (row for row in evidence.secondary_running if row.get("initial_query_id") == query_id),
+        None,
+    )
+    ended_ids = {row.get("query_id") for row in ended}
+    open_id = (
+        running.get("query_id")
+        if running is not None
+        else next(
+            (
+                row.get("query_id")
+                for row in log
+                if row.get("type") == "QueryStart" and row.get("query_id") not in ended_ids
+            ),
+            None,
+        )
+    )
+    if open_id is not None:
+        return _Outcome(
+            "wait",
+            reason=f"its secondary query {open_id} is still running, or system.query_log "
+            "has no outcome for it",
+        )
+    return None
 
 
 @dataclass(frozen=True)
@@ -388,7 +446,7 @@ _NO_OUTCOME_REASON = (
 )
 
 
-def _classify_attempt(  # noqa: PLR0911 — mirrors the TS classifier
+def _classify_attempt(  # noqa: PLR0911, PLR0912 — mirrors the TS classifier
     plan_id: str,
     chunk_id: str,
     state: BackfillChunkState,
@@ -409,10 +467,11 @@ def _classify_attempt(  # noqa: PLR0911 — mirrors the TS classifier
       Only that proves a replay cannot write the chunk's rows twice. A failure
       after a written row is unknown at once: those rows stay, and a replay
       writes them again. So is any failure of a target whose failures cannot
-      be proven (``unprovable_failures``). An attempt an older release recorded may have been
-      sent twice under its id, so its failure rows prove nothing, and a read
-      that may have missed a replica cannot rule out a run or a QueryFinish
-      on it.
+      be proven (``unprovable_failures``), and one whose secondary queries
+      (see ``_secondary_writes``) wrote a row or have not ended. An attempt
+      an older release recorded may have been sent twice under its id, so
+      its failure rows prove nothing, and a read that may have missed a
+      replica cannot rule out a run or a QueryFinish on it.
     - Otherwise an attempt that may have run (see ``_attempt_may_have_run``)
       waits through the flush window, then its outcome is unknown. An empty
       query_log is no proof that it never ran: logs can flush late, or not at
@@ -437,6 +496,11 @@ def _classify_attempt(  # noqa: PLR0911 — mirrors the TS classifier
     if failure is not None and state.single_send is True and evidence.partial is None:
         if evidence.unprovable is not None:
             return _Outcome("unknown", reason=evidence.unprovable)
+        shards = _secondary_writes(query_id, evidence)
+        if shards is not None and (shards.kind == "unknown" or final):
+            return _Outcome("unknown", reason=shards.reason)
+        if shards is not None:
+            return _Outcome("wait")
         # Proof needs every row of the id to state, as a number, that it
         # wrote nothing, and no earlier poll of this attempt to have seen it
         # write.
@@ -586,10 +650,20 @@ def _read_evidence(
     every replica answers, the reads use the local tables, also with
     ``clickhouse.cluster`` set, as TS does, and what they do not find proves
     nothing."""
-    if prefix is not None:
-        match = f"query_id LIKE '{_escape_like_prefix(prefix)}%'"
-    else:
-        match = f"query_id IN ({', '.join(string_literal(i) for i in ids or [])})"
+    def match_on(column: str) -> str:
+        if prefix is not None:
+            return f"{column} LIKE '{_escape_like_prefix(prefix)}%'"
+        return f"{column} IN ({', '.join(string_literal(i) for i in ids or [])})"
+
+    match = match_on("query_id")
+    # The attempts' own queries, and the secondary queries they started on
+    # other replicas or shards (parallel replicas, a Distributed INSERT
+    # SELECT): those write rows the initial query's written_rows may not count.
+    own_or_secondary = (
+        f"((user = currentUser() AND {match} AND is_initial_query = 1) OR "
+        f"(initial_user = currentUser() AND {match_on('initial_query_id')} "
+        "AND is_initial_query = 0))"
+    )
     pruning = (
         "\n  AND event_date >= toDate32(parseDateTimeBestEffort("
         f"{string_literal(after)})) - 1"
@@ -602,31 +676,34 @@ def _read_evidence(
         return all_replicas(access.fanout, table) if access.fanout is not None else table
 
     running_result = executor.query(
-        "SELECT query_id, read_rows, read_bytes, written_rows, written_bytes, elapsed "
+        "SELECT query_id, initial_query_id, is_initial_query, read_rows, read_bytes, "
+        "written_rows, written_bytes, elapsed "
         f"FROM {source('system.processes')} "
-        f"WHERE user = currentUser() AND {match} "
+        f"WHERE {own_or_secondary} "
         f"SETTINGS {STRICT_READ_SETTINGS}"
     )
     log_result = executor.query(
-        "SELECT query_id, type, written_rows, written_bytes, query_duration_ms,"
-        " exception\n"
+        "SELECT query_id, initial_query_id, is_initial_query, type, written_rows, "
+        "written_bytes, query_duration_ms, exception\n"
         f"FROM {source('system.query_log')}\n"
-        "WHERE user = currentUser()\n"
-        f"  AND {match}\n"
+        f"WHERE {own_or_secondary}\n"
         "  AND type IN ('QueryStart', 'QueryFinish', 'ExceptionBeforeStart',"
-        " 'ExceptionWhileProcessing')\n"
-        f"  AND is_initial_query = 1{pruning}\n"
+        f" 'ExceptionWhileProcessing'){pruning}\n"
         "ORDER BY event_time DESC\n"
         f"SETTINGS {STRICT_READ_SETTINGS}"
     )
+    running_rows = _rows_of(running_result)
+    log_rows = _rows_of(log_result)
     running = {
         str(row.get("query_id")): row
-        for row in _rows_of(running_result)
-        if row.get("query_id") is not None
+        for row in running_rows
+        if row.get("query_id") is not None and not _is_secondary(row)
     }
     return _ChunkEvidence(
         running=running,
-        log_rows=_rows_of(log_result),
+        log_rows=[row for row in log_rows if not _is_secondary(row)],
+        secondary_running=[row for row in running_rows if _is_secondary(row)],
+        secondary_log=[row for row in log_rows if _is_secondary(row)],
         partial=access.reason if access.kind == "partial" else None,
         unprovable=unprovable,
     )
@@ -668,6 +745,25 @@ def _unknown_outcome_error(plan_id: str, unknown: list[_UnknownAttempt]) -> Unkn
     )
 
 
+_UNLESS_LOGGED = (
+    "Unless system.query_log shows its outcome, a resume stops on it, and only "
+    "--accept-unknown replays it."
+)
+
+
+def _send_failed_error(
+    plan_id: str, chunk_id: str, query_id: str, error: BaseException
+) -> RuntimeError:
+    """A send that failed (a connect timeout, a lost connection, an error the
+    server returned): it may have reached the server, so its attempt stays
+    recorded as one that may have run, and nothing attaches to it."""
+    return RuntimeError(
+        f"Backfill plan {plan_id}: the send of chunk {chunk_id} (query_id {query_id}) "
+        f"failed: {error} It may have reached the server, so its attempt stays recorded "
+        f"as one that may have run. {_UNLESS_LOGGED}"
+    )
+
+
 def _interrupted_error(
     plan_id: str,
     abandoned: list[str] | None = None,
@@ -693,7 +789,8 @@ def _interrupted_error(
     if not alive:
         note = (
             f"The send of {chunks} did not reach the server in time and was abandoned: it "
-            "may still have reached it, so its attempt stays recorded as one that may have run."
+            "may still have reached it, so its attempt stays recorded as one that may have run. "
+            f"{_UNLESS_LOGGED}"
         )
     else:
         note = (
@@ -1169,7 +1266,7 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
             progress[chunk_id] = next_state
         write_checkpoint(after_close=True)
 
-    def send(
+    def send(  # noqa: PLR0915 — mirrors the TS send
         chunk_id: str, previous: BackfillChunkState, attempt: BackfillChunkState
     ) -> _UnknownAttempt | None:
         """Record ``attempt`` and send the chunk under its query id. The SQL is
@@ -1237,6 +1334,8 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
         except SendNotAdmittedError:
             record(chunk_id, previous)
             return None
+        except Exception as error:
+            raise _send_failed_error(plan_id, chunk_id, query_id, error) from error
         finally:
             if token is not None:
                 SEND_ADMISSION.reset(token)

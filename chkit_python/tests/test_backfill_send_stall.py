@@ -153,7 +153,8 @@ def test_an_interrupt_abandons_the_stalled_send_releases_the_lock_and_says_it_ma
         "lock is released; a chunk already submitted keeps running on the server, and a "
         "resume attaches to it. The send of chunk c1 did not reach the server in time and was "
         "abandoned: it may still have reached it, so its attempt stays recorded as one that "
-        "may have run."
+        "may have run. Unless system.query_log shows its outcome, a resume stops on it, and "
+        "only --accept-unknown replays it."
     ) in stderr
     assert _last_checkpoint(stdout) == {
         "status": "pending",
@@ -172,7 +173,14 @@ def test_without_an_interrupt_the_connect_timeout_fails_the_run_and_keeps_the_at
     stdout, stderr = child.communicate(timeout=30)
 
     assert child.returncode not in (0, None), f"{stdout}\n{stderr}"
-    assert "could not connect and be written within 300 ms" in stderr
+    assert (
+        f"Backfill plan {PLAN_ID}: the send of chunk c1 (query_id backfill-{PLAN_ID}-c1) "
+        "failed: The request could not connect and be written within 300 ms"
+    ) in stderr
+    assert (
+        "so its attempt stays recorded as one that may have run. Unless system.query_log "
+        "shows its outcome, a resume stops on it, and only --accept-unknown replays it."
+    ) in stderr
     assert not lock_path.exists()
     assert _last_checkpoint(stdout) == {
         "status": "pending",

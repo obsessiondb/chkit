@@ -1035,3 +1035,41 @@ def test_an_abandoned_send_writes_nothing_after_it_connects() -> None:
 
     assert received == [b""]
     assert admission.handed_off_count == 0
+
+
+# Opus re-review, item 3: a stalled name lookup ends at the connect timeout
+# too, as TS's timer covers its lookup.
+def test_a_send_whose_name_lookup_stalls_ends_at_the_connect_timeout(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    real_getaddrinfo = socket.getaddrinfo
+    release = threading.Event()
+
+    def getaddrinfo(host: Any, *args: Any, **kwargs: Any) -> Any:
+        if host == "stalled.chkit.invalid":
+            release.wait(10)
+        return real_getaddrinfo(host, *args, **kwargs)
+
+    monkeypatch.setattr(socket, "getaddrinfo", getaddrinfo)
+    pool = urllib3.PoolManager()
+    install_send_hook(pool)
+    admission = _Admitting()
+    token = _CURRENT_SEND.set(_Send(admission))
+    started = time.monotonic()
+    try:
+        with pytest.raises(urllib3.exceptions.TimeoutError) as raised:
+            pool.request(
+                "POST",
+                "http://stalled.chkit.invalid:8123/",
+                body=b"SELECT 1",
+                timeout=Timeout(connect=0.3, read=None),
+            )
+    finally:
+        _CURRENT_SEND.reset(token)
+        elapsed = time.monotonic() - started
+        release.set()
+        pool.clear()
+
+    assert elapsed < 2
+    assert "Resolving stalled.chkit.invalid timed out" in str(raised.value)
+    assert admission.handed_off_count == 0

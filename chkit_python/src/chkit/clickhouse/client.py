@@ -14,6 +14,7 @@ import os
 import re
 import socket
 import threading
+import time
 import uuid
 from collections.abc import Callable
 from contextvars import ContextVar
@@ -30,6 +31,7 @@ from clickhouse_connect.driver.exceptions import (  # type: ignore[import-untype
 from pydantic import BaseModel, ConfigDict
 from urllib3 import HTTPConnectionPool, HTTPSConnectionPool, Timeout
 from urllib3.connection import HTTPConnection, HTTPSConnection
+from urllib3.exceptions import ConnectTimeoutError, NameResolutionError, NewConnectionError
 
 from chkit.clickhouse.control import (
     STRICT_CONTROL_SETTINGS,
@@ -683,7 +685,7 @@ class SendAbandonedError(RuntimeError):
 def _connect_timeout_message() -> str:
     return (
         f"The request could not connect and be written within {SEND_CONNECT_TIMEOUT_MS} ms "
-        "(TCP connect, TLS handshake and the request itself), so it was destroyed. "
+        "(name lookup, TCP connect, TLS handshake and the request itself), so it was destroyed. "
         "It may have reached the server."
     )
 
@@ -851,6 +853,37 @@ class _SendConnectionMixin:
     before it writes it, connected first (a plain HTTP connection otherwise
     connects inside its first write), so an abandon finds its socket."""
 
+    def _new_conn(self) -> socket.socket:
+        """The socket, with the name resolved under the connect timeout too
+        (TS's timer covers its lookup): ``getaddrinfo`` cannot time out, so it
+        runs on a daemon thread, and the TCP connect gets what is left."""
+        conn: Any = self
+        new_conn: Callable[[], socket.socket] = super()._new_conn  # type: ignore[misc]
+        timeout = conn.timeout
+        if _CURRENT_SEND.get() is None or not isinstance(timeout, (int, float)):
+            return new_conn()
+        deadline = time.monotonic() + timeout
+        host = conn._dns_host
+        addresses = _resolve_within(host, conn.port, timeout)
+        last: BaseException | None = None
+        for address in addresses:
+            left = deadline - time.monotonic()
+            if left <= 0:
+                break
+            conn._dns_host = address
+            conn.timeout = left
+            try:
+                return new_conn()
+            except NewConnectionError as error:
+                last = error
+            finally:
+                conn._dns_host = host
+                conn.timeout = timeout
+        if last is not None:
+            raise last
+        msg = f"Connection to {host} timed out. (connect timeout={timeout})"
+        raise ConnectTimeoutError(self, msg)
+
     def request(self, method: str, url: str, *args: Any, **kwargs: Any) -> None:
         send = _CURRENT_SEND.get()
         if send is not None and send.admission is not None:
@@ -858,6 +891,31 @@ class _SendConnectionMixin:
                 self.connect()  # type: ignore[attr-defined]
             send.writing(self)
         super().request(method, url, *args, **kwargs)  # type: ignore[misc]
+
+
+def _resolve_within(host: str, port: int, timeout: float) -> list[str]:
+    """The addresses of ``host``, or a ``ConnectTimeoutError`` after
+    ``timeout`` seconds: the lookup runs on a daemon thread left behind."""
+    outcome: list[tuple[bool, object]] = []
+    done = threading.Event()
+
+    def resolve() -> None:
+        try:
+            infos = socket.getaddrinfo(host, port, 0, socket.SOCK_STREAM)
+            outcome.append((True, [str(info[4][0]) for info in infos]))
+        except BaseException as error:
+            outcome.append((False, error))
+        done.set()
+
+    threading.Thread(target=resolve, name="chkit-send-resolve", daemon=True).start()
+    if not done.wait(timeout):
+        msg = f"Resolving {host} timed out. (connect timeout={timeout})"
+        raise ConnectTimeoutError(None, msg)
+    ok, value = outcome[0]
+    if not ok:
+        error = value if isinstance(value, BaseException) else RuntimeError(str(value))
+        raise NameResolutionError(host, None, error)  # type: ignore[arg-type]
+    return list(dict.fromkeys(value))  # type: ignore[call-overload]
 
 
 class _SendHTTPConnection(_SendConnectionMixin, HTTPConnection):

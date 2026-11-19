@@ -59,7 +59,7 @@ function sendAbandonedError(): Error {
 
 function connectTimeoutError(timeoutMs: number): Error {
   return Object.assign(
-    new Error(`The request could not connect and be written within ${timeoutMs} ms (TCP connect, TLS handshake and the request itself), so it was destroyed. It may have reached the server.`),
+    new Error(`The request could not connect and be written within ${timeoutMs} ms (name lookup, TCP connect, TLS handshake and the request itself), so it was destroyed. It may have reached the server.`),
     { code: 'CHKIT_SEND_CONNECT_TIMEOUT' },
   )
 }
