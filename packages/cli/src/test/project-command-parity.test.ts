@@ -220,6 +220,30 @@ describe('commands in a project match chkit-py (#776)', () => {
     }
   }, 60_000)
 
+  test('a disabled obsessiondb plugin is not configured, and its help still prints', async () => {
+    const project = await createProject({
+      imports: withObsessionDB.imports,
+      list: '{ ...obsessiondb(), enabled: false }',
+    })
+    try {
+      const message = 'ObsessionDB plugin is not configured. Add it to config.plugins first.'
+      for (const args of [['obsessiondb'], ['obsessiondb', 'login']]) {
+        const result = project.run(args)
+        expect([args, result.exitCode, result.stdout, result.stderr.trim()]).toEqual([args, 1, '', message])
+      }
+      for (const [args, usage] of [
+        [['obsessiondb', '--help'], 'chkit obsessiondb <command> [options]'],
+        [['obsessiondb', 'login', '--help'], 'chkit obsessiondb login [options]'],
+      ] as const) {
+        const help = project.run(args)
+        expect([args, help.exitCode, help.stderr]).toEqual([args, 0, ''])
+        expect(help.stdout).toContain(usage)
+      }
+    } finally {
+      await project.cleanup()
+    }
+  }, 60_000)
+
   test('an unknown service subcommand prints one message', async () => {
     for (const plugins of [undefined, withObsessionDB]) {
       const project = await createProject(plugins)
