@@ -88,6 +88,11 @@ export interface BackfillChunkState {
    *  resubmitted the chunk's id, and chkit-py's driver resent a reset
    *  request), so a failure row of an attempt without it proves nothing. */
   singleSend?: boolean
+  /** A secondary query this attempt ran on another replica or shard, once
+   *  any read saw one (#765). It stays recorded: the query can leave
+   *  system.processes before its query_log row is visible, and such an
+   *  attempt's failure never proves a safe replay. */
+  secondaryQueryId?: string
 }
 
 export type BackfillProgress = Record<string, BackfillChunkState>
@@ -388,15 +393,17 @@ function classifyAttempt(
   // A failure this release proved stays proven, whatever query_log shows
   // now: its rows may have aged out (TTL), or sit on a replica this read
   // cannot reach. Only a newer outcome of the id, read above, replaces it.
-  if (state.status === 'failed' && state.singleSend === true) return { kind: 'unchanged' }
+  // Evidence against it, seen now or recorded by an earlier read, revokes it.
+  if (state.status === 'failed' && state.singleSend === true) {
+    const revoked = contradiction(queryId, state, evidence)
+    return revoked === undefined ? { kind: 'unchanged' } : { kind: 'unknown', reason: revoked }
+  }
   const kind = attemptKind(planId, chunkId, state)
   const failure = own.find((row) => FAILURE_TYPES.has(row.type))
   if (failure && state.singleSend === true && evidence.partial === undefined) {
     if (evidence.unprovable !== undefined) return { kind: 'unknown', reason: evidence.unprovable }
-    const secondary = secondaryQueryOf(queryId, evidence)
-    if (secondary !== undefined) {
-      return { kind: 'unknown', reason: `it ran a secondary query on another replica or shard (query_id ${secondary}), whose writes system.query_log may show late or not at all, so its failure proves nothing` }
-    }
+    const secondary = state.secondaryQueryId ?? secondaryQueryOf(queryId, evidence)
+    if (secondary !== undefined) return { kind: 'unknown', reason: secondaryReason(secondary) }
     // Proof needs every row of the id to state, as a number, that it wrote
     // nothing, and no earlier poll of this attempt to have seen it write.
     const counts = own.map((row) => rowCount(row.written_rows))
@@ -421,6 +428,47 @@ function classifyAttempt(
     return { kind: 'unknown', reason: 'an older release may have sent it more than once under this query id, so the failure in system.query_log may not be its last send' }
   }
   return { kind: 'unknown', reason: 'it is not running on any replica and system.query_log has no outcome for it' }
+}
+
+function secondaryReason(secondary: string): string {
+  return `it ran a secondary query on another replica or shard (query_id ${secondary}), whose writes system.query_log may show late or not at all, so its failure proves nothing`
+}
+
+/**
+ * Why a failure this release proved no longer holds, if it does not: a
+ * secondary query of the attempt, or a written row, seen now or recorded by
+ * an earlier read. query_log rows that aged out prove nothing either way.
+ */
+function contradiction(queryId: string, state: BackfillChunkState, evidence: ChunkEvidence): string | undefined {
+  const secondary = state.secondaryQueryId ?? secondaryQueryOf(queryId, evidence)
+  if (secondary !== undefined) return secondaryReason(secondary)
+  const written = Math.max(state.writtenRows ?? 0, ownWrittenRows(queryId, evidence))
+  if (written > 0) return `it failed after writing ${written} rows, which a replay would write again`
+  return undefined
+}
+
+function ownWrittenRows(queryId: string, evidence: ChunkEvidence): number {
+  const counts = evidence.logRows
+    .filter((row) => row.query_id === queryId)
+    .map((row) => rowCount(row.written_rows))
+    .filter((count): count is number => count !== undefined)
+  return Math.max(0, ...counts)
+}
+
+/**
+ * `state` with what this read saw of the attempt that must outlive the read
+ * (#765): the first secondary query of it, and the most rows any of its own
+ * query_log rows say it wrote. The caller saves it, so a later read, or a
+ * resume after a restart, still knows once the evidence is gone.
+ */
+function notedState(planId: string, chunkId: string, state: BackfillChunkState, evidence: ChunkEvidence): BackfillChunkState {
+  const queryId = attemptQueryId(planId, chunkId, state)
+  let next = state
+  const secondary = secondaryQueryOf(queryId, evidence)
+  if (secondary !== undefined && state.secondaryQueryId === undefined) next = { ...next, secondaryQueryId: secondary }
+  const written = ownWrittenRows(queryId, evidence)
+  if (written > (state.writtenRows ?? 0)) next = { ...next, writtenRows: written }
+  return next
 }
 
 /**
@@ -453,7 +501,9 @@ function applyEvidence(
   const waiting: string[] = []
   const unknown: UnknownAttempt[] = []
   for (const chunkId of chunkIds) {
-    const current = getChunk(updated, chunkId)
+    const saved = getChunk(updated, chunkId)
+    const current = notedState(planId, chunkId, saved, evidence)
+    if (current !== saved) updated = updateChunk(updated, chunkId, current)
     const queryId = attemptQueryId(planId, chunkId, current)
     const outcome = classifyAttempt(planId, chunkId, current, evidence, final)
     if (outcome.kind === 'running') {
@@ -753,7 +803,7 @@ async function pollChunk(
   executor: ClickHouseExecutor,
   target: { planId: string; chunkId: string } & EvidenceReads,
   initial: BackfillChunkState,
-  limits: { pollIntervalMs: number; maxPollErrors: number; emptyWindowMs: number; stopped: () => boolean },
+  limits: { pollIntervalMs: number; maxPollErrors: number; emptyWindowMs: number; stopped: () => boolean; stopDispatch: () => void },
   onChanged: (state: BackfillChunkState) => void | Promise<void>,
 ): Promise<UnknownAttempt | undefined> {
   const { planId, chunkId } = target
@@ -766,9 +816,11 @@ async function pollChunk(
     if (!queryId) break
     const final = emptySince !== undefined && Date.now() - emptySince >= limits.emptyWindowMs
     let outcome: AttemptOutcome
+    let noted = state
     try {
       const evidence = await readEvidence(executor, { ids: [queryId], after: final ? undefined : state.submittedAt }, target)
-      outcome = classifyAttempt(planId, chunkId, state, evidence, final)
+      noted = notedState(planId, chunkId, state, evidence)
+      outcome = classifyAttempt(planId, chunkId, noted, evidence, final)
     } catch (error) {
       errors++
       if (errors >= limits.maxPollErrors) {
@@ -777,10 +829,13 @@ async function pollChunk(
       continue
     }
     errors = 0
+    // What this read saw of the attempt is saved whatever its outcome.
+    const sawMore = noted !== state
+    state = noted
     if (outcome.kind === 'running') {
       emptySince = undefined
       const result = runningState(state, outcome.row)
-      if (result.changed) {
+      if (result.changed || sawMore) {
         state = result.state
         await onChanged(state)
       }
@@ -788,8 +843,12 @@ async function pollChunk(
       state = settledState(state, queryId, outcome)
       await onChanged(state)
     } else if (outcome.kind === 'unknown') {
+      // No other chunk is sent from here on, before this save is made.
+      limits.stopDispatch()
+      if (sawMore) await onChanged(state)
       return { chunkId, queryId, reason: outcome.reason }
     } else {
+      if (sawMore) await onChanged(state)
       emptySince ??= Date.now()
     }
   }
@@ -880,10 +939,16 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     return lastReport
   }
 
+  // Set once an interrupt has seen the last checkpoint write end: no write
+  // starts after that, not even an admitted chunk's own record.
+  let sealed = false
+
   // Save the reconciled state, every chunk included, before anything is
   // submitted: a chunk this checkpoint lists as pending without a query id
-  // was never submitted.
-  await report()
+  // was never submitted. An interrupt during this write waits for it as long
+  // as for any other (`handoffTimeoutMs`), then seals the run; a write still
+  // under way keeps the lock.
+  await firstReport()
 
   // An attempt that may have run and has no outcome may have written its
   // rows: submitting the chunk again could write them twice (#765).
@@ -896,9 +961,6 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
   }
   // An admitted chunk's own records, saved even after an interrupt: the
   // interrupt waits for them (see `send`).
-  // Set once an interrupt has seen the last checkpoint write end: no write
-  // starts after that, not even an admitted chunk's own record.
-  let sealed = false
   const record = (id: string, next: BackfillChunkState) => {
     progress = updateChunk(progress, id, next)
     if (sealed) return lastReport
@@ -929,6 +991,10 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
     maxPollErrors,
     emptyWindowMs: Math.max(outcomeRecheckAttempts * outcomeRecheckIntervalMs, maxPollErrors * pollIntervalMs),
     stopped: () => closed,
+    stopDispatch: () => {
+      stopDispatch = true
+      dispatchStopped.abort()
+    },
   }
   const pollUnknown: UnknownAttempt[] = []
   // Checked again right before each send: a chunk can reach its send after
@@ -1003,6 +1069,26 @@ export async function executeBackfill(options: BackfillOptions): Promise<Backfil
         return { abandoned, alive, writeHung: !ended }
       }
     }
+  }
+
+  async function firstReport(): Promise<void> {
+    const write = report()
+    if (!signal) return write
+    let onAbort: () => void = () => undefined
+    const aborted = new Promise<'aborted'>((resolve) => {
+      onAbort = () => resolve('aborted')
+      if (signal.aborted) onAbort()
+      else signal.addEventListener('abort', onAbort, { once: true })
+    })
+    try {
+      if ((await Promise.race([write.then(() => 'written' as const), aborted])) === 'written') return
+    } finally {
+      signal.removeEventListener('abort', onAbort)
+    }
+    closed = true
+    const ended = await endsWithin(write, handoffTimeoutMs)
+    sealed = true
+    throw interruptedError(planId, { abandoned: [], alive: [], writeHung: !ended })
   }
 
   async function runChunk(chunk: { id: string; from?: string; to?: string }): Promise<UnknownAttempt | undefined> {

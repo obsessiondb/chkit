@@ -2730,3 +2730,229 @@ def test_without_a_secondary_query_the_failure_read_after_the_window_is_proof() 
     assert len(submits) == 1
     assert submits[0].startswith(f"{_SECONDARY_OF}-")
     assert "secondary" not in str(error)
+
+
+# Codex round 9: what a read saw of an attempt outlives the read. A secondary
+# query seen while the primary still ran, or a written row, keeps its failure
+# unproven after that evidence is gone, also across a restart, and revokes a
+# failure recorded as proven.
+_KEPT_ID = f"backfill-{PLAN_ID}-c1"
+_KEPT_SECONDARY = (
+    f"chunk c1 (query_id {_KEPT_ID}): it ran a secondary query on another replica or "
+    "shard (query_id secondary-1), whose writes system.query_log may show late or not at "
+    "all, so its failure proves nothing."
+)
+
+
+def _kept_failure_row(written: str, **extra: object) -> dict[str, object]:
+    return {
+        "query_id": _KEPT_ID,
+        "is_initial_query": 1,
+        "type": "ExceptionWhileProcessing",
+        "written_rows": written,
+        "written_bytes": "0",
+        "query_duration_ms": "1",
+        "exception": "transient",
+        **extra,
+    }
+
+
+def _kept_running(query_id: str, initial: int, written: str) -> dict[str, object]:
+    return {
+        "query_id": query_id,
+        "initial_query_id": _KEPT_ID,
+        "is_initial_query": initial,
+        "read_rows": "0",
+        "read_bytes": "0",
+        "written_rows": written,
+        "written_bytes": "0",
+        "elapsed": 1,
+    }
+
+
+class _Snapshots(SubmitRecordingExecutor):
+    """system.processes and system.query_log as ``snapshot(read)`` gives them."""
+
+    def __init__(
+        self, snapshot: Callable[[int], tuple[list[dict[str, object]], list[dict[str, object]]]]
+    ) -> None:
+        super().__init__({})
+        self.snapshot = snapshot
+        self.reads = 0
+
+    def _rows(self, statement: str) -> list[dict[str, object]]:
+        if "now64" in statement:
+            return [{"now_ms": str(int(time.time() * 1000))}]
+        if "system.one" in statement:
+            return [{"replicas": 1}]
+        if "system.processes" in statement:
+            self.reads += 1
+            return self.snapshot(self.reads)[0]
+        if "system.query_log" in statement:
+            return self.snapshot(self.reads)[1]
+        return []
+
+
+def _kept_resume(
+    executor: _Snapshots, c1: BackfillChunkState
+) -> tuple[BaseException | None, BackfillChunkState | None]:
+    saved: list[BackfillProgress] = []
+    error: BaseException | None = None
+    try:
+        execute_backfill(
+            executor=executor,
+            plan_id=PLAN_ID,
+            chunk_ids=["c1"],
+            build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+            resume_from={"c1": c1},
+            checkpoint_version=CHECKPOINT_VERSION,
+            replay_failed=True,
+            poll_interval_ms=1,
+            outcome_recheck_attempts=2,
+            outcome_recheck_interval_ms=5,
+            on_progress=saved.append,
+        )
+    except RuntimeError as raised:
+        error = raised
+    return error, saved[-1]["c1"] if saved else None
+
+
+def test_a_secondary_seen_only_while_the_primary_ran_keeps_the_failure_unproven() -> None:
+    # First the primary and a secondary that wrote 50 rows run; then only the
+    # primary's zero-row failure is left.
+    executor = _Snapshots(
+        lambda read: (
+            [_kept_running(_KEPT_ID, 1, "0"), _kept_running("secondary-1", 0, "50")],
+            [],
+        )
+        if read == 1
+        else ([], [_kept_failure_row("0")])
+    )
+
+    error, saved = _kept_resume(
+        executor, BackfillChunkState(status="submitted", query_id=_KEPT_ID, single_send=True)
+    )
+
+    assert _KEPT_SECONDARY in str(error)
+    assert saved is not None
+    assert (saved.query_id, saved.secondary_query_id) == (_KEPT_ID, "secondary-1")
+    assert saved.status != "failed"
+    # A new process resumes from that checkpoint: the secondary is gone from every table.
+    error, _ = _kept_resume(executor, saved)
+    assert _KEPT_SECONDARY in str(error)
+    assert executor.submit_order == []
+
+
+@pytest.mark.parametrize(
+    ("log", "reason"),
+    [
+        (
+            [
+                _kept_failure_row("0"),
+                _kept_failure_row(
+                    "0", query_id="secondary-1", initial_query_id=_KEPT_ID, is_initial_query=0
+                ),
+            ],
+            _KEPT_SECONDARY,
+        ),
+        (
+            [_kept_failure_row("5")],
+            f"chunk c1 (query_id {_KEPT_ID}): it failed after writing 5 rows, which a replay "
+            "would write again.",
+        ),
+    ],
+    ids=["secondary", "written-row"],
+)
+def test_evidence_seen_now_revokes_a_recorded_proof_and_it_stays_revoked(
+    log: list[dict[str, object]], reason: str
+) -> None:
+    gone = [False]
+    executor = _Snapshots(lambda _read: ([], [] if gone[0] else log))
+    proven = BackfillChunkState(
+        status="failed", query_id=_KEPT_ID, single_send=True, error="transient"
+    )
+
+    error, saved = _kept_resume(executor, proven)
+    assert reason in str(error)
+    assert saved is not None
+
+    gone[0] = True
+    error, _ = _kept_resume(executor, saved)
+    assert reason in str(error)
+    assert executor.submit_order == []
+
+
+def test_a_proof_whose_logs_only_aged_out_stays_proven() -> None:
+    executor = _Snapshots(lambda _read: ([], []))
+
+    error, _ = _kept_resume(
+        executor,
+        BackfillChunkState(status="failed", query_id=_KEPT_ID, single_send=True, error="x"),
+    )
+
+    assert len(executor.submit_order) == 1
+    assert "secondary" not in str(error or "")
+
+
+# Codex round 9: the first checkpoint write, before any chunk is sent, gets the
+# same bounded interrupt as the others.
+def _interrupt_first_write(write_s: float | None) -> tuple[BaseException, float, int, list[str]]:
+    writes: list[int] = []
+    writing = threading.Event()
+    stop = threading.Event()
+    outcome: list[BaseException] = []
+    executor = SubmitRecordingExecutor({})
+
+    def on_progress(_progress: BackfillProgress) -> None:
+        writes.append(1)
+        if len(writes) > 1:
+            return
+        writing.set()
+        if write_s is None:
+            threading.Event().wait(30)
+        else:
+            time.sleep(write_s)
+
+    def run() -> None:
+        try:
+            execute_backfill(
+                executor=executor,
+                plan_id=PLAN_ID,
+                chunk_ids=["c1"],
+                build_query=lambda _chunk_id: "INSERT INTO t SELECT 1",
+                poll_interval_ms=1,
+                stop=stop,
+                handoff_timeout_ms=300,
+                on_progress=on_progress,
+            )
+        except BaseException as error:
+            outcome.append(error)
+
+    worker = threading.Thread(target=run, daemon=True)
+    worker.start()
+    assert writing.wait(5)
+    started = time.monotonic()
+    stop.set()
+    worker.join(5)
+    elapsed = time.monotonic() - started
+    time.sleep(0.05)
+    assert len(outcome) == 1
+    return outcome[0], elapsed, len(writes), executor.submit_order
+
+
+def test_a_hung_first_write_keeps_the_lock_after_the_bounded_wait() -> None:
+    error, elapsed, writes, submits = _interrupt_first_write(None)
+
+    assert isinstance(error, BackfillInterruptedError)
+    assert error.keep_lock is True
+    assert error.note == _HUNG_WRITE
+    assert elapsed < 2
+    assert (writes, submits) == (1, [])
+
+
+def test_a_slow_first_write_that_ends_in_time_releases_the_lock() -> None:
+    error, _elapsed, writes, submits = _interrupt_first_write(0.1)
+
+    assert isinstance(error, BackfillInterruptedError)
+    assert error.keep_lock is False
+    assert (writes, submits) == (1, [])

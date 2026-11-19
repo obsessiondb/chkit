@@ -112,6 +112,11 @@ class BackfillChunkProgress(BaseModel):
     # the chunk's id, and the driver resent a reset request), so a failure row
     # of an attempt without it proves nothing.
     single_send: bool | None = Field(default=None, alias="singleSend")
+    # A secondary query this attempt ran on another replica or shard, once any
+    # read saw one (#765). It stays recorded: the query can leave
+    # system.processes before its query_log row is visible, and such an
+    # attempt's failure never proves a safe replay.
+    secondary_query_id: str | None = Field(default=None, alias="secondaryQueryId")
 
     model_config = ConfigDict(frozen=True, extra="ignore", populate_by_name=True)
 

@@ -375,6 +375,59 @@ def _is_secondary(row: dict[str, object]) -> bool:
     return value is not None and str(value) in {"0", "False"}
 
 
+def _secondary_reason(secondary: str) -> str:
+    return (
+        f"it ran a secondary query on another replica or shard (query_id {secondary}), "
+        "whose writes system.query_log may show late or not at all, so its failure "
+        "proves nothing"
+    )
+
+
+def _contradiction(
+    query_id: str, state: BackfillChunkState, evidence: _ChunkEvidence
+) -> str | None:
+    """Why a failure this release proved no longer holds, if it does not (TS
+    ``contradiction``): a secondary query of the attempt, or a written row,
+    seen now or recorded by an earlier read. query_log rows that aged out
+    prove nothing either way."""
+    secondary = state.secondary_query_id or _secondary_query_of(query_id, evidence)
+    if secondary is not None:
+        return _secondary_reason(secondary)
+    written = max(state.written_rows or 0, _own_written_rows(query_id, evidence))
+    if written > 0:
+        return f"it failed after writing {written} rows, which a replay would write again"
+    return None
+
+
+def _own_written_rows(query_id: str, evidence: _ChunkEvidence) -> int:
+    counts = [
+        count
+        for row in evidence.log_rows
+        if str(row.get("query_id")) == query_id
+        and (count := _row_count(row.get("written_rows"))) is not None
+    ]
+    return max([0, *counts])
+
+
+def _noted_state(
+    plan_id: str, chunk_id: str, state: BackfillChunkState, evidence: _ChunkEvidence
+) -> BackfillChunkState:
+    """``state`` with what this read saw of the attempt that must outlive the
+    read (#765, TS ``notedState``): the first secondary query of it, and the
+    most rows any of its own query_log rows say it wrote. The caller saves
+    it, so a later read, or a resume after a restart, still knows once the
+    evidence is gone."""
+    query_id = _attempt_query_id(plan_id, chunk_id, state)
+    update: dict[str, object] = {}
+    secondary = _secondary_query_of(query_id, evidence)
+    if secondary is not None and state.secondary_query_id is None:
+        update["secondary_query_id"] = secondary
+    written = _own_written_rows(query_id, evidence)
+    if written > (state.written_rows or 0):
+        update["written_rows"] = written
+    return state.model_copy(update=update) if update else state
+
+
 def _secondary_query_of(query_id: str, evidence: _ChunkEvidence) -> str | None:
     """The query id of a secondary query of the attempt (on another replica or
     shard, by its ``initial_query_id``), if any was seen (TS
@@ -454,21 +507,18 @@ def _classify_attempt(  # noqa: PLR0911, PLR0912 — mirrors the TS classifier
     # A failure this release proved stays proven, whatever query_log shows
     # now: its rows may have aged out (TTL), or sit on a replica this read
     # cannot reach. Only a newer outcome of the id, read above, replaces it.
+    # Evidence against it, seen now or recorded by an earlier read, revokes it.
     if state.status == "failed" and state.single_send is True:
-        return _Outcome("unchanged")
+        revoked = _contradiction(query_id, state, evidence)
+        return _Outcome("unchanged") if revoked is None else _Outcome("unknown", reason=revoked)
     kind = _attempt_kind(plan_id, chunk_id, state)
     failure = next((row for row in own if row.get("type") in _FAILURE_TYPES), None)
     if failure is not None and state.single_send is True and evidence.partial is None:
         if evidence.unprovable is not None:
             return _Outcome("unknown", reason=evidence.unprovable)
-        secondary = _secondary_query_of(query_id, evidence)
+        secondary = state.secondary_query_id or _secondary_query_of(query_id, evidence)
         if secondary is not None:
-            return _Outcome(
-                "unknown",
-                reason=f"it ran a secondary query on another replica or shard (query_id "
-                f"{secondary}), whose writes system.query_log may show late or not at all, "
-                "so its failure proves nothing",
-            )
+            return _Outcome("unknown", reason=_secondary_reason(secondary))
         # Proof needs every row of the id to state, as a number, that it
         # wrote nothing, and no earlier poll of this attempt to have seen it
         # write.
@@ -524,7 +574,10 @@ def _apply_evidence(
     waiting: list[str] = []
     unknown: list[_UnknownAttempt] = []
     for chunk_id in chunk_ids:
-        current = _get_chunk(updated, chunk_id)
+        saved = _get_chunk(updated, chunk_id)
+        current = _noted_state(plan_id, chunk_id, saved, evidence)
+        if current is not saved:
+            updated[chunk_id] = current
         query_id = _attempt_query_id(plan_id, chunk_id, current)
         outcome = _classify_attempt(plan_id, chunk_id, current, evidence, final=final)
         if outcome.kind == "running":
@@ -1013,6 +1066,27 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
     def emit_progress() -> None:
         write_checkpoint(after_close=False)
 
+    def first_report() -> None:
+        if stop is None:
+            emit_progress()
+            return
+        failure: list[BaseException] = []
+
+        def write() -> None:
+            try:
+                emit_progress()
+            except BaseException as error:
+                failure.append(error)
+
+        writer = threading.Thread(target=write, name="backfill-first-checkpoint", daemon=True)
+        writer.start()
+        while writer.is_alive():
+            if stop.is_set():
+                raise close()
+            writer.join(_STOP_CHECK_S)
+        if failure:
+            raise failure[0]
+
     # Chunks between their admission and their request's handoff to the
     # transport (or their refusal and saved-back state). close() waits for
     # them, so no chunk of a stopped run is sent or saved after it returns,
@@ -1099,8 +1173,10 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
 
     # Save the reconciled state, every chunk included, before anything is
     # submitted: a chunk this checkpoint lists as pending without a query id
-    # was never submitted.
-    emit_progress()
+    # was never submitted. A stop during this write waits for it as long as
+    # for any other (``handoff_timeout_ms``, through close()), then seals the
+    # run; a write still under way keeps the lock.
+    first_report()
 
     # An attempt that may have run and has no outcome may have written its
     # rows: submitting the chunk again could write them twice (#765).
@@ -1151,7 +1227,8 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                     after=None if final else state.submitted_at,
                     unprovable=unprovable_failures,
                 )
-                outcome = _classify_attempt(plan_id, chunk_id, state, evidence, final=final)
+                noted = _noted_state(plan_id, chunk_id, state, evidence)
+                outcome = _classify_attempt(plan_id, chunk_id, noted, evidence, final=final)
             except Exception as error:
                 errors += 1
                 if errors >= max_poll_errors:
@@ -1163,19 +1240,30 @@ def execute_backfill(  # noqa: PLR0912, PLR0915 — mirrors the TS loop's struct
                     )
                 continue
             errors = 0
+            # What this read saw of the attempt is saved whatever its outcome.
+            saw_more = noted is not state
+            state = noted
             if outcome.kind == "running":
                 empty_since = None
                 next_state, changed = _running_state(state, outcome.row or {})
-                if changed:
+                if changed or saw_more:
                     state = next_state
                     set_chunk(chunk_id, state)
             elif outcome.kind in {"done", "failed"}:
                 state = _settled_state(state, query_id, outcome)
                 set_chunk(chunk_id, state)
             elif outcome.kind == "unknown":
+                # No other chunk is sent from here on, before this save
+                # (which can wait behind another chunk's write) is made.
+                dispatch_stopped.set()
+                if saw_more:
+                    set_chunk(chunk_id, state)
                 return _UnknownAttempt(chunk_id, query_id, outcome.reason or "")
-            elif empty_since is None:
-                empty_since = time.monotonic() * 1000
+            else:
+                if saw_more:
+                    set_chunk(chunk_id, state)
+                if empty_since is None:
+                    empty_since = time.monotonic() * 1000
         return None
 
     def run_chunk(chunk_id: str) -> _UnknownAttempt | None:

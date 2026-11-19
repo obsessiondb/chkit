@@ -1966,3 +1966,157 @@ describe('a failure whose attempt ran secondary queries', () => {
     expect(error?.message).not.toContain('secondary')
   })
 })
+
+// Codex round 9: what a read saw of an attempt outlives the read. A secondary
+// query seen while the primary still ran, or a written row, keeps its failure
+// unproven after that evidence is gone, also across a restart, and revokes a
+// failure recorded as proven.
+describe('evidence against a proof is kept in the checkpoint', () => {
+  const id = `backfill-${PLAN_ID}-c1`
+  const failureRow = (written: string) => ({ query_id: id, is_initial_query: 1, type: 'ExceptionWhileProcessing', written_rows: written, written_bytes: '0', query_duration_ms: '1', exception: 'transient' })
+  const running = (queryId: string, initial: number, written: string) => ({ query_id: queryId, initial_query_id: id, is_initial_query: initial, read_rows: '0', read_bytes: '0', written_rows: written, written_bytes: '0', elapsed: 1 })
+  const SECONDARY = `chunk c1 (query_id ${id}): it ran a secondary query on another replica or shard (query_id secondary-1), whose writes system.query_log may show late or not at all, so its failure proves nothing.`
+
+  function executorWith(snapshot: (read: number) => { processes: object[]; log: object[] }) {
+    const submits: string[] = []
+    let reads = 0
+    const executor = createMockExecutor(new Map())
+    executor.query = async <T>(sql: string): Promise<T[]> => {
+      if (sql.includes('now64')) return [{ now_ms: String(Date.now()) }] as T[]
+      if (sql.includes('system.one')) return [{ replicas: '1' }] as T[]
+      if (sql.includes('system.processes')) return snapshot(++reads).processes as T[]
+      if (sql.includes('system.query_log')) return snapshot(reads).log as T[]
+      return [] as T[]
+    }
+    executor.submit = async (_sql, queryId) => {
+      submits.push(queryId ?? '')
+      return queryId ?? ''
+    }
+    return { executor, submits }
+  }
+
+  async function resume(executor: ClickHouseExecutor, c1: BackfillProgress[string]) {
+    const reports: BackfillProgress[] = []
+    const error = await executeBackfill({
+      executor,
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }],
+      buildQuery: () => 'INSERT INTO t SELECT 1',
+      resumeFrom: { c1 },
+      checkpointVersion: CHECKPOINT_VERSION,
+      replayFailed: true,
+      pollIntervalMs: 1,
+      outcomeRecheckAttempts: 2,
+      outcomeRecheckIntervalMs: 5,
+      onProgress: (progress) => { reports.push(progress) },
+    }).then(() => undefined, (rejection: unknown) => rejection as Error)
+    return { error, saved: reports.at(-1)?.c1 }
+  }
+
+  test('a secondary query seen only while the primary ran keeps a later zero-row failure unproven, across a restart', async () => {
+    // First the primary and a secondary that wrote 50 rows run; then only the
+    // primary's zero-row failure is left.
+    const { executor, submits } = executorWith((read) => read === 1
+      ? { processes: [running(id, 1, '0'), running('secondary-1', 0, '50')], log: [] }
+      : { processes: [], log: [failureRow('0')] })
+
+    const first = await resume(executor, { status: 'submitted', queryId: id, singleSend: true })
+
+    expect(first.error?.message).toContain(SECONDARY)
+    expect(first.saved).toMatchObject({ queryId: id, secondaryQueryId: 'secondary-1' })
+    expect(first.saved?.status).not.toBe('failed')
+
+    // A new process resumes from that checkpoint: the secondary is gone from every table.
+    const restarted = await resume(executor, first.saved as BackfillProgress[string])
+    expect(restarted.error?.message).toContain(SECONDARY)
+    expect(submits).toEqual([])
+  })
+
+  for (const [label, log, reason] of [
+    ['a secondary query', [failureRow('0'), { ...failureRow('0'), query_id: 'secondary-1', initial_query_id: id, is_initial_query: 0 }], SECONDARY],
+    ['a written row', [failureRow('5')], `chunk c1 (query_id ${id}): it failed after writing 5 rows, which a replay would write again.`],
+  ] as const) {
+    test(`${label} seen now revokes a recorded proof, and it stays revoked once the logs are gone`, async () => {
+      let gone = false
+      const { executor, submits } = executorWith(() => ({ processes: [], log: gone ? [] : [...log] }))
+      const proven = { status: 'failed' as const, queryId: id, singleSend: true, error: 'transient' }
+
+      const first = await resume(executor, proven)
+      expect(first.error?.message).toContain(reason)
+
+      gone = true
+      const later = await resume(executor, first.saved as BackfillProgress[string])
+      expect(later.error?.message).toContain(reason)
+      expect(submits).toEqual([])
+    })
+  }
+
+  test('a proof whose logs only aged out stays proven', async () => {
+    const { executor, submits } = executorWith(() => ({ processes: [], log: [] }))
+
+    const { error } = await resume(executor, { status: 'failed', queryId: id, singleSend: true, error: 'transient' })
+
+    expect(submits).toHaveLength(1)
+    expect(error?.message ?? '').not.toContain('secondary')
+  })
+})
+
+// Codex round 9: the first checkpoint write, before any chunk is sent, gets
+// the same bounded interrupt as the others.
+describe('an interrupt during the first checkpoint write', () => {
+  async function interruptFirstWrite(writeMs: number | undefined) {
+    const controller = new AbortController()
+    const writes: number[] = []
+    let writing = false
+    const submits: string[] = []
+    const executor = createMockExecutor(new Map())
+    const submit = executor.submit.bind(executor)
+    executor.submit = (sql, queryId, settings, admission) => {
+      submits.push(queryId ?? '')
+      return submit(sql, queryId, settings, admission)
+    }
+    const run = executeBackfill({
+      executor,
+      planId: PLAN_ID,
+      chunks: [{ id: 'c1' }],
+      buildQuery: () => 'INSERT INTO t SELECT 1',
+      pollIntervalMs: 1,
+      signal: controller.signal,
+      handoffTimeoutMs: 300,
+      onProgress: () => {
+        writes.push(Date.now())
+        if (writes.length > 1) return
+        writing = true
+        return new Promise<void>((resolve) => {
+          if (writeMs !== undefined) setTimeout(resolve, writeMs)
+        })
+      },
+    })
+    while (!writing) await new Promise((resolve) => setTimeout(resolve, 5))
+    const started = Date.now()
+    controller.abort()
+    const error = await run.then(() => undefined, (rejection: unknown) => rejection)
+    const elapsed = Date.now() - started
+    await new Promise((resolve) => setTimeout(resolve, 50))
+    return { error, elapsed, writes: writes.length, submits }
+  }
+
+  test('a hung first write: the interrupt returns after its bounded wait and keeps the lock', async () => {
+    const { error, elapsed, writes, submits } = await interruptFirstWrite(undefined)
+
+    expect(error).toBeInstanceOf(BackfillInterruptedError)
+    expect(error).toMatchObject({ keepLock: true, note: 'The checkpoint write under way did not finish in time: it may still complete while this process runs, so the plan\'s lock stays in place.' })
+    expect(elapsed).toBeLessThan(2_000)
+    expect(writes).toBe(1)
+    expect(submits).toEqual([])
+  })
+
+  test('a slow first write that ends in time: the interrupt waits for it and releases the lock', async () => {
+    const { error, writes, submits } = await interruptFirstWrite(100)
+
+    expect(error).toBeInstanceOf(BackfillInterruptedError)
+    expect(error).toMatchObject({ keepLock: false })
+    expect(writes).toBe(1)
+    expect(submits).toEqual([])
+  })
+})
