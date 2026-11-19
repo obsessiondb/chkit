@@ -1172,6 +1172,56 @@ describe('applyMigration with an edited in-progress migration (#233)', () => {
     expect(writes).toEqual([])
   })
 
+  // A lookup of a fenced attempt's outcome that fails (a gateway error, a user
+  // that cannot read system.query_log) leaves the outcome unknown, so --json
+  // reports async_outcome_unknown, with the request's error as the cause.
+  for (const [label, lookupError, text] of [
+    ['a gateway error', new Error('HTTP 504: gateway timeout'), 'could not check whether a previous attempt is still running (HTTP 504: gateway timeout)'],
+    [
+      'denied system.query_log access',
+      new Error("Code: 497. DB::Exception: default: Not enough privileges. To execute this query, it's necessary to have the grant SELECT(type, query_id) ON system.query_log. (ACCESS_DENIED)"),
+      'the ClickHouse user cannot read system.query_log',
+    ],
+  ] as const) {
+    test(`an async statement whose fenced attempt's outcome lookup fails with ${label} stops with async_outcome_unknown`, async () => {
+      const sql = 'INSERT INTO db.a SELECT 1;'
+      const file = `-- operation: load_table_data key=table:db.a risk=safe mode=async\n${sql}\n`
+      const dir = writeMigration(file)
+      const { store, writes } = createFakeStore(inProgressState(checksumSQL(file), [{
+        ...operation(0, 'started', { type: 'load_table_data', key: 'table:db.a' }),
+        queryId: 'fenced-query-id',
+        lastError: ATTEMPT_RECORD_MARKER,
+        fingerprint: statementFingerprint(sql),
+        attemptFenced: true,
+      }]))
+      const { db: recording, commandCalls } = recordingDb()
+      const db = {
+        ...recording,
+        async query() { return [{ now_ms: '1700000000000', database: 'db' }] },
+        async queryStatus() { throw lookupError },
+        async submit() { throw new Error('never submitted') },
+      } as unknown as ClickHouseExecutor
+
+      const run = applyMigration({
+        db, journalStore: store, pluginRuntime: fakePluginRuntime(), config: CONFIG,
+        tableScope: TABLE_SCOPE, flags: FLAGS, migrationsDir: dir, file: 'm.sql', log: () => {},
+      })
+      const error = await run.then(() => undefined, (caught: unknown) => caught)
+      rmSync(dir, { recursive: true, force: true })
+      expect(error).toBeInstanceOf(MigrateError)
+      expect(error).toMatchObject({ code: 'async_outcome_unknown' })
+      const { message } = error as Error
+      expect(message.startsWith('Migration m.sql failed at statement 1 of 1')).toBe(true)
+      expect(message.includes(`(query_id fenced-query-id): ${text}`)).toBe(true)
+      // The stop's own error, then the request's.
+      const stop = (error as Error).cause
+      expect(stop).toMatchObject({ code: 'async_outcome_unknown' })
+      expect((stop as Error).cause).toBe(lookupError)
+      expect(commandCalls).toEqual([])
+      expect(writes).toEqual([])
+    })
+  }
+
   test('a started statement still requires --retry: it may have run', async () => {
     const dir = writeMigration(EDITED_SQL)
     const { db, commandCalls } = recordingDb()
