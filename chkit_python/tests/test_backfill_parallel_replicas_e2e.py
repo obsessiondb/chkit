@@ -145,8 +145,13 @@ def _settled_queries(ctx: _Ctx, initial_query_id: str) -> list[dict[str, object]
         ended = {row["query_id"] for row in rows if row["type"] != "QueryStart"}
         return running == 0 and initial_query_id in ended and started <= ended
 
-    _, rows = poll_until(read, settled, timeout=30.0, interval=0.5)
-    return [row for row in rows if row["type"] != "QueryStart"]
+    # A query that has not started by the time the initial one logged its
+    # outcome gets no work from it any more, so it cannot write.
+    value = poll_until(read, settled, timeout=30.0, interval=0.5)
+    assert settled(value), (
+        f"queries of {initial_query_id} still running or without an outcome: {value!r}"
+    )
+    return [row for row in value[1] if row["type"] != "QueryStart"]
 
 
 def _initial(rows: list[dict[str, object]]) -> dict[str, object]:

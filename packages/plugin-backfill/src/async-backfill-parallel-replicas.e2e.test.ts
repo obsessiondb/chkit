@@ -92,11 +92,15 @@ async function settledQueries(initialQueryId: string): Promise<LoggedQuery[]> {
     )
     return { running: Number(running?.running), rows }
   }
-  const settled = await pollUntil(read, ({ running, rows }) => {
+  // A query that has not started by the time the initial one logged its
+  // outcome gets no work from it any more, so it cannot write.
+  const isSettled = ({ running, rows }: Awaited<ReturnType<typeof read>>) => {
     const started = new Set(rows.filter((row) => row.type === 'QueryStart').map((row) => row.query_id))
     const ended = new Set(rows.filter((row) => row.type !== 'QueryStart').map((row) => row.query_id))
     return running === 0 && ended.has(initialQueryId) && [...started].every((id) => ended.has(id))
-  }, { timeoutMs: 30_000, intervalMs: 500 })
+  }
+  const settled = await pollUntil(read, isSettled, { timeoutMs: 30_000, intervalMs: 500 })
+  expect(isSettled(settled), `queries of ${initialQueryId} still running or without an outcome: ${JSON.stringify(settled)}`).toBe(true)
   return settled.rows.filter((row) => row.type !== 'QueryStart')
 }
 
