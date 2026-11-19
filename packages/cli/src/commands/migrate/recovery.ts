@@ -27,6 +27,12 @@ export interface StatementIdentity extends StatementMarker {
    * cannot be checked yet, because a plugin's onBeforeApply may still rewrite it.
    */
   fingerprint: string | undefined
+  /**
+   * The marker releases before #831 gave the statement, when it differs: they
+   * paired the n-th marker of the file with the n-th statement, and the
+   * journal names the marker they gave each statement they ran.
+   */
+  legacy?: StatementMarker
 }
 
 export interface OperationMismatch {
@@ -105,7 +111,7 @@ export function normalizeMigrationName(raw: string, flag: '--retry' | '--abandon
 
 /** The (type, key) the journal records for statement `index`; apply and --retry share it. */
 export function statementIdentity(
-  operations: readonly MigrationOperationSummary[],
+  operations: ReadonlyArray<MigrationOperationSummary | undefined>,
   index: number,
 ): StatementMarker {
   const operation = operations[index]
@@ -114,12 +120,22 @@ export function statementIdentity(
     : { type: operation.type, key: operation.key, marked: true }
 }
 
-/** One identity per statement; `fingerprints` has one entry per statement. */
+/**
+ * One identity per statement; `fingerprints` has one entry per statement.
+ * `operations` has the marker of each statement (`extractStatementOperations`),
+ * `legacyOperations` the file's markers in order, as releases before #831
+ * paired them (`extractMigrationOperationSummaries`).
+ */
 export function statementIdentities(
-  operations: readonly MigrationOperationSummary[],
+  operations: ReadonlyArray<MigrationOperationSummary | undefined>,
   fingerprints: ReadonlyArray<string | undefined>,
+  legacyOperations: readonly MigrationOperationSummary[],
 ): StatementIdentity[] {
-  return fingerprints.map((fingerprint, index) => ({ ...statementIdentity(operations, index), fingerprint }))
+  return fingerprints.map((fingerprint, index) => {
+    const identity = statementIdentity(operations, index)
+    const legacy = statementIdentity(legacyOperations, index)
+    return sameMarker(identity, legacy) ? { ...identity, fingerprint } : { ...identity, fingerprint, legacy }
+  })
 }
 
 /**
@@ -128,8 +144,26 @@ export function statementIdentities(
  * by position, so each of them must keep its position, operation marker and,
  * where the journal recorded its fingerprint, its SQL (#599). A record from
  * an older release has no fingerprint and is matched by position and marker.
+ *
+ * The records of a release before #831 name the markers it paired by order.
+ * When the statements' own markers do not match them, every record is checked
+ * against that pairing instead, as a whole, so a marker that several statements
+ * share keeps its count (#831).
  */
 export function verifyRetryEdit(
+  operations: readonly OperationState[],
+  identities: readonly StatementIdentity[],
+): RetryEditCheck {
+  const own = checkRetryEdit(operations, identities)
+  if (own.ok || !identities.some((identity) => identity.legacy !== undefined)) return own
+  const legacy = checkRetryEdit(
+    operations,
+    identities.map((identity) => (identity.legacy ? { ...identity.legacy, fingerprint: identity.fingerprint } : identity)),
+  )
+  return legacy.ok ? legacy : own
+}
+
+function checkRetryEdit(
   operations: readonly OperationState[],
   identities: readonly StatementIdentity[],
 ): RetryEditCheck {
@@ -225,6 +259,10 @@ export function retryMismatchError(
  * recorded (--retry verified them). A failed or started statement stays only
  * if the same operation still sits at its index, so a retry keeps its
  * `-- before-retry:` compensation and query id; any other record is dropped.
+ * A record under the marker a release before #831 gave the statement stays
+ * too when it is an attempt of this statement: an async attempt --retry
+ * matched, or one the journal recorded with the statement's SQL. Another
+ * statement's record never passes on its compensation (#831).
  */
 export function rebaseInProgressState(
   state: MigrationRowState,
@@ -233,7 +271,10 @@ export function rebaseInProgressState(
   const operations = state.operations.filter((op) => {
     if (op.status === 'completed') return true
     const current = input.identities[op.operationIndex]
-    return current !== undefined && sameMarker(current, markerOf(op))
+    if (current === undefined) return false
+    if (sameMarker(current, markerOf(op))) return true
+    if (current.legacy === undefined || !sameMarker(current.legacy, markerOf(op))) return false
+    return isBoundToPosition(op) || (op.fingerprint !== '' && op.fingerprint === current.fingerprint)
   })
   return { ...state, checksum: input.checksum, appliedAt: input.appliedAt, operations }
 }

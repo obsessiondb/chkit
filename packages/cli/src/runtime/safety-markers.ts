@@ -1,4 +1,10 @@
-import { extractExecutableStatements, isTrivia, tokenizeSQL, type SQLToken } from '@chkit/core'
+import {
+  extractExecutableStatements,
+  extractExecutableStatementsWithComments,
+  isTrivia,
+  tokenizeSQL,
+  type SQLToken,
+} from '@chkit/core'
 
 export { extractExecutableStatements }
 
@@ -102,6 +108,35 @@ export function extractMigrationOperationSummaries(sql: string): MigrationOperat
   return summaries
 }
 
+/**
+ * The `-- operation:` marker of each statement of `sql`, one entry per
+ * statement of `extractExecutableStatements(sql)`, undefined for a statement
+ * without one (#831). A marker belongs to the statement after it, so a
+ * statement without a marker leaves the markers of the others where they are.
+ * Where several markers come before one statement, as when a statement above
+ * it was commented out, the last one counts; a marker after the last
+ * statement, or one that does not parse, marks nothing. The marker's
+ * `-- before-retry:` line follows it in the same run of comment lines.
+ */
+export function extractStatementOperations(sql: string): Array<MigrationOperationSummary | undefined> {
+  return extractExecutableStatementsWithComments(sql).map(({ commentBlocks }) => {
+    for (let b = commentBlocks.length - 1; b >= 0; b--) {
+      const block = commentBlocks[b] ?? []
+      let at = block.length - 1
+      while (at >= 0 && !block[at]?.startsWith('-- operation:')) at--
+      if (at === -1) continue
+      const beforeRetryLine = block.slice(at + 1).find((line) => line.startsWith(BEFORE_RETRY_PREFIX))
+      let beforeRetry: string | null = null
+      if (beforeRetryLine !== undefined) {
+        beforeRetry = stripTrailingSemicolon(beforeRetryLine.slice(BEFORE_RETRY_PREFIX.length).trim())
+        if (beforeRetry === '') beforeRetry = null
+      }
+      return parseOperationLine((block[at] ?? '').replace(/^-- operation:\s*/, ''), beforeRetry) ?? undefined
+    }
+    return undefined
+  })
+}
+
 export interface NonSelectBarrier {
   /** 0-based position among the statements. */
   index: number
@@ -111,15 +146,16 @@ export interface NonSelectBarrier {
 }
 
 /**
- * The statements marked `mode=barrier` that are not a SELECT (#634); the
- * n-th operation marker belongs to the n-th statement. The barrier read runs
+ * The statements marked `mode=barrier` that are not a SELECT (#634);
+ * `operations` has the marker of each statement, as `extractStatementOperations`
+ * returns them. The barrier read runs
  * its statement as a query, once and then every second, and nothing waits for
  * a change it makes to reach the other replicas, so migrate refuses any other
  * statement there.
  */
 export function findNonSelectBarriers(
   statements: readonly string[],
-  operations: readonly MigrationOperationSummary[],
+  operations: ReadonlyArray<MigrationOperationSummary | undefined>,
 ): NonSelectBarrier[] {
   const found: NonSelectBarrier[] = []
   for (const [index, statement] of statements.entries()) {
@@ -355,16 +391,16 @@ export interface ScannedDestructiveStatement {
  * Scan the executable SQL (comments stripped) for destructive statements that
  * are NOT covered by a planner `-- operation:` marker.
  *
- * Generated migrations emit exactly one marker per statement, in order (the same
- * 1:1 invariant apply.ts relies on), so a marker-covered statement is governed
- * by the planner's risk classification and is trusted — e.g. a non-danger
- * `DROP MATERIALIZED VIEW` recreate. Only marker-less positions are flagged: a
- * fully hand-written migration (no markers) or a destructive statement
- * hand-appended to a generated one.
+ * Generated migrations emit a marker before each statement, so a
+ * marker-covered statement is governed by the planner's risk classification
+ * and is trusted — e.g. a non-danger `DROP MATERIALIZED VIEW` recreate. Only
+ * statements without a marker of their own are flagged (#831): a fully
+ * hand-written migration (no markers) or a destructive statement added to a
+ * generated one, anywhere in the file.
  */
 export function scanDestructiveSqlStatements(sql: string): ScannedDestructiveStatement[] {
   const statements = extractExecutableStatements(sql)
-  const operations = extractMigrationOperationSummaries(sql)
+  const operations = extractStatementOperations(sql)
   const found: ScannedDestructiveStatement[] = []
   for (let i = 0; i < statements.length; i++) {
     if (operations[i] !== undefined) continue
