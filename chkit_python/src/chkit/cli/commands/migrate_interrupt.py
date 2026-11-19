@@ -55,6 +55,11 @@ class _State:
 _state = _State()
 
 
+def interrupted() -> bool:
+    """Whether a first SIGINT came."""
+    return _state.received
+
+
 def raise_if_interrupted() -> None:
     """Refuses a request not sent yet once a first SIGINT came, unless it is cleanup's."""
     if _state.received and _state.cleanups == 0:

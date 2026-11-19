@@ -11,7 +11,7 @@ from typing import TYPE_CHECKING, Any, Literal
 
 from chkit import __version__
 from chkit.cli.commands.migrate_errors import MigrateError
-from chkit.cli.commands.migrate_interrupt import MigrateInterrupted, raise_if_interrupted
+from chkit.cli.commands.migrate_interrupt import interrupted, raise_if_interrupted
 from chkit.core.identifier import quote_identifier
 from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.core.sql_lexer import SQLToken, identifier_name, is_trivia, tokenize_sql
@@ -162,7 +162,7 @@ class QueryTracker:
             self._mark_untracked(error)
 
     def _mark_untracked(self, error: Exception) -> None:
-        if self._recovery is not None or isinstance(error, MigrateInterrupted) or (
+        if self._recovery is not None or interrupted() or (
             isinstance(error, MigrateError) and error.code == "migrate_lock_lost"
         ):
             raise error
