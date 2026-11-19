@@ -423,30 +423,54 @@ def dispatch_plugin_command(  # noqa: PLR0912, PLR0915
 
 class _LazyClickHouseClient:
     """A :class:`ClickHouseClient` for the ``clickhouse`` block that connects
-    when a command first uses it; closing it before then sends nothing."""
+    when a command first calls one of its methods. Reading its configuration,
+    looking a method up or closing it sends nothing; once closed it does not
+    connect again."""
 
     def __init__(self, config: ChxResolvedClickHouseConfig) -> None:
         self._config = config
         self._client: ClickHouseClient | None = None
+        self._closed = False
         self._lock = threading.Lock()
+
+    @property
+    def database(self) -> str:
+        return self._config.database
+
+    @property
+    def query_control_cluster(self) -> str | None:
+        return self._config.cluster
 
     def _connected(self) -> ClickHouseClient:
         with self._lock:
+            if self._closed:
+                msg = "The ClickHouse client is closed."
+                raise RuntimeError(msg)
             if self._client is None:
                 self._client = ClickHouseClient.connect(self._config)
             return self._client
 
     def __getattr__(self, name: str) -> Any:
-        return getattr(self._connected(), name)
+        # Only the client's public methods; anything else (a private name, or
+        # a dunder `copy` looks up) is missing, as on an object without it.
+        method = getattr(ClickHouseClient, name, None) if not name.startswith("_") else None
+        if not callable(method):
+            raise AttributeError(name)
 
-    def __enter__(self) -> ClickHouseClient:
-        return self._connected()
+        def call(*args: Any, **kwargs: Any) -> Any:
+            return getattr(self._connected(), name)(*args, **kwargs)
+
+        return call
+
+    def __enter__(self) -> _LazyClickHouseClient:
+        return self
 
     def __exit__(self, *_exc: object) -> None:
         self.close()
 
     def close(self) -> None:
         with self._lock:
+            self._closed = True
             client, self._client = self._client, None
         if client is not None:
             client.close()

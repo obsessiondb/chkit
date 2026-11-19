@@ -20,7 +20,10 @@ from typing import Any
 import pytest
 from typer.testing import CliRunner
 
+from chkit.cli.commands.plugin import _LazyClickHouseClient
 from chkit.cli.main import app
+from chkit.clickhouse.client import ClickHouseClient
+from chkit.core.model import ChxResolvedClickHouseConfig
 from tests.e2e_testkit import resolve_live_env
 
 PROBE_PLUGIN = '''
@@ -171,3 +174,65 @@ def test_plugin_command_sends_sql_through_the_default_executor(
 
     assert result.exit_code == 0, result.output
     assert _ran(root) == [{"answer": 42}]
+
+
+class _FakeClient:
+    def __init__(self) -> None:
+        self.closed = 0
+
+    def query(self, statement: str) -> str:
+        return f"ran {statement}"
+
+    def close(self) -> None:
+        self.closed += 1
+
+
+@pytest.fixture
+def connects(monkeypatch: pytest.MonkeyPatch) -> list[_FakeClient]:
+    """Each client the default executor opens, in place of a real connection."""
+    opened: list[_FakeClient] = []
+
+    def connect(cls: object, config: object) -> _FakeClient:
+        opened.append(_FakeClient())
+        return opened[-1]
+
+    monkeypatch.setattr(ClickHouseClient, "connect", classmethod(connect))
+    return opened
+
+
+def _default_executor() -> Any:
+    return _LazyClickHouseClient(
+        ChxResolvedClickHouseConfig(
+            url="http://127.0.0.1:9", database="app", cluster="c1", username="default", password="", secure=False
+        )
+    )
+
+
+def test_default_executor_reads_its_configuration_without_connecting(
+    connects: list[_FakeClient],
+) -> None:
+    executor = _default_executor()
+
+    assert executor.database == "app"
+    assert executor.query_control_cluster == "c1"
+    assert hasattr(executor, "submit")
+    assert not hasattr(executor, "no_such_method")
+    executor.close()
+
+    assert connects == []
+
+
+def test_default_executor_connects_once_and_not_after_close(
+    connects: list[_FakeClient],
+) -> None:
+    executor = _default_executor()
+
+    assert executor.query("SELECT 1") == "ran SELECT 1"
+    assert executor.query("SELECT 2") == "ran SELECT 2"
+    executor.close()
+    executor.close()
+    with pytest.raises(RuntimeError, match="closed"):
+        executor.query("SELECT 3")
+
+    assert len(connects) == 1
+    assert connects[0].closed == 1
