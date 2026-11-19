@@ -774,7 +774,7 @@ function failedWhileRunningError(input: {
     : `failed while it ran: ${input.error}. A statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts)`
   return new MigrateError(
     'async_outcome_unknown',
-    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) ${what}, so chkit does not run it, or its before-retry SQL, again. Check in ClickHouse what the statement applied. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}) ${what}, so chkit does not run it, or its before-retry SQL, again. Check in ClickHouse what the statement applied. ${recordOutcomeAdvice(input.migrationName)}`,
   )
 }
 
@@ -884,8 +884,13 @@ export function outcomeUnknownError(input: {
 }): MigrateError {
   return new MigrateError(
     'async_outcome_unknown',
-    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${input.reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. Then reconcile every statement of ${input.migrationName} that already ran, since an abandon runs the migration again from statement 1, run chkit migrate --apply --abandon ${input.migrationName}, and apply again.`,
+    `Async migration step ${input.operationType} (statement ${input.statementIndex + 1} of ${input.migrationName}, query_id ${input.queryId}): the journal records an attempt of it and no replica runs it, but chkit cannot tell whether it finished: ${input.reason}. Nothing was submitted and no before-retry SQL ran. Check in ClickHouse whether the statement's rows reached its target. ${recordOutcomeAdvice(input.migrationName)}`,
   )
+}
+
+/** How the operator records an attempt's outcome once they checked it. */
+function recordOutcomeAdvice(migrationName: string): string {
+  return `Then record what you found: chkit migrate --apply --mark-applied ${migrationName} if it applied all of its writes, or chkit migrate --apply --mark-not-applied ${migrationName} once nothing it applied is left (its before-retry SQL runs before it is submitted again), and apply again; the statements recorded as completed do not run again. Or reconcile every statement of ${migrationName} that already ran and run chkit migrate --apply --abandon ${migrationName}, which runs the migration again from statement 1.`
 }
 
 // The journal returns DateTime64 without a zone, all of it UTC.

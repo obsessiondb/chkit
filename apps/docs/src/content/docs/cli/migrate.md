@@ -22,6 +22,8 @@ chkit migrate [flags]
 | `--allow-destructive` | boolean | `false` | Allow destructive operations (required in non-interactive mode) |
 | `--retry <migration>` | string | — | Resume a [failed migration](#failed-migrations) after editing its file; completed statements are skipped. Takes effect with `--apply` or interactive confirmation |
 | `--abandon <migration>` | string | — | Reset a failed migration so the next apply runs it from statement 1. Preview with `--json`; cannot be combined with `--retry`, `--table`, or `--allow-destructive` |
+| `--mark-applied <migration>` | string | — | Record that the statement which stopped with `async_outcome_unknown` ran, so the next apply [continues after it](#recording-an-unknown-outcome). Previews without `--apply` |
+| `--mark-not-applied <migration>` | string | — | Record that the statement which stopped with `async_outcome_unknown` did not run, so the next apply [runs it again](#recording-an-unknown-outcome). Previews without `--apply` |
 | `-t`, `--table <selector>` | string | — | Scope migrations to those affecting matching tables |
 | `--break-lock <claim>` | string | — | Release the [migrate lock](#concurrent-runs) claim of a run that is no longer running, then take the lock |
 | `--cancel-lock-queries` | boolean | `false` | Cancel [tracked statements of a stopped run](#cancelling-a-stopped-runs-queries) before recovery; requires `--apply --break-lock <claim>` |
@@ -149,6 +151,29 @@ The report lists the statements that completed. They **stay applied** in ClickHo
 To regenerate the migration instead, delete the file, restore `chkit/meta/snapshot.json` from git to its state before the migration was generated, and run `chkit generate`. The statements that completed stay applied. The new migration runs the ones it repeats again, so they must be safe to run twice, as above: delete a repeated `REMOVE DEFAULT` or `REMOVE MATERIALIZED` from it before you apply it. Run `chkit drift` after you apply the new migration: a completed statement that the new migration does not repeat, such as a `DROP VIEW`, leaves the database out of step with the schema.
 
 `--abandon` fails when the journal has no in-progress state for the migration, or when the migration is already applied.
+
+### Recording an unknown outcome
+
+When an [async statement](#async-operations-modeasync) stops with `async_outcome_unknown`, check in ClickHouse what it applied, then record what you found for that statement alone ([#824](https://github.com/obsessiondb/chkit/issues/824)):
+
+```sh
+chkit migrate --mark-applied 20260929001110_funnel-model.sql --apply      # it ran
+chkit migrate --mark-not-applied 20260929001110_funnel-model.sql --apply  # it did not run
+chkit migrate --apply
+```
+
+- `--mark-applied` records the statement as completed: the next apply continues after it.
+- `--mark-not-applied` records it as failed, as `--abandon` does: the next apply runs its `-- before-retry:` SQL, when it has one, and submits it again. Use it once nothing the attempt applied is left, or when its before-retry SQL removes it.
+- Unlike `--abandon`, the other statements keep their records: the statements recorded as completed do not run again.
+
+The flags act on the one async statement whose attempt has no known outcome. They read its attempt on every replica, as `migrate --apply` does, and change nothing when:
+
+- the attempt still runs on any replica (`async_outcome_unknown`): wait for it, or `KILL QUERY` it and check what it applied; a replica that cannot be read stops the command too;
+- chkit can tell the outcome itself (`migration_outcome_known`): run `migrate --apply`;
+- more than one statement has no known outcome (`migration_outcome_known`): use `--abandon`;
+- the journal has no in-progress state for the migration, or it is applied (as for `--abandon`).
+
+Without `--apply` they only report the statement (`--json` prints it as `mark`, below). They run no migration SQL, take the [migrate lock](#concurrent-runs) to write the journal, and cannot be combined with each other, `--abandon`, `--retry`, `--table`, `--allow-destructive` or `--cancel-lock-queries`.
 
 ### Empty migrations
 
@@ -307,7 +332,7 @@ When `chkit migrate --apply` encounters an async operation it:
 2. Checks `system.processes` for an attempt with the recorded id that is still running, and attaches to it instead of submitting again. On a [multi-replica target](#multi-replica-targets) the check reads every replica. When a replica cannot be read, `migrate` stops with an error before it runs `-- before-retry:` SQL or submits again; re-run it once the replica is back. The polls that follow skip a replica they cannot reach. chkit attaches only to an attempt whose started record this release wrote; the attach writes nothing until the attempt ends. Any other running attempt (one an earlier release recorded, one under a failed record, or one under the earlier first-attempt id without a record) may share its id with earlier attempts, so `migrate` stops with `async_outcome_unknown` and asks you to wait for it or `KILL QUERY` it.
    When the journal records the statement as started (its run was killed, or stopped polling without an outcome) and no replica still runs it, the check also reads that attempt's outcome from `system.query_log` on every replica, by its recorded id only. Its entries count from an hour before the start the journal records, which only lets `query_log` skip older partitions. A finished attempt is recorded as completed and the statement is not submitted again. `query_log` is written on a timer (every 7.5 seconds by default), so an attempt without an entry yet is checked again every 2 seconds for 10 seconds. A SELECT or an INSERT the server rejected before it started (`ExceptionBeforeStart`, such as a syntax error or an unknown table) ran nothing and is retried as below. Any other statement can apply effects before the server logs that rejection: an `ALTER ... UPDATE` killed while it waits for its mutation (`mutations_sync`) logs `ExceptionBeforeStart` while the mutation still completes, and a mutation that fails on one partition logs it after it changed the others. So for every statement other than a SELECT or an INSERT (ALTER mutations, `RENAME`, `EXCHANGE`, `OPTIMIZE`, DDL), and one chkit cannot classify, a rejection before the start stops the run with `async_outcome_unknown`, like a failure while it ran. chkit reads every `query_log` entry of the id: a `QueryFinish` or an `ExceptionWhileProcessing` outranks an `ExceptionBeforeStart`, and a rejected duplicate delivery (`QUERY_WITH_SAME_ID_IS_ALREADY_RUNNING`) is never the attempt's failure. For a retried SELECT or INSERT, when the statement has `-- before-retry:` SQL, the attempt is recorded as failed before that SQL runs, so a later re-run cannot take a late `QueryFinish` of it for the outcome of rows the SQL removed. A statement that failed while it ran (`ExceptionWhileProcessing`) can have applied some of its writes, such as parts of an `INSERT ... SELECT` or a DDL that ran on some hosts, so `migrate` stops with `async_outcome_unknown` and does not compensate or run it again. A finished attempt of other SQL than the statement now has (an edit, or a rewrite by a plugin's `onBeforeApply`) stops the run the same way. So does a recorded attempt of a statement that a plugin's `onBeforeApply` dropped, when it still runs or has no outcome: it is read before the recorded statements are checked, the run stops before any statement runs, and the migration is not recorded as applied. Only a rejection before the start, or an [abandon](#abandoning-a-failed-migration), lets a failed record be retried: a failed record an earlier release wrote without one (for example `no longer running and no outcome in system.query_log; retried`, or a lost submit response) may have finished, so it stops the run with `async_outcome_unknown`. An attempt with no entry at all (query logging is off for the user, `query_log` is flushed later than chkit waits, or the run stopped before it submitted the statement) may have finished, so `migrate` stops with `async_outcome_unknown`, with or without `-- before-retry:` SQL, and writes nothing. When the user cannot read `system.query_log`, `migrate` stops and names the missing `SELECT ON system.query_log` grant; any other failed read stops it the same way as an unreadable replica.
    This release reads `system.query_log` only for a started record it wrote itself. Such a record stores its fingerprint in the `operation_fingerprints` column with the prefix `fenced-attempt;`, so a release from #599 on stops with `statement_split_changed` instead of resuming it. A journal without the `operation_fingerprints` column cannot store the fence, so a migration with async statements stops with `async_attempt_unfenced` before any of its statements runs. Add the column with a user that can alter the journal before you upgrade: run any `chkit migrate --apply` as that user, or `ALTER TABLE <database>.<journal> ADD COLUMN IF NOT EXISTS operation_fingerprints Array(String) DEFAULT []` (`ON CLUSTER` in cluster mode). A started record an earlier release wrote, or one in a journal without the column, may name an id that earlier attempts share, or one an earlier release compensated without recording it, so it is checked in `system.processes` only, and when it no longer runs `migrate` stops with `async_outcome_unknown`. Switch chkit releases only while no async migration is in progress, and stop every run of an earlier release before you upgrade: a release before #599 does not see the prefix, and a run from #599 on checks it only when it starts. Either can run the `-- before-retry:` SQL without first recording the attempt as failed, and if it stops right after that SQL, this release can still take the attempt's `QueryFinish` for the outcome.
-   After `async_outcome_unknown`, check in ClickHouse whether the statement's rows reached its target, reconcile every statement of the migration that already ran (an abandon runs the migration again from statement 1), then [abandon](#abandoning-a-failed-migration) it and apply again.
+   After `async_outcome_unknown`, check in ClickHouse whether the statement's rows reached its target, then [record what you found](#recording-an-unknown-outcome) with `--mark-applied` or `--mark-not-applied` and apply again: the statements recorded as completed do not run again. Or reconcile every statement of the migration that already ran (an abandon runs the migration again from statement 1), then [abandon](#abandoning-a-failed-migration) it and apply again.
 3. Otherwise submits the query under its new id without blocking on the HTTP response. chkit-py sends the request once: its driver would otherwise send it again after a connection reset. It connects within 10 seconds.
 4. Polls every 5 seconds and prints a one-line progress update (`written=N.NM rows (N.N GiB), elapsed Ns`). Every `system.query_log` entry of the attempt's id counts, from an hour before its submission. A failed submit request (a gateway timeout, a lost response) says nothing about the outcome, so it is not recorded as a failure: the polls decide. At the 20th poll in a row that finds the query neither running nor in `query_log`, however polling started, chkit reads every replica once more through a `query_log` flush, then stops with `async_outcome_unknown` and keeps the attempt recorded as started. A failed poll request starts the count again. 21 failed poll requests in a row, or a final check that fails, stop the run the same way. A run that ends, with an outcome or without one (a journal write of the outcome that fails included), does not wait for a submit request that has not settled: it aborts it, so a request whose first bytes are not written yet, one still connecting included, never reaches the server. chkit-py refuses to start writing the request once the run gave up, on its own transport and on the ObsessionDB console API alike; a proxy's `CONNECT` and the TLS handshake through it are connection setup, so the request is refused after them too. It keeps the migrate lock while the request connects, for at most 15 seconds, and while its bytes are being written, until the write completed or failed (a write times out after 30 seconds). Neither port waits for the response of a request that was sent. In chkit-py, Ctrl-C gives the submit up the same way before the run releases the migrate lock. The run then releases the lock.
 5. Records the journal entry on success. A rejection before the start (`ExceptionBeforeStart`) of a SELECT or an INSERT is recorded as failed; for any other statement it stops the run with `async_outcome_unknown`, as above. When the run stops after it recorded the attempt as one that may have been sent but before the submit, it puts the record back to prepared. A failure while the statement ran (`ExceptionWhileProcessing`) stops the run with `async_outcome_unknown` and keeps the attempt recorded as started, as above.
@@ -521,6 +546,24 @@ In JSON mode, without `--apply`, `mode` is `plan` and nothing changes; with `--a
 }
 ```
 
+### Mark
+
+`--mark-applied` and `--mark-not-applied` print the stopped statement's record before the change as `mark.operation`; `mode` is `plan` without `--apply` (nothing changes) and `execute` with it.
+
+```json
+{
+  "command": "migrate",
+  "schemaVersion": 1,
+  "mode": "execute",
+  "scope": { "enabled": false },
+  "mark": {
+    "migration": "20260929001110_funnel-model.sql",
+    "outcome": "not-applied",
+    "operation": { "operationIndex": 1, "operationKey": "table:analytics.events", "operationType": "load_table_data", "queryId": "3f1c…", "status": "started", "startedAt": "2026-09-29 00:11:10.240", "finishedAt": null, "lastError": "submitted under its own query id; a retry reads its outcome from system.query_log" }
+  }
+}
+```
+
 ### Errors
 
 A failure that stops the command prints the standard error envelope:
@@ -544,17 +587,18 @@ A failure that stops the command prints the standard error envelope:
 | `barrier_not_select` | A pending migration marks a statement `mode=barrier` that is not a `SELECT` ([insert barriers](#insert-barriers-modebarrier)); nothing was applied |
 | `retry_mismatch` | `--retry`: a statement that completed, or an async statement that may still be running, no longer matches the edited file (position, marker or SQL), or the edit left fewer statements with a marker that a completed statement shares |
 | `migration_not_found` | `--retry` names a file that is not in the migrations directory |
-| `migration_not_in_progress` | `--abandon`: the journal has no in-progress state for the migration |
+| `migration_not_in_progress` | `--abandon`, `--mark-applied`, `--mark-not-applied`: the journal has no in-progress state for the migration |
 | `migration_already_applied` | `--abandon`: the migration is already applied |
+| `migration_outcome_known` | `--mark-applied` / `--mark-not-applied`: no statement of the migration has an unknown outcome, so chkit resolves it itself, or more than one has |
 | `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
 | `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, a heartbeat did not read back, or another run broke its claim; the run stopped before its next request |
 | `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |
 | `migrate_cancellation_failed` | Recovery was unsupported, could not be verified or was interrupted; the recovery barrier remains until a run with `--cancel-lock-queries` completes it |
-| `async_outcome_unknown` | chkit cannot tell from `system.query_log` whether an async attempt of a statement finished: no entry has its recorded id after the polls and the flush rechecks, it failed while it ran, an earlier release recorded it, or its failed record has no rejection by the server behind it. Or such an attempt is still running. Nothing was submitted, rewritten or compensated ([#767](https://github.com/obsessiondb/chkit/issues/767)) |
+| `async_outcome_unknown` | `--mark-applied` / `--mark-not-applied`: the stopped attempt still runs. Otherwise: chkit cannot tell from `system.query_log` whether an async attempt of a statement finished: no entry has its recorded id after the polls and the flush rechecks, it failed while it ran, an earlier release recorded it, or its failed record has no rejection by the server behind it. Or such an attempt is still running. Nothing was submitted, rewritten or compensated ([#767](https://github.com/obsessiondb/chkit/issues/767)) |
 | `async_attempt_unfenced` | The migration has async statements and the journal has no `operation_fingerprints` column to store their fence; nothing ran. Add the column with a user that can alter the journal and apply again ([#767](https://github.com/obsessiondb/chkit/issues/767)) |
 | `async_needs_lock` | The run takes no migrate lock because the target database did not exist yet, so it stopped before an async statement; the statements before it are recorded. Apply again ([#767](https://github.com/obsessiondb/chkit/issues/767)) |
 | `journal_changed` | Another run changed the journal between the plan and the lock in a way the plan does not cover; nothing was applied |
-| `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`, or an empty migration name |
+| `invalid_usage` | `--abandon` combined with `--retry`, `--table`, or `--allow-destructive`; `--mark-applied` or `--mark-not-applied` combined with each other or another recovery flag; or an empty migration name |
 
 Other failures, such as a statement that ClickHouse rejects, use the code `error`.
 

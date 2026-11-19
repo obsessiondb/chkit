@@ -4,6 +4,7 @@ export type MigrateErrorCode =
   | 'migration_not_found'
   | 'migration_not_in_progress'
   | 'migration_already_applied'
+  | 'migration_outcome_known'
   | 'retry_mismatch'
   | 'in_progress_checksum_mismatch'
   | 'statement_split_changed'

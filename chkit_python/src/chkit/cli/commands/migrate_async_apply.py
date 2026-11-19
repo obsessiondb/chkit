@@ -1342,10 +1342,7 @@ def _failed_while_running_error(
         f"Async migration step {input_.operation_type} (statement "
         f"{input_.statement_index + 1} of {input_.migration_name}, query_id {query_id}) "
         f"{what}, so chkit does not run it, or its before-retry SQL, again. Check in "
-        "ClickHouse what the statement applied. Then reconcile every statement of "
-        f"{input_.migration_name} "
-        "that already ran, since an abandon runs the migration again from statement 1, run "
-        f"chkit migrate --apply --abandon {input_.migration_name}, and apply again."
+        f"ClickHouse what the statement applied. {_record_outcome_advice(input_.migration_name)}"
     )
     return MigrateError("async_outcome_unknown", msg)
 
@@ -1362,12 +1359,23 @@ def outcome_unknown_error(
         f"{statement_index + 1} of {migration_name}, query_id {query_id}): "
         "the journal records an attempt of it and no replica runs it, but chkit cannot "
         f"tell whether it finished: {reason}. Nothing was submitted and no before-retry SQL "
-        "ran. Check in ClickHouse whether the statement's rows reached its target. Then "
-        f"reconcile every statement of {migration_name} that already ran, since an abandon "
-        "runs the migration again from statement 1, run chkit migrate --apply --abandon "
-        f"{migration_name}, and apply again."
+        "ran. Check in ClickHouse whether the statement's rows reached its target. "
+        f"{_record_outcome_advice(migration_name)}"
     )
     return MigrateError("async_outcome_unknown", msg)
+
+
+def _record_outcome_advice(migration_name: str) -> str:
+    """How the operator records an attempt's outcome once they checked it."""
+    return (
+        f"Then record what you found: chkit migrate --apply --mark-applied {migration_name} "
+        "if it applied all of its writes, or chkit migrate --apply --mark-not-applied "
+        f"{migration_name} once nothing it applied is left (its before-retry SQL runs before "
+        "it is submitted again), and apply again; the statements recorded as completed do "
+        f"not run again. Or reconcile every statement of {migration_name} that already ran "
+        f"and run chkit migrate --apply --abandon {migration_name}, which runs the migration "
+        "again from statement 1."
+    )
 
 
 def _journal_time(value: str) -> datetime:
