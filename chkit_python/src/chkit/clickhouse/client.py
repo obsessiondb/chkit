@@ -230,13 +230,23 @@ class ClickHouseClient:
         """No asynchronous INSERT, and one that a table's own async_insert
         setting still makes asynchronous waits for its flush, as TS sends with
         every write, so a write is stored when it returns (#790). A setting the
-        user cannot change (readonly = 1, or a constraint) is left out, where
-        clickhouse-connect would refuse it before the server's own error."""
+        user cannot change (readonly = 1, or a constraint) is left out when it
+        already has that value, where clickhouse-connect would refuse it before
+        the server's own error. Fixed at another value, the write is refused, as
+        the server refuses TS's."""
         settings: dict[str, Any] = {}
         for name, value in _DURABLE_INSERT_SETTINGS.items():
             setting = self._client.server_settings.get(name)
-            if setting is not None and not setting.readonly:
+            if setting is None:
+                continue
+            if not setting.readonly:
                 settings[name] = value
+            elif str(setting.value) != str(value):
+                msg = (
+                    f"Setting {name} is fixed at {setting.value} for this ClickHouse user, "
+                    f"and chkit writes need {name} = {value} to be stored when they return."
+                )
+                raise RuntimeError(msg)
         return settings
 
     def execute_guarded(
@@ -400,15 +410,13 @@ class ClickHouseClient:
         # clickhouse-connect's command() has no query_id parameter; over HTTP
         # the id travels as a query parameter, which the driver forwards from
         # per-query settings. Verified live: the id lands in system.query_log.
+        # Stored when it finishes, as execute sends: an asynchronous INSERT
+        # would finish while its rows are still buffered (#790).
+        sent = {**self._write_settings(), **(settings or {}), "query_id": qid}
         driver = self._submit_driver()
         _SUBMIT_SEND.before_send = before_send
         try:
-            # Stored when it finishes, as execute sends: an asynchronous
-            # INSERT would finish while its rows are still buffered (#790).
-            driver.command(
-                statement,
-                settings={**self._write_settings(), **(settings or {}), "query_id": qid},
-            )
+            driver.command(statement, settings=sent)
         finally:
             _SUBMIT_SEND.before_send = None
         return qid

@@ -35,6 +35,7 @@ from chkit.core.model import ChxResolvedClickHouseConfig
 
 def _stub_client() -> tuple[ClickHouseClient, MagicMock]:
     fake = MagicMock()
+    fake.server_settings = {}
     cfg = ChxResolvedClickHouseConfig(
         url="http://localhost:8123",
         username="default",
@@ -122,27 +123,41 @@ def test_execute_retries_unknown_database_without_the_database() -> None:
 
 def test_execute_sends_no_asynchronous_insert_as_ts_does() -> None:
     """A write is stored when it returns, as TS sends with every command
-    (#767). A caller's setting still wins, and a user that cannot change the
-    setting gets the server's own error."""
+    (#767, #790). A caller's setting still wins. A user that cannot change a
+    setting it already has at chkit's value gets the server's own error, and
+    one fixed at another value is refused before anything is sent, as the
+    server refuses TS's write."""
     client, fake = _stub_client()
-    changeable = SimpleNamespace(readonly=False, value="1")
-    constrained = SimpleNamespace(readonly=True, value="1")
-    fake.server_settings = {"async_insert": changeable, "wait_for_async_insert": changeable}
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=False, value="1"),
+        "wait_for_async_insert": SimpleNamespace(readonly=False, value="0"),
+    }
 
     client.execute("INSERT INTO t VALUES (1)")
     client.execute("INSERT INTO t VALUES (1)", settings={"async_insert": 1, "max_threads": 2})
-    # A constraint that fixes async_insert alone still leaves the flush waited for (#790).
-    fake.server_settings = {"async_insert": constrained, "wait_for_async_insert": changeable}
+    fake.server_settings = {
+        "async_insert": SimpleNamespace(readonly=True, value="0"),
+        "wait_for_async_insert": SimpleNamespace(readonly=True, value="1"),
+    }
     client.execute("INSERT INTO t VALUES (2)")
-    fake.server_settings = {"async_insert": constrained, "wait_for_async_insert": constrained}
-    client.execute("INSERT INTO t VALUES (3)")
 
     assert [call.kwargs["settings"] for call in fake.command.call_args_list] == [
         {"async_insert": 0, "wait_for_async_insert": 1},
         {"async_insert": 1, "wait_for_async_insert": 1, "max_threads": 2},
-        {"wait_for_async_insert": 1},
         {},
     ]
+
+    for name, fixed in [("async_insert", "1"), ("wait_for_async_insert", "0")]:
+        fake.server_settings = {
+            "async_insert": SimpleNamespace(readonly=False, value="0"),
+            "wait_for_async_insert": SimpleNamespace(readonly=False, value="1"),
+            name: SimpleNamespace(readonly=True, value=fixed),
+        }
+        with pytest.raises(RuntimeError, match=f"Setting {name} is fixed at {fixed}"):
+            client.execute("INSERT INTO t VALUES (3)")
+        with pytest.raises(RuntimeError, match=f"Setting {name} is fixed at {fixed}"):
+            client.submit("INSERT INTO t VALUES (3)")
+    assert fake.command.call_count == 3
 
 
 def test_execute_reraises_other_database_errors_without_retry() -> None:
@@ -299,6 +314,7 @@ def test_submit_runs_on_its_own_driver_without_a_session(
 
     def fake_get_client(**kwargs: object) -> MagicMock:
         driver = MagicMock()
+        driver.server_settings = {}
         drivers.append((driver, kwargs))
         return driver
 
@@ -356,6 +372,7 @@ def test_every_driver_waits_without_a_timeout_as_ts(
 
     def fake_get_client(**kwargs: object) -> MagicMock:
         driver = MagicMock()
+        driver.server_settings = {}
         driver.timeout = Timeout(connect=10, read=300)
         driver._progress_interval = driver_interval
         drivers.append((driver, kwargs))
@@ -398,6 +415,7 @@ def test_submit_driver_still_opening_at_close_sends_nothing(
 
     def fake_get_client(**kwargs: object) -> MagicMock:
         driver = MagicMock()
+        driver.server_settings = {}
         drivers.append(driver)
         if kwargs.get("autogenerate_session_id") is False:
             opening.set()

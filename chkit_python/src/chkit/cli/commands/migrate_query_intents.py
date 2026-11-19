@@ -25,6 +25,7 @@ UNTRACKED = "untracked"
 CANCELLABLE_SETTINGS = {
     "max_threads", "max_insert_threads", "max_block_size", "max_insert_block_size",
     "min_insert_block_size_rows", "min_insert_block_size_bytes", "async_insert",
+    "wait_for_async_insert",
 }
 QueryPhase = Literal["forward", "compensation"]
 QueryKind = Literal["insert", "replace", "async", "unsupported"]
@@ -202,6 +203,8 @@ class QueryTracker:
                 any(key not in CANCELLABLE_SETTINGS for key, value in settings.items()
                     if value is not None)
                 or ("async_insert" in settings and str(settings["async_insert"]) != "0")
+                or ("wait_for_async_insert" in settings
+                    and str(settings["wait_for_async_insert"]) != "1")
             )
         )
         recorded_target = classification.target
