@@ -326,7 +326,7 @@ function significantTokens(sql: string): SQLToken[] {
 }
 
 // Tarjan's algorithm over index-based edges (`edges[v]` = nodes v points to).
-function stronglyConnectedComponents(edges: number[][]): number[][] {
+export function stronglyConnectedComponents(edges: number[][]): number[][] {
   let counter = 0
   const index = new Map<number, number>()
   const lowLink = new Map<number, number>()
