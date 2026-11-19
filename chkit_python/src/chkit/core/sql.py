@@ -311,6 +311,12 @@ def render_alter_modify_refresh(definition: MaterializedViewDefinition) -> str:
     return f"ALTER TABLE {name} MODIFY {clause};"
 
 
+def render_alter_modify_query(definition: MaterializedViewDefinition) -> str:
+    """Render ALTER TABLE ... MODIFY QUERY, which replaces a materialized view's query in place."""
+    name = render_qualified_name(definition.database, definition.name)
+    return f"ALTER TABLE {name} MODIFY QUERY\n{definition.as_};"
+
+
 def _render_dictionary_attribute(attr: DictionaryAttribute) -> str:
     out = f"{quote_identifier(attr.name)} {attr.type}"
     if attr.expression is not None:

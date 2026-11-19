@@ -1206,7 +1206,7 @@ def test_plan_materialized_view_modification_sql_valid(assert_valid_sql: AssertV
         as_="SELECT id, name FROM default.source",
     )
     plan = plan_diff([old_mv], [new_mv])
-    assert len(plan.operations) == 2
+    assert [op.type for op in plan.operations] == ["alter_materialized_view_modify_query"]
     for op in plan.operations:
         assert_valid_sql(op.sql)
 

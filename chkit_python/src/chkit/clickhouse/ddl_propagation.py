@@ -49,6 +49,7 @@ DEFINITION_WAIT_DEADLINE_SECONDS = 30.0
 # the object it changes. Creates and drops use the bare key.
 _KEY_SUFFIXES: dict[str, str] = {
     "alter_materialized_view_modify_refresh": ":refresh",
+    "alter_materialized_view_modify_query": ":query",
     "alter_table_add_column": ":column:",
     "alter_table_modify_column": ":column:",
     "alter_table_drop_column": ":column:",
@@ -449,6 +450,38 @@ def wait_for_column_rename(
     _wait_until_applied(client, f"{database}.{table_name} rename of column {from_} to {to}", _check)
 
 
+def wait_for_view_query(
+    client: Any, database: str, view_name: str, *, cluster: str | None = None
+) -> None:
+    """Wait until every replica lists the materialized view with one query.
+
+    The query is ``system.tables.as_select``. The replica that ran MODIFY
+    QUERY has applied it when the statement returns, so once every replica
+    agrees, all have. A replica that still runs the old query would refuse a
+    following DROP COLUMN of a column the old query reads.
+    """
+    fanout = resolve_replica_fanout(client, cluster)
+    replicas = fanout.replicas if fanout else 1
+    source = all_replicas(fanout, "system.tables") if fanout else "system.tables"
+    sql = (
+        f"SELECT count(DISTINCT hostName()) AS replicas, uniqExact(as_select) AS queries "
+        f"FROM {source} WHERE database = '{_quote(database)}' AND name = '{_quote(view_name)}'"
+    )
+
+    def _check(reader: Any) -> str | None:
+        rows = reader.query(sql).rows
+        row = rows[0] if rows else {}
+        listed = int(row.get("replicas") or 0)
+        if listed < replicas:
+            return f"the view is listed on {listed} of {replicas} replicas"
+        queries = int(row.get("queries") or 0)
+        if queries > 1:
+            return f"the replicas report {queries} different queries"
+        return None
+
+    _wait_until_applied(client, f"{database}.{view_name} query", _check)
+
+
 def _wait_until_applied(client: Any, subject: str, check: Callable[[Any], str | None]) -> None:
     """Poll ``check`` until it reports no mismatch.
 
@@ -843,6 +876,7 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
     - create_table / alter_rename_table              → wait_for_table
     - create_view / create_materialized_view         → wait_for_view
     - create_dictionary                               → wait_for_dictionary
+    - alter_materialized_view_modify_query            → wait_for_view_query
     - drop_dictionary                                 → wait_for_table_absent
     - alter_table_add_column / alter_table_modify_column → wait_for_column_definition
       (MODIFY also checks what ``statement`` sets)
@@ -884,6 +918,9 @@ def wait_for_ddl_propagation(  # noqa: PLR0911, PLR0912
         return
     if operation_type == "create_dictionary":
         wait_for_dictionary(client, database, table, cluster=cluster)
+        return
+    if operation_type == "alter_materialized_view_modify_query":
+        wait_for_view_query(client, database, table, cluster=cluster)
         return
     # ADD COLUMN IF NOT EXISTS leaves an existing column as it is, so only
     # agreement between replicas is checked; MODIFY also checks what it sets.
