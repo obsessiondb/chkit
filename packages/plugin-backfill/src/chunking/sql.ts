@@ -34,6 +34,26 @@ const TRAILING_CLAUSE_KEYWORDS = [
  */
 const ASTERISK_SETTINGS = 'asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0'
 
+/**
+ * Settings every chunk INSERT runs with, in its own SETTINGS so they win over
+ * profile defaults (#765). The INSERT never runs as secondary queries on other
+ * replicas or shards (parallel replicas, a Distributed INSERT SELECT), whose
+ * writes its own written_rows may not count and whose query_log rows can
+ * flush late, and it is always logged, its start included: a resume proves a
+ * failure from that log alone.
+ */
+export const PINNED_INSERT_SETTINGS = {
+  enable_parallel_replicas: '0',
+  parallel_distributed_insert_select: '0',
+  log_queries: '1',
+  log_queries_min_type: "'QUERY_START'",
+  log_queries_min_query_duration_ms: '0',
+} as const
+
+export const PINNED_INSERT_SETTINGS_SQL = Object.entries(PINNED_INSERT_SETTINGS)
+  .map(([name, value]) => `${name}=${value}`)
+  .join(', ')
+
 // ── Chunk execution SQL ──────────────────────────────────────────────────────
 
 export function buildChunkExecutionSql(input: {
@@ -125,7 +145,7 @@ function buildCutoverChunkSql(input: {
     `WHERE _partition_id = ${quoteSqlString(input.chunk.partitionId)}`,
     ...input.chunkConditions.map((condition) => `  AND ${condition}`),
     `  AND (${key}) NOT IN (SELECT ${key} FROM ${input.target}${shadowConditions.length > 0 ? ` WHERE ${shadowConditions.join(' AND ')}` : ''})`,
-    `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplicate=0, select_sequential_consistency=1`,
+    `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT_SETTINGS_SQL}`,
   ]
   return lines.join('\n')
 }
@@ -522,9 +542,9 @@ function buildRangeBoundConditions(range: ChunkRange, sortKey: SortKey): string[
 
 function buildSettingsClause(token: string): string {
   if (token) {
-    return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplication_token='${token}'`
+    return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, insert_deduplication_token='${token}', ${PINNED_INSERT_SETTINGS_SQL}`
   }
-  return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}`
+  return `SETTINGS async_insert=0, ${ASTERISK_SETTINGS}, ${PINNED_INSERT_SETTINGS_SQL}`
 }
 
 function buildChunkConditions(chunk: Pick<Chunk, 'ranges'>, sortKeys: SortKey[]): string[] {

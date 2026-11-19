@@ -16,6 +16,7 @@ from chkit_plugin_backfill.chunking.boundary_codec import (
     encode_chunk_plan_for_persistence,
 )
 from chkit_plugin_backfill.chunking.planner import generate_chunk_plan
+from chkit_plugin_backfill.chunking.sql import PINNED_INSERT_SETTINGS_SQL
 from chkit_plugin_backfill.chunking.types import (
     GenerateChunkPlanInput,
     PlannerQuery,
@@ -106,6 +107,21 @@ def _detect_backfill_strategy(
     except Exception:
         # Schema load failed, fall back to direct copy.
         return _BackfillStrategy(mvs=[])
+
+
+def assert_pinned_insert_settings_accepted(*, plan_id: str, query: PlannerQuery) -> None:
+    """Fail before anything is submitted when the server would refuse the
+    settings every chunk INSERT runs with (``PINNED_INSERT_SETTINGS``): a user
+    with ``readonly = 1``, or a settings constraint on one of them."""
+    try:
+        query(f"SELECT 1 SETTINGS {PINNED_INSERT_SETTINGS_SQL}", None)
+    except Exception as error:
+        msg = (
+            f"Backfill plan {plan_id}: the server refused the settings every chunk INSERT "
+            f"runs with ({PINNED_INSERT_SETTINGS_SQL}): {error}. Nothing was submitted. Use a "
+            "user allowed to set them (not readonly = 1, and no settings constraint on them)."
+        )
+        raise BackfillConfigError(msg) from error
 
 
 def unprovable_target_failures(

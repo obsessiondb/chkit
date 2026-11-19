@@ -31,7 +31,10 @@ from chkit_plugin_backfill.async_backfill import (
     run_interruptible,
 )
 from chkit_plugin_backfill.check import evaluate_backfill_check
-from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
+from chkit_plugin_backfill.chunking.sql import (
+    assert_insert_settings_keep_pinned,
+    build_chunk_execution_sql,
+)
 from chkit_plugin_backfill.chunking.types import QuerySettings
 from chkit_plugin_backfill.chunking.utils.ids import generate_idempotency_token
 from chkit_plugin_backfill.errors import BackfillConfigError
@@ -62,6 +65,7 @@ from chkit_plugin_backfill.payload import (
 )
 from chkit_plugin_backfill.planner import (
     assert_backfill_target_safe,
+    assert_pinned_insert_settings_accepted,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
     unprovable_target_failures,
@@ -275,6 +279,9 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
     insert_settings: dict[str, str | int | float | bool] | None,
     stop: StopFlag,
 ) -> int:
+    # insertSettings that would undo the INSERT's pinned settings are refused
+    # before anything is read or submitted.
+    assert_insert_settings_keep_pinned(insert_settings)
     # Check for existing run state
     existing_run = read_run(paths.run_path)
 
@@ -338,6 +345,13 @@ def _run_backfill_locked(  # noqa: PLR0912, PLR0915 — mirrors TS runBackfill
         insertable_columns = run_interruptible(
             lambda: assert_backfill_target_safe(
                 database=database, table=table, mode=plan.execution.mode, query=db.query_rows
+            ),
+            stop,
+            plan.plan_id,
+        )
+        run_interruptible(
+            lambda: assert_pinned_insert_settings_accepted(
+                plan_id=plan.plan_id, query=db.query_rows
             ),
             stop,
             plan.plan_id,

@@ -375,53 +375,16 @@ def _is_secondary(row: dict[str, object]) -> bool:
     return value is not None and str(value) in {"0", "False"}
 
 
-def _secondary_writes(query_id: str, evidence: _ChunkEvidence) -> _Outcome | None:
-    """What the secondary queries of an attempt (on other replicas or
-    shards, by its ``initial_query_id``) wrote (TS ``secondaryWrites``). A
-    failure proves a safe replay only when every one has ended and states, as
-    a number, that it wrote nothing: with parallel replicas, the initiator's
-    written_rows does not count what the replicas wrote. One still running,
-    or with a start and no end, may still write (``wait``, carrying its
-    reason); any written row stays, and a replay writes it again."""
-    log = [row for row in evidence.secondary_log if row.get("initial_query_id") == query_id]
-    ended = [row for row in log if row.get("type") != "QueryStart"]
-    for row in ended:
-        count = _row_count(row.get("written_rows"))
-        if count is None:
-            return _Outcome(
-                "unknown",
-                reason="system.query_log does not say how many rows its secondary query "
-                f"{row.get('query_id')} wrote",
-            )
-        if count > 0:
-            return _Outcome(
-                "unknown",
-                reason=f"its secondary query {row.get('query_id')} wrote {count} rows, "
-                "which a replay would write again",
-            )
-    running = next(
-        (row for row in evidence.secondary_running if row.get("initial_query_id") == query_id),
-        None,
-    )
-    ended_ids = {row.get("query_id") for row in ended}
-    open_id = (
-        running.get("query_id")
-        if running is not None
-        else next(
-            (
-                row.get("query_id")
-                for row in log
-                if row.get("type") == "QueryStart" and row.get("query_id") not in ended_ids
-            ),
-            None,
-        )
-    )
-    if open_id is not None:
-        return _Outcome(
-            "wait",
-            reason=f"its secondary query {open_id} is still running, or system.query_log "
-            "has no outcome for it",
-        )
+def _secondary_query_of(query_id: str, evidence: _ChunkEvidence) -> str | None:
+    """The query id of a secondary query of the attempt (on another replica or
+    shard, by its ``initial_query_id``), if any was seen (TS
+    ``secondaryQueryOf``). Its writes may not be in the initiator's
+    written_rows, and its own query_log row can flush late, or not at all, so
+    a failure with one proves nothing. The chunk INSERT pins settings that keep
+    it from running any (see ``PINNED_INSERT_SETTINGS``)."""
+    for row in [*evidence.secondary_log, *evidence.secondary_running]:
+        if row.get("initial_query_id") == query_id:
+            return str(row.get("query_id"))
     return None
 
 
@@ -467,8 +430,10 @@ def _classify_attempt(  # noqa: PLR0911, PLR0912 — mirrors the TS classifier
       Only that proves a replay cannot write the chunk's rows twice. A failure
       after a written row is unknown at once: those rows stay, and a replay
       writes them again. So is any failure of a target whose failures cannot
-      be proven (``unprovable_failures``), and one whose secondary queries
-      (see ``_secondary_writes``) wrote a row or have not ended. An attempt
+      be proven (``unprovable_failures``), and any failure of an attempt that
+      ran a secondary query (see ``_secondary_query_of``). A failure is
+      recorded only on the read after the flush window, so a row a replica
+      flushes late can still turn it unknown. An attempt
       an older release recorded may have been sent twice under its id, so
       its failure rows prove nothing, and a read that may have missed a
       replica cannot rule out a run or a QueryFinish on it.
@@ -496,11 +461,14 @@ def _classify_attempt(  # noqa: PLR0911, PLR0912 — mirrors the TS classifier
     if failure is not None and state.single_send is True and evidence.partial is None:
         if evidence.unprovable is not None:
             return _Outcome("unknown", reason=evidence.unprovable)
-        shards = _secondary_writes(query_id, evidence)
-        if shards is not None and (shards.kind == "unknown" or final):
-            return _Outcome("unknown", reason=shards.reason)
-        if shards is not None:
-            return _Outcome("wait")
+        secondary = _secondary_query_of(query_id, evidence)
+        if secondary is not None:
+            return _Outcome(
+                "unknown",
+                reason=f"it ran a secondary query on another replica or shard (query_id "
+                f"{secondary}), whose writes system.query_log may show late or not at all, "
+                "so its failure proves nothing",
+            )
         # Proof needs every row of the id to state, as a number, that it
         # wrote nothing, and no earlier poll of this attempt to have seen it
         # write.
@@ -510,8 +478,10 @@ def _classify_attempt(  # noqa: PLR0911, PLR0912 — mirrors the TS classifier
                 "unknown", reason="system.query_log does not say how many rows it wrote"
             )
         written = max([*(count or 0 for count in counts), state.written_rows or 0])
+        # Only once the flush window is over: a replica that flushes its
+        # query_log late can still show a row that turns it unknown.
         if written == 0:
-            return _Outcome("failed", failure)
+            return _Outcome("failed", failure) if final else _Outcome("wait")
         return _Outcome(
             "unknown",
             reason=f"it failed after writing {written} rows, which a replay would write again",

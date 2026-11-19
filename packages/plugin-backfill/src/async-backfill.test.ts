@@ -130,6 +130,9 @@ describe('executeBackfill', () => {
       buildQuery: () => 'SELECT 1',
       concurrency: 2,
       pollIntervalMs: 10,
+      // A failure is recorded on the read after this flush window.
+      outcomeRecheckAttempts: 1,
+      outcomeRecheckIntervalMs: 20,
     })
 
     expect(result.completed).toBe(1)
@@ -426,7 +429,9 @@ describe('syncProgress', () => {
     expect(synced.c1.writtenRows).toBe(100)
   })
 
-  test('updates failed server state for locally submitted chunk', async () => {
+  // One read never proves a failure: a replica that flushes late could still
+  // show a row that turns it unknown. executeBackfill reads it again.
+  test('leaves a failure it reads once unsettled', async () => {
     const executor = createMockExecutor(new Map())
     executor.query = async <T>(sql: string): Promise<T[]> => {
       if (sql.includes('system.one')) return [{ replicas: '1' }] as T[]
@@ -449,8 +454,7 @@ describe('syncProgress', () => {
     }
 
     const synced = await syncProgress(executor, PLAN_ID, [{ id: 'c1' }], progress)
-    expect(synced.c1.status).toBe('failed')
-    expect(synced.c1.error).toBe('Memory limit exceeded')
+    expect(synced.c1).toEqual(progress.c1)
   })
 
   // Round 3: a probe with no replica count proves nothing about the replicas,
@@ -1893,13 +1897,15 @@ describe('an interrupt while a checkpoint write is under way', () => {
 })
 
 // Opus re-review: with parallel replicas, the initiator's failure row says
-// written_rows = 0 while its secondary queries committed rows. A failure is
-// proof only when every secondary query of its id ended and wrote nothing.
-describe('a failure whose secondary queries wrote rows', () => {
+// written_rows = 0 while its secondary queries committed rows, and a
+// replica's query_log can flush them late. Any secondary query seen for an
+// attempt makes its failure unknown, whatever its written rows say.
+describe('a failure whose attempt ran secondary queries', () => {
   const id = `backfill-${PLAN_ID}-c1`
   const failure = { query_id: id, is_initial_query: 1, type: 'ExceptionWhileProcessing', written_rows: '0', written_bytes: '0', query_duration_ms: '1', exception: 'transient' }
   const secondary = (type: string, written: string | null, queryId = 'secondary-1') =>
     ({ query_id: queryId, initial_query_id: id, is_initial_query: 0, type, written_rows: written, written_bytes: '0', query_duration_ms: '1', exception: '' })
+  const SECONDARY = `chunk c1 (query_id ${id}): it ran a secondary query on another replica or shard (query_id secondary-1), whose writes system.query_log may show late or not at all, so its failure proves nothing.`
 
   async function resume(log: object[], running: object[] = []) {
     const submits: string[] = []
@@ -1933,35 +1939,23 @@ describe('a failure whose secondary queries wrote rows', () => {
     return { error: await run, submits }
   }
 
-  const unknownFor = (reason: string) => `chunk c1 (query_id ${id}): ${reason}.`
+  for (const [label, log, running] of [
+    ['wrote rows', [secondary('ExceptionWhileProcessing', '581632')], []],
+    ['ended with zero rows', [secondary('QueryStart', '0'), secondary('ExceptionWhileProcessing', '0')], []],
+    ['only started', [secondary('QueryStart', '0')], []],
+    ['has no row count', [secondary('QueryFinish', null)], []],
+    ['is still running', [], [{ query_id: 'secondary-1', initial_query_id: id, is_initial_query: 0, read_rows: '0', read_bytes: '0', written_rows: '0', written_bytes: '0', elapsed: 1 }]],
+  ] as const) {
+    test(`a secondary query that ${label} makes it unknown, and --replay-failed sends nothing`, async () => {
+      const { error, submits } = await resume([...log], [...running])
 
-  test('a secondary query that wrote rows makes it unknown, and --replay-failed sends nothing', async () => {
-    const { error, submits } = await resume([secondary('ExceptionWhileProcessing', '581632')])
+      expect(error?.message).toContain(SECONDARY)
+      expect(submits).toEqual([])
+    })
+  }
 
-    expect(error?.message).toContain(unknownFor('its secondary query secondary-1 wrote 581632 rows, which a replay would write again'))
-    expect(submits).toEqual([])
-  })
-
-  test('a secondary query with no end, or still running, is unknown once the window is over', async () => {
-    const pending = unknownFor('its secondary query secondary-1 is still running, or system.query_log has no outcome for it')
-    const started = await resume([secondary('QueryStart', '0')])
-    expect(started.error?.message).toContain(pending)
-    expect(started.submits).toEqual([])
-
-    const running = await resume([], [{ query_id: 'secondary-1', initial_query_id: id, is_initial_query: 0, read_rows: '0', read_bytes: '0', written_rows: '0', written_bytes: '0', elapsed: 1 }])
-    expect(running.error?.message).toContain(pending)
-    expect(running.submits).toEqual([])
-  })
-
-  test('a secondary query without a row count is unknown', async () => {
-    const { error, submits } = await resume([secondary('QueryFinish', null)])
-
-    expect(error?.message).toContain(unknownFor('system.query_log does not say how many rows its secondary query secondary-1 wrote'))
-    expect(submits).toEqual([])
-  })
-
-  test('secondary queries that ended without writing keep the proof, and the chunk is replayed', async () => {
-    const { error, submits } = await resume([secondary('QueryStart', '0'), secondary('ExceptionWhileProcessing', '0')])
+  test('without a secondary query, the failure read after the window is proof, and the chunk is replayed', async () => {
+    const { error, submits } = await resume([])
 
     // The replay's own reads find nothing, so its outcome is unknown; it was sent once.
     expect(submits).toHaveLength(1)

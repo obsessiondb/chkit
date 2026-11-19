@@ -28,6 +28,7 @@ from chkit_plugin_backfill.options import PlanOptions
 from chkit_plugin_backfill.planner import (
     BuildBackfillPlanOutput,
     assert_backfill_target_safe,
+    assert_pinned_insert_settings_accepted,
     assert_replay_columns_still_insertable,
     build_backfill_plan,
     unprovable_target_failures,
@@ -849,4 +850,39 @@ def test_a_target_whose_engine_cannot_be_read_cannot_either(
     assert unprovable_target_failures(database="app", table="events", query=query) == (
         f"the engine of its target app.events could not be read, and a Distributed table, "
         f"{_SHARDS}, cannot be ruled out"
+    )
+
+
+# Opus delta review: a server that refuses the INSERT's pinned settings
+# (readonly = 1, a settings constraint) fails the run before it submits.
+_PINNED_SQL = (
+    "enable_parallel_replicas=0, parallel_distributed_insert_select=0, log_queries=1, "
+    "log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+)
+
+
+def test_the_pinned_settings_check_reads_select_1_with_them() -> None:
+    reads: list[str] = []
+
+    def query(sql: str, _settings: QuerySettings | None = None) -> list[dict[str, object]]:
+        reads.append(sql)
+        return []
+
+    assert_pinned_insert_settings_accepted(plan_id="p1", query=query)
+
+    assert reads == [f"SELECT 1 SETTINGS {_PINNED_SQL}"]
+
+
+def test_a_refused_pinned_setting_fails_before_anything_is_submitted() -> None:
+    def query(_sql: str, _settings: QuerySettings | None = None) -> list[dict[str, object]]:
+        raise RuntimeError("Cannot modify 'log_queries' setting in readonly mode")
+
+    with pytest.raises(BackfillConfigError) as raised:
+        assert_pinned_insert_settings_accepted(plan_id="p1", query=query)
+
+    assert str(raised.value) == (
+        f"Backfill plan p1: the server refused the settings every chunk INSERT runs with "
+        f"({_PINNED_SQL}): Cannot modify 'log_queries' setting in readonly mode. Nothing was "
+        "submitted. Use a user allowed to set them (not readonly = 1, and no settings "
+        "constraint on them)."
     )

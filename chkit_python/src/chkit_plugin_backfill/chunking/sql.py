@@ -22,6 +22,7 @@ from chkit_plugin_backfill.chunking.types import (
     TableProfile,
 )
 from chkit_plugin_backfill.chunking.utils.binary_string import latin1_bytes
+from chkit_plugin_backfill.errors import BackfillConfigError
 
 # Top-level clause keywords, in the order they may legally follow a
 # projection. `inject_where_condition` uses this both to detect an existing
@@ -70,6 +71,61 @@ def _js_trim(value: str) -> str:
 
 
 # ── Chunk execution SQL ──────────────────────────────────────────────────────
+
+
+#: Settings every chunk INSERT runs with, in its own SETTINGS so they win over
+#: profile defaults (#765, TS ``PINNED_INSERT_SETTINGS``). The INSERT never runs
+#: as secondary queries on other replicas or shards (parallel replicas, a
+#: Distributed INSERT SELECT), whose writes its own written_rows may not count
+#: and whose query_log rows can flush late, and it is always logged, its start
+#: included: a resume proves a failure from that log alone.
+PINNED_INSERT_SETTINGS: dict[str, str] = {
+    "enable_parallel_replicas": "0",
+    "parallel_distributed_insert_select": "0",
+    "log_queries": "1",
+    "log_queries_min_type": "'QUERY_START'",
+    "log_queries_min_query_duration_ms": "0",
+}
+
+PINNED_INSERT_SETTINGS_SQL = ", ".join(
+    f"{name}={value}" for name, value in PINNED_INSERT_SETTINGS.items()
+)
+
+
+def assert_insert_settings_keep_pinned(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> None:
+    """Refuse ``insert_settings`` that set a pinned setting to another value
+    (``PINNED_INSERT_SETTINGS``): the chunk INSERT must not run as secondary
+    queries, and must be logged."""
+    def normal(value: str) -> str:
+        bare = value.strip("'").lower()
+        return {"true": "1", "false": "0"}.get(bare, bare)
+
+    conflicts = [
+        f"{key}={_render_insert_setting_value(value)}"
+        for key, value in (insert_settings or {}).items()
+        if key in PINNED_INSERT_SETTINGS
+        and normal(_render_insert_setting_value(value)) != normal(PINNED_INSERT_SETTINGS[key])
+    ]
+    if conflicts:
+        msg = (
+            f"insertSettings sets {', '.join(conflicts)}, which every backfill chunk INSERT "
+            f"runs with as {PINNED_INSERT_SETTINGS_SQL}: with those, its failure cannot be "
+            "proven from system.query_log, and a replay could write its rows twice. Remove "
+            "them from insertSettings."
+        )
+        raise BackfillConfigError(msg)
+
+
+def _unpinned(
+    insert_settings: Mapping[str, str | int | float | bool] | None,
+) -> list[tuple[str, str | int | float | bool]]:
+    return [
+        (key, value)
+        for key, value in (insert_settings or {}).items()
+        if key not in PINNED_INSERT_SETTINGS
+    ]
 
 
 def build_chunk_execution_sql(
@@ -174,8 +230,10 @@ def _build_cutover_chunk_sql(
         "insert_deduplicate=0",
         "select_sequential_consistency=1",
     ]
-    for setting, value in (insert_settings or {}).items():
+    assert_insert_settings_keep_pinned(insert_settings)
+    for setting, value in _unpinned(insert_settings):
         parts.append(f"{setting}={_render_insert_setting_value(value)}")
+    parts.append(PINNED_INSERT_SETTINGS_SQL)
     lines = [
         header,
         f"INSERT INTO {target} ({columns})",
@@ -638,8 +696,10 @@ def _build_settings_clause(
     # Per-chunk insert settings from the plugin config (e.g. max_insert_threads,
     # min_insert_block_size_rows). Rendered into the single SETTINGS clause because
     # ClickHouse rejects a second SETTINGS clause on INSERT ... SELECT.
-    for key, value in (insert_settings or {}).items():
+    assert_insert_settings_keep_pinned(insert_settings)
+    for key, value in _unpinned(insert_settings):
         parts.append(f"{key}={_render_insert_setting_value(value)}")
+    parts.append(PINNED_INSERT_SETTINGS_SQL)
     return f"SETTINGS {', '.join(parts)}"
 
 

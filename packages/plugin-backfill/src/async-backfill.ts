@@ -359,8 +359,10 @@ const FAILURE_TYPES = new Set(['ExceptionBeforeStart', 'ExceptionWhileProcessing
  *   that proves a replay cannot write the chunk's rows twice. A failure
  *   after a written row is unknown at once: those rows stay, and a replay
  *   writes them again. So is any failure of a target whose failures cannot
- *   be proven (`unprovableFailures`), and one whose secondary queries (see
- *   `secondaryWrites`) wrote a row or have not ended. An attempt an older release recorded may have been
+ *   be proven (`unprovableFailures`), and any failure of an attempt that ran
+ *   a secondary query (see `secondaryQueryOf`). A failure is recorded only
+ *   on the read after the flush window, so a row a replica flushes late can
+ *   still turn it unknown. An attempt an older release recorded may have been
  *   sent twice under its id, so its failure rows prove nothing, and a read
  *   that may have missed a replica cannot rule out a run or a QueryFinish
  *   on it.
@@ -391,9 +393,10 @@ function classifyAttempt(
   const failure = own.find((row) => FAILURE_TYPES.has(row.type))
   if (failure && state.singleSend === true && evidence.partial === undefined) {
     if (evidence.unprovable !== undefined) return { kind: 'unknown', reason: evidence.unprovable }
-    const shards = secondaryWrites(queryId, evidence)
-    if (shards.kind === 'unknown') return shards
-    if (shards.kind === 'pending') return final ? { kind: 'unknown', reason: shards.reason } : { kind: 'wait' }
+    const secondary = secondaryQueryOf(queryId, evidence)
+    if (secondary !== undefined) {
+      return { kind: 'unknown', reason: `it ran a secondary query on another replica or shard (query_id ${secondary}), whose writes system.query_log may show late or not at all, so its failure proves nothing` }
+    }
     // Proof needs every row of the id to state, as a number, that it wrote
     // nothing, and no earlier poll of this attempt to have seen it write.
     const counts = own.map((row) => rowCount(row.written_rows))
@@ -401,7 +404,9 @@ function classifyAttempt(
       return { kind: 'unknown', reason: 'system.query_log does not say how many rows it wrote' }
     }
     const written = Math.max(...(counts as number[]), state.writtenRows ?? 0)
-    if (written === 0) return { kind: 'failed', row: failure }
+    // Only once the flush window is over: a replica that flushes its
+    // query_log late can still show a row that turns it unknown.
+    if (written === 0) return final ? { kind: 'failed', row: failure } : { kind: 'wait' }
     return { kind: 'unknown', reason: `it failed after writing ${written} rows, which a replay would write again` }
   }
   if (!attemptMayHaveRun(state)) return { kind: 'unchanged' }
@@ -419,34 +424,15 @@ function classifyAttempt(
 }
 
 /**
- * What the secondary queries of an attempt (on other replicas or shards, by
- * its `initial_query_id`) wrote. A failure proves a safe replay only when
- * every one has ended and states, as a number, that it wrote nothing: with
- * parallel replicas, the initiator's written_rows does not count what the
- * replicas wrote. One still running, or with a start and no end, may still
- * write; any written row stays, and a replay writes it again.
+ * The query id of a secondary query of the attempt (on another replica or
+ * shard, by its `initial_query_id`), if any was seen. Its writes may not be in
+ * the initiator's written_rows, and its own query_log row can flush late, or
+ * not at all, so a failure with one proves nothing. The chunk INSERT pins
+ * settings that keep it from running any (see `PINNED_INSERT_SETTINGS`).
  */
-function secondaryWrites(
-  queryId: string,
-  evidence: ChunkEvidence,
-): { kind: 'none' } | { kind: 'pending'; reason: string } | { kind: 'unknown'; reason: string } {
-  const log = (evidence.secondaryLog ?? []).filter((row) => row.initial_query_id === queryId)
-  const ended = log.filter((row) => row.type !== 'QueryStart')
-  for (const row of ended) {
-    const count = rowCount(row.written_rows)
-    if (count === undefined) {
-      return { kind: 'unknown', reason: `system.query_log does not say how many rows its secondary query ${row.query_id} wrote` }
-    }
-    if (count > 0) {
-      return { kind: 'unknown', reason: `its secondary query ${row.query_id} wrote ${count} rows, which a replay would write again` }
-    }
-  }
-  const running = (evidence.secondaryRunning ?? []).find((row) => row.initial_query_id === queryId)
-  const open = running?.query_id ?? log.find((row) => row.type === 'QueryStart' && !ended.some((end) => end.query_id === row.query_id))?.query_id
-  if (open !== undefined) {
-    return { kind: 'pending', reason: `its secondary query ${open} is still running, or system.query_log has no outcome for it` }
-  }
-  return { kind: 'none' }
+function secondaryQueryOf(queryId: string, evidence: ChunkEvidence): string | undefined {
+  return (evidence.secondaryLog ?? []).find((row) => row.initial_query_id === queryId)?.query_id
+    ?? (evidence.secondaryRunning ?? []).find((row) => row.initial_query_id === queryId)?.query_id
 }
 
 /** A row count as query_log reports it: a whole number, or its digits. */

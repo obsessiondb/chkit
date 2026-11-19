@@ -4,6 +4,7 @@ import { parseCutoverMetadata, type CutoverMetadata, type MaterializedViewDefini
 import { loadSchemaDefinitions } from '@chkit/core/schema-loader'
 
 import { encodeChunkPlanForPersistence } from './chunking/boundary-codec.js'
+import { PINNED_INSERT_SETTINGS_SQL } from './chunking/sql.js'
 import { generateChunkPlan } from './chunking/planner.js'
 import { findMvsForTarget, resolveMvReplaySource } from './detect.js'
 import { BackfillConfigError } from './errors.js'
@@ -110,6 +111,24 @@ export async function assertBackfillTargetSafe(input: {
     throw new BackfillConfigError(`Automatic backfill cannot reconstruct EPHEMERAL inputs; copying ${target} recomputes MATERIALIZED column(s) ${materialized.join(', ')}, which may read EPHEMERAL column(s) ${ephemeral.join(', ')}. Use an explicit INSERT with an input column mapping.`)
   }
   return rows.filter((column) => ['', 'DEFAULT'].includes(column.default_kind)).map((column) => column.name)
+}
+
+/**
+ * Fail before anything is submitted when the server would refuse the
+ * settings every chunk INSERT runs with (`PINNED_INSERT_SETTINGS`): a user
+ * with `readonly = 1`, or a settings constraint on one of them.
+ */
+export async function assertPinnedInsertSettingsAccepted(input: {
+  planId: string
+  query: ClickHouseQuery
+}): Promise<void> {
+  try {
+    await input.query(`SELECT 1 SETTINGS ${PINNED_INSERT_SETTINGS_SQL}`)
+  } catch (error) {
+    throw new BackfillConfigError(
+      `Backfill plan ${input.planId}: the server refused the settings every chunk INSERT runs with (${PINNED_INSERT_SETTINGS_SQL}): ${error instanceof Error ? error.message : String(error)}. Nothing was submitted. Use a user allowed to set them (not readonly = 1, and no settings constraint on them).`,
+    )
+  }
 }
 
 /**

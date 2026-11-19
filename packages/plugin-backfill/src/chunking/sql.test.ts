@@ -10,6 +10,10 @@ import {
 } from './sql.js'
 import type { Chunk } from './types.js'
 
+// Opus delta review: every chunk INSERT runs without secondary queries, and
+// fully logged, whatever the profile says (#765).
+const PINNED_INSERT = "enable_parallel_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+
 describe('findTopLevelKeywords', () => {
   test('finds keywords at the top level in ascending position order', () => {
     const hits = findTopLevelKeywords('SELECT a FROM t', ['SELECT', 'FROM'])
@@ -248,7 +252,7 @@ describe('buildChunkExecutionSql asterisk settings', () => {
   test('copy mode pins SELECT * to insertable columns', () => {
     const sql = buildChunkExecutionSql({ planId: 'p', chunk, target: 'db.t', table: { sortKeys: [] } })
     expect(sql).toContain('SELECT *')
-    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}`)
+    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}, ${PINNED_INSERT}`)
   })
 
   test('mv_replay pins the settings once for every UNION ALL branch, with the dedup token', () => {
@@ -262,7 +266,7 @@ describe('buildChunkExecutionSql asterisk settings', () => {
     })
     expect(sql).toContain('UNION ALL')
     expect(sql.match(/SETTINGS/g)).toHaveLength(1)
-    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}, insert_deduplication_token='tok'`)
+    expect(sql.split('\n').at(-1)).toBe(`SETTINGS async_insert=0, ${pinned}, insert_deduplication_token='tok', ${PINNED_INSERT}`)
   })
 })
 
@@ -349,7 +353,7 @@ describe('buildChunkExecutionSql cutover_copy', () => {
       "  AND id < '200'",
       "  AND toDate(ts) >= '5'",
       "  AND (`id`) NOT IN (SELECT `id` FROM db.events__cutover_1 WHERE id >= '100' AND id < '200')",
-      'SETTINGS async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1',
+      `SETTINGS async_insert=0, asterisk_include_materialized_columns=0, asterisk_include_alias_columns=0, insert_deduplicate=0, select_sequential_consistency=1, ${PINNED_INSERT}`,
     ])
   })
 })

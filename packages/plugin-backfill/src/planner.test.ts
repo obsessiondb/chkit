@@ -8,7 +8,7 @@ import { resolveConfig } from '@chkit/core'
 import { buildChunkExecutionSql, rewriteSelectColumns } from './chunking/sql.js'
 import { generateIdempotencyToken } from './chunking/utils/ids.js'
 import { PlanSchema } from './options.js'
-import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
+import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
 import { backfillPaths, computeBackfillStateDir, readPlan } from './state.js'
 
 function createMockQuery(opts: {
@@ -765,4 +765,23 @@ describe('unprovableTargetFailures', () => {
         .toBe(`the engine of its target app.events could not be read, and a Distributed table, ${SHARDS}, cannot be ruled out`)
     })
   }
+})
+
+// Opus delta review: a server that refuses the INSERT's pinned settings
+// (readonly = 1, a settings constraint) fails the run before it submits.
+describe('assertPinnedInsertSettingsAccepted', () => {
+  const PINNED = "enable_parallel_replicas=0, parallel_distributed_insert_select=0, log_queries=1, log_queries_min_type='QUERY_START', log_queries_min_query_duration_ms=0"
+
+  test('reads SELECT 1 with the pinned settings', async () => {
+    const reads: string[] = []
+    await assertPinnedInsertSettingsAccepted({ planId: 'p1', query: async <T>(sql: string) => { reads.push(sql); return [] as T[] } })
+    expect(reads).toEqual([`SELECT 1 SETTINGS ${PINNED}`])
+  })
+
+  test('a refusal fails before anything is submitted', async () => {
+    const query = async <T>(): Promise<T[]> => { throw new Error('Cannot modify \'log_queries\' setting in readonly mode') }
+    await expect(assertPinnedInsertSettingsAccepted({ planId: 'p1', query })).rejects.toThrow(
+      `Backfill plan p1: the server refused the settings every chunk INSERT runs with (${PINNED}): Cannot modify 'log_queries' setting in readonly mode. Nothing was submitted. Use a user allowed to set them (not readonly = 1, and no settings constraint on them).`,
+    )
+  })
 })

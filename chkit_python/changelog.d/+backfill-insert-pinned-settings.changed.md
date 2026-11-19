@@ -1,0 +1,1 @@
+Every `chkit plugin backfill` chunk INSERT now runs with `enable_parallel_replicas = 0`, `parallel_distributed_insert_select = 0` and full query logging, so a failed chunk is never replayed on top of rows its replicas or shards wrote; `insertSettings` that change one of those are refused, and a user who may not change them gets an error before anything is sent.

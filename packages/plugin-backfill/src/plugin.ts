@@ -30,7 +30,7 @@ import {
   type StatusOptions,
 } from './options.js'
 import { planPayload, statusPayload, cancelPayload, doctorPayload } from './payload.js'
-import { assertBackfillTargetSafe, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
+import { assertBackfillTargetSafe, assertPinnedInsertSettingsAccepted, assertReplayColumnsStillInsertable, buildBackfillPlan, unprovableTargetFailures } from './planner.js'
 import { evaluateBackfillCheck } from './check.js'
 import { cancelBackfillRun, getBackfillDoctorReport, getBackfillStatus } from './queries.js'
 import {
@@ -153,6 +153,11 @@ async function runBackfillLocked(
     // A metadata read that hangs must not keep an interrupted run, and its lock.
     const insertableColumns = await untilAborted(
       assertBackfillTargetSafe({ database, table, mode: plan.execution.mode, query: (sql, settings) => db.query(sql, settings) }),
+      signal,
+      () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
+    )
+    await untilAborted(
+      assertPinnedInsertSettingsAccepted({ planId: plan.planId, query: (sql, settings) => db.query(sql, settings) }),
       signal,
       () => new BackfillInterruptedError(`Backfill plan ${plan.planId}: interrupted.`),
     )

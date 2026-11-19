@@ -19,8 +19,12 @@ import pytest
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table
 from chkit.core.model import ChxResolvedClickHouseConfig
+from chkit_plugin_backfill.chunking.sql import (
+    PINNED_INSERT_SETTINGS_SQL as _PINNED_INSERT,
+)
 from chkit_plugin_backfill.chunking.sql import build_chunk_execution_sql
 from chkit_plugin_backfill.chunking.types import Chunk, TableProfile
+from chkit_plugin_backfill.errors import BackfillConfigError
 from chkit_plugin_backfill.options import PluginConfig
 from chkit_plugin_backfill.planner import BuildBackfillPlanOutput
 from chkit_plugin_backfill.plugin import backfill
@@ -82,9 +86,9 @@ def test_without_insert_settings_the_clause_is_unchanged() -> None:
     )
 
     assert _settings_line(with_token) == (
-        f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok'"
+        f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok', {_PINNED_INSERT}"
     )
-    assert _settings_line(without_token) == f"SETTINGS async_insert=0, {PINNED}"
+    assert _settings_line(without_token) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
 
 
 def test_insert_settings_are_appended_to_the_single_settings_clause_in_order() -> None:
@@ -110,7 +114,7 @@ def test_insert_settings_are_appended_to_the_single_settings_clause_in_order() -
         f"SETTINGS async_insert=0, {PINNED}, insert_deduplication_token='tok', "
         "max_insert_threads=4, min_insert_block_size_rows=1000000, "
         "log_comment='it\\'s chkit', insert_deduplicate=true, "
-        "max_partitions_per_insert_block=0, ratio=0.5, whole_float=2"
+        f"max_partitions_per_insert_block=0, ratio=0.5, whole_float=2, {_PINNED_INSERT}"
     )
 
 
@@ -124,7 +128,48 @@ def test_insert_settings_without_a_token() -> None:
     )
 
     assert _settings_line(sql) == (
-        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, insert_deduplicate=false"
+        f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=2, insert_deduplicate=false, "
+        f"{_PINNED_INSERT}"
+    )
+
+
+# Opus delta review: insertSettings that keep a pinned setting are folded into
+# the pinned one; one that changes it is refused.
+def test_insert_settings_that_keep_a_pinned_setting_are_not_repeated() -> None:
+    sql = build_chunk_execution_sql(
+        plan_id="p",
+        chunk=_chunk(),
+        target="app.events",
+        table=TABLE,
+        insert_settings={"log_queries": True, "enable_parallel_replicas": 0},
+    )
+
+    assert _settings_line(sql) == f"SETTINGS async_insert=0, {PINNED}, {_PINNED_INSERT}"
+
+
+@pytest.mark.parametrize(
+    ("setting", "value", "rendered"),
+    [
+        ("enable_parallel_replicas", 1, "enable_parallel_replicas=1"),
+        ("parallel_distributed_insert_select", 2, "parallel_distributed_insert_select=2"),
+        ("log_queries", False, "log_queries=false"),
+        ("log_queries_min_type", "QUERY_FINISH", "log_queries_min_type='QUERY_FINISH'"),
+        ("log_queries_min_query_duration_ms", 1000, "log_queries_min_query_duration_ms=1000"),
+    ],
+)
+def test_insert_settings_that_change_a_pinned_setting_are_refused(
+    setting: str, value: str | int | bool, rendered: str
+) -> None:
+    with pytest.raises(BackfillConfigError) as raised:
+        build_chunk_execution_sql(
+            plan_id="p", chunk=_chunk(), target="app.events", table=TABLE,
+            insert_settings={setting: value},
+        )
+
+    assert str(raised.value) == (
+        f"insertSettings sets {rendered}, which every backfill chunk INSERT runs with as "
+        f"{_PINNED_INSERT}: with those, its failure cannot be proven from system.query_log, "
+        "and a replay could write its rows twice. Remove them from insertSettings."
     )
 
 
@@ -140,7 +185,7 @@ def test_insert_settings_apply_to_the_mv_replay_union_insert() -> None:
 
     assert sql.count("SETTINGS") == 1
     assert "UNION ALL" in sql
-    assert sql.endswith(f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=8")
+    assert sql.endswith(f"SETTINGS async_insert=0, {PINNED}, max_insert_threads=8, {_PINNED_INSERT}")
 
 
 # ---------- plugin options ----------
@@ -170,7 +215,7 @@ def test_build_submit_tasks_renders_the_insert_settings() -> None:
 
     for task in tasks:
         assert task.sql.count("SETTINGS") == 1
-        assert task.sql.endswith(", max_insert_threads=4")
+        assert task.sql.endswith(f", max_insert_threads=4, {_PINNED_INSERT}")
 
 
 def test_handle_submit_uses_the_backfill_plugin_insert_settings(
@@ -213,7 +258,9 @@ def test_handle_submit_uses_the_backfill_plugin_insert_settings(
 
     assert code == 0
     [call] = submitted
-    assert all(task.sql.endswith(", max_insert_threads=6") for task in call["tasks"])
+    assert all(
+        task.sql.endswith(f", max_insert_threads=6, {_PINNED_INSERT}") for task in call["tasks"]
+    )
 
 
 # ---------- live ClickHouse ----------

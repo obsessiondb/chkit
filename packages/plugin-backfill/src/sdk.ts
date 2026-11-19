@@ -24,6 +24,7 @@ export {
   buildChunkExecutionSql,
   buildWhereClauseFromChunk,
   injectSortKeyFilter,
+  PINNED_INSERT_SETTINGS,
   rewriteSelectColumns,
 } from './chunking/sql.js'
 export { generateIdempotencyToken } from './chunking/utils/ids.js'
