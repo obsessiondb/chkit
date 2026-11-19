@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -911,57 +911,68 @@ def order_column_statements(
     a table's statements never move past another table's (they share no
     edge). ``renames`` names the columns of each RENAME COLUMN in ``operations``.
     """
-    reads = _column_default_reads(next_)
-    old_reads = _column_default_reads(previous)
+    reads = _column_default_reads(next_, _column_id)
+    old_reads = _column_default_reads(previous, _column_id)
     ttl_reads = _table_ttl_reads(next_)
     old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
-        column_rename_key(rename): _column_key(rename.database, rename.table, rename.to)
+        _rename_id(rename): _column_id(rename.database, rename.table, rename.to)
         for rename in renames
     }
     statements = sorted((op for op in operations if is_column_statement(op)), key=lambda op: op.key)
+    ids = _statement_ids(statements, previous, next_, renames)
+    # The statements of one object (``ids``) are next to each other in key order.
+    last_of: dict[str, int] = {}
+    previous_of: list[int | None] = []
+    for index, id_ in enumerate(ids):
+        previous_of.append(last_of.get(id_))
+        last_of[id_] = index
 
     providers: dict[str, list[int]] = {}
     releasers: dict[str, list[int]] = {}
     modifies: dict[str, list[int]] = {}
     for index, op in enumerate(statements):
+        id_ = ids[index]
         if op.type == "alter_table_add_column":
-            providers.setdefault(op.key, []).append(index)
-        renamed = renamed_to.get(op.key)
+            providers.setdefault(id_, []).append(index)
+        renamed = renamed_to.get(id_)
         if op.type == "alter_table_rename_column" and renamed is not None:
             providers.setdefault(renamed, []).append(index)
         if op.type == "alter_table_modify_column":
-            modifies.setdefault(op.key, []).append(index)
+            modifies.setdefault(id_, []).append(index)
         if op.type in ("alter_table_modify_column", "alter_table_drop_column"):
-            for read in old_reads.get(op.key, ()):
+            for read in old_reads.get(id_, ()):
                 releasers.setdefault(read, []).append(index)
         if op.type == "alter_table_modify_ttl":
-            for read in old_ttl_reads.get(op.key, ()):
+            for read in old_ttl_reads.get(id_, ()):
                 releasers.setdefault(read, []).append(index)
 
-    added = {op.key for op in statements if op.type == "alter_table_add_column"}
+    added = {
+        id_ for id_, op in zip(ids, statements, strict=True) if op.type == "alter_table_add_column"
+    }
     prerequisites: list[list[str]] = []
     for index, op in enumerate(statements):
+        id_ = ids[index]
         found: dict[int, None] = {}
         if op.type in ("alter_table_add_column", "alter_table_modify_column"):
-            for read in reads.get(op.key, ()):
+            for read in reads.get(id_, ()):
                 for other in providers.get(read, []):
                     found[other] = None
         if op.type == "alter_table_modify_ttl":
-            for read in ttl_reads.get(op.key, ()):
+            for read in ttl_reads.get(id_, ()):
                 for other in providers.get(read, []):
                     found[other] = None
         if op.type == "alter_table_drop_column":
-            for other in releasers.get(op.key, []):
+            for other in releasers.get(id_, []):
                 found[other] = None
         # A column's last statement is the MODIFY COLUMN that sets its new expression.
-        is_last = index + 1 == len(statements) or statements[index + 1].key != op.key
-        if op.type == "alter_table_modify_column" and is_last:
-            for column in _cycle_releases(op.key, reads, old_reads, added):
+        if op.type == "alter_table_modify_column" and last_of[id_] == index:
+            for column in _cycle_releases(id_, reads, old_reads, added):
                 for other in modifies.get(column, []):
                     found[other] = None
-        if index > 0 and statements[index - 1].key == op.key:
-            found[index - 1] = None
+        before = previous_of[index]
+        if before is not None:
+            found[before] = None
         found.pop(index, None)
         prerequisites.append([str(other) for other in found])
 
@@ -1024,6 +1035,89 @@ def _column_key(database: str, table: str, column: str) -> str:
     return f"table:{database}.{table}:column:{column}"
 
 
+# Ids of the objects the column statements change. Unlike operation keys,
+# two objects never share one: table ``t:column:x`` and column ``x:column:a``
+# of ``t`` give the same key (#801).
+def _column_id(database: str, table: str, column: str) -> str:
+    return json.dumps(["column", database, table, column])
+
+
+def _ttl_id(database: str, table: str) -> str:
+    return json.dumps(["ttl", database, table])
+
+
+def _rename_id(rename: ColumnRenameSuggestion) -> str:
+    return json.dumps(["rename", rename.database, rename.table, rename.from_, rename.to])
+
+
+def _statement_ids(
+    statements: Sequence[MigrationOperation],
+    previous: Sequence[SchemaDefinition],
+    next_: Sequence[SchemaDefinition],
+    renames: Sequence[ColumnRenameSuggestion],
+) -> list[str]:
+    """The id of the object each column statement changes (#801).
+
+    A key that names one object of the definitions or ``renames`` is that
+    object's. A key that names several (keys of two tables can be the same)
+    is the one whose table the statement's SQL alters, and for a RENAME
+    COLUMN whose SQL it is. A statement that is still not one object's keeps
+    its key as its id, so it reads and provides nothing.
+    """
+    candidates: dict[str, dict[str, Callable[[str], bool]]] = {}
+
+    def add(kind: str, key: str, id_: str, matches: Callable[[str], bool]) -> None:
+        candidates.setdefault(json.dumps([kind, key]), {}).setdefault(id_, matches)
+
+    for definition in [*previous, *next_]:
+        if not isinstance(definition, TableDefinition):
+            continue
+        prefix = f"ALTER TABLE {render_qualified_name(definition.database, definition.name)} "
+
+        def starts(sql: str, prefix: str = prefix) -> bool:
+            return sql.startswith(prefix)
+
+        for column in definition.columns:
+            add(
+                "column",
+                _column_key(definition.database, definition.name, column.name),
+                _column_id(definition.database, definition.name, column.name),
+                starts,
+            )
+        add(
+            "ttl",
+            f"table:{definition.database}.{definition.name}:ttl",
+            _ttl_id(definition.database, definition.name),
+            starts,
+        )
+    for rename in renames:
+        sql = (
+            f"ALTER TABLE {render_qualified_name(rename.database, rename.table)} "
+            f"RENAME COLUMN IF EXISTS {quote_identifier(rename.from_)} "
+            f"TO {quote_identifier(rename.to)};"
+        )
+
+        def equals(other: str, sql: str = sql) -> bool:
+            return other == sql
+
+        add("rename", column_rename_key(rename), _rename_id(rename), equals)
+
+    def kind_of(op: MigrationOperation) -> str:
+        if op.type == "alter_table_modify_ttl":
+            return "ttl"
+        return "rename" if op.type == "alter_table_rename_column" else "column"
+
+    ids: list[str] = []
+    for op in statements:
+        slot = json.dumps([kind_of(op), op.key])
+        found = candidates.get(slot, {})
+        matching = list(found)
+        if len(matching) > 1:
+            matching = [id_ for id_, matches in found.items() if matches(op.sql)]
+        ids.append(matching[0] if len(matching) == 1 else slot)
+    return ids
+
+
 def _dotted_names(sql: str, columns: set[str]) -> list[str]:
     """The column names that ``sql`` reads, from runs of bare or quoted names joined by dots.
 
@@ -1084,17 +1178,21 @@ def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
     return None
 
 
-def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+def _column_default_reads(
+    definitions: Sequence[SchemaDefinition],
+    column_key_of: Callable[[str, str, str], str] = _column_key,
+) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
-    A name followed by ``(`` is a function call, not a column, and neither are
-    the names ``_not_column_names`` finds.
+    Or the same with the keys ``column_key_of`` gives. A name followed by
+    ``(`` is a function call, not a column, and neither are the names
+    ``_not_column_names`` finds.
     """
     graph: dict[str, set[str]] = {}
     for definition in definitions:
         if not isinstance(definition, TableDefinition):
             continue
-        prefix = f"table:{definition.database}.{definition.name}:column:"
+        database, table_name = definition.database, definition.name
         names = {column.name for column in definition.columns}
         for column in definition.columns:
             if column.default is None:
@@ -1105,13 +1203,13 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             read: set[str] = set()
             for name in _dotted_names(parsed.sql, names):
                 if name != column.name:
-                    read.add(prefix + name)
-            graph[prefix + column.name] = read
+                    read.add(column_key_of(database, table_name, name))
+            graph[column_key_of(database, table_name, column.name)] = read
     return graph
 
 
 def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
-    """Table TTL operation key to the keys of the table's columns the TTL names.
+    """Table TTL id to the ids of the table's columns the TTL names.
 
     The TTL is read with the same rules as a column's default expression
     (``_dotted_names``).
@@ -1121,8 +1219,8 @@ def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[s
         if not isinstance(definition, TableDefinition) or definition.ttl is None:
             continue
         names = {column.name for column in definition.columns}
-        graph[f"table:{definition.database}.{definition.name}:ttl"] = {
-            _column_key(definition.database, definition.name, name)
+        graph[_ttl_id(definition.database, definition.name)] = {
+            _column_id(definition.database, definition.name, name)
             for name in _dotted_names(definition.ttl, names)
         }
     return graph

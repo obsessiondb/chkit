@@ -1,0 +1,5 @@
+---
+"chkit": patch
+---
+
+`generate` orders the column statements of each table by its own columns' reads when another table or rename gives the same operation key (for example table `t:column:x` and column `x:column:a` of table `t`), so `migrate` no longer runs a statement before the one it depends on. Plans for other schemas are unchanged.
