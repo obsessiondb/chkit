@@ -1256,7 +1256,7 @@ def _closing_paren(tokens: list[SQLToken], open_: int) -> int:
 
 # Bare words ClickHouse reads as literals (any case), even when a column has
 # that name (#805). A quoted ``null`` reads its column.
-_LITERAL_WORDS = frozenset({"false", "inf", "infinity", "nan", "null", "true"})
+_LITERAL_KEYWORDS = frozenset({"false", "inf", "infinity", "nan", "null", "true"})
 # Keywords that follow an operand (``x IS NULL``, ``CASE x WHEN 1 THEN 2 END``,
 # ``substring(s FROM 1 FOR 2)``, ``x AS y``). ClickHouse reads a column of that
 # name where an operand is expected (``end + 1``, ``THEN end``, ``x AND end``).
@@ -1292,7 +1292,7 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
 ) -> set[int]:
     """Indices of the single bare names in ``tokens`` (trivia removed) that are keywords (#805).
 
-    They read no column of that name: the words in ``_LITERAL_WORDS`` and NOT,
+    They read no column of that name: the words in ``_LITERAL_KEYWORDS`` and NOT,
     except before a single ``=``; CASE when no column has that name, with a
     WHEN right after it; a word in ``_INFIX_KEYWORDS`` right after a complete
     operand; and the name after such an AS (``toUInt64(x AS c)``), which
@@ -1340,7 +1340,7 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
             # A part of a dotted name, which may or may not be a complete operand.
             state = "unknown"
         # A word before a single ``=`` may be the column a TTL's ``SET col = …`` assigns.
-        elif word is not None and word in _LITERAL_WORDS and not assigned(i):
+        elif word is not None and word in _LITERAL_KEYWORDS and not assigned(i):
             keywords.add(i)
             state = "ended"
         elif word == "not" and not assigned(i):

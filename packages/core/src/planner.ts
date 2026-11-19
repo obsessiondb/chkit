@@ -1202,7 +1202,7 @@ function closingParen(tokens: SQLToken[], open: number): number {
 
 // Bare words ClickHouse reads as literals (any case), even when a column has
 // that name (#805). A quoted `` `null` `` reads its column.
-const LITERAL_WORDS: ReadonlySet<string> = new Set(['false', 'inf', 'infinity', 'nan', 'null', 'true'])
+const LITERAL_KEYWORDS: ReadonlySet<string> = new Set(['false', 'inf', 'infinity', 'nan', 'null', 'true'])
 // Keywords that follow an operand (`x IS NULL`, `CASE x WHEN 1 THEN 2 END`,
 // `substring(s FROM 1 FOR 2)`, `x AS y`). ClickHouse reads a column of that
 // name where an operand is expected (`end + 1`, `THEN end`, `x AND end`).
@@ -1227,7 +1227,7 @@ const EXTRACT_UNITS: ReadonlySet<string> = new Set([
 /**
  * Indices of the single bare names in `tokens` (trivia removed) that are
  * keywords, not reads of a column with that name (#805): the words in
- * `LITERAL_WORDS` and NOT, except before a single `=`; CASE when no column
+ * `LITERAL_KEYWORDS` and NOT, except before a single `=`; CASE when no column
  * has that name, with a WHEN right after it; a word in `INFIX_KEYWORDS`
  * right after a complete operand; and the name after such an AS
  * (`toUInt64(x AS c)`), which ClickHouse does not read as the column. A
@@ -1258,7 +1258,7 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
     // A part of a dotted name, which may or may not be a complete operand.
     else if (tokens[i - 1]?.text === '.' || tokens[i + 1]?.text === '.') state = 'unknown'
     // A word before a single `=` may be the column a TTL's `SET col = …` assigns.
-    else if (word !== undefined && LITERAL_WORDS.has(word) && !assigned(i)) {
+    else if (word !== undefined && LITERAL_KEYWORDS.has(word) && !assigned(i)) {
       keywords.add(i)
       state = 'ended'
     } else if (word === 'not' && !assigned(i)) {
