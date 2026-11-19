@@ -613,7 +613,7 @@ const UNVERIFIED_FAILURE_REASON =
   'the journal records it as failed, but not from a rejection the server recorded before it started (an earlier chkit release recorded it, it failed while it ran, or a run lost its submit response), so some of its writes may have been applied'
 const WHILE_PROCESSING_REASON =
   'the server reports it failed while it ran (ExceptionWhileProcessing), and a statement that fails while it runs can leave some of its writes applied (parts of an INSERT ... SELECT, a DDL that ran on some hosts)'
-const BEFORE_START_EFFECTS_REASON =
+export const BEFORE_START_EFFECTS_REASON =
   "the server reports it was rejected before it started (ExceptionBeforeStart), but a statement other than a SELECT or an INSERT can apply effects before that (an ALTER's mutation keeps running in system.mutations, or applied to some partitions before one failed)"
 const STALE_PREPARED_REASON =
   'the journal records it as prepared, not sent, but chkit cannot read every copy of the journal to rule out a newer record of it (one that may have been sent)'

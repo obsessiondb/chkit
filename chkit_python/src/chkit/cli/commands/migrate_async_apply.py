@@ -1086,7 +1086,7 @@ _WHILE_PROCESSING_REASON = (
     "that fails while it runs can leave some of its writes applied (parts of an INSERT ... "
     "SELECT, a DDL that ran on some hosts)"
 )
-_BEFORE_START_EFFECTS_REASON = (
+BEFORE_START_EFFECTS_REASON = (
     "the server reports it was rejected before it started (ExceptionBeforeStart), but a "
     "statement other than a SELECT or an INSERT can apply effects before that (an ALTER's "
     "mutation keeps running in system.mutations, or applied to some partitions before one "
@@ -1188,7 +1188,7 @@ def resolve_recorded_attempt(  # noqa: PLR0911, PLR0912 - one return per outcome
                 return RecordedAttempt(kind="unknown", reason=_WHILE_PROCESSING_REASON)
             if sql is not None and rejection_runs_nothing(sql):
                 return RecordedAttempt(kind="failed", error=status.error or "<unknown>")
-            return RecordedAttempt(kind="unknown", reason=_BEFORE_START_EFFECTS_REASON)
+            return RecordedAttempt(kind="unknown", reason=BEFORE_START_EFFECTS_REASON)
         if not prepared:
             return RecordedAttempt(kind="unknown", reason=_NO_ENTRY_REASON)
         # A prepared attempt with nothing of its id on the server was never

@@ -147,6 +147,7 @@ from chkit.cli.table_scope import (
 from chkit.clickhouse.client import ClickHouseClient, clickhouse_error_message
 from chkit.clickhouse.replicas import ReplicaFanout
 from chkit.core.model import ChxConfigEnv, ChxResolvedConfig, configured_index_granularity
+from chkit.core.sql_fingerprint import statement_fingerprint
 from chkit.plugins import ChxOnConfigLoadedContext, ChxPlugin
 
 
@@ -653,11 +654,20 @@ def run_mark_outcome(target: MarkTarget, ctx: _MigrateContext) -> None:
     def log(line: str) -> None:
         typer.echo(line, err=ctx.json_mode)
 
+    statements = (
+        extract_executable_statements(
+            (ctx.migrations_dir / target.migration).read_text(encoding="utf-8")
+        )
+        if target.migration in ctx.files
+        else []
+    )
+    sql_by_fingerprint = {statement_fingerprint(statement): statement for statement in statements}
     shown = read_stopped_statement(
         ctx.client,
         migration=target.migration,
         applied_names=ctx.applied_names,
         flag=flag,
+        sql_by_fingerprint=sql_by_fingerprint,
         journal_store=ctx.journal_store,
         log=log,
     )
@@ -670,6 +680,7 @@ def run_mark_outcome(target: MarkTarget, ctx: _MigrateContext) -> None:
                 shown,
                 applied_names=ctx.applied_names,
                 flag=flag,
+                sql_by_fingerprint=sql_by_fingerprint,
                 journal_store=ctx.journal_store,
                 log=log,
             )

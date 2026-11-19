@@ -4,7 +4,8 @@ import type { ClickHouseExecutor } from '@chkit/clickhouse'
 
 import type { JournalStore, MigrationRowState, OperationState } from '../../runtime/journal-store.js'
 import { abandonedError, readAbandonableState, type ReportedOperation } from './abandon.js'
-import { finishedRecordOf, isoWithoutZone, resolveRecordedAttempt, stopRunningAdvice } from './async-apply.js'
+import { CLI_VERSION } from '../../runtime/version.js'
+import { BEFORE_START_EFFECTS_REASON, finishedRecordOf, isoWithoutZone, resolveRecordedAttempt, stopRunningAdvice } from './async-apply.js'
 import { MigrateError, journalChangedError } from './errors.js'
 
 /** What the operator says about the attempt chkit could not resolve (#824). */
@@ -30,6 +31,14 @@ interface MarkDeps {
   now?: () => number
 }
 
+export interface MarkInput {
+  migration: string
+  appliedNames: ReadonlySet<string>
+  flag: string
+  /** The migration file's statements by fingerprint, empty when the file is gone. */
+  sqlByFingerprint: ReadonlyMap<string, string>
+}
+
 /**
  * The async statement of `migration` whose attempt has no known outcome
  * (async_outcome_unknown), read on every replica as an apply reads it. Refuses
@@ -37,21 +46,31 @@ interface MarkDeps {
  * itself, and when more than one statement has no known outcome.
  */
 export async function readStoppedStatement(
-  input: { migration: string; appliedNames: ReadonlySet<string>; flag: string },
+  input: MarkInput,
   deps: MarkDeps,
 ): Promise<{ state: MigrationRowState; op: OperationState }> {
   const { migration, flag } = input
   const state = await readAbandonableState({ migration, appliedNames: input.appliedNames }, deps, flag)
+  // The journal writer stamps this release on the state, after which apply no
+  // longer checks the positions another release recorded without fingerprints
+  // against this release's split (#562), so such a state is not marked.
+  if (state.chkitVersion !== CLI_VERSION && state.operations.some((op) => op.status !== 'failed' && op.fingerprint === '')) {
+    throw new MigrateError(
+      'mark_refused',
+      `Cannot ${flag} ${migration}: chkit ${state.chkitVersion} recorded its statements without their SQL fingerprints, so chkit cannot check that they are the statements this release splits the file into. Nothing was changed; reconcile every statement of ${migration} that already ran and run chkit migrate --apply --abandon ${migration}.`,
+    )
+  }
   const unknown: OperationState[] = []
   for (const op of state.operations) {
     if (op.status === 'completed' || op.queryId === '') continue
+    const sql = op.fingerprint === '' ? undefined : input.sqlByFingerprint.get(op.fingerprint)
     const recorded = await resolveRecordedAttempt({
       db: deps.db,
       journalStore: deps.journalStore,
       migrationName: migration,
       op,
       fingerprint: op.fingerprint,
-      sql: undefined,
+      sql,
       queryId: op.queryId,
       operationType: op.operationType,
       log: deps.log,
@@ -63,18 +82,26 @@ export async function readStoppedStatement(
         `Cannot ${flag} ${migration}: statement ${op.operationIndex + 1} (query_id ${op.queryId}) is still running on the server, so its outcome is not known yet. Nothing was changed. ${stopRunningAdvice(op.queryId)}`,
       )
     }
+    // Only the statement's SQL tells whether a rejection before the start ran
+    // nothing (a SELECT or an INSERT), which apply then retries itself.
+    if (recorded.kind === 'unknown' && recorded.reason === BEFORE_START_EFFECTS_REASON && sql === undefined) {
+      throw new MigrateError(
+        'mark_refused',
+        `Cannot ${flag} ${migration}: the server rejected statement ${op.operationIndex + 1} (query_id ${op.queryId}) before it started, and without the statement's SQL in the migration file chkit cannot tell whether that rejection ran nothing. Nothing was changed; restore the file, or reconcile every statement that already ran and run chkit migrate --apply --abandon ${migration}.`,
+      )
+    }
     if (recorded.kind === 'unknown') unknown.push(op)
   }
   const [op, ...more] = unknown
   if (op === undefined) {
     throw new MigrateError(
-      'migration_outcome_known',
+      'mark_refused',
       `Cannot ${flag} ${migration}: no statement of it stopped with async_outcome_unknown, so chkit resolves its state itself. Nothing was changed; run chkit migrate --apply.`,
     )
   }
   if (more.length > 0) {
     throw new MigrateError(
-      'migration_outcome_known',
+      'mark_refused',
       `Cannot ${flag} ${migration}: statements ${unknown.map((item) => item.operationIndex + 1).join(', ')} have no known outcome, and ${flag} acts on one. Nothing was changed; reconcile them and run chkit migrate --apply --abandon ${migration}.`,
     )
   }
@@ -116,10 +143,10 @@ export async function markStoppedStatement(
 export async function markUnderLock(
   target: MarkTarget,
   shown: { state: MigrationRowState; op: OperationState },
-  input: { appliedNames: ReadonlySet<string>; flag: string },
+  input: MarkInput,
   deps: MarkDeps,
 ): Promise<void> {
-  const current = await readStoppedStatement({ migration: target.migration, appliedNames: input.appliedNames, flag: input.flag }, deps)
+  const current = await readStoppedStatement(input, deps)
   if (current.state.appliedAt !== shown.state.appliedAt || current.op.queryId !== shown.op.queryId) {
     throw journalChangedError(`the journal state of ${target.migration} is no longer the one shown`)
   }

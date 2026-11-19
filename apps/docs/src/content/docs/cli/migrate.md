@@ -168,9 +168,11 @@ chkit migrate --apply
 
 The flags act on the one async statement whose attempt has no known outcome. They read its attempt on every replica, as `migrate --apply` does, and change nothing when:
 
-- the attempt still runs on any replica (`async_outcome_unknown`): wait for it, or `KILL QUERY` it and check what it applied; a replica that cannot be read stops the command too;
-- chkit can tell the outcome itself (`migration_outcome_known`): run `migrate --apply`;
-- more than one statement has no known outcome (`migration_outcome_known`): use `--abandon`;
+- the attempt still runs on a replica (`async_outcome_unknown`): wait for it, or `KILL QUERY` it and check what it applied;
+- chkit can tell the outcome itself (`mark_refused`): run `migrate --apply`;
+- the server rejected the attempt before it started and the migration file does not have the statement's SQL, which tells whether that rejection ran nothing (`mark_refused`);
+- more than one statement has no known outcome (`mark_refused`): use `--abandon`;
+- another chkit release recorded statements of the migration without their SQL fingerprints (`mark_refused`), so this release cannot check that they are the statements it splits the file into: use `--abandon`;
 - the journal has no in-progress state for the migration, or it is applied (as for `--abandon`).
 
 Without `--apply` they only report the statement (`--json` prints it as `mark`, below). They run no migration SQL, take the [migrate lock](#concurrent-runs) to write the journal, and cannot be combined with each other, `--abandon`, `--retry`, `--table`, `--allow-destructive` or `--cancel-lock-queries`.
@@ -589,7 +591,7 @@ A failure that stops the command prints the standard error envelope:
 | `migration_not_found` | `--retry` names a file that is not in the migrations directory |
 | `migration_not_in_progress` | `--abandon`, `--mark-applied`, `--mark-not-applied`: the journal has no in-progress state for the migration |
 | `migration_already_applied` | `--abandon`: the migration is already applied |
-| `migration_outcome_known` | `--mark-applied` / `--mark-not-applied`: no statement of the migration has an unknown outcome, so chkit resolves it itself, or more than one has |
+| `mark_refused` | `--mark-applied` / `--mark-not-applied`: no statement of the migration has an unknown outcome, so chkit resolves it itself, more than one has, the file lacks the SQL of a statement the server rejected before it started, or another release recorded statements without fingerprints; nothing changed |
 | `migrate_locked` | Another run holds the [migrate lock](#concurrent-runs); nothing was applied |
 | `migrate_lock_lost` | This run's lock renewals did not count for 60 seconds, a heartbeat did not read back, or another run broke its claim; the run stopped before its next request |
 | `migrate_lock_unverifiable` | A read right after this run wrote its lock claim did not return it; nothing was applied |

@@ -3,7 +3,7 @@ import { join, relative } from 'node:path'
 import process from 'node:process'
 
 import { assertServerIndexGranularity, type ClickHouseExecutor, type ClickHouseSettings } from '@chkit/clickhouse'
-import { configuredIndexGranularity, type ResolvedChxConfig } from '@chkit/core'
+import { configuredIndexGranularity, statementFingerprint, type ResolvedChxConfig } from '@chkit/core'
 
 import {
   defineFlags,
@@ -491,13 +491,17 @@ async function abandonUnderLock(ctx: AbandonContext, migration: string, state: M
  * Without --apply it only previews. Runs before every other gate and applies nothing.
  */
 export async function runMarkOutcome(
-  ctx: Pick<MigrateContext, 'jsonMode' | 'executeRequested' | 'journalStore' | 'tableScope' | 'appliedNames' | 'db' | 'withLock'>,
+  ctx: Pick<MigrateContext, 'jsonMode' | 'executeRequested' | 'journalStore' | 'tableScope' | 'appliedNames' | 'db' | 'withLock' | 'files' | 'migrationsDir'>,
   target: MarkTarget,
 ): Promise<number> {
   const flag = target.outcome === 'applied' ? 'mark-applied' : 'mark-not-applied'
   const log = ctx.jsonMode ? (line: string) => console.error(line) : (line: string) => console.log(line)
   const deps = { db: ctx.db, journalStore: ctx.journalStore, log }
-  const input = { migration: target.migration, appliedNames: ctx.appliedNames, flag }
+  const statements = ctx.files.includes(target.migration)
+    ? extractExecutableStatements(await readFile(join(ctx.migrationsDir, target.migration), 'utf8'))
+    : []
+  const sqlByFingerprint = new Map(statements.map((statement) => [statementFingerprint(statement), statement]))
+  const input = { migration: target.migration, appliedNames: ctx.appliedNames, flag, sqlByFingerprint }
   const shown = await readStoppedStatement(input, deps)
   const report = markReport(target, shown.op)
   if (ctx.executeRequested) {

@@ -7,15 +7,17 @@ Record the operator's outcome for the one statement that stopped with
 
 from __future__ import annotations
 
-from collections.abc import Callable, Collection
+from collections.abc import Callable, Collection, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
 from typing import Any, Literal
 
 import typer
 
+from chkit import __version__
 from chkit.cli.commands.migrate_abandon import abandoned_error, read_abandonable_state
 from chkit.cli.commands.migrate_async_apply import (
+    BEFORE_START_EFFECTS_REASON,
     finished_record_of,
     iso_without_zone,
     resolve_recorded_attempt,
@@ -40,6 +42,8 @@ def read_stopped_statement(
     migration: str,
     applied_names: Collection[str],
     flag: str,
+    # The migration file's statements by fingerprint, empty when the file is gone.
+    sql_by_fingerprint: Mapping[str, str],
     journal_store: JournalStore,
     log: Callable[[str], None],
 ) -> tuple[MigrationRowState, OperationState]:
@@ -52,17 +56,32 @@ def read_stopped_statement(
     state = read_abandonable_state(
         migration=migration, applied_names=applied_names, journal_store=journal_store, action=flag
     )
+    # The journal writer stamps this release on the state, after which apply no
+    # longer checks the positions another release recorded without fingerprints
+    # against this release's split (#562), so such a state is not marked.
+    if state.chkit_version != __version__ and any(
+        op.status != "failed" and op.fingerprint == "" for op in state.operations
+    ):
+        raise MigrateError(
+            "mark_refused",
+            f"Cannot {flag} {migration}: chkit {state.chkit_version} recorded its statements "
+            "without their SQL fingerprints, so chkit cannot check that they are the statements "
+            "this release splits the file into. Nothing was changed; reconcile every statement "
+            f"of {migration} that already ran and run chkit migrate --apply --abandon "
+            f"{migration}.",
+        )
     unknown: list[OperationState] = []
     for op in state.operations:
         if op.status == "completed" or op.query_id == "":
             continue
+        sql = sql_by_fingerprint.get(op.fingerprint) if op.fingerprint else None
         recorded = resolve_recorded_attempt(
             client,
             journal_store=journal_store,
             migration_name=migration,
             op=op,
             fingerprint=op.fingerprint,
-            sql=None,
+            sql=sql,
             query_id=op.query_id,
             operation_type=op.operation_type,
             log=log,
@@ -74,11 +93,27 @@ def read_stopped_statement(
                 f"(query_id {op.query_id}) is still running on the server, so its outcome "
                 f"is not known yet. Nothing was changed. {stop_running_advice(op.query_id)}",
             )
+        # Only the statement's SQL tells whether a rejection before the start ran
+        # nothing (a SELECT or an INSERT), which apply then retries itself.
+        if (
+            recorded.kind == "unknown"
+            and recorded.reason == BEFORE_START_EFFECTS_REASON
+            and sql is None
+        ):
+            raise MigrateError(
+                "mark_refused",
+                f"Cannot {flag} {migration}: the server rejected statement "
+                f"{op.operation_index + 1} (query_id {op.query_id}) before it started, and "
+                "without the statement's SQL in the migration file chkit cannot tell whether "
+                "that rejection ran nothing. Nothing was changed; restore the file, or "
+                "reconcile every statement that already ran and run chkit migrate --apply "
+                f"--abandon {migration}.",
+            )
         if recorded.kind == "unknown":
             unknown.append(op)
     if not unknown:
         raise MigrateError(
-            "migration_outcome_known",
+            "mark_refused",
             f"Cannot {flag} {migration}: no statement of it stopped with "
             "async_outcome_unknown, so chkit resolves its state itself. Nothing was "
             "changed; run chkit migrate --apply.",
@@ -86,7 +121,7 @@ def read_stopped_statement(
     if len(unknown) > 1:
         statements = ", ".join(str(item.operation_index + 1) for item in unknown)
         raise MigrateError(
-            "migration_outcome_known",
+            "mark_refused",
             f"Cannot {flag} {migration}: statements {statements} have no known outcome, "
             f"and {flag} acts on one. Nothing was changed; reconcile them and run chkit "
             f"migrate --apply --abandon {migration}.",
@@ -146,6 +181,7 @@ def mark_under_lock(
     *,
     applied_names: Collection[str],
     flag: str,
+    sql_by_fingerprint: Mapping[str, str],
     journal_store: JournalStore,
     log: Callable[[str], None],
 ) -> None:
@@ -155,6 +191,7 @@ def mark_under_lock(
         migration=target.migration,
         applied_names=applied_names,
         flag=flag,
+        sql_by_fingerprint=sql_by_fingerprint,
         journal_store=journal_store,
         log=log,
     )
