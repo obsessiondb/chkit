@@ -231,7 +231,16 @@ def test_normalize_query_json_result_wraps_envelope() -> None:
 # ---------- RemoteClickHouseClient ----------
 
 
+def _add_async_insert_lookup(httpx_mock: HTTPXMock) -> None:
+    """Answer a write's async_insert lookup (#803): the profile doesn't lock it."""
+    httpx_mock.add_response(
+        url=f"{BASE}/rpc/workbench/query/execute",
+        json={"data": [["0"]], "meta": [{"name": "readonly", "type": "String"}], "rows": 1},
+    )
+
+
 def test_remote_client_execute_raises_on_error_field(httpx_mock: HTTPXMock) -> None:
+    _add_async_insert_lookup(httpx_mock)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [], "meta": [], "rows": 0, "error": "bad sql"},
@@ -273,6 +282,7 @@ def test_remote_client_query_json_returns_envelope(httpx_mock: HTTPXMock) -> Non
 
 
 def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> None:
+    _add_async_insert_lookup(httpx_mock)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [], "meta": [], "rows": 0},
@@ -281,10 +291,11 @@ def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> 
     qid = client.submit("ALTER TABLE x ADD COLUMN y UInt64", query_id="my-qid")
     assert qid == "my-qid"
     # The id travels as the top-level queryId, never as a query_id setting.
-    [request] = httpx_mock.get_requests()
+    [_lookup, request] = httpx_mock.get_requests()
     assert json.loads(request.content)["json"] == {
         "serviceSlug": SVC,
         "query": "ALTER TABLE x ADD COLUMN y UInt64",
+        "settings": {"async_insert": 0},
         "queryId": "my-qid",
     }
 
@@ -292,13 +303,14 @@ def test_remote_client_submit_returns_passed_query_id(httpx_mock: HTTPXMock) -> 
 def test_remote_client_submit_without_query_id_returns_server_id(
     httpx_mock: HTTPXMock,
 ) -> None:
+    _add_async_insert_lookup(httpx_mock)
     httpx_mock.add_response(
         url=f"{BASE}/rpc/workbench/query/execute",
         json={"data": [], "meta": [], "rows": 0, "query_id": "server-id"},
     )
     client = create_remote_executor(_creds(), service_slug=SVC)
     assert client.submit("SELECT 1") == "server-id"
-    [request] = httpx_mock.get_requests()
+    [_lookup, request] = httpx_mock.get_requests()
     assert "queryId" not in json.loads(request.content)["json"]
 
 

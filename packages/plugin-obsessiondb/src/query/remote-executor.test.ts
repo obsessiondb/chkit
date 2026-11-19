@@ -179,6 +179,44 @@ describe('createRemoteExecutor command', () => {
 			workbench.stop()
 		}
 	})
+
+	// A profile that locks async_insert rejects any change of it, also on DDL.
+	test('sends only the caller\'s settings when the profile locks async_insert, looked up once', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, asyncInsertReadonly: '1' })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.command('CREATE TABLE t (id UInt64) ENGINE = MergeTree ORDER BY id')
+			await remote.insert({ table: 't', values: [{ id: 1 }], settings: { insert_deduplication_token: 'tok' } })
+			await remote.commandTracked?.('INSERT INTO t VALUES (2)', () => {}, async () => 'tracked-locked')
+			await remote.submit('INSERT INTO t VALUES (3)', 'qid-locked')
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'CREATE TABLE t (id UInt64) ENGINE = MergeTree ORDER BY id' },
+				{ serviceSlug: 'test', query: 'INSERT INTO t (id) VALUES (1)', settings: { insert_deduplication_token: 'tok' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO t VALUES (2)', queryId: 'tracked-locked' },
+				{ serviceSlug: 'test', query: 'INSERT INTO t VALUES (3)', queryId: 'qid-locked' },
+			])
+			expect(workbench.settingsLookups).toHaveLength(1)
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends no write when the async_insert lookup fails, and looks it up again next time', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1, asyncInsertReadonly: { error: 'Code: 497. ACCESS_DENIED' } })
+		try {
+			const remote = connect(workbench.url)
+
+			await expect(remote.command('DROP TABLE t')).rejects.toThrow('ACCESS_DENIED')
+			await expect(remote.command('DROP TABLE t')).rejects.toThrow('ACCESS_DENIED')
+
+			expect(workbench.inputs).toEqual([])
+			expect(workbench.settingsLookups).toHaveLength(2)
+		} finally {
+			workbench.stop()
+		}
+	})
 })
 
 describe('createRemoteExecutor cancellation transport', () => {
@@ -494,14 +532,27 @@ function startScriptedWorkbench(script: {
 	truncated?: boolean
 	tables?: { meta: string[]; data: string[][] }
 	queryLog?: { meta: string[]; data: string[][] }
+	/** system.settings `readonly` of async_insert; an error object fails the lookup. */
+	asyncInsertReadonly?: '0' | '1' | { error: string }
 }) {
 	const queries: string[] = []
 	const inputs: Array<Record<string, unknown>> = []
+	// The writes' async_insert lookup, kept apart from the inputs.
+	const settingsLookups: string[] = []
 	const server = Bun.serve({
 		port: 0,
 		async fetch(request) {
 			const { json: input } = (await request.json()) as {
 				json: { query: string } & Record<string, unknown>
+			}
+			if (input.query.includes('FROM system.settings')) {
+				settingsLookups.push(input.query)
+				const readonly = script.asyncInsertReadonly ?? '0'
+				return Response.json({
+					json: typeof readonly === 'string'
+						? { data: [[readonly]], meta: [{ name: 'readonly', type: 'String' }], rows: 1 }
+						: { data: [], meta: [], rows: 0, error: readonly.error },
+				})
 			}
 			inputs.push(input)
 			queries.push(input.query)
@@ -528,5 +579,5 @@ function startScriptedWorkbench(script: {
 			return Response.json({ json: { data: [], meta: [], rows: 0 } })
 		},
 	})
-	return { url: `http://127.0.0.1:${server.port}`, queries, inputs, stop: () => server.stop(true) }
+	return { url: `http://127.0.0.1:${server.port}`, queries, inputs, settingsLookups, stop: () => server.stop(true) }
 }

@@ -653,3 +653,37 @@ def test_no_write_is_an_asynchronous_insert_under_a_fire_and_forget_profile(
     finally:
         live.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
         live.execute(f"DROP TABLE IF EXISTS {table} SYNC")
+
+
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
+def test_writes_run_under_a_profile_that_locks_async_insert(
+    live_env: LiveEnv, live: ClickHouseClient
+) -> None:
+    """A profile that locks async_insert rejects any change of it
+    (SETTING_CONSTRAINT_VIOLATION), also on DDL, so writes leave it out there.
+    Port of the TS test in ``remote-executor.e2e.test.ts``."""
+    prefix = create_prefix("remote_locked_async_py")
+    user = f"{prefix}user"
+    password = "Pw-remote-locked-async"
+    name = f"{prefix}t"
+    table = f"{quote_ident(live_env.clickhouse_database)}.{quote_ident(name)}"
+    try:
+        live.execute(
+            f"CREATE USER {quote_ident(user)} IDENTIFIED BY '{password}' SETTINGS "
+            "async_insert = 1 CONST, wait_for_async_insert = 1"
+        )
+        live.execute(f"GRANT CREATE TABLE, INSERT, SELECT ON {table} TO {quote_ident(user)}")
+        as_user = replace(live_env, clickhouse_user=user, clickhouse_password=password)
+        for remote in _serve_remote(as_user):
+            remote.execute(f"CREATE TABLE {table} (id UInt64) ENGINE = MergeTree ORDER BY id")
+            wait_for_table(live, live_env.clickhouse_database, name)
+            remote.insert(f"{live_env.clickhouse_database}.{name}", [{"id": 1}])
+            remote.execute_tracked(
+                f"INSERT INTO {table} VALUES (2)", lambda: None, lambda: str(uuid.uuid4())
+            )
+            remote.submit(f"INSERT INTO {table} VALUES (3)", str(uuid.uuid4()))
+        # wait_for_async_insert = 1: each insert returned once flushed.
+        assert live.query(f"SELECT toString(count()) AS n FROM {table}").rows == [{"n": "3"}]
+    finally:
+        live.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
+        live.execute(f"DROP TABLE IF EXISTS {table} SYNC")

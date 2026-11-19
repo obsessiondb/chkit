@@ -125,7 +125,8 @@ def test_get_context_returns_the_remote_executor_for_the_selected_service(
     assert ctx.has_executor is True
     assert isinstance(ctx.executor, RemoteClickHouseClient)
     ctx.executor.execute("SELECT 1")
-    assert slugs == [SLUG]
+    # The write's async_insert lookup (#803), then the statement.
+    assert slugs == [SLUG, SLUG]
 
 
 def test_check_without_clickhouse_block_runs_through_the_selected_service(

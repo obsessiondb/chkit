@@ -74,15 +74,6 @@ def _coerce_wire_settings(
     return coerced or None
 
 
-def _write_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
-    """Sent with writes (execute, insert, submit) under the caller's settings,
-    as a direct connection sends: an INSERT with inline data is no
-    asynchronous insert, which a service profile with
-    ``wait_for_async_insert = 0`` would finish while its rows are still
-    buffered. TS ``writeSettings``."""
-    return {"async_insert": 0, **(settings or {})}
-
-
 def _row_to_dict(row: Any, column_names: Sequence[str]) -> dict[str, Any]:
     """Normalize ``data`` rows — TS returns lists for unnamed, dicts otherwise."""
     if isinstance(row, dict):
@@ -126,7 +117,7 @@ def _raise_if_error(result: WorkbenchExecuteResult) -> None:
 class RemoteClickHouseClient:
     """Drop-in replacement for :class:`chkit.clickhouse.client.ClickHouseClient`."""
 
-    __slots__ = ("_credentials", "_database", "_service_slug")
+    __slots__ = ("_async_insert_locked", "_credentials", "_database", "_service_slug")
     query_control_cluster: str = "default"
 
     def __init__(
@@ -139,6 +130,7 @@ class RemoteClickHouseClient:
         self._credentials: Credentials = credentials
         self._service_slug: str = service_slug
         self._database: str = database
+        self._async_insert_locked: bool | None = None
 
     # ---- context manager parity ----
 
@@ -156,6 +148,25 @@ class RemoteClickHouseClient:
     def database(self) -> str:
         return self._database
 
+    def _write_settings(self, settings: dict[str, Any] | None) -> dict[str, Any] | None:
+        """Sent with writes (execute, insert, submit) under the caller's
+        settings, as the direct connection sends: an INSERT with inline data is
+        no asynchronous insert, which a service profile with
+        ``wait_for_async_insert = 0`` would finish while its rows are still
+        buffered. A profile that locks the setting (a constraint, or
+        readonly = 1) rejects any change of it, also on DDL, so it is left out
+        there. Looked up once; a failed lookup is not cached. TS
+        ``writeSettings``."""
+        if self._async_insert_locked is None:
+            rows = self.query(
+                "SELECT toString(readonly) AS readonly FROM system.settings "
+                "WHERE name = 'async_insert'"
+            ).rows
+            self._async_insert_locked = bool(rows) and rows[0]["readonly"] != "0"
+        if self._async_insert_locked:
+            return settings
+        return {"async_insert": 0, **(settings or {})}
+
     # ---- ClickHouseClient surface ----
 
     def execute_tracked(
@@ -165,10 +176,12 @@ class RemoteClickHouseClient:
         before_attempt: Callable[[], str],
         settings: dict[str, Any] | None = None,
     ) -> None:
+        # Looked up first: no request may come between the last check and the send.
+        sent = self._write_settings(settings)
         check()
         query_id = before_attempt()
         check()
-        wire_settings = _coerce_wire_settings(_write_settings(settings)) or {}
+        wire_settings = _coerce_wire_settings(sent) or {}
         wire_settings.pop("query_id", None)
         result = workbench_query_execute(
             self._credentials,
@@ -214,7 +227,7 @@ class RemoteClickHouseClient:
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
-            settings=_coerce_wire_settings(_write_settings(settings)),
+            settings=_coerce_wire_settings(self._write_settings(settings)),
         )
         _raise_if_error(result)
 
@@ -250,9 +263,11 @@ class RemoteClickHouseClient:
         *,
         before_send: Callable[[], None] | None = None,
     ) -> str:
-        # Never start a request after the caller gave up on it, and stop one
-        # still connecting before its first bytes (#767), as the native driver
-        # does. QUERY_TIMEOUT bounds the connect (10 s).
+        # The settings are resolved first, so no request comes between the
+        # cancel check and the send. Never start a request after the caller
+        # gave up on it, and stop one still connecting before its first bytes
+        # (#767), as the native driver does. QUERY_TIMEOUT bounds the connect (10 s).
+        wire_settings = _coerce_wire_settings(self._write_settings(settings))
         if before_send is not None:
             before_send()
         # The API takes the id as a top-level field and ignores a query_id
@@ -261,7 +276,7 @@ class RemoteClickHouseClient:
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
-            settings=_coerce_wire_settings(_write_settings(settings)),
+            settings=wire_settings,
             query_id=query_id,
             guard=before_send,
         )

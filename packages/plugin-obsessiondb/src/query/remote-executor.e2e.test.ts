@@ -187,6 +187,36 @@ describe('createRemoteExecutor write settings (live)', () => {
 			await admin.close()
 		}
 	}, TIMEOUT_MS)
+
+	// A profile that locks async_insert rejects any change of it
+	// (SETTING_CONSTRAINT_VIOLATION), also on DDL, so writes leave it out there.
+	test.skipIf(onObsessionDB)('writes run under a profile that locks async_insert', async () => {
+		const env = getLiveEnv()
+		const admin = createLiveExecutor(env)
+		const prefix = createPrefix('remote_locked_async')
+		const user = `${prefix}user`
+		const password = 'Pw-remote-locked-async'
+		const name = `${prefix}t`
+		const table = `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(name)}`
+		const workbench = startWorkbench({ ...env, clickhouseUser: user, clickhousePassword: password })
+		try {
+			await admin.command(`CREATE USER ${quoteIdent(user)} IDENTIFIED BY '${password}' SETTINGS async_insert = 1 CONST, wait_for_async_insert = 1`)
+			await admin.command(`GRANT CREATE TABLE, INSERT, SELECT ON ${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(name)} TO ${quoteIdent(user)}`)
+			const remote = connect(workbench.url)
+			await remote.command(`CREATE TABLE ${table} (id UInt64) ENGINE = MergeTree ORDER BY id`)
+			await waitForTable(admin, env.clickhouseDatabase, name)
+			await remote.insert({ table: `${env.clickhouseDatabase}.${name}`, values: [{ id: 1 }] })
+			await remote.commandTracked?.(`INSERT INTO ${table} VALUES (2)`, () => {}, async () => randomUUID())
+			await remote.submit(`INSERT INTO ${table} VALUES (3)`, randomUUID())
+			// wait_for_async_insert = 1: each insert returned once flushed.
+			expect(await admin.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`)).toEqual([{ n: '3' }])
+		} finally {
+			workbench.stop()
+			await admin.command(`DROP USER IF EXISTS ${quoteIdent(user)}`)
+			await admin.command(`DROP TABLE IF EXISTS ${table} SYNC`)
+			await admin.close()
+		}
+	}, TIMEOUT_MS)
 })
 
 // The table with index_granularity filled in as drift does when the stored
