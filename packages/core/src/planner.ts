@@ -893,6 +893,9 @@ export function orderColumnStatements(
 ): MigrationOperation[] {
   const reads = columnDefaultReads(definitions.next)
   const oldReads = columnDefaultReads(definitions.previous)
+  // ALTER's check for cyclic defaults also reads lambda parameters (#799).
+  const cycleReads = columnDefaultReads(definitions.next, true)
+  const oldCycleReads = columnDefaultReads(definitions.previous, true)
   const ttlReads = tableTtlReads(definitions.next)
   const oldTtlReads = tableTtlReads(definitions.previous)
   const renamedTo = new Map(renames.map((rename) => [columnRenameKey(rename), columnKey(rename, rename.to)]))
@@ -932,7 +935,7 @@ export function orderColumnStatements(
     }
     // A column's last statement is the MODIFY COLUMN that sets its new expression.
     if (op.type === 'alter_table_modify_column' && statements[index + 1]?.key !== op.key) {
-      for (const column of cycleReleases(op.key, reads, oldReads, added)) {
+      for (const column of cycleReleases(op.key, cycleReads, oldCycleReads, added)) {
         for (const other of modifies.get(column) ?? []) found.add(other)
       }
     }
@@ -1053,9 +1056,10 @@ function longestColumnPrefix(parts: string[], columns: ReadonlySet<string>): str
 /**
  * Column operation key → keys of the other columns of the same table that the
  * column's default expression names. A name followed by `(` is a function
- * call, not a column, and neither are the names `notColumnNames` finds.
+ * call, not a column, and neither are the names `notColumnNames` finds. With
+ * `lambdas`, the lambdas' own names read columns as well (`lambdaReads`).
  */
-export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyGraph {
+export function columnDefaultReads(definitions: SchemaDefinition[], lambdas = false): DependencyGraph {
   const graph = new Map<string, Set<string>>()
   for (const def of definitions) {
     if (def.kind !== 'table') continue
@@ -1066,13 +1070,37 @@ export function columnDefaultReads(definitions: SchemaDefinition[]): DependencyG
       const parsed = parseColumnDefault(column.default)
       if (parsed.kind !== 'expression') continue
       const read = new Set<string>()
-      for (const name of dottedNames(parsed.sql, names)) {
+      const found = dottedNames(parsed.sql, names)
+      for (const name of lambdas ? [...found, ...lambdaReads(parsed.sql, names)] : found) {
         if (name !== column.name) read.add(keyOf(name))
       }
       graph.set(keyOf(column.name), read)
     }
   }
   return graph
+}
+
+/**
+ * The columns the lambdas in `sql` name where `dottedNames` skips them (#768):
+ * each lambda's parameter list and body, read by the rules of `dottedNames`.
+ * ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
+ * parameters as columns, even one its body never uses (#799).
+ */
+function lambdaReads(sql: string, columns: ReadonlySet<string>): string[] {
+  const tokens = tokenizeSQL(sql).filter((token) => !isTrivia(token))
+  const found: string[] = []
+  const read = (from: number, to: number) => {
+    if (from < to) found.push(...dottedNames(sql.slice(tokens[from]!.start, tokens[to - 1]!.end), columns))
+  }
+  tokens.forEach((token, i) => {
+    const next = tokens[i + 1]
+    if (token.text !== '-' || next?.text !== '>' || token.end !== next.start) return
+    const params = lambdaParameters(tokens, i)
+    if (params === undefined) return
+    read(params.from, i)
+    read(i + 2, groupEnd(tokens, i + 2))
+  })
+  return found
 }
 
 /**

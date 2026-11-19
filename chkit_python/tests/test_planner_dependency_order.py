@@ -853,6 +853,44 @@ def test_a_lambda_parameter_named_like_a_column_is_not_a_read() -> None:
     ]
 
 
+# ALTER's check for cyclic defaults counts a lambda parameter named like a
+# column as a read of it, so MODIFY `a` DEFAULT b first met the old `b`
+# DEFAULT that declares `a`: Cyclic alias detected (#799).
+@pytest.mark.parametrize(
+    "expression",
+    [
+        "arraySum(arrayMap(a -> 1, [1]))",
+        "arraySum(arrayMap((x, a) -> x, [1], [2]))",
+        "arraySum(arrayMap(lambda(tuple(a), 1), [1]))",
+    ],
+)
+def test_an_old_lambda_parameter_named_like_a_column_holds_back_the_modify_that_reads_back(
+    expression: str,
+) -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr(expression)}])],
+        [_t([{"name": "a", "type": "UInt64", "default": _expr("b")}, {"name": "b", "type": "UInt64"}])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;",
+    ]
+
+
+def test_a_new_lambda_parameter_named_like_a_column_waits_for_the_release_of_its_old_read_back() -> None:
+    assert _sqls(
+        [_t([{"name": "a", "type": "UInt64"}, {"name": "b", "type": "UInt64", "default": _expr("a")}])],
+        [_t([
+            {"name": "a", "type": "UInt64", "default": _expr("arraySum(arrayMap(b -> 1, [1]))")},
+            {"name": "b", "type": "UInt64"},
+        ])],
+    ) == [
+        "ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;",
+        "ALTER TABLE app.t MODIFY COLUMN `b` UInt64;",
+        "ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(b -> 1, [1]));",
+    ]
+
+
 def test_a_cast_type_named_like_a_column_is_not_a_read() -> None:
     assert _sqls(
         [_t([

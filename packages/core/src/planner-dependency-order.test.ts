@@ -815,6 +815,44 @@ describe('planDiff orders the column statements of a table by the columns they r
     ])
   })
 
+  // ALTER's check for cyclic defaults counts a lambda parameter named like a
+  // column as a read of it, so MODIFY `a` DEFAULT b first met the old `b`
+  // DEFAULT that declares `a`: Cyclic alias detected (#799).
+  test.each([
+    'arraySum(arrayMap(a -> 1, [1]))',
+    'arraySum(arrayMap((x, a) -> x, [1], [2]))',
+    'arraySum(arrayMap(lambda(tuple(a), 1), [1]))',
+  ])('an old lambda parameter named like a column holds back the MODIFY that reads back: %s', (expression) => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression } }])],
+        [t([{ name: 'a', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64' }])]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT b;',
+    ])
+  })
+
+  test('a new lambda parameter named like a column waits for the release of its old read back (#799)', () => {
+    expect(
+      sqls(
+        [t([{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }])],
+        [
+          t([
+            { name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(b -> 1, [1]))' } },
+            { name: 'b', type: 'UInt64' },
+          ]),
+        ]
+      )
+    ).toEqual([
+      'ALTER TABLE app.t MODIFY COLUMN `b` REMOVE DEFAULT;',
+      'ALTER TABLE app.t MODIFY COLUMN `b` UInt64;',
+      'ALTER TABLE app.t MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(b -> 1, [1]));',
+    ])
+  })
+
   test('a CAST type named like a column is not a read', () => {
     expect(
       sqls(

@@ -913,6 +913,9 @@ def order_column_statements(
     """
     reads = _column_default_reads(next_)
     old_reads = _column_default_reads(previous)
+    # ALTER's check for cyclic defaults also reads lambda parameters (#799).
+    cycle_reads = _column_default_reads(next_, lambdas=True)
+    old_cycle_reads = _column_default_reads(previous, lambdas=True)
     ttl_reads = _table_ttl_reads(next_)
     old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
@@ -957,7 +960,7 @@ def order_column_statements(
         # A column's last statement is the MODIFY COLUMN that sets its new expression.
         is_last = index + 1 == len(statements) or statements[index + 1].key != op.key
         if op.type == "alter_table_modify_column" and is_last:
-            for column in _cycle_releases(op.key, reads, old_reads, added):
+            for column in _cycle_releases(op.key, cycle_reads, old_cycle_reads, added):
                 for other in modifies.get(column, []):
                     found[other] = None
         if index > 0 and statements[index - 1].key == op.key:
@@ -1084,11 +1087,14 @@ def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
     return None
 
 
-def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+def _column_default_reads(
+    definitions: Sequence[SchemaDefinition], lambdas: bool = False
+) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
     A name followed by ``(`` is a function call, not a column, and neither are
-    the names ``_not_column_names`` finds.
+    the names ``_not_column_names`` finds. With ``lambdas``, the lambdas' own
+    names read columns as well (``_lambda_reads``).
     """
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -1103,11 +1109,40 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             if parsed.kind != "expression":
                 continue
             read: set[str] = set()
-            for name in _dotted_names(parsed.sql, names):
+            found = _dotted_names(parsed.sql, names)
+            for name in [*found, *_lambda_reads(parsed.sql, names)] if lambdas else found:
                 if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
     return graph
+
+
+def _lambda_reads(sql: str, columns: set[str]) -> list[str]:
+    """The columns the lambdas in ``sql`` name where ``_dotted_names`` skips them (#768).
+
+    Each lambda's parameter list and body, read by the rules of
+    ``_dotted_names``. ClickHouse's ALTER check for cyclic defaults (code 174)
+    reads a lambda's parameters as columns, even one its body never uses (#799).
+    """
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    found: list[str] = []
+
+    def read(start: int, stop: int) -> None:
+        if start < stop:
+            found.extend(_dotted_names(sql[tokens[start].start : tokens[stop - 1].end], columns))
+
+    for i, token in enumerate(tokens):
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if following is None or token.text != "-" or following.text != ">":
+            continue
+        if token.end != following.start:
+            continue
+        params = _lambda_parameters(tokens, i)
+        if params is None:
+            continue
+        read(params[1], i)
+        read(i + 2, _group_end(tokens, i + 2))
+    return found
 
 
 def _table_ttl_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
