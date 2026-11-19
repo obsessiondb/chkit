@@ -1348,12 +1348,14 @@ def _keyword_names(  # noqa: PLR0915 — mirrors TS keywordNames
             # after an operand it starts ``NOT IN``, ``NOT LIKE`` or ``NOT BETWEEN``.
             keywords.add(i)
         elif word == "case" and token.text not in columns:
-            # Without a column of that name, a CASE that parses is the keyword.
+            # Without a column of that name, `case` is the keyword or an alias the
+            # expression defines (``s AS case``), and a WHEN right after it is the
+            # keyword or an alias too. Which one it is stays unknown.
             keywords.add(i)
             if bare(i + 1) == "when":
                 i += 1
                 keywords.add(i)
-            state = "operand"
+            state = "unknown"
         elif word is not None and word in _INFIX_KEYWORDS and state == "ended":
             keywords.add(i)
             state = "ended" if word == "end" else "operand"

@@ -1156,7 +1156,7 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
 
   test.each<[string, string[]]>([
     ['case when x = 1 then 2 else 3 end', ['x']],
-    ['case x when 1 then 2 end', ['x']],
+    ['case x when 1 then 2 end', ['when', 'x']],
     ['CASE x WHEN 1 THEN 2 END + 0', ['x']],
     ['if(x is null, 1, 2)', ['x']],
     ['if(x is not null, 1, 2)', ['x']],
@@ -1203,6 +1203,8 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     // Unclear positions keep the read: after a lambda parameter, and before a single `=`.
     ['arraySum(arrayMap(i -> i is null, [x]))', ['is', 'x']],
     ['toUInt8(null = 1)', ['null']],
+    // An alias named `case` (`s AS case`) is no CASE keyword.
+    ['length(concat(toString(s) AS case, substring(case from then)))', ['from', 's', 'then']],
     ["length(extract(interval from day > interval 0 day ? 'a' : 'b', '.'))", ['from', 'interval']],
   ])('column: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)

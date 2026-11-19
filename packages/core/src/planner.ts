@@ -1266,13 +1266,15 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
       // after an operand it starts `NOT IN`, `NOT LIKE` or `NOT BETWEEN`.
       keywords.add(i)
     } else if (word === 'case' && !columns.has(token.text)) {
-      // Without a column of that name, a CASE that parses is the keyword.
+      // Without a column of that name, `case` is the keyword or an alias the
+      // expression defines (`s AS case`), and a WHEN right after it is the
+      // keyword or an alias too. Which one it is stays unknown.
       keywords.add(i)
       if (bare(i + 1) === 'when') {
         i += 1
         keywords.add(i)
       }
-      state = 'operand'
+      state = 'unknown'
     } else if (word !== undefined && INFIX_KEYWORDS.has(word) && state === 'ended') {
       keywords.add(i)
       state = word === 'end' ? 'ended' : 'operand'
