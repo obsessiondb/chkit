@@ -13,7 +13,7 @@ Hard-fails (never skips) if a node is unreachable.
 from __future__ import annotations
 
 import os
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 from pathlib import Path
 
 import pytest
@@ -23,6 +23,7 @@ from tests.cutover_scenario import (
     create_cutover_project,
     drop_cutover_project,
     run_keep_scenario,
+    run_refused_at_start_scenario,
     run_retry_scenario,
     write_schema,
 )
@@ -97,6 +98,45 @@ def test_resumes_after_a_failure_at_every_step_on_both_shards(
     target: CutoverTarget, tmp_path: Path
 ) -> None:
     run_retry_scenario(target, "cutover_retry_2s", tmp_path)
+
+
+# The schema says {uuid}, but the snapshot is created AS the table and takes the
+# path the server stores.
+@pytest.mark.parametrize(
+    ("label", "path"),
+    [
+        ("cutover_table_path_2s", lambda _table: "/clickhouse/tables/{shard}/{database}/{table}"),
+        ("cutover_literal_path_2s", lambda table: f"/clickhouse/tables/{{shard}}/literal_{table}"),
+    ],
+)
+def test_stops_before_it_creates_anything_when_the_stored_path_has_no_uuid(
+    target: CutoverTarget, tmp_path: Path, label: str, path: Callable[[str], str]
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        label,
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String",
+        engine=lambda table: f"ReplicatedMergeTree('{path(table)}', '{{replica}}')",
+        message="stores has no {uuid}",
+    )
+
+
+# {uuid} in the sorting key is not the replication path.
+def test_stops_before_it_creates_anything_when_uuid_is_only_in_the_sorting_key(
+    target: CutoverTarget, tmp_path: Path
+) -> None:
+    run_refused_at_start_scenario(
+        target,
+        "cutover_uuid_key_2s",
+        tmp_path,
+        columns="id UInt64, user_id UInt64, payload String",
+        engine=lambda table: (
+            f"ReplicatedMergeTree('/clickhouse/tables/{{shard}}/literal_{table}', '{{replica}}')"
+        ),
+        message="stores has no {uuid}",
+        order_by="(id, cityHash64(id, '{uuid}'))",
+    )
 
 
 def test_refuses_the_backfill_copy_with_a_cluster(target: CutoverTarget, tmp_path: Path) -> None:

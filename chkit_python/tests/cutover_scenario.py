@@ -34,6 +34,7 @@ from tests.e2e_testkit import (
     create_journal_table_name,
     create_prefix,
     format_test_diagnostic,
+    poll_until,
     wait_for_table_on_every_replica,
 )
 
@@ -73,6 +74,8 @@ class CutoverProject:
     ingest: str
     previous: str
     historic: int = HISTORIC_ROWS
+    # The table's columns in the schema, when they are not id, user_id and payload.
+    columns: list[dict[str, Any]] | None = None
 
 
 @dataclass
@@ -90,7 +93,10 @@ class CliOutcome:
 
 
 def create_cutover_project(
-    target: CutoverTarget, label: str, directory: Path
+    target: CutoverTarget,
+    label: str,
+    directory: Path,
+    columns: list[dict[str, Any]] | None = None,
 ) -> CutoverProject:
     """Write config + schema, migrate the initial table and insert the historic rows.
 
@@ -104,6 +110,7 @@ def create_cutover_project(
         by_user=f"{prefix}events_by_user",
         ingest=f"{prefix}ingest",
         previous=f"{prefix}events_previous",
+        columns=columns,
     )
     os.environ["CHKIT_JOURNAL_TABLE"] = project.journal_table
     config = {
@@ -168,8 +175,9 @@ columns = [
     {{"name": "user_id", "type": "UInt64"}},
     {{"name": "payload", "type": "String"}},
 ]
+table_columns = {project.columns!r} or columns
 
-events = table(database={db!r}, name={project.table!r}, engine={engine!r}, columns=columns,
+events = table(database={db!r}, name={project.table!r}, engine={engine!r}, columns=table_columns,
                primary_key={order_by!r}, order_by={order_by!r}, settings={settings!r})
 by_user = table(database={db!r}, name={project.by_user!r}, engine={engine!r},
                 columns=[{{"name": "user_id", "type": "UInt64"}}, {{"name": "id", "type": "UInt64"}}],
@@ -606,6 +614,123 @@ def run_retry_scenario(
     finally:
         if writers is not None:
             writers.stop()
+        drop_cutover_project(target, project)
+
+
+def run_undeclared_primary_key_scenario(
+    target: CutoverTarget, label: str, directory: Path
+) -> None:
+    """A table created with only ORDER BY, as outside chkit (#524). Before
+    ClickHouse 26.7 its parts attach only to a table that leaves PRIMARY KEY
+    out too, so the snapshot must copy the table's stored definition."""
+    project = create_cutover_project(target, label, directory)
+    try:
+        fqn = f"{target.database}.{project.table}"
+        target.admin.execute(f"DROP TABLE {fqn} SYNC")
+        target.admin.execute(
+            f"CREATE TABLE {fqn} (id UInt64, user_id UInt64, payload String) "
+            f"ENGINE = {target.engine} ORDER BY id"
+        )
+        created = poll_until(
+            lambda: target.admin.query(
+                "SELECT engine_full FROM system.tables "
+                f"WHERE database = '{target.database}' AND name = '{project.table}'"
+            ).rows,
+            bool,
+        )
+        assert created, "the table is not listed"
+        assert " PRIMARY KEY " not in str(created[0]["engine_full"]), created
+        target.admin.execute(
+            f"INSERT INTO {fqn} (id, user_id, payload) "
+            "SELECT number, number % 97, 'historic' FROM numbers(1000)"
+        )
+
+        _generate_cutover(target, project)
+        expect_ok(cli(["migrate", "--apply", "--json"]), "migrate --apply (cutover)")
+        assert sorting_keys(target, project) == {
+            project.table: "user_id, id",
+            project.previous: "id",
+        }
+        total = rows(target, f"SELECT count() AS total FROM {target.rows_of(project.table)}")
+        assert int(total[0]["total"]) == 1000
+        assert_chkit_clean()
+    finally:
+        drop_cutover_project(target, project)
+
+
+def run_refused_at_start_scenario(
+    target: CutoverTarget,
+    label: str,
+    directory: Path,
+    *,
+    columns: str,
+    engine: Callable[[str], str],
+    message: str,
+    order_by: str = "id",
+    clauses: str = "",
+    schema_columns: list[dict[str, Any]] | None = None,
+) -> None:
+    """The table is created outside chkit with ``columns`` and the engine that
+    ``engine`` returns for its name, which differ from the schema
+    (``schema_columns``, or id, user_id and payload). The snapshot is created AS
+    the table, so it would take the server's state: the cutover must stop at its
+    first statement, before it creates anything. TS
+    ``runRefusedAtStartScenario``."""
+    project = create_cutover_project(target, label, directory, schema_columns)
+    try:
+        fqn = f"{target.database}.{project.table}"
+        on_cluster = f" ON CLUSTER '{target.cluster}'" if target.cluster else ""
+        target.admin.execute(f"DROP TABLE {fqn}{on_cluster} SYNC")
+        target.admin.execute(
+            f"CREATE TABLE {fqn}{on_cluster} ({columns}) "
+            f"ENGINE = {engine(project.table)} ORDER BY {order_by}"
+            + (f" {clauses}" if clauses else "")
+        )
+        created = poll_until(
+            lambda: target.admin.query(
+                "SELECT name FROM system.tables "
+                f"WHERE database = '{target.database}' AND name = '{project.table}'"
+            ).rows,
+            bool,
+        )
+        assert created, "the table is not listed"
+
+        _generate_cutover(target, project)
+        refused = cli(["migrate", "--apply", "--json"])
+        diagnostic = format_test_diagnostic(f'migrate --apply must stop with "{message}"', refused)
+        assert refused.exit_code != 0, diagnostic
+        assert message in refused.output, diagnostic
+        tables = (
+            f"clusterAllReplicas('{target.cluster}', system.tables)"
+            if target.cluster
+            else "system.tables"
+        )
+        leftovers = target.admin.query(
+            f"SELECT name FROM {tables} WHERE database = '{target.database}' "
+            f"AND startsWith(name, '{project.table}__cutover_')"
+        ).rows
+        assert leftovers == [], f"the cutover must create nothing, found {leftovers}"
+    finally:
+        drop_cutover_project(target, project)
+
+
+def run_stored_spelling_scenario(
+    target: CutoverTarget, label: str, directory: Path, columns: list[dict[str, Any]]
+) -> None:
+    """The schema declares ``columns``, and chkit creates the table from it.
+    ClickHouse stores some types in another spelling (``Decimal64(2)`` as
+    ``Decimal(18, 2)``), and the cutover must still accept the unchanged table.
+    TS ``runStoredSpellingScenario``."""
+    project = create_cutover_project(target, label, directory, columns)
+    try:
+        _generate_cutover(target, project)
+        expect_ok(cli(["migrate", "--apply", "--json"]), "migrate --apply (cutover)")
+        assert sorting_keys(target, project)[project.table] == "user_id, id"
+        total = rows(target, f"SELECT count() AS total FROM {target.rows_of(project.table)}")
+        assert int(total[0]["total"]) == project.historic
+        # No assert_chkit_clean: chkit drift reports Decimal64(2) against the stored
+        # Decimal(18, 2) on its own.
+    finally:
         drop_cutover_project(target, project)
 
 

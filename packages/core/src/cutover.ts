@@ -10,6 +10,7 @@ import {
   type TableDefinition,
 } from './model.js'
 import { columnTypeFingerprint, keyFingerprint, renderColumnType, toCreateSQL } from './sql.js'
+import { splitTopLevelComma } from './key-clause.js'
 import { identifierName, isTrivia, tokenizeSQL } from './sql-lexer.js'
 import {
   DEFAULT_INDEX_GRANULARITY,
@@ -210,6 +211,8 @@ export function planCutover(input: {
     table: request.table,
     names,
     columns,
+    oldColumns: oldDef.columns,
+    snapshotFromDefinition: snapshotFromDefinition(oldDef),
     key: request.key,
     cluster: options.cluster,
     readonlySettings: declaredReadonlySettings(oldDef.settings, newDef.settings),
@@ -277,7 +280,7 @@ function buildOperations(input: {
       type: 'create_table',
       key: `table:${database}.${names.snapshot}`,
       risk: 'safe',
-      sql: toCreateSQL({ ...withoutRename(oldDef), name: names.snapshot, comment: formatCutoverMetadata(metadata) }),
+      sql: createSnapshotSQL({ oldDef, request, names, metadata }),
     },
     {
       type: 'cutover_snapshot',
@@ -420,6 +423,34 @@ function buildOperations(input: {
   return operations
 }
 
+/**
+ * The snapshot is created AS the table, so it gets the table's definition as
+ * the server stores it. ATTACH PARTITION compares the keys as they are
+ * written, so before ClickHouse 26.7 a table created with only ORDER BY does
+ * not attach to one that declares PRIMARY KEY (#524). A Replicated table
+ * keeps the old definition unless its path in the schema has {uuid}: ClickHouse
+ * expands {table} when it creates a table, also in a default_replica_path that
+ * chkit cannot see, so a copy could register at the table's own path. The
+ * first statement checks that the path the server stores has {uuid} too.
+ */
+function createSnapshotSQL(input: {
+  oldDef: TableDefinition
+  request: CutoverRequest
+  names: CutoverNames
+  metadata: CutoverMetadata
+}): string {
+  const { oldDef, request, names, metadata } = input
+  const comment = formatCutoverMetadata(metadata)
+  if (snapshotFromDefinition(oldDef)) {
+    return toCreateSQL({ ...withoutRename(oldDef), name: names.snapshot, comment })
+  }
+  return `CREATE TABLE IF NOT EXISTS ${renderQualifiedName(request.database, names.snapshot)} AS ${renderQualifiedName(request.database, request.table)}\nCOMMENT ${stringLiteral(comment)};`
+}
+
+function snapshotFromDefinition(oldDef: TableDefinition): boolean {
+  return engineName(oldDef.engine).startsWith('Replicated') && !replicatedPath(oldDef.engine)?.includes('{uuid}')
+}
+
 interface CutoverSql {
   validateStart: string
   createMirror: string
@@ -449,6 +480,10 @@ function createCutoverSql(input: {
   table: string
   names: CutoverNames
   columns: string[]
+  /** Every column the old definition declares. */
+  oldColumns: ColumnDefinition[]
+  /** The snapshot is rendered from the old definition, not created AS the table. */
+  snapshotFromDefinition: boolean
   key: string[]
   cluster?: string
   /** Read-only settings the layout compares, besides engine and keys. */
@@ -457,7 +492,7 @@ function createCutoverSql(input: {
   oldSettings: TableDefinition['settings']
   indexGranularity: number
 }): CutoverSql {
-  const { database, table, names, columns, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
+  const { database, table, names, columns, oldColumns, snapshotFromDefinition, key, cluster, readonlySettings, oldSettings, indexGranularity } = input
   const q = (name: string) => renderQualifiedName(database, name)
   const target = `${database}.${table}`
   const columnList = columns.map(quoteColumn).join(', ')
@@ -466,17 +501,69 @@ function createCutoverSql(input: {
   const tableCount = (name: string) => `(SELECT count() FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
   const layout = (name: string) =>
     `(SELECT any(tuple(engine, sorting_key, primary_key, partition_key${readonlySettings.length > 0 ? `, ${readonlySettingsLayoutSQL(readonlySettings, indexGranularity)}` : ''})) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(name)})`
-  // The snapshot table is created from the old definition and must get the
-  // old table's layout, or the EXCHANGE guard stops the cutover after the
-  // copy. Check before anything is created: the old table stores what it was
-  // created with, and a missing index_granularity is the server's default,
-  // which chkit only assumes (clickhouse.indexGranularity).
+  // The EXCHANGE guards tell the old table from the new one by layout, so the
+  // old table must store the read-only settings the migration expects, or
+  // the guard stops the cutover after the copy. Check before anything is
+  // created: the old table stores what it was created with, and a missing
+  // index_granularity is the server's default, which chkit only assumes
+  // (clickhouse.indexGranularity).
   const settingsMatch = readonlySettings.length > 0
     ? `(${tableCount(table)} = 0 OR (SELECT any(${readonlySettingsLayoutSQL(readonlySettings, indexGranularity)}) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) = ${readonlySettingsExpectedSQL(readonlySettings, oldSettings)}) AS settings`
     : undefined
   const expectedSettings = readonlySettings
     .map((setting) => (oldSettings?.[setting] === undefined ? `${setting} unset` : `${setting} = ${String(oldSettings[setting])}`))
     .join(', ')
+  // The snapshot holds every column the table stores, but the mirror and the
+  // copy move only the columns of the old definition: a column only the server
+  // has would not reach the new table, and a copied column it lacks stops the
+  // mirror. ClickHouse stores `n Nested(x T)` as the column `n.x Array(T)`.
+  const literals = (values: string[]) => `[${values.map(stringLiteral).join(', ')}]`
+  const leaves = oldColumns.flatMap((column) =>
+    columnLeaves(column).map((leaf) => ({ ...leaf, column: column.name, stored: isStored(column) }))
+  )
+  const stored = leaves.filter((leaf) => leaf.stored)
+  const liveColumns = `FROM system.columns WHERE database = ${stringLiteral(database)} AND table = ${stringLiteral(table)}`
+  const storedColumns = `${liveColumns} AND default_kind NOT IN ('ALIAS', 'EPHEMERAL')`
+  const undeclaredColumns = `(SELECT countIf(NOT has(${literals(leaves.map((leaf) => leaf.name))}, name)) ${storedColumns}) AS undeclared_columns`
+  const declaredColumns = `(${tableCount(table)} = 0 OR (SELECT hasAll(groupArray(name), ${literals(stored.filter((leaf) => columns.includes(leaf.column)).map((leaf) => leaf.name))}) ${storedColumns})) AS declared_columns`
+  // The mirror, the copy and the verify skip a column the schema declares
+  // ALIAS or EPHEMERAL. If the table stores that column, its values would not
+  // reach the new table, so the kinds must match too.
+  const kindPairs = `[${leaves.map((leaf) => `(${stringLiteral(leaf.name)}, ${leaf.stored ? 1 : 0})`).join(', ')}]`
+  const columnKinds = `(SELECT countIf(has(${literals(leaves.map((leaf) => leaf.name))}, name) AND NOT has(${kindPairs}, (name, toUInt8(default_kind NOT IN ('ALIAS', 'EPHEMERAL'))))) ${liveColumns}) AS column_kinds`
+  // The snapshot takes the column types the server stores, and the copy then
+  // converts each value to the new type. The verify hash does not see every
+  // change: cityHash64 is the same for UInt32 and UInt64. ClickHouse stores
+  // some types in another spelling (`Decimal64(2)` as `Decimal(18, 2)`), so the
+  // server gives the schema's type in its stored form too.
+  // toTypeName prints a named Tuple over several lines, and system.columns
+  // on one: the line breaks go. A newline in an Enum label is escaped, so no
+  // label changes.
+  const storedType = (type: string) =>
+    `replaceRegexpAll(replaceRegexpAll(toTypeName(defaultValueOfTypeName(${stringLiteral(type)})), ',\\n *', ', '), '\\n *', '')`
+  const typePairs = `[${stored.map((leaf) => `(${stringLiteral(leaf.name)}, ${storedType(leaf.type)})`).join(', ')}]`
+  const mistypedColumns = `(SELECT countIf(has(${literals(stored.map((leaf) => leaf.name))}, name) AND NOT has(${typePairs}, (name, type))) ${storedColumns}) AS mistyped_columns`
+  const storedTable = (condition: string, alias: string) =>
+    `(${tableCount(table)} = 0 OR (SELECT any(${condition}) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)})) AS ${alias}`
+  // AS copies the replication path the server stores, which can differ from
+  // the schema's. Without {uuid} the snapshot would register at the table's
+  // own path, and ClickHouse refuses that only after the mirror exists. The
+  // path is the engine's first argument: {uuid} in a key or setting does not count.
+  const uuidPath = snapshotFromDefinition
+    ? undefined
+    : storedTable(`NOT startsWith(engine, 'Replicated') OR position(extract(engine_full, ${stringLiteral(REPLICATED_PATH_SQL_REGEX)}), '{uuid}') > 0`, 'uuid_path')
+  // AS also copies the table's TTLs. A TTL merge on the snapshot could change
+  // rows before the copy, and the verify would compare the changed rows on
+  // both sides. The query is read without its strings, quoted names and comments.
+  const storedTtl = snapshotFromDefinition
+    ? undefined
+    : storedTable(`NOT match(replaceRegexpAll(create_table_query, ${stringLiteral(SQL_QUOTED_REGEX)}, ' '), ${stringLiteral(String.raw`\bTTL\b`)})`, 'no_ttl')
+  // A snapshot rendered from the old definition always declares PRIMARY KEY.
+  // Before ClickHouse 26.7 parts attach only between tables that both declare
+  // it or both leave it out; 26.7 compares the key by value.
+  const declaredKey = snapshotFromDefinition
+    ? `(${tableCount(table)} = 0 OR (SELECT any(position(engine_full, ' PRIMARY KEY ') > 0) FROM system.tables WHERE database = ${stringLiteral(database)} AND name = ${stringLiteral(table)}) OR toUInt32OrZero(splitByChar('.', version())[1]) * 100 + toUInt32OrZero(splitByChar('.', version())[2]) >= 2607) AS declared_key`
+    : undefined
   // Per replica: 1 when the condition holds. A guard throws unless every replica reports 1.
   const guard = (condition: string, message: string) =>
     `SELECT throwIf(countIf(ok = 0) > 0 OR count() = 0, ${stringLiteral(message)}) FROM ${everyReplica(`SELECT toUInt8(${condition}) AS ok`)}`
@@ -550,6 +637,25 @@ function createCutoverSql(input: {
       'SELECT',
       `  throwIf(min(atomic) = 0, ${stringLiteral(`Database ${database} must use the Atomic or Replicated engine: EXCHANGE TABLES needs it.`)}),`,
       `  throwIf(min(present) = 0, ${stringLiteral(`Table ${target} does not exist.`)}),`,
+      `  throwIf(max(undeclared_columns) > 0, ${stringLiteral(`${target} stores a column that the schema does not declare, so its values would not reach the new table. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
+      `  throwIf(min(declared_columns) = 0, ${stringLiteral(`${target} lacks a column that the schema declares, so the mirror cannot read it. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
+      `  throwIf(max(column_kinds) > 0, ${stringLiteral(`${target} stores a column that the schema declares ALIAS or EPHEMERAL, or computes a column that the schema stores, so the cutover would not copy its values. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
+      `  throwIf(max(mistyped_columns) > 0, ${stringLiteral(`${target} stores a column with another type than the schema declares, so the copy would convert its values. Nothing was created or copied. Run chkit drift, change the schema to match the table, and generate the cutover again.`)}),`,
+      ...(uuidPath
+        ? [
+            `  throwIf(min(uuid_path) = 0, ${stringLiteral(`The replication path that ${target} stores has no {uuid}, so a snapshot created AS the table would register at the same path. Nothing was created or copied. Set the replication path in the schema to the one the table was created with, and generate the cutover again.`)}),`,
+          ]
+        : []),
+      ...(storedTtl
+        ? [
+            `  throwIf(min(no_ttl) = 0, ${stringLiteral(`${target} has a TTL, and the cutover's snapshot, created AS the table, would keep it: a TTL merge could change rows before they are copied. Nothing was created or copied. Remove the TTL from the table for the cutover and add it back in a separate migration.`)}),`,
+          ]
+        : []),
+      ...(declaredKey
+        ? [
+            `  throwIf(min(declared_key) = 0, ${stringLiteral(`${target} was created without PRIMARY KEY. Its replication path in the schema has no {uuid}, so the cutover's snapshot is created from the schema with PRIMARY KEY, and before ClickHouse 26.7 the table's parts do not attach to it. Nothing was created or copied. Recreate the table with PRIMARY KEY, or cut it over by hand: see "When a cutover does not fit" in the cutover guide.`)}),`,
+          ]
+        : []),
       `  throwIf(max(leftovers) > 0, ${stringLiteral(`Objects of an earlier attempt of this cutover exist (${names.shadow}, ${names.mirror}, ${names.snapshot} or ${names.reconcile}). If the tables were already swapped, ${names.shadow} is the pre-cutover table and may hold rows not yet reconciled into ${table}: do not drop it. Inspect them before you run the migration again.`)}),`,
       `  throwIf(max(mutations) > 0, ${stringLiteral(`${target} has unfinished mutations. Wait for them to finish: rows they change would not reach the new table.`)})${settingsMatch ? ',' : ''}`,
       ...(settingsMatch
@@ -561,6 +667,13 @@ function createCutoverSql(input: {
         [
           `SELECT (SELECT count() FROM system.databases WHERE name = ${stringLiteral(database)} AND engine IN ('Atomic', 'Replicated')) AS atomic,`,
           `${tableCount(table)} AS present,`,
+          `${undeclaredColumns},`,
+          `${declaredColumns},`,
+          `${columnKinds},`,
+          `${mistypedColumns},`,
+          ...(uuidPath ? [`${uuidPath},`] : []),
+          ...(storedTtl ? [`${storedTtl},`] : []),
+          ...(declaredKey ? [`${declaredKey},`] : []),
           `${tableCount(names.shadow)} + ${tableCount(names.mirror)} + ${tableCount(names.snapshot)} + ${tableCount(names.reconcile)} AS leftovers,`,
           `${pendingMutations} AS mutations${settingsMatch ? ',' : ''}`,
           ...(settingsMatch ? [settingsMatch] : []),
@@ -801,6 +914,28 @@ function isInsertable(column: ColumnDefinition): boolean {
 }
 
 /** The first argument of a Replicated*MergeTree engine with explicit arguments. */
+/** The first argument of a stored Replicated*MergeTree engine: its replication path. */
+const REPLICATED_PATH_SQL_REGEX = String.raw`^Replicated\w*MergeTree\(\s*'((?:[^'\\]|\\.)*)'`
+
+/** A string, quoted name or comment in a query ClickHouse stores. */
+const SQL_QUOTED_REGEX = String.raw`'(?:[^'\\]|\\.)*'|\`(?:[^\`\\]|\\.)*\`|"(?:[^"\\]|\\.)*"|--[^\n]*|/\*[\s\S]*?\*/`
+
+/**
+ * The columns ClickHouse stores for a declared column, with their types. With
+ * the default flatten_nested = 1, `n Nested(x T)` is stored as `n.x Array(T)`.
+ */
+function columnLeaves(column: ColumnDefinition): Array<{ name: string; type: string }> {
+  const fields = /^Nested\s*\((.*)\)$/s.exec(column.type.trim())?.[1]
+  if (fields === undefined) return [{ name: column.name, type: renderColumnType(column) }]
+  return splitTopLevelComma(fields).map((field) => {
+    const token = tokenizeSQL(field).find((candidate) => !isTrivia(candidate))
+    const name = token ? identifierName(token) : undefined
+    // A field chkit cannot read keeps the Nested name, which ClickHouse does not store: the check refuses it.
+    if (!token || name === undefined) return { name: column.name, type: renderColumnType(column) }
+    return { name: `${column.name}.${name}`, type: `Array(${field.slice(token.end).trim()})` }
+  })
+}
+
 function replicatedPath(engine: string): string | undefined {
   if (!engineName(engine).startsWith('Replicated')) return undefined
   const match = /^\s*\w+\s*\(\s*'((?:[^'\\]|\\.)*)'/.exec(engine)

@@ -6,6 +6,7 @@ import {
   createCutoverProject,
   dropCutoverProject,
   runKeepScenario,
+  runRefusedAtStartScenario,
   runRetryScenario,
   writeSchema,
   type CutoverTarget,
@@ -54,6 +55,35 @@ describe('generate --cutover on a 2-shard cluster (#202)', () => {
   test('resumes after a failure at every step and never replays the swap', async () => {
     await runRetryScenario(clusterTarget(), 'cutover2s_retry')
   }, 1_800_000)
+
+  // The schema says {uuid}, but the snapshot is created AS the table and takes the path the server stores.
+  for (const [label, path] of [
+    ['cutover2s_table_path', () => '/clickhouse/tables/{shard}/{database}/{table}'],
+    ['cutover2s_literal_path', (table: string) => `/clickhouse/tables/{shard}/literal_${table}`],
+  ] as const) {
+    test(`stops before it creates anything when the table was created with the path ${path('<table>')}`, async () => {
+      await runRefusedAtStartScenario(
+        clusterTarget(),
+        label,
+        { columns: 'id UInt64, user_id UInt64, payload String', engine: (table) => `ReplicatedMergeTree('${path(table)}', '{replica}')` },
+        'stores has no {uuid}',
+      )
+    }, 300_000)
+  }
+
+  // {uuid} in the sorting key is not the replication path.
+  test('stops before it creates anything when {uuid} is only in the sorting key of the table', async () => {
+    await runRefusedAtStartScenario(
+      clusterTarget(),
+      'cutover2s_uuid_key',
+      {
+        columns: 'id UInt64, user_id UInt64, payload String',
+        engine: (table) => `ReplicatedMergeTree('/clickhouse/tables/{shard}/literal_${table}', '{replica}')`,
+        orderBy: "(id, cityHash64(id, '{uuid}'))",
+      },
+      'stores has no {uuid}',
+    )
+  }, 300_000)
 
   test('refuses the backfill copy with clickhouse.cluster', async () => {
     const target = clusterTarget()
