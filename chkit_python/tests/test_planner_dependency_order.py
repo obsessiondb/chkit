@@ -1802,13 +1802,18 @@ def test_query_words_and_unit_calls_keep_the_sorted_order(
         ("not", _FALLBACK),
         ("NoT", _FALLBACK),
         ("null", _REPAIRED),
+        ("all", _REPAIRED),
+        ("ALL", _REPAIRED),
+        ("select", _REPAIRED),
     ],
 )
 def test_a_quoted_literal_word_keeps_the_sorted_order(name: str, order: list[str]) -> None:
     # ALTER's cycle check reads a quoted `true`, `false`, `inf`, `nan` or
     # `infinity` as a literal, and ClickHouse stores a quoted `not` before an
-    # operand as NOT, so an expression with one keeps the sorted order; a
-    # quoted `null` reads its column.
+    # operand as NOT, so an expression with one keeps the sorted order. A
+    # quoted `null`, and a quoted name of any other keyword, reads its column:
+    # on ClickHouse 26.3, of the 388 one-word `system.keywords`, only `not`,
+    # `true` and `false` escaped ALTER's cycle check in eleven positions.
     extra = [_u(name), _u("extra", f"toUInt64(`{name}`)")]
     assert _order_of(
         [_t([*_CYCLE_BEFORE, *extra])], [_t([*_CYCLE_AFTER, *extra])]
@@ -1823,6 +1828,15 @@ def test_a_quoted_true_is_no_read_of_a_column_with_that_name() -> None:
         [_t([{"name": "a", "type": "String"}, _u("b"), _text("c", "a"), _text("true", "c")])],
         [_t([_u("a", "toUInt64(`true`)"), _u("b", "a + 1"), _text("c", "'x'"), _text("true", "'y'")])],
     ) == ["t.a", "t.b", "t.c", "t.true"]
+
+
+def test_a_quoted_all_is_a_read_of_the_column_with_that_name() -> None:
+    # ALTER's cycle check reads a quoted `all` as the column (ClickHouse 26.3
+    # rejects main's order with code 174), so the table is repaired.
+    assert _order_of(
+        [_t([_u("a"), _u("aa"), _u("ab", "a"), _u("all", "ab")])],
+        [_t([_u("a", "`all` + 1"), _u("aa", "a + 1"), _u("ab", "5"), _u("all", "5")])],
+    ) == ["t.aa", "t.ab", "t.a", "t.all"]
 
 
 def test_a_quoted_not_is_no_read_of_a_column_with_that_name() -> None:

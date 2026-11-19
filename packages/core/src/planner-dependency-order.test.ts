@@ -1746,8 +1746,10 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
 
   // ALTER's cycle check reads a quoted `true`, `false`, `inf`, `nan` or
   // `infinity` as a literal, and ClickHouse stores a quoted `not` before an
-  // operand as NOT, so an expression with one keeps the sorted order; a
-  // quoted `null` reads its column.
+  // operand as NOT, so an expression with one keeps the sorted order. A
+  // quoted `null`, and a quoted name of any other keyword, reads its column:
+  // on ClickHouse 26.3, of the 388 one-word `system.keywords`, only `not`,
+  // `true` and `false` escaped ALTER's cycle check in eleven positions.
   test.each<[string, string[]]>([
     ['true', ['t.a', 't.b', 't.c']],
     ['FALSE', ['t.a', 't.b', 't.c']],
@@ -1757,6 +1759,9 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     ['not', ['t.a', 't.b', 't.c']],
     ['NoT', ['t.a', 't.b', 't.c']],
     ['null', ['t.b', 't.a', 't.c']],
+    ['all', ['t.b', 't.a', 't.c']],
+    ['ALL', ['t.b', 't.a', 't.c']],
+    ['select', ['t.b', 't.a', 't.c']],
   ])('with a quoted %s in an unchanged DEFAULT, the MODIFYs run in the order %p', (name, order) => {
     const extra = [u(name), u('extra', `toUInt64(\`${name}\`)`)]
     expect(orderOf([t([...cycleBefore, ...extra])], [t([...cycleAfter, ...extra])])).toEqual(order)
@@ -1772,6 +1777,17 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
         [t([u('a', 'toUInt64(`true`)'), u('b', 'a + 1'), text('c', "'x'"), text('true', "'y'")])]
       )
     ).toEqual(['t.a', 't.b', 't.c', 't.true'])
+  })
+
+  // ALTER's cycle check reads a quoted `all` as the column (ClickHouse 26.3
+  // rejects main's order with code 174), so the table is repaired.
+  test('a quoted all is a read of the column with that name', () => {
+    expect(
+      orderOf(
+        [t([u('a'), u('aa'), u('ab', 'a'), u('all', 'ab')])],
+        [t([u('a', '`all` + 1'), u('aa', 'a + 1'), u('ab', '5'), u('all', '5')])]
+      )
+    ).toEqual(['t.aa', 't.ab', 't.a', 't.all'])
   })
 
   // ClickHouse stores `` `not` + 1 `` as `NOT 1`, so `a` does not read the
