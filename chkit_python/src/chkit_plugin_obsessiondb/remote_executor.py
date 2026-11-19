@@ -155,7 +155,8 @@ class RemoteClickHouseClient:
         ``wait_for_async_insert = 0`` would finish while its rows are still
         buffered. A profile that locks the setting (a constraint, or
         readonly = 1) rejects any change of it, also on DDL, so it is left out
-        there. Looked up once; a failed lookup is not cached. TS
+        there. Looked up on the first write (concurrent first writes may each
+        look it up); a failed lookup is not cached. TS
         ``writeSettings``."""
         if self._async_insert_locked is None:
             rows = self.query(

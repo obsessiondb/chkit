@@ -52,6 +52,16 @@ function toApiSettings(
 	return Object.keys(out).length > 0 ? out : undefined
 }
 
+/** `promise`, or the signal's reason once it aborts; the promise itself runs on. */
+function untilAborted<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
+	if (!signal) return promise
+	return new Promise<T>((resolve, reject) => {
+		const onAbort = () => reject(signal.reason)
+		signal.addEventListener('abort', onAbort, { once: true })
+		promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', onAbort))
+	})
+}
+
 export function normalizeQueryData<T>(
 	res: Awaited<ReturnType<ApiClient['workbench']['query']['execute']>>,
 ): T[] {
@@ -238,10 +248,12 @@ export function createRemoteExecutor(deps: {
 		},
 
 		async submit(sql, queryId?, settings?, options?) {
-			// The settings are resolved first, so no request comes between the
-			// abort check and the send. Never start a request after the caller
-			// gave up on it (#767): the signal also aborts the fetch while it connects.
-			const apiSettings = toApiSettings(await writeSettings(settings))
+			// Never start a request after the caller gave up on it (#767): the
+			// signal also aborts the fetch while it connects. The settings are
+			// resolved first, so no request comes between the last check and the
+			// send, and a stalled lookup doesn't hold up the caller's abort.
+			options?.signal?.throwIfAborted()
+			const apiSettings = toApiSettings(await untilAborted(writeSettings(settings), options?.signal))
 			options?.signal?.throwIfAborted()
 			const res = await client.workbench.query.execute(
 				{

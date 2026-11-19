@@ -129,6 +129,37 @@ describe('createRemoteExecutor submit', () => {
 		}
 	})
 
+	test('an abort ends a submit whose async_insert lookup stalls, and nothing is sent', async () => {
+		const queries: string[] = []
+		let releaseLookup = () => {}
+		const lookupHeld = new Promise<void>((resolve) => {
+			releaseLookup = resolve
+		})
+		const server = Bun.serve({
+			port: 0,
+			async fetch(request) {
+				const { json: input } = (await request.json()) as { json: { query: string } }
+				queries.push(input.query)
+				if (input.query.includes('FROM system.settings')) await lookupHeld
+				return Response.json({ json: { data: [], meta: [], rows: 0 } })
+			},
+		})
+		try {
+			const remote = connect(`http://127.0.0.1:${server.port}`)
+			const controller = new AbortController()
+			const submitted = remote.submit('INSERT INTO t VALUES (1)', 'qid-stalled', undefined, { signal: controller.signal })
+			while (queries.length === 0) await Bun.sleep(5)
+			controller.abort(new Error('run gave up'))
+			await expect(submitted).rejects.toThrow('run gave up')
+			releaseLookup()
+			await Bun.sleep(50)
+			expect(queries).toEqual(["SELECT toString(readonly) AS readonly FROM system.settings WHERE name = 'async_insert'"])
+		} finally {
+			releaseLookup()
+			server.stop(true)
+		}
+	})
+
 	test('sends no queryId when the caller has none', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {
