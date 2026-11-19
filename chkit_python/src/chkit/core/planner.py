@@ -1266,6 +1266,20 @@ _INFIX_KEYWORDS = frozenset(
         "mod", "or", "then", "when",
     }
 )  # fmt: skip
+# Words that can take an operand after them (``INTERVAL end DAY``, ``DISTINCT x``,
+# ``DELETE WHERE end``). A column of that name, read where an operand belongs,
+# may be that keyword, so the word after it keeps its read.
+_PREFIX_KEYWORDS = frozenset(
+    {
+        "all", "any", "array", "asc", "ascending", "both", "by", "case", "cast", "columns", "date",
+        "delete", "desc", "descending", "disk", "distinct", "escape", "except", "exists", "extract",
+        "global", "interval", "lambda", "leading", "not", "over", "partition", "position",
+        "recompress", "regexp", "select", "set", "substring", "timestamp", "to", "trailing", "trim",
+        "volume", "where", "with",
+    }
+)  # fmt: skip
+# Word operators besides ``_INFIX_KEYWORDS`` (``x GLOBAL IN (…)``, ``s REGEXP 'a'``).
+_OTHER_OPERATORS = frozenset({"global", "regexp"})
 
 
 def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int]) -> set[int]:
@@ -1277,8 +1291,9 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
     such an AS (``toUInt64(x AS c)``), which ClickHouse does not read as the
     column. A complete operand ends on a number, a string, a closing bracket,
     a literal word, END, a name ``skipped`` holds, the unit after
-    ``extract(``, or a column read where an operand was expected. After any
-    other name the next word keeps its read.
+    ``extract(``, or a column read where an operand was expected that is not
+    named like a word in ``_PREFIX_KEYWORDS``. After any other name the next
+    word keeps its read.
     """
     keywords: set[int] = set()
     count = len(tokens)
@@ -1340,7 +1355,8 @@ def _keyword_names(tokens: list[SQLToken], columns: set[str], skipped: set[int])
         elif text_at(i - 1) == "(" and bare(i - 2) == "extract":
             state = "ended"
         else:
-            state = "ended" if state == "operand" and name in columns else "unknown"
+            prefix = word is not None and word in _PREFIX_KEYWORDS
+            state = "ended" if state == "operand" and name in columns and not prefix else "unknown"
         i += 1
     return keywords
 
@@ -1354,7 +1370,9 @@ def _case_follows(following: SQLToken | None) -> bool:
     if following.kind != "identifier":
         return False
     word = following.text.lower()
-    return word == "when" or (word not in _INFIX_KEYWORDS and word != "not")
+    return word == "when" or (
+        word not in _INFIX_KEYWORDS and word not in _OTHER_OPERATORS and word != "not"
+    )
 
 
 def _dictionary_source_is_hidden(source: str) -> bool:

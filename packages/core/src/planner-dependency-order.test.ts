@@ -1137,7 +1137,7 @@ describe('planDiff orders MODIFY read releases and table TTL changes (#769)', ()
 // Each expected read below is what ClickHouse 26.3 reads: a DROP COLUMN of a
 // column it reads is refused (#805).
 describe('columnDefaultReads skips keywords and alias names (#805)', () => {
-  const columns = ['and', 'as', 'c', 'case', 'else', 'end', 'from', 'id', 'is', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
+  const columns = ['and', 'as', 'c', 'case', 'else', 'end', 'from', 'id', 'interval', 'is', 'nan', 'not', 'null', 'NULL', 's', 'then', 'true', 'ts', 'when', 'x']
   const readsOf = (expression: string) => {
     const definition = table({
       database: 'app',
@@ -1197,6 +1197,10 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
     ['toUInt64(`not`)', ['not']],
     ['toUInt64(c as c)', ['c']],
     ['(x + 1 as c) * c', ['c', 'x']],
+    // A column named like a prefix keyword may be that keyword: the name after it is still read.
+    ['toUInt64(toDateTime(0) + interval end day)', ['end', 'interval']],
+    ['case global in (1, 2)', ['case']],
+    ["case regexp 'x'", ['case']],
   ])('column: %s reads %p', (expression, expected) => {
     expect(readsOf(expression)).toEqual(expected)
   })
@@ -1211,6 +1215,19 @@ describe('columnDefaultReads skips keywords and alias names (#805)', () => {
       'alter_table_drop_column table:app.t:column:end',
       'alter_table_drop_column table:app.t:column:a',
     ])
+  })
+
+  test('a TTL that reads a column after a column named INTERVAL changes before that column is dropped', () => {
+    const columns = [
+      { name: 'id', type: 'UInt64' },
+      { name: 'ts', type: 'DateTime' },
+      { name: 'interval', type: 'UInt64' },
+    ]
+    const withTtl = (extra: ColumnDefinition[], ttl: string) =>
+      table({ database: 'app', name: 't', columns: [...columns, ...extra], engine: 'MergeTree()', primaryKey: ['id'], orderBy: ['id'], ttl })
+    expect(
+      objectOps([withTtl([{ name: 'end', type: 'UInt64' }], 'ts + interval end day')], [withTtl([], 'ts + interval 1 day')])
+    ).toEqual(['alter_table_modify_ttl table:app.t:ttl', 'alter_table_drop_column table:app.t:column:end'])
   })
 })
 

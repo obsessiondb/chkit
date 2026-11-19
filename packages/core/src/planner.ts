@@ -1210,6 +1210,17 @@ const INFIX_KEYWORDS: ReadonlySet<string> = new Set([
   'and', 'as', 'between', 'div', 'else', 'end', 'for', 'from', 'ilike', 'in', 'is', 'like', 'mod', 'or', 'then',
   'when',
 ])
+// Words that can take an operand after them (`INTERVAL end DAY`, `DISTINCT x`,
+// `DELETE WHERE end`). A column of that name, read where an operand belongs,
+// may be that keyword, so the word after it keeps its read.
+const PREFIX_KEYWORDS: ReadonlySet<string> = new Set([
+  'all', 'any', 'array', 'asc', 'ascending', 'both', 'by', 'case', 'cast', 'columns', 'date', 'delete', 'desc',
+  'descending', 'disk', 'distinct', 'escape', 'except', 'exists', 'extract', 'global', 'interval', 'lambda',
+  'leading', 'not', 'over', 'partition', 'position', 'recompress', 'regexp', 'select', 'set', 'substring',
+  'timestamp', 'to', 'trailing', 'trim', 'volume', 'where', 'with',
+])
+// Word operators besides `INFIX_KEYWORDS` (`x GLOBAL IN (…)`, `s REGEXP 'a'`).
+const OTHER_OPERATORS: ReadonlySet<string> = new Set(['global', 'regexp'])
 
 /**
  * Indices of the single bare names in `tokens` (trivia removed) that are
@@ -1219,8 +1230,9 @@ const INFIX_KEYWORDS: ReadonlySet<string> = new Set([
  * and the name after such an AS (`toUInt64(x AS c)`), which ClickHouse does
  * not read as the column. A complete operand ends on a number, a string, a
  * closing bracket, a literal word, END, a name `skipped` holds, the unit
- * after `extract(`, or a column read where an operand was expected. After
- * any other name the next word keeps its read.
+ * after `extract(`, or a column read where an operand was expected that is
+ * not named like a word in `PREFIX_KEYWORDS`. After any other name the next
+ * word keeps its read.
  */
 function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped: ReadonlySet<number>): Set<number> {
   const keywords = new Set<number>()
@@ -1263,7 +1275,7 @@ function keywordNames(tokens: SQLToken[], columns: ReadonlySet<string>, skipped:
         state = 'ended'
       }
     } else if (tokens[i - 1]?.text === '(' && bare(i - 2) === 'extract') state = 'ended'
-    else state = state === 'operand' && columns.has(name) ? 'ended' : 'unknown'
+    else state = state === 'operand' && columns.has(name) && !PREFIX_KEYWORDS.has(word ?? '') ? 'ended' : 'unknown'
   }
   return keywords
 }
@@ -1274,5 +1286,5 @@ function caseFollows(next: SQLToken | undefined): boolean {
   if (next.kind === 'number' || next.kind === 'string' || next.kind === 'quoted_identifier') return true
   if (next.kind !== 'identifier') return false
   const word = next.text.toLowerCase()
-  return word === 'when' || (!INFIX_KEYWORDS.has(word) && word !== 'not')
+  return word === 'when' || (!INFIX_KEYWORDS.has(word) && !OTHER_OPERATORS.has(word) && word !== 'not')
 }

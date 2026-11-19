@@ -986,8 +986,8 @@ def test_keeps_the_other_statements_other_tables_and_same_column_statements_in_p
 
 
 _KEYWORD_COLUMNS = [
-    "and", "as", "c", "case", "else", "end", "from", "id", "is", "nan", "not", "null", "NULL", "s",
-    "then", "true", "ts", "when", "x",
+    "and", "as", "c", "case", "else", "end", "from", "id", "interval", "is", "nan", "not", "null",
+    "NULL", "s", "then", "true", "ts", "when", "x",
 ]  # fmt: skip
 
 
@@ -1055,6 +1055,10 @@ def test_reads_skip_keywords(expression: str, expected: list[str]) -> None:
         ("toUInt64(`not`)", ["not"]),
         ("toUInt64(c as c)", ["c"]),
         ("(x + 1 as c) * c", ["c", "x"]),
+        # A column named like a prefix keyword may be that keyword: the name after it is still read.
+        ("toUInt64(toDateTime(0) + interval end day)", ["end", "interval"]),
+        ("case global in (1, 2)", ["case"]),
+        ("case regexp 'x'", ["case"]),
     ],
 )
 def test_reads_keep_keyword_named_columns_where_an_operand_is_expected(
@@ -1073,6 +1077,20 @@ def test_drops_a_column_after_the_dropped_column_that_reads_it_when_a_case_names
     ) == [
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `end`;",
         "ALTER TABLE app.t DROP COLUMN IF EXISTS `a`;",
+    ]
+
+
+def test_a_ttl_that_reads_a_column_after_a_column_named_interval_changes_before_that_column_is_dropped() -> None:
+    columns: list[dict[str, Any]] = [
+        {"name": "ts", "type": "DateTime"},
+        {"name": "interval", "type": "UInt64"},
+    ]
+    assert _sqls(
+        [_t([*columns, {"name": "end", "type": "UInt64"}], ttl="ts + interval end day")],
+        [_t(columns, ttl="ts + interval 1 day")],
+    ) == [
+        "ALTER TABLE app.t MODIFY TTL ts + interval 1 day;",
+        "ALTER TABLE app.t DROP COLUMN IF EXISTS `end`;",
     ]
 
 
