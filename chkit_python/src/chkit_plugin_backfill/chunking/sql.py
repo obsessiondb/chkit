@@ -83,14 +83,17 @@ def _js_trim(value: str) -> str:
 #: An INSERT into a Distributed table (the target, or a materialized view's)
 #: also returns only once its rows reached the shards (#821): by default it
 #: returns once they are queued on the initiator, and the chunk would be done
-#: before they are delivered. This one is pinned for delivery, not for proof:
-#: writing to a remote shard runs a secondary query there, so the failure of
-#: such a chunk is never proven, as for any Distributed target
-#: (``unprovable_target_failures``).
+#: before they are delivered. A materialized view's write that fails fails the
+#: INSERT: with materialized_views_ignore_errors = 1 a shard that cannot be
+#: reached would drop the view's rows and the chunk would still be done. These
+#: two are pinned for delivery, not for proof: writing to a remote shard runs a
+#: secondary query there, so the failure of such a chunk is never proven, as
+#: for any Distributed target (``unprovable_target_failures``).
 PINNED_INSERT_SETTINGS: dict[str, str] = {
     "allow_experimental_parallel_reading_from_replicas": "0",
     "parallel_distributed_insert_select": "0",
     "distributed_foreground_insert": "1",
+    "materialized_views_ignore_errors": "0",
     "log_queries": "1",
     "log_queries_min_type": "'QUERY_START'",
     "log_queries_min_query_duration_ms": "0",

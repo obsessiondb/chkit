@@ -182,6 +182,7 @@ def test_insert_settings_with_the_pinned_value_are_dropped() -> None:
             {"insert_distributed_sync": False},
             "insert_distributed_sync=false (an alias of distributed_foreground_insert)",
         ),
+        ({"materialized_views_ignore_errors": 1}, "materialized_views_ignore_errors=1"),
     ],
 )
 def test_insert_settings_that_change_a_pinned_setting_are_refused(
@@ -227,7 +228,7 @@ def test_the_server_aliases_come_from_system_settings_alias_for() -> None:
     assert reads == [
         "SELECT name, alias_for FROM system.settings WHERE alias_for IN ("
         "'allow_experimental_parallel_reading_from_replicas', "
-        "'parallel_distributed_insert_select', 'distributed_foreground_insert', "
+        "'parallel_distributed_insert_select', 'distributed_foreground_insert', 'materialized_views_ignore_errors', "
         "'log_queries', 'log_queries_min_type', "
         "'log_queries_min_query_duration_ms')"
     ]
