@@ -107,7 +107,7 @@ describe('createRemoteExecutor submit', () => {
 			expect(await remote.submit('INSERT INTO t SELECT 1', 'qid-1')).toBe('qid-1')
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1' },
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0 } },
 			])
 		} finally {
 			workbench.stop()
@@ -122,7 +122,7 @@ describe('createRemoteExecutor submit', () => {
 			await remote.submit('INSERT INTO t SELECT 1', 'qid-1', { log_comment: 'x' })
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { log_comment: 'x' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'qid-1', settings: { async_insert: 0, log_comment: 'x' } },
 			])
 		} finally {
 			workbench.stop()
@@ -136,7 +136,7 @@ describe('createRemoteExecutor submit', () => {
 
 			await remote.submit('INSERT INTO t SELECT 1')
 
-			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1' }])
+			expect(workbench.inputs).toEqual([{ serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', settings: { async_insert: 0 } }])
 		} finally {
 			workbench.stop()
 		}
@@ -144,6 +144,7 @@ describe('createRemoteExecutor submit', () => {
 })
 
 // migrate --setting (#321) reaches ClickHouse through command()'s settings.
+// Every write also sends async_insert = 0 under them, as a direct connection does.
 describe('createRemoteExecutor command', () => {
 	test('forwards per-statement settings to the API', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
@@ -154,8 +155,25 @@ describe('createRemoteExecutor command', () => {
 			await remote.command('DROP TABLE u')
 
 			expect(workbench.inputs).toEqual([
-				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { max_table_size_to_drop: '0' } },
-				{ serviceSlug: 'test', query: 'DROP TABLE u' },
+				{ serviceSlug: 'test', query: 'DROP TABLE t', settings: { async_insert: 0, max_table_size_to_drop: '0' } },
+				{ serviceSlug: 'test', query: 'DROP TABLE u', settings: { async_insert: 0 } },
+			])
+		} finally {
+			workbench.stop()
+		}
+	})
+
+	test('sends insert() rows with async_insert = 0 under the caller\'s settings', async () => {
+		const workbench = startScriptedWorkbench({ replicas: 1 })
+		try {
+			const remote = connect(workbench.url)
+
+			await remote.insert({ table: 'db.t', values: [{ id: 1 }], settings: { insert_deduplication_token: 'tok' } })
+			await remote.insert({ table: 'db.t', values: [{ id: 2 }], settings: { async_insert: 1, wait_for_async_insert: 1 } })
+
+			expect(workbench.inputs).toEqual([
+				{ serviceSlug: 'test', query: 'INSERT INTO db.t (id) VALUES (1)', settings: { async_insert: 0, insert_deduplication_token: 'tok' } },
+				{ serviceSlug: 'test', query: 'INSERT INTO db.t (id) VALUES (2)', settings: { async_insert: 1, wait_for_async_insert: 1 } },
 			])
 		} finally {
 			workbench.stop()
@@ -187,15 +205,15 @@ describe('createRemoteExecutor cancellation transport', () => {
 		}
 	})
 
-	// Like the native path, a tracked write adds no settings of its own; only
-	// recovery asks for async_insert=0 (#733 review G).
-	test('sends a tracked write with only the caller\'s settings', async () => {
+	// Like the native path, a tracked write sends async_insert = 0 under the
+	// caller's settings; recovery forces it over them (#733 review G).
+	test('sends a tracked write with async_insert = 0 under the caller\'s settings', async () => {
 		const workbench = startScriptedWorkbench({ replicas: 1 })
 		try {
 			const remote = connect(workbench.url)
 			await remote.commandTracked('INSERT INTO t SELECT 1', () => {}, async () => 'tracked-sync')
 			expect(workbench.inputs).toEqual([{
-				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync',
+				serviceSlug: 'test', query: 'INSERT INTO t SELECT 1', queryId: 'tracked-sync', settings: { async_insert: 0 },
 			}])
 		} finally {
 			workbench.stop()

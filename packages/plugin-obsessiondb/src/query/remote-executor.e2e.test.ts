@@ -144,6 +144,51 @@ describe('createRemoteExecutor listTableDetails (live)', () => {
 	}, TIMEOUT_MS)
 })
 
+// ObsessionDB users have no CREATE USER (or any access-management) grant
+// (#430), so this test runs in verify, against the local stack, only.
+const onObsessionDB = process.env.CHKIT_E2E_TARGET === 'obsessiondb'
+
+// A write through the console API is stored when it returns, also for a
+// service whose profile turns on fire-and-forget async inserts, as with a
+// direct connection (write-settings.e2e.test.ts). chkit-py sends the same
+// (test_obsessiondb_remote_executor_e2e.py).
+describe('createRemoteExecutor write settings (live)', () => {
+	test.skipIf(onObsessionDB)('no write is an asynchronous insert under a fire-and-forget profile', async () => {
+		const env = getLiveEnv()
+		const admin = createLiveExecutor(env)
+		const prefix = createPrefix('remote_write_settings')
+		const user = `${prefix}user`
+		const password = 'Pw-remote-write-settings'
+		const name = `${prefix}t`
+		const table = `${quoteIdent(env.clickhouseDatabase)}.${quoteIdent(name)}`
+		const workbench = startWorkbench({ ...env, clickhouseUser: user, clickhousePassword: password })
+		const count = async () => (await admin.query<{ n: string }>(`SELECT toString(count()) AS n FROM ${table}`))[0]?.n
+		try {
+			await admin.command(`CREATE TABLE ${table} (id UInt64) ENGINE = MergeTree ORDER BY id`)
+			await waitForTable(admin, env.clickhouseDatabase, name)
+			await admin.command(`CREATE USER ${quoteIdent(user)} IDENTIFIED BY '${password}' SETTINGS async_insert = 1, wait_for_async_insert = 0, async_insert_use_adaptive_busy_timeout = 0, async_insert_busy_timeout_max_ms = 30000`)
+			await admin.command(`GRANT SELECT, INSERT ON ${table} TO ${quoteIdent(user)}`)
+			const remote = connect(workbench.url)
+			// Each write is counted right after it returns: a buffered insert
+			// would wait out the profile's 30 s flush timeout.
+			await remote.command(`INSERT INTO ${table} VALUES (1)`)
+			const afterCommand = await count()
+			await remote.insert({ table: `${env.clickhouseDatabase}.${name}`, values: [{ id: 2 }] })
+			const afterInsert = await count()
+			await remote.commandTracked?.(`INSERT INTO ${table} VALUES (3)`, () => {}, async () => randomUUID())
+			const afterTracked = await count()
+			await remote.submit(`INSERT INTO ${table} VALUES (4)`, randomUUID())
+			const afterSubmit = await count()
+			expect([afterCommand, afterInsert, afterTracked, afterSubmit]).toEqual(['1', '2', '3', '4'])
+		} finally {
+			workbench.stop()
+			await admin.command(`DROP USER IF EXISTS ${quoteIdent(user)}`)
+			await admin.command(`DROP TABLE IF EXISTS ${table} SYNC`)
+			await admin.close()
+		}
+	}, TIMEOUT_MS)
+})
+
 // The table with index_granularity filled in as drift does when the stored
 // CREATE leaves it out, and every setting in comparison form.
 function withServerDefaults(table: IntrospectedTable): IntrospectedTable {

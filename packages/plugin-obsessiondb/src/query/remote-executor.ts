@@ -52,6 +52,16 @@ function toApiSettings(
 	return Object.keys(out).length > 0 ? out : undefined
 }
 
+/**
+ * Sent with writes (command, insert, submit) under the caller's settings, as a
+ * direct connection sends: an INSERT with inline data is no asynchronous insert,
+ * which a service profile with wait_for_async_insert = 0 would finish while its
+ * rows are still buffered.
+ */
+function writeSettings(settings?: ClickHouseSettings): ClickHouseSettings {
+	return { async_insert: 0, ...settings }
+}
+
 export function normalizeQueryData<T>(
 	res: Awaited<ReturnType<ApiClient['workbench']['query']['execute']>>,
 ): T[] {
@@ -121,7 +131,7 @@ export function createRemoteExecutor(deps: {
 			check()
 			const queryId = await beforeAttempt()
 			check()
-			const apiSettings = toApiSettings(settings) ?? {}
+			const apiSettings = toApiSettings(writeSettings(settings)) ?? {}
 			delete apiSettings.query_id
 			const res = await client.workbench.query.execute({
 				serviceSlug,
@@ -165,7 +175,7 @@ export function createRemoteExecutor(deps: {
 		},
 
 		async command(sql, settings?) {
-			const apiSettings = toApiSettings(settings)
+			const apiSettings = toApiSettings(writeSettings(settings))
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query: sql,
@@ -203,7 +213,7 @@ export function createRemoteExecutor(deps: {
 			if (!query) return
 			// Per-insert settings such as insert_deduplication_token must reach
 			// ClickHouse, so this cannot go through command(), which sends none.
-			const apiSettings = toApiSettings(params.settings)
+			const apiSettings = toApiSettings(writeSettings(params.settings))
 			const res = await client.workbench.query.execute({
 				serviceSlug,
 				query,
@@ -216,7 +226,7 @@ export function createRemoteExecutor(deps: {
 			// Never start a request after the caller gave up on it (#767): the
 			// signal also aborts the fetch while it connects.
 			options?.signal?.throwIfAborted()
-			const apiSettings = toApiSettings(settings)
+			const apiSettings = toApiSettings(writeSettings(settings))
 			const res = await client.workbench.query.execute(
 				{
 					serviceSlug,

@@ -14,10 +14,12 @@ the SQL the remote executor builds meets a real server.
 from __future__ import annotations
 
 import json
+import os
 import threading
 import time
 import uuid
 from collections.abc import Callable, Iterator
+from dataclasses import replace
 from datetime import UTC, datetime
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from typing import Any, TypeVar
@@ -599,3 +601,55 @@ def test_a_running_attempt_under_a_record_an_earlier_release_wrote_stops_the_run
     finally:
         worker.join(timeout=60)
         live.execute(f"DROP TABLE IF EXISTS {table}")
+
+
+# ObsessionDB users have no CREATE USER (or any access-management) grant
+# (#430), so this test runs in verify, against the local stack, only.
+_ON_OBSESSIONDB = os.environ.get("CHKIT_E2E_TARGET") == "obsessiondb"
+
+
+@pytest.mark.skipif(_ON_OBSESSIONDB, reason="ObsessionDB users have no CREATE USER grant (#430)")
+def test_no_write_is_an_asynchronous_insert_under_a_fire_and_forget_profile(
+    live_env: LiveEnv, live: ClickHouseClient
+) -> None:
+    """Port of the TS write-settings test in ``remote-executor.e2e.test.ts``.
+
+    A write through the console API is stored when it returns, also for a
+    service whose profile turns on fire-and-forget async inserts, as with a
+    direct connection (``test_clickhouse_write_settings_e2e.py``).
+    """
+    prefix = create_prefix("remote_write_settings_py")
+    user = f"{prefix}user"
+    password = "Pw-remote-write-settings"
+    name = f"{prefix}t"
+    table = _create_table(live, live_env.clickhouse_database, name)
+    try:
+        live.execute(
+            f"CREATE USER {quote_ident(user)} IDENTIFIED BY '{password}' SETTINGS "
+            "async_insert = 1, wait_for_async_insert = 0, "
+            "async_insert_use_adaptive_busy_timeout = 0, async_insert_busy_timeout_max_ms = 30000"
+        )
+        live.execute(f"GRANT SELECT, INSERT ON {table} TO {quote_ident(user)}")
+        as_user = replace(live_env, clickhouse_user=user, clickhouse_password=password)
+
+        def count() -> str:
+            return str(live.query(f"SELECT toString(count()) AS n FROM {table}").rows[0]["n"])
+
+        counts: list[str] = []
+        for remote in _serve_remote(as_user):
+            # Each write is counted right after it returns: a buffered insert
+            # would wait out the profile's 30 s flush timeout.
+            remote.execute(f"INSERT INTO {table} VALUES (1)")
+            counts.append(count())
+            remote.insert(f"{live_env.clickhouse_database}.{name}", [{"n": 2}])
+            counts.append(count())
+            remote.execute_tracked(
+                f"INSERT INTO {table} VALUES (3)", lambda: None, lambda: str(uuid.uuid4())
+            )
+            counts.append(count())
+            remote.submit(f"INSERT INTO {table} VALUES (4)", str(uuid.uuid4()))
+            counts.append(count())
+        assert counts == ["1", "2", "3", "4"]
+    finally:
+        live.execute(f"DROP USER IF EXISTS {quote_ident(user)}")
+        live.execute(f"DROP TABLE IF EXISTS {table} SYNC")

@@ -74,6 +74,15 @@ def _coerce_wire_settings(
     return coerced or None
 
 
+def _write_settings(settings: dict[str, Any] | None) -> dict[str, Any]:
+    """Sent with writes (execute, insert, submit) under the caller's settings,
+    as a direct connection sends: an INSERT with inline data is no
+    asynchronous insert, which a service profile with
+    ``wait_for_async_insert = 0`` would finish while its rows are still
+    buffered. TS ``writeSettings``."""
+    return {"async_insert": 0, **(settings or {})}
+
+
 def _row_to_dict(row: Any, column_names: Sequence[str]) -> dict[str, Any]:
     """Normalize ``data`` rows — TS returns lists for unnamed, dicts otherwise."""
     if isinstance(row, dict):
@@ -159,7 +168,7 @@ class RemoteClickHouseClient:
         check()
         query_id = before_attempt()
         check()
-        wire_settings = _coerce_wire_settings(settings) or {}
+        wire_settings = _coerce_wire_settings(_write_settings(settings)) or {}
         wire_settings.pop("query_id", None)
         result = workbench_query_execute(
             self._credentials,
@@ -205,7 +214,7 @@ class RemoteClickHouseClient:
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
-            settings=_coerce_wire_settings(settings),
+            settings=_coerce_wire_settings(_write_settings(settings)),
         )
         _raise_if_error(result)
 
@@ -252,7 +261,7 @@ class RemoteClickHouseClient:
             self._credentials,
             service_slug=self._service_slug,
             query=statement,
-            settings=_coerce_wire_settings(settings),
+            settings=_coerce_wire_settings(_write_settings(settings)),
             query_id=query_id,
             guard=before_send,
         )

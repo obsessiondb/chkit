@@ -28,6 +28,15 @@ const SLOW_ROWS = 20
 const MIGRATION_CHECKSUM = 'c1'
 
 describe('async migrate through the real ObsessionDB workbench API', () => {
+  // Every write sends async_insert = 0 in the request's settings (#803), so the
+  // API must hand them to ClickHouse. Two values, so a profile default can't pass.
+  test('the API forwards query settings to ClickHouse', async () => {
+    const remote = await connect()
+    const read = async (value: number) =>
+      (await remote.query<{ v: string }>("SELECT toString(toUInt8(getSetting('async_insert'))) AS v", { async_insert: value }))[0]?.v
+    expect([await read(0), await read(1)]).toEqual(['0', '1'])
+  }, TIMEOUT_MS)
+
   test('a submission keeps its query id and reads as running on every replica until it finishes', async () => {
     const remote = await connect()
     const queryId = `chkit-e2e-${randomUUID()}`
