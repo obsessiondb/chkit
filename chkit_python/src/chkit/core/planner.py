@@ -1722,10 +1722,14 @@ _LITERAL_WORDS = frozenset(["false", "inf", "infinity", "nan", "null", "true"])
 # Bare words that are not function names even before ``(``.
 _NOT_FUNCTIONS = frozenset(["exists", "lambda", "select", "with"])
 # Keywords of ClickHouse's expression grammar (operators, literals and the
-# words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries, joins and
-# windows): a bare one may not read a column of that name, so its expression
-# is not plain, and neither is a call to one outside ``_KEYWORD_FUNCTIONS``. A
-# quoted name reads such a column.
+# words of CASE, INTERVAL, DATE, CAST, EXTRACT, subqueries and windows): a
+# bare one may not read a column of that name, so its expression is not
+# plain, and neither is a call to one outside ``_KEYWORD_FUNCTIONS``. A quoted
+# name reads such a column. Query clause and join words (``left``, ``right``,
+# ``format``, ``values``, ``offset``, ``settings``...) are not here: ClickHouse
+# 26.3 reads a bare one as its column and a call to one as a function, and
+# their clause uses (``... FORMAT JSON``, ``LIMIT 1 OFFSET 2``) follow an
+# operand, which is not plain anyway.
 _EXPRESSION_KEYWORDS = frozenset(
     [
         "all", "and", "any", "array", "as", "asc", "ascending", "between", "both", "by",
@@ -1736,12 +1740,6 @@ _EXPRESSION_KEYWORDS = frozenset(
         "over", "partition", "position", "preceding", "range", "regexp", "replace",
         "respect", "row", "rows", "select", "substring", "then", "ties", "timestamp",
         "trailing", "trim", "unbounded", "when", "where", "window", "with", "within",
-        # Query clauses and joins.
-        "anti", "apply", "asof", "cross", "cube", "fill", "final", "format", "full", "group",
-        "grouping", "having", "inner", "interpolate", "intersect", "into", "join", "left",
-        "limit", "natural", "offset", "on", "outer", "paste", "placing", "prewhere", "qualify",
-        "right", "rollup", "sample", "semi", "sets", "settings", "step", "totals", "union",
-        "using", "values",
     ]
 )
 # Keywords that are also ordinary functions when called: their special forms

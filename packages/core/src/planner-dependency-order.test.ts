@@ -1724,14 +1724,24 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
     ])
   })
 
-  // A bare query or join word, and a call to a function whose arguments can
-  // be units or keywords (in any case, with any arguments), keep the sorted
-  // order. A quoted name is a column read, and other calls, in any case,
-  // keep the repair.
+  // A call to a function whose arguments can be units or keywords (in any
+  // case, with any arguments) keeps the sorted order. A bare query or join
+  // word reads its column and a call to one is a function, as ClickHouse 26.3
+  // parses them, so both keep the repair; such a word after an operand does
+  // not. A quoted name is a column read, and other calls, in any case, keep
+  // the repair.
   test.each<[string, ColumnDefinition[], string[]]>([
-    ['a bare APPLY', [u('APPLY'), u('extra', 'toUInt64(APPLY)')], ['t.a', 't.b', 't.c']],
-    ['a bare JOIN', [u('join'), u('extra', 'toUInt64(join)')], ['t.a', 't.b', 't.c']],
-    ['a bare PLACING', [u('placing'), u('extra', 'toUInt64(placing)')], ['t.a', 't.b', 't.c']],
+    ['a bare APPLY', [u('APPLY'), u('extra', 'toUInt64(APPLY)')], ['t.b', 't.a', 't.c']],
+    ['a bare JOIN', [u('join'), u('extra', 'toUInt64(join)')], ['t.b', 't.a', 't.c']],
+    ['a bare PLACING', [u('placing'), u('extra', 'toUInt64(placing)')], ['t.b', 't.a', 't.c']],
+    ['bare left and RIGHT', [u('left'), u('RIGHT'), u('extra', 'left + RIGHT')], ['t.b', 't.a', 't.c']],
+    ['bare format and values', [u('format'), u('values'), u('extra', 'plus(format, -values)')], ['t.b', 't.a', 't.c']],
+    ['bare offset, step and Final', [u('offset'), u('step'), u('Final'), u('extra', 'offset * step = Final')], ['t.b', 't.a', 't.c']],
+    ['bare settings and sample', [u('settings'), u('sample'), u('extra', 'CAST(settings AS UInt64) + sample::UInt64')], ['t.b', 't.a', 't.c']],
+    ['calls to left and RIGHT', [u('extra', 'toUInt64(left(toString(id), 1)) + toUInt64(RIGHT(toString(id), 1))')], ['t.b', 't.a', 't.c']],
+    ['a call to format', [u('extra', "length(format('{}-{}', toString(id), 'x'))")], ['t.b', 't.a', 't.c']],
+    ['a call to left with a left column', [u('left'), u('extra', 'toUInt64(left(toString(left), 1))')], ['t.b', 't.a', 't.c']],
+    ['a query word after an operand', [u('offset'), u('extra', 'id offset')], ['t.a', 't.b', 't.c']],
     ['a quoted APPLY', [u('APPLY'), u('extra', 'toUInt64(`APPLY`)')], ['t.b', 't.a', 't.c']],
     ['eXTrAcT with string arguments', [u('extra', "length(eXTrAcT('abc', 'a'))")], ['t.a', 't.b', 't.c']],
     ['dateDiff with a string unit', [u('extra', "toUInt64(dateDiff('day', toDateTime(id), toDateTime(id)))")], ['t.a', 't.b', 't.c']],
@@ -1788,6 +1798,16 @@ describe('planDiff moves a breaker before the MODIFY that closes a temporary cyc
         [t([u('a', '`all` + 1'), u('aa', 'a + 1'), u('ab', '5'), u('all', '5')])]
       )
     ).toEqual(['t.aa', 't.ab', 't.a', 't.all'])
+  })
+
+  // ClickHouse 26.3 reads a bare `left` as the column: main's order fails
+  // with code 174 when `a DEFAULT left + 1` closes a -> left -> c -> a.
+  // Either `c` or `left` breaks it, so the first in key order, `c`, runs
+  // first.
+  test('a bare left on the cycle is a read of its column', () => {
+    expect(
+      orderOf([t([u('a'), u('c', 'a'), u('left', 'c')])], [t([u('a', 'left + 1'), u('c', 'id'), u('left', 'id')])])
+    ).toEqual(['t.c', 't.a', 't.left'])
   })
 
   // ClickHouse stores `` `not` + 1 `` as `NOT 1`, so `a` does not read the
