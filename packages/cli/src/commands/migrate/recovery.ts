@@ -29,10 +29,10 @@ export interface StatementIdentity extends StatementMarker {
   fingerprint: string | undefined
   /**
    * The marker releases before #831 gave the statement, when it differs: they
-   * paired the n-th marker of the file with the n-th statement. A record they
-   * wrote names that marker, and still matches the statement.
+   * paired the n-th marker of the file with the n-th statement, and the
+   * journal names the marker they gave each statement they ran.
    */
-  legacy?: { type: string; key: string }
+  legacy?: StatementMarker
 }
 
 export interface OperationMismatch {
@@ -134,9 +134,7 @@ export function statementIdentities(
   return fingerprints.map((fingerprint, index) => {
     const identity = statementIdentity(operations, index)
     const legacy = statementIdentity(legacyOperations, index)
-    return sameMarker(identity, legacy)
-      ? { ...identity, fingerprint }
-      : { ...identity, fingerprint, legacy: { type: legacy.type, key: legacy.key } }
+    return sameMarker(identity, legacy) ? { ...identity, fingerprint } : { ...identity, fingerprint, legacy }
   })
 }
 
@@ -146,8 +144,26 @@ export function statementIdentities(
  * by position, so each of them must keep its position, operation marker and,
  * where the journal recorded its fingerprint, its SQL (#599). A record from
  * an older release has no fingerprint and is matched by position and marker.
+ *
+ * The records of a release before #831 name the markers it paired by order.
+ * When the statements' own markers do not match them, every record is checked
+ * against that pairing instead, as a whole, so a marker that several statements
+ * share keeps its count (#831).
  */
 export function verifyRetryEdit(
+  operations: readonly OperationState[],
+  identities: readonly StatementIdentity[],
+): RetryEditCheck {
+  const own = checkRetryEdit(operations, identities)
+  if (own.ok || !identities.some((identity) => identity.legacy !== undefined)) return own
+  const legacy = checkRetryEdit(
+    operations,
+    identities.map((identity) => (identity.legacy ? { ...identity.legacy, fingerprint: identity.fingerprint } : identity)),
+  )
+  return legacy.ok ? legacy : own
+}
+
+function checkRetryEdit(
   operations: readonly OperationState[],
   identities: readonly StatementIdentity[],
 ): RetryEditCheck {
@@ -160,14 +176,14 @@ export function verifyRetryEdit(
   let positionOnlyCompleted = 0
   for (const op of bound) {
     const current = identities[op.operationIndex]
-    if (current === undefined || !matchesMarker(current, markerOf(op)) || !sameSql(current, op)) {
+    if (current === undefined || !sameMarker(current, markerOf(op)) || !sameSql(current, op)) {
       mismatches.push({
         statement: op.operationIndex + 1,
         status: op.status,
         queryId: op.queryId,
         recorded: markerOf(op),
         current: current === undefined ? null : { type: current.type, key: current.key },
-        sqlChanged: current !== undefined && matchesMarker(current, markerOf(op)),
+        sqlChanged: current !== undefined && sameMarker(current, markerOf(op)),
       })
       continue
     }
@@ -243,6 +259,9 @@ export function retryMismatchError(
  * recorded (--retry verified them). A failed or started statement stays only
  * if the same operation still sits at its index, so a retry keeps its
  * `-- before-retry:` compensation and query id; any other record is dropped.
+ * An async attempt that --retry matched with the marker a release before #831
+ * recorded stays too. Any other record stays only under the statement's own
+ * marker, whose `-- before-retry:` SQL a retry runs (#831).
  */
 export function rebaseInProgressState(
   state: MigrationRowState,
@@ -251,7 +270,9 @@ export function rebaseInProgressState(
   const operations = state.operations.filter((op) => {
     if (op.status === 'completed') return true
     const current = input.identities[op.operationIndex]
-    return current !== undefined && matchesMarker(current, markerOf(op))
+    if (current === undefined) return false
+    if (sameMarker(current, markerOf(op))) return true
+    return isBoundToPosition(op) && current.legacy !== undefined && sameMarker(current.legacy, markerOf(op))
   })
   return { ...state, checksum: input.checksum, appliedAt: input.appliedAt, operations }
 }
@@ -352,7 +373,7 @@ function findSharedMarkerMismatches(
       .filter((op) => sameMarker(markerOf(op), marker))
       .sort((a, b) => a.operationIndex - b.operationIndex)
       .map((op) => ({ statement: op.operationIndex + 1, status: op.status }))
-    const currentCount = identities.filter((identity) => matchesMarker(identity, marker)).length
+    const currentCount = identities.filter((identity) => sameMarker(identity, marker)).length
     return currentCount < recorded.length ? [{ ...marker, recorded, currentCount }] : []
   })
 }
@@ -374,11 +395,6 @@ function markerOf(op: OperationState): { type: string; key: string } {
 
 function sameMarker(a: { type: string; key: string }, b: { type: string; key: string }): boolean {
   return a.type === b.type && a.key === b.key
-}
-
-// The statement's marker, or the one a release before #831 recorded for it.
-function matchesMarker(identity: StatementIdentity, recorded: { type: string; key: string }): boolean {
-  return sameMarker(identity, recorded) || (identity.legacy !== undefined && sameMarker(identity.legacy, recorded))
 }
 
 /** `['1', '2', '3']` → `1, 2 and 3`. */

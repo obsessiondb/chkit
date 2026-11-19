@@ -507,6 +507,11 @@ describe('extractStatementOperations (#831)', () => {
     expect(scanDestructiveSqlStatements(sql)).toEqual([{ type: 'drop_table', statement: 'DROP TABLE app.old;' }])
   })
 
+  test('a danger marker after a byte order mark still needs --allow-destructive', () => {
+    const sql = '\ufeff-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;'
+    expect(collectDestructiveOperationMarkers('m.sql', sql).map((marker) => marker.type)).toEqual(['drop_table'])
+  })
+
   test('a barrier after an unmarked statement is checked at its own statement', () => {
     const sql = [
       'INSERT INTO app.t VALUES (1);',

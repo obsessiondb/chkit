@@ -137,6 +137,20 @@
         { "type": "create_table", "key": "table:app.t", "risk": "safe", "mode": "sync", "beforeRetry": null },
         { "type": "drop_table", "key": "table:app.t", "risk": "danger", "mode": "sync", "beforeRetry": null }
       ]
+    },
+    {
+      "name": "a byte order mark before the first marker",
+      "sql": "\ufeff-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;\n",
+      "operations": [
+        { "type": "drop_table", "key": "table:app.t", "risk": "danger", "mode": "sync", "beforeRetry": null }
+      ],
+      "legacy": "same"
+    },
+    {
+      "name": "a marker that ends in a character JavaScript does not read as whitespace does not parse",
+      "sql": "-- operation: create_table key=table:app.t risk=safe\u0085\nCREATE TABLE app.t (id UInt64) ENGINE = MergeTree ORDER BY id;\n",
+      "operations": [null],
+      "legacy": "same"
     }
   ]
 }

@@ -474,6 +474,35 @@ def test_retry_refuses_a_recorded_marker_neither_pairing_gives_the_statement() -
     assert isinstance(result, RetryEditMismatch)
 
 
+def test_retry_checks_the_order_pairing_as_a_whole_so_a_shared_marker_keeps_its_count() -> None:
+    shared = "-- operation: alter_table_modify_column key=table:db.t:column:f risk=caution"
+    # The REMOVE DEFAULT that completed was deleted; only the MODIFY after it is left.
+    sql = "\n".join(["SELECT 0;", shared, "ALTER TABLE db.t MODIFY COLUMN f UInt64;"])
+    result = verify_retry_edit(
+        [op(0, "completed", MODIFY_F), op(1, "completed", MODIFY_F), op(2, "failed", MODIFY_F)],
+        _file_identities(sql),
+    )
+    assert isinstance(result, RetryEditMismatch)
+
+
+def test_rebase_drops_a_failed_record_only_the_order_pairing_matches() -> None:
+    sql = "\n".join(
+        [
+            "-- operation: load_table_data key=table:db.a risk=caution",
+            "-- INSERT INTO db.a SELECT bad;",
+            "/* replacement */",
+            "-- operation: load_table_data key=table:db.b risk=caution",
+            "-- before-retry: TRUNCATE TABLE db.b",
+            "INSERT INTO db.b SELECT 1;",
+        ]
+    )
+    state = in_progress([op(0, "failed", LOAD)], checksum="old")
+    rebased = rebase_in_progress_state(
+        state, checksum="new", identities=_file_identities(sql), applied_at="T"
+    )
+    assert rebased.operations == []
+
+
 def test_rebase_keeps_a_started_attempt_recorded_under_the_order_pairing() -> None:
     state = in_progress([op(0, "started", LOAD, query_id="q-0")], checksum="old")
     rebased = rebase_in_progress_state(

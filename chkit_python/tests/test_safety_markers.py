@@ -10,12 +10,12 @@ import pytest
 
 from chkit.cli.safety_markers import (
     DestructiveOperationMarker,
+    MigrationOperationSummary,
     NonSelectBarrier,
     ScannedDestructiveStatement,
     collect_destructive_operation_markers,
     collect_unmarked_destructive_statements,
     extract_executable_statements,
-    MigrationOperationSummary,
     extract_migration_operation_summaries,
     extract_statement_operations,
     find_non_select_barriers,
@@ -448,6 +448,11 @@ def test_unmarked_drop_before_a_marked_statement_still_needs_allow_destructive()
     assert scan_destructive_sql_statements(sql) == [
         ScannedDestructiveStatement(type="drop_table", statement="DROP TABLE app.old;")
     ]
+
+
+def test_danger_marker_after_a_byte_order_mark_still_needs_allow_destructive() -> None:
+    sql = "\ufeff-- operation: drop_table key=table:app.t risk=danger\nDROP TABLE app.t;"
+    assert [m.type for m in collect_destructive_operation_markers("m.sql", sql)] == ["drop_table"]
 
 
 def test_barrier_after_an_unmarked_statement_is_checked_at_its_own_statement() -> None:

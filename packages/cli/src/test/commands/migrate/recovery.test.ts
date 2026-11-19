@@ -488,6 +488,38 @@ describe('records written with the markers paired by order (#831)', () => {
     expect(result.ok).toBe(false)
   })
 
+  test('the old pairing is checked as a whole, so a shared marker keeps its count', () => {
+    const shared = '-- operation: alter_table_modify_column key=table:db.t:column:f risk=caution'
+    // The REMOVE DEFAULT that completed was deleted; only the MODIFY after it is left.
+    const sql = ['SELECT 0;', shared, 'ALTER TABLE db.t MODIFY COLUMN f UInt64;'].join('\n')
+    const result = verifyRetryEdit(
+      [op(0, 'completed', MODIFY_F), op(1, 'completed', MODIFY_F), op(2, 'failed', MODIFY_F)],
+      fileIdentities(sql),
+    )
+    expect(result.ok).toBe(false)
+  })
+
+  test('a failed record that only the old pairing matches is dropped on the re-key, so its statement gets no before-retry', () => {
+    const sql = [
+      '-- operation: load_table_data key=table:db.a risk=caution',
+      '-- INSERT INTO db.a SELECT bad;',
+      '/* replacement */',
+      '-- operation: load_table_data key=table:db.b risk=caution',
+      '-- before-retry: TRUNCATE TABLE db.b',
+      'INSERT INTO db.b SELECT 1;',
+    ].join('\n')
+    const state: MigrationRowState = {
+      name: 'm.sql',
+      appliedAt: '2026-09-29 00:11:11.000',
+      checksum: 'old',
+      chkitVersion: '0.2.0-test',
+      migrationCompleted: false,
+      operations: [op(0, 'failed', LOAD)],
+    }
+    const rebased = rebaseInProgressState(state, { checksum: 'new', identities: fileIdentities(sql), appliedAt: 'T' })
+    expect(rebased.operations).toEqual([])
+  })
+
   test('a started async attempt recorded under the old pairing stays recorded on the re-key', () => {
     const state: MigrationRowState = {
       name: 'm.sql',

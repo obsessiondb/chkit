@@ -31,7 +31,7 @@ from collections.abc import Sequence
 from dataclasses import dataclass
 from typing import Literal
 
-from chkit.core.sql_lexer import SQLToken, is_trivia, tokenize_sql
+from chkit.core.sql_lexer import SQLToken, is_trivia, js_regex, js_trim, tokenize_sql
 from chkit.core.sql_splitter import (
     extract_executable_statements,
     extract_executable_statements_with_comments,
@@ -63,9 +63,12 @@ _PREVIEW_TRUNCATE_LEN = 117
 
 _BEFORE_RETRY_PREFIX = "-- before-retry:"
 
+# JavaScript's ``\s`` and trim, so both ports read the same markers (#831).
 _OPERATION_LINE = re.compile(
-    r"^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$"
+    js_regex(r"^([a-z_]+)\s+key=(.+?)\s+risk=([a-z_]+)(?:\s+mode=([a-z_]+))?$")
 )
+_OPERATION_PREFIX = re.compile(js_regex(r"^-- operation:\s*"))
+_TRAILING_SEMICOLON = re.compile(js_regex(r";\s*$"))
 
 _OBJECT_KEY_RE = re.compile(
     r"\b(?:TABLE|VIEW|DATABASE|DICTIONARY)\s+(?:IF\s+EXISTS\s+)?`?([\w.]+)`?",
@@ -147,9 +150,9 @@ def migration_contains_danger_operation(sql: str) -> bool:
 def _extract_destructive_operation_summaries(sql: str) -> list[str]:
     out: list[str] = []
     for raw_line in sql.split("\n"):
-        line = raw_line.strip()
+        line = js_trim(raw_line)
         if line.startswith("-- operation:") and "risk=danger" in line:
-            out.append(re.sub(r"^-- operation:\s*", "", line))
+            out.append(_OPERATION_PREFIX.sub("", line))
     return out
 
 
@@ -174,17 +177,17 @@ def _parse_operation_line(
 
 
 def _strip_trailing_semicolon(value: str) -> str:
-    return re.sub(r";\s*$", "", value).strip()
+    return js_trim(_TRAILING_SEMICOLON.sub("", value))
 
 
 def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSummary]:
     """Parse every ``-- operation:`` block in ``sql`` with its before-retry SQL."""
-    lines = [line.strip() for line in sql.split("\n")]
+    lines = [js_trim(line) for line in sql.split("\n")]
     summaries: list[MigrationOperationSummary] = []
     for i, line in enumerate(lines):
         if not line.startswith("-- operation:"):
             continue
-        summary = re.sub(r"^-- operation:\s*", "", line)
+        summary = _OPERATION_PREFIX.sub("", line)
 
         before_retry: str | None = None
         for j in range(i + 1, len(lines)):
@@ -195,7 +198,7 @@ def extract_migration_operation_summaries(sql: str) -> list[MigrationOperationSu
                 break
             if nxt.startswith(_BEFORE_RETRY_PREFIX):
                 before_retry = _strip_trailing_semicolon(
-                    nxt[len(_BEFORE_RETRY_PREFIX) :].strip()
+                    js_trim(nxt[len(_BEFORE_RETRY_PREFIX) :])
                 )
                 if before_retry == "":
                     before_retry = None
@@ -236,9 +239,9 @@ def _statement_operation(comment_blocks: list[list[str]]) -> MigrationOperationS
         before_retry: str | None = None
         line = next((x for x in block[at + 1 :] if x.startswith(_BEFORE_RETRY_PREFIX)), None)
         if line is not None:
-            value = _strip_trailing_semicolon(line[len(_BEFORE_RETRY_PREFIX) :].strip())
+            value = _strip_trailing_semicolon(js_trim(line[len(_BEFORE_RETRY_PREFIX) :]))
             before_retry = value or None
-        return _parse_operation_line(re.sub(r"^-- operation:\s*", "", block[at]), before_retry)
+        return _parse_operation_line(_OPERATION_PREFIX.sub("", block[at]), before_retry)
     return None
 
 

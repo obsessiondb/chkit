@@ -35,9 +35,9 @@ class StatementIdentity:
     # be checked yet, because a plugin's on_before_apply may still rewrite it.
     fingerprint: str | None = None
     # The marker releases before #831 gave the statement, when it differs:
-    # they paired the n-th marker of the file with the n-th statement. A record
-    # they wrote names that marker, and still matches the statement.
-    legacy: tuple[str, str] | None = None
+    # they paired the n-th marker of the file with the n-th statement, and the
+    # journal names the marker they gave each statement they ran.
+    legacy: StatementIdentity | None = None
 
 
 class Marker(BaseModel):
@@ -180,7 +180,7 @@ def statement_identities(
                 key=marker.key,
                 marked=marker.marked,
                 fingerprint=fingerprint,
-                legacy=(legacy.type, legacy.key) if differs else None,
+                legacy=legacy if differs else None,
             )
         )
     return out
@@ -197,7 +197,36 @@ def verify_retry_edit(
     marker and, where the journal recorded its fingerprint, its SQL (#599). A
     record from an older release has no fingerprint and is matched by position
     and marker.
+
+    The records of a release before #831 name the markers it paired by order.
+    When the statements' own markers do not match them, every record is
+    checked against that pairing instead, as a whole, so a marker that several
+    statements share keeps its count (#831).
     """
+    own = _check_retry_edit(operations, identities)
+    if isinstance(own, RetryEditOk) or all(i.legacy is None for i in identities):
+        return own
+    legacy = _check_retry_edit(
+        operations,
+        [
+            i
+            if i.legacy is None
+            else StatementIdentity(
+                type=i.legacy.type,
+                key=i.legacy.key,
+                marked=i.legacy.marked,
+                fingerprint=i.fingerprint,
+            )
+            for i in identities
+        ],
+    )
+    return legacy if isinstance(legacy, RetryEditOk) else own
+
+
+def _check_retry_edit(
+    operations: Sequence[OperationState],
+    identities: Sequence[StatementIdentity],
+) -> RetryEditCheck:
     bound = sorted(
         (op for op in operations if _is_bound_to_position(op)),
         key=lambda op: op.operation_index,
@@ -330,7 +359,10 @@ def rebase_in_progress_state(
     Completed statements stay recorded (--retry verified them). A failed or
     started statement stays only if the same operation still sits at its
     index, so a retry keeps its ``-- before-retry:`` compensation and query
-    id; any other record is dropped.
+    id; any other record is dropped. An async attempt that --retry matched
+    with the marker a release before #831 recorded stays too. Any other record
+    stays only under the statement's own marker, whose ``-- before-retry:``
+    SQL a retry runs (#831).
     """
 
     def keep(op: OperationState) -> bool:
@@ -338,7 +370,14 @@ def rebase_in_progress_state(
             return True
         if op.operation_index >= len(identities):
             return False
-        return _same_identity(identities[op.operation_index], op)
+        current = identities[op.operation_index]
+        if _same_identity(current, op):
+            return True
+        return (
+            _is_bound_to_position(op)
+            and current.legacy is not None
+            and _same_identity(current.legacy, op)
+        )
 
     return state.model_copy(
         update={
@@ -481,7 +520,9 @@ def _find_shared_marker_mismatches(
             if _marker_of(op) == marker
         ]
         current_count = sum(
-            1 for identity in identities if _matches_marker(identity, marker.type, marker.key)
+            1
+            for identity in identities
+            if identity.type == marker.type and identity.key == marker.key
         )
         if current_count < len(recorded):
             out.append(
@@ -501,12 +542,7 @@ def _is_bound_to_position(op: OperationState) -> bool:
 
 
 def _same_identity(identity: StatementIdentity, op: OperationState) -> bool:
-    return _matches_marker(identity, op.operation_type, op.operation_key)
-
-
-def _matches_marker(identity: StatementIdentity, type_: str, key: str) -> bool:
-    """The statement's marker, or the one a release before #831 recorded for it."""
-    return (identity.type, identity.key) == (type_, key) or identity.legacy == (type_, key)
+    return identity.type == op.operation_type and identity.key == op.operation_key
 
 
 def _same_sql(identity: StatementIdentity, op: OperationState) -> bool:
