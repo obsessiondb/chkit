@@ -18,7 +18,7 @@ import {
   setActiveOrganization,
   verifyOtp,
 } from './api-client.js'
-import { saveCredentials } from './credentials.js'
+import { type Credentials, saveCredentials } from './credentials.js'
 
 export interface SignupOptions {
   /** Skip the email prompt (non-interactive / tests). */
@@ -52,9 +52,25 @@ export async function runSignup(
   print: (value: unknown) => void,
   options: SignupOptions = {},
 ): Promise<number> {
+  const outcome = await signup(baseUrl, print, options)
+  return outcome.status === 'failed' ? 1 : 0
+}
+
+/** What a signup run did: only sent the code, verified it (with the saved credentials), or failed. */
+export type SignupOutcome =
+  | { status: 'otp_sent' }
+  | { status: 'verified'; credentials: Credentials }
+  | { status: 'failed' }
+
+/** {@link runSignup} returning its outcome, so onboarding claims only with credentials this run verified. */
+export async function signup(
+  baseUrl: string,
+  print: (value: unknown) => void,
+  options: SignupOptions = {},
+): Promise<SignupOutcome> {
   const jsonMode = options.jsonMode === true
   const email = options.email ?? (await promptEmail(print, jsonMode))
-  if (email === null) return 1
+  if (email === null) return { status: 'failed' }
 
   // A supplied code means this is the verify step of a prior request — re-sending would
   // invalidate the code the caller is about to submit, so only send when we have no code yet.
@@ -65,7 +81,7 @@ export async function runSignup(
       if (error instanceof OtpRateLimitError) {
         if (jsonMode) print(errorEnvelope('obsessiondb signup', 'otp_rate_limited', error.message))
         else print(error.message)
-        return 1
+        return { status: 'failed' }
       }
       throw error
     }
@@ -76,15 +92,16 @@ export async function runSignup(
     if (options.requestOnly || !process.stdin.isTTY) {
       if (jsonMode) print(otpSentEnvelope(email))
       else print(verifyStepHint(email).join('\n'))
-      return 0
+      return { status: 'otp_sent' }
     }
   }
 
   const code = options.code ?? (await promptCode(print, jsonMode))
-  if (code === null) return 1
+  if (code === null) return { status: 'failed' }
 
   const { token, user } = await verifyOtp(baseUrl, email, code)
-  await saveCredentials({ access_token: token, base_url: baseUrl })
+  const credentials = { access_token: token, base_url: baseUrl }
+  await saveCredentials(credentials)
 
   const created = await ensureActiveOrganization(baseUrl, token, {
     email,
@@ -99,7 +116,7 @@ export async function runSignup(
     print(`Welcome back, ${user.email}.`)
   }
 
-  return 0
+  return { status: 'verified', credentials }
 }
 
 /**

@@ -28,12 +28,9 @@ from typing import Final, Literal
 from chkit_plugin_obsessiondb.auth_login import run_login
 from chkit_plugin_obsessiondb.auth_signup import (
     SignupOptions,
-    run_signup,
+    signup,
 )
-from chkit_plugin_obsessiondb.credentials import (
-    load_credentials,
-    resolve_base_url,
-)
+from chkit_plugin_obsessiondb.credentials import resolve_base_url
 from chkit_plugin_obsessiondb.service_claim import run_claim
 
 
@@ -284,23 +281,22 @@ def run_onboarding(
         return
 
     # Falls through to the "claim a free instance" path.
-    signup_code = run_signup(
+    outcome = signup(
         base_url,
         _print_obj,
         SignupOptions(email=email, code=code, org_name=org_name),
     )
-    if signup_code != 0:
+    if outcome.status == "failed":
         msg = (
             "Signup did not complete. Run `chkit plugin obsessiondb signup` "
             "to finish, then `chkit plugin obsessiondb service claim`."
         )
         raise RuntimeError(msg)
-    creds = load_credentials()
-    # signup returned 0 but no creds persisted → two-step pause (code sent, user
-    # needs to re-run with --code). Not a failure, just exit cleanly.
-    if creds is None:
+    # Two-step pause (code sent, user needs to re-run with --code). Not a failure,
+    # just exit cleanly; never fall back to a login on disk, which may be another account.
+    if outcome.credentials is None:
         return
-    claim_code = run_claim(creds, config_path, _print_obj)
+    claim_code = run_claim(outcome.credentials, config_path, _print_obj)
     if claim_code != 0:
         msg = (
             "Could not claim a free instance. Run "
