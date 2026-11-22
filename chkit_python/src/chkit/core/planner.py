@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import json
 import re
-from collections.abc import Sequence
+from collections.abc import Callable, Iterable, Sequence
 from typing import Any
 
 from chkit.core.canonical import canonicalize_definitions, definition_key
@@ -943,6 +943,7 @@ def order_column_statements(
                 releasers.setdefault(read, []).append(index)
 
     added = {op.key for op in statements if op.type == "alter_table_add_column"}
+    releases = _cycle_releases(cycle_reads, old_cycle_reads, added, set(modifies))
     prerequisites: list[list[str]] = []
     for index, op in enumerate(statements):
         found: dict[int, None] = {}
@@ -960,7 +961,7 @@ def order_column_statements(
         # A column's last statement is the MODIFY COLUMN that sets its new expression.
         is_last = index + 1 == len(statements) or statements[index + 1].key != op.key
         if op.type == "alter_table_modify_column" and is_last:
-            for column in _cycle_releases(op.key, cycle_reads, old_cycle_reads, added):
+            for column in releases.get(op.key, []):
                 for other in modifies.get(column, []):
                     found[other] = None
         if index > 0 and statements[index - 1].key == op.key:
@@ -979,48 +980,115 @@ def order_column_statements(
 
 
 def _cycle_releases(
-    key: str,
     reads: dict[str, set[str]],
     old_reads: dict[str, set[str]],
     added: set[str],
-) -> list[str]:
-    """Columns whose MODIFY must run before the MODIFY that sets ``key``'s expression (#769).
+    modified: set[str],
+) -> dict[str, list[str]]:
+    """For each ``modified`` column K, the ``modified`` columns whose MODIFY must run first (#769).
 
-    ClickHouse rejects an expression that closes a cycle. The new expression
+    These MODIFYs must run before the MODIFY that gives K its new expression.
+    ClickHouse rejects an expression that closes a cycle. K's new expression
     closes one through column P when it reads a column that leads to P, and
-    P's old expression reads a column that leads back to ``key``, which P's
-    new expression no longer reads. "Leads to" follows reads that both the
-    old and the new expression of their column have, so the path exists in
-    every intermediate state and only P's MODIFY breaks it. On the way to P
-    it also follows the reads of ``added`` columns: the MODIFY runs after the
-    ADD of every added column its expression reads through them. Every such
-    P is read by the new expression through the new schema, so these edges
-    can't form a cycle unless the new schema has one.
-    """
+    P's old expression reads a column that leads back to K, which P's new
+    expression no longer reads. "Leads to" follows reads that both the old
+    and the new expression of their column have, so the path exists in every
+    intermediate state and only P's MODIFY breaks it. On the way to P it also
+    follows the reads of ``added`` columns: the MODIFY runs after the ADD of
+    every added column its expression reads through them. Every such P is
+    read by K's new expression through the new schema, so these edges can't
+    form a cycle unless the new schema has one.
 
-    def reachable(start: str, through_added: bool) -> set[str]:
+    Such a K, P and every column between them lie on a cycle of old and new
+    reads, so the search starts from the old reads that P drops and keeps to
+    the columns on such cycles (#789). Beyond work linear in the reads, it
+    searches those columns once for each old read that a P drops, and once
+    more for each such read and P when the first search finds a K: a deep
+    chain of defaults costs no more than a short one, unless many dropped
+    reads lead into the same long part of a cycle. Beyond the result, memory
+    stays linear in the reads.
+    """
+    cyclic = _on_cycles(reads, old_reads)
+    # Column -> the columns that lead to it, the first step from K excluded.
+    leads_from: dict[str, list[str]] = {}
+    for column, column_reads in reads.items():
+        if column not in cyclic:
+            continue
+        follow = column in added
+        for read in column_reads:
+            if read in cyclic and (follow or read in old_reads.get(column, ())):
+                leads_from.setdefault(read, []).append(column)
+
+    def closure(start: str, step: Callable[[str], Iterable[str]]) -> set[str]:
         seen = {start}
         pending = [start]
         while pending:
-            column = pending.pop()
-            follow = through_added and column in added
-            for read in reads.get(column, ()):
-                if (follow or read in old_reads.get(column, ())) and read not in seen:
-                    seen.add(read)
-                    pending.append(read)
+            for other in step(pending.pop()):
+                if other in cyclic and other not in seen:
+                    seen.add(other)
+                    pending.append(other)
         return seen
 
-    released: dict[str, None] = {}
-    for read in reads.get(key, ()):
-        for column in reachable(read, through_added=True):
-            if column == key:
-                continue
-            for dropped in old_reads.get(column, ()):
-                if dropped not in reads.get(column, ()) and key in reachable(
-                    dropped, through_added=False
-                ):
-                    released[column] = None
-    return list(released)
+    def stable_reads(column: str) -> Iterable[str]:
+        return reads.get(column, set()) & old_reads.get(column, set())
+
+    # Dropped read -> the breakers that drop it. Each closure is searched,
+    # used and let go, so the searches need memory linear in the reads.
+    dropped_by: dict[str, list[str]] = {}
+    for breaker in sorted(modified):
+        if breaker not in cyclic:
+            continue
+        for dropped in old_reads.get(breaker, ()):
+            if dropped not in reads.get(breaker, ()) and dropped in cyclic:
+                dropped_by.setdefault(dropped, []).append(breaker)
+    released: dict[str, dict[str, None]] = {}
+    for dropped, breakers in dropped_by.items():
+        back = closure(dropped, stable_reads)
+        for breaker in breakers:
+            leads_to_breaker: set[str] | None = None
+            for key in back:
+                if key == breaker or key not in modified:
+                    continue
+                if leads_to_breaker is None:
+                    leads_to_breaker = closure(breaker, lambda column: leads_from.get(column, ()))
+                if not leads_to_breaker.isdisjoint(reads.get(key, ())):
+                    released.setdefault(key, {})[breaker] = None
+    return {key: list(breakers) for key, breakers in released.items()}
+
+
+def _on_cycles(reads: dict[str, set[str]], old_reads: dict[str, set[str]]) -> set[str]:
+    """The columns on a cycle of ``reads`` and ``old_reads`` together, or on a path between two.
+
+    It is what is left after taking away, again and again, every column that
+    reads none of the rest or that none of the rest reads.
+    """
+    reads_of: dict[str, set[str]] = {}
+    read_by: dict[str, set[str]] = {}
+    for graph in (reads, old_reads):
+        for column, column_reads in graph.items():
+            for read in column_reads:
+                reads_of.setdefault(column, set()).add(read)
+                read_by.setdefault(read, set()).add(column)
+    left = {column for column in reads_of if column in read_by}
+    outs = {column: len(reads_of[column] & left) for column in left}
+    ins = {column: len(read_by[column] & left) for column in left}
+    pending = [column for column in left if outs[column] == 0 or ins[column] == 0]
+    while pending:
+        column = pending.pop()
+        if column not in left:
+            continue
+        left.discard(column)
+        for read in reads_of.get(column, ()):
+            if read in left:
+                ins[read] -= 1
+                if ins[read] == 0:
+                    pending.append(read)
+        for other in read_by.get(column, ()):
+            if other in left:
+                outs[other] -= 1
+                if outs[other] == 0:
+                    pending.append(other)
+    return left
 
 
 def _column_key(database: str, table: str, column: str) -> str:
