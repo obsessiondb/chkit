@@ -49,9 +49,10 @@ Both implementations produce the same artifacts, so a project (or a team) can mi
 
 ## Differences from the TypeScript version
 
-The schema/migration CLI and backfill engine share the TypeScript workflow. The following features are TypeScript-only:
+The schema/migration CLI and backfill engine share the TypeScript workflow. The following features are TypeScript-only. chkit-py reports a TypeScript-only command such as `chkit add` as `Unknown command` and exits 1.
 
 - `chkit skills` proxy and the `create-chkit` scaffolder: use `chkit init` instead.
+- `chkit add` and `chkit registry`, the provider template commands of [chkit Sync (beta)](/sync/).
 - `deps.ts`-style dependency auto-install: install packages explicitly with `pip`.
 - The project `entry` module: use `schema` globs to select Python schema files.
 

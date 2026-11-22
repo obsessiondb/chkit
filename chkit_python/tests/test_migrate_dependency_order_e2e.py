@@ -437,6 +437,25 @@ _COLUMN_CHANGES: list[dict[str, Any]] = [
         "columns": ["b", "id", "y"],
     },
     {
+        # #799: ALTER's check for cyclic defaults counts a lambda parameter
+        # named like a column as a read of it, so MODIFY `a` first met the
+        # other side of the cycle: Cyclic alias detected.
+        "label": "lambdaold",
+        "before": f"{{'name': 'a', 'type': 'UInt64'}}, "
+        f"{{'name': 'b', 'type': 'UInt64', {_e('arraySum(arrayMap(a -> 1, [1]))')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('b')}}}, {{'name': 'b', 'type': 'UInt64'}}",
+        "order": ["column:b", "column:a"],
+        "columns": ["a", "b", "id"],
+    },
+    {
+        "label": "lambdanew",
+        "before": f"{{'name': 'a', 'type': 'UInt64'}}, {{'name': 'b', 'type': 'UInt64', {_e('a')}}}",
+        "after": f"{{'name': 'a', 'type': 'UInt64', {_e('arraySum(arrayMap(b -> 1, [1]))')}}}, "
+        "{'name': 'b', 'type': 'UInt64'}",
+        "order": ["column:b", "column:a"],
+        "columns": ["a", "b", "id"],
+    },
+    {
         # #768: reading the lambda parameter `c` as the new column `c` ran
         # MODIFY `a` last, so MODIFY `b` DEFAULT a met the old `a DEFAULT b`:
         # Cyclic alias detected in column DEFAULT expressions.

@@ -936,6 +936,8 @@ def _check_in_flight(
     a fresh server has no ``system.query_log`` until its first log flush. With
     one, the check also reads the attempt's outcome from ``system.query_log``
     (#672), and fails like an unreadable replica when query_log cannot be read.
+    A failed outcome lookup leaves the attempt's outcome unknown, so it stops
+    with ``async_outcome_unknown`` (#782).
     """
     try:
         if attempt_after_time is None:
@@ -958,14 +960,16 @@ def _check_in_flight(
                 "system.query_log to the user; until then a re-run of `chkit migrate "
                 "--apply` stops here too."
             )
-            raise RuntimeError(msg) from error
+            raise MigrateError("async_outcome_unknown", msg) from error
         msg = (
             f"Async migration step {operation_type} (query_id {query_id}): could "
             f"not check whether a previous attempt is still running "
             f"({_describe_error(error)}). Nothing was resubmitted and no "
             f"before-retry SQL ran — re-run `chkit migrate --apply`."
         )
-        raise RuntimeError(msg) from error
+        if attempt_after_time is None:
+            raise RuntimeError(msg) from error
+        raise MigrateError("async_outcome_unknown", msg) from error
 
 
 def _record_finished_attempt(

@@ -1877,8 +1877,10 @@ def test_a_user_that_cannot_read_query_log_is_told_which_grant_it_lacks() -> Non
         ]
     )
     journal = _FakeJournalStore(state=_started_record())
-    with pytest.raises(RuntimeError) as raised:
+    with pytest.raises(MigrateError) as raised:
         apply_async_statement(_rerun_input(client, journal))
+    # The attempt's outcome stays unknown (#782).
+    assert raised.value.code == "async_outcome_unknown"
     message = str(raised.value)
     assert message.startswith(
         "Async migration step alter_table_modify_column (query_id "

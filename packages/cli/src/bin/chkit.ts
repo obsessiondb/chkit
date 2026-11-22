@@ -30,6 +30,7 @@ import { CLI_VERSION } from '../runtime/version.js'
 const WELL_KNOWN_PLUGIN_COMMANDS: Record<string, string> = {
   codegen: 'Codegen',
   ingest: 'Ingest',
+  obsessiondb: 'ObsessionDB',
   pull: 'Pull',
 }
 
@@ -196,8 +197,8 @@ async function codegenFallbackPlugins(): Promise<ChxPluginRegistration[]> {
 /**
  * The plugin that a project config does not register but chkit-py has anyway
  * (#776): `pull`, a built-in command in chkit-py, also as `chkit plugin pull`
- * (#771), and the `codegen` help. A registration with that name, also a
- * disabled one, keeps its own.
+ * (#771), and the `codegen` and `obsessiondb` help. A registration with that name, also a
+ * disabled one, keeps its own, except for the `obsessiondb` help.
  */
 async function projectFallbackPlugins(
   registrations: readonly ChxPluginRegistration[],
@@ -206,10 +207,15 @@ async function projectFallbackPlugins(
 ): Promise<ChxPluginRegistration[]> {
   const commandName = argv[0]
   const pluginName = commandName === 'plugin' ? forwardedPluginName(argv.slice(1)) : commandName
-  const registered = registrations.some(
-    (entry) => normalizePluginRegistration(entry).plugin?.manifest?.name === pluginName,
-  )
-  if (registered) return []
+  const matching = registrations
+    .map(normalizePluginRegistration)
+    .filter((entry) => entry.plugin?.manifest?.name === pluginName)
+  // chkit-py, which has no disabled plugins, prints the `obsessiondb` help
+  // also when the config lists no enabled ObsessionDB plugin (#776).
+  if (commandName === 'obsessiondb' && wantsHelp && !matching.some((entry) => entry.enabled)) {
+    return profileFallbackPlugins()
+  }
+  if (matching.length > 0) return []
   if (pluginName === 'pull') return pullFallbackPlugins()
   if (commandName === 'codegen' && wantsHelp) return codegenFallbackPlugins()
   return []

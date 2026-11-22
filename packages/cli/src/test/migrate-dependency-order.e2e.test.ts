@@ -662,6 +662,31 @@ describe('@chkit/cli migrate orders the column statements of a table (#745, #746
       columns: ['a', 'b', 'c', 'id'],
     })
   }, 120_000)
+
+  // ALTER's check for cyclic defaults counts a lambda parameter named like a
+  // column as a read of it, so MODIFY `a` first met the other side of the
+  // cycle: Cyclic alias detected in column DEFAULT expressions (#799).
+  test('an old lambda parameter named like a column holds back the MODIFY that reads it back (#799)', async () => {
+    await migrateColumnChange({
+      label: 'lambdaold',
+      before:
+        "{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'arraySum(arrayMap(a -> 1, [1]))' } }",
+      after: "{ name: 'a', type: 'UInt64', default: { expression: 'b' } }, { name: 'b', type: 'UInt64' }",
+      order: ['MODIFY COLUMN `b` REMOVE DEFAULT;', 'MODIFY COLUMN `a` UInt64 DEFAULT b;'],
+      columns: ['a', 'b', 'id'],
+    })
+  }, 120_000)
+
+  test('a new lambda parameter named like a column waits for the release of its old read back (#799)', async () => {
+    await migrateColumnChange({
+      label: 'lambdanew',
+      before: "{ name: 'a', type: 'UInt64' }, { name: 'b', type: 'UInt64', default: { expression: 'a' } }",
+      after:
+        "{ name: 'a', type: 'UInt64', default: { expression: 'arraySum(arrayMap(b -> 1, [1]))' } }, { name: 'b', type: 'UInt64' }",
+      order: ['MODIFY COLUMN `b` REMOVE DEFAULT;', 'MODIFY COLUMN `a` UInt64 DEFAULT arraySum(arrayMap(b -> 1, [1]));'],
+      columns: ['a', 'b', 'id'],
+    })
+  }, 120_000)
 })
 
 // Each change below fails on ClickHouse 26.3 in the order of the #759 plan:
