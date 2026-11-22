@@ -247,4 +247,31 @@ describe('commands in a project match chkit-py (#776)', () => {
       await rm(dir, { recursive: true, force: true })
     }
   }, 60_000)
+
+  test('service with no subcommand prints one usage message (#781)', async () => {
+    const message = 'Usage: chkit plugin obsessiondb service <list|select|claim|alias> [args]'
+    for (const plugins of [undefined, withObsessionDB]) {
+      const project = await createProject(plugins)
+      try {
+        const text = project.run(['obsessiondb', 'service'])
+        expect([text.exitCode, text.stdout, text.stderr]).toEqual([1, `${message}\n`, ''])
+        const json = project.run(['obsessiondb', 'service', '--json'])
+        expect([json.exitCode, json.stderr]).toEqual([1, ''])
+        expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 1, message })
+      } finally {
+        await project.cleanup()
+      }
+    }
+    const dir = await mkdtemp(join(tmpdir(), 'chkit-project-parity-empty-'))
+    try {
+      const json = spawnWithTimeout(['bun', entry, 'obsessiondb', 'service', '--json'], {
+        cwd: dir,
+        env: { HOME: dir, XDG_CONFIG_HOME: dir },
+      })
+      expect([json.exitCode, json.stderr]).toEqual([1, ''])
+      expect(JSON.parse(json.stdout)).toEqual({ schemaVersion: 1, message })
+    } finally {
+      await rm(dir, { recursive: true, force: true })
+    }
+  }, 60_000)
 })
