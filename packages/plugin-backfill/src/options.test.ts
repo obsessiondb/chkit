@@ -6,6 +6,7 @@ import {
   PlanSchema,
   RunSchema,
   ResumeSchema,
+  RESUME_FLAG_MAP,
   CheckSchema,
   PluginConfigSchema,
 } from './options.js'
@@ -97,6 +98,14 @@ describe('ResumeSchema', () => {
     expect(opts.forceEnvironment).toBe(false)
     expect(opts.concurrency).toBe(3)
     expect(opts.pollIntervalMs).toBe(5000)
+    expect(opts.replayFailed).toBe(false)
+    expect(opts.acceptUnknown).toBe(false)
+  })
+
+  test('--accept-unknown sets acceptUnknown', () => {
+    const opts = resolveOptions(ResumeSchema, {}, { '--plan-id': 'abc123def456789a', '--accept-unknown': true }, RESUME_FLAG_MAP)
+
+    expect(opts.acceptUnknown).toBe(true)
     expect(opts.replayFailed).toBe(false)
   })
 })

@@ -1,6 +1,6 @@
 export * from '@logtape/logtape'
 
-export { executeBackfill, syncProgress } from './async-backfill.js'
+export { BackfillInterruptedError, CHECKPOINT_VERSION, executeBackfill, syncProgress } from './async-backfill.js'
 export { analyzeAndChunk, analyzeTable } from './chunking/analyze.js'
 export {
   decodeChunkPlanFromPersistence,
@@ -24,6 +24,7 @@ export {
   buildChunkExecutionSql,
   buildWhereClauseFromChunk,
   injectSortKeyFilter,
+  PINNED_INSERT_SETTINGS,
   rewriteSelectColumns,
 } from './chunking/sql.js'
 export { generateIdempotencyToken } from './chunking/utils/ids.js'

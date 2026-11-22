@@ -913,6 +913,9 @@ def order_column_statements(
     """
     reads = _column_default_reads(next_)
     old_reads = _column_default_reads(previous)
+    # ALTER's check for cyclic defaults also reads lambda parameters (#799).
+    cycle_reads = _column_default_reads(next_, lambdas=True)
+    old_cycle_reads = _column_default_reads(previous, lambdas=True)
     ttl_reads = _table_ttl_reads(next_)
     old_ttl_reads = _table_ttl_reads(previous)
     renamed_to = {
@@ -940,7 +943,7 @@ def order_column_statements(
                 releasers.setdefault(read, []).append(index)
 
     added = {op.key for op in statements if op.type == "alter_table_add_column"}
-    releases = _cycle_releases(reads, old_reads, added, set(modifies))
+    releases = _cycle_releases(cycle_reads, old_cycle_reads, added, set(modifies))
     prerequisites: list[list[str]] = []
     for index, op in enumerate(statements):
         found: dict[int, None] = {}
@@ -1152,11 +1155,14 @@ def _longest_column_prefix(parts: list[str], columns: set[str]) -> str | None:
     return None
 
 
-def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, set[str]]:
+def _column_default_reads(
+    definitions: Sequence[SchemaDefinition], lambdas: bool = False
+) -> dict[str, set[str]]:
     """Column operation key to the keys of the same table's columns its default expression names.
 
     A name followed by ``(`` is a function call, not a column, and neither are
-    the names ``_not_column_names`` finds.
+    the names ``_not_column_names`` finds. With ``lambdas``, the lambdas' own
+    names read columns as well (``_lambda_reads``).
     """
     graph: dict[str, set[str]] = {}
     for definition in definitions:
@@ -1171,7 +1177,8 @@ def _column_default_reads(definitions: Sequence[SchemaDefinition]) -> dict[str, 
             if parsed.kind != "expression":
                 continue
             read: set[str] = set()
-            for name in _dotted_names(parsed.sql, names):
+            found = _dotted_names(parsed.sql, names)
+            for name in [*found, *_lambda_reads(parsed.sql, names)] if lambdas else found:
                 if name != column.name:
                     read.add(prefix + name)
             graph[prefix + column.name] = read
@@ -1288,6 +1295,47 @@ def _lambda_parameters(tokens: list[SQLToken], arrow: int) -> tuple[set[str], in
             return None
         j -= 2
     return None
+
+
+def _lambda_reads(sql: str, columns: set[str]) -> list[str]:
+    """The columns the lambdas in ``sql`` name where ``_dotted_names`` skips them (#768).
+
+    ClickHouse's ALTER check for cyclic defaults (code 174) reads a lambda's
+    parameters as columns, even one its body never uses, and a use with
+    ``.name`` parts as the longest leading part that is a column: ``w -> w.a``
+    reads the column ``w.a`` or ``w``, never ``a`` (#799).
+    """
+    tokens = [token for token in tokenize_sql(sql) if not is_trivia(token)]
+    found: list[str] = []
+    count = len(tokens)
+    for i, token in enumerate(tokens):
+        following = tokens[i + 1] if i + 1 < len(tokens) else None
+        if following is None or token.text != "-" or following.text != ">":
+            continue
+        if token.end != following.start:
+            continue
+        params = _lambda_parameters(tokens, i)
+        if params is None:
+            continue
+        names = params[0]
+        found.extend(name for name in sorted(names) if name in columns)
+        end = _group_end(tokens, i + 2)
+        j = i + 2
+        while j < end:
+            name = identifier_name(tokens[j])
+            if name is not None and name in names and tokens[j - 1].text != ".":
+                run = [name]
+                while j + 2 < count and tokens[j + 1].text == ".":
+                    part = identifier_name(tokens[j + 2])
+                    if part is None:
+                        break
+                    run.append(part)
+                    j += 2
+                column = _longest_column_prefix(run, columns)
+                if column is not None:
+                    found.append(column)
+            j += 1
+    return found
 
 
 def _group_end(tokens: list[SQLToken], start: int) -> int:

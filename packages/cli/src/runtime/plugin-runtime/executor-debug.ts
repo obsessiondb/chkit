@@ -40,6 +40,8 @@ export function wrapExecutorWithDebug(
   const queryControl = executor.queryControl?.bind(executor)
 
   return {
+    // Backfill proves a failed chunk only through an executor that sends once (#765).
+    ...(executor.submitSendsOnce ? { submitSendsOnce: true } : {}),
     ...(executor.queryControlCluster ? { queryControlCluster: executor.queryControlCluster } : {}),
     ...(systemTableSource ? { systemTableSource } : {}),
     ...(openConcurrent ? { openConcurrent: () => wrapExecutorWithDebug(openConcurrent()) } : {}),
