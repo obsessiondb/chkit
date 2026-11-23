@@ -171,7 +171,7 @@ describe('@chkit/cli usage-error --json envelopes (#4)', () => {
       const help = runCli(['ingest', 'run', '--help', '--config', fixture.configPath])
       expect(help.exitCode).toBe(0)
       expect(help.stdout).toContain('chkit ingest run [options]')
-      for (const flag of ['--tag <tag>', '--backfill <id>', '--from <timestamp>', '--to <timestamp>', '--max-duration <seconds>']) {
+      for (const flag of ['--tag <tag>', '--backfill <id>', '--from <timestamp>', '--to <timestamp>', '--max-duration <seconds>', '--retries <count>']) {
         expect(help.stdout).toContain(flag)
       }
       expect(help.stdout).not.toContain('--apply')
