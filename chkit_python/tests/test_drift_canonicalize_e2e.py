@@ -14,7 +14,7 @@ from chkit.cli.commands.drift_payload import build_drift_payload
 from chkit.clickhouse.canonicalize import canonicalize_sql_fragments
 from chkit.clickhouse.client import ClickHouseClient
 from chkit.clickhouse.ddl_propagation import wait_for_table, wait_for_view
-from chkit.clickhouse.introspect import list_table_details
+from chkit.clickhouse.introspect import list_schema_objects, list_table_details
 from chkit.core.canonical import canonicalize_definitions
 from chkit.core.model import (
     ChxResolvedClickHouseConfig,
@@ -360,3 +360,62 @@ def test_view_query_function_case_and_aliases_report_no_drift(tmp_path: Path) ->
         finally:
             client.execute(f"DROP VIEW IF EXISTS {database}.{report} SYNC")
             client.execute(f"DROP TABLE IF EXISTS {database}.{events} SYNC")
+
+
+def test_refresh_backing_catalog_filter_requires_same_database_owner() -> None:
+    with _connect() as client:
+        database = create_prefix("refresh_objects")
+        try:
+            client.execute(f"CREATE DATABASE {database}")
+            client.execute(
+                f"CREATE MATERIALIZED VIEW {database}.mv REFRESH AFTER 1 DAY "
+                "ENGINE=MergeTree ORDER BY id EMPTY AS "
+                "SELECT number AS id FROM numbers(3)"
+            )
+            uuid = client.query(
+                "SELECT toString(uuid) AS uuid FROM system.tables "
+                f"WHERE database='{database}' AND name='mv'"
+            ).rows[0]["uuid"]
+            inner, temporary = f".inner_id.{uuid}", f".tmp.inner_id.{uuid}"
+            client.execute(f"SYSTEM STOP VIEW {database}.mv")
+            client.execute(
+                f"CREATE TABLE IF NOT EXISTS {database}.`{temporary}` (id UInt64) ENGINE=Memory"
+            )
+            orphan = ".tmp.inner_id.00000000-0000-0000-0000-000000000001"
+            lookalike = temporary + "_user"
+            for name in (orphan, lookalike):
+                client.execute(f"CREATE TABLE {database}.`{name}` (id UInt64) ENGINE=Memory")
+            raw = client.query(f"SELECT name FROM system.tables WHERE database='{database}'").rows
+            assert {inner, temporary} <= {row["name"] for row in raw}
+            objects = [obj.name for obj in list_schema_objects(client) if obj.database == database]
+            assert sorted(objects) == sorted([orphan, lookalike, "mv"])
+        finally:
+            client.execute(f"DROP DATABASE IF EXISTS {database} SYNC")
+
+
+def test_shared_udf_queries_retain_literals_independently_of_pair_order() -> None:
+    with _connect() as client:
+        name = create_prefix("shared_udf")
+        body = (
+            "CAST(tuple(if(length(text) + length(toString(categories)) >= 0, "
+            "'unknown', 'unknown'), toFloat64(0)), 'Tuple(category String, confidence Float64)')"
+        )
+        try:
+            client.execute(f"CREATE FUNCTION {name} AS (text, categories) -> {body}")
+            original = f"SELECT {name}('original input', map('lead', 'original prompt')) AS verdict"
+            changed = original.replace("original prompt", "changed prompt")
+            stored_body = body.replace("length(text)", "length('original input')").replace(
+                "toString(categories)", "toString(map('lead', 'original prompt'))"
+            )
+            stored = f"SELECT {stored_body} AS verdict"
+            for pairs in (
+                [(original, stored), (changed, stored)],
+                [(changed, stored), (original, stored)],
+            ):
+                result = canonicalize_sql_fragments(
+                    client, [original, stored, changed], wrap=False, stored_query_pairs=pairs
+                )
+                assert result[original] == result[stored]
+                assert result[changed] != result[stored]
+        finally:
+            client.execute(f"DROP FUNCTION IF EXISTS {name}")
