@@ -102,6 +102,16 @@ export function extractMigrationOperationSummaries(sql: string): MigrationOperat
   return summaries
 }
 
+export function asyncInsertOperations(statements: readonly string[], operations: readonly MigrationOperationSummary[]): MigrationOperationSummary[] {
+  return statements.map((statement, index) => {
+    const existing = operations[index]
+    if (existing !== undefined) return existing
+    const tokens = tokenizeSQL(statement).filter((token) => !isTrivia(token))
+    const insertSelect = keyword(tokens[0]) === 'INSERT' && keyword(tokens[1]) === 'INTO' && tokens.some((token) => keyword(token) === 'SELECT')
+    return { type: 'sql_statement', key: `statement:${index}`, risk: 'caution', mode: insertSelect ? 'async' : 'sync', beforeRetry: null, summary: '' }
+  })
+}
+
 export interface NonSelectBarrier {
   /** 0-based position among the statements. */
   index: number

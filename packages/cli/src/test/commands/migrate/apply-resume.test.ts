@@ -2,11 +2,12 @@ import { mkdtempSync, rmSync, writeFileSync } from 'node:fs'
 import { tmpdir } from 'node:os'
 import { join } from 'node:path'
 
-import { afterEach, beforeEach, describe, expect, type Mock, spyOn, test } from 'bun:test'
+import { afterAll, afterEach, beforeEach, describe, expect, type Mock, spyOn, test } from 'bun:test'
 
 import type { ClickHouseExecutor } from '@chkit/clickhouse'
 import { statementFingerprint } from '@chkit/core'
 
+import * as asyncApplyModule from '../../../commands/migrate/async-apply.js'
 import { applyMigration, PROPAGATION_WAIT_PENDING } from '../../../commands/migrate/apply.js'
 import { ATTEMPT_RECORD_MARKER, PREPARED_RECORD_MARKER } from '../../../commands/migrate/async-apply.js'
 import { abandonMigrationState } from '../../../commands/migrate/abandon.js'
@@ -1982,5 +1983,31 @@ describe('applyMigration fire-and-forget async insert guard', () => {
     await expect(run(db, dir, store)).rejects.toThrow('wait_for_async_insert = 0')
     expect(commandCalls).toEqual(['SELECT 1;', 'ALTER TABLE app.events__cutover_1_snapshot ATTACH PARTITION ALL FROM app.events;'])
     rmSync(dir, { recursive: true, force: true })
+  })
+})
+
+describe('unmarked async insert recovery', () => {
+  const cleanup: (() => void)[] = []
+  afterEach(() => { for (const restore of cleanup.splice(0)) restore() })
+  const sql = 'CREATE TABLE IF NOT EXISTS t (x UInt8);\nINSERT INTO t SELECT 1;\nCREATE VIEW IF NOT EXISTS v AS SELECT * FROM t;\n'
+  const dir = writeMigration(sql)
+  afterAll(() => rmSync(dir, { recursive: true, force: true }))
+
+  test('keeps the migration checksum and completed prefix while dispatching the backfill through native async polling', async () => {
+    const completed = { ...operation(0, 'completed'), fingerprint: statementFingerprint('CREATE TABLE IF NOT EXISTS t (x UInt8);') }
+    const fake = createFakeStore(inProgressState(checksumSQL(sql), [completed]))
+    const { db, commandCalls } = recordingDb()
+    const dispatch = spyOn(asyncApplyModule, 'applyAsyncStatement').mockImplementation(async (input) => {
+      const result = { ...operation(input.statementIndex, 'completed'), fingerprint: input.fingerprint ?? '' }
+      await fake.store.writeMigrationState({ ...fake.state()!, operations: [completed, result] })
+      return { kind: 'completed', operation: result }
+    })
+    cleanup.push(() => dispatch.mockRestore())
+    await applyMigration({ db, journalStore: fake.store, pluginRuntime: fakePluginRuntime(), config: CONFIG,
+      tableScope: TABLE_SCOPE, flags: { '--async-inserts': true }, migrationsDir: dir, file: 'm.sql' })
+    expect(dispatch).toHaveBeenCalledWith(expect.objectContaining({ statementIndex: 1, operationType: 'sql_statement', operationKey: 'statement:1', migrationChecksum: checksumSQL(sql) }))
+    expect(commandCalls).toEqual(['CREATE VIEW IF NOT EXISTS v AS SELECT * FROM t;'])
+    expect(fake.state()?.operations[0]).toEqual(completed)
+    expect(fake.appended[0]?.checksum).toBe(checksumSQL(sql))
   })
 })

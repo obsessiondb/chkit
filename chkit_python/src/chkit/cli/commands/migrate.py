@@ -226,6 +226,14 @@ def run(  # noqa: PLR0917
         bool,
         typer.Option("--execute", help="Alias for --apply"),
     ] = False,
+    async_inserts: Annotated[
+        bool,
+        typer.Option(
+            "--async-inserts",
+            help=("Poll unmarked INSERT SELECT statements asynchronously "
+                  "without editing migration files"),
+        ),
+    ] = False,
     allow_destructive: Annotated[
         bool,
         typer.Option(
@@ -303,6 +311,7 @@ def run(  # noqa: PLR0917
             "--config": str(config_path) if config_path is not None else None,
             "--apply": apply,
             "--execute": execute,
+            "--async-inserts": async_inserts,
             "--allow-destructive": allow_destructive,
             "--table": table_selector,
             "--retry": retry,
@@ -375,6 +384,10 @@ def _run(
             "invalid_usage",
             "--cancel-lock-queries requires explicit --apply, --break-lock <claim>, "
             "an enabled migrate lock and query tracking, and no --abandon.",
+        )
+    if cancel_lock_queries and hook_flags.get("--async-inserts") is True:
+        raise MigrateError(
+            "invalid_usage", "--async-inserts cannot be combined with --cancel-lock-queries."
         )
     settings = parse_setting_flags(setting)
     config = load_config(config_path, ChxConfigEnv(command="migrate"))

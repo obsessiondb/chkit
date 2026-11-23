@@ -71,6 +71,7 @@ const MIGRATE_FLAGS = defineFlags([
   TABLE_FLAG,
   { name: '--apply', type: 'boolean', description: 'Apply pending migrations on ClickHouse (no prompt)' },
   { name: '--execute', type: 'boolean', description: 'Alias for --apply' },
+  { name: '--async-inserts', type: 'boolean', description: 'Poll unmarked INSERT SELECT statements asynchronously without editing migration files' },
   { name: '--allow-destructive', type: 'boolean', description: 'Allow destructive migrations tagged with risk=danger' },
   {
     name: '--retry',
@@ -225,6 +226,7 @@ async function prepareMigration(runCtx: ChxPluginCommandContext): Promise<Migrat
   const jsonMode = f['--json'] === true
   const { retryTarget, abandonTarget } = resolveRecoveryTargets(flags)
   const cancelQueries = f['--cancel-lock-queries'] === true
+  if (cancelQueries && f['--async-inserts'] === true) throw new MigrateError('invalid_usage', '--async-inserts cannot be combined with --cancel-lock-queries.')
   if (cancelQueries && (f['--apply'] !== true || !f['--break-lock'] || abandonTarget !== undefined || migrateLockDisabled() || queryTrackingDisabled())) {
     throw new MigrateError('invalid_usage', '--cancel-lock-queries requires explicit --apply, --break-lock <claim>, an enabled migrate lock and query tracking, and no --abandon.')
   }

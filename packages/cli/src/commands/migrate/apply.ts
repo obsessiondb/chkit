@@ -27,6 +27,7 @@ import { checksumSQL, type MigrationJournalEntry } from '../../runtime/migration
 import {
   extractExecutableStatements,
   extractMigrationOperationSummaries,
+  asyncInsertOperations,
   findNonSelectBarriers,
   type MigrationOperationSummary,
 } from '../../runtime/safety-markers.js'
@@ -279,7 +280,7 @@ export async function applyMigration(input: {
   debug('migrate', `applying ${file}`)
   const sql = await readFile(join(migrationsDir, file), 'utf8')
   const parsedStatements = extractExecutableStatements(sql)
-  const operationSummaries = extractMigrationOperationSummaries(sql)
+  let operationSummaries = extractMigrationOperationSummaries(sql)
   debug('migrate', `${file}: ${parsedStatements.length} statements, ${operationSummaries.length} operations`)
 
   const statements = await pluginRuntime.runOnBeforeApply({
@@ -291,6 +292,8 @@ export async function applyMigration(input: {
     sql,
     statements: parsedStatements,
   })
+
+  if (flags['--async-inserts'] === true) operationSummaries = asyncInsertOperations(statements, operationSummaries)
 
   // migrate refused a file's non-SELECT barrier before the run; a plugin may
   // have rewritten the statements since (#634).

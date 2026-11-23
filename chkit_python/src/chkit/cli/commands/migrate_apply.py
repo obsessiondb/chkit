@@ -66,6 +66,7 @@ from chkit.cli.migration_store import MigrationJournalEntry, checksum_sql
 from chkit.cli.plugin_runtime import PluginRuntime
 from chkit.cli.safety_markers import (
     MigrationOperationSummary,
+    async_insert_operations,
     extract_migration_operation_summaries,
     find_non_select_barriers,
 )
@@ -146,6 +147,8 @@ def apply_migration(input_: ApplyMigrationInput) -> MigrationJournalEntry:  # no
             )
         )
     )
+    if input_.flags.get("--async-inserts") is True:
+        operation_summaries = async_insert_operations(statements, operation_summaries)
     # migrate refused a file's non-SELECT barrier before the run; a plugin may
     # have rewritten the statements since (#634).
     barriers = non_select_barriers(file, statements, operation_summaries)

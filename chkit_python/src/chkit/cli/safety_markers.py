@@ -122,6 +122,33 @@ class MigrationOperationSummary:
     summary: str
 
 
+def async_insert_operations(
+    statements: Sequence[str], operations: Sequence[MigrationOperationSummary]
+) -> list[MigrationOperationSummary]:
+    resolved = []
+    for index, statement in enumerate(statements):
+        if index < len(operations):
+            resolved.append(operations[index])
+            continue
+        tokens = [token for token in tokenize_sql(statement) if not is_trivia(token)]
+        prefix = ["INSERT", "INTO"]
+        insert_select = (
+            [_keyword(token) for token in tokens[:len(prefix)]] == prefix
+            and any(_keyword(token) == "SELECT" for token in tokens)
+        )
+        resolved.append(
+            MigrationOperationSummary(
+                type="sql_statement",
+                key=f"statement:{index}",
+                risk="caution",
+                mode="async" if insert_select else "sync",
+                before_retry=None,
+                summary="",
+            )
+        )
+    return resolved
+
+
 @dataclass(frozen=True, slots=True)
 class ScannedDestructiveStatement:
     type: str
